@@ -16,4 +16,3 @@ ghostty = ["dep:libghostty-vt"]
 # libghostty-rs master (2026-10-09), pinned; the 0.2.2 on crates.io is older and needs Zig 0.15.2.
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54", optional = true }
 portable-pty = "0.9"
-thiserror = "2"

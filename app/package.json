@@ -1,0 +1,13 @@
+{
+  "name": "holzwave-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p . && node scripts/copy-static.mjs",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "3.0.0-alpha.4",
+    "typescript": "^7"
+  }
+}

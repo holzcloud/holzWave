@@ -1,0 +1,21 @@
+[package]
+name = "holzwave-app"
+description = "The holzWave app shell (Tauri)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "holzwave_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = "3.0.0-alpha.3"
+
+[dependencies]
+holzwave-core = { path = "../../core" }
+tauri = "3.0.0-alpha.4"
+tauri-runtime-wry = "3.0.0-alpha.4"
+serde = { version = "1", features = ["derive"] }
