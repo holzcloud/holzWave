@@ -7,13 +7,14 @@ use libghostty_vt::render::{
     CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot,
 };
 use libghostty_vt::screen::{CellWide, Screen as VtScreen};
+use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::style::Underline;
-use libghostty_vt::terminal::{ClipboardMime, Mode, ScrollViewport, SizeReportSize};
+use libghostty_vt::terminal::{ClipboardMime, Mode, Point, PointCoordinate, ScrollViewport, SizeReportSize};
 use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::engine::{
     Cell, Color, Cursor, CursorStyle, KeyAction, KeyEvent, Modes, Mods, PasteOutcome, RowUpdate, Screen,
-    Scrollbar, TerminalEngine, Update, Width,
+    Scrollbar, SelectMode, SelectOp, Span, TerminalEngine, Update, Width,
 };
 use crate::{Error, Result};
 
@@ -306,6 +307,12 @@ pub struct GhosttyEngine {
     /// The grid size at the previous `update`, so that a size change resets the consumer even when libghostty
     /// reports nothing.
     last_size: Option<(u16, u16)>,
+    /// The selected column range `(x0, x1)` of every viewport row, as libghostty last reported it for that row.
+    ///
+    /// A partial pass visits only dirty rows, so the cache is what makes `Update.selection` complete: a row that did
+    /// not change keeps its range. Setting or clearing a selection, scrolling and resizing are full passes that
+    /// refresh every row.
+    sel_cache: Vec<Option<(u16, u16)>>,
 }
 
 impl GhosttyEngine {
@@ -361,11 +368,25 @@ impl GhosttyEngine {
             option_as_alt: false,
             force_full: true,
             last_size: None,
+            sel_cache: Vec::new(),
         })
     }
 }
 
 impl GhosttyEngine {
+    /// The viewport point of a cell, with both coordinates clamped into the grid.
+    ///
+    /// Coordinates come from the webview and are never trusted; libghostty is only called with points inside the
+    /// grid (T-02-37).
+    fn clamped_point(&self, x: u16, y: u16) -> Result<Point> {
+        let cols = self.terminal.cols().map_err(eng)?;
+        let rows = self.terminal.rows().map_err(eng)?;
+        Ok(Point::Viewport(PointCoordinate {
+            x: x.min(cols.saturating_sub(1)),
+            y: u32::from(y.min(rows.saturating_sub(1))),
+        }))
+    }
+
     /// Fill the reusable key event and run the encoder against the terminal's current modes.
     #[allow(clippy::too_many_arguments)]
     fn encode_event(
@@ -531,6 +552,13 @@ impl TerminalEngine for GhosttyEngine {
         let full = reset || snapshot.dirty().map_err(eng)? == Dirty::Full;
         let cursor = read_cursor(&snapshot)?;
 
+        // The cache has one entry per viewport row. A size change is always a full pass, which refreshes every
+        // entry, so starting from blanks loses nothing.
+        if self.sel_cache.len() != usize::from(rows) {
+            self.sel_cache.clear();
+            self.sel_cache.resize(usize::from(rows), None);
+        }
+
         let mut changed = Vec::new();
         {
             let mut row_iter = self.rows_iter.update(&snapshot).map_err(eng)?;
@@ -540,6 +568,9 @@ impl TerminalEngine for GhosttyEngine {
                 while let Some(row) = row_iter.next() {
                     let mut cells = Vec::with_capacity(cols as usize);
                     read_row(&mut self.cells_iter, row, &colors, &mut cells)?;
+                    if let Some(slot) = self.sel_cache.get_mut(usize::from(y)) {
+                        *slot = row.selection().map_err(eng)?.map(|s| (s.start_x, s.end_x));
+                    }
                     changed.push(RowUpdate { y, cells });
                     y = y.saturating_add(1);
                 }
@@ -547,10 +578,23 @@ impl TerminalEngine for GhosttyEngine {
                 while let Some((y, row)) = row_iter.next_dirty() {
                     let mut cells = Vec::with_capacity(cols as usize);
                     read_row(&mut self.cells_iter, row, &colors, &mut cells)?;
+                    if let Some(slot) = self.sel_cache.get_mut(usize::from(y)) {
+                        *slot = row.selection().map_err(eng)?.map(|s| (s.start_x, s.end_x));
+                    }
                     changed.push(RowUpdate { y, cells });
                 }
             }
         }
+        // The complete list in viewport order, whatever part of it was visited: unvisited rows keep their range.
+        let selection: Vec<Span> = self
+            .sel_cache
+            .iter()
+            .enumerate()
+            .filter_map(|(y, range)| {
+                let (x0, x1) = (*range)?;
+                Some(Span { y: y as u16, x0: x0.min(x1), x1: x1.min(cols.saturating_sub(1)) })
+            })
+            .collect();
         // Only after the rows were consumed: clean() clears the global and the per-row flags.
         snapshot.clean().map_err(eng)?;
         self.force_full = false;
@@ -567,7 +611,7 @@ impl TerminalEngine for GhosttyEngine {
             default_bg: color(colors.background),
             modes,
             changed,
-            selection: Vec::new(),
+            selection,
             matches: Vec::new(),
             search: None,
             copy_cursor: None,
@@ -576,6 +620,54 @@ impl TerminalEngine for GhosttyEngine {
 
     fn request_full(&mut self) {
         self.force_full = true;
+    }
+
+    fn select(&mut self, op: SelectOp) -> Result<()> {
+        match op {
+            SelectOp::Begin { x, y, mode } => {
+                let point = self.clamped_point(x, y)?;
+                let at = self.terminal.grid_ref(point).map_err(eng)?;
+                // The derived selection of a word or a line; a point on nothing selectable (blank cells for a
+                // word) falls back to the one cell under the pointer, so a drag that follows still has an anchor.
+                let derived = match mode {
+                    SelectMode::Cell => None,
+                    SelectMode::Word => {
+                        self.terminal.select_word(SelectWordOptions::new(at.clone())).map_err(eng)?
+                    }
+                    SelectMode::Line => {
+                        self.terminal.select_line(SelectLineOptions::new(at.clone())).map_err(eng)?
+                    }
+                };
+                let selection = derived.unwrap_or_else(|| Selection::new(at.clone(), at, false));
+                self.terminal.set_selection(Some(&selection)).map_err(eng)?;
+            }
+            SelectOp::Extend { x, y } => {
+                // The terminal's own tracked anchor is the start of its current selection; nothing is cached here.
+                // Without a selection there is nothing to extend, which is not an error.
+                let Some(current) = self.terminal.selection().map_err(eng)? else { return Ok(()) };
+                let to = self.terminal.grid_ref(self.clamped_point(x, y)?).map_err(eng)?;
+                let extended = Selection::new(current.start(), to, current.is_rectangle());
+                self.terminal.set_selection(Some(&extended)).map_err(eng)?;
+            }
+            SelectOp::All => {
+                let all = self.terminal.select_all().map_err(eng)?;
+                self.terminal.set_selection(all.as_ref()).map_err(eng)?;
+            }
+            SelectOp::Clear => {
+                self.terminal.set_selection(None).map_err(eng)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn selection_text(&mut self) -> Result<Option<String>> {
+        // Soft wraps are joined and trailing blanks trimmed, so the text is what the user would paste.
+        let options = FormatOptions::new().with_unwrap(true).with_trim(true);
+        let bytes = self.terminal.format_selection_alloc(None, options).map_err(eng)?;
+        // A selection of nothing but blanks has no text to copy: that is no text, like no selection.
+        Ok(bytes
+            .map(|b| String::from_utf8_lossy(b.as_ref()).into_owned())
+            .filter(|text| !text.is_empty()))
     }
 }
 

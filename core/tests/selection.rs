@@ -79,8 +79,8 @@ fn the_text_stays_the_same_after_output_and_the_spans_follow_the_scroll() {
     assert_eq!(text(&mut e).as_deref(), Some("row09\nrow1"), "scrolling must not change what is selected");
     assert_eq!(spans(&mut e), before);
 
-    // Half way, only the second row is on the screen, on its new y.
-    e.scroll(7);
+    // Two rows further down only the second selected row is still on the screen, now on y 0.
+    e.scroll(2);
     assert_eq!(spans(&mut e), vec![span(0, 0, 3)]);
 }
 
@@ -221,4 +221,48 @@ fn coordinates_outside_the_grid_are_clamped_not_trusted() {
     op(&mut e, SelectOp::Extend { x: u16::MAX, y: u16::MAX });
     let update = e.update().expect("update");
     assert!(update.selection.iter().all(|s| s.y < update.rows && s.x1 < update.cols));
+}
+
+/// The spans the engine reports from its per-row cache must equal what a full pass over every row reports, after
+/// any mix of output, scrolling, selecting and resizing: a stale cache would show a highlight where there is none.
+#[test]
+fn the_cached_spans_equal_a_full_pass_after_random_operations() {
+    use common::Xorshift64;
+
+    for seed in 1..=10u64 {
+        let mut rng = Xorshift64::new(seed);
+        let mut e = engine(20, 6);
+        let (mut cols, mut rows) = (20u16, 6u16);
+        for step in 0..150 {
+            match rng.below(9) {
+                0 | 1 => {
+                    let word = ["alpha beta", "x", "wrapping line of text that is longer than a row", "\r\n", "gamma"]
+                        [rng.below(5)];
+                    e.feed(word.as_bytes());
+                    e.feed(b"\r\n");
+                }
+                2 => e.scroll(rng.below(9) as isize - 4),
+                3 => e.scroll_to_bottom(),
+                4 => {
+                    let mode = [SelectMode::Cell, SelectMode::Word, SelectMode::Line][rng.below(3)];
+                    let (x, y) = (rng.below(usize::from(cols) + 2) as u16, rng.below(usize::from(rows) + 2) as u16);
+                    op(&mut e, SelectOp::Begin { x, y, mode });
+                }
+                5 | 6 => {
+                    let (x, y) = (rng.below(usize::from(cols) + 2) as u16, rng.below(usize::from(rows) + 2) as u16);
+                    op(&mut e, SelectOp::Extend { x, y });
+                }
+                7 => op(&mut e, if rng.chance(50) { SelectOp::All } else { SelectOp::Clear }),
+                _ => {
+                    cols = 8 + rng.below(20) as u16;
+                    rows = 3 + rng.below(6) as u16;
+                    e.resize(cols, rows, (0, 0)).expect("resize");
+                }
+            }
+            let cached = spans(&mut e);
+            e.request_full();
+            let full = spans(&mut e);
+            assert_eq!(cached, full, "seed {seed} step {step}: the cache is stale");
+        }
+    }
 }
