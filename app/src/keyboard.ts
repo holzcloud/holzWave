@@ -7,8 +7,9 @@
 // All keys go to a hidden textarea that keeps the keyboard focus: it is what makes the system's input methods and
 // dead keys work, because composition events exist only on editable elements.
 import { registerAction, runAction } from "./actions.js";
-import { call } from "./bridge.js";
+import { call, listen } from "./bridge.js";
 import { actionIdFor } from "./chords.js";
+import { gridRect } from "./geometry.js";
 import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "./keymap.js";
 import { offerKey, pushKeyHandler } from "./keystack.js";
 import { state } from "./state.js";
@@ -51,6 +52,89 @@ function createInput(): HTMLTextAreaElement {
   return box;
 }
 
+// ---- composition and committed text --------------------------------------------------------------
+
+/** An input method composition is active: its keys are the textarea's and its text is not final. */
+let composing = false;
+
+/** When the last composition that delivered text ended (`performance.now()`). */
+let endedAt = Number.NEGATIVE_INFINITY;
+
+/** A commit just sent: the `input` event some engines fire after `compositionend` must not send it again. */
+let recent: { text: string; until: number } | null = null;
+
+/** The window in which an Enter right after a composition's end is the key that ended it, not new input. */
+const ENTER_AFTER_COMPOSITION_MS = 80;
+
+/** The window in which an `input` event with the text just committed is the same commit. */
+const DUPLICATE_MS = 100;
+
+/** Send committed text (an input method result, a dead-key result) for the focused pane. It is not a paste. */
+function sendText(text: string): void {
+  const pane = state.view?.focus;
+  if (pane === undefined || text === "") return;
+  void call("text", { pane, text }).catch(() => {});
+}
+
+/** Put the textarea at the cursor cell of the focused pane so the system's candidate window opens there. */
+function placeInput(): void {
+  const view = state.view;
+  if (!ime || !view) return;
+  const entry = view.panes.find(([id]) => id === view.focus);
+  if (!entry) return;
+  const m = state.metrics;
+  const grid = gridRect(m, entry[1]);
+  const cursor = state.frames.get(view.focus)?.cursor;
+  const x = cursor && Number.isFinite(cursor.x) ? Math.max(0, cursor.x) : 0;
+  const y = cursor && Number.isFinite(cursor.y) ? Math.max(0, cursor.y) : 0;
+  ime.style.left = `${grid.x + x * m.cellW}px`;
+  ime.style.top = `${grid.y + y * m.cellH}px`;
+  ime.style.height = `${m.cellH}px`;
+}
+
+let placing = false;
+
+/** Move the textarea after the frame that just arrived has been patched into the mirror. */
+function placeInputSoon(): void {
+  if (placing) return;
+  placing = true;
+  requestAnimationFrame(() => {
+    placing = false;
+    if (composing) placeInput();
+  });
+}
+
+function onCompositionStart(): void {
+  composing = true;
+  placeInput();
+}
+
+function onCompositionEnd(e: CompositionEvent): void {
+  composing = false;
+  const box = ime;
+  if (box) box.value = "";
+  const text = e.data ?? "";
+  if (text === "") return;
+  endedAt = performance.now();
+  recent = { text, until: endedAt + DUPLICATE_MS };
+  sendText(text);
+}
+
+/** Text that did not come from a keydown: a dead key's result, the emoji picker, dictation. */
+function onInput(e: Event): void {
+  if (composing || (e as InputEvent).isComposing) return; // the commit arrives with compositionend
+  const box = ime;
+  if (!box) return;
+  const text = box.value;
+  box.value = "";
+  if (text === "") return;
+  if (recent && performance.now() < recent.until && text === recent.text) {
+    recent = null; // the same commit again: some engines deliver it after compositionend as well
+    return;
+  }
+  sendText(text);
+}
+
 // ---- terminal input ------------------------------------------------------------------------------
 
 /** The codes of keys whose press went to the core: only their release is sent, so a shortcut leaves no stray one. */
@@ -72,8 +156,18 @@ function sendKey(pane: number, e: KeyboardEvent, release: boolean): void {
 
 function onKeyDown(e: KeyboardEvent): void {
   // A key that belongs to an input method or a dead-key sequence is the textarea's: no command, no preventDefault.
-  if (isComposingKey(e)) return;
-  if (offerKey(e)) return;
+  if (composing || isComposingKey(e)) return;
+  // WebKit fires the keydown of the Enter that committed a composition after compositionend: it is not input.
+  if (e.key === "Enter" && performance.now() - endedAt < ENTER_AFTER_COMPOSITION_MS) {
+    e.preventDefault();
+    return;
+  }
+  if (offerKey(e)) {
+    // A handler that took the key leaves the default to itself. In the terminal's own input the default would put
+    // the character into the field, where it would be sent as text.
+    if (e.target === ime) e.preventDefault();
+    return;
+  }
   for (const chord of chordsOf(e)) {
     const id = actionIdFor(chord);
     if (id !== undefined && runAction(id)) {
@@ -149,6 +243,14 @@ export function initKeyboard(applyView: (v: View) => void): void {
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
   window.addEventListener("paste", onPaste);
+  box.addEventListener("compositionstart", onCompositionStart);
+  box.addEventListener("compositionupdate", placeInput);
+  box.addEventListener("compositionend", onCompositionEnd);
+  box.addEventListener("input", onInput);
+  // While a composition is active the textarea follows the cursor: a frame of the focused pane moves it.
+  void listen<{ pane?: number }>("frame", (msg) => {
+    if (composing && msg?.pane === state.view?.focus) placeInputSoon();
+  });
 
   // The canvas is focusable for the mouse, but the keyboard lives in the textarea.
   document.addEventListener("focusin", (e) => {
