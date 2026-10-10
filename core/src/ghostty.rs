@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use libghostty_vt::key::{self, Action, Key, OptionAsAlt};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::Underline;
@@ -8,7 +9,8 @@ use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{RenderState, Terminal};
 
 use crate::engine::{
-    Cell, Color, Cursor, CursorStyle, KeyEvent, PasteOutcome, Screen, Scrollbar, TerminalEngine, Width,
+    Cell, Color, Cursor, CursorStyle, KeyAction, KeyEvent, Mods, PasteOutcome, Screen, Scrollbar,
+    TerminalEngine, Width,
 };
 use crate::{Error, Result};
 
@@ -20,6 +22,62 @@ fn color(c: libghostty_vt::style::RgbColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b }
 }
 
+/// The libghostty key for a W3C `KeyboardEvent.code`. Codes it does not know are an unidentified key, which the
+/// encoder still encodes from the event's text.
+fn key_from_code(code: &str) -> Key {
+    match code {
+        "ArrowUp" => Key::ArrowUp,
+        "ArrowDown" => Key::ArrowDown,
+        "ArrowLeft" => Key::ArrowLeft,
+        "ArrowRight" => Key::ArrowRight,
+        "Enter" => Key::Enter,
+        "KeyA" => Key::A,
+        "KeyB" => Key::B,
+        "KeyC" => Key::C,
+        "KeyD" => Key::D,
+        "KeyE" => Key::E,
+        "KeyF" => Key::F,
+        "KeyG" => Key::G,
+        "KeyH" => Key::H,
+        "KeyI" => Key::I,
+        "KeyJ" => Key::J,
+        "KeyK" => Key::K,
+        "KeyL" => Key::L,
+        "KeyM" => Key::M,
+        "KeyN" => Key::N,
+        "KeyO" => Key::O,
+        "KeyP" => Key::P,
+        "KeyQ" => Key::Q,
+        "KeyR" => Key::R,
+        "KeyS" => Key::S,
+        "KeyT" => Key::T,
+        "KeyU" => Key::U,
+        "KeyV" => Key::V,
+        "KeyW" => Key::W,
+        "KeyX" => Key::X,
+        "KeyY" => Key::Y,
+        "KeyZ" => Key::Z,
+        _ => Key::Unidentified,
+    }
+}
+
+fn key_mods(m: Mods) -> key::Mods {
+    let mut out = key::Mods::empty();
+    if m.contains(Mods::SHIFT) {
+        out |= key::Mods::SHIFT;
+    }
+    if m.contains(Mods::ALT) {
+        out |= key::Mods::ALT;
+    }
+    if m.contains(Mods::CTRL) {
+        out |= key::Mods::CTRL;
+    }
+    if m.contains(Mods::SUPER) {
+        out |= key::Mods::SUPER;
+    }
+    out
+}
+
 /// [`TerminalEngine`] backed by `libghostty-vt`.
 pub struct GhosttyEngine {
     terminal: Terminal<'static, 'static>,
@@ -28,6 +86,8 @@ pub struct GhosttyEngine {
     cells_iter: CellIterator<'static>,
     /// Bytes the terminal wants written to the PTY: query replies and paste output.
     replies: Rc<RefCell<Vec<u8>>>,
+    encoder: key::Encoder<'static>,
+    key_event: key::Event<'static>,
     option_as_alt: bool,
 }
 
@@ -48,6 +108,8 @@ impl GhosttyEngine {
             rows_iter: RowIterator::new().map_err(eng)?,
             cells_iter: CellIterator::new().map_err(eng)?,
             replies,
+            encoder: key::Encoder::new().map_err(eng)?,
+            key_event: key::Event::new().map_err(eng)?,
             option_as_alt: false,
         })
     }
@@ -137,8 +199,31 @@ impl TerminalEngine for GhosttyEngine {
         self.option_as_alt = on;
     }
 
-    fn encode_key(&mut self, _event: &KeyEvent) -> Result<Vec<u8>> {
-        Ok(Vec::new())
+    fn encode_key(&mut self, event: &KeyEvent) -> Result<Vec<u8>> {
+        let action = match event.action {
+            KeyAction::Press => Action::Press,
+            KeyAction::Repeat => Action::Repeat,
+            KeyAction::Release => Action::Release,
+        };
+        self.key_event
+            .set_action(action)
+            .set_key(key_from_code(&event.code))
+            .set_mods(key_mods(event.mods))
+            .set_consumed_mods(key_mods(event.consumed))
+            .set_composing(event.composing)
+            .set_unshifted_codepoint(event.unshifted.unwrap_or('\0'))
+            .set_utf8(event.text.as_deref());
+
+        // The terminal's live modes (DECCKM, keypad, Kitty flags, modifyOtherKeys) are read at encode time.
+        // `set_options_from_terminal` resets option-as-alt to false, so the setting goes in afterwards.
+        let option_as_alt = if self.option_as_alt { OptionAsAlt::True } else { OptionAsAlt::False };
+        let mut out = Vec::with_capacity(16);
+        self.encoder
+            .set_options_from_terminal(&self.terminal)
+            .set_macos_option_as_alt(option_as_alt)
+            .encode_to_vec(&self.key_event, &mut out)
+            .map_err(eng)?;
+        Ok(out)
     }
 
     fn encode_text(&mut self, _text: &str) -> Result<Vec<u8>> {
