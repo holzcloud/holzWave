@@ -1,7 +1,7 @@
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::Underline;
-use libghostty_vt::{RenderState, Terminal, TerminalOptions};
+use libghostty_vt::{RenderState, Terminal};
 
 use crate::engine::{Cell, Color, Cursor, Screen, TerminalEngine, Width};
 use crate::{Error, Result};
@@ -24,8 +24,10 @@ pub struct GhosttyEngine {
 
 impl GhosttyEngine {
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
+        let mut terminal = Terminal::new(cols, rows).map_err(eng)?;
+        terminal.set_scrollback_max_lines(Some(max_scrollback)).map_err(eng)?;
         Ok(Self {
-            terminal: Terminal::new(TerminalOptions { cols, rows, max_scrollback }).map_err(eng)?,
+            terminal,
             render: RenderState::new().map_err(eng)?,
             rows_iter: RowIterator::new().map_err(eng)?,
             cells_iter: CellIterator::new().map_err(eng)?,
@@ -72,7 +74,6 @@ impl TerminalEngine for GhosttyEngine {
                     CellWide::Narrow => Width::Narrow,
                     CellWide::Wide => Width::Wide,
                     CellWide::SpacerTail | CellWide::SpacerHead => Width::Spacer,
-                    _ => Width::Narrow,
                 };
                 cells.push(Cell {
                     text,
