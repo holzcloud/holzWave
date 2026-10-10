@@ -13,11 +13,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use common::wait_until;
-use holzwave_core::engine::{DomKey, KeyEvent, Mods, PasteOutcome, Screen, TerminalEngine, Update};
+use common::{scratch_dir, wait_until};
+use holzwave_core::engine::{
+    CopyOp, CopyState, DomKey, EngineTheme, KeyEvent, Mods, PasteOutcome, Screen, SearchOp, SearchState, SelectMode,
+    SelectOp, TerminalEngine, Update,
+};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::queue::OUTPUT_LIMIT;
 use holzwave_core::wire::{FrameMsg, RowMsg};
+use holzwave_core::Color;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -321,9 +325,21 @@ struct Spy {
     /// Bit `n` is set once the capital letter `A + n` was fed.
     upper: AtomicU32,
     resizes: Mutex<Vec<(u16, u16)>>,
+    /// The engine calls of the routing tests, as text, in order.
+    calls: Mutex<Vec<String>>,
 }
 
 impl Spy {
+    fn record(&self, call: String) {
+        self.calls.lock().unwrap().push(call);
+    }
+
+    /// The recorded calls whose text starts with one of `prefixes`.
+    fn calls(&self, prefixes: &[&str]) -> Vec<String> {
+        let calls = self.calls.lock().unwrap();
+        calls.iter().filter(|c| prefixes.iter().any(|p| c.starts_with(p))).cloned().collect()
+    }
+
     /// Whether this capital letter was fed at some point.
     fn saw(&self, letter: u8) -> bool {
         assert!(letter.is_ascii_uppercase());
@@ -384,7 +400,9 @@ impl TerminalEngine for CountingEngine {
         Ok(Screen::default())
     }
 
-    fn set_option_as_alt(&mut self, _on: bool) {}
+    fn set_option_as_alt(&mut self, on: bool) {
+        self.spy.record(format!("option_as_alt {on}"));
+    }
 
     fn encode_key(&mut self, event: &KeyEvent) -> holzwave_core::Result<Vec<u8>> {
         if event.code == "Enter" {
@@ -414,6 +432,35 @@ impl TerminalEngine for CountingEngine {
 
     fn request_full(&mut self) {
         self.reset = true;
+    }
+
+    fn set_theme(&mut self, _theme: &EngineTheme) -> holzwave_core::Result<()> {
+        self.spy.record("set_theme".into());
+        Ok(())
+    }
+
+    fn select(&mut self, op: SelectOp) -> holzwave_core::Result<()> {
+        self.spy.record(format!("select {op:?}"));
+        Ok(())
+    }
+
+    fn selection_text(&mut self) -> holzwave_core::Result<Option<String>> {
+        self.spy.record("selection_text".into());
+        Ok(Some("scripted selection".into()))
+    }
+
+    fn search(&mut self, op: SearchOp) -> holzwave_core::Result<SearchState> {
+        self.spy.record(format!("search {op:?}"));
+        Ok(SearchState { total: 7, current: Some(2) })
+    }
+
+    fn copy_mode(&mut self, op: CopyOp) -> holzwave_core::Result<CopyState> {
+        self.spy.record(format!("copy_mode {op:?}"));
+        Ok(CopyState {
+            active: !matches!(op, CopyOp::Exit | CopyOp::Yank),
+            selecting: matches!(op, CopyOp::ToggleSelection),
+            yanked: matches!(op, CopyOp::Yank).then(|| "yanked text".to_string()),
+        })
     }
 }
 
@@ -623,4 +670,257 @@ fn a_nonsense_size_is_clamped_before_it_reaches_the_engine() {
     assert_eq!(*spy.resizes.lock().unwrap(), vec![(2, 1), (1000, 1000)]);
     pane.close();
     assert!(pane.join(Duration::from_secs(3)));
+}
+
+// ---- the remaining controls, working-directory events (task 3) -----------------------------------------------
+
+impl Probe {
+    fn cwds(&self) -> Vec<String> {
+        self.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                PaneEvent::Cwd(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// A scratch directory and its canonical form: the shell's working directory is reported with symlinks resolved
+/// (`/var` is `/private/var` on macOS).
+fn canonical(dir: &std::path::Path) -> String {
+    std::fs::canonicalize(dir).expect("canonical").to_string_lossy().into_owned()
+}
+
+#[test]
+fn a_selection_made_through_the_handle_is_readable_and_typing_clears_it() {
+    let probe = Probe::default();
+    let pane = spawn(spec_sh("printf 'hello world'; exec cat"), &probe);
+    assert!(wait_until(WAIT, || probe.has_text("hello world")), "the output never arrived");
+
+    pane.select(SelectOp::Begin { x: 0, y: 0, mode: SelectMode::Cell }).expect("begin");
+    pane.select(SelectOp::Extend { x: 4, y: 0 }).expect("extend");
+
+    assert_eq!(pane.selection_text().expect("answer"), Some("hello".to_string()));
+    assert!(
+        wait_until(WAIT, || probe.frames().last().is_some_and(|f| f.selection == vec![(0, 0, 4)])),
+        "the selection is not in the frame header"
+    );
+
+    pane.key(key("KeyX", "x")).expect("key");
+    assert!(
+        wait_until(WAIT, || probe.frames().last().is_some_and(|f| f.selection.is_empty())),
+        "typing left the selection in place"
+    );
+    assert_eq!(pane.selection_text().expect("answer"), None);
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn a_theme_set_through_the_handle_is_a_full_frame_with_the_new_default_colours() {
+    let probe = Probe::default();
+    let pane = spawn(PaneSpec::new("/bin/cat", 80, 24), &probe);
+    assert!(wait_until(WAIT, || !probe.frames().is_empty()));
+
+    let mut ansi = [Color::default(); 16];
+    for (i, c) in ansi.iter_mut().enumerate() {
+        *c = Color { r: (i * 16) as u8, g: (255 - i * 16) as u8, b: 0x40 };
+    }
+    let theme = EngineTheme {
+        fg: Color { r: 0xaa, g: 0xbb, b: 0xcc },
+        bg: Color { r: 0x10, g: 0x20, b: 0x30 },
+        cursor: Color { r: 0xff, g: 0, b: 0 },
+        ansi,
+    };
+    let before = probe.last_seq();
+    pane.set_theme(theme).expect("set_theme");
+
+    assert!(
+        wait_until(WAIT, || probe
+            .frames()
+            .iter()
+            .any(|f| f.seq > before && f.full && f.fg == 0x00aa_bbcc && f.bg == 0x0010_2030)),
+        "no full frame with the new colours: {:?}",
+        probe.frames().last().map(|f| (f.full, f.fg, f.bg))
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn option_as_alt_changes_how_alt_f_is_encoded_in_a_following_key() {
+    let probe = Probe::default();
+    // Echo off: `cat -v` shows exactly the bytes the pane sent, ESC as ^[ and bytes above 127 as M-.
+    let pane = spawn(spec_sh("stty -echo; printf ready; exec cat -v"), &probe);
+    assert!(wait_until(WAIT, || probe.has_text("ready")));
+    let alt_f = DomKey { code: "KeyF".into(), key: "\u{0192}".into(), mods: Mods::ALT, ..DomKey::default() };
+
+    if cfg!(target_os = "macos") {
+        // Option composes characters on macOS unless it is meant as Alt: the composed character is sent.
+        pane.key(alt_f.clone()).expect("key");
+        pane.key(key("Enter", "Enter")).expect("enter");
+        assert!(wait_until(WAIT, || probe.has_text("M-")), "the composed character never arrived");
+        assert!(!probe.has_text("^[f"), "Option+f was sent as Alt+f although option-as-alt is off");
+    }
+
+    pane.set_option_as_alt(true).expect("set_option_as_alt");
+    pane.key(alt_f).expect("key");
+    pane.key(key("Enter", "Enter")).expect("enter");
+
+    assert!(wait_until(WAIT, || probe.has_text("^[f")), "Alt+f was not sent as ESC f after the switch");
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn scroll_to_bottom_returns_the_viewport_to_the_live_screen() {
+    let probe = Probe::default();
+    let pane = spawn(
+        spec_sh("i=0; while [ $i -lt 100 ]; do echo line $i; i=$((i+1)); done; exec cat"),
+        &probe,
+    );
+    assert!(wait_until(WAIT, || probe.has_text("line 99")));
+    pane.scroll(-30).expect("scroll");
+    assert!(wait_until(WAIT, || probe.frames().last().is_some_and(|f| !at_bottom(f))));
+
+    let before = probe.last_seq();
+    pane.scroll_to_bottom().expect("scroll_to_bottom");
+
+    assert!(wait_until(WAIT, || probe.frames().iter().any(|f| f.seq > before && at_bottom(f))));
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn search_and_copy_mode_are_routed_to_the_engine_and_return_its_state() {
+    let probe = Probe::default();
+    // A mock engine that returns scripted states: the test does not depend on which capabilities the real engine
+    // implements, nor on the trait's `Unsupported` defaults, which later plans replace.
+    let (pane, spy) = spawn_counting(PaneSpec::new("/bin/cat", 80, 24), &probe, Duration::ZERO);
+
+    let found = pane.search(SearchOp::Set("needle".into())).expect("search");
+    assert_eq!(found, SearchState { total: 7, current: Some(2) });
+    assert_eq!(pane.search(SearchOp::Next).expect("search"), SearchState { total: 7, current: Some(2) });
+    let entered = pane.copy_mode(CopyOp::Enter).expect("copy mode");
+    assert_eq!(entered, CopyState { active: true, selecting: false, yanked: None });
+    let yanked = pane.copy_mode(CopyOp::Yank).expect("copy mode");
+    assert_eq!(yanked.yanked.as_deref(), Some("yanked text"));
+    assert_eq!(pane.selection_text().expect("selection"), Some("scripted selection".to_string()));
+
+    assert_eq!(
+        spy.calls(&["search", "copy_mode", "selection_text"]),
+        vec![
+            "search Set(\"needle\")",
+            "search Next",
+            "copy_mode Enter",
+            "copy_mode Yank",
+            "selection_text"
+        ]
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn typing_text_and_a_paste_clear_the_selection_before_they_act() {
+    let probe = Probe::default();
+    let (pane, spy) = spawn_counting(PaneSpec::new("/bin/cat", 80, 24), &probe, Duration::ZERO);
+    let begin = SelectOp::Begin { x: 1, y: 2, mode: SelectMode::Word };
+
+    for step in 0..3 {
+        pane.select(begin).expect("select");
+        match step {
+            0 => pane.key(key("KeyA", "a")).expect("key"),
+            1 => pane.text("\u{e9}".into()).expect("text"),
+            _ => assert_eq!(pane.paste("pasted".into(), false).expect("paste"), PasteOutcome::Written),
+        }
+        // `paste` answers after it ran; the other two are asynchronous.
+        assert!(
+            wait_until(WAIT, || spy.calls(&["select"]).len() == 2 * (step + 1)),
+            "step {step}: {:?}",
+            spy.calls(&["select"])
+        );
+    }
+
+    let begin_text = "select Begin { x: 1, y: 2, mode: Word }".to_string();
+    let clear = "select Clear".to_string();
+    assert_eq!(
+        spy.calls(&["select"]),
+        vec![begin_text.clone(), clear.clone(), begin_text.clone(), clear.clone(), begin_text, clear]
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn a_pane_reports_its_starting_directory_once_its_output_goes_idle() {
+    let probe = Probe::default();
+    let dir = scratch_dir("pane-cwd");
+    let pane = spawn(spec_sh("printf hi; sleep 6").cwd(&dir), &probe);
+
+    assert!(
+        wait_until(WAIT, || probe.cwds() == vec![canonical(&dir)]),
+        "no Cwd for the starting directory: {:?}",
+        probe.cwds()
+    );
+    // Nothing changes, so nothing more is reported.
+    thread::sleep(Duration::from_millis(1500));
+    assert_eq!(probe.cwds(), vec![canonical(&dir)]);
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_new_directory_is_reported_after_the_shell_changes_it() {
+    let probe = Probe::default();
+    let (first, second) = (scratch_dir("pane-cwd-a"), scratch_dir("pane-cwd-b"));
+    let script = format!("printf a; sleep 1.5; cd '{}'; printf b; sleep 8", canonical(&second));
+    let pane = spawn(spec_sh(&script).cwd(&first), &probe);
+
+    assert!(
+        wait_until(Duration::from_secs(8), || probe.cwds() == vec![canonical(&first), canonical(&second)]),
+        "the change was not reported: {:?}",
+        probe.cwds()
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+    let _ = std::fs::remove_dir_all(first);
+    let _ = std::fs::remove_dir_all(second);
+}
+
+#[test]
+fn the_directory_is_looked_up_at_most_once_per_second() {
+    let probe = Probe::default();
+    let root = scratch_dir("pane-cwd-many");
+    let dirs: Vec<String> = (0..12)
+        .map(|i| {
+            let d = root.join(format!("d{i}"));
+            std::fs::create_dir(&d).expect("dir");
+            canonical(&d)
+        })
+        .collect();
+    // A directory change and some output every quarter second: each one is idle for longer than the 150 ms
+    // coalescing, so without the one-per-second limit every change would be looked up and reported.
+    let mut script = String::new();
+    for d in &dirs {
+        script.push_str(&format!("cd '{d}'; printf x; sleep 0.25; "));
+    }
+    script.push_str("sleep 8");
+    let pane = spawn(spec_sh(&script).cwd(&root), &probe);
+
+    let last = dirs.last().unwrap().clone();
+    assert!(
+        wait_until(Duration::from_secs(10), || probe.cwds().last() == Some(&last)),
+        "the final directory was never reported: {:?}",
+        probe.cwds()
+    );
+    let reported = probe.cwds();
+    // About 3.2 s of changes: lookups at 0.15 s, then at least a second apart.
+    assert!(reported.len() <= 5, "{} lookups in about 3 seconds: {reported:?}", reported.len());
+    assert!(reported.len() >= 2, "{reported:?}");
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+    let _ = std::fs::remove_dir_all(root);
 }

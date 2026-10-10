@@ -42,7 +42,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::engine::{DomKey, EngineEvent, EngineTheme, KeyEvent, PasteOutcome, TerminalEngine};
+use crate::engine::{
+    CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, PasteOutcome, SearchOp, SearchState, SelectOp,
+    TerminalEngine,
+};
 use crate::layout::PaneId;
 use crate::pty::{Pty, SpawnOptions};
 use crate::queue::{PaneQueue, Popped};
@@ -325,6 +328,41 @@ impl PaneHandle {
     /// for tests and diagnostics: it is how the byte bound of the queue is observed from outside.
     pub fn queue_high_water(&self) -> usize {
         self.shared.queue.high_water()
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn set_theme(&self, _theme: EngineTheme) -> Result<()> {
+        Err(Error::Unsupported("set_theme".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn set_option_as_alt(&self, _on: bool) -> Result<()> {
+        Err(Error::Unsupported("set_option_as_alt".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn select(&self, _op: SelectOp) -> Result<()> {
+        Err(Error::Unsupported("select".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn selection_text(&self) -> Result<Option<String>> {
+        Err(Error::Unsupported("selection_text".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn search(&self, _op: SearchOp) -> Result<SearchState> {
+        Err(Error::Unsupported("search".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn copy_mode(&self, _op: CopyOp) -> Result<CopyState> {
+        Err(Error::Unsupported("copy_mode".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn scroll_to_bottom(&self) -> Result<()> {
+        Err(Error::Unsupported("scroll_to_bottom".into()))
     }
 
     /// End the pane: the shell is killed and reaped on the engine thread and one `Exited` event follows. Does not
@@ -698,4 +736,137 @@ fn engine_main<E, F, S>(
     let _ = started.send(Ok(pid));
     actor.run();
     actor.finish();
+}
+
+/// How long the output must have been quiet before the working directory is looked up.
+const CWD_IDLE: Duration = Duration::from_millis(150);
+
+/// The least time between two working-directory lookups of one pane.
+const CWD_MIN_GAP: Duration = Duration::from_secs(1);
+
+/// Skeleton: decides when to look up the shell's working directory and what to report.
+#[allow(dead_code)]
+struct CwdTracker {
+    due: Option<Instant>,
+    last_lookup: Option<Instant>,
+    reported: Option<String>,
+    osc7: Option<String>,
+}
+
+#[allow(dead_code)]
+impl CwdTracker {
+    fn new(_now: Instant) -> Self {
+        Self { due: None, last_lookup: None, reported: None, osc7: None }
+    }
+
+    fn output(&mut self, _now: Instant) {}
+
+    fn announced(&mut self, _path: String, _now: Instant) {}
+
+    fn deadline(&self) -> Option<Instant> {
+        None
+    }
+
+    fn check(&mut self, _now: Instant, _lookup: impl FnOnce() -> Option<PathBuf>) -> Option<String> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MS: Duration = Duration::from_millis(1);
+
+    fn at(base: Instant, ms: u64) -> Instant {
+        base + MS * ms as u32
+    }
+
+    #[test]
+    fn nothing_is_looked_up_until_the_output_has_been_quiet_for_150_ms() {
+        let base = Instant::now();
+        let mut tracker = CwdTracker::new(base);
+        tracker.output(at(base, 10));
+
+        assert_eq!(tracker.check(at(base, 100), || Some("/a".into())), None, "only 90 ms after the output");
+        assert_eq!(tracker.check(at(base, 170), || Some("/a".into())), Some("/a".to_string()));
+    }
+
+    #[test]
+    fn more_output_pushes_the_check_back() {
+        let base = Instant::now();
+        let mut tracker = CwdTracker::new(base);
+        tracker.output(at(base, 0));
+        tracker.output(at(base, 100));
+        tracker.output(at(base, 200));
+
+        assert_eq!(tracker.check(at(base, 300), || Some("/a".into())), None, "100 ms after the last output");
+        assert_eq!(tracker.check(at(base, 360), || Some("/a".into())), Some("/a".to_string()));
+    }
+
+    #[test]
+    fn there_is_at_most_one_lookup_per_second_and_a_postponed_one_still_happens() {
+        let base = Instant::now();
+        let mut tracker = CwdTracker::new(base);
+        let mut lookups = 0;
+        tracker.output(at(base, 0));
+        assert_eq!(
+            tracker.check(at(base, 200), || {
+                lookups += 1;
+                Some("/a".into())
+            }),
+            Some("/a".to_string())
+        );
+
+        // New output and a changed directory 300 ms later: due at 450 ms, but a lookup ran at 200 ms.
+        tracker.output(at(base, 300));
+        assert_eq!(tracker.deadline(), Some(at(base, 1200)), "postponed to one second after the last lookup");
+        assert_eq!(
+            tracker.check(at(base, 500), || {
+                lookups += 1;
+                Some("/b".into())
+            }),
+            None
+        );
+        assert_eq!(lookups, 1, "no second lookup inside the same second");
+        assert_eq!(
+            tracker.check(at(base, 1250), || {
+                lookups += 1;
+                Some("/b".into())
+            }),
+            Some("/b".to_string())
+        );
+        assert_eq!(lookups, 2);
+    }
+
+    #[test]
+    fn an_unchanged_directory_is_reported_once() {
+        let base = Instant::now();
+        let mut tracker = CwdTracker::new(base);
+        tracker.output(at(base, 0));
+        assert_eq!(tracker.check(at(base, 200), || Some("/a".into())), Some("/a".to_string()));
+        tracker.output(at(base, 1300));
+        assert_eq!(tracker.check(at(base, 1500), || Some("/a".into())), None);
+    }
+
+    #[test]
+    fn the_last_osc7_value_is_the_fallback_when_the_lookup_yields_nothing() {
+        let base = Instant::now();
+        let mut tracker = CwdTracker::new(base);
+        tracker.announced("/remote/project".into(), at(base, 0));
+        assert_eq!(tracker.check(at(base, 10), || None), Some("/remote/project".to_string()));
+
+        // A lookup that works beats what the program announced.
+        tracker.announced("/remote/other".into(), at(base, 2000));
+        assert_eq!(tracker.check(at(base, 2010), || Some("/local".into())), Some("/local".to_string()));
+    }
+
+    #[test]
+    fn with_no_lookup_and_no_announcement_nothing_is_reported() {
+        let base = Instant::now();
+        let mut tracker = CwdTracker::new(base);
+        tracker.output(at(base, 0));
+        assert_eq!(tracker.check(at(base, 200), || None), None);
+        assert_eq!(tracker.deadline(), None, "a check that ran is not due again until there is output");
+    }
 }
