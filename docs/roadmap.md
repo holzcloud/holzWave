@@ -35,6 +35,9 @@ Done when: a shell runs in the window, the renderer is chosen with the measureme
 
 ## Phase 2 — Desktop MVP
 
+Status in `0.0.1-alpha1`: scrollback (wheel), selection and copy, paste, tiling with splits and draggable dividers,
+tabs, workspaces and a persisted layout exist. Themes, drag-and-drop of blocks, hyperlinks and the key encoder do not.
+
 - Local shell, scrollback, copy and paste, Unicode, resize, themes.
 - Block tiling with tabs and workspaces.
 - Persistent layout state.

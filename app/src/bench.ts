@@ -54,11 +54,13 @@ function run(name: string, r: Renderer) {
     f.lines[i % ROWS] = frames[(i % 7) + 1]!.lines[i % ROWS]!;
     return f;
   };
-  for (let i = 0; i < 30; i++) { r.draw(pick(i)); r.sync(); } // warm up, fills the glyph atlas
+  for (let i = 0; i < 30; i++) { const f = pick(i); r.begin(f.bg); r.drawPane(f, { x: 0, y: 0, w: m.width, h: m.height }); r.sync(); } // warm up, fills the glyph atlas
   const times: number[] = [];
   for (let i = 0; i < 300; i++) {
     const t = performance.now();
-    r.draw(pick(i));
+    const f = pick(i);
+    r.begin(f.bg);
+    r.drawPane(f, { x: 0, y: 0, w: m.width, h: m.height });
     r.sync();
     times.push(performance.now() - t);
   }
@@ -68,8 +70,39 @@ function run(name: string, r: Renderer) {
 }
 
 const which = q.get("renderer") ?? "webgl";
-const r = which === "canvas" ? new Canvas2DRenderer(canvas) : new WebGLRenderer(canvas);
-const res = run(which, r);
-const text = JSON.stringify({ ...res, grid: `${COLS}x${ROWS}`, dpr, scenario: q.get("scenario") ?? "full", ua: navigator.userAgent });
-out.textContent = text;
-document.title = "done";
+if (!q.get("check")) {
+  const r = which === "canvas" ? new Canvas2DRenderer(canvas) : new WebGLRenderer(canvas);
+  const res = run(which, r);
+  out.textContent = JSON.stringify({ ...res, grid: `${COLS}x${ROWS}`, dpr, scenario: q.get("scenario") ?? "full", ua: navigator.userAgent });
+  document.title = "done";
+}
+
+// `?check=1`: two panes with different backgrounds side by side, then read pixels back.
+// Used to verify that a renderer keeps each pane inside its rectangle.
+if (q.get("check")) {
+  const r2 = which === "canvas" ? new Canvas2DRenderer(canvas) : new WebGLRenderer(canvas);
+  r2.configure(m);
+  const solid = (bg: number): Frame => ({
+    cols: 20, rows: 4, cursor: null, fg: 0xffffff, bg,
+    lines: [[["hello", 5, 0xffffff, bg, 0]], [], [], []],
+  });
+  const half = m.width / 2;
+  r2.begin(0x101010);
+  r2.drawPane(solid(0xaa0000), { x: 0, y: 0, w: half - 10, h: m.height });
+  r2.drawPane(solid(0x0000aa), { x: half + 10, y: 0, w: half - 10, h: m.height });
+  const px = (x: number, y: number): number[] => {
+    const X = Math.round(x * dpr), Y = Math.round(y * dpr);
+    const gl = canvas.getContext("webgl2");
+    if (gl) {
+      const b = new Uint8Array(4);
+      gl.readPixels(X, canvas.height - 1 - Y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, b);
+      return [...b.slice(0, 3)];
+    }
+    return [...canvas.getContext("2d")!.getImageData(X, Y, 1, 1).data.slice(0, 3)];
+  };
+  out.textContent = JSON.stringify({
+    left: px(half / 2, m.height - 5), gap: px(half, m.height - 5), right: px(half * 1.5, m.height - 5),
+    leftEdge: px(half - 11, m.height - 5), rightEdge: px(half + 11, m.height - 5),
+  });
+  document.title = "done";
+}

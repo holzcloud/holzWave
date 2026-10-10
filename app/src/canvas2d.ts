@@ -1,4 +1,4 @@
-import { BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, Metrics, Renderer, UNDERLINE, css, font } from "./frame.js";
+import { BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, css, font } from "./frame.js";
 
 /** The simple renderer: one `fillText` per glyph on a 2D canvas. */
 export class Canvas2DRenderer implements Renderer {
@@ -13,13 +13,24 @@ export class Canvas2DRenderer implements Renderer {
     this.m = m;
   }
 
-  draw(f: Frame) {
+  begin(bg: number) {
     const { ctx, m } = this;
-    const { cellW, cellH, dpr } = m;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(m.dpr, 0, 0, m.dpr, 0, 0);
+    ctx.fillStyle = css(bg);
+    ctx.fillRect(0, 0, m.width, m.height);
+  }
+
+  drawPane(f: Frame, r: PxRect) {
+    const { ctx, m } = this;
+    const { cellW, cellH } = m;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.clip();
+    ctx.translate(r.x, r.y);
     ctx.textBaseline = "alphabetic";
     ctx.fillStyle = css(f.bg);
-    ctx.fillRect(0, 0, m.width, m.height);
+    ctx.fillRect(0, 0, r.w, r.h);
 
     const baseline = Math.round(cellH * 0.78);
     let lastFont = -1;
@@ -58,6 +69,7 @@ export class Canvas2DRenderer implements Renderer {
       ctx.fillRect(f.cursor[0] * cellW, f.cursor[1] * cellH, cellW, cellH);
       ctx.globalAlpha = 1;
     }
+    ctx.restore();
   }
 
   sync() {

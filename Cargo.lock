@@ -1227,10 +1227,11 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "holzwave-app"
-version = "0.0.1"
+version = "0.0.1-alpha1"
 dependencies = [
  "holzwave-core",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-runtime-wry",
@@ -1238,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-core"
-version = "0.0.1"
+version = "0.0.1-alpha1"
 dependencies = [
  "libghostty-vt",
  "portable-pty",
@@ -1248,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-spike"
-version = "0.0.1"
+version = "0.0.1-alpha1"
 dependencies = [
  "holzwave-core",
 ]

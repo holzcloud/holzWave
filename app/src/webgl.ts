@@ -1,4 +1,4 @@
-import { BOLD, CURSOR_COLOR, FONT_PX, Frame, INVERSE, ITALIC, Metrics, Renderer, UNDERLINE, font } from "./frame.js";
+import { BOLD, CURSOR_COLOR, FONT_PX, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, font } from "./frame.js";
 
 // WebGL2 renderer: one instanced draw per frame. Every cell is an instance that carries its
 // glyph slot in a texture atlas plus foreground and background colour; the fragment shader mixes them.
@@ -169,7 +169,15 @@ export class WebGLRenderer implements Renderer {
     return slot;
   }
 
-  draw(f: Frame) {
+  begin(bg: number) {
+    const gl = this.gl;
+    gl.disable(gl.SCISSOR_TEST);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.clearColor(((bg >> 16) & 255) / 255, ((bg >> 8) & 255) / 255, (bg & 255) / 255, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+
+  drawPane(f: Frame, r: PxRect) {
     const gl = this.gl;
     const cells = f.cols * f.rows;
     if (cells > this.capacity) {
@@ -229,10 +237,19 @@ export class WebGLRenderer implements Renderer {
       put(cx, cy, 0, f.bg, CURSOR_COLOR, 0);
     }
 
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    // The pane's rectangle in device pixels; the origin of a GL viewport is the bottom-left corner.
+    const dpr = this.m.dpr;
+    const vx = Math.round(r.x * dpr), vw = Math.round(r.w * dpr), vh = Math.round(r.h * dpr);
+    const vy = this.canvas.height - Math.round(r.y * dpr) - vh;
+    gl.viewport(vx, vy, vw, vh);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(vx, vy, vw, vh);
+    // The grid covers whole cells only; the rest of the rectangle is the pane's background.
+    gl.clearColor(((f.bg >> 16) & 255) / 255, ((f.bg >> 8) & 255) / 255, (f.bg & 255) / 255, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(this.prog);
     gl.uniform2f(this.uniforms.uCell!, this.cw, this.ch);
-    gl.uniform2f(this.uniforms.uViewport!, this.canvas.width, this.canvas.height);
+    gl.uniform2f(this.uniforms.uViewport!, vw, vh);
     gl.uniform2f(this.uniforms.uSlot!, this.cw, this.ch);
     gl.uniform1ui(this.uniforms.uAtlasCols!, this.atlasCols);
     gl.activeTexture(gl.TEXTURE0);

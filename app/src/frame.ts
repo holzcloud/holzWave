@@ -25,10 +25,21 @@ export interface Metrics {
   height: number;
 }
 
+/** A rectangle in CSS pixels, relative to the canvas. */
+export interface PxRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface Renderer {
   /** Called whenever the canvas or the cell metrics change. */
   configure(m: Metrics): void;
-  draw(frame: Frame): void;
+  /** Start a frame: clear the whole canvas to `bg`. */
+  begin(bg: number): void;
+  /** Draw one pane's grid into `rect`; the grid starts at the rect's top-left corner. */
+  drawPane(frame: Frame, rect: PxRect): void;
   /** Block until the GPU has finished, so timings are real. Only used by the benchmark. */
   sync(): void;
 }
