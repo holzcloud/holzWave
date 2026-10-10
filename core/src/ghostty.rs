@@ -258,6 +258,11 @@ fn key_mods(m: Mods) -> key::Mods {
     out
 }
 
+/// Bits of [`GhosttyEngine::buttons`].
+const BUTTON_LEFT: u8 = 1;
+const BUTTON_MIDDLE: u8 = 2;
+const BUTTON_RIGHT: u8 = 4;
+
 /// A pointer coordinate in device pixels brought into `0..extent`: a value that is not finite or negative becomes 0
 /// and one past the end becomes the last pixel, so the encoder only ever sees a position on the grid (T-02-94).
 fn clamp_px(value: f32, extent: u32) -> f32 {
@@ -478,6 +483,14 @@ pub struct GhosttyEngine {
     mouse_event: mouse::Event<'static>,
     /// The cell size in device pixels as the last `resize` told it, `(0, 0)` while unknown.
     cell_px: (u32, u32),
+    /// The buttons held down, as `BUTTON_*` bits. Kept here so that button-event tracking and the any-button state
+    /// of the encoder are right without the caller supplying them, and so that a lost release cannot outlive the
+    /// program's own interest in the mouse (T-02-95).
+    buttons: u8,
+    /// The cell of the last mouse report, for dropping a motion that stays inside one cell. Kept here and not in the
+    /// library's encoder: that one forgets it whenever the options are set from the terminal, which has to happen
+    /// for every event because the program may change its modes between any two of them.
+    last_cell: Option<(u32, u32)>,
     option_as_alt: bool,
     /// The next `update` reports every row and tells the consumer to start over: true at the start and after
     /// `request_full`.
@@ -573,6 +586,8 @@ impl GhosttyEngine {
             mouse_encoder: mouse::Encoder::new().map_err(eng)?,
             mouse_event: mouse::Event::new().map_err(eng)?,
             cell_px: (0, 0),
+            buttons: 0,
+            last_cell: None,
             option_as_alt: false,
             force_full: true,
             last_size: None,
@@ -879,7 +894,53 @@ impl GhosttyEngine {
     ///
     /// The position is clamped onto the grid first. An unknown cell size is a documented case, not an error: the
     /// encoder insists on a non-zero cell, so it gets a 1 x 1 pixel cell and the position is cell (0, 0).
-    fn encode_pointer(
+    ///
+    /// Nothing is held while the program does not track the mouse: a press that arrives then is not remembered, and
+    /// whatever was remembered is dropped, so a program that turns tracking on later never sees a phantom drag.
+    fn encode_pointer(&mut self, event: &MouseEvent) -> Result<Vec<u8>> {
+        if !self.terminal.is_mouse_tracking().map_err(eng)? {
+            self.release_buttons();
+            return Ok(Vec::new());
+        }
+        let bit = match event.button {
+            MouseButton::None => 0,
+            MouseButton::Left => BUTTON_LEFT,
+            MouseButton::Middle => BUTTON_MIDDLE,
+            MouseButton::Right => BUTTON_RIGHT,
+        };
+        match event.action {
+            MouseAction::Press => self.buttons |= bit,
+            MouseAction::Release => self.buttons &= !bit,
+            MouseAction::Motion => {}
+        }
+        // A motion says which button is held, or says nothing: then it is the one the engine saw pressed.
+        let held = match event.button {
+            MouseButton::None => match self.buttons {
+                b if b & BUTTON_LEFT != 0 => Some(mouse::Button::Left),
+                b if b & BUTTON_MIDDLE != 0 => Some(mouse::Button::Middle),
+                b if b & BUTTON_RIGHT != 0 => Some(mouse::Button::Right),
+                _ => None,
+            },
+            MouseButton::Left => Some(mouse::Button::Left),
+            MouseButton::Middle => Some(mouse::Button::Middle),
+            MouseButton::Right => Some(mouse::Button::Right),
+        };
+        let action = match event.action {
+            MouseAction::Press => mouse::Action::Press,
+            MouseAction::Release => mouse::Action::Release,
+            MouseAction::Motion => mouse::Action::Motion,
+        };
+        self.encode_pointer_at(action, held, event.mods, event.x, event.y)
+    }
+
+    /// Forget every held button and the last reported cell.
+    fn release_buttons(&mut self) {
+        self.buttons = 0;
+        self.last_cell = None;
+    }
+
+    /// Run the mouse encoder for one pointer event: clamp the position, describe the grid, encode.
+    fn encode_pointer_at(
         &mut self,
         action: mouse::Action,
         button: Option<mouse::Button>,
@@ -904,17 +965,31 @@ impl GhosttyEngine {
         let (px, py) =
             if known { (clamp_px(x, size.screen_width), clamp_px(y, size.screen_height)) } else { (0.0, 0.0) };
 
+        // A motion inside the cell of the previous report is not news, except in SGR-Pixels, which reports pixels.
+        let cell = ((px as u32) / cell_width, (py as u32) / cell_height);
+        if action == mouse::Action::Motion
+            && self.last_cell == Some(cell)
+            && !self.terminal.mode(Mode::SGR_PIXELS_MOUSE).map_err(eng)?
+        {
+            return Ok(Vec::new());
+        }
+
         self.mouse_event
             .set_action(action)
             .set_button(button)
             .set_mods(key_mods(mods))
             .set_position(mouse::Position { x: px, y: py });
         let mut out = Vec::with_capacity(32);
+        // The options of the terminal first: they reset what the calls after them set.
         self.mouse_encoder
             .set_options_from_terminal(&self.terminal)
             .set_size(size)
+            .set_any_button_pressed(self.buttons != 0)
             .encode_to_vec(&self.mouse_event, &mut out)
             .map_err(eng)?;
+        if !out.is_empty() {
+            self.last_cell = Some(cell);
+        }
         Ok(out)
     }
 }
@@ -941,6 +1016,9 @@ impl TerminalEngine for GhosttyEngine {
         }
         self.terminal.resize(cols, rows, cell_px.0, cell_px.1).map_err(eng)?;
         self.cell_px = cell_px;
+        // The cells moved under the pointer: the last reported cell means nothing now, and a drag that was in
+        // progress is over as far as the program is concerned.
+        self.release_buttons();
         Ok(())
     }
 
@@ -1020,18 +1098,7 @@ impl TerminalEngine for GhosttyEngine {
     }
 
     fn mouse(&mut self, event: &MouseEvent) -> Result<Vec<u8>> {
-        let action = match event.action {
-            MouseAction::Press => mouse::Action::Press,
-            MouseAction::Release => mouse::Action::Release,
-            MouseAction::Motion => mouse::Action::Motion,
-        };
-        let button = match event.button {
-            MouseButton::None => None,
-            MouseButton::Left => Some(mouse::Button::Left),
-            MouseButton::Middle => Some(mouse::Button::Middle),
-            MouseButton::Right => Some(mouse::Button::Right),
-        };
-        self.encode_pointer(action, button, event.mods, event.x, event.y)
+        self.encode_pointer(event)
     }
 
     fn paste(&mut self, text: &str, allow_unsafe: bool) -> Result<PasteOutcome> {

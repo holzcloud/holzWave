@@ -255,3 +255,28 @@ fn an_unknown_cell_size_is_cell_zero_zero_and_never_a_division_by_zero() {
     assert_eq!(press(&mut e, MouseButton::Left, (300.0, 100.0)), r"\x1b[<0;1;1M");
     assert_eq!(release(&mut e, MouseButton::Left, (300.0, 100.0)), r"\x1b[<0;1;1m");
 }
+
+#[test]
+fn sgr_pixels_reports_every_pixel_even_inside_one_cell() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1003h\x1b[?1016h");
+
+    assert_eq!(motion(&mut e, MouseButton::None, (36.0, 40.0)), r"\x1b[<35;36;40M");
+    assert_eq!(motion(&mut e, MouseButton::None, (37.0, 40.0)), r"\x1b[<35;37;40M");
+    assert_eq!(motion(&mut e, MouseButton::None, (37.0, 41.0)), r"\x1b[<35;37;41M");
+}
+
+#[test]
+fn a_resize_forgets_the_held_button_and_the_last_cell() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1002h\x1b[?1006h");
+    press(&mut e, MouseButton::Left, centre(4, 2));
+    assert_eq!(motion(&mut e, MouseButton::Left, centre(5, 2)), r"\x1b[<32;6;3M");
+
+    e.resize(40, 10, (10, 20)).expect("resize");
+
+    // The button is no longer held, so a motion with none is silent; and the cell geometry is new.
+    assert_eq!(motion(&mut e, MouseButton::None, (55.0, 50.0)), "");
+    assert_eq!(press(&mut e, MouseButton::Left, (55.0, 50.0)), r"\x1b[<0;6;3M");
+    assert_eq!(motion(&mut e, MouseButton::Left, (65.0, 50.0)), r"\x1b[<32;7;3M");
+}
