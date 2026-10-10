@@ -71,6 +71,40 @@ const MIN_RATIO: f32 = 0.1;
 /// the limit (and with it `u64::MAX`, which `next_id` could never be raised above) is not repaired.
 const ID_CEILING: u64 = 1 << 53;
 
+/// Most panes one tab may hold.
+const MAX_PANES_PER_TAB: usize = 64;
+/// Most panes the whole layout may hold; each pane is a shell with a thread, so this bounds the processes a
+/// damaged file can start.
+const MAX_PANES: usize = 256;
+/// Deepest nesting of splits in one tab. The serialiser writes two JSON levels per split and serde_json
+/// refuses documents nested deeper than 128, so a chain of repeated splits would stop loading near 60. Stopping
+/// well below that keeps everything the operations produce loadable.
+const MAX_SPLIT_DEPTH: usize = 32;
+/// Longest workspace name or tab title, in characters.
+const MAX_TEXT_CHARS: usize = 128;
+
+/// Drop control characters (terminal escapes, newlines) and cut to `MAX_TEXT_CHARS` characters.
+fn clean_text(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).take(MAX_TEXT_CHARS).collect()
+}
+
+/// Keep the items `keep` accepts, in order. Returns them and the new index of the item that was at `active`,
+/// or `None` when that item was dropped (or `active` was out of range).
+fn retain_tracking<T>(items: Vec<T>, active: usize, mut keep: impl FnMut(&mut T) -> bool) -> (Vec<T>, Option<usize>) {
+    let mut out = Vec::with_capacity(items.len());
+    let mut new_active = None;
+    for (i, mut item) in items.into_iter().enumerate() {
+        if !keep(&mut item) {
+            continue;
+        }
+        if i == active {
+            new_active = Some(out.len());
+        }
+        out.push(item);
+    }
+    (out, new_active)
+}
+
 /// What `Layout::close_pane` did. The three cases need different reactions: an unknown id is a stale event
 /// and is ignored, the last pane ends the app, anything else changed the layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +143,35 @@ impl Node {
         match self {
             Node::Pane(p) => *p == pane,
             Node::Split { a, b, .. } => a.contains(pane) || b.contains(pane),
+        }
+    }
+
+    /// Number of splits between the root and `pane`, or `None` when the pane is not in the tree.
+    fn depth_of(&self, pane: PaneId) -> Option<usize> {
+        match self {
+            Node::Pane(p) => (*p == pane).then_some(0),
+            Node::Split { a, b, .. } => a.depth_of(pane).or_else(|| b.depth_of(pane)).map(|d| d + 1),
+        }
+    }
+
+    /// Longest chain of splits in the tree.
+    fn depth(&self) -> usize {
+        match self {
+            Node::Pane(_) => 0,
+            Node::Split { a, b, .. } => 1 + a.depth().max(b.depth()),
+        }
+    }
+
+    /// Replace every ratio that is not finite by 0.5 and clamp the rest. Returns how many were changed.
+    fn sanitize_ratios(&mut self) -> usize {
+        match self {
+            Node::Pane(_) => 0,
+            Node::Split { ratio, a, b, .. } => {
+                let fixed = if ratio.is_finite() { ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO) } else { 0.5 };
+                let changed = usize::from(fixed != *ratio);
+                *ratio = fixed;
+                changed + a.sanitize_ratios() + b.sanitize_ratios()
+            }
         }
     }
 
@@ -259,17 +322,35 @@ impl Layout {
     }
 
     /// Split the focused pane; the new pane gets focus. Returns it.
+    ///
+    /// Returns `None`, and changes nothing, when the focus is not in the tree, when the tab or the whole
+    /// layout is at its pane limit, or when the focused pane is already nested `MAX_SPLIT_DEPTH` splits deep.
     pub fn split_focused(&mut self, axis: Axis) -> Option<PaneId> {
+        if self.all_panes().len() >= MAX_PANES {
+            return None;
+        }
+        let tab = self.tab();
+        if tab.panes().len() >= MAX_PANES_PER_TAB {
+            return None;
+        }
+        if tab.root.depth_of(tab.focus).is_none_or(|d| d >= MAX_SPLIT_DEPTH) {
+            return None;
+        }
         let (split_id, new_pane) = (self.id(), self.id());
         let tab = self.tab_mut();
         let focus = tab.focus;
-        tab.root.split_pane(focus, axis, split_id, new_pane);
+        if !tab.root.split_pane(focus, axis, split_id, new_pane) {
+            return None;
+        }
         tab.focus = new_pane;
         Some(new_pane)
     }
 
-    /// Open a new tab in the active workspace and focus it. Returns its pane.
+    /// Open a new tab in the active workspace and focus it. Returns its pane, or `None` at the pane limit.
     pub fn new_tab(&mut self) -> Option<PaneId> {
+        if self.all_panes().len() >= MAX_PANES {
+            return None;
+        }
         let (tab_id, pane) = (self.id(), self.id());
         let w = self.workspace_mut();
         w.tabs.push(Tab { id: tab_id, title: "shell".into(), root: Node::Pane(pane), focus: pane });
@@ -277,12 +358,16 @@ impl Layout {
         Some(pane)
     }
 
-    /// Add a workspace with one tab and switch to it. Returns its pane.
+    /// Add a workspace with one tab and switch to it. Returns its pane, or `None` at the pane limit. The name
+    /// is cut and stripped of control characters the same way a loaded one is.
     pub fn new_workspace(&mut self, name: &str) -> Option<PaneId> {
+        if self.all_panes().len() >= MAX_PANES {
+            return None;
+        }
         let (ws, tab, pane) = (self.id(), self.id(), self.id());
         self.workspaces.push(Workspace {
             id: ws,
-            name: name.into(),
+            name: clean_text(name),
             tabs: vec![Tab { id: tab, title: "shell".into(), root: Node::Pane(pane), focus: pane }],
             active: 0,
         });
@@ -318,29 +403,105 @@ impl Layout {
     }
 
     /// The repair pass. `Err` carries the reason when nothing usable is left; `self` is then unspecified.
+    ///
+    /// Order matters: first everything that cannot be kept is dropped, in file order, so that the first of
+    /// two clashing tabs wins and the caps count what is really kept; then indices, focus, ratios and text
+    /// of what remains are repaired; last the id counter is raised above every id that is left.
     fn check(&mut self) -> Result<Vec<String>, String> {
-        let mut repairs = Vec::new();
+        use std::collections::HashSet;
 
-        // Workspaces without tabs cannot be shown; the active index follows the workspace it pointed at.
+        #[derive(Default)]
+        struct Dropped {
+            workspaces_repeated: usize,
+            workspaces_empty: usize,
+            tabs_repeated_ids: usize,
+            tabs_too_many_panes: usize,
+            tabs_over_total: usize,
+            tabs_too_deep: usize,
+        }
+
+        let mut repairs = Vec::new();
+        let mut dropped = Dropped::default();
+        let (mut workspace_ids, mut tab_ids): (HashSet<u64>, HashSet<u64>) = (HashSet::new(), HashSet::new());
+        let (mut pane_ids, mut split_ids): (HashSet<u64>, HashSet<u64>) = (HashSet::new(), HashSet::new());
+        let mut total_panes = 0usize;
         let (old_active, old_len) = (self.active, self.workspaces.len());
-        let mut kept = Vec::with_capacity(old_len);
-        let mut new_active = None;
-        for (i, w) in std::mem::take(&mut self.workspaces).into_iter().enumerate() {
-            if w.tabs.is_empty() {
-                continue;
+
+        let (workspaces, new_active) = retain_tracking(std::mem::take(&mut self.workspaces), old_active, |w| {
+            if workspace_ids.contains(&w.id) {
+                dropped.workspaces_repeated += 1;
+                return false;
             }
-            if i == old_active {
-                new_active = Some(kept.len());
+            let (old_tab_active, old_tabs) = (w.active, w.tabs.len());
+            let (tabs, new_tab_active) = retain_tracking(std::mem::take(&mut w.tabs), old_tab_active, |tab| {
+                let (mut panes, mut splits) = (Vec::new(), Vec::new());
+                tab.root.panes(&mut panes);
+                tab.root.split_ids(&mut splits);
+                if tab.root.depth() > MAX_SPLIT_DEPTH {
+                    dropped.tabs_too_deep += 1;
+                    return false;
+                }
+                if panes.len() > MAX_PANES_PER_TAB {
+                    dropped.tabs_too_many_panes += 1;
+                    return false;
+                }
+                if total_panes + panes.len() > MAX_PANES {
+                    dropped.tabs_over_total += 1;
+                    return false;
+                }
+                let own_panes: HashSet<u64> = panes.iter().copied().collect();
+                let own_splits: HashSet<u64> = splits.iter().copied().collect();
+                if tab_ids.contains(&tab.id)
+                    || own_panes.len() != panes.len()
+                    || own_splits.len() != splits.len()
+                    || !own_panes.is_disjoint(&pane_ids)
+                    || !own_splits.is_disjoint(&split_ids)
+                {
+                    dropped.tabs_repeated_ids += 1;
+                    return false;
+                }
+                tab_ids.insert(tab.id);
+                pane_ids.extend(own_panes);
+                split_ids.extend(own_splits);
+                total_panes += panes.len();
+                true
+            });
+            if tabs.is_empty() {
+                dropped.workspaces_empty += 1;
+                return false;
             }
-            kept.push(w);
+            w.tabs = tabs;
+            match new_tab_active {
+                Some(a) => w.active = a,
+                None => {
+                    // The active tab was dropped, or the index was never valid.
+                    w.active = old_tab_active.min(w.tabs.len() - 1);
+                    if old_tab_active >= old_tabs {
+                        repairs.push(format!("active tab {old_tab_active} is out of range, set to {}", w.active));
+                    }
+                }
+            }
+            workspace_ids.insert(w.id);
+            true
+        });
+        self.workspaces = workspaces;
+
+        for (count, what) in [
+            (dropped.workspaces_repeated, "workspace(s) with a repeated id"),
+            (dropped.workspaces_empty, "workspace(s) without a usable tab"),
+            (dropped.tabs_repeated_ids, "tab(s) that repeat an id"),
+            (dropped.tabs_too_many_panes, "tab(s) with more than 64 panes"),
+            (dropped.tabs_over_total, "tab(s) beyond the 256 pane limit"),
+            (dropped.tabs_too_deep, "tab(s) with splits nested deeper than 32"),
+        ] {
+            if count > 0 {
+                repairs.push(format!("dropped {count} {what}"));
+            }
         }
-        self.workspaces = kept;
         if self.workspaces.is_empty() {
-            return Err("no workspace with a tab".into());
+            return Err(if old_len == 0 { "no workspaces".into() } else { repairs.join("; ") });
         }
-        if self.workspaces.len() < old_len {
-            repairs.push(format!("dropped {} workspace(s) without tabs", old_len - self.workspaces.len()));
-        }
+
         let last = self.workspaces.len() - 1;
         match new_active {
             Some(a) => self.active = a,
@@ -353,12 +514,17 @@ impl Layout {
         }
 
         for (wi, w) in self.workspaces.iter_mut().enumerate() {
-            if w.active >= w.tabs.len() {
-                let fixed = w.tabs.len() - 1;
-                repairs.push(format!("workspace {wi}: active tab {} is out of range, set to {fixed}", w.active));
-                w.active = fixed;
+            let name = clean_text(&w.name);
+            if name != w.name {
+                repairs.push(format!("workspace {wi}: name shortened or stripped of control characters"));
+                w.name = name;
             }
             for (ti, tab) in w.tabs.iter_mut().enumerate() {
+                let title = clean_text(&tab.title);
+                if title != tab.title {
+                    repairs.push(format!("workspace {wi} tab {ti}: title shortened or stripped of control characters"));
+                    tab.title = title;
+                }
                 let panes = tab.panes();
                 if !panes.contains(&tab.focus) {
                     repairs.push(format!(
@@ -367,21 +533,19 @@ impl Layout {
                     ));
                     tab.focus = panes[0];
                 }
+                let ratios = tab.root.sanitize_ratios();
+                if ratios > 0 {
+                    repairs.push(format!("workspace {wi} tab {ti}: {ratios} split ratio(s) out of range"));
+                }
             }
         }
 
         // Id counter: every id in the file must be below next_id, or a new pane could repeat an old id.
-        let mut max_id = 0;
-        for w in &self.workspaces {
-            max_id = max_id.max(w.id);
-            for t in &w.tabs {
-                max_id = max_id.max(t.id);
-                let (mut panes, mut splits) = (Vec::new(), Vec::new());
-                t.root.panes(&mut panes);
-                t.root.split_ids(&mut splits);
-                max_id = panes.into_iter().chain(splits).fold(max_id, u64::max);
-            }
-        }
+        let max_id = [&workspace_ids, &tab_ids, &pane_ids, &split_ids]
+            .into_iter()
+            .flat_map(|ids| ids.iter().copied())
+            .max()
+            .unwrap_or(0);
         if max_id >= ID_CEILING - 1 || self.next_id >= ID_CEILING {
             return Err(format!("ids are out of range (largest {max_id}, next {})", self.next_id));
         }
@@ -455,21 +619,16 @@ impl Layout {
         }
     }
 
+    /// Move a divider. A value that is not a number (a pointer position computed from nothing) leaves the
+    /// divider where it is; any other value is clamped to `MIN_RATIO..=1 - MIN_RATIO`.
     pub fn set_ratio(&mut self, split: SplitId, ratio: f32) {
+        if !ratio.is_finite() {
+            return;
+        }
         for w in &mut self.workspaces {
             for t in &mut w.tabs {
                 if t.root.set_ratio(split, ratio) {
                     return;
-                }
-            }
-        }
-    }
-
-    pub fn set_title(&mut self, pane: PaneId, title: &str) {
-        for w in &mut self.workspaces {
-            for t in &mut w.tabs {
-                if t.root.contains(pane) && t.focus == pane {
-                    t.title = title.into();
                 }
             }
         }
@@ -988,12 +1147,24 @@ mod tests {
         assert_eq!(l, before, "nothing changed, not even the id counter");
     }
 
+    /// Split every pane of the active tab once per round, so the tree grows level by level (depth 6 for 64
+    /// panes) instead of as a chain, until it holds `n` panes.
+    fn fill_tab(l: &mut Layout, n: usize) {
+        while l.tab().panes().len() < n {
+            for pane in l.tab().panes() {
+                if l.tab().panes().len() >= n {
+                    break;
+                }
+                l.focus_pane(pane);
+                assert!(l.split_focused(Axis::Row).is_some());
+            }
+        }
+    }
+
     #[test]
     fn a_tab_stops_at_64_panes_and_the_layout_at_256() {
         let (mut l, _) = Layout::new();
-        for _ in 0..63 {
-            assert!(l.split_focused(Axis::Row).is_some());
-        }
+        fill_tab(&mut l, 64);
         assert_eq!(l.tab().panes().len(), 64);
         let before = l.clone();
         assert_eq!(l.split_focused(Axis::Column), None, "65th pane in a tab");
@@ -1001,9 +1172,7 @@ mod tests {
 
         for _ in 0..3 {
             assert!(l.new_tab().is_some());
-            for _ in 0..63 {
-                assert!(l.split_focused(Axis::Row).is_some());
-            }
+            fill_tab(&mut l, 64);
         }
         assert_eq!(l.all_panes().len(), 256);
         let before = l.clone();
@@ -1059,8 +1228,9 @@ mod tests {
         }
     }
 
-    /// Everything a valid layout promises, checked from the outside.
-    fn assert_invariants(l: &Layout, context: &str) {
+    /// Everything a valid layout promises, checked from the outside. `deep` adds the JSON round trip and a
+    /// full `validate()`, which cost a thousand times the rest; the random test runs them every 100 steps and after the last.
+    fn assert_invariants(l: &Layout, context: &str, deep: bool) {
         let mut panes = l.all_panes();
         let total = panes.len();
         panes.sort_unstable();
@@ -1083,10 +1253,15 @@ mod tests {
                 assert!(dividers.iter().all(|d| d.ratio.is_finite()), "{context}: ratio not finite");
             }
         }
-        let json = serde_json::to_string(l).unwrap();
-        let back: Layout = serde_json::from_str(&json).unwrap();
-        assert_eq!(&back, l, "{context}: JSON round trip differs");
-        assert!(l.clone().validate().is_empty(), "{context}: validate repairs a layout made by operations");
+        if deep {
+            let json = serde_json::to_string(l).unwrap();
+            let back: Layout = serde_json::from_str(&json).unwrap();
+            assert_eq!(&back, l, "{context}: JSON round trip differs");
+            let (loaded, status) = Layout::from_json(&json);
+            assert_eq!(status, LoadStatus::Clean, "{context}: the loader repairs a layout made by operations");
+            assert_eq!(&loaded, l);
+            assert!(l.clone().validate().is_empty(), "{context}: validate repairs a layout made by operations");
+        }
     }
 
     #[test]
@@ -1156,7 +1331,7 @@ mod tests {
                         "select_workspace"
                     }
                 };
-                assert_invariants(&l, &format!("seed {seed} step {step} after {name}"));
+                assert_invariants(&l, &format!("seed {seed} step {step} after {name}"), step % 100 == 99);
             }
         }
     }
