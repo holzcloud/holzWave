@@ -261,6 +261,31 @@ impl PaneHandle {
         self.send(Control::Text(text))
     }
 
+    /// Skeleton: not implemented yet.
+    pub fn paste(&self, _text: String, _allow_unsafe: bool) -> Result<crate::engine::PasteOutcome> {
+        Err(Error::Unsupported("paste".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn resize(&self, _cols: u16, _rows: u16, _cell_px: (u32, u32)) -> Result<()> {
+        Err(Error::Unsupported("resize".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn scroll(&self, _rows: isize) -> Result<()> {
+        Err(Error::Unsupported("scroll".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn request_full(&self) -> Result<()> {
+        Err(Error::Unsupported("request_full".into()))
+    }
+
+    /// Skeleton: not implemented yet.
+    pub fn queue_high_water(&self) -> usize {
+        0
+    }
+
     /// End the pane: the shell is killed and reaped on the engine thread and one `Exited` event follows. Does not
     /// wait (killing takes about 200 ms); use [`PaneHandle::join`] to wait. Closing twice is fine.
     pub fn close(&self) {
