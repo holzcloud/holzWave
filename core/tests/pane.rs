@@ -924,3 +924,24 @@ fn the_directory_is_looked_up_at_most_once_per_second() {
     assert!(pane.join(Duration::from_secs(3)));
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_key_that_changes_nothing_does_not_make_its_own_echo_wait_for_the_frame_interval() {
+    let probe = Probe::default();
+    // A long interval, so that a delay of one interval cannot be mistaken for scheduling noise.
+    let interval = Duration::from_millis(400);
+    let pane = spawn(PaneSpec { frame_interval: interval, ..PaneSpec::new("/bin/cat", 80, 24) }, &probe);
+    assert!(wait_until(WAIT, || !probe.frames().is_empty()), "no first frame");
+    thread::sleep(interval + Duration::from_millis(100));
+
+    // The key itself changes nothing on screen (the viewport is at the bottom) and the echo follows a fraction of a
+    // millisecond later. Looking at the engine for the key must not use up the interval for that echo.
+    pane.key(key("KeyX", "x")).expect("key");
+
+    assert!(
+        wait_until(Duration::from_millis(150), || probe.has_text("x")),
+        "the echo waited for the pacing interval"
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}

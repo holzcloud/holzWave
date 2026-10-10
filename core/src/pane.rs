@@ -44,10 +44,10 @@ use std::time::{Duration, Instant};
 
 use crate::engine::{
     CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, PasteOutcome, SearchOp, SearchState, SelectOp,
-    TerminalEngine,
+    TerminalEngine, parse_osc7,
 };
 use crate::layout::PaneId;
-use crate::pty::{Pty, SpawnOptions};
+use crate::pty::{Pty, SpawnOptions, process_cwd};
 use crate::queue::{PaneQueue, Popped};
 use crate::wire::{FrameEncoder, FrameMsg};
 use crate::{Error, Result};
@@ -76,6 +76,9 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The largest cell size in pixels and the largest scroll step a caller can ask for; larger values are clamped.
 const MAX_CELL_PX: u32 = 1024;
 const MAX_SCROLL_ROWS: isize = 1_000_000;
+
+/// The longest text of a search ([`SearchOp::Set`]) the actor accepts.
+const MAX_SEARCH_BYTES: usize = 4096;
 
 /// The longest `code` or `key` string of a [`DomKey`] the actor accepts. The longest real value is a named key.
 const MAX_KEY_FIELD_BYTES: usize = 256;
@@ -168,7 +171,14 @@ enum Control {
     Paste { text: String, allow_unsafe: bool, reply: Sender<Result<PasteOutcome>> },
     Resize { cols: u16, rows: u16, cell_px: (u32, u32) },
     Scroll(isize),
+    ScrollToBottom,
     RequestFull,
+    SetTheme(EngineTheme),
+    SetOptionAsAlt(bool),
+    Select(SelectOp),
+    SelectionText(Sender<Result<Option<String>>>),
+    Search(SearchOp, Sender<Result<SearchState>>),
+    CopyMode(CopyOp, Sender<Result<CopyState>>),
     Close,
 }
 
@@ -330,39 +340,45 @@ impl PaneHandle {
         self.shared.queue.high_water()
     }
 
-    /// Skeleton: not implemented yet.
-    pub fn set_theme(&self, _theme: EngineTheme) -> Result<()> {
-        Err(Error::Unsupported("set_theme".into()))
-    }
-
-    /// Skeleton: not implemented yet.
-    pub fn set_option_as_alt(&self, _on: bool) -> Result<()> {
-        Err(Error::Unsupported("set_option_as_alt".into()))
-    }
-
-    /// Skeleton: not implemented yet.
-    pub fn select(&self, _op: SelectOp) -> Result<()> {
-        Err(Error::Unsupported("select".into()))
-    }
-
-    /// Skeleton: not implemented yet.
-    pub fn selection_text(&self) -> Result<Option<String>> {
-        Err(Error::Unsupported("selection_text".into()))
-    }
-
-    /// Skeleton: not implemented yet.
-    pub fn search(&self, _op: SearchOp) -> Result<SearchState> {
-        Err(Error::Unsupported("search".into()))
-    }
-
-    /// Skeleton: not implemented yet.
-    pub fn copy_mode(&self, _op: CopyOp) -> Result<CopyState> {
-        Err(Error::Unsupported("copy_mode".into()))
-    }
-
-    /// Skeleton: not implemented yet.
+    /// Scroll back to the live screen at the bottom.
     pub fn scroll_to_bottom(&self) -> Result<()> {
-        Err(Error::Unsupported("scroll_to_bottom".into()))
+        self.send(Control::ScrollToBottom)
+    }
+
+    /// Give the pane new colours. The next frame is a full one carrying the new defaults.
+    pub fn set_theme(&self, theme: EngineTheme) -> Result<()> {
+        self.send(Control::SetTheme(theme))
+    }
+
+    /// Whether the macOS Option key acts as Alt (an ESC prefix) instead of composing characters. It applies to the
+    /// keys that follow.
+    pub fn set_option_as_alt(&self, on: bool) -> Result<()> {
+        self.send(Control::SetOptionAsAlt(on))
+    }
+
+    /// Change the selection. The selection itself lives in the engine and arrives in the frame header.
+    pub fn select(&self, op: SelectOp) -> Result<()> {
+        self.send(Control::Select(op))
+    }
+
+    /// The selected text, `None` when nothing (or only blanks) is selected. Waits for the answer like
+    /// [`PaneHandle::paste`] does: never call it on the Tauri main thread.
+    pub fn selection_text(&self) -> Result<Option<String>> {
+        self.request(Control::SelectionText)
+    }
+
+    /// Change the search and return its state. Waits for the answer like [`PaneHandle::paste`] does. Search text
+    /// over 4096 bytes is refused.
+    pub fn search(&self, op: SearchOp) -> Result<SearchState> {
+        if matches!(&op, SearchOp::Set(text) if text.len() > MAX_SEARCH_BYTES) {
+            return Err(Error::Pty("search text too long".into()));
+        }
+        self.request(|reply| Control::Search(op, reply))
+    }
+
+    /// Run a copy-mode operation and return its state. Waits for the answer like [`PaneHandle::paste`] does.
+    pub fn copy_mode(&self, op: CopyOp) -> Result<CopyState> {
+        self.request(|reply| Control::CopyMode(op, reply))
     }
 
     /// End the pane: the shell is killed and reaped on the engine thread and one `Exited` event follows. Does not
@@ -490,17 +506,25 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     /// Something changed since the last frame.
     dirty: bool,
     last_emit: Option<Instant>,
+    /// The engine has a selection that this actor made (or believes it made): input clears it.
+    selecting: bool,
+    /// The process id of the shell, for the working-directory lookup.
+    pid: Option<u32>,
+    cwd: CwdTracker,
 }
 
 impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// The main loop. Returns when the pane is to end.
     fn run(&mut self) {
         loop {
-            let wait = match (self.dirty, self.last_emit) {
+            let mut wait = match (self.dirty, self.last_emit) {
                 (true, Some(last)) => self.interval.saturating_sub(last.elapsed()),
                 (true, None) => Duration::ZERO,
                 (false, _) => Duration::from_secs(3600),
             };
+            if let Some(deadline) = self.cwd.deadline() {
+                wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+            }
             match self.queue.pop(wait) {
                 Popped::Control(Control::Close) | Popped::Closed => return,
                 Popped::Control(control) => self.handle(control),
@@ -517,6 +541,10 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             if self.dirty && self.last_emit.is_none_or(|last| last.elapsed() >= self.interval) {
                 self.emit_frame();
             }
+            let pid = self.pid;
+            if let Some(dir) = self.cwd.check(Instant::now(), || pid.and_then(process_cwd)) {
+                (self.sink)(PaneEvent::Cwd(dir));
+            }
         }
     }
 
@@ -530,6 +558,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 // happens later can pick it up again.
                 let bytes = self.engine.take_replies();
                 if matches!(outcome, Ok(PasteOutcome::Written)) {
+                    self.clear_selection();
                     self.engine.scroll_to_bottom();
                     self.dirty = true;
                     self.writer.input(bytes);
@@ -544,10 +573,43 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 self.engine.scroll(rows);
                 self.dirty = true;
             }
+            Control::ScrollToBottom => {
+                self.engine.scroll_to_bottom();
+                self.dirty = true;
+            }
             Control::RequestFull => {
                 self.encoder.request_full();
                 self.engine.request_full();
                 self.dirty = true;
+            }
+            Control::SetTheme(theme) => {
+                if self.engine.set_theme(&theme).is_ok() {
+                    self.dirty = true;
+                }
+            }
+            Control::SetOptionAsAlt(on) => {
+                self.option_as_alt = on;
+                self.engine.set_option_as_alt(on);
+            }
+            Control::Select(op) => {
+                if self.engine.select(op).is_ok() {
+                    self.selecting = !matches!(op, SelectOp::Clear);
+                    self.dirty = true;
+                }
+            }
+            Control::SelectionText(reply) => {
+                let _ = reply.send(self.engine.selection_text());
+            }
+            Control::Search(op, reply) => {
+                let state = self.engine.search(op);
+                // The matches are part of the next frame.
+                self.dirty = true;
+                let _ = reply.send(state);
+            }
+            Control::CopyMode(op, reply) => {
+                let state = self.engine.copy_mode(op);
+                self.dirty = true;
+                let _ = reply.send(state);
             }
             // `run` ends the loop on Close before it gets here.
             Control::Close => {}
@@ -559,6 +621,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         self.engine.feed(bytes);
         let replies = self.engine.take_replies();
         self.writer.reply(replies);
+        self.cwd.output(Instant::now());
         self.drain_events();
         self.dirty = true;
     }
@@ -571,7 +634,8 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             return;
         }
         if !dom.release {
-            // Typing returns to the live screen, like every terminal.
+            // Typing replaces the selection and returns to the live screen, like every terminal.
+            self.clear_selection();
             self.engine.scroll_to_bottom();
             self.dirty = true;
         }
@@ -583,9 +647,19 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         if bytes.is_empty() {
             return;
         }
+        self.clear_selection();
         self.engine.scroll_to_bottom();
         self.dirty = true;
         self.writer.input(bytes);
+    }
+
+    /// Input replaces the selection. Only asks the engine when this actor made one.
+    fn clear_selection(&mut self) {
+        if self.selecting {
+            let _ = self.engine.select(SelectOp::Clear);
+            self.selecting = false;
+            self.dirty = true;
+        }
     }
 
     fn resize(&mut self, cols: u16, rows: u16, cell_px: (u32, u32)) {
@@ -610,19 +684,30 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         for event in self.engine.take_events() {
             match event {
                 EngineEvent::Title(title) => (self.sink)(PaneEvent::Title(title)),
-                EngineEvent::Pwd(_) => {}
+                EngineEvent::Pwd(raw) => {
+                    // A program (a shell with integration, or something on the far side of ssh) announced its
+                    // directory. Only a well-formed `file://` path counts; it is the fallback of the lookup.
+                    if let Some((_host, path)) = parse_osc7(&raw) {
+                        self.cwd.announced(path.to_string_lossy().into_owned(), Instant::now());
+                    }
+                }
             }
         }
     }
 
+    /// Look at the engine and send a frame when something differs from the last one sent.
+    ///
+    /// The pacing clock is the last frame that was actually *sent*: an attempt that finds nothing new (a key that
+    /// only moved the viewport it was already at, an update after output that left every row as it was) must not
+    /// use up the interval, or the echo of that key, arriving a fraction of a millisecond later, would wait for it.
     fn emit_frame(&mut self) {
         self.dirty = false;
         if let Ok(update) = self.engine.update()
             && let Some(frame) = self.encoder.encode(update)
         {
             (self.sink)(PaneEvent::Frame(frame));
+            self.last_emit = Some(Instant::now());
         }
-        self.last_emit = Some(Instant::now());
     }
 
     /// Close the child and report the end. The one place a pane ends.
@@ -730,8 +815,13 @@ fn engine_main<E, F, S>(
         sink,
         option_as_alt: spec.option_as_alt,
         interval: spec.frame_interval,
-        dirty: false,
+        // The first frame goes out at once, before the shell has printed anything: the webview learns the grid, the
+        // colours and the cursor of a pane that is still silent.
+        dirty: true,
         last_emit: None,
+        selecting: false,
+        pid,
+        cwd: CwdTracker::new(Instant::now()),
     };
     let _ = started.send(Ok(pid));
     actor.run();
@@ -744,31 +834,64 @@ const CWD_IDLE: Duration = Duration::from_millis(150);
 /// The least time between two working-directory lookups of one pane.
 const CWD_MIN_GAP: Duration = Duration::from_secs(1);
 
-/// Skeleton: decides when to look up the shell's working directory and what to report.
-#[allow(dead_code)]
+/// Decides when to look up the shell's working directory and what to report. Pure: the caller passes the time and
+/// the lookup, so the rules are unit-tested without a shell.
+///
+/// The lookup (`process_cwd`) can start a process, so it is rationed: it runs only when the output has been quiet
+/// for [`CWD_IDLE`] (a prompt was drawn; a flood never gets one) and at most once per [`CWD_MIN_GAP`]. A result
+/// that equals the last one reported is not reported again.
 struct CwdTracker {
+    /// When the next check is wanted: [`CWD_IDLE`] after the last output.
     due: Option<Instant>,
     last_lookup: Option<Instant>,
+    /// What was last reported.
     reported: Option<String>,
+    /// The last directory a program announced with OSC 7.
     osc7: Option<String>,
 }
 
-#[allow(dead_code)]
 impl CwdTracker {
-    fn new(_now: Instant) -> Self {
-        Self { due: None, last_lookup: None, reported: None, osc7: None }
+    /// A tracker that wants a first look [`CWD_IDLE`] after `now`, so that a program that never prints still gets
+    /// its starting directory reported.
+    fn new(now: Instant) -> Self {
+        Self { due: Some(now + CWD_IDLE), last_lookup: None, reported: None, osc7: None }
     }
 
-    fn output(&mut self, _now: Instant) {}
+    /// Output arrived: the check moves to [`CWD_IDLE`] after it.
+    fn output(&mut self, now: Instant) {
+        self.due = Some(now + CWD_IDLE);
+    }
 
-    fn announced(&mut self, _path: String, _now: Instant) {}
+    /// A program announced its directory (OSC 7): remember it as the fallback and look soon.
+    fn announced(&mut self, path: String, now: Instant) {
+        self.osc7 = Some(path);
+        self.due = Some(now);
+    }
 
+    /// When the next lookup may run, `None` when none is wanted.
     fn deadline(&self) -> Option<Instant> {
-        None
+        let due = self.due?;
+        Some(match self.last_lookup {
+            Some(last) => due.max(last + CWD_MIN_GAP),
+            None => due,
+        })
     }
 
-    fn check(&mut self, _now: Instant, _lookup: impl FnOnce() -> Option<PathBuf>) -> Option<String> {
-        None
+    /// Run the check if it is due at `now`. `lookup` is called at most once, and only when due. Returns the
+    /// directory to report when it differs from the last one reported.
+    fn check(&mut self, now: Instant, lookup: impl FnOnce() -> Option<PathBuf>) -> Option<String> {
+        if self.deadline().is_none_or(|deadline| now < deadline) {
+            return None;
+        }
+        self.due = None;
+        self.last_lookup = Some(now);
+        // The process is the truth; what the program announced is only for when the process cannot be read.
+        let current = lookup().map(|p| p.to_string_lossy().into_owned()).or_else(|| self.osc7.clone())?;
+        if self.reported.as_deref() == Some(current.as_str()) {
+            return None;
+        }
+        self.reported = Some(current.clone());
+        Some(current)
     }
 }
 
