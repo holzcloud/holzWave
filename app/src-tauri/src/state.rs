@@ -1287,3 +1287,348 @@ mod tests {
         );
     }
 }
+
+/// The protocol golden (`app/tests/fixtures/protocol.json`): what the webview depends on, generated from the real
+/// Rust types and read by the TypeScript tests too, so that a renamed argument or a changed payload fails on both
+/// sides at once.
+///
+/// `UPDATE_FIXTURES=1` rewrites the file, as for the frame golden of the core.
+#[cfg(test)]
+mod protocol {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
+
+    use crate::commands::{
+        CopyMotionMsg, CopyOpMsg, CopyStateMsg, PasteOutcomeMsg, SearchOpMsg, SelectModeMsg, SelectOpMsg,
+    };
+    use holzwave_core::layout::Axis;
+    use holzwave_core::wire::{ModesMsg, SearchMsg};
+
+    const COMMANDS_SRC: &str = include_str!("commands.rs");
+    const LIB_SRC: &str = include_str!("lib.rs");
+
+    /// Serialises the writers of the golden: both tests write the same bytes in update mode.
+    static GOLDEN: Mutex<()> = Mutex::new(());
+
+    fn golden_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/protocol.json")
+    }
+
+    fn update_fixtures() -> bool {
+        std::env::var("UPDATE_FIXTURES").is_ok_and(|v| v == "1")
+    }
+
+    /// One `#[tauri::command]` function of `commands.rs`.
+    struct CommandSource {
+        name: String,
+        /// The attribute carries `rename_all = "snake_case"`.
+        snake_case: bool,
+        /// The argument names in order, State and AppHandle parameters left out.
+        args: Vec<String>,
+    }
+
+    /// Split `text` at the commas that are not inside brackets, parentheses or angle brackets.
+    fn split_top_level(text: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let (mut depth, mut start) = (0i32, 0usize);
+        for (i, c) in text.char_indices() {
+            match c {
+                '(' | '[' | '<' | '{' => depth += 1,
+                ')' | ']' | '>' | '}' => depth -= 1,
+                ',' if depth == 0 => {
+                    parts.push(&text[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&text[start..]);
+        parts
+    }
+
+    /// Read the command functions out of the source text: the name and the argument names of every function that
+    /// follows a `#[tauri::command` attribute.
+    fn parse_commands(source: &str) -> Vec<CommandSource> {
+        let mut found = Vec::new();
+        let mut rest = source;
+        while let Some(at) = rest.find("#[tauri::command") {
+            rest = &rest[at + "#[tauri::command".len()..];
+            let attr_end = rest.find(']').expect("the attribute is closed");
+            let snake_case = rest[..attr_end].contains("rename_all = \"snake_case\"");
+            rest = &rest[attr_end..];
+
+            let fn_at = rest.find("fn ").expect("a function follows the attribute");
+            let after = &rest[fn_at + 3..];
+            let open = after.find('(').expect("an argument list");
+            let name = after[..open].trim().to_owned();
+
+            // The matching close parenthesis of the argument list.
+            let (mut depth, mut close) = (0i32, None);
+            for (i, c) in after[open..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(open + i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let list = &after[open + 1..close.expect("the argument list is closed")];
+            let args = split_top_level(list)
+                .into_iter()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .filter_map(|a| {
+                    let (arg, ty) = a.split_once(':').expect("name: Type");
+                    let ty = ty.trim();
+                    if ty.starts_with("State<") || ty.contains("AppHandle") {
+                        return None;
+                    }
+                    Some(arg.trim().to_owned())
+                })
+                .collect();
+            found.push(CommandSource { name, snake_case, args });
+        }
+        found
+    }
+
+    fn sample_view() -> View {
+        let (mut layout, _) = Layout::new();
+        layout.split_focused(Axis::Row);
+        layout.new_tab();
+        layout.new_tab();
+        layout.select_tab(0);
+        layout.new_workspace("notes");
+        layout.select_workspace(0);
+        let view = View::of(&layout);
+        assert_eq!(view.workspaces.len(), 2);
+        assert_eq!(view.tabs.len(), 3);
+        assert_eq!(view.panes.len(), 2);
+        assert_eq!(view.dividers.len(), 1);
+        view
+    }
+
+    fn to_value<T: Serialize>(value: &T) -> Value {
+        serde_json::to_value(value).expect("serialises")
+    }
+
+    /// Every value serialises, and deserialises back to itself: the page sends what the Rust side reads.
+    fn ops<T>(values: Vec<T>) -> Value
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        Value::Array(
+            values
+                .into_iter()
+                .map(|op| {
+                    let json = to_value(&op);
+                    let back: T = serde_json::from_value(json.clone()).expect("reads back");
+                    assert_eq!(back, op, "{json} must read back as the same op");
+                    json
+                })
+                .collect(),
+        )
+    }
+
+    fn samples() -> Value {
+        let frame = FrameMsg {
+            pane: 3,
+            seq: 1,
+            full: true,
+            cols: 80,
+            rows: 24,
+            fg: 0xffffff,
+            bg: 0,
+            cursor: None,
+            scrollbar: (0, 24, 24),
+            selection: Vec::new(),
+            matches: Vec::new(),
+            search: None,
+            copy_cursor: None,
+            modes: ModesMsg { alt: false, bracketed_paste: false, mouse: false },
+            changed: Vec::new(),
+        };
+        let view = sample_view();
+        let events = [
+            Out::Frame(frame),
+            Out::Layout(view.clone()),
+            Out::Title { pane: 3, title: "vim README.md".into() },
+            Out::Cwd { pane: 3, cwd: "/Users/holz/Projects/holzWave".into() },
+            Out::PaneExit { pane: 3, code: Some(0) },
+        ];
+        let names: Vec<&str> = events.iter().map(Out::name).collect();
+        let payload = |i: usize| to_value(&events[i]);
+
+        let mut motions = Vec::new();
+        for motion in [
+            CopyMotionMsg::Left,
+            CopyMotionMsg::Right,
+            CopyMotionMsg::Up,
+            CopyMotionMsg::Down,
+            CopyMotionMsg::LineStart,
+            CopyMotionMsg::LineEnd,
+            CopyMotionMsg::Top,
+            CopyMotionMsg::Bottom,
+            CopyMotionMsg::PageUp,
+            CopyMotionMsg::PageDown,
+            CopyMotionMsg::WordForward,
+            CopyMotionMsg::WordBack,
+        ] {
+            motions.push(CopyOpMsg::Move { motion });
+        }
+        let mut copy_ops = vec![CopyOpMsg::Enter, CopyOpMsg::Exit, CopyOpMsg::Toggle, CopyOpMsg::Yank];
+        copy_ops.extend(motions);
+
+        json!({
+            "view": to_value(&view),
+            "events": {
+                "names": names,
+                "title": payload(2),
+                "cwd": payload(3),
+                "pane-exit": [
+                    payload(4),
+                    to_value(&Out::PaneExit { pane: 3, code: None }),
+                ],
+            },
+            "ops": {
+                "select": ops(vec![
+                    SelectOpMsg::Begin { x: 3, y: 4, mode: SelectModeMsg::Cell },
+                    SelectOpMsg::Begin { x: 3, y: 4, mode: SelectModeMsg::Word },
+                    SelectOpMsg::Begin { x: 3, y: 4, mode: SelectModeMsg::Line },
+                    SelectOpMsg::Extend { x: 10, y: 4 },
+                    SelectOpMsg::All,
+                    SelectOpMsg::Clear,
+                ]),
+                "search": ops(vec![
+                    SearchOpMsg::Set { needle: "find".into() },
+                    SearchOpMsg::Next,
+                    SearchOpMsg::Prev,
+                    SearchOpMsg::Clear,
+                ]),
+                "copy_mode": ops(copy_ops),
+            },
+            "paste": [
+                to_value(&PasteOutcomeMsg::from(PasteOutcome::Written)),
+                to_value(&PasteOutcomeMsg::from(PasteOutcome::Empty)),
+                to_value(&PasteOutcomeMsg::from(PasteOutcome::Rejected)),
+            ],
+            "answers": {
+                "search": [
+                    to_value(&SearchMsg { total: 3, current: Some(1) }),
+                    to_value(&SearchMsg { total: 0, current: None }),
+                ],
+                "copy_mode": [
+                    to_value(&CopyStateMsg { active: true, selecting: false, yanked: None }),
+                    to_value(&CopyStateMsg { active: false, selecting: false, yanked: Some("text".into()) }),
+                ],
+            },
+        })
+    }
+
+    /// The command table of the golden: Rust name to ordered argument names.
+    fn command_table() -> Value {
+        let table: BTreeMap<String, Vec<String>> =
+            parse_commands(COMMANDS_SRC).into_iter().map(|c| (c.name, c.args)).collect();
+        to_value(&table)
+    }
+
+    fn document() -> Value {
+        let mut doc = samples();
+        doc.as_object_mut().expect("object").insert("commands".into(), command_table());
+        doc
+    }
+
+    /// Update mode writes the whole document; compare mode checks the part `pick` selects.
+    fn check(pick: impl Fn(&Value) -> Value, what: &str) {
+        let _guard = lock(&GOLDEN);
+        let doc = document();
+        let path = golden_path();
+        if update_fixtures() {
+            let mut text = serde_json::to_string_pretty(&doc).expect("json");
+            text.push('\n');
+            std::fs::create_dir_all(path.parent().expect("dir")).expect("fixtures dir");
+            std::fs::write(&path, text).expect("write protocol.json");
+            return;
+        }
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is missing ({e}); run with UPDATE_FIXTURES=1", path.display()));
+        let on_disk: Value = serde_json::from_str(&text).expect("protocol.json is JSON");
+        assert!(
+            pick(&on_disk) == pick(&doc),
+            "{what} differ from protocol.json; review the change and run with UPDATE_FIXTURES=1"
+        );
+    }
+
+    #[test]
+    fn protocol_samples_match_golden() {
+        check(
+            |doc| {
+                let mut rest = doc.clone();
+                rest.as_object_mut().expect("object").remove("commands");
+                rest
+            },
+            "the payload samples",
+        );
+    }
+
+    #[test]
+    fn protocol_commands_match_source() {
+        let commands = parse_commands(COMMANDS_SRC);
+        assert!(commands.len() >= 20, "the scanner found only {} commands", commands.len());
+        for command in &commands {
+            assert!(
+                command.snake_case,
+                "{} lacks rename_all = \"snake_case\": the page would have to send camelCase",
+                command.name
+            );
+            assert!(
+                LIB_SRC.contains(&format!("commands::{},", command.name)),
+                "{} is not registered in generate_handler!",
+                command.name
+            );
+        }
+        assert!(
+            !commands.iter().any(|c| c.name == "input"),
+            "the raw input command must not exist: keys, text and paste go through the engine encoder (D-05)"
+        );
+        // The arguments the page was promised.
+        let table = command_table();
+        assert_eq!(table["paste"], json!(["pane", "text", "allow_unsafe"]));
+        assert_eq!(table["start_pane"], json!(["pane", "cols", "rows", "cell_w", "cell_h"]));
+        assert_eq!(table["resize"], json!(["pane", "cols", "rows", "cell_w", "cell_h"]));
+        assert_eq!(
+            table["key"],
+            json!(["pane", "code", "key", "mods", "repeat", "release", "composing"])
+        );
+
+        check(|doc| doc["commands"].clone(), "the command argument names");
+    }
+
+    #[test]
+    fn the_scanner_reads_generics_and_skips_state_and_handles() {
+        let source = r#"
+            #[tauri::command(async, rename_all = "snake_case")]
+            pub fn demo(core: State<Arc<AppCore>>, app: AppHandle, pane: PaneId, map: HashMap<String, Vec<u8>>) -> Result<(), String> {
+                Ok(())
+            }
+            #[tauri::command]
+            pub async fn camel(core: State<'_, Arc<AppCore>>, allow_unsafe: bool) {}
+        "#;
+
+        let found = parse_commands(source);
+
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].name, "demo");
+        assert!(found[0].snake_case);
+        assert_eq!(found[0].args, vec!["pane", "map"]);
+        assert_eq!(found[1].name, "camel");
+        assert!(!found[1].snake_case, "a bare attribute is camelCase");
+        assert_eq!(found[1].args, vec!["allow_unsafe"]);
+    }
+}
