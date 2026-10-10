@@ -3,15 +3,17 @@ use std::rc::Rc;
 
 use libghostty_vt::key::{self, Action, Key, OptionAsAlt};
 use libghostty_vt::paste::Options as PasteOptions;
-use libghostty_vt::render::{CellIterator, CursorVisualStyle, RowIterator};
-use libghostty_vt::screen::CellWide;
+use libghostty_vt::render::{
+    CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot,
+};
+use libghostty_vt::screen::{CellWide, Screen as VtScreen};
 use libghostty_vt::style::Underline;
-use libghostty_vt::terminal::{ClipboardMime, ScrollViewport, SizeReportSize};
+use libghostty_vt::terminal::{ClipboardMime, Mode, ScrollViewport, SizeReportSize};
 use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::engine::{
-    Cell, Color, Cursor, CursorStyle, KeyAction, KeyEvent, Mods, PasteOutcome, Screen, Scrollbar,
-    TerminalEngine, Update, Width,
+    Cell, Color, Cursor, CursorStyle, KeyAction, KeyEvent, Modes, Mods, PasteOutcome, RowUpdate, Screen,
+    Scrollbar, TerminalEngine, Update, Width,
 };
 use crate::{Error, Result};
 
@@ -233,6 +235,57 @@ fn key_mods(m: Mods) -> key::Mods {
     out
 }
 
+/// The cursor of a snapshot in viewport terms; `None` when it is outside the viewport.
+fn read_cursor(snapshot: &Snapshot<'static, '_>) -> Result<Option<Cursor>> {
+    let c = snapshot.cursor().map_err(eng)?;
+    Ok(c.viewport.map(|v| Cursor {
+        x: v.x,
+        y: v.y,
+        visible: c.visible,
+        style: match c.visual_style {
+            CursorVisualStyle::Bar => CursorStyle::Bar,
+            CursorVisualStyle::Underline => CursorStyle::Underline,
+            CursorVisualStyle::BlockHollow => CursorStyle::Hollow,
+            _ => CursorStyle::Block,
+        },
+        blinking: c.blinking,
+    }))
+}
+
+/// Read every cell of the row the iteration stands on, resolving colours against the snapshot's defaults.
+///
+/// The one place where a libghostty cell becomes a neutral [`Cell`]: `screen` and `update` share it, so the two can
+/// never disagree about what a cell is.
+fn read_row(
+    cells_iter: &mut CellIterator<'static>,
+    row: &RowIteration<'static, '_>,
+    colors: &Colors,
+    out: &mut Vec<Cell>,
+) -> Result<()> {
+    let mut cell_iter = cells_iter.update(row).map_err(eng)?;
+    while let Some(cell) = cell_iter.next() {
+        let mut text = String::new();
+        cell.graphemes_utf8(&mut text).map_err(eng)?;
+        let style = cell.style().map_err(eng)?;
+        let width = match cell.raw_cell().map_err(eng)?.wide().map_err(eng)? {
+            CellWide::Narrow => Width::Narrow,
+            CellWide::Wide => Width::Wide,
+            CellWide::SpacerTail | CellWide::SpacerHead => Width::Spacer,
+        };
+        out.push(Cell {
+            text,
+            width,
+            fg: color(cell.fg_color().map_err(eng)?.unwrap_or(colors.foreground)),
+            bg: color(cell.bg_color().map_err(eng)?.unwrap_or(colors.background)),
+            bold: style.bold,
+            italic: style.italic,
+            underline: style.underline != Underline::None,
+            inverse: style.inverse,
+        });
+    }
+    Ok(())
+}
+
 /// [`TerminalEngine`] backed by `libghostty-vt`.
 pub struct GhosttyEngine {
     terminal: Terminal<'static, 'static>,
@@ -247,6 +300,9 @@ pub struct GhosttyEngine {
     encoder: key::Encoder<'static>,
     key_event: key::Event<'static>,
     option_as_alt: bool,
+    /// The next `update` reports every row and tells the consumer to start over: true at the start and after
+    /// `request_full`.
+    force_full: bool,
 }
 
 impl GhosttyEngine {
@@ -300,6 +356,7 @@ impl GhosttyEngine {
             encoder: key::Encoder::new().map_err(eng)?,
             key_event: key::Event::new().map_err(eng)?,
             option_as_alt: false,
+            force_full: true,
         })
     }
 }
@@ -369,46 +426,12 @@ impl TerminalEngine for GhosttyEngine {
         let colors = snapshot.colors().map_err(eng)?;
         let (cols, rows) = (snapshot.cols().map_err(eng)?, snapshot.rows().map_err(eng)?);
 
-        let cursor = {
-            let c = snapshot.cursor().map_err(eng)?;
-            c.viewport.map(|v| Cursor {
-                x: v.x,
-                y: v.y,
-                visible: c.visible,
-                style: match c.visual_style {
-                    CursorVisualStyle::Bar => CursorStyle::Bar,
-                    CursorVisualStyle::Underline => CursorStyle::Underline,
-                    CursorVisualStyle::BlockHollow => CursorStyle::Hollow,
-                    _ => CursorStyle::Block,
-                },
-                blinking: c.blinking,
-            })
-        };
+        let cursor = read_cursor(&snapshot)?;
 
         let mut cells = Vec::with_capacity(cols as usize * rows as usize);
         let mut row_iter = self.rows_iter.update(&snapshot).map_err(eng)?;
         while let Some(row) = row_iter.next() {
-            let mut cell_iter = self.cells_iter.update(row).map_err(eng)?;
-            while let Some(cell) = cell_iter.next() {
-                let mut text = String::new();
-                cell.graphemes_utf8(&mut text).map_err(eng)?;
-                let style = cell.style().map_err(eng)?;
-                let width = match cell.raw_cell().map_err(eng)?.wide().map_err(eng)? {
-                    CellWide::Narrow => Width::Narrow,
-                    CellWide::Wide => Width::Wide,
-                    CellWide::SpacerTail | CellWide::SpacerHead => Width::Spacer,
-                };
-                cells.push(Cell {
-                    text,
-                    width,
-                    fg: color(cell.fg_color().map_err(eng)?.unwrap_or(colors.foreground)),
-                    bg: color(cell.bg_color().map_err(eng)?.unwrap_or(colors.background)),
-                    bold: style.bold,
-                    italic: style.italic,
-                    underline: style.underline != Underline::None,
-                    inverse: style.inverse,
-                });
-            }
+            read_row(&mut self.cells_iter, row, &colors, &mut cells)?;
         }
 
         Ok(Screen {
@@ -479,8 +502,64 @@ impl TerminalEngine for GhosttyEngine {
     }
 
     fn update(&mut self) -> Result<Update> {
-        // Skeleton for the RED commit: reports nothing.
-        Ok(Update::default())
+        // The scrollbar is read at the same moment as the render-state update (render.rs docs).
+        let sb = self.terminal.scrollbar().map_err(eng)?;
+        let modes = Modes {
+            alt_screen: self.terminal.active_screen().map_err(eng)? == VtScreen::Alternate,
+            bracketed_paste: self.terminal.mode(Mode::BRACKETED_PASTE).map_err(eng)?,
+            mouse_tracking: self.terminal.is_mouse_tracking().map_err(eng)?,
+        };
+        let snapshot = self.render.update(&self.terminal).map_err(eng)?;
+        let colors = snapshot.colors().map_err(eng)?;
+        let (cols, rows) = (snapshot.cols().map_err(eng)?, snapshot.rows().map_err(eng)?);
+        let reset = self.force_full;
+        let full = reset || snapshot.dirty().map_err(eng)? == Dirty::Full;
+        let cursor = read_cursor(&snapshot)?;
+
+        let mut changed = Vec::new();
+        {
+            let mut row_iter = self.rows_iter.update(&snapshot).map_err(eng)?;
+            if full {
+                // A full pass: libghostty's per-row flags are conservative, every row is read.
+                let mut y: u16 = 0;
+                while let Some(row) = row_iter.next() {
+                    let mut cells = Vec::with_capacity(cols as usize);
+                    read_row(&mut self.cells_iter, row, &colors, &mut cells)?;
+                    changed.push(RowUpdate { y, cells });
+                    y = y.saturating_add(1);
+                }
+            } else {
+                while let Some((y, row)) = row_iter.next_dirty() {
+                    let mut cells = Vec::with_capacity(cols as usize);
+                    read_row(&mut self.cells_iter, row, &colors, &mut cells)?;
+                    changed.push(RowUpdate { y, cells });
+                }
+            }
+        }
+        // Only after the rows were consumed: clean() clears the global and the per-row flags.
+        snapshot.clean().map_err(eng)?;
+        self.force_full = false;
+
+        Ok(Update {
+            full,
+            reset,
+            cols,
+            rows,
+            cursor,
+            scrollbar: Scrollbar { total: sb.total, offset: sb.offset, len: sb.len },
+            default_fg: color(colors.foreground),
+            default_bg: color(colors.background),
+            modes,
+            changed,
+            selection: Vec::new(),
+            matches: Vec::new(),
+            search: None,
+            copy_cursor: None,
+        })
+    }
+
+    fn request_full(&mut self) {
+        self.force_full = true;
     }
 }
 
