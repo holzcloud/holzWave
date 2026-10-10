@@ -16,6 +16,8 @@ use holzwave_core::{GhosttyEngine, Screen, TerminalEngine, Width};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// A layout file larger than this is not read: a real layout is a few KiB.
+const MAX_LAYOUT_BYTES: u64 = 1 << 20;
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const SCROLLBACK_LINES: usize = 10_000;
 
@@ -470,6 +472,39 @@ mod tests {
             "{ not json",
             "the damaged file is kept next to the layout"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_layout_file_over_one_mebibyte_is_not_read_and_keeps_a_bad_copy() {
+        let dir = std::env::temp_dir().join(format!("holzwave-oversize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("layout.json");
+        // A perfectly valid layout, padded with blanks past the limit: the size alone is the reason.
+        let mut text = r#"{"workspaces":[{"id":1,"name":"main","tabs":[{"id":2,"title":"shell","root":{"Pane":3},"focus":3}],"active":0}],"active":0,"next_id":4}"#.to_owned();
+        text.push_str(&" ".repeat(MAX_LAYOUT_BYTES as usize));
+        std::fs::write(&path, &text).unwrap();
+
+        let app = App::load(path.clone());
+        assert_eq!(*app.layout.lock().unwrap(), Layout::new().0, "an oversized file is not used");
+        let bad = std::fs::metadata(dir.join("layout.json.bad")).expect("a bad copy next to the file");
+        assert_eq!(bad.len(), text.len() as u64);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn saving_leaves_no_temporary_file_and_creates_the_directory() {
+        let dir = std::env::temp_dir().join(format!("holzwave-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("layout.json");
+        let app = App::load(path.clone());
+        app.save(&app.layout.lock().unwrap());
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["layout.json"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
