@@ -65,7 +65,7 @@ test("previewOf shows at most 5 lines, each cut at 80 characters", () => {
   assert.deepEqual(p.shown.slice(0, 2), ["one", "two"]);
   assert.ok([...p.shown[2]].length <= PREVIEW_COLUMNS + 1, `cut line is ${[...p.shown[2]].length} characters`);
   assert.ok(p.shown[2].startsWith("x".repeat(PREVIEW_COLUMNS)), "the first 80 characters are kept");
-  assert.ok(p.shown[2].endsWith("…"), "a cut line says so");
+  assert.ok(p.shown[2].endsWith("\u2026"), "a cut line says so");
 });
 
 test("previewOf cuts by code point: an emoji is one character", () => {
@@ -77,12 +77,12 @@ test("previewOf cuts by code point: an emoji is one character", () => {
 test("previewOf shows control characters as visible markers and flags control sequences", () => {
   const p = previewOf("echo \u001b[31mred\u0007\u007f\u0085\nnext");
   assert.equal(p.control, true);
-  assert.equal(p.shown[0], "echo ␛[31mred␇␡<U+0085>");
+  assert.equal(p.shown[0], "echo \u241b[31mred\u2407\u2421<U+0085>");
   assert.ok(![...p.shown.join("")].some((c) => c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f), "no raw control character");
 });
 
 test("previewOf marks invisible and bidirectional format characters", () => {
-  const p = previewOf("safe‮gnp.exe​﻿");
+  const p = previewOf("safe\u202egnp.exe\u200b\ufeff");
   assert.equal(p.shown[0], "safe<U+202E>gnp.exe<U+200B><U+FEFF>");
   assert.equal(p.control, false, "format characters are marked but are not terminal control sequences");
 });

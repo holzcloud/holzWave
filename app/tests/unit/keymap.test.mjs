@@ -67,14 +67,14 @@ test("chordsOf names letters upper case and keeps Shift in the chord", () => {
 });
 
 test("chordsOf matches by physical key on a layout that types something else (Swiss Cmd+[)", () => {
-  assert.ok(chordsOf(ev("BracketLeft", "ü", { metaKey: true })).includes("Cmd+["));
-  assert.ok(chordsOf(ev("BracketRight", "¨", { metaKey: true })).includes("Cmd+]"));
+  assert.ok(chordsOf(ev("BracketLeft", "\u00fc", { metaKey: true })).includes("Cmd+["));
+  assert.ok(chordsOf(ev("BracketRight", "\u00a8", { metaKey: true })).includes("Cmd+]"));
 });
 
 test("chordsOf with Option held falls back to the digit or letter of the physical key", () => {
   assert.ok(chordsOf(ev("Digit1", "1", { metaKey: true, altKey: true })).includes("Cmd+Alt+1"));
-  assert.ok(chordsOf(ev("Digit1", "¡", { metaKey: true, altKey: true })).includes("Cmd+Alt+1"));
-  assert.ok(chordsOf(ev("KeyB", "∫", { altKey: true, ctrlKey: true })).includes("Ctrl+Alt+B"));
+  assert.ok(chordsOf(ev("Digit1", "\u00a1", { metaKey: true, altKey: true })).includes("Cmd+Alt+1"));
+  assert.ok(chordsOf(ev("KeyB", "\u222b", { altKey: true, ctrlKey: true })).includes("Ctrl+Alt+B"));
 });
 
 test("chordsOf names Space, arrows, page keys and function keys as the grammar spells them", () => {
@@ -91,7 +91,7 @@ const SAMPLES = [
   ["Cmd+D", ev("KeyD", "d", { metaKey: true })],
   ["Cmd+Shift+D", ev("KeyD", "D", { metaKey: true, shiftKey: true })],
   ["Cmd+]", ev("BracketRight", "]", { metaKey: true })],
-  ["Cmd+Alt+1", ev("Digit1", "¡", { metaKey: true, altKey: true })],
+  ["Cmd+Alt+1", ev("Digit1", "\u00a1", { metaKey: true, altKey: true })],
   ["Cmd+Ctrl+Space", ev("Space", " ", { metaKey: true, ctrlKey: true })],
   ["Ctrl+Alt+Shift+Up", ev("ArrowUp", "ArrowUp", { ctrlKey: true, altKey: true, shiftKey: true })],
   ["Cmd+,", ev("Comma", ",", { metaKey: true })],

@@ -1,0 +1,20 @@
+/* Dialogs: floating layers above the terminal. Loaded with `loadStyles("./dialogs.css")` by the module that
+   opens one, so the page needs no markup for them. Floating layers are the only elements with a shadow and an
+   8 px radius (docs/design.md section 6); chrome labels are 11 px, uppercase, tracked. */
+.dlg-backdrop { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+                background: rgba(20, 9, 26, .6); }
+.dlg { box-sizing: border-box; width: min(560px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: auto;
+       padding: 16px; background: var(--bar); color: var(--ink); border: 1px solid var(--edge); border-radius: 8px;
+       box-shadow: 0 12px 40px rgba(0, 0, 0, .5); }
+.dlg-title { margin: 0 0 8px; font-size: 12px; font-weight: 700; line-height: 1.3; }
+.dlg-why, .dlg-more { margin: 0 0 8px; color: var(--ink2); line-height: 1.4; }
+.dlg-note { margin: 0 0 8px; color: #e8c15c; line-height: 1.4; }
+.dlg-preview { margin: 8px 0; padding: 8px; background: var(--ground); border: 1px solid var(--edge); border-radius: 4px;
+               line-height: 1.4; }
+.dlg-line { min-height: 1.4em; white-space: pre; overflow: hidden; text-overflow: clip; }
+.dlg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.dlg button { all: unset; box-sizing: border-box; cursor: pointer; padding: 6px 12px; border: 1px solid var(--edge);
+              border-radius: 6px; color: var(--ink2); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+.dlg button:hover { color: var(--ink); background: rgba(255, 143, 184, .1); }
+.dlg button.dlg-ok { color: var(--ink); background: var(--edge); }
+.dlg button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }

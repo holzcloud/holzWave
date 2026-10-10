@@ -12,6 +12,7 @@ import { actionIdFor } from "./chords.js";
 import { gridRect } from "./geometry.js";
 import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "./keymap.js";
 import { offerKey, pushKeyHandler } from "./keystack.js";
+import { confirmPaste, isConfirmingPaste, pasteDecision } from "./paste-confirm.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
 
@@ -156,7 +157,8 @@ function sendKey(pane: number, e: KeyboardEvent, release: boolean): void {
 
 function onKeyDown(e: KeyboardEvent): void {
   // A key that belongs to an input method or a dead-key sequence is the textarea's: no command, no preventDefault.
-  if (composing || isComposingKey(e)) return;
+  if (isComposingKey(e)) return;
+  composing = false; // a key that is not an input method's proves no composition is running: never stay stuck
   // WebKit fires the keydown of the Enter that committed a composition after compositionend: it is not input.
   if (e.key === "Enter" && performance.now() - endedAt < ENTER_AFTER_COMPOSITION_MS) {
     e.preventDefault();
@@ -194,13 +196,49 @@ function onKeyUp(e: KeyboardEvent): void {
 
 // ---- paste ---------------------------------------------------------------------------------------
 
+/** Whether a multi-line paste to a program that did not ask for bracketed paste is confirmed first (D-15). */
+let pasteConfirm = true;
+
+/**
+ * Set the preference "confirm a multi-line paste" (default true). The settings plan drives it. With it off a paste
+ * the core rejected is sent again without asking, except one that holds the bracketed-paste end marker.
+ */
+export function setPasteConfirm(enabled: boolean): void {
+  pasteConfirm = enabled;
+}
+
+/**
+ * Paste into `pane` through the core, which decides what is unsafe: bracketed when the program asked, `rejected`
+ * for multi-line text it did not ask for. The page only asks the person and, on a yes, sends the text again.
+ */
+async function pasteInto(pane: number, text: string): Promise<void> {
+  try {
+    const outcome = await call<unknown>("paste", { pane, text, allow_unsafe: false });
+    const step = pasteDecision(outcome, text, pasteConfirm);
+    if (step === "done") return;
+    if (step === "confirm") {
+      let yes = false;
+      try {
+        yes = await confirmPaste(text);
+      } finally {
+        focusInput();
+      }
+      if (!yes) return;
+    }
+    await call("paste", { pane, text, allow_unsafe: true });
+  } catch {
+    // The core reports what it refused (a paste over its size limit, a pane that is gone); the page does not fail.
+  }
+}
+
 function onPaste(e: ClipboardEvent): void {
   if (inOtherField(e.target)) return; // a text field of the page keeps its own paste
   e.preventDefault();
+  if (isConfirmingPaste()) return; // one question at a time
   const text = e.clipboardData?.getData("text/plain") ?? "";
   const pane = state.view?.focus;
   if (text === "" || pane === undefined) return;
-  void call("paste", { pane, text, allow_unsafe: false }).catch(() => {});
+  void pasteInto(pane, text);
 }
 
 // ---- layout actions ------------------------------------------------------------------------------
@@ -246,7 +284,7 @@ export function initKeyboard(applyView: (v: View) => void): void {
   box.addEventListener("compositionstart", onCompositionStart);
   box.addEventListener("compositionupdate", placeInput);
   box.addEventListener("compositionend", onCompositionEnd);
-  box.addEventListener("input", onInput);
+  box.oninput = onInput; // text that is not a keydown: dead-key results, the emoji picker, dictation
   // While a composition is active the textarea follows the cursor: a frame of the focused pane moves it.
   void listen<{ pane?: number }>("frame", (msg) => {
     if (composing && msg?.pane === state.view?.focus) placeInputSoon();
@@ -259,6 +297,7 @@ export function initKeyboard(applyView: (v: View) => void): void {
   // A click on nothing focusable would leave the page without a keyboard owner. A control that took the focus
   // (a bar button, a dialog) keeps it until it gives it back.
   box.addEventListener("blur", () => {
+    composing = false; // a composition does not outlive the focus, whether or not the engine says compositionend
     setTimeout(() => {
       const now = document.activeElement;
       if (now === null || now === document.body) focusInput();

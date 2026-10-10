@@ -114,14 +114,14 @@ async function plainKeyCase(page, url) {
 async function facts(page, url) {
   await open(page, url);
   const before = (await sent(page)).length;
-  const prevented = await keydown(page, { key: "é", code: "KeyE" });
+  const prevented = await keydown(page, { key: "\u00e9", code: "KeyE" });
   assert.equal(prevented, true, "a plain character press is handled by the page");
   await keydown(page, { key: "\u{1F600}", code: "" });
   await keydown(page, { key: "a", code: "KeyA", repeat: true });
   await keydown(page, { key: "A", code: "KeyA", shiftKey: true });
   const calls = (await sent(page)).slice(before);
   assert.deepEqual(calls, [
-    ["key", { pane: 2, code: "KeyE", key: "é", mods: 0, repeat: false, release: false, composing: false }],
+    ["key", { pane: 2, code: "KeyE", key: "\u00e9", mods: 0, repeat: false, release: false, composing: false }],
     ["key", { pane: 2, code: "", key: "\u{1F600}", mods: 0, repeat: false, release: false, composing: false }],
     ["key", { pane: 2, code: "KeyA", key: "a", mods: 0, repeat: true, release: false, composing: false }],
     ["key", { pane: 2, code: "KeyA", key: "A", mods: 1, repeat: false, release: false, composing: false }],
@@ -136,9 +136,9 @@ async function shortcutCase(page, url) {
 
   // A Swiss layout types "u-umlaut" for the physical bracket key; Cmd+[ must still move the focus.
   const before = (await sent(page)).length;
-  await keydown(page, { key: "ü", code: "BracketLeft", metaKey: true });
-  await keydown(page, { key: "¨", code: "BracketRight", metaKey: true });
-  await keydown(page, { key: "¡", code: "Digit1", metaKey: true, altKey: true });
+  await keydown(page, { key: "\u00fc", code: "BracketLeft", metaKey: true });
+  await keydown(page, { key: "\u00a8", code: "BracketRight", metaKey: true });
+  await keydown(page, { key: "\u00a1", code: "Digit1", metaKey: true, altKey: true });
   assert.deepEqual((await sent(page)).slice(before), [
     ["cycle_focus", { step: -1 }],
     ["cycle_focus", { step: 1 }],

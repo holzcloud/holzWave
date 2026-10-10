@@ -27,6 +27,9 @@ const rejectUnsafe = (page) =>
 const dialog = (page) => page.locator('[role="dialog"]');
 const pastes = (page) => callsOf(page, "paste");
 const active = (page) => page.evaluate(() => document.activeElement && document.activeElement.id);
+/** The keyboard is back in the terminal input (a click may move it away first; the page takes it back). */
+const focusBack = (page) =>
+  page.waitForFunction(() => document.activeElement && document.activeElement.id === "ime", undefined, { timeout: 2000 });
 const settle = (page) =>
   page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
 
@@ -95,8 +98,8 @@ async function overlayCase(page, url) {
   assert.match(d.title, /7 lines/, "the title names the number of lines");
   assert.equal(d.lines.length, 5, "at most 5 preview lines");
   assert.deepEqual(d.lines.slice(0, 2), ["first", "second"]);
-  assert.ok([...d.lines[2]].length <= 81 && d.lines[2].endsWith("…"), "a long line is cut at 80 characters");
-  assert.ok(d.lines[4].startsWith("␛[31m"), `control characters are shown as markers: ${JSON.stringify(d.lines[4])}`);
+  assert.ok([...d.lines[2]].length <= 81 && d.lines[2].endsWith("\u2026"), "a long line is cut at 80 characters");
+  assert.ok(d.lines[4].startsWith("\u241b[31m"), `control characters are shown as markers: ${JSON.stringify(d.lines[4])}`);
   assert.ok(!d.lines.join("").includes("\u001b"), "no raw escape in the preview");
   assert.match(d.more, /2 more lines/);
   assert.match(d.note, /control sequences/, "the overlay says the text holds terminal control sequences");
@@ -116,6 +119,7 @@ async function overlayCase(page, url) {
   // The terminal input must not hold the keys either: leaving by Escape gives them back.
   await page.keyboard.press("Escape");
   await dialog(page).waitFor({ state: "detached" });
+  await focusBack(page);
   assert.equal(await active(page), "ime", "focus returns to the terminal input");
   const before = (await callsOf(page, "key")).length;
   await page.keyboard.press("a");
@@ -137,7 +141,7 @@ async function confirmCase(page, url) {
       [{ pane: 2, text: SEVEN, allow_unsafe: false }, { pane: 2, text: SEVEN, allow_unsafe: true }],
       `${how}: the same text is sent again, allowed`,
     );
-    assert.equal(await active(page), "ime", `${how}: focus returns to the terminal input`);
+    await focusBack(page);
     assert.deepEqual(await callsOf(page, "key"), [], `${how}: the key that confirmed did not reach the pane`);
   }
 }
@@ -166,7 +170,7 @@ async function cancelCase(page, url) {
     }
     await dialog(page).waitFor({ state: "detached" });
     assert.equal((await pastes(page)).length, 1, `${how}: nothing is sent after the first, rejected paste`);
-    assert.equal(await active(page), "ime", `${how}: focus returns to the terminal input`);
+    await focusBack(page);
     assert.deepEqual(await callsOf(page, "key"), [], `${how}: no key reached the pane`);
   }
 }
