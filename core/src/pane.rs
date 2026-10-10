@@ -220,6 +220,7 @@ impl PaneHandle {
         spec.cols = spec.cols.clamp(MIN_COLS, MAX_DIM);
         spec.rows = spec.rows.clamp(MIN_ROWS, MAX_DIM);
         spec.frame_interval = spec.frame_interval.max(Duration::from_millis(1));
+        spec.cell_px = (spec.cell_px.0.min(MAX_CELL_PX), spec.cell_px.1.min(MAX_CELL_PX));
 
         let queue: Arc<PaneQueue<Control>> = Arc::new(PaneQueue::new());
         let (started_tx, started_rx) = mpsc::channel::<Result<Option<u32>>>();
@@ -742,6 +743,11 @@ where
     F: FnOnce(&PaneSpec) -> Result<E>,
 {
     let mut engine = make_engine(spec)?;
+    if spec.cell_px != (0, 0) {
+        // An engine learns the size of a cell only through a resize. Without this, a size report the program asks
+        // for before the first resize of the pane says 0 x 0 although the spec knew the real size.
+        let _ = engine.resize(spec.cols, spec.rows, spec.cell_px);
+    }
     engine.set_option_as_alt(spec.option_as_alt);
     if let Some(theme) = &spec.theme {
         // A theme that cannot be applied is not a reason to have no terminal.

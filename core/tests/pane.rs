@@ -259,6 +259,23 @@ fn a_title_the_program_sets_arrives_as_a_title_event() {
 }
 
 #[test]
+fn the_cell_size_of_the_spec_is_in_the_first_size_report() {
+    let probe = Probe::default();
+    // CSI 16 t asks for the cell size. The reply is tty input and the tty echoes it (ESC as ^[) into the output, so
+    // it is visible in a frame. Nothing resizes the pane first: the spec's size must already be known to the engine.
+    let spec = PaneSpec { cell_px: (9, 18), ..spec_sh("printf '\\033[16t'; sleep 3") };
+    let pane = spawn(spec, &probe);
+
+    assert!(
+        wait_until(WAIT, || probe.has_text("[6;18;9t")),
+        "the size report did not say 18 x 9: {:?}",
+        probe.frames().iter().flat_map(|f| f.changed.iter().map(row_text)).collect::<Vec<_>>()
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
 fn frames_are_paced_to_the_interval_and_none_are_sent_while_nothing_changes() {
     let probe = Probe::default();
     let interval = Duration::from_millis(60);
