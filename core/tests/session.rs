@@ -310,9 +310,10 @@ fn the_visible_part_must_be_at_least_100_by_50_on_one_monitor() {
 
 #[test]
 fn the_visible_parts_of_two_monitors_do_not_add_up() {
-    // 60 px on the left monitor and 60 px on the right one: neither reaches 100 px.
-    let m = [monitor(0, 0, 1000, 1000), monitor(1000, 0, 1000, 1000)];
-    let p = session_with_window(window(940, 100, 120, 600)).placement(&m);
+    // 60 px on the left monitor and 40 px on the right one, with a gap of 100 px between them: together that
+    // is 100 px, but neither monitor reaches it.
+    let m = [monitor(0, 0, 1000, 1000), monitor(1100, 0, 1000, 1000)];
+    let p = session_with_window(window(940, 100, 200, 600)).placement(&m);
     assert_eq!(p.position, None);
 }
 
