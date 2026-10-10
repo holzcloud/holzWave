@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 const LIB_RS: &str = include_str!("../src/lib.rs");
 const BUILD_RS: &str = include_str!("../build.rs");
+const MENU_RS: &str = include_str!("../src/menu.rs");
 const CAPABILITY: &str = include_str!("../capabilities/default.json");
 
 /// Permissions of the main window that are not commands of the app: the defaults of the core plugin set and the one
@@ -185,4 +186,25 @@ fn the_scanners_read_a_list_with_comments_and_paths() {
     assert_eq!(manifest_commands(build).unwrap(), set(&["a_b", "c"]));
     assert!(handler_commands("fn main() {}").is_err());
     assert!(manifest_commands("fn main() {}").is_err());
+}
+
+/// The lines of a Rust source file that are not comments (line or doc comments).
+fn code_lines(source: &str) -> Vec<&str> {
+    source.lines().filter(|line| !line.trim_start().starts_with("//")).collect()
+}
+
+#[test]
+fn the_native_menu_has_no_close_window_and_replaces_the_default_one() {
+    // Cmd+W belongs to the page (D-14): a Close Window item would swallow it.
+    for line in code_lines(MENU_RS) {
+        assert!(!line.contains("close_window"), "menu.rs builds a Close Window item: {line}");
+        assert!(!line.contains("fullscreen"), "menu.rs builds a full screen item: {line}");
+    }
+    // The clipboard items stay so that copy and paste reach the web view.
+    for item in ["PredefinedMenuItem::cut", "PredefinedMenuItem::copy", "PredefinedMenuItem::paste", "PredefinedMenuItem::select_all"] {
+        assert!(MENU_RS.contains(item), "menu.rs lost {item}");
+    }
+    let lib: String = code_lines(LIB_RS).join("\n");
+    assert!(lib.contains("enable_macos_default_menu(false)"), "lib.rs must switch the default macOS menu off");
+    assert!(lib.contains(".menu(menu::build)"), "lib.rs must install the explicit menu");
 }

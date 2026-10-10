@@ -1,12 +1,12 @@
 // The static table from a canonical chord to an action id. Canonical form is the core's (core/src/keybindings.rs):
 // modifiers in the order Cmd, Ctrl, Alt, Shift, then the key, letters upper case, "+" as the separator.
 // These are the macOS defaults; a chord whose action nobody registered resolves and then does nothing.
-// `pane.close` stays on Cmd+Shift+W until the plan that removes the native Cmd+W owner moves it.
+// `pane.close` is Cmd+W (D-14): the native macOS menu has no Close Window item, so the page owns the shortcut.
 
 export const CHORDS: ReadonlyMap<string, string> = new Map([
   ["Cmd+D", "pane.split_right"],
   ["Cmd+Shift+D", "pane.split_down"],
-  ["Cmd+Shift+W", "pane.close"],
+  ["Cmd+W", "pane.close"],
   ["Cmd+]", "pane.focus_next"],
   ["Cmd+[", "pane.focus_prev"],
   ["Cmd+T", "tab.new"],

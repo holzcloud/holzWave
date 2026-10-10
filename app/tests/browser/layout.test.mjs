@@ -199,7 +199,7 @@ async function shortcutCase(page, url) {
     ["Meta+Shift+D", [["split", { column: true }]]],
     ["Meta+t", [["new_tab", undefined]]],
     ["Meta+Shift+N", [["new_workspace", { name: "ws 2" }]]],
-    ["Meta+Shift+W", [["close_pane", { pane: 2 }]]],
+    ["Meta+w", [["close_pane", { pane: 2 }]]],
     ["Meta+]", [["cycle_focus", { step: 1 }]]],
     ["Meta+[", [["cycle_focus", { step: -1 }]]],
     ["Meta+1", [["select_tab", { index: 0 }]]],
@@ -210,8 +210,9 @@ async function shortcutCase(page, url) {
     assert.deepEqual(await press(page, chord), want, `${chord} sent the wrong commands`);
   }
 
-  // A Cmd chord that nothing owns goes nowhere: not to a command and not to the shell.
-  for (const chord of ["Meta+z", "Meta+w", "Meta+k"]) {
+  // A Cmd chord that nothing owns goes nowhere: not to a command and not to the shell. Cmd+Shift+W is one of them
+  // since Cmd+W closes the pane (D-14).
+  for (const chord of ["Meta+z", "Meta+Shift+W", "Meta+k"]) {
     assert.deepEqual(await press(page, chord), [], `${chord} must send nothing`);
   }
 }

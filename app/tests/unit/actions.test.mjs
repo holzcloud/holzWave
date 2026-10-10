@@ -99,7 +99,7 @@ const EXPECTED = {
   "Cmd+Shift+D": "pane.split_down",
   "Cmd+T": "tab.new",
   "Cmd+Shift+N": "workspace.new",
-  "Cmd+Shift+W": "pane.close",
+  "Cmd+W": "pane.close",
   "Cmd+]": "pane.focus_next",
   "Cmd+[": "pane.focus_prev",
   "Cmd+C": "edit.copy",

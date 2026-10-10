@@ -9,6 +9,7 @@
 //! arguments are snake_case.
 
 mod commands;
+mod menu;
 mod state;
 
 use std::sync::Arc;
@@ -41,8 +42,15 @@ impl Sink for TauriSink {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .runtime(tauri_runtime_wry::Wry::default())
+    let builder = tauri::Builder::default().runtime(tauri_runtime_wry::Wry::default());
+    // macOS: no default menu (it owns Cmd+W, Close Window) but the explicit one of `menu.rs`. The other platforms
+    // draw their own chrome and have no native menu at all (D-01, D-14).
+    #[cfg(target_os = "macos")]
+    let builder = builder.enable_macos_default_menu(false).menu(menu::build);
+
+    // The exit events can come more than once (a requested exit, then the exit itself): the shutdown runs once.
+    let mut ended = false;
+    builder
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             let sink = Arc::new(TauriSink { app: app.handle().clone() });
@@ -84,11 +92,14 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")
-        .run(|app, event| {
-            // The pending layout goes to disk and every shell ends before the process does (DESK-16, DESK-14).
-            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit)
+        .run(move |app, event| {
+            // The pending layout and session go to disk and every shell ends before the process does (DESK-16,
+            // DESK-14). Closing the last window and Cmd+Q arrive here too.
+            if !ended
+                && matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit)
                 && let Some(core) = app.try_state::<Arc<AppCore>>()
             {
+                ended = true;
                 core.shutdown();
             }
         });
