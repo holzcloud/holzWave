@@ -140,42 +140,54 @@ async function rerenderCase(page, url) {
 
 async function selectionCase(page, url) {
   await open(page, url);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
   await tagAll(page, ".focus", "focus");
   await tagAll(page, ".divider", "divider");
   const canvas = await page.evaluate(() => {
     const r = document.getElementById("term").getBoundingClientRect();
-    return { left: r.left, top: r.top };
+    return { left: r.left, top: r.top, width: r.width };
   });
-  const x = canvas.left + PAD + 20;
-  const rowY = (row) => canvas.top + PAD + row * ROW_PX + ROW_PX / 2;
+  // The selection is the core's: the boxes follow the span lists of the focused pane's frames.
+  const msg = (seq, selection, full = false) => ({
+    pane: 2, seq, full, cols: 20, rows: 6, fg: 0xffffff, bg: 0x14091a, cursor: null, scrollbar: [0, 6, 6],
+    selection, matches: [], search: null, copy_cursor: null,
+    modes: { alt: false, bracketed_paste: false, mouse: false }, changed: [],
+  });
+  const row = (y) => [y, 0, 9];
 
-  await page.mouse.move(x, rowY(0));
-  await page.mouse.down();
-  await page.mouse.move(x + 120, rowY(2));
-  await frame(page);
+  await emit(page, "frame", msg(1, [row(0), row(1), row(2)], true));
   assert.equal(await page.locator("#overlay .sel").count(), 3, "rows 0 to 2 are selected: three boxes");
   await tagAll(page, ".sel", "row");
 
-  await page.mouse.move(x + 120, rowY(3));
-  await frame(page);
+  await emit(page, "frame", msg(2, [row(0), row(1), row(2), row(3)]));
   assert.deepEqual(
     await tagsOf(page, ".sel"),
     ["row0", "row1", "row2", ""],
     "growing the selection recreated the boxes of the rows that were already there",
   );
 
-  await page.mouse.move(x + 120, rowY(1));
-  await frame(page);
+  await emit(page, "frame", msg(3, [row(0), row(1)]));
   assert.deepEqual(
     await tagsOf(page, ".sel"),
     ["row0", "row1"],
     "shrinking the selection recreated the boxes of the rows that stay",
   );
 
+  // A gesture on the pane changes no element: the answer to it is a frame, not a local selection.
+  const x = canvas.left + canvas.width / 2 + PAD + 20;
+  const rowY = (r) => canvas.top + PAD + r * ROW_PX + ROW_PX / 2;
+  await page.mouse.move(x, rowY(0));
+  await page.mouse.down();
+  await page.mouse.move(x + 120, rowY(2));
+  await frame(page);
   await page.mouse.up();
   await emit(page, "layout", await page.evaluate(() => window.__MOCK__.view()));
   await settle(page);
   assert.deepEqual(await tagsOf(page, ".sel"), ["row0", "row1"], "a render of the same view replaced a selection box");
-  assert.deepEqual(await tagsOf(page, ".focus"), ["focus0"], "the focus answer of the click replaced the focus box");
+  assert.deepEqual(await tagsOf(page, ".focus"), ["focus0"], "the gesture replaced the focus box");
   assert.deepEqual(await tagsOf(page, ".divider"), ["divider0"], "the selection gesture replaced the divider");
+
+  // The spans go: so do the boxes.
+  await emit(page, "frame", msg(4, []));
+  assert.equal(await page.locator("#overlay .sel").count(), 0, "the boxes stay after the spans are gone");
 }

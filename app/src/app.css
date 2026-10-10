@@ -43,5 +43,7 @@ html, body { margin: 0; height: 100%; background: var(--ground); overflow: hidde
 .divider:hover::after { background: var(--rose); }
 .focus { position: absolute; box-sizing: border-box; border: 1px solid rgba(255, 143, 184, .55); border-radius: 3px; }
 .sel { position: absolute; background: rgba(255, 143, 184, .35); }
+/* The textarea `execCommand("copy")` needs: focusable and selectable, but out of sight and out of the layout. */
+.clipboard-buffer { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
 #stats { position: absolute; right: 8px; bottom: 6px; font: 11px/1.2 "JetBrains Mono", ui-monospace, Menlo, monospace;
          color: var(--rose); opacity: .7; pointer-events: none; white-space: pre; text-align: right; }

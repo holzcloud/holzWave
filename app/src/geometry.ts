@@ -1,7 +1,7 @@
 // Pure geometry: where panes and grids are on the canvas and which pane or cell is under a point.
 // No DOM, no state: everything arrives as an argument, so node can import and test this module.
 import type { Metrics, PxRect } from "./frame.js";
-import type { CellSize, Divider, Selection, UnitRect, View } from "./types.js";
+import type { CellSize, Divider, UnitRect, View } from "./types.js";
 
 /** CSS px between a pane's edge and its grid. */
 export const PAD = 6;
@@ -62,10 +62,4 @@ export function dividerRect(m: Metrics, d: Divider): PxRect {
  */
 export function ratioAt(area: PxRect, axis: Divider["axis"], x: number, y: number): number {
   return axis === "Row" ? (x - area.x) / area.w : (y - area.y) / area.h;
-}
-
-/** The selection's ends in reading order: the start first. */
-export function ordered(s: Selection): [[number, number], [number, number]] {
-  const [a, b] = [s.a, s.b];
-  return a[1] < b[1] || (a[1] === b[1] && a[0] <= b[0]) ? [a, b] : [b, a];
 }

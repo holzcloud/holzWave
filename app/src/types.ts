@@ -35,10 +35,3 @@ export interface PaneSize extends CellSize {
   cellW: number;
   cellH: number;
 }
-
-/** The legacy frontend selection: cell coordinates of the anchor `a` and the moving end `b`. */
-export interface Selection {
-  pane: number;
-  a: [number, number];
-  b: [number, number];
-}

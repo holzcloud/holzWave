@@ -6,10 +6,11 @@ import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
 import { BOLD, FONT_PX, ITALIC, Metrics, Renderer, font } from "./frame.js";
-import { applyFrame, toRenderFrame } from "./frames.js";
+import { applyFrame, spansSignature, toRenderFrame } from "./frames.js";
 import type { FrameMsg } from "./frames.js";
 import { fitCells, gridRect } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
+import { onSelectionSpans } from "./selection.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
 import { WebGLRenderer } from "./webgl.js";
@@ -110,8 +111,6 @@ function measure(): Metrics {
 /** Take a new layout: the one place every answer and event of the core with a view ends up. */
 export function applyView(v: View): void {
   state.view = v;
-  const live = new Set(v.panes.map(([id]) => id));
-  if (state.selection && !live.has(state.selection.pane)) state.selection = null;
   renderBar(v, applyView);
   syncSizes();
   renderOverlay();
@@ -175,7 +174,11 @@ function onFrame(msg: FrameMsg): void {
   }
   if (!mirror) return;
   if (msg.full) waiting.delete(pane);
+  const before = spansSignature(state.frames.get(pane)?.selection);
   state.frames.set(pane, mirror);
+  // The cache of the selection's text follows the spans; the highlight is redrawn when the focused pane's change.
+  onSelectionSpans(pane, mirror.selection, msg.changed);
+  if (pane === state.view?.focus && before !== spansSignature(mirror.selection)) renderOverlay();
   schedule();
 }
 

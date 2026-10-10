@@ -1,4 +1,4 @@
-// The overlay above the canvas: divider hit areas, the focus box and the selection boxes.
+// The overlay above the canvas: divider hit areas, the focus box and the selection boxes (from the frame spans).
 //
 // Every element is keyed (dividers by split id, the focus box as "focus", selection boxes by row) and moved in
 // place on every render. A divider must survive every layout response, because the drag gesture lives on it:
@@ -6,7 +6,8 @@
 import { call } from "./bridge.js";
 import { el, setRect } from "./dom.js";
 import type { PxRect } from "./frame.js";
-import { dividerRect, gridRect, ordered, paneRect, ratioAt } from "./geometry.js";
+import { visibleSpans } from "./frames.js";
+import { dividerRect, gridRect, paneRect, ratioAt } from "./geometry.js";
 import { state } from "./state.js";
 import type { Divider, View } from "./types.js";
 
@@ -170,30 +171,31 @@ function placeFocus(keep: Set<string>, view: View): void {
   if (pane) place(keep, "focus", "focus", focusLayer, paneRect(state.metrics, pane[1]));
 }
 
-/** One box per selected row, keyed by the row. */
+/**
+ * One box per selection span of the focused pane, as its latest frame carries them (viewport cells, both ends
+ * inclusive). The core owns the selection: nothing is kept here, so a span that scrolls or ends is simply not in
+ * the next frame. Boxes are keyed by row and reused.
+ */
 function placeSelection(keep: Set<string>, view: View): void {
-  const sel = state.selection;
-  if (!sel) return;
-  const pane = view.panes.find(([id]) => id === sel.pane);
-  if (!pane) return;
+  const pane = view.panes.find(([id]) => id === view.focus);
+  const mirror = state.frames.get(view.focus);
+  if (!pane || !mirror) return;
   const m = state.metrics;
   const g = gridRect(m, pane[1]);
-  const [s, e] = ordered(sel);
-  const cols = state.sizes.get(sel.pane)?.cols ?? 0;
-  for (let row = s[1]; row <= e[1]; row++) {
-    const from = row === s[1] ? s[0] : 0;
-    const to = row === e[1] ? e[0] : cols - 1;
-    place(keep, `sel-${row}`, "sel", selectionLayer, {
-      x: g.x + from * m.cellW,
-      y: g.y + row * m.cellH,
-      w: (to - from + 1) * m.cellW,
+  for (const [y, x0, x1] of visibleSpans(mirror)) {
+    let key = `sel-${y}`;
+    for (let i = 1; keep.has(key); i++) key = `sel-${y}-${i}`; // two spans on one row are legal on the wire
+    place(keep, key, "sel", selectionLayer, {
+      x: g.x + x0 * m.cellW,
+      y: g.y + y * m.cellH,
+      w: (x1 - x0 + 1) * m.cellW,
       h: m.cellH,
     });
   }
 }
 
 /**
- * Bring the overlay in line with `state.view` and `state.selection`. Every element is looked up by a stable key
+ * Bring the overlay in line with `state.view` and the focused pane's selection spans. Every element is looked up by a stable key
  * and moved in place; one is created or removed only when its key appears or vanishes.
  */
 export function renderOverlay(): void {

@@ -8,7 +8,6 @@ import {
   dividerRect,
   fitCells,
   gridRect,
-  ordered,
   paneAt,
   paneRect,
   ratioAt,
@@ -105,12 +104,4 @@ test("ratioAt maps a pointer position into the split's area", () => {
 test("ratioAt is not finite for an area without size", () => {
   assert.ok(!Number.isFinite(ratioAt({ x: 0, y: 0, w: 0, h: 10 }, "Row", 5, 5)));
   assert.ok(!Number.isFinite(ratioAt({ x: 0, y: 0, w: 10, h: 0 }, "Column", 5, 5)));
-});
-
-test("ordered puts the selection's ends in reading order", () => {
-  const same = { pane: 1, a: [2, 3], b: [5, 3] };
-  assert.deepEqual(ordered(same), [[2, 3], [5, 3]]);
-  assert.deepEqual(ordered({ pane: 1, a: [5, 3], b: [2, 3] }), [[2, 3], [5, 3]]);
-  assert.deepEqual(ordered({ pane: 1, a: [9, 7], b: [1, 2] }), [[1, 2], [9, 7]]);
-  assert.deepEqual(ordered({ pane: 1, a: [1, 2], b: [9, 7] }), [[1, 2], [9, 7]]);
 });

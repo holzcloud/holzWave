@@ -105,22 +105,31 @@ async function pointerCase(page, url) {
     await page.mouse.move(toX, y, { steps: 4 });
     await page.mouse.up();
   };
+  const kinds = (calls) => calls.map(([cmd, args]) => (cmd === "select" ? `select:${args.op.kind}` : cmd));
 
   const before = (await sent(page)).length;
   await drag(c.left + c.width / 2 + PAD + 4, c.left + c.width / 2 + PAD + 44);
-  assert.deepEqual((await sent(page)).slice(before), [], "selecting in the focused pane sends no command");
-  assert.ok((await page.locator("#overlay .sel").count()) >= 1, "the drag leaves a selection box");
-
-  await page.mouse.click(c.left + PAD + 4, y); // a plain click is not a selection
-  assert.equal(await page.locator("#overlay .sel").count(), 0, "a plain click must not leave a selection");
-  const calls = (await sent(page)).slice(before);
-  assert.deepEqual(calls, [["focus_pane", { pane: 1 }]], "a click in the other pane only focuses it");
+  const dragged = (await sent(page)).slice(before);
+  const dragKinds = kinds(dragged);
+  assert.equal(dragKinds[0], "select:begin", "a drag begins a selection in the core");
+  assert.ok(dragKinds.includes("select:extend"), "a drag extends it");
+  assert.ok(dragKinds.every((k) => k.startsWith("select:")), `a drag in the focused pane sends only select: ${dragKinds}`);
+  assert.ok(dragged.every(([, args]) => args.pane === 2), "the selection is in the pane under the pointer");
+  assert.equal(await page.locator("#overlay .sel").count(), 0, "the page draws no selection of its own: the frames do");
 
   const mid = (await sent(page)).length;
+  await page.mouse.click(c.left + PAD + 4, y); // a plain click is not a selection
+  assert.deepEqual(
+    kinds((await sent(page)).slice(mid)),
+    ["focus_pane", "select:begin", "select:clear"],
+    "a click in the other pane focuses it, begins and clears",
+  );
+  assert.deepEqual((await sent(page)).slice(mid)[0], ["focus_pane", { pane: 1 }]);
+
+  const last = (await sent(page)).length;
   await drag(c.left + PAD + 4, c.left + PAD + 44);
-  assert.ok((await page.locator("#overlay .sel").count()) >= 1, "a drag in the left pane selects");
-  const extra = (await sent(page)).slice(mid).filter(([cmd]) => cmd !== "focus_pane");
-  assert.deepEqual(extra, [], "a selection drag must send nothing but the legacy focus command");
+  const extra = (await sent(page)).slice(last).filter(([cmd]) => cmd !== "focus_pane" && cmd !== "select");
+  assert.deepEqual(extra, [], "a selection drag sends nothing but focus and select commands");
 }
 
 async function wheelCase(page, url) {
@@ -143,31 +152,29 @@ async function wheelCase(page, url) {
 
 async function copyCase(page, url) {
   await open(page, url);
-  // The page writes to the clipboard through navigator.clipboard; record what it writes.
+  // The page copies through a hidden textarea and execCommand; record what it would copy.
   await page.evaluate(() => {
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText: async (t) => { window.__copied = t; } },
-    });
+    window.__copied = null;
+    document.execCommand = (cmd) => {
+      window.__copied = [cmd, document.activeElement && document.activeElement.value];
+      return true;
+    };
+    window.__MOCK__.on("selection_text", () => "hello world");
   });
   const row = (y, text) => ({ y, runs: [[text, text.length, 0xf6efe6, 0x14091a, 0]] });
   await page.evaluate((frame) => window.__MOCK__.emit("frame", frame), {
     pane: 2, seq: 1, full: true, cols: 60, rows: 4, fg: 0xf6efe6, bg: 0x14091a, cursor: null,
-    scrollbar: [0, 4, 4], selection: [], matches: [], search: null, copy_cursor: null,
+    scrollbar: [0, 4, 4], selection: [[0, 0, 10]], matches: [], search: null, copy_cursor: null,
     modes: { alt: false, bracketed_paste: false, mouse: false },
     changed: [row(0, "hello world"), row(1, "second row")],
   });
-  const c = await canvasOrigin(page);
-  const x0 = c.left + c.width / 2 + PAD + 2;
-  const y = c.top + PAD + ROW_PX / 2;
+  await page.waitForFunction(() => window.__MOCK__.callsOf("selection_text").length >= 1);
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done())));
   const before = (await sent(page)).length;
-  await page.mouse.move(x0, y);
-  await page.mouse.down();
-  await page.mouse.move(x0 + 300, y, { steps: 4 });
-  await page.mouse.up();
   await page.keyboard.press("Meta+c");
-  assert.equal(await page.evaluate(() => window.__copied), "hello world", "Cmd+C copies the selected text");
-  assert.deepEqual((await sent(page)).slice(before), [], "Cmd+C must not reach the shell");
+  assert.deepEqual(await page.evaluate(() => window.__copied), ["copy", "hello world"], "Cmd+C copies the selected text");
+  const calls = (await sent(page)).slice(before);
+  assert.deepEqual(calls, [], "Cmd+C must not reach the shell or the core");
 }
 
 async function resizeCase(page, url) {

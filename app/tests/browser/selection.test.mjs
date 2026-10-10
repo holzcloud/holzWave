@@ -68,6 +68,12 @@ const frames = (page, n = 2) =>
 
 const reset = (page) => page.evaluate(() => window.__MOCK__.reset());
 
+/** Forget the calls and let the multi-click window of the click before run out. */
+async function fresh(page) {
+  await reset(page);
+  await page.waitForTimeout(450);
+}
+
 export default async function ({ page, url, errors }) {
   await gestureCase(page, url);
   await clickCountCase(page, url);
@@ -118,18 +124,18 @@ async function clickCountCase(page, url) {
   await page.mouse.click(x, y);
   assert.deepEqual(await kinds(), ["begin:cell", "clear", "begin:word", "begin:line"], "the third click selects a line");
 
-  await reset(page);
+  await fresh(page);
   await page.mouse.click(x, y);
   await page.waitForTimeout(450); // longer than the 400 ms window
   await page.mouse.click(x, y);
   assert.deepEqual(await kinds(), ["begin:cell", "clear", "begin:cell", "clear"], "a slow second click is a new single click");
 
-  await reset(page);
+  await fresh(page);
   await page.mouse.click(x, y);
   await page.mouse.click(x + 12, y); // farther than 4 px
   assert.deepEqual(await kinds(), ["begin:cell", "clear", "begin:cell", "clear"], "a distant second click is a new single click");
 
-  await reset(page);
+  await fresh(page);
   await page.mouse.click(x, y);
   await page.mouse.click(x + 3, y); // within 4 px, still inside one cell
   assert.deepEqual((await kinds()).filter((k) => k.startsWith("begin")), ["begin:cell", "begin:word"]);
@@ -413,13 +419,13 @@ async function handlerStackCase(page, url) {
 
   // Popping removes exactly that push; popping twice does nothing.
   await page.evaluate(() => { window.__consume.top = true; window.__pops.top(); window.__pops.top(); window.__seen.length = 0; });
-  await reset(page);
+  await fresh(page);
   await page.mouse.click(x, y);
   assert.deepEqual((await seen("pointerdown")).map((s) => s[0]), ["low"], "the popped handler is gone, the other stays");
   assert.deepEqual((await selects(page)).map((o) => o.kind), ["begin", "clear"]);
 
   await page.evaluate(() => { window.__pops.low(); window.__seen.length = 0; });
-  await reset(page);
+  await fresh(page);
   await page.mouse.click(x, y);
   assert.deepEqual(await page.evaluate(() => window.__seen), [], "no handlers left");
   assert.deepEqual((await selects(page)).map((o) => o.kind), ["begin", "clear"]);

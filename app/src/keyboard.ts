@@ -5,7 +5,6 @@
 import { registerAction, runAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { actionIdFor } from "./chords.js";
-import { renderOverlay } from "./overlay.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
 
@@ -66,7 +65,6 @@ const KEYS: Record<string, string> = {
 
 function send(data: string): void {
   if (!state.view) return;
-  if (state.selection) { state.selection = null; renderOverlay(); }
   void call("input", { pane: state.view.focus, data });
 }
 

@@ -184,14 +184,25 @@ export function gridText(mirror: PaneMirror): string[] {
  * A cheap signature of a span list: equal lists give equal strings and different lists different ones. The empty
  * list (and anything that is not a list) is the empty string.
  */
-export function spansSignature(_spans: readonly SpanMsg[] | undefined): string {
-  return "";
+export function spansSignature(spans: readonly SpanMsg[] | undefined): string {
+  if (!Array.isArray(spans) || spans.length === 0) return "";
+  return spans.map((s) => (Array.isArray(s) ? s.join(",") : "?")).join(";");
 }
 
 /**
  * The spans of the mirror that can be drawn: whole numbers, a row inside the grid, the ends clamped to the columns
  * of the grid. A span that is empty after clamping, or malformed, is dropped.
  */
-export function visibleSpans(_mirror: PaneMirror): SpanMsg[] {
-  return [];
+export function visibleSpans(mirror: PaneMirror): SpanMsg[] {
+  const out: SpanMsg[] = [];
+  for (const span of mirror.selection) {
+    if (!Array.isArray(span) || span.length < 3) continue;
+    const [y, x0, x1] = span;
+    if (!Number.isInteger(y) || !Number.isInteger(x0) || !Number.isInteger(x1)) continue;
+    if (y < 0 || y >= mirror.rows) continue;
+    const from = Math.max(0, x0);
+    const to = Math.min(mirror.cols - 1, x1);
+    if (from <= to) out.push([y, from, to]);
+  }
+  return out;
 }

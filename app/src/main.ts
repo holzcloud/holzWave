@@ -1,12 +1,14 @@
 // holzWave frontend bootstrap: tabs, workspaces and tiled panes drawn on one canvas.
-// No framework and no @tauri-apps/api: the Tauri global is enough for the commands and two events.
+// No framework and no @tauri-apps/api: the Tauri global is enough for the commands and the events.
 // Everything lives in a module of its own: scene (canvas, draw loop, view), chrome (bar), overlay (dividers,
-// focus, selection boxes), keyboard and actions, pointer, bridge, state, geometry. This file only starts them.
+// focus, selection boxes), keyboard and actions, pointer, selection (the clipboard text), frames (the pane
+// mirrors), bridge, state, geometry. This file only starts them.
 import { call, listen } from "./bridge.js";
 import { initKeyboard } from "./keyboard.js";
 import { initOverlay } from "./overlay.js";
 import { initPointer } from "./pointer.js";
 import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
+import { initSelection } from "./selection.js";
 import type { View } from "./types.js";
 
 async function main() {
@@ -14,6 +16,7 @@ async function main() {
   initOverlay(applyView);
   initKeyboard(applyView);
   initPointer(applyView);
+  initSelection();
   await initEvents();
   await listen<View>("layout", applyView);
   fit();
