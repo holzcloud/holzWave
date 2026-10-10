@@ -1,0 +1,17 @@
+[package]
+name = "holzwave-core"
+description = "The shared core of holzWave: terminal engine, PTY and connections"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["ghostty"]
+# Terminal engine backed by libghostty-vt. Needs Zig 0.16 at build time.
+ghostty = ["dep:libghostty-vt"]
+
+[dependencies]
+libghostty-vt = { version = "0.2", optional = true }
+portable-pty = "0.9"
+thiserror = "2"

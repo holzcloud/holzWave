@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["core", "spike"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/holzcloud/holzWave"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

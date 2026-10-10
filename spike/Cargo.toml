@@ -1,0 +1,10 @@
+[package]
+name = "holzwave-spike"
+description = "Phase 1 spike: measurements for the engine and renderer decision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+holzwave-core = { path = "../core" }
