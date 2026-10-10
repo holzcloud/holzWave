@@ -146,6 +146,24 @@ function skipBraces(text, open) {
   throw new Error("unbalanced braces");
 }
 
+/** `text` without its comments; strings and templates are kept as they are. */
+function stripComments(text) {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const next = skipLiteral(text, i);
+    const isComment = text[i] === "/" && (text[i + 1] === "/" || text[i + 1] === "*");
+    if (next === i) {
+      out += text[i];
+      i += 1;
+      continue;
+    }
+    if (!isComment) out += text.slice(i, next);
+    i = next;
+  }
+  return out;
+}
+
 /** The top-level keys of the object literal whose `{` is at `open`. Spreads and computed keys are reported as such. */
 function objectKeys(text, open) {
   const end = skipBraces(text, open) - 1;
@@ -153,7 +171,7 @@ function objectKeys(text, open) {
   let depth = 0;
   let entryStart = open + 1;
   const flush = (to) => {
-    const entry = text.slice(entryStart, to).trim();
+    const entry = stripComments(text.slice(entryStart, to)).trim();
     if (entry === "") return;
     if (entry.startsWith("...")) return void found.push("...spread");
     if (entry.startsWith("[")) return void found.push("[computed]");

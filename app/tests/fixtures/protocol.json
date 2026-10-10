@@ -1,0 +1,317 @@
+{
+  "answers": {
+    "copy_mode": [
+      {
+        "active": true,
+        "selecting": false,
+        "yanked": null
+      },
+      {
+        "active": false,
+        "selecting": false,
+        "yanked": "text"
+      }
+    ],
+    "search": [
+      {
+        "current": 1,
+        "total": 3
+      },
+      {
+        "current": null,
+        "total": 0
+      }
+    ]
+  },
+  "commands": {
+    "close_pane": [
+      "pane"
+    ],
+    "copy_mode": [
+      "pane",
+      "op"
+    ],
+    "cycle_focus": [
+      "step"
+    ],
+    "focus_pane": [
+      "pane"
+    ],
+    "get_layout": [],
+    "key": [
+      "pane",
+      "code",
+      "key",
+      "mods",
+      "repeat",
+      "release",
+      "composing"
+    ],
+    "new_tab": [],
+    "new_workspace": [
+      "name"
+    ],
+    "paste": [
+      "pane",
+      "text",
+      "allow_unsafe"
+    ],
+    "request_full": [
+      "pane"
+    ],
+    "resize": [
+      "pane",
+      "cols",
+      "rows",
+      "cell_w",
+      "cell_h"
+    ],
+    "scroll": [
+      "pane",
+      "rows"
+    ],
+    "scroll_to_bottom": [
+      "pane"
+    ],
+    "search": [
+      "pane",
+      "op"
+    ],
+    "select": [
+      "pane",
+      "op"
+    ],
+    "select_tab": [
+      "index"
+    ],
+    "select_workspace": [
+      "index"
+    ],
+    "selection_text": [
+      "pane"
+    ],
+    "set_ratio": [
+      "split",
+      "ratio"
+    ],
+    "split": [
+      "column"
+    ],
+    "start_pane": [
+      "pane",
+      "cols",
+      "rows",
+      "cell_w",
+      "cell_h"
+    ],
+    "text": [
+      "pane",
+      "text"
+    ]
+  },
+  "events": {
+    "cwd": {
+      "cwd": "/Users/holz/Projects/holzWave",
+      "pane": 3
+    },
+    "names": [
+      "frame",
+      "layout",
+      "title",
+      "cwd",
+      "pane-exit"
+    ],
+    "pane-exit": [
+      {
+        "code": 0,
+        "pane": 3
+      },
+      {
+        "code": null,
+        "pane": 3
+      }
+    ],
+    "title": {
+      "pane": 3,
+      "title": "vim README.md"
+    }
+  },
+  "ops": {
+    "copy_mode": [
+      {
+        "kind": "enter"
+      },
+      {
+        "kind": "exit"
+      },
+      {
+        "kind": "toggle"
+      },
+      {
+        "kind": "yank"
+      },
+      {
+        "kind": "move",
+        "motion": "left"
+      },
+      {
+        "kind": "move",
+        "motion": "right"
+      },
+      {
+        "kind": "move",
+        "motion": "up"
+      },
+      {
+        "kind": "move",
+        "motion": "down"
+      },
+      {
+        "kind": "move",
+        "motion": "line_start"
+      },
+      {
+        "kind": "move",
+        "motion": "line_end"
+      },
+      {
+        "kind": "move",
+        "motion": "top"
+      },
+      {
+        "kind": "move",
+        "motion": "bottom"
+      },
+      {
+        "kind": "move",
+        "motion": "page_up"
+      },
+      {
+        "kind": "move",
+        "motion": "page_down"
+      },
+      {
+        "kind": "move",
+        "motion": "word_forward"
+      },
+      {
+        "kind": "move",
+        "motion": "word_back"
+      }
+    ],
+    "search": [
+      {
+        "kind": "set",
+        "needle": "find"
+      },
+      {
+        "kind": "next"
+      },
+      {
+        "kind": "prev"
+      },
+      {
+        "kind": "clear"
+      }
+    ],
+    "select": [
+      {
+        "kind": "begin",
+        "mode": "cell",
+        "x": 3,
+        "y": 4
+      },
+      {
+        "kind": "begin",
+        "mode": "word",
+        "x": 3,
+        "y": 4
+      },
+      {
+        "kind": "begin",
+        "mode": "line",
+        "x": 3,
+        "y": 4
+      },
+      {
+        "kind": "extend",
+        "x": 10,
+        "y": 4
+      },
+      {
+        "kind": "all"
+      },
+      {
+        "kind": "clear"
+      }
+    ]
+  },
+  "paste": [
+    "written",
+    "empty",
+    "rejected"
+  ],
+  "view": {
+    "dividers": [
+      {
+        "area": {
+          "h": 1.0,
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "axis": "Row",
+        "ratio": 0.5,
+        "split": 4
+      }
+    ],
+    "focus": 5,
+    "panes": [
+      [
+        3,
+        {
+          "h": 1.0,
+          "w": 0.5,
+          "x": 0.0,
+          "y": 0.0
+        }
+      ],
+      [
+        5,
+        {
+          "h": 1.0,
+          "w": 0.5,
+          "x": 0.5,
+          "y": 0.0
+        }
+      ]
+    ],
+    "tabs": [
+      {
+        "active": true,
+        "focus": 5,
+        "title": "shell"
+      },
+      {
+        "active": false,
+        "focus": 7,
+        "title": "shell"
+      },
+      {
+        "active": false,
+        "focus": 9,
+        "title": "shell"
+      }
+    ],
+    "workspaces": [
+      {
+        "active": true,
+        "name": "main"
+      },
+      {
+        "active": false,
+        "name": "notes"
+      }
+    ]
+  }
+}

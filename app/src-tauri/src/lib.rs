@@ -76,10 +76,10 @@ pub fn run() {
         .expect("error while building holzWave")
         .run(|app, event| {
             // The pending layout goes to disk and every shell ends before the process does (DESK-16, DESK-14).
-            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-                if let Some(core) = app.try_state::<Arc<AppCore>>() {
-                    core.shutdown();
-                }
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit)
+                && let Some(core) = app.try_state::<Arc<AppCore>>()
+            {
+                core.shutdown();
             }
         });
 }
