@@ -507,12 +507,17 @@ pub enum SearchOp {
     Clear,
 }
 
+/// The most bytes a search needle may have (T-02-46): a longer one is refused and an earlier search stays.
+pub const MAX_SEARCH_BYTES: usize = 1024;
+
 /// The result of a search.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SearchState {
     /// Matches in the whole scrollback.
     pub total: usize,
-    /// Index of the current match, when there is one.
+    /// The place of the current match in reading order, when there is one: 0 is the oldest match and `total - 1`
+    /// the newest, so a find bar shows `current + 1` of `total`. A search starts on the newest match, `Prev` goes up
+    /// (towards 0) and `Next` goes down, both wrap.
     pub current: Option<usize>,
 }
 

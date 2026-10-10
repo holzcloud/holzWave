@@ -6,15 +6,19 @@ use libghostty_vt::paste::Options as PasteOptions;
 use libghostty_vt::render::{
     CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot,
 };
-use libghostty_vt::screen::{CellWide, Screen as VtScreen};
+use libghostty_vt::screen::{CellWide, GridRef, Screen as VtScreen};
+use libghostty_vt::search::{MatchBuffer, Scroll, Search};
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::style::{Palette, PaletteIndex, RgbColor, Underline};
-use libghostty_vt::terminal::{ClipboardMime, Mode, Point, PointCoordinate, ScrollViewport, SizeReportSize};
+use libghostty_vt::terminal::{
+    ClipboardMime, Mode, Point, PointCoordinate, PointSpace, ScrollViewport, SizeReportSize,
+};
 use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::engine::{
-    Cell, Color, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent, Modes, Mods, PasteOutcome,
-    RowUpdate, Screen, Scrollbar, SelectMode, SelectOp, Span, TerminalEngine, Update, Width, sanitize_program_text,
+    Cell, Color, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent, MAX_SEARCH_BYTES, MatchSpan,
+    Modes, Mods, PasteOutcome, RowUpdate, Screen, Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span,
+    TerminalEngine, Update, Width, sanitize_program_text,
 };
 use crate::{Error, Result};
 
@@ -303,9 +307,73 @@ fn read_row(
     Ok(())
 }
 
+/// Where a cell is in relation to the viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Edge {
+    /// Scrolled out of sight above the first row.
+    Above,
+    /// On the viewport at this column and row.
+    In(u16, u16),
+    /// Scrolled out of sight below the last row.
+    Below,
+}
+
+/// The spans, as `(y, x0, x1)` with both ends inclusive, that a match covers on the viewport rows.
+///
+/// A start above the viewport is clipped to the top left cell and an end below it to the bottom right one; a match
+/// that lies wholly outside gives nothing. The first row runs from `start.x` to the last column, the rows between are
+/// whole, and the last row runs to `end.x`, so a match that wraps is one span per row. Everything is clamped into the
+/// grid, whatever the library reports.
+fn match_spans(start: Edge, end: Edge, cols: u16, rows: u16) -> Vec<(u16, u16, u16)> {
+    let last_col = cols.saturating_sub(1);
+    let last_row = rows.saturating_sub(1);
+    let (mut x0, mut y0) = match start {
+        Edge::Above => (0, 0),
+        Edge::In(x, y) => (x.min(last_col), y.min(last_row)),
+        Edge::Below => return Vec::new(),
+    };
+    let (mut x1, mut y1) = match end {
+        Edge::Below => (last_col, last_row),
+        Edge::In(x, y) => (x.min(last_col), y.min(last_row)),
+        Edge::Above => return Vec::new(),
+    };
+    if (y0, x0) > (y1, x1) {
+        // Endpoints keep their direction; a span runs from the earlier cell to the later one. Clipped ends are never
+        // reversed, so this is only about two cells on the viewport.
+        if !matches!((start, end), (Edge::In(..), Edge::In(..))) {
+            return Vec::new();
+        }
+        (x0, y0, x1, y1) = (x1, y1, x0, y0);
+    }
+    if y0 == y1 {
+        return vec![(y0, x0, x1)];
+    }
+    let mut spans = Vec::with_capacity(usize::from(y1 - y0) + 1);
+    spans.push((y0, x0, last_col));
+    spans.extend((y0 + 1..y1).map(|y| (y, 0, last_col)));
+    spans.push((y1, 0, x1));
+    spans
+}
+
+/// Where a grid reference is in relation to a viewport of `rows` rows.
+///
+/// The library answers `None` for a cell above the viewport and a row number past the last one for a cell below it.
+fn viewport_edge(term: &Terminal<'_, '_>, at: &GridRef<'_>, rows: u16) -> Result<Edge> {
+    Ok(match term.point_from_grid_ref(at, PointSpace::Viewport).map_err(eng)? {
+        None => Edge::Above,
+        Some(p) if p.y < u32::from(rows) => Edge::In(p.x, p.y as u16),
+        Some(_) => Edge::Below,
+    })
+}
+
 /// [`TerminalEngine`] backed by `libghostty-vt`.
 pub struct GhosttyEngine {
     terminal: Terminal<'static, 'static>,
+    /// The active search, from a non-empty needle until `Clear`. It borrows nothing: the terminal is passed to every
+    /// call that needs it, and either may be dropped first.
+    search: Option<Search<'static, 'static>>,
+    /// Storage for the matches of one update, reused so a frame does not allocate.
+    match_buf: MatchBuffer,
     render: RenderState<'static>,
     rows_iter: RowIterator<'static>,
     cells_iter: CellIterator<'static>,
@@ -413,6 +481,8 @@ impl GhosttyEngine {
             last_size: None,
             sel_cache: Vec::new(),
             events,
+            search: None,
+            match_buf: MatchBuffer::new(),
         })
     }
 }
@@ -429,6 +499,75 @@ impl GhosttyEngine {
             x: x.min(cols.saturating_sub(1)),
             y: u32::from(y.min(rows.saturating_sub(1))),
         }))
+    }
+
+    /// The state of the active search, `None` without one. Reads what the library last saw: callers that need it
+    /// current have run the search first.
+    fn search_state(&self) -> Result<Option<SearchState>> {
+        let Some(search) = &self.search else { return Ok(None) };
+        let total = search.total_matches().map_err(eng)?;
+        // The library counts from the newest match; the engine's contract counts in reading order.
+        let current = search.selected_index().map_err(eng)?.and_then(|newest_first| total.checked_sub(newest_first + 1));
+        Ok(Some(SearchState { total, current }))
+    }
+
+    /// Catch the search up with the terminal and read the matches that are on the viewport.
+    ///
+    /// Done before the render state is read, so the terminal borrows never overlap. The library lists matches page
+    /// by page, so the list can reach past the viewport; every match is converted to viewport rows and clipped.
+    fn search_view(&mut self) -> Result<(Vec<MatchSpan>, Option<SearchState>)> {
+        let Some(search) = self.search.as_mut() else { return Ok((Vec::new(), None)) };
+        let cols = self.terminal.cols().map_err(eng)?;
+        let rows = self.terminal.rows().map_err(eng)?;
+        // Output, resizes and screen switches reach the search only through a feed; `run` feeds and ticks until the
+        // search has caught up with the terminal.
+        search.run(&mut self.terminal).map_err(eng)?;
+        let total = search.total_matches().map_err(eng)?;
+        let current = search.selected_index().map_err(eng)?.and_then(|newest_first| total.checked_sub(newest_first + 1));
+
+        let snapshot = search.snapshot(&mut self.terminal).map_err(eng)?;
+        let term = snapshot.terminal();
+        let selected = match snapshot.selected_match().map_err(eng)? {
+            Some(sel) => Some((viewport_edge(term, &sel.start(), rows)?, viewport_edge(term, &sel.end(), rows)?)),
+            None => None,
+        };
+        let mut spans = Vec::new();
+        for found in snapshot.viewport_matches(&mut self.match_buf).map_err(eng)? {
+            let edges = (viewport_edge(term, &found.start(), rows)?, viewport_edge(term, &found.end(), rows)?);
+            let is_current = selected == Some(edges);
+            spans.extend(
+                match_spans(edges.0, edges.1, cols, rows)
+                    .into_iter()
+                    .map(|(y, x0, x1)| MatchSpan { y, x0, x1, current: is_current }),
+            );
+        }
+        spans.sort_by_key(|m| (m.y, m.x0));
+        Ok((spans, Some(SearchState { total, current })))
+    }
+
+    /// Scroll so that the selected match is visible: untouched when its first row is already on the viewport,
+    /// centred on that row otherwise. Without a search or a selected match nothing happens.
+    fn reveal_selected(&mut self) -> Result<()> {
+        let Some(search) = self.search.as_mut() else { return Ok(()) };
+        let rows_u16 = self.terminal.rows().map_err(eng)?;
+        let rows = usize::from(rows_u16);
+        let top = {
+            let snapshot = search.snapshot(&mut self.terminal).map_err(eng)?;
+            let Some(selected) = snapshot.selected_match().map_err(eng)? else { return Ok(()) };
+            let term = snapshot.terminal();
+            let start = selected.start();
+            if matches!(viewport_edge(term, &start, rows_u16)?, Edge::In(..)) {
+                return Ok(());
+            }
+            let Some(at) = term.point_from_grid_ref(&start, PointSpace::Screen).map_err(eng)? else {
+                return Ok(());
+            };
+            (at.y as usize).saturating_sub(rows / 2)
+        };
+        // A match near the end must not be centred past the last page.
+        let last_top = self.terminal.total_rows().map_err(eng)?.saturating_sub(rows);
+        self.terminal.scroll_viewport(ScrollViewport::Row(top.min(last_top)));
+        Ok(())
     }
 
     /// Fill the reusable key event and run the encoder against the terminal's current modes.
@@ -582,6 +721,8 @@ impl TerminalEngine for GhosttyEngine {
     }
 
     fn update(&mut self) -> Result<Update> {
+        // The search is caught up first: it needs the terminal exclusively, which the render state below borrows.
+        let (matches, search) = self.search_view()?;
         // The scrollbar is read at the same moment as the render-state update (render.rs docs).
         let sb = self.terminal.scrollbar().map_err(eng)?;
         let modes = Modes {
@@ -656,8 +797,8 @@ impl TerminalEngine for GhosttyEngine {
             modes,
             changed,
             selection,
-            matches: Vec::new(),
-            search: None,
+            matches,
+            search,
             copy_cursor: None,
         })
     }
@@ -729,6 +870,40 @@ impl TerminalEngine for GhosttyEngine {
             }
         }
         Ok(())
+    }
+
+    fn search(&mut self, op: SearchOp) -> Result<SearchState> {
+        match op {
+            SearchOp::Set(needle) => {
+                if needle.len() > MAX_SEARCH_BYTES {
+                    // Before anything is touched: the earlier search stays as it was.
+                    return Err(Error::Engine(format!(
+                        "search needle is {} bytes, the limit is {MAX_SEARCH_BYTES}",
+                        needle.len()
+                    )));
+                }
+                if needle.is_empty() {
+                    self.search = None;
+                    return Ok(SearchState::default());
+                }
+                // A fresh search every time: results of an equal needle would be kept by the library, but the
+                // contract is that `Set` starts over on the newest match. The old search is replaced only when the
+                // new one is ready, so a failure leaves it alone.
+                let mut fresh = Search::new(&mut self.terminal).map_err(eng)?;
+                // The engine scrolls itself (centred); the library would put the match on the nearest edge.
+                fresh.set_scroll(Scroll::None).map_err(eng)?;
+                fresh.set_needle(&mut self.terminal, needle.as_bytes()).map_err(eng)?;
+                fresh.run(&mut self.terminal).map_err(eng)?;
+                // The first step goes to the newest match, the one nearest the prompt.
+                fresh.select_next(&mut self.terminal).map_err(eng)?;
+                self.search = Some(fresh);
+                self.reveal_selected()?;
+            }
+            SearchOp::Next | SearchOp::Prev | SearchOp::Clear => {
+                return Err(Error::Unsupported("search navigation".into()));
+            }
+        }
+        Ok(self.search_state()?.unwrap_or_default())
     }
 
     fn selection_text(&mut self) -> Result<Option<String>> {
