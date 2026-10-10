@@ -197,3 +197,210 @@ fn an_override_equal_to_the_default_counts_as_default() {
     assert_eq!(row.chord.as_deref(), Some("Cmd+D"));
     assert!(row.is_default);
 }
+
+// ---- the bindability policy ---------------------------------------------------------------------------
+
+#[test]
+fn a_chord_is_bindable_with_cmd_or_with_two_modifiers_including_ctrl_or_alt() {
+    for text in [
+        "Cmd+D",
+        "Cmd+Shift+D",
+        "Cmd+Alt+1",
+        "Cmd+Ctrl+Space",
+        "Cmd+Tab",
+        "Cmd+F12",
+        "Ctrl+Alt+D",
+        "Ctrl+Shift+PageDown",
+        "Alt+Shift+X",
+        "Ctrl+Alt+Shift+Up",
+    ] {
+        assert!(chord(text).is_bindable(), "{text} should be bindable");
+    }
+}
+
+#[test]
+fn plain_keys_and_single_ctrl_or_alt_chords_stay_with_the_terminal() {
+    for text in ["D", "Shift+D", "Ctrl+D", "Alt+D", "Escape", "Enter", "Shift+Tab", "Ctrl+C", "F5", "Up", "Shift+Up"] {
+        assert!(!chord(text).is_bindable(), "{text} must stay with the terminal");
+    }
+}
+
+#[test]
+fn ctrl_or_alt_with_one_more_modifier_is_bindable_even_on_a_letter() {
+    // Ctrl+Shift+C is the usual terminal copy chord on other platforms; the policy leaves it to the user.
+    assert!(chord("Ctrl+Shift+C").is_bindable());
+    assert!(chord("Alt+Shift+C").is_bindable());
+}
+
+#[test]
+fn every_default_chord_is_unique_and_bindable_under_the_policy() {
+    let mut seen = HashSet::new();
+    for a in all_actions() {
+        let Some(d) = a.default else { continue };
+        let c = chord(d);
+        assert!(c.is_bindable(), "default {d} of {} is refused by the policy", a.id);
+        assert!(seen.insert(c), "default chord {d} is used twice");
+    }
+}
+
+// ---- the validation policy of resolve -----------------------------------------------------------------
+
+#[test]
+fn an_unknown_action_id_is_reported_and_ignored() {
+    let (kb, warnings) = Keybindings::resolve(&overrides(&[("pane.explode", "Cmd+Alt+E")]));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("pane.explode"), "{warnings:?}");
+    assert_eq!(kb.table(), Keybindings::default().table(), "the table is the default table");
+    assert_eq!(kb.action_of(&chord("Cmd+Alt+E")), None);
+}
+
+#[test]
+fn an_unparsable_chord_is_reported_and_the_default_stays() {
+    for bad in ["Cmd++", "Hyper+X", "Cmd+Shift", "Cmd+Cmd+D", "Cmd+F25", "Cmd+F01", "Cmd+ab", "+"] {
+        let (kb, warnings) = Keybindings::resolve(&overrides(&[("pane.close", bad)]));
+        assert_eq!(warnings.len(), 1, "{bad:?}: {warnings:?}");
+        assert!(warnings[0].contains("pane.close"), "{bad:?}: {warnings:?}");
+        assert_eq!(kb.chord_of("pane.close"), Some(&chord("Cmd+W")), "{bad:?}");
+        assert!(kb.table().iter().all(|r| r.is_default), "{bad:?} changed something");
+    }
+}
+
+#[test]
+fn the_empty_string_unbinds_a_known_action_without_a_warning() {
+    let (kb, warnings) = Keybindings::resolve(&overrides(&[("pane.close", "")]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(kb.chord_of("pane.close"), None);
+    assert_eq!(kb.action_of(&chord("Cmd+W")), None);
+    let row = kb.table().into_iter().find(|r| r.action == "pane.close").expect("row");
+    assert_eq!(row.chord, None);
+    assert!(!row.is_default);
+}
+
+#[test]
+fn a_chord_that_would_steal_terminal_input_is_refused_with_a_warning() {
+    for refused in ["D", "Shift+D", "Ctrl+D", "Alt+D", "Escape", "shift+enter", "F5"] {
+        let (kb, warnings) = Keybindings::resolve(&overrides(&[("tab.new", refused)]));
+        assert_eq!(warnings.len(), 1, "{refused:?}: {warnings:?}");
+        assert!(warnings[0].contains("tab.new"), "{refused:?}: {warnings:?}");
+        assert_eq!(kb.chord_of("tab.new"), Some(&chord("Cmd+T")), "{refused:?} keeps the default");
+        assert!(kb.table().iter().all(|r| r.is_default), "{refused:?} changed something");
+    }
+}
+
+#[test]
+fn an_override_beats_a_default_and_the_displaced_action_is_unbound_with_a_warning() {
+    // Cmd+K is the default of palette.open.
+    let (kb, warnings) = Keybindings::resolve(&overrides(&[("tab.new", "Cmd+K")]));
+    assert_eq!(kb.chord_of("tab.new"), Some(&chord("Cmd+K")));
+    assert_eq!(kb.action_of(&chord("Cmd+K")), Some("tab.new"));
+    assert_eq!(kb.chord_of("palette.open"), None, "the displaced default is unbound");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("palette.open") && warnings[0].contains("tab.new"), "{warnings:?}");
+    let row = kb.table().into_iter().find(|r| r.action == "palette.open").expect("row");
+    assert!(!row.is_default && row.chord.is_none());
+}
+
+#[test]
+fn two_overrides_on_one_chord_drop_the_alphabetically_later_action() {
+    // The same chord in two spellings, so the conflict is found on the canonical form.
+    let (kb, warnings) =
+        Keybindings::resolve(&overrides(&[("tab.new", "cmd+alt+y"), ("pane.split_down", "Command+Alt+Y")]));
+    assert_eq!(kb.action_of(&chord("Cmd+Alt+Y")), Some("pane.split_down"), "pane.* sorts before tab.*");
+    assert_eq!(kb.chord_of("tab.new"), Some(&chord("Cmd+T")), "the dropped override leaves the default");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("tab.new") && warnings[0].contains("pane.split_down"), "{warnings:?}");
+}
+
+#[test]
+fn a_dropped_override_still_loses_its_default_to_another_override() {
+    // tab.new is dropped by the conflict and falls back to Cmd+T, which workspace.new then claims.
+    let (kb, warnings) = Keybindings::resolve(&overrides(&[
+        ("pane.split_down", "Cmd+Alt+Y"),
+        ("tab.new", "Cmd+Alt+Y"),
+        ("workspace.new", "Cmd+T"),
+    ]));
+    assert_eq!(kb.action_of(&chord("Cmd+T")), Some("workspace.new"));
+    assert_eq!(kb.chord_of("tab.new"), None);
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+}
+
+#[test]
+fn swapping_two_defaults_is_not_a_conflict() {
+    let (kb, warnings) =
+        Keybindings::resolve(&overrides(&[("pane.split_right", "Cmd+Shift+D"), ("pane.split_down", "Cmd+D")]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(kb.action_of(&chord("Cmd+D")), Some("pane.split_down"));
+    assert_eq!(kb.action_of(&chord("Cmd+Shift+D")), Some("pane.split_right"));
+}
+
+#[test]
+fn every_chord_in_the_resolved_table_belongs_to_at_most_one_action() {
+    let (kb, _) = Keybindings::resolve(&overrides(&[
+        ("tab.new", "Cmd+K"),
+        ("search.open", "Cmd+K"),
+        ("font.reset", "Cmd+W"),
+        ("palette.open", "Cmd+Alt+P"),
+    ]));
+    let mut seen = HashSet::new();
+    for row in kb.table() {
+        if let Some(c) = row.chord {
+            assert!(seen.insert(c.clone()), "{c} is bound twice");
+            assert_eq!(kb.action_of(&chord(&c)), Some(row.action), "reverse lookup of {c}");
+        }
+    }
+}
+
+#[test]
+fn warnings_never_carry_control_characters_from_the_file() {
+    let (_, warnings) = Keybindings::resolve(&overrides(&[
+        ("evil\u{1b}[2J", "Cmd+X"),
+        ("tab.new", "Cmd+\u{7}\u{1b}]0;x"),
+        ("pane.close", "Hyper+\n+X"),
+    ]));
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    for w in &warnings {
+        assert!(!w.chars().any(char::is_control), "control character in {w:?}");
+    }
+}
+
+// ---- the grammar shared with the frontend --------------------------------------------------------------
+
+/// The 14 chord strings the webview must produce from a `KeyboardEvent`. The frontend test copies this literal;
+/// chord generation there has to yield exactly these canonical strings.
+const SHARED_SAMPLES: [&str; 14] = [
+    "Cmd+D",
+    "Cmd+Shift+D",
+    "Cmd+]",
+    "Cmd+Alt+1",
+    "Cmd+Ctrl+Space",
+    "Ctrl+Alt+Shift+Up",
+    "Cmd+,",
+    "Cmd+=",
+    "Cmd+-",
+    "Cmd+Shift+Space",
+    "Ctrl+Shift+PageDown",
+    "Cmd+F12",
+    "Cmd+Alt+Enter",
+    "Cmd+Tab",
+];
+
+#[test]
+fn the_shared_chord_samples_parse_to_themselves() {
+    assert_eq!(SHARED_SAMPLES.len(), 14);
+    for sample in SHARED_SAMPLES {
+        assert_eq!(canon(sample), Ok(sample.to_string()), "{sample}");
+        assert!(chord(sample).is_bindable(), "{sample} must be bindable");
+    }
+}
+
+#[test]
+fn the_shared_samples_survive_a_round_trip_through_the_settings_map() {
+    // Each sample bound to font.reset comes back as the same string. A sample that is the default chord of another
+    // action takes it away from that action, which is one warning; any other sample is silent.
+    for sample in SHARED_SAMPLES {
+        let (kb, warnings) = Keybindings::resolve(&overrides(&[("font.reset", sample)]));
+        assert_eq!(kb.chord_of("font.reset").map(ToString::to_string).as_deref(), Some(sample));
+        let taken = actions().iter().filter(|a| a.id != "font.reset" && a.default == Some(sample)).count();
+        assert_eq!(warnings.len(), taken, "{sample}: {warnings:?}");
+    }
+}

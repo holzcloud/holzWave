@@ -89,6 +89,11 @@ impl Chord {
         Ok(chord)
     }
 
+    /// Whether a user may bind this chord to an action.
+    pub fn is_bindable(&self) -> bool {
+        true
+    }
+
     /// How many of the four modifiers are held.
     pub fn modifier_count(&self) -> usize {
         [self.cmd, self.ctrl, self.alt, self.shift].iter().filter(|m| **m).count()
