@@ -137,15 +137,15 @@ async function wheelCase(page, url) {
   const c = await canvasOrigin(page);
   await page.mouse.move(c.left + c.width * 0.75, 200);
   await page.mouse.wheel(0, 120);
-  await page.waitForFunction(() => window.__MOCK__.callsOf("scroll").length >= 1, undefined, { timeout: 5000 });
-  const down = (await callsOf(page, "scroll")).at(-1);
-  assert.equal(down.pane, 2, "the wheel scrolls the pane under the pointer");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("wheel").length >= 1, undefined, { timeout: 5000 });
+  const down = (await callsOf(page, "wheel")).at(-1);
+  assert.equal(down.pane, 2, "the wheel goes to the pane under the pointer");
   assert.ok(down.rows > 0, `a downward wheel gave ${down.rows} rows`);
 
   await page.mouse.move(c.left + c.width * 0.25, 200);
   await page.mouse.wheel(0, -120);
-  await page.waitForFunction(() => window.__MOCK__.callsOf("scroll").length >= 2, undefined, { timeout: 5000 });
-  const up = (await callsOf(page, "scroll")).at(-1);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("wheel").length >= 2, undefined, { timeout: 5000 });
+  const up = (await callsOf(page, "wheel")).at(-1);
   assert.equal(up.pane, 1, "the wheel follows the pointer to the other pane");
   assert.ok(up.rows < 0, `an upward wheel gave ${up.rows} rows`);
 }

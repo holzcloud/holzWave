@@ -258,8 +258,8 @@ async function fallbackCase(page, url, errors) {
 
   await page.mouse.move(origin.left + size.w * 0.75, origin.top + size.h * 0.5);
   await page.mouse.wheel(0, 120);
-  await page.waitForFunction(() => window.__MOCK__.callsOf("scroll").length >= 1, undefined, { timeout: 5000 });
-  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("scroll")))[0].pane, 2);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("wheel").length >= 1, undefined, { timeout: 5000 });
+  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("wheel")))[0].pane, 2);
 
   await page.keyboard.press("a");
   await page.waitForFunction(

@@ -3,14 +3,18 @@
 // animation frame, and a click that never moved clears. Nothing about the selection is kept here.
 //
 // Handlers can be stacked in front of the gesture (`pushPointerHandler`): links, hints and copy mode take clicks
-// without this file knowing them. The wheel scrolls the pane under the pointer. Also owns `edit.copy`.
+// without this file knowing them. The wheel always goes to the core as a `wheel` command for the pane under the
+// pointer: only the core sees the live modes and decides between reports, arrow keys and scrollback. Also owns
+// `edit.copy`.
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
-import { cellAt, paneAt } from "./geometry.js";
+import type { PxRect } from "./frame.js";
+import { cellAt, gridRect, paneAt } from "./geometry.js";
+import { gridPoint, modifierBits, wheelRows } from "./mouse.js";
 import { canvas as sceneCanvas } from "./scene.js";
 import { copySelection } from "./selection.js";
 import { state } from "./state.js";
-import type { View } from "./types.js";
+import type { UnitRect, View } from "./types.js";
 
 // ---- handler stack -------------------------------------------------------------------------------
 
@@ -67,6 +71,23 @@ function clamp(pane: number, cell: [number, number]): [number, number] {
   return [Math.max(0, Math.min(cell[0], g.cols - 1)), Math.max(0, Math.min(cell[1], g.rows - 1))];
 }
 
+/**
+ * Where the cells of a pane are on the canvas in CSS pixels: the grid origin and the size of the cells the core
+ * knows (the pane's grid rectangle when no frame or size is known yet).
+ */
+function gridBox(pane: number, r: UnitRect): PxRect {
+  const g = gridRect(state.metrics, r);
+  const cells = gridOf(pane);
+  if (!cells) return g;
+  return { x: g.x, y: g.y, w: cells.cols * state.metrics.cellW, h: cells.rows * state.metrics.cellH };
+}
+
+/** The position of an event inside a pane's grid in whole device pixels, as the `mouse` and `wheel` commands want it. */
+function devicePoint(e: { clientX: number; clientY: number }, canvas: HTMLCanvasElement, pane: number, r: UnitRect): [number, number] {
+  const rect = canvas.getBoundingClientRect();
+  return gridPoint(e.clientX, e.clientY, rect, gridBox(pane, r), state.metrics.dpr);
+}
+
 function hitAt(e: PointerEvent, canvas: HTMLCanvasElement): PointerHit | null {
   const rect = canvas.getBoundingClientRect();
   const x = e.clientX - rect.left;
@@ -99,6 +120,8 @@ interface Gesture {
 
 let gesture: Gesture | null = null;
 let lastClick: { t: number; x: number; y: number; n: number; pane: number } | null = null;
+/** The wheel's fractional rows, kept for the pane they were collected over. */
+let wheelPane = 0;
 let wheelRemainder = 0;
 
 type Op =
@@ -231,11 +254,18 @@ export function initPointer(applyView: (v: View) => void): void {
       const hit = paneAt(state.metrics, state.view, e.clientX - rect.left, e.clientY - rect.top);
       if (!hit) return;
       e.preventDefault();
-      wheelRemainder += e.deltaMode === 0 ? e.deltaY / state.metrics.cellH : e.deltaY * 3;
-      const rows = Math.trunc(wheelRemainder);
-      if (rows === 0) return;
-      wheelRemainder -= rows;
-      void call("scroll", { pane: hit[0], rows });
+      const [pane, unit] = hit;
+      if (pane !== wheelPane) {
+        wheelPane = pane;
+        wheelRemainder = 0;
+      }
+      // With Shift the browser turns a vertical wheel into a sideways one: the core's Shift policy wants the rows.
+      const delta = e.deltaY === 0 && e.shiftKey ? e.deltaX : e.deltaY;
+      const step = wheelRows(wheelRemainder, delta, e.deltaMode, state.metrics.cellH, gridOf(pane)?.rows);
+      wheelRemainder = step.remainder;
+      if (step.rows === 0) return;
+      const [x, y] = devicePoint(e, canvas, pane, unit);
+      void call("wheel", { pane, rows: step.rows, x, y, mods: modifierBits(e) }).catch(() => {});
     },
     { passive: false },
   );

@@ -431,13 +431,13 @@ async function handlerStackCase(page, url) {
   assert.deepEqual((await selects(page)).map((o) => o.kind), ["begin", "clear"]);
 }
 
-/** The wheel still scrolls the pane under the pointer. */
+/** The wheel reaches the core for the pane under the pointer (what it means is the core's: see mouse.test.mjs). */
 async function wheelCase(page, url) {
   const g = await open(page, url);
   await page.mouse.move(...g.pt(1, 3, 1));
   await page.mouse.wheel(0, 120);
-  await page.waitForFunction(() => window.__MOCK__.callsOf("scroll").length >= 1, undefined, { timeout: 5000 });
-  const down = (await callsOf(page, "scroll")).at(-1);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("wheel").length >= 1, undefined, { timeout: 5000 });
+  const down = (await callsOf(page, "wheel")).at(-1);
   assert.equal(down.pane, 1);
   assert.ok(down.rows > 0);
 }
