@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::{Error, Result};
 
 /// An RGB colour, already resolved against the palette.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -35,11 +35,30 @@ pub struct Cell {
     pub inverse: bool,
 }
 
+/// The shape of the text cursor (DECSCUSR).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorStyle {
+    /// A filled cell.
+    #[default]
+    Block,
+    /// A thin vertical bar at the left edge of the cell.
+    Bar,
+    /// A line under the cell.
+    Underline,
+    /// An outlined cell; the engine reports it for an unfocused block cursor.
+    Hollow,
+}
+
+/// The text cursor inside the viewport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub x: u16,
     pub y: u16,
+    /// Whether the program wants the cursor shown (DECTCEM).
     pub visible: bool,
+    pub style: CursorStyle,
+    /// Whether the program asked for a blinking cursor.
+    pub blinking: bool,
 }
 
 /// Where the viewport sits in the scrollable area, in rows.
@@ -93,12 +112,281 @@ impl Screen {
     }
 }
 
+/// Modifier keys held while a key event happens, as a bit set.
+///
+/// The bit values are part of the contract with the webview: SHIFT 1, ALT 2, CTRL 4, SUPER 8 (the Command key on
+/// macOS, the Windows key elsewhere). Only the low four bits mean anything; [`Mods::from_bits`] drops the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Mods(pub u8);
+
+impl Mods {
+    /// No modifier.
+    pub const NONE: Mods = Mods(0);
+    pub const SHIFT: Mods = Mods(1);
+    pub const ALT: Mods = Mods(2);
+    pub const CTRL: Mods = Mods(4);
+    pub const SUPER: Mods = Mods(8);
+
+    /// Build a set from raw bits, ignoring everything but the four known modifiers.
+    pub const fn from_bits(bits: u8) -> Mods {
+        Mods(bits & 0x0f)
+    }
+
+    /// The raw bits.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Whether every modifier of `other` is in this set.
+    pub const fn contains(self, other: Mods) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether no modifier is set.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for Mods {
+    type Output = Mods;
+
+    fn bitor(self, rhs: Mods) -> Mods {
+        Mods(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for Mods {
+    fn bitor_assign(&mut self, rhs: Mods) {
+        self.0 |= rhs.0;
+    }
+}
+
+/// What happened to a key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyAction {
+    #[default]
+    Press,
+    /// The key is held down and the operating system repeats it.
+    Repeat,
+    Release,
+}
+
+/// A key event in the terms of the engine: the physical key, the text the layout produced for it and what was held.
+///
+/// The webview never builds one directly. It sends [`DomKey`] facts and the core converts them with
+/// [`KeyEvent::from_dom`], so the conversion rules are unit-testable without a window.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyEvent {
+    /// The W3C `KeyboardEvent.code` of the physical key, for example `ArrowUp` or `KeyA`. An unknown code is
+    /// treated as an unidentified key.
+    pub code: String,
+    /// The text the key produced on the current layout, before any Ctrl or Meta transformation; `None` when the
+    /// key produces no text (arrows, Enter, dead keys, function keys).
+    pub text: Option<String>,
+    /// The character of the key without Shift on a US layout, when known. Kitty reports use it.
+    pub unshifted: Option<char>,
+    pub mods: Mods,
+    /// Modifiers that were already used up to produce `text` (Shift for a capital letter, Option on macOS for a
+    /// composed character).
+    pub consumed: Mods,
+    pub action: KeyAction,
+    /// The key is part of an IME composition; legacy encoding sends nothing for it.
+    pub composing: bool,
+}
+
+/// The facts a webview sends for one `keydown` or `keyup`: `KeyboardEvent.code`, `.key` and the flags.
+///
+/// Nothing here is interpreted by the webview. [`KeyEvent::from_dom`] applies the rules.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DomKey {
+    pub code: String,
+    pub key: String,
+    pub mods: Mods,
+    pub repeat: bool,
+    pub release: bool,
+    pub composing: bool,
+}
+
+/// What a paste did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteOutcome {
+    /// The bytes are in [`TerminalEngine::take_replies`].
+    Written,
+    /// There was nothing to paste.
+    Empty,
+    /// The text could inject commands (a newline without bracketed paste, or the end marker with it) and nothing
+    /// was written. The caller asks the user and repeats the paste with `allow_unsafe` set; the engine never
+    /// decides that itself.
+    Rejected,
+}
+
+/// Terminal modes the UI needs to know about.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modes {
+    /// The alternate screen is active (full-screen programs).
+    pub alt_screen: bool,
+    /// The program asked for bracketed paste (mode 2004).
+    pub bracketed_paste: bool,
+    /// Some mouse tracking mode is on.
+    pub mouse_tracking: bool,
+}
+
+/// A horizontal run of selected cells on one viewport row; `x0` and `x1` are inclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub y: u16,
+    pub x0: u16,
+    pub x1: u16,
+}
+
+/// A search match on one viewport row; `x0` and `x1` are inclusive. `current` marks the match that `Next` and
+/// `Prev` moved to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatchSpan {
+    pub y: u16,
+    pub x0: u16,
+    pub x1: u16,
+    pub current: bool,
+}
+
+/// One changed viewport row with all its cells.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowUpdate {
+    pub y: u16,
+    pub cells: Vec<Cell>,
+}
+
+/// What changed since the previous [`TerminalEngine::update`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Update {
+    /// Every viewport row is in `changed`.
+    pub full: bool,
+    /// The consumer must replace its whole mirror: the grid size or the theme changed, or it asked for a fresh
+    /// start with [`TerminalEngine::request_full`].
+    pub reset: bool,
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor: Option<Cursor>,
+    pub scrollbar: Scrollbar,
+    pub default_fg: Color,
+    pub default_bg: Color,
+    pub modes: Modes,
+    pub changed: Vec<RowUpdate>,
+    /// The complete current selection, not only the part on changed rows.
+    pub selection: Vec<Span>,
+    /// All search matches inside the viewport.
+    pub matches: Vec<MatchSpan>,
+    pub search: Option<SearchState>,
+    /// Where the copy-mode cursor is, in viewport coordinates, when copy mode is active.
+    pub copy_cursor: Option<(u16, u16)>,
+}
+
+/// The colours a theme gives the terminal. The palette entries 16 to 255 are derived from `bg`, `fg` and `ansi`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EngineTheme {
+    pub fg: Color,
+    pub bg: Color,
+    pub cursor: Color,
+    pub ansi: [Color; 16],
+}
+
+/// Something the program told the terminal that the shell should show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EngineEvent {
+    /// The window title changed (OSC 0 or 2).
+    Title(String),
+    /// The working directory changed (OSC 7), as the raw value the program sent.
+    Pwd(String),
+}
+
+/// How far a pointer selection grows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectMode {
+    Cell,
+    Word,
+    Line,
+}
+
+/// A change to the selection. Coordinates are viewport cells; the engine keeps the selection attached to the text,
+/// so it survives output and scrolling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectOp {
+    Begin { x: u16, y: u16, mode: SelectMode },
+    Extend { x: u16, y: u16 },
+    /// Select everything: scrollback and screen.
+    All,
+    Clear,
+}
+
+/// A change to the search state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchOp {
+    /// Start searching for this text (the previous search is replaced).
+    Set(String),
+    Next,
+    Prev,
+    Clear,
+}
+
+/// The result of a search.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchState {
+    /// Matches in the whole scrollback.
+    pub total: usize,
+    /// Index of the current match, when there is one.
+    pub current: Option<usize>,
+}
+
+/// A cursor movement in copy mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyMotion {
+    Left,
+    Right,
+    Up,
+    Down,
+    LineStart,
+    LineEnd,
+    Top,
+    Bottom,
+    PageUp,
+    PageDown,
+    WordForward,
+    WordBack,
+}
+
+/// An operation of the keyboard-driven copy mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyOp {
+    Enter,
+    Exit,
+    Move(CopyMotion),
+    ToggleSelection,
+    /// Leave copy mode and hand back the selected text in [`CopyState::yanked`].
+    Yank,
+}
+
+/// The state of copy mode after an operation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CopyState {
+    pub active: bool,
+    pub selecting: bool,
+    pub yanked: Option<String>,
+}
+
 /// The boundary between holzWave and a terminal emulation library.
 ///
 /// `libghostty-vt` is young and its API moves, so nothing outside the engine
 /// implementation may name its types. An engine is **not** required to be
 /// `Send`: `libghostty-vt` objects are not, so an engine lives on one thread
 /// and is driven over channels.
+///
+/// Everything that must go back to the PTY comes out of one place, [`TerminalEngine::take_replies`]: the engine's
+/// answers to queries from the program (cursor position, device attributes, size reports) and the bytes of a
+/// paste. The caller writes them to the PTY in order.
+///
+/// Capabilities that arrive with later work have default bodies that return [`Error::Unsupported`]; an engine
+/// overrides what it can do.
 pub trait TerminalEngine {
     /// Feed bytes that came from the PTY (or any VT source).
     fn feed(&mut self, bytes: &[u8]);
@@ -118,4 +406,61 @@ pub trait TerminalEngine {
 
     /// Copy the visible screen out of the engine.
     fn screen(&mut self) -> Result<Screen>;
+
+    /// Treat the macOS Option key as Alt (an ESC prefix) instead of a composing key. Off by default: a Swiss or
+    /// German layout types `@ | [ ] { }` with Option.
+    fn set_option_as_alt(&mut self, on: bool);
+
+    /// Encode a key event using the terminal's current modes (application cursor keys, Kitty keyboard protocol,
+    /// modifyOtherKeys). The result may be empty: key releases and composing keys send nothing in legacy mode.
+    fn encode_key(&mut self, event: &KeyEvent) -> Result<Vec<u8>>;
+
+    /// Encode committed text (an IME commit, a dead-key result) as input. It is not a paste and is never bracketed.
+    fn encode_text(&mut self, text: &str) -> Result<Vec<u8>>;
+
+    /// Paste `text` the way the program asked for it: sanitised always, bracketed when mode 2004 is on. The bytes
+    /// are queued for [`TerminalEngine::take_replies`]. Text that could inject commands is [`PasteOutcome::Rejected`]
+    /// unless `allow_unsafe` is set.
+    fn paste(&mut self, text: &str, allow_unsafe: bool) -> Result<PasteOutcome>;
+
+    /// Take every byte the engine wants written to the PTY.
+    fn take_replies(&mut self) -> Vec<u8>;
+
+    /// What changed since the previous call.
+    fn update(&mut self) -> Result<Update> {
+        Err(Error::Unsupported("update".into()))
+    }
+
+    /// Make the next [`TerminalEngine::update`] report every row.
+    fn request_full(&mut self) {}
+
+    /// Set the default colours and palette.
+    fn set_theme(&mut self, _theme: &EngineTheme) -> Result<()> {
+        Err(Error::Unsupported("set_theme".into()))
+    }
+
+    /// Change the selection.
+    fn select(&mut self, _op: SelectOp) -> Result<()> {
+        Err(Error::Unsupported("select".into()))
+    }
+
+    /// The selected text, with soft wraps joined and trailing blanks trimmed.
+    fn selection_text(&mut self) -> Result<Option<String>> {
+        Err(Error::Unsupported("selection_text".into()))
+    }
+
+    /// Take the events the program caused (title, working directory) since the previous call.
+    fn take_events(&mut self) -> Vec<EngineEvent> {
+        Vec::new()
+    }
+
+    /// Change the search and return its state.
+    fn search(&mut self, _op: SearchOp) -> Result<SearchState> {
+        Err(Error::Unsupported("search".into()))
+    }
+
+    /// Run a copy-mode operation and return its state.
+    fn copy_mode(&mut self, _op: CopyOp) -> Result<CopyState> {
+        Err(Error::Unsupported("copy_mode".into()))
+    }
 }

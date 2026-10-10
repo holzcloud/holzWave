@@ -1,10 +1,15 @@
-use libghostty_vt::render::{CellIterator, RowIterator};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use libghostty_vt::render::{CellIterator, CursorVisualStyle, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::Underline;
 use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{RenderState, Terminal};
 
-use crate::engine::{Cell, Color, Cursor, Screen, Scrollbar, TerminalEngine, Width};
+use crate::engine::{
+    Cell, Color, Cursor, CursorStyle, KeyEvent, PasteOutcome, Screen, Scrollbar, TerminalEngine, Width,
+};
 use crate::{Error, Result};
 
 fn eng<E: std::fmt::Debug>(e: E) -> Error {
@@ -21,17 +26,29 @@ pub struct GhosttyEngine {
     render: RenderState<'static>,
     rows_iter: RowIterator<'static>,
     cells_iter: CellIterator<'static>,
+    /// Bytes the terminal wants written to the PTY: query replies and paste output.
+    replies: Rc<RefCell<Vec<u8>>>,
+    option_as_alt: bool,
 }
 
 impl GhosttyEngine {
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
         let mut terminal = Terminal::new(cols, rows).map_err(eng)?;
         terminal.set_scrollback_max_lines(Some(max_scrollback)).map_err(eng)?;
+        let replies: Rc<RefCell<Vec<u8>>> = Rc::default();
+        {
+            let sink = replies.clone();
+            terminal
+                .on_pty_write(move |_t, data| sink.borrow_mut().extend_from_slice(data))
+                .map_err(eng)?;
+        }
         Ok(Self {
             terminal,
             render: RenderState::new().map_err(eng)?,
             rows_iter: RowIterator::new().map_err(eng)?,
             cells_iter: CellIterator::new().map_err(eng)?,
+            replies,
+            option_as_alt: false,
         })
     }
 }
@@ -63,13 +80,20 @@ impl TerminalEngine for GhosttyEngine {
         let colors = snapshot.colors().map_err(eng)?;
         let (cols, rows) = (snapshot.cols().map_err(eng)?, snapshot.rows().map_err(eng)?);
 
-        let cursor = match snapshot.cursor_viewport().map_err(eng)? {
-            Some(c) => Some(Cursor {
-                x: c.x,
-                y: c.y,
-                visible: snapshot.cursor_visible().map_err(eng)?,
-            }),
-            None => None,
+        let cursor = {
+            let c = snapshot.cursor().map_err(eng)?;
+            c.viewport.map(|v| Cursor {
+                x: v.x,
+                y: v.y,
+                visible: c.visible,
+                style: match c.visual_style {
+                    CursorVisualStyle::Bar => CursorStyle::Bar,
+                    CursorVisualStyle::Underline => CursorStyle::Underline,
+                    CursorVisualStyle::BlockHollow => CursorStyle::Hollow,
+                    _ => CursorStyle::Block,
+                },
+                blinking: c.blinking,
+            })
         };
 
         let mut cells = Vec::with_capacity(cols as usize * rows as usize);
@@ -107,5 +131,25 @@ impl TerminalEngine for GhosttyEngine {
             default_bg: color(colors.background),
             cells,
         })
+    }
+
+    fn set_option_as_alt(&mut self, on: bool) {
+        self.option_as_alt = on;
+    }
+
+    fn encode_key(&mut self, _event: &KeyEvent) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    fn encode_text(&mut self, _text: &str) -> Result<Vec<u8>> {
+        Err(Error::Unsupported("encode_text".into()))
+    }
+
+    fn paste(&mut self, _text: &str, _allow_unsafe: bool) -> Result<PasteOutcome> {
+        Err(Error::Unsupported("paste".into()))
+    }
+
+    fn take_replies(&mut self) -> Vec<u8> {
+        std::mem::take(&mut *self.replies.borrow_mut())
     }
 }

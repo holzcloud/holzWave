@@ -7,6 +7,8 @@ pub enum Error {
     Engine(String),
     Pty(String),
     Io(std::io::Error),
+    /// The engine does not implement this capability.
+    Unsupported(String),
 }
 
 impl fmt::Display for Error {
@@ -15,6 +17,7 @@ impl fmt::Display for Error {
             Error::Engine(m) => write!(f, "terminal engine: {m}"),
             Error::Pty(m) => write!(f, "pty: {m}"),
             Error::Io(e) => e.fmt(f),
+            Error::Unsupported(m) => write!(f, "unsupported: {m}"),
         }
     }
 }
