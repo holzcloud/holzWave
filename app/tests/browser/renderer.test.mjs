@@ -20,6 +20,15 @@ async function installHarness(page) {
       document.body.append(canvas);
       const r = kind === "webgl" ? new WebGLRenderer(canvas, options) : new Canvas2DRenderer(canvas);
       r.configure(m);
+      if (kind === "canvas") {
+        // Chromium moves a 2D canvas from GPU to CPU rasterisation after a few read-backs, and the two differ by
+        // one level in some channels. Do the switch now so every image a test compares comes from the same path.
+        const g = canvas.getContext("2d");
+        for (let i = 0; i < 64; i++) {
+          g.fillRect(0, 0, 1, 1);
+          g.getImageData(0, 0, 1, 1);
+        }
+      }
       return { kind, canvas, r, m, cols, rows };
     };
     const dispose = (h) => {
@@ -363,12 +372,16 @@ export default async function ({ page, url }) {
       return { cols, rows, cursor: null, focused: true, fg: 0xffffff, bg: 0x000000, lines };
     };
     const half = (y, x) => y * cols + x; // 160 distinct glyphs
-    const fewer = (base) => (y, x) => base + ((y * cols + x) % 90); // 90 distinct glyphs
+    const fewer = (base, n = 90) => (y, x) => base + ((y * cols + x) % n); // n distinct glyphs
     const out = {};
 
-    // (a) distinct sets that overflow mid-frame, the next frame re-using glyphs of the first
+    // (a) distinct sets that overflow mid-frame, the next frame re-using glyphs of the first: the last frame has
+    // 40 + 80 = 120 distinct glyphs, which fits after the reset
     const tiny = R.make("webgl", cols, rows, { atlasSize: 128 });
-    const frames = [mk(fewer(0)), mk(fewer(1000)), mk(fewer(2000)), mk((y, x) => (y < 2 ? fewer(0)(y, x) : fewer(3000)(y, x)))];
+    const frames = [
+      mk(fewer(0)), mk(fewer(1000)), mk(fewer(2000)),
+      mk((y, x) => (y < 2 ? fewer(0)(y, x) : fewer(3000, 80)(y, x))),
+    ];
     for (const f of frames) R.draw(tiny, f);
     const a = R.pixels(tiny);
     const big = R.make("webgl", cols, rows);

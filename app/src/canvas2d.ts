@@ -1,27 +1,30 @@
 import {
-  BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, css, font, gridCells, visibleCursor,
+  BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, css, font, gridCells, rowExtras,
+  visibleCursor,
 } from "./frame.js";
+
+/** The cursor bar and underline are this many device pixels thick, the hollow outline one. Same as the WebGL shader. */
+const CUR_THICK = 2;
 
 /** What the cell (x, y) of a frame holds: its character and style, and the cells a wide character covers. */
 function cellAt(f: Frame, y: number, x: number): { ch: string; flags: number; first: number; span: number } {
   let col = 0;
-  let prev: { ch: string; flags: number } | null = null;
+  let prev: string | null = null;
   for (const [text, runCols, , , flags] of f.lines[y] ?? []) {
     const end = col + runCols;
+    const chars = Array.from(text);
     if (x < end) {
-      const chars = Array.from(text);
       const i = x - col;
       const ch = chars[i] ?? " ";
       if (ch === "\0") {
         // The second half of a wide character: the character itself is the cell before.
-        const before = i > 0 ? chars[i - 1] : prev?.ch;
+        const before = i > 0 ? chars[i - 1] : prev;
         return { ch: before ?? " ", flags, first: x - 1, span: 2 };
       }
       const wide = chars[i + 1] === "\0";
       return { ch, flags, first: x, span: wide ? 2 : 1 };
     }
-    const chars = Array.from(text);
-    prev = { ch: chars[chars.length - 1] ?? " ", flags };
+    prev = chars[chars.length - 1] ?? " ";
     col = end;
   }
   return { ch: " ", flags: 0, first: x, span: 1 };
@@ -70,6 +73,7 @@ export class Canvas2DRenderer implements Renderer {
     const lines = Math.min(f.rows, f.lines.length);
     for (let y = 0; y < lines; y++) {
       const line = f.lines[y]!;
+      const extras = rowExtras(f, y);
       let col = 0;
       for (const [text, runCols, fg0, bg0, flags] of line) {
         if (col >= cols) break;
@@ -82,18 +86,32 @@ export class Canvas2DRenderer implements Renderer {
           ctx.fillStyle = css(bg);
           ctx.fillRect(x, y * cellH, (end - col) * cellW, cellH);
         }
-        if (text.trim() !== "" || flags & UNDERLINE) {
+        if (text.trim() !== "" || flags & UNDERLINE || extras) {
           ctx.fillStyle = css(fg);
           const style = flags & (BOLD | ITALIC);
           if (style !== lastFont) {
             ctx.font = font(style);
             lastFont = style;
           }
-          let c = col;
-          for (const ch of text) {
-            if (c >= end) break;
-            if (ch !== "\0" && ch !== " ") ctx.fillText(ch, c * cellW, y * cellH + baseline);
-            c += 1;
+          const chars = Array.from(text);
+          for (let i = 0, c = col; i < chars.length && c < end; i++, c++) {
+            const ch = chars[i]!;
+            const tail = extras?.get(c);
+            if (ch === "\0" || (ch === " " && tail === undefined)) continue;
+            // The cell's first code point plus the rest of its cluster, drawn as one glyph in its cell(s).
+            const wide = chars[i + 1] === "\0";
+            const glyph = tail === undefined ? ch : ch + tail;
+            if (tail === undefined && !wide) {
+              ctx.fillText(glyph, c * cellW, y * cellH + baseline);
+            } else {
+              // A cluster or a wide character may be wider than its cells: it never paints into the next one.
+              ctx.save();
+              ctx.beginPath();
+              ctx.rect(c * cellW, y * cellH, (wide ? 2 : 1) * cellW, cellH);
+              ctx.clip();
+              ctx.fillText(glyph, c * cellW, y * cellH + baseline);
+              ctx.restore();
+            }
           }
           if (flags & UNDERLINE) ctx.fillRect(x, y * cellH + cellH - 2, (end - col) * cellW, 1);
         }
@@ -103,16 +121,35 @@ export class Canvas2DRenderer implements Renderer {
 
     const cursor = visibleCursor(f);
     if (cursor) {
-      // Block: a cursor-colour cell with its glyph redrawn in the pane background, so the character stays readable.
       const at = cellAt(f, cursor.y, cursor.x);
-      const x = at.first * cellW, y = cursor.y * cellH;
+      const x = at.first * cellW, y = cursor.y * cellH, w = at.span * cellW;
+      const t = 1 / m.dpr; // one device pixel in CSS pixels
       ctx.fillStyle = css(CURSOR_COLOR);
-      ctx.fillRect(x, y, at.span * cellW, cellH);
-      if (at.ch !== " " && at.ch !== "\0") {
-        ctx.fillStyle = css(f.bg);
-        ctx.font = font(at.flags & (BOLD | ITALIC));
-        ctx.fillText(at.ch, x, y + baseline);
-        if (at.flags & UNDERLINE) ctx.fillRect(x, y + cellH - 2, at.span * cellW, 1);
+      switch (cursor.style) {
+        case "block": {
+          // A cursor-colour cell with its glyph redrawn in the pane background, so the character stays readable.
+          ctx.fillRect(x, y, w, cellH);
+          if (at.ch !== " " && at.ch !== "\0") {
+            const tail = rowExtras(f, cursor.y)?.get(at.first);
+            ctx.fillStyle = css(f.bg);
+            ctx.font = font(at.flags & (BOLD | ITALIC));
+            ctx.fillText(tail === undefined ? at.ch : at.ch + tail, x, y + baseline);
+            if (at.flags & UNDERLINE) ctx.fillRect(x, y + cellH - 2, w, 1);
+          }
+          break;
+        }
+        case "bar":
+          ctx.fillRect(x, y, CUR_THICK * t, cellH);
+          break;
+        case "underline":
+          ctx.fillRect(x, y + cellH - CUR_THICK * t, w, CUR_THICK * t);
+          break;
+        case "hollow":
+          ctx.fillRect(x, y, w, t);
+          ctx.fillRect(x, y + cellH - t, w, t);
+          ctx.fillRect(x, y, t, cellH);
+          ctx.fillRect(x + w - t, y, t, cellH);
+          break;
       }
     }
     ctx.restore();

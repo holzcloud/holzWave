@@ -54,13 +54,16 @@ export function gridCells(f: Pick<Frame, "cols" | "rows">): number | null {
   return cells <= MAX_CELLS ? cells : null;
 }
 
-/** The cursor to draw: null when there is none or it lies outside the grid. */
+/**
+ * The cursor to draw: null when there is none or it lies outside the grid. A pane without the keyboard shows it as
+ * a hollow outline whatever its style (docs/design.md).
+ */
 export function visibleCursor(f: Frame): CursorShape | null {
   const c = f.cursor;
-  if (!c || !f.focused) return null;
+  if (!c) return null;
   const { x, y } = c;
   if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= f.cols || y >= f.rows) return null;
-  return c;
+  return f.focused || c.style === "hollow" ? c : { x, y, style: "hollow", blink: c.blink };
 }
 
 /** The longest cluster tail that is drawn, in code points; a longer one is cut. Real clusters stay below 16. */

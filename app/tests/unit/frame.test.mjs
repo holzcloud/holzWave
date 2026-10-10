@@ -34,10 +34,14 @@ test("gridCells is the cell count of a sane grid and null for anything else", ()
   }
 });
 
-test("visibleCursor is null without a cursor, outside the grid and without focus", () => {
+test("visibleCursor is null without a cursor and outside the grid, and hollow without focus", () => {
   assert.deepEqual(visibleCursor(frame()), { x: 2, y: 1, style: "block", blink: false });
   assert.equal(visibleCursor(frame({ cursor: null })), null);
-  assert.equal(visibleCursor(frame({ focused: false })), null);
+  assert.deepEqual(visibleCursor(frame({ focused: false })), { x: 2, y: 1, style: "hollow", blink: false });
+  assert.deepEqual(
+    visibleCursor(frame({ focused: false, cursor: { x: 0, y: 0, style: "bar", blink: true } })),
+    { x: 0, y: 0, style: "hollow", blink: true },
+  );
   for (const [x, y] of [[10, 0], [0, 4], [-1, 0], [0, -1], [NaN, 0], [0, 1.5]]) {
     assert.equal(visibleCursor(frame({ cursor: { x, y, style: "block", blink: false } })), null, `${x},${y}`);
   }
