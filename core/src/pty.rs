@@ -44,6 +44,16 @@ impl Pty {
         Ok(())
     }
 
+    /// The operating system's id of the child, while it is known.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    /// End the child, reap it and release the PTY. Skeleton: not implemented yet.
+    pub fn close(self) -> Result<u32> {
+        Err(Error::Unsupported("Pty::close".into()))
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         self.master
             .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
