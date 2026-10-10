@@ -16,6 +16,7 @@ use holzwave_core::keybindings::Keybindings;
 use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
+use holzwave_core::session::{MonitorRect, Placement, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
 use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
 use holzwave_core::wire::FrameMsg;
@@ -370,6 +371,8 @@ pub struct AppCore {
     /// Serialises the commands that write `settings.json` or reload it, so the file, the memory and the events
     /// of two of them never interleave. Held across the file IO; `config` is not.
     settings_io: Mutex<()>,
+    /// The last working directory each pane reported (its `Cwd` events).
+    last_cwd: Arc<Mutex<HashMap<PaneId, String>>>,
     sink: Arc<dyn Sink>,
     shell: ShellSpec,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
@@ -414,6 +417,7 @@ impl AppCore {
             panes: Mutex::new(HashMap::new()),
             config,
             settings_io: Mutex::new(()),
+            last_cwd: Arc::new(Mutex::new(HashMap::new())),
             sink,
             shell,
             saver,
@@ -526,6 +530,21 @@ impl AppCore {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn layout_writes(&self) -> usize {
         self.writes.load(Ordering::SeqCst)
+    }
+
+    // ---- session and window --------------------------------------------------------------------------------
+
+    /// The directory a new shell of `pane` starts in; `None` for the default directory.
+    fn start_dir(&self, _pane: PaneId) -> Option<PathBuf> {
+        None
+    }
+
+    /// Remember the window geometry for the next start.
+    pub fn note_window(&self, _window: WindowState) {}
+
+    /// Where and how large the window opens, given the monitors that are connected now.
+    pub fn placement(&self, _monitors: &[MonitorRect]) -> Placement {
+        Placement { size: (0, 0), position: None, maximized: false }
     }
 
     // ---- settings, themes and key bindings ---------------------------------------------------------------------
@@ -1881,6 +1900,297 @@ mod tests {
         assert_eq!(rec.settings_events().len(), 2);
     }
 
+    // ---- session, working directories and the window (plan 23, task 2) -------------------------------------------
+
+    use holzwave_core::session::{Session, WindowState};
+
+    impl Recorder {
+        fn cwds(&self, pane: PaneId) -> Vec<String> {
+            self.all()
+                .into_iter()
+                .filter_map(|o| match o {
+                    Out::Cwd { pane: p, cwd } if p == pane => Some(cwd),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    /// A scratch directory whose `layout.json` holds exactly one pane, and that pane's id.
+    fn dir_with_one_pane(tag: &str) -> (Scratch, PaneId) {
+        let dir = Scratch::new(tag);
+        let (layout, _) = Layout::new();
+        std::fs::write(dir.layout_file(), serde_json::to_vec_pretty(&layout).unwrap()).unwrap();
+        let pane = layout.all_panes()[0];
+        (dir, pane)
+    }
+
+    /// An existing directory below the scratch directory, in its canonical spelling (macOS temp is a symlink).
+    fn real_dir(dir: &Scratch, name: &str) -> PathBuf {
+        let path = dir.0.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    fn session_on_disk(dir: &Scratch) -> Session {
+        let text = std::fs::read_to_string(dir.0.join("session.json")).expect("session.json was written");
+        let (session, status) = Session::from_json(&text);
+        assert_eq!(status, LoadStatus::Clean, "what the core writes loads clean");
+        session
+    }
+
+    /// Prints where it starts, then goes to `a` (the first shell to get there) or `b`, announces that directory with
+    /// OSC 7 and stays alive. The marker directory makes the choice atomic between two shells.
+    fn two_directory_script(marker: &Path, a: &Path, b: &Path) -> String {
+        format!(
+            "echo \"start:$(pwd)\"; if mkdir '{m}' 2>/dev/null; then d='{a}'; else d='{b}'; fi; cd \"$d\"; \
+             printf '\\033]7;file://localhost%s\\007' \"$d\"; sleep 30",
+            m = marker.display(),
+            a = a.display(),
+            b = b.display()
+        )
+    }
+
+    #[test]
+    fn a_pane_starts_in_the_directory_the_session_saved_for_it() {
+        let (dir, pane) = dir_with_one_pane("saved-cwd");
+        let saved = real_dir(&dir, "project");
+        std::fs::write(
+            dir.0.join("session.json"),
+            format!(r#"{{"version": 1, "cwds": {{"{pane}": {:?}}}}}"#, saved.to_str().unwrap()),
+        )
+        .unwrap();
+        let (core, rec) = core_in(&dir, "/bin/sh", &["-c", "echo \"in:$(pwd)\"; sleep 30"]);
+
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+
+        let needle = format!("in:{}", saved.display());
+        assert!(wait_until(WAIT, || rec.has_text(pane, &needle)), "the shell did not start in {saved:?}");
+    }
+
+    #[test]
+    fn a_saved_directory_that_no_longer_exists_does_not_break_the_start() {
+        let (dir, pane) = dir_with_one_pane("gone-cwd");
+        let gone = real_dir(&dir, "was-here");
+        std::fs::write(
+            dir.0.join("session.json"),
+            format!(r#"{{"version": 1, "cwds": {{"{pane}": {:?}}}}}"#, gone.to_str().unwrap()),
+        )
+        .unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        let (core, rec) = core_in(&dir, "/bin/sh", &["-c", "echo \"in:$(pwd)\"; echo up; sleep 30"]);
+
+        assert_eq!(core.start_dir(pane), None, "a directory that is gone is not used");
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts anyway");
+
+        assert!(wait_until(WAIT, || rec.has_text(pane, "up")), "the shell did not start");
+        assert!(!rec.has_text(pane, &gone.display().to_string()), "it started in the missing directory");
+    }
+
+    #[test]
+    fn a_split_starts_in_the_last_known_directory_of_the_pane_that_was_focused() {
+        let dir = Scratch::new("split-cwd");
+        let (a, b) = (real_dir(&dir, "a"), real_dir(&dir, "b"));
+        let script = two_directory_script(&dir.0.join("marker"), &a, &b);
+        let (core, rec) = core_in(&dir, "/bin/sh", &["-c", &script]);
+        let first = only_pane(&core);
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        let a_text = a.display().to_string();
+        assert!(wait_until(WAIT, || rec.cwds(first).contains(&a_text)), "no cwd event: {:?}", rec.cwds(first));
+
+        let second = core.split(false).focus;
+        assert_ne!(second, first);
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+
+        let needle = format!("start:{a_text}");
+        assert!(wait_until(WAIT, || rec.has_text(second, &needle)), "the split did not start in {a_text}");
+    }
+
+    #[test]
+    fn a_new_tab_starts_in_the_last_known_directory_of_the_pane_that_was_focused() {
+        let dir = Scratch::new("tab-cwd");
+        let (a, b) = (real_dir(&dir, "a"), real_dir(&dir, "b"));
+        let script = two_directory_script(&dir.0.join("marker"), &a, &b);
+        let (core, rec) = core_in(&dir, "/bin/sh", &["-c", &script]);
+        let first = only_pane(&core);
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        let a_text = a.display().to_string();
+        assert!(wait_until(WAIT, || rec.cwds(first).contains(&a_text)), "no cwd event");
+
+        let tab_pane = core.new_tab().focus;
+        assert_ne!(tab_pane, first);
+        core.start_pane(tab_pane, 80, 24, 0, 0).expect("starts");
+
+        let needle = format!("start:{a_text}");
+        assert!(wait_until(WAIT, || rec.has_text(tab_pane, &needle)), "the new tab did not start in {a_text}");
+    }
+
+    #[test]
+    fn a_directory_saved_for_the_new_pane_wins_over_the_one_it_would_inherit() {
+        let (dir, first) = dir_with_one_pane("saved-wins");
+        // The id the split will give: the same layout split on a copy.
+        let (layout, _) = Layout::new();
+        let mut probe = layout.clone();
+        probe.split_focused(Axis::Row);
+        let predicted = probe.tab().focus;
+        let saved = real_dir(&dir, "saved");
+        let inherited = real_dir(&dir, "inherited");
+        std::fs::write(
+            dir.0.join("session.json"),
+            format!(r#"{{"version": 1, "cwds": {{"{predicted}": {:?}}}}}"#, saved.to_str().unwrap()),
+        )
+        .unwrap();
+        let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+        lock(&core.last_cwd).insert(first, inherited.display().to_string());
+
+        let second = core.split(false).focus;
+
+        assert_eq!(second, predicted);
+        assert_eq!(core.start_dir(second), Some(saved));
+    }
+
+    #[test]
+    fn the_session_holds_the_directory_of_every_live_pane_after_shutdown() {
+        let dir = Scratch::new("session-shutdown");
+        let (a, b) = (real_dir(&dir, "a"), real_dir(&dir, "b"));
+        let script = two_directory_script(&dir.0.join("marker"), &a, &b);
+        let (core, rec) = core_in(&dir, "/bin/sh", &["-c", &script]);
+        let first = only_pane(&core);
+        let second = core.split(false).focus;
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        assert!(
+            wait_until(WAIT, || {
+                let (x, y) = (rec.cwds(first), rec.cwds(second));
+                !x.is_empty() && !y.is_empty() && x.last() != y.last()
+            }),
+            "both panes did not announce different directories: {:?} {:?}",
+            rec.cwds(first),
+            rec.cwds(second)
+        );
+        let expected_first = rec.cwds(first).last().cloned().unwrap();
+        let expected_second = rec.cwds(second).last().cloned().unwrap();
+
+        core.shutdown();
+
+        let session = session_on_disk(&dir);
+        assert_eq!(session.cwds.get(&first), Some(&expected_first));
+        assert_eq!(session.cwds.get(&second), Some(&expected_second));
+        assert_eq!(session.cwds.len(), 2);
+    }
+
+    #[test]
+    fn the_session_is_written_two_seconds_after_the_first_change_without_any_flush() {
+        let (dir, pane) = dir_with_one_pane("session-debounce");
+        let target = real_dir(&dir, "target");
+        let script = format!("cd '{d}'; printf '\\033]7;file://localhost%s\\007' '{d}'; sleep 30", d = target.display());
+        let (core, rec) = core_in(&dir, "/bin/sh", &["-c", &script]);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        let text = target.display().to_string();
+        assert!(wait_until(WAIT, || rec.cwds(pane).contains(&text)), "no cwd event");
+        let announced = Instant::now();
+
+        assert!(
+            wait_until(Duration::from_secs(6), || dir.0.join("session.json").exists()),
+            "the session was not written within six seconds"
+        );
+
+        assert!(announced.elapsed() >= Duration::from_millis(1200), "written after {:?}: no debounce", announced.elapsed());
+        assert_eq!(session_on_disk(&dir).cwds.get(&pane), Some(&text));
+        drop(core);
+    }
+
+    #[test]
+    fn a_pane_that_reported_nothing_is_asked_for_its_directory_when_the_session_is_written() {
+        let (dir, pane) = dir_with_one_pane("session-process");
+        let (core, _rec) = core_in(&dir, "/bin/sh", &["-c", "sleep 30"]);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+
+        core.shutdown();
+
+        let expected = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        let session = session_on_disk(&dir);
+        let got = session.cwds.get(&pane).map(std::fs::canonicalize);
+        assert_eq!(got.and_then(Result::ok), Some(expected), "{:?}", session.cwds);
+    }
+
+    #[test]
+    fn closing_a_pane_takes_its_directory_out_of_the_session() {
+        let dir = Scratch::new("session-close");
+        let (a, b) = (real_dir(&dir, "a"), real_dir(&dir, "b"));
+        let script = two_directory_script(&dir.0.join("marker"), &a, &b);
+        let (core, rec) = core_in(&dir, "/bin/sh", &["-c", &script]);
+        let first = only_pane(&core);
+        let second = core.split(false).focus;
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || !rec.cwds(first).is_empty() && !rec.cwds(second).is_empty()), "no cwd events");
+        core.flush();
+        assert_eq!(session_on_disk(&dir).cwds.len(), 2);
+
+        core.close_pane(second);
+        core.flush();
+
+        let session = session_on_disk(&dir);
+        assert!(session.cwds.contains_key(&first));
+        assert!(!session.cwds.contains_key(&second), "a closed pane must not leave its directory behind");
+    }
+
+    #[test]
+    fn note_window_is_saved_and_placement_drops_an_off_screen_position() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        let monitors = [MonitorRect { x: 0, y: 0, width: 1920, height: 1080 }];
+        assert_eq!(core.placement(&monitors).size, holzwave_core::session::DEFAULT_SIZE, "nothing saved yet");
+
+        core.note_window(WindowState { x: 100, y: 80, width: 1200, height: 700, maximized: false });
+        let on_screen = core.placement(&monitors);
+        core.note_window(WindowState { x: 5000, y: 80, width: 1200, height: 700, maximized: true });
+        let off_screen = core.placement(&monitors);
+        core.flush();
+
+        assert_eq!(on_screen.position, Some((100, 80)));
+        assert_eq!(on_screen.size, (1200, 700));
+        assert_eq!(off_screen.position, None, "a position that is on no monitor is dropped");
+        assert_eq!(off_screen.size, (1200, 700), "the size is still applied");
+        assert!(off_screen.maximized);
+        assert_eq!(core.placement(&[]).position, None, "with no monitor known the system places the window");
+        assert_eq!(session_on_disk(&dir).window.map(|w| (w.x, w.width)), Some((5000, 1200)));
+    }
+
+    #[test]
+    fn a_window_far_outside_the_range_is_clamped_before_it_is_stored() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+
+        core.note_window(WindowState { x: i32::MAX, y: i32::MIN, width: 7, height: u32::MAX, maximized: false });
+        core.flush();
+
+        let window = session_on_disk(&dir).window.expect("stored");
+        assert_eq!((window.x, window.y), (32768, -32768));
+        assert_eq!((window.width, window.height), (200, 16384));
+    }
+
+    #[test]
+    fn a_session_file_that_is_not_json_or_holds_hostile_entries_never_fails_the_start() {
+        let (dir, pane) = dir_with_one_pane("session-bad");
+        std::fs::write(dir.0.join("session.json"), "{ nope").unwrap();
+        let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+        assert_eq!(core.start_dir(pane), None);
+        assert_eq!(std::fs::read_to_string(dir.0.join("session.json.bad")).unwrap(), "{ nope");
+        drop(core);
+
+        let (dir, pane) = dir_with_one_pane("session-hostile");
+        let hostile = format!(
+            r#"{{"version": 1, "cwds": {{"{pane}": "../../etc", "x": 5, "9": "relative", "8": "/tmp/\u001b]0;evil\u0007"}}, "window": "no"}}"#
+        );
+        std::fs::write(dir.0.join("session.json"), &hostile).unwrap();
+        let (core, rec) = core_in(&dir, "/bin/cat", &[]);
+
+        assert_eq!(core.start_dir(pane), None, "a relative path is not a directory to start in");
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || !rec.frames(pane).is_empty()), "no frame");
+        assert_eq!(std::fs::read_to_string(dir.0.join("session.json.bad")).unwrap(), hostile);
+    }
+
 }
 
 /// The protocol golden (`app/tests/fixtures/protocol.json`): what the webview depends on, generated from the real
@@ -2201,6 +2511,12 @@ mod protocol {
             !commands.iter().any(|c| c.name == "input"),
             "the raw input command must not exist: keys, text and paste go through the engine encoder (D-05)"
         );
+        for name in ["note_window", "placement"] {
+            assert!(
+                !commands.iter().any(|c| c.name == name) && !COMMANDS_SRC.contains(&format!("fn {name}")),
+                "{name} is a method of AppCore for the window event handlers, not a command"
+            );
+        }
         // The arguments the page was promised.
         let table = command_table();
         assert_eq!(table["paste"], json!(["pane", "text", "allow_unsafe"]));
