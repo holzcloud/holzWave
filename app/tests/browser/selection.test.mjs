@@ -366,8 +366,8 @@ async function copyActionCase(page, url) {
   const before = (await page.evaluate(() => window.__MOCK__.calls.length));
   await page.keyboard.press("Meta+c");
   assert.deepEqual(await page.evaluate(() => window.__exec), [["copy", "TEXTAREA", "abc"]], "execCommand copied the cache");
-  assert.equal(await page.evaluate(() => document.querySelectorAll("textarea").length), 0, "the textarea was removed");
-  assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), "term", "the canvas has the keyboard back");
+  assert.equal(await page.evaluate(() => document.querySelectorAll(".clipboard-buffer").length), 0, "the textarea was removed");
+  assert.equal(await page.evaluate(() => document.activeElement && document.activeElement.id), "ime", "the terminal input has the keyboard back");
   const shell = (await page.evaluate((n) => window.__MOCK__.calls.slice(n).map((c) => c[0]), before))
     .filter((c) => ["key", "text", "paste", "input"].includes(c));
   assert.deepEqual(shell, [], "Cmd+C must not reach the shell");

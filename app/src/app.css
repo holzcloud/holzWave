@@ -45,5 +45,10 @@ html, body { margin: 0; height: 100%; background: var(--ground); overflow: hidde
 .sel { position: absolute; background: rgba(255, 143, 184, .35); }
 /* The textarea `execCommand("copy")` needs: focusable and selectable, but out of sight and out of the layout. */
 .clipboard-buffer { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
+/* The terminal's input element: every key goes through it so input methods and dead keys work. One pixel, not
+   drawn, never hit by the pointer; the page moves it to the cursor cell while a composition is active. */
+.ime { position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; padding: 0; border: 0; outline: none;
+       resize: none; overflow: hidden; background: transparent; color: transparent; caret-color: transparent;
+       opacity: 0; pointer-events: none; font: 14px/18px "JetBrains Mono", ui-monospace, Menlo, monospace; }
 #stats { position: absolute; right: 8px; bottom: 6px; font: 11px/1.2 "JetBrains Mono", ui-monospace, Menlo, monospace;
          color: var(--rose); opacity: .7; pointer-events: none; white-space: pre; text-align: right; }

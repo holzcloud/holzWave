@@ -1,100 +1,112 @@
-// Keyboard input: window-level shortcuts, the transitional key table that turns keys into terminal input, and
-// paste. A shortcut is a canonical chord built from the event, looked up in chords.ts and run through the action
-// registry. Features that need keys for themselves (palette, search, copy mode) push a handler instead of
-// editing this file.
+// Keyboard input: window-level shortcuts, keys for the core's encoder and paste. The page sends facts about key
+// events (code, key, modifier bits, repeat, release, composing) and never builds an escape sequence; the core's
+// encoder decides what they mean for the program. A shortcut is a canonical chord from the event, looked up in
+// chords.ts and run through the action registry. Features that need keys for themselves (palette, search, copy
+// mode, the paste confirmation) push a handler instead of editing this file.
+//
+// All keys go to a hidden textarea that keeps the keyboard focus: it is what makes the system's input methods and
+// dead keys work, because composition events exist only on editable elements.
 import { registerAction, runAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { actionIdFor } from "./chords.js";
+import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "./keymap.js";
+import { offerKey, pushKeyHandler } from "./keystack.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
 
-// ---- handler stack -------------------------------------------------------------------------------
+export { pushKeyHandler };
+export type { KeyHandler } from "./keystack.js";
 
-/** Return true to consume the event: no later handler, no shortcut and no terminal input sees it. */
-export type KeyHandler = (e: KeyboardEvent) => boolean;
+// ---- the input element ---------------------------------------------------------------------------
 
-// One entry per push, so removing one push can never remove another push of the same function.
-const handlers: { fn: KeyHandler }[] = [];
+let ime: HTMLTextAreaElement | null = null;
 
-/**
- * Put `fn` on top of the handler stack: it is consulted before every older handler and before the shortcuts.
- * The returned function removes exactly this push; calling it again does nothing. A consuming handler decides
- * for itself whether to call `preventDefault`: a text field of its own needs the browser's default.
- */
-export function pushKeyHandler(fn: KeyHandler): () => void {
-  const entry = { fn };
-  handlers.push(entry);
-  return () => {
-    const at = handlers.indexOf(entry);
-    if (at >= 0) handlers.splice(at, 1);
-  };
+/** Give the keyboard to the terminal input. The page's other modules call this after a control had the focus. */
+export function focusInput(): void {
+  ime?.focus({ preventScroll: true });
 }
 
-// ---- chords --------------------------------------------------------------------------------------
-
-/** The key part of a chord, or null for keys the table has no name for yet (named keys are the keyboard plan's). */
-function keyName(e: KeyboardEvent): string | null {
-  // Option changes the typed character on macOS (Option+1 gives "¡"): the physical key names the chord instead.
-  const physical = e.altKey ? /^(?:Digit(\d)|Key([A-Z]))$/.exec(e.code) : null;
-  if (physical) return physical[1] ?? physical[2] ?? null;
-  if (e.key === " ") return "Space";
-  if (e.key.length === 1) return e.key.toUpperCase();
-  return null;
+/** A text field of the page other than the terminal input: it keeps its own keys and its own paste. */
+function inOtherField(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement) || target === ime) return false;
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    target.isContentEditable
+  );
 }
 
-/** The canonical chord of a key event: Cmd, Ctrl, Alt, Shift, then the key. Null when the key has no name. */
-function chordOf(e: KeyboardEvent): string | null {
-  const key = keyName(e);
-  if (key === null) return null;
-  const parts: string[] = [];
-  if (e.metaKey) parts.push("Cmd");
-  if (e.ctrlKey) parts.push("Ctrl");
-  if (e.altKey) parts.push("Alt");
-  if (e.shiftKey) parts.push("Shift");
-  parts.push(key);
-  return parts.join("+");
+function createInput(): HTMLTextAreaElement {
+  const box = document.createElement("textarea");
+  box.id = "ime";
+  box.className = "ime";
+  box.rows = 1;
+  box.setAttribute("aria-label", "Terminal input");
+  box.setAttribute("autocomplete", "off");
+  box.setAttribute("autocorrect", "off");
+  box.setAttribute("autocapitalize", "off");
+  box.spellcheck = false;
+  (document.getElementById("stage") ?? document.body).append(box);
+  return box;
 }
 
 // ---- terminal input ------------------------------------------------------------------------------
 
-const KEYS: Record<string, string> = {
-  Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b",
-  ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D",
-  Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~",
-};
+/** The codes of keys whose press went to the core: only their release is sent, so a shortcut leaves no stray one. */
+const pressed = new Set<string>();
 
-function send(data: string): void {
-  if (!state.view) return;
-  void call("input", { pane: state.view.focus, data });
-}
-
-/** The bytes a key event stands for, or undefined if it is not terminal input. */
-function terminalInput(e: KeyboardEvent): string | undefined {
-  let data = KEYS[e.key];
-  if (data === undefined && e.ctrlKey && e.key.length === 1) {
-    const c = e.key.toLowerCase().charCodeAt(0);
-    if (c >= 97 && c <= 122) data = String.fromCharCode(c - 96);
-  }
-  if (data === undefined && e.key.length === 1 && !e.ctrlKey) data = e.altKey ? "\x1b" + e.key : e.key;
-  return data;
+/** Send one key event for the focused pane. A command that fails is the core's to report, not an error here. */
+function sendKey(pane: number, e: KeyboardEvent, release: boolean): void {
+  const p = keyPayload(e, release);
+  void call("key", {
+    pane,
+    code: p.code,
+    key: p.key,
+    mods: p.mods,
+    repeat: p.repeat,
+    release: p.release,
+    composing: p.composing,
+  }).catch(() => {});
 }
 
 function onKeyDown(e: KeyboardEvent): void {
-  // Newest handler first. Work on a copy so a handler may push or pop while it runs.
-  for (const entry of [...handlers].reverse()) {
-    if (handlers.includes(entry) && entry.fn(e)) return;
-  }
-  const chord = chordOf(e);
-  const id = chord === null ? undefined : actionIdFor(chord);
-  if (id !== undefined && runAction(id)) {
-    e.preventDefault();
-    return;
+  // A key that belongs to an input method or a dead-key sequence is the textarea's: no command, no preventDefault.
+  if (isComposingKey(e)) return;
+  if (offerKey(e)) return;
+  for (const chord of chordsOf(e)) {
+    const id = actionIdFor(chord);
+    if (id !== undefined && runAction(id)) {
+      e.preventDefault();
+      return;
+    }
   }
   if (e.metaKey) return; // a Cmd chord nobody owns is neither a command nor terminal input
-  const data = terminalInput(e);
-  if (data === undefined) return;
+  if (isModifierKey(e)) return; // the encoder reads the modifier bits of the next key
+  if (inOtherField(e.target)) return; // a text field of the page types for itself
+  const pane = state.view?.focus;
+  if (pane === undefined) return;
   e.preventDefault();
-  send(data);
+  pressed.add(e.code);
+  sendKey(pane, e, false);
+}
+
+function onKeyUp(e: KeyboardEvent): void {
+  if (!pressed.delete(e.code)) return; // the press never went to the core
+  const pane = state.view?.focus;
+  if (pane === undefined) return;
+  sendKey(pane, e, true);
+}
+
+// ---- paste ---------------------------------------------------------------------------------------
+
+function onPaste(e: ClipboardEvent): void {
+  if (inOtherField(e.target)) return; // a text field of the page keeps its own paste
+  e.preventDefault();
+  const text = e.clipboardData?.getData("text/plain") ?? "";
+  const pane = state.view?.focus;
+  if (text === "" || pane === undefined) return;
+  void call("paste", { pane, text, allow_unsafe: false }).catch(() => {});
 }
 
 // ---- layout actions ------------------------------------------------------------------------------
@@ -132,9 +144,23 @@ function registerLayoutActions(apply: (v: View) => void): void {
 /** Register the layout actions and start listening to the keyboard and to paste. Call once at start-up. */
 export function initKeyboard(applyView: (v: View) => void): void {
   registerLayoutActions(applyView);
+  ime = createInput();
+  const box = ime;
   window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("paste", (e) => {
-    const text = e.clipboardData?.getData("text");
-    if (text) send(text);
+  window.addEventListener("keyup", onKeyUp);
+  window.addEventListener("paste", onPaste);
+
+  // The canvas is focusable for the mouse, but the keyboard lives in the textarea.
+  document.addEventListener("focusin", (e) => {
+    if (e.target instanceof Element && e.target.id === "term") focusInput();
   });
+  // A click on nothing focusable would leave the page without a keyboard owner. A control that took the focus
+  // (a bar button, a dialog) keeps it until it gives it back.
+  box.addEventListener("blur", () => {
+    setTimeout(() => {
+      const now = document.activeElement;
+      if (now === null || now === document.body) focusInput();
+    }, 0);
+  });
+  focusInput();
 }

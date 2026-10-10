@@ -213,14 +213,14 @@ async function fallbackCase(page, url, errors) {
       original: c.__original === true,
       tabindex: c.getAttribute("tabindex"),
       parent: c.parentElement?.id,
-      focused: document.activeElement === c,
+      focused: document.activeElement === document.getElementById("ime"),
     };
   });
   assert.equal(canvas.count, 1, `the page has ${canvas.count} canvas elements, expected the replacement only`);
   assert.equal(canvas.original, false, "the canvas that handed out the WebGL context is still in the page");
   assert.equal(canvas.tabindex, "0", "the fresh canvas lost its tabindex");
   assert.equal(canvas.parent, "stage", "the fresh canvas is not where the old one was");
-  assert.equal(canvas.focused, true, "the fresh canvas does not have the keyboard");
+  assert.equal(canvas.focused, true, "the terminal input does not have the keyboard");
 
   // The Canvas 2D renderer draws: one stub frame per pane, a pixel inside each pane's grid has the pane colour.
   const size = await page.evaluate(() => {
@@ -263,7 +263,7 @@ async function fallbackCase(page, url, errors) {
 
   await page.keyboard.press("a");
   await page.waitForFunction(
-    () => window.__MOCK__.callsOf("input").some((a) => a.data === "a"),
+    () => window.__MOCK__.callsOf("key").some((a) => a.key === "a" && !a.release),
     undefined,
     { timeout: 5000 },
   );

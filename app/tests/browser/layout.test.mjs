@@ -80,8 +80,8 @@ async function barCase(page, url) {
   assert.equal((await callsOf(page, "new_tab")).length, 1, "the second plus adds a tab");
   assert.equal(
     await page.evaluate(() => document.activeElement?.id),
-    "term",
-    "a bar button gives the keyboard back to the canvas",
+    "ime",
+    "a bar button gives the keyboard back to the terminal input",
   );
 
   // Names are text, never markup (T-02-84).
@@ -218,20 +218,27 @@ async function shortcutCase(page, url) {
 
 async function plainKeyCase(page, url) {
   await open(page, url);
-  assert.deepEqual(await press(page, "a"), [["input", { pane: 2, data: "a" }]], "a plain key goes to the focused pane");
-  assert.deepEqual(await press(page, "Enter"), [["input", { pane: 2, data: "\r" }]]);
-  assert.deepEqual(await press(page, "ArrowUp"), [["input", { pane: 2, data: "\x1b[A" }]]);
-  assert.deepEqual(await press(page, "Control+C"), [["input", { pane: 2, data: "\x03" }]]);
-  assert.deepEqual(await press(page, "Alt+b"), [["input", { pane: 2, data: "\x1bb" }]]);
+  // A key is a `key` command with the facts of the event (down, then up); the core builds the bytes.
+  const key = (code, k, mods = 0) => [
+    ["key", { pane: 2, code, key: k, mods, repeat: false, release: false, composing: false }],
+    ["key", { pane: 2, code, key: k, mods, repeat: false, release: true, composing: false }],
+  ];
+  assert.deepEqual(await press(page, "a"), key("KeyA", "a"), "a plain key goes to the focused pane");
+  assert.deepEqual(await press(page, "Enter"), key("Enter", "Enter"));
+  assert.deepEqual(await press(page, "ArrowUp"), key("ArrowUp", "ArrowUp"));
 
-  // Paste goes to the focused pane as typed text.
+  // Paste goes to the focused pane through the core, not as typed text.
   await page.evaluate(() => {
     const data = new DataTransfer();
-    data.setData("text", "echo pasted");
+    data.setData("text/plain", "echo pasted");
     window.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data }));
   });
   const calls = await sent(page);
-  assert.deepEqual(calls[calls.length - 1], ["input", { pane: 2, data: "echo pasted" }], "paste must reach the pane");
+  assert.deepEqual(
+    calls[calls.length - 1],
+    ["paste", { pane: 2, text: "echo pasted", allow_unsafe: false }],
+    "paste must reach the pane",
+  );
 }
 
 async function handlerStackCase(page, url) {
@@ -265,7 +272,11 @@ async function handlerStackCase(page, url) {
   // Popping it restores the shortcut and the older handler is consulted again.
   await pop("grab");
   assert.deepEqual(await press(page, "Meta+d"), [["split", { column: false }]], "popping must restore the shortcut");
-  assert.deepEqual(await press(page, "a"), [["input", { pane: 2, data: "a" }]], "popping must restore the shell");
+  assert.deepEqual(
+    (await press(page, "a")).map(([cmd, args]) => [cmd, args.pane, args.key, args.release]),
+    [["key", 2, "a", false], ["key", 2, "a", true]],
+    "popping must restore the shell",
+  );
   assert.deepEqual(await seen(), ["watch:d", "watch:a"]);
 
   // Removing twice is harmless and removes nothing else.

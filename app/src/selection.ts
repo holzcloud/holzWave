@@ -142,8 +142,12 @@ export function copySelection(): boolean {
   return false;
 }
 
-/** Whether a copy inside this element belongs to the element (a text field of the page), not to the terminal. */
+/**
+ * Whether a copy inside this element belongs to the element (a text field of the page), not to the terminal. The
+ * terminal's own input element (`#ime`, keyboard.ts) is not a field: a copy from the Edit menu fires on it.
+ */
 function isField(target: EventTarget | null): boolean {
+  if (target instanceof HTMLElement && target.id === "ime") return false;
   return (
     target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||
