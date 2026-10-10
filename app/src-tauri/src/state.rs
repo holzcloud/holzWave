@@ -6,12 +6,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use holzwave_core::engine::{CopyOp, CopyState, DomKey, PasteOutcome, SearchOp, SearchState, SelectOp};
 use holzwave_core::layout::{Divider, Layout, LoadStatus, PaneId, Rect};
-use holzwave_core::pane::PaneHandle;
+use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist;
 use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
@@ -198,62 +198,175 @@ impl AppCore {
         View::of(&lock(&self.layout))
     }
 
-    // Skeleton: the pane commands do nothing yet.
-
-    pub fn start_pane(&self, _pane: PaneId, _cols: u32, _rows: u32, _cell_w: u32, _cell_h: u32) -> Result<(), String> {
-        let _ = (&self.panes, &self.sink, &self.shell, &self.dir, &self.exiting, &self.me);
-        Err("not implemented".into())
+    /// The handle of a running pane. `None` for an unknown pane and for one that is still starting.
+    fn handle(&self, pane: PaneId) -> Option<PaneHandle> {
+        match lock(&self.panes).get(&pane) {
+            Some(Slot::Running(handle)) => Some(handle.clone()),
+            _ => None,
+        }
     }
 
-    pub fn key(&self, _pane: PaneId, _key: DomKey) -> Result<(), String> {
-        Ok(())
+    /// Like [`AppCore::handle`], for the commands that answer with something and so need the pane to exist.
+    fn handle_or_err(&self, pane: PaneId) -> Result<PaneHandle, String> {
+        self.handle(pane).ok_or_else(|| "no such pane".to_owned())
     }
 
-    pub fn text(&self, _pane: PaneId, _text: String) -> Result<(), String> {
-        Ok(())
+    /// Start the shell of a pane if it has none yet. The webview calls this once it knows the pane's size. A pane
+    /// that is not in the layout is refused; a second call for a pane that runs (or is starting) changes nothing.
+    ///
+    /// Waits for the actor's startup handshake (a few milliseconds), so the command is async.
+    pub fn start_pane(&self, pane: PaneId, cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> Result<(), String> {
+        if self.exiting.load(Ordering::SeqCst) {
+            return Err("the app is closing".into());
+        }
+        // Checked and reserved under both locks, so that a concurrent close cannot slip in between.
+        {
+            let layout = lock(&self.layout);
+            if !layout.all_panes().contains(&pane) {
+                return Err("no such pane".into());
+            }
+            let mut panes = lock(&self.panes);
+            if panes.contains_key(&pane) {
+                return Ok(());
+            }
+            panes.insert(pane, Slot::Starting);
+        }
+
+        let (cols, rows) = clamp_grid(cols, rows);
+        let mut spec = PaneSpec::new(self.shell.program.clone(), cols, rows).args(self.shell.args.clone());
+        spec.cell_px = (clamp_cell(cell_w), clamp_cell(cell_h));
+
+        // The sink runs on the pane's engine thread, possibly before `spawn_ghostty` has returned (a failed start
+        // reports first), so it only holds the sink and a weak reference and never waits for the handle.
+        let sink = self.sink.clone();
+        let me = self.me.clone();
+        let started = PaneHandle::spawn_ghostty(pane, spec, move |event| match event {
+            PaneEvent::Frame(frame) => sink.send(Out::Frame(frame)),
+            PaneEvent::Title(title) => sink.send(Out::Title { pane, title }),
+            PaneEvent::Cwd(cwd) => sink.send(Out::Cwd { pane, cwd }),
+            PaneEvent::Exited { code } => {
+                if let Some(core) = me.upgrade() {
+                    core.pane_gone(pane, code);
+                }
+            }
+            PaneEvent::Failed(reason) => {
+                // The reason names the failure (no program, no PTY), never terminal content.
+                eprintln!("holzwave: pane {pane} did not start: {reason}");
+                if let Some(core) = me.upgrade() {
+                    core.pane_gone(pane, None);
+                }
+            }
+        });
+        match started {
+            Ok(handle) => {
+                let mut panes = lock(&self.panes);
+                match panes.get_mut(&pane) {
+                    Some(slot @ Slot::Starting) => *slot = Slot::Running(handle),
+                    // The pane was closed (or ended, or the app is closing) while the shell started.
+                    _ => {
+                        drop(panes);
+                        handle.close();
+                    }
+                }
+                Ok(())
+            }
+            // The sink was told, and `pane_gone` forgot the slot, before `spawn_ghostty` returned.
+            Err(e) => Err(e.to_string()),
+        }
     }
 
-    pub fn paste(&self, _pane: PaneId, _text: String, _allow_unsafe: bool) -> Result<PasteOutcome, String> {
-        Err("not implemented".into())
+    /// The shell of a pane ended, or never started: forget the handle and tell the webview.
+    fn pane_gone(&self, pane: PaneId, code: Option<u32>) {
+        let slot = lock(&self.panes).remove(&pane);
+        drop(slot);
+        self.sink.send(Out::PaneExit { pane, code });
     }
 
-    pub fn resize(&self, _pane: PaneId, _cols: u32, _rows: u32, _cell_w: u32, _cell_h: u32) -> Result<(), String> {
-        Ok(())
+    /// A key press or release, as the webview saw it. The engine encodes it against the terminal's live modes.
+    pub fn key(&self, pane: PaneId, key: DomKey) -> Result<(), String> {
+        if key.code.len() > MAX_KEY_BYTES || key.key.len() > MAX_KEY_BYTES {
+            return Err("key description too long".into());
+        }
+        match self.handle(pane) {
+            Some(handle) => handle.key(key).map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
     }
 
-    pub fn scroll(&self, _pane: PaneId, _rows: i32) -> Result<(), String> {
-        Ok(())
+    /// Committed text (an IME commit, a dead-key result) as input.
+    pub fn text(&self, pane: PaneId, text: String) -> Result<(), String> {
+        match self.handle(pane) {
+            Some(handle) => handle.text(text).map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
     }
 
-    pub fn scroll_to_bottom(&self, _pane: PaneId) -> Result<(), String> {
-        Ok(())
+    /// Paste clipboard text the way the program asked for it. Waits for the engine's answer for up to two seconds,
+    /// so the command is async.
+    pub fn paste(&self, pane: PaneId, text: String, allow_unsafe: bool) -> Result<PasteOutcome, String> {
+        self.handle_or_err(pane)?.paste(text, allow_unsafe).map_err(|e| e.to_string())
     }
 
-    pub fn request_full(&self, _pane: PaneId) -> Result<(), String> {
-        Ok(())
+    pub fn resize(&self, pane: PaneId, cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> Result<(), String> {
+        let Some(handle) = self.handle(pane) else { return Ok(()) };
+        let (cols, rows) = clamp_grid(cols, rows);
+        handle.resize(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h))).map_err(|e| e.to_string())
     }
 
-    pub fn select(&self, _pane: PaneId, _op: SelectOp) -> Result<(), String> {
-        Ok(())
+    /// Scroll the viewport by `rows`; negative is towards older output.
+    pub fn scroll(&self, pane: PaneId, rows: i32) -> Result<(), String> {
+        match self.handle(pane) {
+            Some(handle) => handle.scroll(rows as isize).map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
     }
 
-    pub fn selection_text(&self, _pane: PaneId) -> Result<Option<String>, String> {
-        Err("not implemented".into())
+    pub fn scroll_to_bottom(&self, pane: PaneId) -> Result<(), String> {
+        match self.handle(pane) {
+            Some(handle) => handle.scroll_to_bottom().map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
     }
 
-    pub fn search(&self, _pane: PaneId, _op: SearchOp) -> Result<SearchState, String> {
-        Err("not implemented".into())
+    /// Make the next frame of the pane a full one: the webview reconnected or saw a gap in the sequence numbers.
+    pub fn request_full(&self, pane: PaneId) -> Result<(), String> {
+        match self.handle(pane) {
+            Some(handle) => handle.request_full().map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
     }
 
-    pub fn copy_mode(&self, _pane: PaneId, _op: CopyOp) -> Result<CopyState, String> {
-        Err("not implemented".into())
+    pub fn select(&self, pane: PaneId, op: SelectOp) -> Result<(), String> {
+        match self.handle(pane) {
+            Some(handle) => handle.select(op).map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
+    }
+
+    /// The selected text; waits for the engine's answer, so the command is async.
+    pub fn selection_text(&self, pane: PaneId) -> Result<Option<String>, String> {
+        self.handle_or_err(pane)?.selection_text().map_err(|e| e.to_string())
+    }
+
+    /// Change the search and return its state; waits for the engine's answer, so the command is async.
+    pub fn search(&self, pane: PaneId, op: SearchOp) -> Result<SearchState, String> {
+        self.handle_or_err(pane)?.search(op).map_err(|e| e.to_string())
+    }
+
+    /// Run a copy-mode operation and return its state; waits for the engine's answer, so the command is async.
+    pub fn copy_mode(&self, pane: PaneId, op: CopyOp) -> Result<CopyState, String> {
+        self.handle_or_err(pane)?.copy_mode(op).map_err(|e| e.to_string())
     }
 
     #[cfg(test)]
-    fn pid(&self, _pane: PaneId) -> Option<u32> {
-        None
+    fn pid(&self, pane: PaneId) -> Option<u32> {
+        self.handle(pane)?.pid()
     }
 }
+
+/// The longest `code` or `key` string of a key event the shell passes on (T-02-50): the longest real value is a
+/// named key such as `MediaTrackPrevious`.
+const MAX_KEY_BYTES: usize = 32;
 
 /// The grid of a pane: at least 2 x 1, at most 1000 x 500.
 fn clamp_grid(cols: u32, rows: u32) -> (u16, u16) {
@@ -511,7 +624,7 @@ mod tests {
         assert!(
             wait_until(WAIT, || rec.has_text(pane, "[6;18;9t")),
             "the size report did not carry 9 x 18: {:?}",
-            rec.frames(pane).len()
+            rec.frames(pane).iter().map(|f| f.changed.iter().map(|r| r.runs.clone()).collect::<Vec<_>>()).collect::<Vec<_>>()
         );
     }
 
@@ -533,12 +646,12 @@ mod tests {
         core.start_pane(pane, 80, 24, 0, 0).expect("starts");
         let long = "K".repeat(33);
 
-        assert!(core.key(pane, key(&long, "x")).is_err(), "code of 33 bytes");
-        assert!(core.key(pane, key("KeyX", &long)).is_err(), "key of 33 bytes");
-        assert!(core.key(pane, key(&"K".repeat(32), "x")).is_ok(), "32 bytes are fine");
+        assert!(core.key(pane, key(&long, "q")).is_err(), "code of 33 bytes");
+        assert!(core.key(pane, key("KeyQ", &long)).is_err(), "key of 33 bytes");
+        assert!(core.key(pane, key(&"K".repeat(32), "w")).is_ok(), "32 bytes are fine");
         assert!(core.key(424_242, key("KeyX", "x")).is_ok(), "an unknown pane is a no-op");
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!rec.has_text(pane, "x"), "a rejected key must not reach the shell");
+        assert!(!rec.has_text(pane, "q"), "a rejected key must not reach the shell");
     }
 
     #[test]
