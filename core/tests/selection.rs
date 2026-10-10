@@ -6,7 +6,7 @@ mod common;
 
 use common::engine;
 use holzwave_core::TerminalEngine;
-use holzwave_core::engine::{SelectMode, SelectOp, Span};
+use holzwave_core::engine::{EngineTheme, SelectMode, SelectOp, Span};
 use holzwave_core::wire::{FrameEncoder, FrameMsg};
 
 /// Apply an operation and assert that the engine accepted it.
@@ -203,6 +203,21 @@ fn a_selection_survives_a_resize() {
     e.resize(30, 5, (0, 0)).expect("wider");
     assert_eq!(text(&mut e).as_deref(), Some("row09\nrow1"));
     e.resize(12, 4, (0, 0)).expect("smaller");
+    assert_eq!(text(&mut e).as_deref(), Some("row09\nrow1"));
+}
+
+#[test]
+fn a_selection_survives_a_theme_change_and_is_reported_again_in_the_reset() {
+    let mut e = twelve_rows();
+    op(&mut e, BEGIN);
+    op(&mut e, EXTEND);
+    let before = spans(&mut e);
+
+    let theme = EngineTheme::default();
+    assert!(e.set_theme(&theme).is_ok(), "set_theme must be accepted");
+    let update = e.update().expect("update");
+    assert!(update.reset);
+    assert_eq!(update.selection, before, "a reset update carries the complete selection");
     assert_eq!(text(&mut e).as_deref(), Some("row09\nrow1"));
 }
 

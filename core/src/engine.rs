@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::{Error, Result};
 
 /// An RGB colour, already resolved against the palette.
@@ -404,6 +406,25 @@ pub enum EngineEvent {
     Title(String),
     /// The working directory changed (OSC 7), as the raw value the program sent.
     Pwd(String),
+}
+
+/// The most bytes a title or working directory from a program may have (T-02-35).
+pub const MAX_EVENT_BYTES: usize = 4096;
+
+/// Make text that a program controls safe to hand to the UI: control characters (C0, DEL and C1) are removed and the
+/// result is cut to [`MAX_EVENT_BYTES`] on a character boundary.
+pub fn sanitize_program_text(text: &str) -> String {
+    // Skeleton: the behaviour arrives with the plan's GREEN step.
+    text.to_owned()
+}
+
+/// The host and the absolute path of an OSC 7 value (`file://host/path`, percent-encoded).
+///
+/// `None` unless the scheme is `file`, the path is absolute and has no `..` segment after decoding, and nothing in
+/// the value is a control character.
+pub fn parse_osc7(_value: &str) -> Option<(String, PathBuf)> {
+    // Skeleton: the behaviour arrives with the plan's GREEN step.
+    None
 }
 
 /// How far a pointer selection grows.

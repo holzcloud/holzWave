@@ -6,6 +6,7 @@ mod common;
 
 use common::engine;
 use holzwave_core::TerminalEngine;
+use holzwave_core::engine::{SelectMode, SelectOp};
 use holzwave_core::wire::{FrameEncoder, FrameMsg};
 
 /// Run the engine's update through the encoder.
@@ -344,6 +345,9 @@ struct Step {
     name: &'static str,
     /// The bytes fed, ASCII-escaped.
     input: String,
+    /// The selection operations applied after the bytes, as text; absent when the step makes none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    select: Option<String>,
     /// The new grid size when the step is a resize.
     resize: Option<(u16, u16)>,
     /// `null` when the step produced no frame.
@@ -367,29 +371,49 @@ fn scenario() -> Fixture {
     let mut enc = FrameEncoder::new(1);
     let mut steps = Vec::new();
 
-    let mut step = |name: &'static str, input: &[u8], resize: Option<(u16, u16)>, e: &mut holzwave_core::GhosttyEngine| {
+    let mut step = |name: &'static str,
+                    input: &[u8],
+                    resize: Option<(u16, u16)>,
+                    ops: &[SelectOp],
+                    e: &mut holzwave_core::GhosttyEngine| {
         e.feed(input);
         if let Some((c, r)) = resize {
             e.resize(c, r, (0, 0)).expect("resize");
         }
+        for op in ops {
+            e.select(*op).expect("select");
+        }
+        let select = (!ops.is_empty()).then(|| format!("{ops:?}"));
         let frame = enc.encode(e.update().expect("update"));
         let text = e.screen().expect("screen").to_text();
         let grid = text.strip_suffix('\n').unwrap_or(&text).split('\n').map(str::to_string).collect();
-        steps.push(Step { name, input: input.escape_ascii().to_string(), resize, frame, grid });
+        steps.push(Step { name, input: input.escape_ascii().to_string(), select, resize, frame, grid });
     };
 
-    step("initial", b"", None, &mut e);
-    step("typing", b"hello", None, &mut e);
-    step("newline and scroll", b"\r\nworld\r\nthree\r\nfour\r\nfive\r\nsix", None, &mut e);
-    step("colours and styles", b"\r\n\x1b[1;31mred\x1b[0m \x1b[4;42mu\x1b[0m \x1b[3;7mit\x1b[0m", None, &mut e);
-    step("wide cjk pair", b"\r\n\xe6\x97\xa5\xe6\x9c\xac!", None, &mut e);
-    step("emoji with clustering", "\u{1b}[?2027h\r\n\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} ok".as_bytes(), None, &mut e);
-    step("combining sequence", "\r\ne\u{0301}o\u{0308}x".as_bytes(), None, &mut e);
-    step("resize to 24x6", b"", Some((24, 6)), &mut e);
-    step("alternate screen enter", b"\x1b[?1049h\x1b[HALT", None, &mut e);
-    step("alternate screen leave", b"\x1b[?1049l", None, &mut e);
-    step("cursor hide", b"\x1b[?25l", None, &mut e);
-    step("erase display", b"\x1b[2J", None, &mut e);
+    step("initial", b"", None, &[], &mut e);
+    step("typing", b"hello", None, &[], &mut e);
+    step("newline and scroll", b"\r\nworld\r\nthree\r\nfour\r\nfive\r\nsix", None, &[], &mut e);
+    step("colours and styles", b"\r\n\x1b[1;31mred\x1b[0m \x1b[4;42mu\x1b[0m \x1b[3;7mit\x1b[0m", None, &[], &mut e);
+    step("wide cjk pair", b"\r\n\xe6\x97\xa5\xe6\x9c\xac!", None, &[], &mut e);
+    step("emoji with clustering", "\u{1b}[?2027h\r\n\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} ok".as_bytes(), None, &[], &mut e);
+    step("combining sequence", "\r\ne\u{0301}o\u{0308}x".as_bytes(), None, &[], &mut e);
+    step(
+        "select two rows",
+        b"",
+        None,
+        &[
+            SelectOp::Begin { x: 0, y: 3, mode: SelectMode::Cell },
+            SelectOp::Extend { x: 3, y: 4 },
+        ],
+        &mut e,
+    );
+    step("selection follows a scroll", b"\r\nmore", None, &[], &mut e);
+    step("selection cleared", b"", None, &[SelectOp::Clear], &mut e);
+    step("resize to 24x6", b"", Some((24, 6)), &[], &mut e);
+    step("alternate screen enter", b"\x1b[?1049h\x1b[HALT", None, &[], &mut e);
+    step("alternate screen leave", b"\x1b[?1049l", None, &[], &mut e);
+    step("cursor hide", b"\x1b[?25l", None, &[], &mut e);
+    step("erase display", b"\x1b[2J", None, &[], &mut e);
 
     Fixture { version: 1, cols, rows, steps }
 }
