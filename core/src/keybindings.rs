@@ -90,8 +90,12 @@ impl Chord {
     }
 
     /// Whether a user may bind this chord to an action.
+    ///
+    /// The terminal owns the plain keys: a binding must never swallow input that a program expects. So a chord
+    /// needs Cmd, or at least two modifiers one of which is Ctrl or Alt. `D`, `Shift+D`, `Ctrl+D`, `Alt+D` and
+    /// `Escape` stay with the encoder; `Cmd+D`, `Ctrl+Alt+D` and `Ctrl+Shift+PageDown` are free to bind.
     pub fn is_bindable(&self) -> bool {
-        true
+        self.cmd || (self.modifier_count() >= 2 && (self.ctrl || self.alt))
     }
 
     /// How many of the four modifiers are held.
@@ -121,6 +125,10 @@ fn parse_key(text: &str) -> Result<String, String> {
     match (chars.next(), chars.next()) {
         (Some(c), None) if c.is_control() || c.is_whitespace() => {
             Err(format!("{:?} is not a printable key; write Space, Tab or Enter by name", c.to_string()))
+        }
+        // Format characters, combining marks and the like: a key must be something the editor can show.
+        (Some(c), None) if c.escape_debug().to_string().starts_with("\\u{") => {
+            Err(format!("{:?} is not a printable key", c.to_string()))
         }
         (Some(c), None) => Ok(upper(c)),
         _ => Err(format!("{:?} is not a key (one character or a name such as Enter or F5)", shown(text))),
@@ -245,18 +253,89 @@ impl Default for Keybindings {
 
 impl Keybindings {
     /// Apply the `overrides` of `settings.json` (action id to chord text, as `Settings::keybindings` holds them)
-    /// to the default table. Returns the table and one plain sentence per override that could not be used.
+    /// to the default table. Returns the table and one plain sentence per override that could not be used, which
+    /// the editor can show next to the row. Nothing here errors: a bad entry is reported and ignored.
+    ///
+    /// The policy, in order:
+    ///
+    /// - an unknown action id is ignored;
+    /// - the empty string unbinds a known action (no warning);
+    /// - a chord that does not parse, or that [`Chord::is_bindable`] refuses, is ignored and the default stays;
+    /// - two overrides on one chord: the alphabetically earlier action keeps it, the later one is ignored and
+    ///   keeps its default;
+    /// - an override beats a default: the action that had the chord by default is unbound, with a warning.
+    ///
+    /// Afterwards no chord belongs to two actions.
     pub fn resolve(overrides: &BTreeMap<String, String>) -> (Keybindings, Vec<String>) {
-        let warnings = Vec::new();
+        let mut warnings = Vec::new();
+        let infos = actions();
         let mut chords: Vec<Option<Chord>> =
-            actions().iter().map(|a| a.default.and_then(|d| Chord::parse(d).ok())).collect();
+            infos.iter().map(|a| a.default.and_then(|d| Chord::parse(d).ok())).collect();
+        let keeps = |index: usize| match infos[index].default {
+            Some(default) => format!("the default {default} stays"),
+            None => "the action stays unbound".to_string(),
+        };
+        // Which actions carry an accepted override, and which override holds which chord.
+        let mut overridden = vec![false; infos.len()];
+        let mut claimed: HashMap<Chord, usize> = HashMap::new();
+
+        // BTreeMap order is the alphabetical order of the action ids, which is the tie-break of the policy.
         for (action, text) in overrides {
-            let Some(index) = actions().iter().position(|a| a.id == action) else { continue };
+            let Some(index) = infos.iter().position(|a| a.id == action) else {
+                warnings.push(format!("Unknown action {:?}; the binding is ignored.", shown(action)));
+                continue;
+            };
+            let id = infos[index].id;
             if text.is_empty() {
                 chords[index] = None;
-            } else if let Ok(chord) = Chord::parse(text) {
-                chords[index] = Some(chord);
+                overridden[index] = true;
+                continue;
             }
+            let chord = match Chord::parse(text) {
+                Ok(chord) => chord,
+                Err(reason) => {
+                    warnings.push(format!(
+                        "The key combination {:?} for {id} cannot be used ({reason}); {}.",
+                        shown(text),
+                        keeps(index)
+                    ));
+                    continue;
+                }
+            };
+            if !chord.is_bindable() {
+                warnings.push(format!(
+                    "The key combination {chord} for {id} is not allowed because it would take plain typing \
+                     away from the terminal; use Cmd, or two modifiers including Ctrl or Alt; {}.",
+                    keeps(index)
+                ));
+                continue;
+            }
+            if let Some(&holder) = claimed.get(&chord) {
+                warnings.push(format!(
+                    "{id} cannot use {chord} because {} already uses it; the binding is ignored and {}.",
+                    infos[holder].id,
+                    keeps(index)
+                ));
+                continue;
+            }
+            claimed.insert(chord.clone(), index);
+            chords[index] = Some(chord);
+            overridden[index] = true;
+        }
+
+        // An override beats a default: whoever still holds a chord by default loses it.
+        for index in 0..infos.len() {
+            if overridden[index] {
+                continue;
+            }
+            let Some(holder) = chords[index].as_ref().and_then(|c| claimed.get(c)).copied() else { continue };
+            warnings.push(format!(
+                "{} lost its default {} to {} and is unbound.",
+                infos[index].id,
+                chords[index].as_ref().map(ToString::to_string).unwrap_or_default(),
+                infos[holder].id
+            ));
+            chords[index] = None;
         }
         (Keybindings::from_chords(chords), warnings)
     }

@@ -404,3 +404,27 @@ fn the_shared_samples_survive_a_round_trip_through_the_settings_map() {
         assert_eq!(warnings.len(), taken, "{sample}: {warnings:?}");
     }
 }
+
+#[test]
+fn format_and_combining_characters_are_not_keys() {
+    // Right-to-left override, zero width space, combining acute accent: the editor could not show them.
+    for key in ["\u{202e}", "\u{200b}", "\u{301}", "\u{ad}"] {
+        let text = format!("Cmd+{key}");
+        assert!(Chord::parse(&text).is_err(), "{text:?} must not parse");
+    }
+}
+
+#[test]
+fn every_printable_ascii_key_parses_and_prints_back_idempotently() {
+    for c in ('!'..='~').filter(|c| *c != '+') {
+        let first = Chord::parse(&format!("Cmd+{c}")).unwrap_or_else(|e| panic!("{c:?} should be a key: {e}"));
+        let again = Chord::parse(&first.to_string()).expect("the canonical form parses");
+        assert_eq!(first, again, "{c:?}");
+        assert_eq!(first.key, c.to_ascii_uppercase().to_string());
+    }
+}
+
+#[test]
+fn spaces_around_the_plus_signs_are_tolerated() {
+    assert_eq!(canon(" cmd + shift + d "), Ok("Cmd+Shift+D".to_string()));
+}
