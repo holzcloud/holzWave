@@ -8,7 +8,8 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "3.0.0-alpha.4",
-    "typescript": "^7"
+    "playwright-core": "1.64.0",
+    "typescript": "7.0.2"
   },
   "version": "0.0.1-alpha1"
 }
