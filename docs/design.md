@@ -1,7 +1,7 @@
 # Design
 
-Status: **plan**. The foundations (section 1 to 5) are decided. The direction of the window chrome (section 6) is
-a choice between five candidates and is pending.
+Status: **plan**. The foundations (section 1 to 5) are decided. The window direction (section 6) follows the
+owner's brief: *the same on all five platforms, plain, terminal-nerd, a little of our colours, and modern.*
 
 holzWave belongs to the holzcloud family: [holzBar](https://github.com/holzcloud/holzBar),
 [holzkube-manager](https://github.com/holzcloud/holzkube-manager) and
@@ -100,24 +100,39 @@ No motion in the terminal grid itself. `prefers-reduced-motion` removes all tran
 **Accessibility:** every colour state has a second cue (underline, dot shape, label). The focus ring is 2 px for
 keyboard focus. Chrome text is at least 12 px. All chrome is operable from the keyboard.
 
-## 6. Window direction: five candidates
+## 6. Window direction: Terminal-modern
 
-Same content in every mockup: a shell, an SSH session and a Markdown preview in a tiled tab. The candidates differ
-only in how the chrome is drawn.
+The owner's brief ruled out the glass, plank and paper looks: they depend on effects (blur, texture) that differ per
+platform and do not scale to a phone. The direction is a refinement of candidate 3, *Haarlinie*, with the modern
+parts kept.
 
-| # | Name | Character | Strength | Cost |
-|---|---|---|---|---|
-| 1 | **Glas** | translucent glass cards on warm washes, closest to the holzcloud web look | feels like the rest of the family | blur costs GPU; least terminal area |
-| 2 | **Planke** | the tab bar is the wooden plank, panes framed in wood | the logo's plank becomes the identity; unmistakable | warm and heavy; wood texture needs care at high DPI |
-| 3 | **Haarlinie** | flat, hairline dividers, mono uppercase labels, slim bars | most terminal area, fastest, calmest | least brand character |
-| 4 | **Welle** | wave line under the bar and in pane headers, rounded blocks, rose pills | carries the name; echoes Wave's blocks in our own way | the wave motif can become noise |
-| 5 | **Papier** | light cream chrome around dark terminals | the daytime variant; strong contrast to the dark family | a different mood from the siblings |
+![Desktop](design/6-desktop.png)
+![Phone](design/7-phone.png)
 
-![Glas](design/1-glas.png)
-![Planke](design/2-planke.png)
-![Haarlinie](design/3-haarlinie.png)
-![Welle](design/4-welle.png)
-![Papier](design/5-papier.png)
+**Rules**
 
-The chosen direction becomes the default theme; the others can remain as selectable chrome themes, because the
-terminal palette (section 2) and the tokens are shared by all of them.
+1. **One look everywhere.** The window chrome is drawn by holzWave, with no native title bar or tab control, so
+   macOS, Windows, Linux, iOS and Android show the same thing. Only the OS window buttons and the system keyboard
+   differ.
+2. **Mono everywhere in the chrome.** Labels, tabs and the status line are JetBrains Mono; Manrope only appears in
+   previews. Labels are uppercase and tracked, as in the holzcloud family.
+3. **Flat and hairline.** No shadows between panes, no gradients, no blur. Panes are separated by a 1 px
+   `--hw-edge` line. Only floating layers (command palette) have a shadow and a 8 px radius.
+4. **Rose is rationed.** It appears for the prompt chevron, the cursor, the focused pane's top line, the active tab
+   marker and the active status segment. Everything else is warm grey.
+5. **tmux-style status line.** A bottom strip of segments (`workspace`, panes, renderer, encoding, version); the
+   active workspace is a solid rose segment.
+6. **Numbered tabs.** Tabs carry their number (`1 shell`) so `⌘1…9` is discoverable.
+7. **Command palette first.** Actions are reachable by name with a fuzzy palette (`⌘K`); the chrome stays small.
+8. **Responsive by layout, not by style.** On a phone the same `View` shows one pane per screen, the tab strip
+   moves to the bottom, and an accessory row (`esc tab ctrl alt ← ↑ ↓ →`) sits above the system keyboard. Colours,
+   type and spacing tokens are identical.
+
+**Size tokens for touch:** minimum target 44 px on mobile and 28 px on desktop; the accessory row keys are 44 px high.
+
+### Candidates considered
+
+The five earlier mockups stay as the record of the alternatives: [Glas](design/1-glas.png),
+[Planke](design/2-planke.png), [Haarlinie](design/3-haarlinie.png), [Welle](design/4-welle.png),
+[Papier](design/5-papier.png). The cream *Papier* look remains a candidate for a **light theme** later, because the
+terminal palette and the tokens are shared by every chrome style.
