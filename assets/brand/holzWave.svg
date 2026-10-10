@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+ <!-- holzWave: a terminal whose top edge is a wave, standing on the holzcloud plank. -->
+ <defs>
+  <clipPath id="plank"><rect x="207" y="702" width="610" height="107" rx="37"/></clipPath>
+ </defs>
+ <!-- tile: the standard macOS icon square (824 px, inset 100 px) -->
+ <rect x="100" y="100" width="824" height="824" rx="185" fill="#14091A"/>
+ <!-- wooden plank -->
+ <rect x="207" y="702" width="610" height="107" rx="37" fill="#C98B4F"/>
+ <rect x="207" y="702" width="610" height="25" rx="12" fill="#E0A869" opacity="0.7" clip-path="url(#plank)"/>
+ <!-- wood grain -->
+ <g fill="none" stroke="#9B6534" stroke-linecap="round">
+  <path d="M265 759 C388 743 545 780 759 755" stroke-width="10.7"/>
+  <path d="M339 784 C446 772 586 792 677 780" stroke-width="8" opacity="0.7"/>
+  <ellipse cx="594" cy="751" rx="25" ry="12" stroke-width="8"/>
+ </g>
+ <!-- terminal: the top edge is the wave -->
+ <path d="M259 490 C326.5 490 360.2 436 427.7 436 C495.1 436 528.9 490 596.3 490 C663.8 490 697.5 436 765.0 436 L765 436 L765 626 a44 44 0 0 1 -44 44 L303 670 a44 44 0 0 1 -44 -44 Z" fill="#FFE6F0" stroke="#FFE6F0" stroke-width="24" stroke-linejoin="round"/>
+ <!-- a second, lighter wave beneath the first -->
+ <path d="M259 524 C326.5 524 360.2 470 427.7 470 C495.1 470 528.9 524 596.3 524 C663.8 524 697.5 470 765.0 470" fill="none" stroke="#FFC2DA" stroke-width="14" stroke-linecap="butt"/>
+ <!-- prompt -->
+ <path d="M345 545 L405 590 L345 635" fill="none" stroke="#C23B72" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+ <rect x="455" y="577" width="110" height="28" rx="14" fill="#C23B72"/>
+ <!-- sparkle -->
+ <path d="M760 306 l12 33 33 12 -33 12 -12 33 -12 -33 -33 -12 33 -12z" fill="#FFFFFF"/>
+</svg>
