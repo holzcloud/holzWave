@@ -5,10 +5,9 @@ import { call } from "./bridge.js";
 import type { Frame } from "./frame.js";
 import { cellAt, ordered, paneAt } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
+import { canvas as sceneCanvas } from "./scene.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
-
-const canvas = document.getElementById("term") as HTMLCanvasElement;
 
 // ---- selection text ------------------------------------------------------------------------------
 
@@ -43,8 +42,12 @@ function selectedText(): string {
 let dragging = false;
 let wheelRemainder = 0;
 
-/** Start listening to the canvas; `applyView` takes the layout answer of a focus change. */
+/**
+ * Start listening to the canvas; `applyView` takes the layout answer of a focus change. Call after `initScene`:
+ * the scene may have replaced the canvas element while it chose the renderer.
+ */
 export function initPointer(applyView: (v: View) => void): void {
+  const canvas = sceneCanvas();
   registerAction({
     id: "edit.copy",
     title: "Copy",

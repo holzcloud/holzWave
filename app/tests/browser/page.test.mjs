@@ -1,5 +1,6 @@
 // Page hygiene (DESK-17): the page carries no inline style, its stylesheet is a file, later plans load their own
-// stylesheets through one helper, and the start-up does not need `unsafe-inline` in the policy.
+// stylesheets through one helper, and the start-up does not need `unsafe-inline` in the policy. Also the renderer
+// fallback: a WebGL2 failure after the context was handed out must not break start-up (DESK-26).
 import assert from "node:assert/strict";
 
 /** Remember what the document looked like when the parser finished, before any module script ran. */
@@ -19,6 +20,8 @@ export default async function ({ page, url, errors }) {
   await stylesheetCase(page, url);
   await loadStylesCase(page, url);
   await strictPolicyCase(page, url, errors);
+  await defaultRendererCase(page, url, errors);
+  await fallbackCase(page, url, errors);
 }
 
 /** The stylesheet is app.css, applies, and nothing in the page is styled inline. */
@@ -139,4 +142,132 @@ async function strictPolicyCase(page, url, errors) {
   await page.waitForTimeout(100);
   assert.deepEqual(errors, [], "the page reported errors under the strict policy");
   assert.equal(await page.locator("#bar button").count() >= 1, true, "the bar did not render");
+}
+
+/** The renderer choice without `?renderer=`: whichever renderer the engine gives, the page starts and draws. */
+async function defaultRendererCase(page, url, errors) {
+  await page.goto(`${url}index.html`);
+  await page.waitForSelector(".divider");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
+  await page.waitForTimeout(100);
+  assert.deepEqual(errors, [], "the page reported errors with the default renderer");
+}
+
+const PANE_1_BG = 0x6b2fa0;
+const PANE_2_BG = 0x2a6fdb;
+
+const stubFrame = (bg) => ({ cols: 20, rows: 4, cursor: null, fg: 0xffffff, bg, lines: [], scrollbar: [0, 0, 0] });
+
+/** One pixel of the 2D canvas as 0xRRGGBB; (x, y) are CSS pixels inside the canvas. */
+const pixel = (page, x, y) =>
+  page.evaluate(
+    ([px, py]) => {
+      const c = document.getElementById("term");
+      const ctx = c.getContext("2d");
+      if (!ctx) throw new Error("the canvas has no 2D context");
+      const k = c.width / c.clientWidth;
+      const [r, g, b] = ctx.getImageData(Math.floor(px * k), Math.floor(py * k), 1, 1).data;
+      return (r << 16) | (g << 8) | b;
+    },
+    [x, y],
+  );
+
+/**
+ * WebGL2 hands out its context and then the program fails to link. A canvas that gave out a WebGL context never
+ * returns a 2D one, so the scene must draw on a fresh element, and input must still reach the page.
+ */
+async function fallbackCase(page, url, errors) {
+  await page.addInitScript(() => {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    window.__forced = { requests: 0, linkCalls: 0 };
+    HTMLCanvasElement.prototype.getContext = function (type, ...rest) {
+      const ctx = getContext.call(this, type, ...rest);
+      if (type === "webgl2" && ctx) {
+        window.__forced.requests++;
+        this.__original = true; // an expando: it is not an attribute, so a copy of the element does not carry it
+      }
+      return ctx;
+    };
+    WebGL2RenderingContext.prototype.linkProgram = function () {
+      window.__forced.linkCalls++;
+      throw new Error("forced link failure");
+    };
+  });
+  await page.goto(`${url}index.html`);
+  await page.waitForSelector(".divider");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
+
+  const forced = await page.evaluate(() => window.__forced);
+  assert.ok(forced.requests >= 1, "the page never asked for a WebGL2 context: the failure path was not exercised");
+  assert.ok(forced.linkCalls >= 1, "the program link was never attempted: the failure path was not exercised");
+
+  const canvas = await page.evaluate(() => {
+    const all = document.querySelectorAll("canvas");
+    const c = document.getElementById("term");
+    return {
+      count: all.length,
+      original: c.__original === true,
+      tabindex: c.getAttribute("tabindex"),
+      parent: c.parentElement?.id,
+      focused: document.activeElement === c,
+    };
+  });
+  assert.equal(canvas.count, 1, `the page has ${canvas.count} canvas elements, expected the replacement only`);
+  assert.equal(canvas.original, false, "the canvas that handed out the WebGL context is still in the page");
+  assert.equal(canvas.tabindex, "0", "the fresh canvas lost its tabindex");
+  assert.equal(canvas.parent, "stage", "the fresh canvas is not where the old one was");
+  assert.equal(canvas.focused, true, "the fresh canvas does not have the keyboard");
+
+  // The Canvas 2D renderer draws: one stub frame per pane, a pixel inside each pane's grid has the pane colour.
+  const size = await page.evaluate(() => {
+    const c = document.getElementById("term");
+    return { w: c.clientWidth, h: c.clientHeight };
+  });
+  await page.evaluate(
+    ([a, b]) => {
+      window.__MOCK__.emit("screen", { pane: 1, frame: a });
+      window.__MOCK__.emit("screen", { pane: 2, frame: b });
+    },
+    [stubFrame(PANE_1_BG), stubFrame(PANE_2_BG)],
+  );
+  await page.waitForFunction(
+    async () => {
+      await new Promise((done) => requestAnimationFrame(() => done()));
+      const c = document.getElementById("term");
+      const [r, g, b] = c.getContext("2d").getImageData(10, 10, 1, 1).data;
+      return ((r << 16) | (g << 8) | b) === 0x6b2fa0;
+    },
+    undefined,
+    { timeout: 5000 },
+  );
+  assert.equal(await pixel(page, size.w * 0.25, size.h * 0.5), PANE_1_BG, "pane 1 did not draw its colour");
+  assert.equal(await pixel(page, size.w * 0.75, size.h * 0.5), PANE_2_BG, "pane 2 did not draw its colour");
+
+  // Pointer, wheel, key and window listeners still reach the page after the swap.
+  const origin = await page.evaluate(() => {
+    const r = document.getElementById("term").getBoundingClientRect();
+    return { left: r.left, top: r.top };
+  });
+  await page.mouse.click(origin.left + size.w * 0.25, origin.top + size.h * 0.5);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("focus_pane").length >= 1, undefined, { timeout: 5000 });
+  assert.deepEqual((await page.evaluate(() => window.__MOCK__.callsOf("focus_pane")))[0], { pane: 1 });
+
+  await page.mouse.move(origin.left + size.w * 0.75, origin.top + size.h * 0.5);
+  await page.mouse.wheel(0, 120);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("scroll").length >= 1, undefined, { timeout: 5000 });
+  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("scroll")))[0].pane, 2);
+
+  await page.keyboard.press("a");
+  await page.waitForFunction(
+    () => window.__MOCK__.callsOf("input").some((a) => a.data === "a"),
+    undefined,
+    { timeout: 5000 },
+  );
+
+  // The resize listener follows the fresh element.
+  await page.setViewportSize({ width: 800, height: 520 });
+  await page.waitForFunction(() => document.getElementById("term").width === 800, undefined, { timeout: 5000 });
+  assert.equal(await page.evaluate(() => document.getElementById("term").clientWidth), 800);
+
+  assert.deepEqual(errors, [], "the page reported errors after the renderer fallback");
 }
