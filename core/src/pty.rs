@@ -49,9 +49,30 @@ impl Pty {
         self.child.process_id()
     }
 
-    /// End the child, reap it and release the PTY. Skeleton: not implemented yet.
-    pub fn close(self) -> Result<u32> {
-        Err(Error::Unsupported("Pty::close".into()))
+    /// End the child, reap it and release the PTY. Returns the child's exit code.
+    ///
+    /// A child that has not exited gets SIGHUP, a short grace period and then SIGKILL (portable-pty's
+    /// `Child::kill`); `close` always waits afterwards, so no zombie remains, even for a shell that ignores
+    /// SIGHUP. The writer and the master are dropped only after the child is gone, in that order: the writer's
+    /// `Drop` writes a newline and EOF into the PTY, which would answer a live program's prompt.
+    ///
+    /// This blocks for up to about 200 ms while the child is given time to leave. Never call it on the Tauri main
+    /// thread.
+    pub fn close(mut self) -> Result<u32> {
+        // A child that was already reaped must not be signalled: its pid may belong to someone else by now.
+        let exited = self.child.try_wait().ok().flatten();
+        let outcome = match exited {
+            Some(status) => Ok(status.exit_code()),
+            None => {
+                let _ = self.child.kill();
+                self.child.wait().map(|status| status.exit_code())
+            }
+        };
+        // The child is gone (or could not be waited for): only now release the PTY.
+        drop(self.writer);
+        drop(self.master);
+        drop(self.reader);
+        Ok(outcome?)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
