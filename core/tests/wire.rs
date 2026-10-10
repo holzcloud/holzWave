@@ -236,8 +236,12 @@ fn sequence_numbers_start_at_one_and_skip_nothing() {
 
 use holzwave_core::wire::Run;
 
-/// Turn grapheme clustering on (DECSET 2027) the way a program that wants clusters does.
+/// Turn grapheme clustering on (DECSET 2027) the way a program that wants clusters does. The engine starts with it
+/// on, so these tests are explicit about the state they mean.
 const CLUSTERING: &[u8] = b"\x1b[?2027h";
+
+/// Turn grapheme clustering off (RM 2027), the way a program that does not want clusters does.
+const NO_CLUSTERING: &[u8] = b"\x1b[?2027l";
 
 /// Feed `bytes` to a fresh 20x5 engine with clustering on and return the first row of the resulting frame.
 fn first_row_of(bytes: &str) -> RowMsg {
@@ -327,9 +331,7 @@ fn the_cell_count_invariant_holds_with_clustering_off_and_on() {
         let mut e = engine(40, 5);
         let mut enc = FrameEncoder::new(1);
         next_frame(&mut e, &mut enc).expect("first");
-        if clustering {
-            e.feed(CLUSTERING);
-        }
+        e.feed(if clustering { CLUSTERING } else { NO_CLUSTERING });
         e.feed(text.as_bytes());
         let f = next_frame(&mut e, &mut enc).expect("frame");
         for row in &f.changed {

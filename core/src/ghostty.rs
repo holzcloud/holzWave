@@ -337,6 +337,11 @@ impl GhosttyEngine {
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
         let mut terminal = Terminal::new(cols, rows).map_err(eng)?;
         terminal.set_scrollback_max_lines(Some(max_scrollback)).map_err(eng)?;
+        // Grapheme clustering (mode 2027) is off in a fresh libghostty terminal: every code point of a ZWJ family or a
+        // flag gets a cell of its own, so the layout disagrees with Unicode. It is on from the start here, as the
+        // default that a reset (RIS) returns to; a program can still switch it off and DECRQM reports the truth
+        // (DESK-27).
+        terminal.set_default_mode(Mode::GRAPHEME_CLUSTER, true).map_err(eng)?;
         let replies: Rc<RefCell<Vec<u8>>> = Rc::default();
         let reply_cap: Rc<StdCell<Option<usize>>> = Rc::default();
         let events: Rc<RefCell<Vec<EngineEvent>>> = Rc::default();
