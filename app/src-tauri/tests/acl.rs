@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 const LIB_RS: &str = include_str!("../src/lib.rs");
 const BUILD_RS: &str = include_str!("../build.rs");
 const MENU_RS: &str = include_str!("../src/menu.rs");
+const TAURI_CONF: &str = include_str!("../tauri.conf.json");
 const CAPABILITY: &str = include_str!("../capabilities/default.json");
 
 /// Permissions of the main window that are not commands of the app: the defaults of the core plugin set and the one
@@ -207,4 +208,84 @@ fn the_native_menu_has_no_close_window_and_replaces_the_default_one() {
     let lib: String = code_lines(LIB_RS).join("\n");
     assert!(lib.contains("enable_macos_default_menu(false)"), "lib.rs must switch the default macOS menu off");
     assert!(lib.contains(".menu(menu::build)"), "lib.rs must install the explicit menu");
+}
+
+// ---- the page policy and the window configuration (T-02-56, T-02-57, DESK-26) ---------------------------------------
+
+fn tauri_conf() -> serde_json::Value {
+    serde_json::from_str(TAURI_CONF).expect("tauri.conf.json is JSON")
+}
+
+/// The directives of a policy: name to the list of its sources.
+fn directives(policy: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    for part in policy.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let mut words = part.split_whitespace();
+        let name = words.next().expect("a directive has a name").to_ascii_lowercase();
+        assert!(!out.contains_key(&name), "the policy sets {name} twice");
+        out.insert(name, words.map(str::to_owned).collect());
+    }
+    out
+}
+
+fn csp() -> String {
+    let conf = tauri_conf();
+    conf.pointer("/app/security/csp").and_then(|c| c.as_str()).expect("app.security.csp is a string").to_owned()
+}
+
+#[test]
+fn the_policy_allows_nothing_inline_nothing_dynamic_and_no_remote_origin() {
+    let policy = csp();
+    let d = directives(&policy);
+    let want = |name: &str, sources: &[&str]| {
+        let have = d.get(name).unwrap_or_else(|| panic!("the policy has no {name} directive"));
+        assert_eq!(have, sources, "{name} must be exactly {sources:?}");
+    };
+    want("default-src", &["'self'"]);
+    want("script-src", &["'self'"]);
+    want("style-src", &["'self'"]);
+    want("font-src", &["'self'"]);
+    want("connect-src", &["ipc:", "http://ipc.localhost"]);
+    want("object-src", &["'none'"]);
+    want("base-uri", &["'none'"]);
+    want("form-action", &["'none'"]);
+
+    assert!(!policy.contains("unsafe-inline"), "the policy allows inline code or style");
+    assert!(!policy.contains("unsafe-eval"), "the policy allows eval");
+    assert!(!policy.contains("data:") && !policy.contains("blob:"), "the policy allows data or blob sources");
+    // The only remote-looking origin is the IPC host of the Windows and Android webviews, in connect-src.
+    for (name, sources) in &d {
+        for source in sources {
+            let remote = source.starts_with("http:") || source.starts_with("https:") || source.starts_with("ws");
+            let ipc = name == "connect-src" && source == "http://ipc.localhost";
+            assert!(!remote || ipc, "{name} allows the origin {source}");
+            assert!(source != "*", "{name} allows every origin");
+        }
+    }
+}
+
+#[test]
+fn the_main_window_draws_its_own_title_bar_and_has_a_minimum_size() {
+    let conf = tauri_conf();
+    let windows = conf.pointer("/app/windows").and_then(|w| w.as_array()).expect("app.windows is an array");
+    assert_eq!(windows.len(), 1, "one window is configured");
+    let window = &windows[0];
+    assert!(window.get("label").is_none_or(|l| l == "main"), "the configured window must be the one labelled main");
+    assert_eq!(window.get("titleBarStyle").and_then(|v| v.as_str()), Some("Overlay"));
+    assert_eq!(window.get("hiddenTitle").and_then(|v| v.as_bool()), Some(true));
+    assert!(window.get("minWidth").and_then(|v| v.as_u64()).is_some_and(|w| w >= 480), "minWidth must be at least 480");
+    assert!(window.get("minHeight").and_then(|v| v.as_u64()).is_some_and(|h| h >= 320), "minHeight must be at least 320");
+}
+
+#[test]
+fn the_global_tauri_object_stays_and_nothing_points_at_the_network() {
+    let conf = tauri_conf();
+    // The page uses window.__TAURI__ and no bundler; the manifest and the capability are the guard.
+    assert_eq!(conf.pointer("/app/withGlobalTauri").and_then(|v| v.as_bool()), Some(true));
+    // A development CSP or a dev server URL would be a second, weaker policy.
+    assert!(conf.pointer("/app/security/devCsp").is_none_or(|v| v.is_null()), "devCsp must not be set");
+    assert!(conf.pointer("/build/devUrl").is_none_or(|v| v.is_null()), "devUrl must not be set");
+    let dist = conf.pointer("/build/frontendDist").and_then(|v| v.as_str()).expect("build.frontendDist is a string");
+    assert!(!dist.contains("://"), "frontendDist points at {dist}");
+    assert!(conf.pointer("/app/security/dangerousDisableAssetCspModification").is_none(), "asset CSP is modified by Tauri");
 }
