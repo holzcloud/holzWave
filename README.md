@@ -4,7 +4,7 @@
 
 <br>
 
-[![Status](https://img.shields.io/badge/status-planning%2C%20no%20code%20yet-FF8FB8?style=for-the-badge)](docs/roadmap.md)
+[![Status](https://img.shields.io/badge/status-phase%201%20spike-FF8FB8?style=for-the-badge)](docs/roadmap.md)
 [![Platforms](https://img.shields.io/badge/macOS%20·%20Windows%20·%20Linux%20·%20iOS%20·%20Android-planned-111827?style=for-the-badge)](docs/roadmap.md#platforms)
 [![Rust](https://img.shields.io/badge/core-Rust-8D3F63?style=for-the-badge&logo=rust&logoColor=white)](docs/architecture.md)
 [![Tauri](https://img.shields.io/badge/shell-Tauri%202-8D3F63?style=for-the-badge&logo=tauri&logoColor=white)](docs/architecture.md)
@@ -22,9 +22,10 @@ Tiling blocks, SSH that reconnects, previews next to the shell, and settings tha
 ---
 
 > [!WARNING]
-> **There is no code and no download yet.** holzWave is in the planning stage; the first milestone is a one-week
-> spike that decides the terminal engine and the renderer. Everything below describes what is *planned*. Nothing in
-> the feature list is built, and the order and scope will change when the spike has results.
+> **There is no app and no download yet.** holzWave is in phase 1, a spike that decides the terminal engine and the
+> renderer. What exists is the Rust core with the `TerminalEngine` trait, a `libghostty-vt` engine, a PTY wrapper and
+> a command-line tool that measures them (`cargo run -p holzwave-spike`). Everything in the feature list below is
+> *planned*, and order and scope will change when the spike has results.
 
 ## What it is going to be
 
