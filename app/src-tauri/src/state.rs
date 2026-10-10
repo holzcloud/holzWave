@@ -11,7 +11,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use holzwave_core::engine::{CopyOp, CopyState, DomKey, EngineTheme, PasteOutcome, SearchOp, SearchState, SelectOp};
+use holzwave_core::engine::{
+    CopyOp, CopyState, DomKey, EngineTheme, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, SearchOp,
+    SearchState, SelectOp, WheelEvent,
+};
 use holzwave_core::keybindings::Keybindings;
 use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
@@ -384,6 +387,8 @@ pub struct AppCore {
     session: Arc<Mutex<Session>>,
     /// Writes `session.json` two seconds after the first change of a burst, and when flushed.
     session_saver: Debounced,
+    /// Starts the opener of the platform for `open_url` and `reveal_path`; tests put a recorder here.
+    launcher: Mutex<fn(&Launch) -> Result<(), String>>,
     sink: Arc<dyn Sink>,
     shell: ShellSpec,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
@@ -446,6 +451,7 @@ impl AppCore {
             starts: Mutex::new(HashMap::new()),
             session,
             session_saver,
+            launcher: Mutex::new(spawn_launch),
             sink,
             shell,
             saver,
@@ -648,6 +654,34 @@ impl AppCore {
     pub fn placement(&self, monitors: &[MonitorRect]) -> Placement {
         lock(&self.session).placement(monitors)
     }
+
+    // ---- links, paths, app info and the pointer ------------------------------------------------------------
+
+    /// Open a link with the platform opener. Only http, https and mailto links are opened.
+    ///
+    /// Starts a process, so the command is async.
+    pub fn open_url(&self, _url: &str) -> Result<(), String> {
+        Err("not implemented".into())
+    }
+
+    /// Reveal a file or folder in the platform file manager without ever running it.
+    ///
+    /// Touches the file system and starts a process, so the command is async.
+    pub fn reveal_path(&self, _path: &str, _base: Option<&str>) -> Result<(), String> {
+        Err("not implemented".into())
+    }
+
+    /// The version of the app, the operating system and the name of the machine.
+    pub fn app_info(&self) -> AppInfo {
+        AppInfo { version: String::new(), os: String::new(), hostname: String::new() }
+    }
+
+    /// A mouse press, release or motion at device pixels `x`, `y` from the origin of the pane's grid. Only pushes
+    /// to the pane's queue.
+    pub fn mouse(&self, _pane: PaneId, _action: MouseAction, _button: MouseButton, _x: f64, _y: f64, _mods: u32) {}
+
+    /// A wheel event of `rows` rows (negative towards older output) at `x`, `y`. Only pushes to the pane's queue.
+    pub fn wheel(&self, _pane: PaneId, _rows: i32, _x: f64, _y: f64, _mods: u32) {}
 
     // ---- settings, themes and key bindings ---------------------------------------------------------------------
 
@@ -1098,6 +1132,77 @@ fn keep_bad_copy(path: &Path) {
     if let Err(e) = persist::backup_bad(path) {
         eprintln!("holzwave: cannot keep a copy of {}: {e}", path.display());
     }
+}
+
+// ---- links, paths and app info ------------------------------------------------------------------------------------
+
+/// The version, the operating system and the host name, for the about dialog and the status bar.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AppInfo {
+    pub version: String,
+    /// `macos`, `windows` or `linux`.
+    pub os: String,
+    /// Empty when it cannot be read.
+    pub hostname: String,
+}
+
+/// A program of the platform to start and its arguments, one entry per argument: never a shell and never a string
+/// that is split (V5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Launch {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+/// The longest link that is opened, in bytes.
+const MAX_URL_BYTES: usize = 2048;
+
+/// The longest path (and base directory) that is revealed, in bytes.
+const MAX_PATH_BYTES: usize = 4096;
+
+/// The largest value of a pointer position, in device pixels.
+const MAX_POINTER_PX: f64 = 100_000.0;
+
+/// The most rows one wheel event moves, in either direction.
+const MAX_WHEEL_ROWS: i32 = 100;
+
+/// How the platform opens a link: validated first, then one fixed program with the link as its only argument.
+fn open_launch(_os: &str, _url: &str) -> Result<Launch, String> {
+    Err("not implemented".into())
+}
+
+/// The path a `reveal_path` call means: absolute, `~/` from the home directory, or relative to `base`. It has to
+/// exist.
+fn resolve_reveal(_path: &str, _base: Option<&str>, _home: Option<&Path>) -> Result<PathBuf, String> {
+    Err("not implemented".into())
+}
+
+/// How the platform shows an existing absolute path in the file manager, without running it.
+fn reveal_launch(_os: &str, _path: &Path) -> Result<Launch, String> {
+    Err("not implemented".into())
+}
+
+/// Start `launch` and do not wait for it: a browser that is started anew can run for as long as the user keeps it.
+fn spawn_launch(_launch: &Launch) -> Result<(), String> {
+    Err("not implemented".into())
+}
+
+/// A pointer coordinate as the engine gets it: finite and between 0 and [`MAX_POINTER_PX`].
+fn clamp_pointer(value: f64) -> f32 {
+    value as f32
+}
+
+fn clamp_rows(rows: i32) -> i32 {
+    rows
+}
+
+fn pointer_mods(mods: u32) -> Mods {
+    Mods::from_bits(mods as u8)
+}
+
+/// The host name from what the platform gave: the first line, without control characters, at most 255 characters.
+fn clean_hostname(_raw: &[u8]) -> String {
+    String::new()
 }
 
 /// Read the session file. There is no error case: a file that cannot be used costs the hints in it and nothing else,
@@ -2386,6 +2491,273 @@ mod tests {
         core.start_pane(pane, 80, 24, 0, 0).expect("starts");
         assert!(wait_until(WAIT, || !rec.frames(pane).is_empty()), "no frame");
         assert_eq!(std::fs::read_to_string(dir.0.join("session.json.bad")).unwrap(), hostile);
+    }
+
+    // ---- links, paths, app info and the pointer (plan 23, task 3) ------------------------------------------------
+
+    static LAUNCHED: Mutex<Vec<Launch>> = Mutex::new(Vec::new());
+
+    /// Stands in for the opener: records instead of starting a process.
+    fn record_launch(launch: &Launch) -> Result<(), String> {
+        lock(&LAUNCHED).push(launch.clone());
+        Ok(())
+    }
+
+    fn launches_with(arg: &str) -> Vec<Launch> {
+        lock(&LAUNCHED).iter().filter(|l| l.args.iter().any(|a| a == arg)).cloned().collect()
+    }
+
+    /// A core whose opener only records.
+    fn recording_core() -> (Arc<AppCore>, Arc<Recorder>, Scratch) {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        *lock(&core.launcher) = record_launch;
+        (core, rec, dir)
+    }
+
+    #[test]
+    fn open_url_opens_http_https_and_mailto_and_nothing_else() {
+        let (core, _rec, _dir) = recording_core();
+        let good = [
+            "https://example.org/a?b=c#d-open-1",
+            "http://localhost:8080/open-2",
+            "mailto:holz@example.org?subject=open-3",
+            "HTTPS://EXAMPLE.ORG/open-4",
+        ];
+        for url in good {
+            assert_eq!(core.open_url(url), Ok(()), "{url}");
+            assert_eq!(launches_with(url).len(), 1, "{url} is opened exactly once");
+        }
+
+        let long_ok = format!("https://example.org/{}", "a".repeat(MAX_URL_BYTES - "https://example.org/".len()));
+        assert_eq!(long_ok.len(), MAX_URL_BYTES);
+        assert_eq!(core.open_url(&long_ok), Ok(()), "2048 bytes are fine");
+
+        let too_long = format!("https://example.org/{}", "b".repeat(MAX_URL_BYTES));
+        let bad = [
+            "file:///etc/passwd-open-5",
+            "javascript:alert(1)-open-6",
+            "ftp://example.org/open-7",
+            "data:text/html,open-8",
+            "vscode://open-9",
+            "x-man-page://open-10",
+            "http:open-11",
+            "https://",
+            "https:///etc/open-12",
+            "mailto:",
+            "",
+            "   https://example.org/open-13",
+            "https://example.org/open 14",
+            "https://exam\nple.org/open-15",
+            "https://example.org/\u{7f}open-16",
+            "https://example.org/\u{9b}open-17",
+            "https://example.org/\u{0}open-18",
+            "not a url open-19",
+            too_long.as_str(),
+        ];
+        for url in bad {
+            assert!(core.open_url(url).is_err(), "{:?} must be refused", url.chars().take(40).collect::<String>());
+            assert!(launches_with(url).is_empty(), "an opener was started for {:?}", url.chars().take(40).collect::<String>());
+        }
+    }
+
+    #[test]
+    fn the_opener_is_one_fixed_program_with_the_link_as_a_single_argument() {
+        let url = "https://example.org/a?b=c&d=e";
+
+        assert_eq!(
+            open_launch("macos", url),
+            Ok(Launch { program: "/usr/bin/open", args: vec![url.to_owned()] })
+        );
+        assert_eq!(open_launch("linux", url), Ok(Launch { program: "xdg-open", args: vec![url.to_owned()] }));
+        assert!(open_launch("windows", url).is_err(), "no opener on this platform until phase 2.2");
+        assert!(open_launch("macos", "file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn reveal_resolves_absolute_home_and_relative_paths_and_requires_that_they_exist() {
+        let dir = Scratch::new("reveal-resolve");
+        let home = real_dir(&dir, "home");
+        let base = real_dir(&dir, "work");
+        std::fs::create_dir_all(home.join("docs")).unwrap();
+        std::fs::write(home.join("docs").join("note.txt"), "x").unwrap();
+        std::fs::write(base.join("main.rs"), "x").unwrap();
+        std::fs::write(base.join("-rf"), "x").unwrap();
+        let file = base.join("main.rs");
+        let text = |p: &Path| p.to_str().unwrap().to_owned();
+
+        assert_eq!(resolve_reveal(&text(&file), None, None), Ok(file.clone()), "absolute");
+        assert_eq!(
+            resolve_reveal("~/docs/note.txt", None, Some(&home)),
+            Ok(home.join("docs").join("note.txt")),
+            "home"
+        );
+        assert_eq!(resolve_reveal("main.rs", Some(&text(&base)), None), Ok(file.clone()), "relative to the base");
+        assert_eq!(
+            resolve_reveal("-rf", Some(&text(&base)), None),
+            Ok(base.join("-rf")),
+            "a name that looks like an option is a path below the base, so it is absolute when it is revealed"
+        );
+
+        assert!(resolve_reveal(&text(&base.join("missing.rs")), None, None).is_err(), "missing");
+        assert!(resolve_reveal("main.rs", None, None).is_err(), "relative without a base");
+        assert!(resolve_reveal("main.rs", Some("relative/base"), None).is_err(), "a base that is not absolute");
+        assert!(resolve_reveal("~/docs/note.txt", None, None).is_err(), "no home directory known");
+        assert!(resolve_reveal("", Some(&text(&base)), None).is_err());
+        assert!(resolve_reveal("main.rs\u{0}", Some(&text(&base)), None).is_err(), "control character");
+        assert!(resolve_reveal("main\n.rs", Some(&text(&base)), None).is_err(), "control character");
+        assert!(resolve_reveal(&"a".repeat(MAX_PATH_BYTES + 1), Some(&text(&base)), None).is_err(), "too long");
+    }
+
+    #[test]
+    fn reveal_shows_a_file_in_the_file_manager_and_never_runs_it() {
+        let dir = Scratch::new("reveal-launch");
+        let root = real_dir(&dir, "root");
+        let file = root.join("tool.sh");
+        std::fs::write(&file, "x").unwrap();
+        let target = file.to_str().unwrap().to_owned();
+
+        assert_eq!(
+            reveal_launch("macos", &file),
+            Ok(Launch { program: "/usr/bin/open", args: vec!["-R".into(), target.clone()] })
+        );
+        // Linux has no reveal: the folder that holds a file is opened, a folder is opened as it is.
+        assert_eq!(
+            reveal_launch("linux", &file),
+            Ok(Launch { program: "xdg-open", args: vec![root.to_str().unwrap().to_owned()] })
+        );
+        assert_eq!(
+            reveal_launch("linux", &root),
+            Ok(Launch { program: "xdg-open", args: vec![root.to_str().unwrap().to_owned()] })
+        );
+        assert!(reveal_launch("windows", &file).is_err());
+    }
+
+    #[test]
+    fn reveal_path_of_an_executable_starts_the_opener_not_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let (core, _rec, dir) = recording_core();
+        let root = real_dir(&dir, "exec");
+        let marker = root.join("ran");
+        let script = root.join("runme.sh");
+        std::fs::write(&script, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let target = script.to_str().unwrap().to_owned();
+
+        assert_eq!(core.reveal_path(&target, None), Ok(()));
+
+        let launches = launches_with(&target);
+        assert_eq!(launches.len(), 1, "the recorder saw one launch");
+        assert_ne!(launches[0].program, target, "the file itself is never the program");
+        assert!(matches!(launches[0].program, "/usr/bin/open" | "xdg-open"), "{:?}", launches[0]);
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!marker.exists(), "the file was executed");
+    }
+
+    #[test]
+    fn reveal_path_with_a_missing_path_is_an_error_and_starts_no_opener() {
+        let (core, _rec, dir) = recording_core();
+        let missing = dir.0.join("nothing-here-reveal-1");
+        let missing_text = missing.to_str().unwrap().to_owned();
+
+        assert!(core.reveal_path(&missing_text, None).is_err());
+        assert!(core.reveal_path("nothing-here-reveal-2", Some(dir.0.to_str().unwrap())).is_err());
+
+        assert!(launches_with(&missing_text).is_empty());
+        assert!(launches_with(dir.0.join("nothing-here-reveal-2").to_str().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn app_info_has_the_crate_version_the_os_name_and_the_host_name() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+
+        let info = core.app_info();
+
+        assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.os, std::env::consts::OS);
+        assert!(["macos", "windows", "linux"].contains(&info.os.as_str()), "{}", info.os);
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
+            assert!(!info.hostname.is_empty(), "the host name could not be read");
+        }
+        assert!(!info.hostname.chars().any(char::is_control));
+        assert!(info.hostname.chars().count() <= 255);
+    }
+
+    #[test]
+    fn a_host_name_is_the_first_line_without_control_characters_and_bounded() {
+        assert_eq!(clean_hostname(b"holz-mac.local\n"), "holz-mac.local");
+        assert_eq!(clean_hostname(b"  holz-mac  \nsecond line\n"), "holz-mac");
+        assert_eq!(clean_hostname(b"ho\x1b]0;evil\x07lz"), "ho]0;evillz");
+        assert_eq!(clean_hostname(&[0xff, 0xfe]), "", "not UTF-8 is no name");
+        assert_eq!(clean_hostname(b""), "");
+        assert_eq!(clean_hostname("a".repeat(1000).as_bytes()).chars().count(), 255);
+    }
+
+    #[test]
+    fn programs_are_started_by_absolute_path_except_the_one_documented_linux_opener() {
+        // T-02-89: nothing of the production code looks a program up through PATH, so that PATH cannot redirect it.
+        let source = include_str!("state.rs");
+        let production = source.split("#[cfg(test)]\nmod tests").next().expect("production part");
+        let mut programs = Vec::new();
+        for marker in ["program: \"", "Command::new(\""] {
+            for part in production.split(marker).skip(1) {
+                programs.push(part.split('"').next().unwrap_or_default().to_owned());
+            }
+        }
+        assert!(programs.len() >= 3, "the scanner found only {programs:?}");
+        for program in programs {
+            assert!(
+                program.starts_with('/') || program == "xdg-open",
+                "{program:?} is looked up through PATH"
+            );
+        }
+    }
+
+    #[test]
+    fn pointer_values_are_finite_within_bounds_and_wheel_rows_and_modifiers_are_clamped() {
+        assert_eq!(clamp_pointer(f64::NAN), 0.0);
+        assert_eq!(clamp_pointer(f64::INFINITY), 0.0);
+        assert_eq!(clamp_pointer(f64::NEG_INFINITY), 0.0);
+        assert_eq!(clamp_pointer(-5.0), 0.0);
+        assert_eq!(clamp_pointer(1e12), 100_000.0);
+        assert_eq!(clamp_pointer(12.5), 12.5);
+        assert_eq!(clamp_rows(i32::MIN), -100);
+        assert_eq!(clamp_rows(i32::MAX), 100);
+        assert_eq!(clamp_rows(-3), -3);
+        assert_eq!(pointer_mods(0xFFFF_FFF3), Mods::from_bits(3));
+        assert_eq!(pointer_mods(8), Mods::SUPER);
+    }
+
+    #[test]
+    fn mouse_and_wheel_reach_a_program_that_asked_for_the_mouse() {
+        let (core, rec, _dir) = sh("printf '\\033[?1000h\\033[?1006h'; echo ready; exec /bin/cat");
+        let pane = only_pane(&core);
+        core.start_pane(pane, 40, 10, 8, 16).expect("starts");
+        assert!(wait_until(WAIT, || rec.has_text(pane, "ready")), "the program did not start");
+
+        // Pixel (36, 40) on a grid of 8 x 16 cells is column 4, row 2: SGR reports are one based.
+        core.mouse(pane, MouseAction::Press, MouseButton::Left, 36.0, 40.0, 0);
+        assert!(wait_until(WAIT, || rec.has_text(pane, "^[[<0;5;3M")), "no press report: {:?}", rec.all().len());
+        core.mouse(pane, MouseAction::Release, MouseButton::Left, 36.0, 40.0, 0);
+        assert!(wait_until(WAIT, || rec.has_text(pane, "^[[<0;5;3m")), "no release report");
+
+        core.wheel(pane, -2, 36.0, 40.0, 0);
+        assert!(wait_until(WAIT, || rec.has_text(pane, "^[[<64;5;3M")), "no wheel report");
+    }
+
+    #[test]
+    fn mouse_and_wheel_for_an_unknown_pane_or_with_hostile_numbers_change_nothing_and_do_not_panic() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        core.start_pane(pane, 40, 10, 8, 16).expect("starts");
+
+        core.mouse(99_999, MouseAction::Press, MouseButton::Left, 1.0, 1.0, 0);
+        core.wheel(99_999, 5, 1.0, 1.0, 0);
+        core.mouse(pane, MouseAction::Motion, MouseButton::None, f64::NAN, f64::INFINITY, u32::MAX);
+        core.wheel(pane, i32::MIN, f64::NEG_INFINITY, 1e300, u32::MAX);
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(rec.pane_exits().is_empty());
+        assert!(core.pid(pane).is_some(), "the pane is alive");
     }
 
 }
