@@ -1,6 +1,7 @@
 //! A pseudo-terminal running a child process, on top of `portable-pty`.
 
 use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -8,6 +9,65 @@ use crate::{Error, Result};
 
 fn pty<E: std::fmt::Display>(e: E) -> Error {
     Error::Pty(e.to_string())
+}
+
+/// How a pane's child process is started. Skeleton: most settings are not applied yet.
+#[derive(Debug, Clone)]
+pub struct SpawnOptions {
+    program: String,
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+    cols: u16,
+    rows: u16,
+    cell_px: (u32, u32),
+    env: Vec<(String, String)>,
+}
+
+impl SpawnOptions {
+    pub fn new(program: impl Into<String>, cols: u16, rows: u16) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            cwd: None,
+            cols,
+            rows,
+            cell_px: (0, 0),
+            env: Vec::new(),
+        }
+    }
+
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+
+    pub fn cell_px(mut self, width: u32, height: u32) -> Self {
+        self.cell_px = (width, height);
+        self
+    }
+
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+
+    pub fn child_env(&self, _parent: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+        vec![("TERM".into(), "xterm-256color".into())]
+    }
+}
+
+/// The working directory of a running process, when it can be read. Skeleton.
+pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
+    None
 }
 
 pub struct Pty {
@@ -20,11 +80,17 @@ pub struct Pty {
 impl Pty {
     /// Start `program` with `args` in a new PTY of the given size.
     pub fn spawn(program: &str, args: &[&str], cols: u16, rows: u16) -> Result<Self> {
+        Self::spawn_with(&SpawnOptions::new(program, cols, rows).args(args.iter().copied()))
+    }
+
+    /// Start a child as described by `options`. Skeleton: the working directory and environment are not applied.
+    pub fn spawn_with(options: &SpawnOptions) -> Result<Self> {
+        let (program, args, cols, rows) = (&options.program, &options.args, options.cols, options.rows);
         let pair = native_pty_system()
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(pty)?;
         let mut cmd = CommandBuilder::new(program);
-        cmd.args(args);
+        cmd.args(args.iter());
         cmd.env("TERM", "xterm-256color");
         let child = pair.slave.spawn_command(cmd).map_err(pty)?;
         drop(pair.slave);
@@ -36,6 +102,21 @@ impl Pty {
     /// The read end. It can be taken once, to move it to a reader thread.
     pub fn take_reader(&mut self) -> Option<Box<dyn Read + Send>> {
         self.reader.take()
+    }
+
+    /// Hand the writer to a writer thread. Skeleton.
+    pub fn take_writer(&mut self) -> Option<Box<dyn Write + Send>> {
+        None
+    }
+
+    /// The exit code once the child has exited, `None` while it runs. Skeleton.
+    pub fn try_wait(&mut self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
+    /// Resize with a pixel size. Skeleton: pixels are ignored.
+    pub fn resize_px(&self, cols: u16, rows: u16, _px_w: u32, _px_h: u32) -> Result<()> {
+        self.resize(cols, rows)
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
