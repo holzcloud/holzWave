@@ -1,11 +1,13 @@
 // holzWave frontend: tabs, workspaces and tiled panes drawn on one canvas.
 // No framework and no @tauri-apps/api: the Tauri global is enough for the commands and two events.
-// The pieces live in their own modules: bridge, types, state, geometry, dom and overlay.
+// The pieces live in their own modules: bridge, types, state, geometry, dom, overlay, actions, chords and keyboard.
+import { registerAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { el } from "./dom.js";
 import { FONT_PX, Frame, Metrics, Renderer, font } from "./frame.js";
 import { cellAt, fitCells, gridRect, ordered, paneAt } from "./geometry.js";
+import { initKeyboard } from "./keyboard.js";
 import { initOverlay, renderOverlay } from "./overlay.js";
 import { state } from "./state.js";
 import type { PaneFrame, View } from "./types.js";
@@ -173,54 +175,6 @@ function schedule() {
 
 // ---- input ---------------------------------------------------------------------------------------
 
-const KEYS: Record<string, string> = {
-  Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b",
-  ArrowUp: "\x1b[A", ArrowDown: "\x1b[B", ArrowRight: "\x1b[C", ArrowLeft: "\x1b[D",
-  Home: "\x1b[H", End: "\x1b[F", Delete: "\x1b[3~", PageUp: "\x1b[5~", PageDown: "\x1b[6~",
-};
-
-function send(data: string) {
-  if (!state.view) return;
-  if (state.selection) { state.selection = null; renderOverlay(); }
-  void call("input", { pane: state.view.focus, data });
-}
-
-/** Window-level shortcuts. Returns true if the key was one. */
-function shortcut(e: KeyboardEvent): boolean {
-  if (!e.metaKey) return false;
-  const k = e.key.toLowerCase();
-  const run = (p: Promise<View>) => void p.then(applyView);
-  if (k === "d") run(call("split", { column: e.shiftKey }));
-  else if (k === "t") run(call("new_tab"));
-  else if (k === "n" && e.shiftKey) run(call("new_workspace", { name: `ws ${(state.view?.workspaces.length ?? 0) + 1}` }));
-  else if (k === "w" && e.shiftKey) run(call("close_pane", { pane: state.view!.focus }));
-  else if (k === "]") run(call("cycle_focus", { step: 1 }));
-  else if (k === "[") run(call("cycle_focus", { step: -1 }));
-  else if (/^[1-9]$/.test(k)) run(call(e.altKey ? "select_workspace" : "select_tab", { index: Number(k) - 1 }));
-  else if (k === "c") { const t = selectedText(); if (t) void navigator.clipboard.writeText(t); }
-  else return false;
-  e.preventDefault();
-  return true;
-}
-
-window.addEventListener("keydown", (e) => {
-  if (shortcut(e) || e.metaKey) return;
-  let data = KEYS[e.key];
-  if (data === undefined && e.ctrlKey && e.key.length === 1) {
-    const c = e.key.toLowerCase().charCodeAt(0);
-    if (c >= 97 && c <= 122) data = String.fromCharCode(c - 96);
-  }
-  if (data === undefined && e.key.length === 1 && !e.ctrlKey) data = e.altKey ? "\x1b" + e.key : e.key;
-  if (data === undefined) return;
-  e.preventDefault();
-  send(data);
-});
-
-window.addEventListener("paste", (e) => {
-  const text = e.clipboardData?.getData("text");
-  if (text) send(text);
-});
-
 // Mouse: click focuses a pane, drag selects, the wheel scrolls the pane under the pointer.
 let dragging = false;
 canvas.addEventListener("pointerdown", (e) => {
@@ -274,6 +228,16 @@ window.addEventListener("resize", fit);
 
 async function main() {
   initOverlay(applyView);
+  initKeyboard(applyView);
+  // Until the pointer module takes over (the selection is still frontend state here), copy lives next to it.
+  registerAction({
+    id: "edit.copy",
+    title: "Copy",
+    run: () => {
+      const t = selectedText();
+      if (t) void navigator.clipboard.writeText(t);
+    },
+  });
   await listen<PaneFrame>("screen", (p) => {
     state.frames.set(p.pane, p.frame);
     schedule();
