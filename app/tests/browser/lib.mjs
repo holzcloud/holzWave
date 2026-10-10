@@ -38,9 +38,10 @@ export async function launch(engine) {
 /**
  * A fresh page with the Tauri stub installed before any page script, plus `errors`: one string for every
  * uncaught page error and every Content-Security-Policy violation. A test fails if `errors` is not empty.
+ * `deviceScaleFactor` sets window.devicePixelRatio (1 by default).
  */
-export async function newPage(browser, { viewport = { width: 1000, height: 640 } } = {}) {
-  const page = await browser.newPage({ viewport });
+export async function newPage(browser, { viewport = { width: 1000, height: 640 }, deviceScaleFactor = 1 } = {}) {
+  const page = await browser.newPage({ viewport, deviceScaleFactor });
   const errors = [];
   page.on("pageerror", (e) => errors.push(`page error: ${e.message}`));
   await page.exposeFunction("__reportCsp__", (what) => errors.push(`csp violation: ${what}`));

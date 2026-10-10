@@ -11,7 +11,7 @@ import { state } from "./state.js";
 import type { PaneFrame, View } from "./types.js";
 
 async function main() {
-  initScene();
+  await initScene();
   initOverlay(applyView);
   initKeyboard(applyView);
   initPointer(applyView);

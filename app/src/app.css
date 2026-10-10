@@ -1,11 +1,27 @@
 /* The page stylesheet. It is a file so the policy needs no `unsafe-inline` for styles; later stylesheets are
    added with `loadStyles(href)` from dom.ts instead of editing this file or index.html. */
+
+/* JetBrains Mono (OFL), bundled in fonts/ (see fonts/README.md). `block` keeps the grid from being measured or
+   drawn with a fallback face; scene.initScene waits for the faces before it measures. */
+@font-face {
+  font-family: "JetBrains Mono"; font-style: normal; font-weight: 400; font-display: block;
+  src: url("./fonts/JetBrainsMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono"; font-style: normal; font-weight: 700; font-display: block;
+  src: url("./fonts/JetBrainsMono-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono"; font-style: italic; font-weight: 400; font-display: block;
+  src: url("./fonts/JetBrainsMono-Italic.woff2") format("woff2");
+}
+
 :root {
   color-scheme: dark;
   --ground: #14091a; --bar: #1d0f26; --edge: #3a2144; --ink: #f6efe6; --ink2: #b9a3b6; --rose: #ff8fb8;
 }
 html, body { margin: 0; height: 100%; background: var(--ground); overflow: hidden;
-             font: 12px/1 -apple-system, "SF Pro Text", system-ui, sans-serif; color: var(--ink); }
+             font: 12px/1 "JetBrains Mono", ui-monospace, Menlo, monospace; color: var(--ink); }
 #app { display: flex; flex-direction: column; height: 100%; }
 #bar { display: flex; align-items: center; gap: 4px; padding: 0 8px; height: 32px; flex: none;
        background: var(--bar); border-bottom: 1px solid var(--edge); user-select: none; }
@@ -27,5 +43,5 @@ html, body { margin: 0; height: 100%; background: var(--ground); overflow: hidde
 .divider:hover::after { background: var(--rose); }
 .focus { position: absolute; box-sizing: border-box; border: 1px solid rgba(255, 143, 184, .55); border-radius: 3px; }
 .sel { position: absolute; background: rgba(255, 143, 184, .35); }
-#stats { position: absolute; right: 8px; bottom: 6px; font: 11px/1.2 ui-monospace, Menlo, monospace;
+#stats { position: absolute; right: 8px; bottom: 6px; font: 11px/1.2 "JetBrains Mono", ui-monospace, Menlo, monospace;
          color: var(--rose); opacity: .7; pointer-events: none; white-space: pre; text-align: right; }

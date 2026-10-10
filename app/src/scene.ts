@@ -5,7 +5,7 @@
 import { call } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
-import { FONT_PX, Frame, Metrics, Renderer, font } from "./frame.js";
+import { BOLD, FONT_PX, Frame, ITALIC, Metrics, Renderer, font } from "./frame.js";
 import { fitCells, gridRect } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
 import { state } from "./state.js";
@@ -26,10 +26,10 @@ export function canvas(): HTMLCanvasElement {
 }
 
 /**
- * Pick the renderer, take the first measurement and follow window resizes. Call once at start-up, before any
- * module attaches listeners to the canvas.
+ * Pick the renderer, load the terminal font, take the first measurement and follow window resizes. Call once at
+ * start-up and wait for it, before any module attaches listeners to the canvas.
  */
-export function initScene(): void {
+export async function initScene(): Promise<void> {
   // `?renderer=canvas` or `?renderer=webgl`; WebGL2 is the default and Canvas 2D is the fallback.
   const wanted = new URLSearchParams(location.search).get("renderer");
   if (wanted === "canvas") {
@@ -44,8 +44,22 @@ export function initScene(): void {
       renderer = new Canvas2DRenderer(replaceCanvas());
     }
   }
+  await loadFonts();
   state.metrics = measure();
   window.addEventListener("resize", fit);
+}
+
+/**
+ * The three bundled faces at the terminal size, loaded before anything is measured: a measurement against a
+ * fallback face would size the grid for the wrong font. A face that cannot be loaded is not fatal; the page then
+ * runs on the fallback families of `FONT_FAMILY`.
+ */
+async function loadFonts(): Promise<void> {
+  try {
+    await Promise.all([font(0), font(BOLD), font(ITALIC)].map((f) => document.fonts.load(f)));
+  } catch {
+    // keep going with the fallback face
+  }
 }
 
 /** Put a new canvas element with the same attributes and inline properties where the current one is. */
@@ -71,13 +85,19 @@ export function focusCanvas(): void {
   canvas().focus();
 }
 
+/**
+ * Cell size in CSS pixels, snapped so that `cell * dpr` is a whole number of device pixels: the glyph grid the
+ * renderers draw, the overlay and the hit tests then all use the same pitch (a fractional cell drifts at dpr 2).
+ */
 function measure(): Metrics {
   const probe = document.createElement("canvas").getContext("2d")!;
   probe.font = font(0);
+  const dpr = window.devicePixelRatio || 1;
+  const snap = (cssPx: number) => Math.max(1, Math.round(cssPx * dpr)) / dpr;
   return {
-    cellW: probe.measureText("M").width,
-    cellH: Math.ceil(FONT_PX * 1.25),
-    dpr: window.devicePixelRatio || 1,
+    cellW: snap(probe.measureText("M").width),
+    cellH: snap(Math.ceil(FONT_PX * 1.25)),
+    dpr,
     width: canvas().clientWidth,
     height: canvas().clientHeight,
   };
