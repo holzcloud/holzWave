@@ -642,7 +642,6 @@ impl AppCore {
 
     /// Remember the window geometry for the next start. Clamped into range by the session; only touches the
     /// debounced saver, so it is cheap on the thread of the window events.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn note_window(&self, window: WindowState) {
         lock(&self.session).set_window(window);
         self.session_saver.touch();
@@ -650,7 +649,6 @@ impl AppCore {
 
     /// Where and how large the window opens, given the monitors that are connected now: the saved size, and the
     /// saved position only if enough of the window is on one of them.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn placement(&self, monitors: &[MonitorRect]) -> Placement {
         lock(&self.session).placement(monitors)
     }

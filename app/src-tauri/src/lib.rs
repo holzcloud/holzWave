@@ -12,11 +12,11 @@ mod commands;
 mod menu;
 mod state;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, WebviewWindow, Window, WindowEvent};
 
-use holzwave_core::session::{MonitorRect, Placement, WindowState};
+use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
 use state::{AppCore, Out, ShellSpec, Sink};
 
 /// Sends the core's events to every webview. Frames are events and are measured (D-16).
@@ -57,9 +57,18 @@ struct Startup {
 }
 
 /// The startup actions for a placement of the core.
+///
+/// With nothing saved the core answers the default size, and then the size of the configuration is left alone: it is
+/// in logical pixels and the saved sizes are physical ones, so applying the default as a physical size would shrink
+/// the window on a high density display. (A saved window of exactly the default size, off every monitor, is treated
+/// the same way; its size differs from the default only on such a display.)
 fn startup_for(placement: Placement) -> Startup {
-    let _ = placement;
-    Startup { size: None, position: None, maximize: false }
+    let untouched = placement.size == DEFAULT_SIZE && placement.position.is_none() && !placement.maximized;
+    Startup {
+        size: (!untouched).then_some(placement.size),
+        position: placement.position,
+        maximize: placement.maximized,
+    }
 }
 
 /// What the shell reads from the window after it moved or was resized.
@@ -79,8 +88,79 @@ type Normal = (i32, i32, u32, u32);
 /// it lives (minimised, full screen). A maximised window keeps the geometry it had before, so that leaving the
 /// maximised state after a restart does not give back a window as large as the screen.
 fn state_to_note(facts: WindowFacts, normal: &mut Option<Normal>) -> Option<WindowState> {
-    let _ = (facts, normal);
-    None
+    if facts.minimized || facts.fullscreen {
+        return None;
+    }
+    let current = (facts.position.0, facts.position.1, facts.size.0, facts.size.1);
+    let (x, y, width, height) = if facts.maximized {
+        normal.unwrap_or(current)
+    } else {
+        *normal = Some(current);
+        current
+    };
+    Some(WindowState { x, y, width, height, maximized: facts.maximized })
+}
+
+/// The geometry the window had while it was normal, kept between the window events of the one window.
+static NORMAL: Mutex<Option<Normal>> = Mutex::new(None);
+
+/// Apply the saved frame to the main window: the monitors that are connected now decide whether the saved position
+/// is used (T-02-59). Failures only cost the restore, never the start.
+fn restore_window(window: &WebviewWindow, core: &AppCore) {
+    let monitors: Vec<MonitorRect> = match window.available_monitors() {
+        Ok(list) => list
+            .iter()
+            .map(|m| MonitorRect { x: m.position().x, y: m.position().y, width: m.size().width, height: m.size().height })
+            .collect(),
+        Err(e) => {
+            eprintln!("holzwave: cannot list the monitors: {e}");
+            Vec::new()
+        }
+    };
+    let startup = startup_for(core.placement(&monitors));
+    if let Some((width, height)) = startup.size
+        && let Err(e) = window.set_size(PhysicalSize::new(width, height))
+    {
+        eprintln!("holzwave: cannot restore the window size: {e}");
+    }
+    if let Some((x, y)) = startup.position
+        && let Err(e) = window.set_position(PhysicalPosition::new(x, y))
+    {
+        eprintln!("holzwave: cannot restore the window position: {e}");
+    }
+    if startup.maximize
+        && let Err(e) = window.maximize()
+    {
+        eprintln!("holzwave: cannot maximise the window: {e}");
+    }
+}
+
+/// The main window moved or changed size: hand its frame to the core, which only touches a debounced saver, so
+/// this is cheap on the thread of the window events.
+fn note_window(window: &Window) {
+    let Some(core) = window.app_handle().try_state::<Arc<AppCore>>() else {
+        return;
+    };
+    let (Ok(position), Ok(size), Ok(maximized), Ok(minimized), Ok(fullscreen)) = (
+        window.outer_position(),
+        window.inner_size(),
+        window.is_maximized(),
+        window.is_minimized(),
+        window.is_fullscreen(),
+    ) else {
+        return;
+    };
+    let facts = WindowFacts {
+        position: (position.x, position.y),
+        size: (size.width, size.height),
+        maximized,
+        minimized,
+        fullscreen,
+    };
+    let noted = state_to_note(facts, &mut NORMAL.lock().unwrap_or_else(PoisonError::into_inner));
+    if let Some(state) = noted {
+        core.note_window(state);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -97,8 +177,17 @@ pub fn run() {
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             let sink = Arc::new(TauriSink { app: app.handle().clone() });
-            app.manage(AppCore::new(dir, sink, ShellSpec::default()));
+            let core = AppCore::new(dir, sink, ShellSpec::default());
+            app.manage(core.clone());
+            if let Some(window) = app.get_webview_window("main") {
+                restore_window(&window, &core);
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, WindowEvent::Resized(_) | WindowEvent::Moved(_)) {
+                note_window(window);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_layout,
