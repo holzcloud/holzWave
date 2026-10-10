@@ -22,15 +22,163 @@ fn color(c: libghostty_vt::style::RgbColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b }
 }
 
-/// The libghostty key for a W3C `KeyboardEvent.code`. Codes it does not know are an unidentified key, which the
-/// encoder still encodes from the event's text.
+/// The libghostty key for a W3C `KeyboardEvent.code`.
+///
+/// The variant names of `key::Key` are the W3C code names, except that the letters are `A` to `Z` for `KeyA` to
+/// `KeyZ`. The library does not expose its own parser, so the table is written out here and a unit test walks the
+/// whole enum to prove it complete. A code the table does not know (including any oversized or hostile string) is an
+/// unidentified key, which the encoder still encodes from the event's text.
 fn key_from_code(code: &str) -> Key {
     match code {
-        "ArrowUp" => Key::ArrowUp,
+        "Backquote" => Key::Backquote,
+        "Backslash" => Key::Backslash,
+        "BracketLeft" => Key::BracketLeft,
+        "BracketRight" => Key::BracketRight,
+        "Comma" => Key::Comma,
+        "Digit0" => Key::Digit0,
+        "Digit1" => Key::Digit1,
+        "Digit2" => Key::Digit2,
+        "Digit3" => Key::Digit3,
+        "Digit4" => Key::Digit4,
+        "Digit5" => Key::Digit5,
+        "Digit6" => Key::Digit6,
+        "Digit7" => Key::Digit7,
+        "Digit8" => Key::Digit8,
+        "Digit9" => Key::Digit9,
+        "Equal" => Key::Equal,
+        "IntlBackslash" => Key::IntlBackslash,
+        "IntlRo" => Key::IntlRo,
+        "IntlYen" => Key::IntlYen,
+        "Minus" => Key::Minus,
+        "Period" => Key::Period,
+        "Quote" => Key::Quote,
+        "Semicolon" => Key::Semicolon,
+        "Slash" => Key::Slash,
+        "AltLeft" => Key::AltLeft,
+        "AltRight" => Key::AltRight,
+        "Backspace" => Key::Backspace,
+        "CapsLock" => Key::CapsLock,
+        "ContextMenu" => Key::ContextMenu,
+        "ControlLeft" => Key::ControlLeft,
+        "ControlRight" => Key::ControlRight,
+        "Enter" => Key::Enter,
+        "MetaLeft" => Key::MetaLeft,
+        "MetaRight" => Key::MetaRight,
+        "ShiftLeft" => Key::ShiftLeft,
+        "ShiftRight" => Key::ShiftRight,
+        "Space" => Key::Space,
+        "Tab" => Key::Tab,
+        "Convert" => Key::Convert,
+        "KanaMode" => Key::KanaMode,
+        "NonConvert" => Key::NonConvert,
+        "Delete" => Key::Delete,
+        "End" => Key::End,
+        "Help" => Key::Help,
+        "Home" => Key::Home,
+        "Insert" => Key::Insert,
+        "PageDown" => Key::PageDown,
+        "PageUp" => Key::PageUp,
         "ArrowDown" => Key::ArrowDown,
         "ArrowLeft" => Key::ArrowLeft,
         "ArrowRight" => Key::ArrowRight,
-        "Enter" => Key::Enter,
+        "ArrowUp" => Key::ArrowUp,
+        "NumLock" => Key::NumLock,
+        "Numpad0" => Key::Numpad0,
+        "Numpad1" => Key::Numpad1,
+        "Numpad2" => Key::Numpad2,
+        "Numpad3" => Key::Numpad3,
+        "Numpad4" => Key::Numpad4,
+        "Numpad5" => Key::Numpad5,
+        "Numpad6" => Key::Numpad6,
+        "Numpad7" => Key::Numpad7,
+        "Numpad8" => Key::Numpad8,
+        "Numpad9" => Key::Numpad9,
+        "NumpadAdd" => Key::NumpadAdd,
+        "NumpadBackspace" => Key::NumpadBackspace,
+        "NumpadClear" => Key::NumpadClear,
+        "NumpadClearEntry" => Key::NumpadClearEntry,
+        "NumpadComma" => Key::NumpadComma,
+        "NumpadDecimal" => Key::NumpadDecimal,
+        "NumpadDivide" => Key::NumpadDivide,
+        "NumpadEnter" => Key::NumpadEnter,
+        "NumpadEqual" => Key::NumpadEqual,
+        "NumpadMemoryAdd" => Key::NumpadMemoryAdd,
+        "NumpadMemoryClear" => Key::NumpadMemoryClear,
+        "NumpadMemoryRecall" => Key::NumpadMemoryRecall,
+        "NumpadMemoryStore" => Key::NumpadMemoryStore,
+        "NumpadMemorySubtract" => Key::NumpadMemorySubtract,
+        "NumpadMultiply" => Key::NumpadMultiply,
+        "NumpadParenLeft" => Key::NumpadParenLeft,
+        "NumpadParenRight" => Key::NumpadParenRight,
+        "NumpadSubtract" => Key::NumpadSubtract,
+        "NumpadSeparator" => Key::NumpadSeparator,
+        "NumpadUp" => Key::NumpadUp,
+        "NumpadDown" => Key::NumpadDown,
+        "NumpadRight" => Key::NumpadRight,
+        "NumpadLeft" => Key::NumpadLeft,
+        "NumpadBegin" => Key::NumpadBegin,
+        "NumpadHome" => Key::NumpadHome,
+        "NumpadEnd" => Key::NumpadEnd,
+        "NumpadInsert" => Key::NumpadInsert,
+        "NumpadDelete" => Key::NumpadDelete,
+        "NumpadPageUp" => Key::NumpadPageUp,
+        "NumpadPageDown" => Key::NumpadPageDown,
+        "Escape" => Key::Escape,
+        "F1" => Key::F1,
+        "F2" => Key::F2,
+        "F3" => Key::F3,
+        "F4" => Key::F4,
+        "F5" => Key::F5,
+        "F6" => Key::F6,
+        "F7" => Key::F7,
+        "F8" => Key::F8,
+        "F9" => Key::F9,
+        "F10" => Key::F10,
+        "F11" => Key::F11,
+        "F12" => Key::F12,
+        "F13" => Key::F13,
+        "F14" => Key::F14,
+        "F15" => Key::F15,
+        "F16" => Key::F16,
+        "F17" => Key::F17,
+        "F18" => Key::F18,
+        "F19" => Key::F19,
+        "F20" => Key::F20,
+        "F21" => Key::F21,
+        "F22" => Key::F22,
+        "F23" => Key::F23,
+        "F24" => Key::F24,
+        "F25" => Key::F25,
+        "Fn" => Key::Fn,
+        "FnLock" => Key::FnLock,
+        "PrintScreen" => Key::PrintScreen,
+        "ScrollLock" => Key::ScrollLock,
+        "Pause" => Key::Pause,
+        "BrowserBack" => Key::BrowserBack,
+        "BrowserFavorites" => Key::BrowserFavorites,
+        "BrowserForward" => Key::BrowserForward,
+        "BrowserHome" => Key::BrowserHome,
+        "BrowserRefresh" => Key::BrowserRefresh,
+        "BrowserSearch" => Key::BrowserSearch,
+        "BrowserStop" => Key::BrowserStop,
+        "Eject" => Key::Eject,
+        "LaunchApp1" => Key::LaunchApp1,
+        "LaunchApp2" => Key::LaunchApp2,
+        "LaunchMail" => Key::LaunchMail,
+        "MediaPlayPause" => Key::MediaPlayPause,
+        "MediaSelect" => Key::MediaSelect,
+        "MediaStop" => Key::MediaStop,
+        "MediaTrackNext" => Key::MediaTrackNext,
+        "MediaTrackPrevious" => Key::MediaTrackPrevious,
+        "Power" => Key::Power,
+        "Sleep" => Key::Sleep,
+        "AudioVolumeDown" => Key::AudioVolumeDown,
+        "AudioVolumeMute" => Key::AudioVolumeMute,
+        "AudioVolumeUp" => Key::AudioVolumeUp,
+        "WakeUp" => Key::WakeUp,
+        "Copy" => Key::Copy,
+        "Cut" => Key::Cut,
+        "Paste" => Key::Paste,
         "KeyA" => Key::A,
         "KeyB" => Key::B,
         "KeyC" => Key::C,
@@ -112,6 +260,41 @@ impl GhosttyEngine {
             key_event: key::Event::new().map_err(eng)?,
             option_as_alt: false,
         })
+    }
+}
+
+impl GhosttyEngine {
+    /// Fill the reusable key event and run the encoder against the terminal's current modes.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_event(
+        &mut self,
+        action: Action,
+        key: Key,
+        mods: key::Mods,
+        consumed: key::Mods,
+        composing: bool,
+        unshifted: Option<char>,
+        text: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        self.key_event
+            .set_action(action)
+            .set_key(key)
+            .set_mods(mods)
+            .set_consumed_mods(consumed)
+            .set_composing(composing)
+            .set_unshifted_codepoint(unshifted.unwrap_or('\0'))
+            .set_utf8(text);
+
+        // The terminal's live modes (DECCKM, keypad, Kitty flags, modifyOtherKeys) are read at encode time.
+        // `set_options_from_terminal` resets option-as-alt to false, so the setting goes in afterwards.
+        let option_as_alt = if self.option_as_alt { OptionAsAlt::True } else { OptionAsAlt::False };
+        let mut out = Vec::with_capacity(16);
+        self.encoder
+            .set_options_from_terminal(&self.terminal)
+            .set_macos_option_as_alt(option_as_alt)
+            .encode_to_vec(&self.key_event, &mut out)
+            .map_err(eng)?;
+        Ok(out)
     }
 }
 
@@ -205,29 +388,32 @@ impl TerminalEngine for GhosttyEngine {
             KeyAction::Repeat => Action::Repeat,
             KeyAction::Release => Action::Release,
         };
-        self.key_event
-            .set_action(action)
-            .set_key(key_from_code(&event.code))
-            .set_mods(key_mods(event.mods))
-            .set_consumed_mods(key_mods(event.consumed))
-            .set_composing(event.composing)
-            .set_unshifted_codepoint(event.unshifted.unwrap_or('\0'))
-            .set_utf8(event.text.as_deref());
-
-        // The terminal's live modes (DECCKM, keypad, Kitty flags, modifyOtherKeys) are read at encode time.
-        // `set_options_from_terminal` resets option-as-alt to false, so the setting goes in afterwards.
-        let option_as_alt = if self.option_as_alt { OptionAsAlt::True } else { OptionAsAlt::False };
-        let mut out = Vec::with_capacity(16);
-        self.encoder
-            .set_options_from_terminal(&self.terminal)
-            .set_macos_option_as_alt(option_as_alt)
-            .encode_to_vec(&self.key_event, &mut out)
-            .map_err(eng)?;
-        Ok(out)
+        self.encode_event(
+            action,
+            key_from_code(&event.code),
+            key_mods(event.mods),
+            key_mods(event.consumed),
+            event.composing,
+            event.unshifted,
+            event.text.as_deref(),
+        )
     }
 
-    fn encode_text(&mut self, _text: &str) -> Result<Vec<u8>> {
-        Err(Error::Unsupported("encode_text".into()))
+    fn encode_text(&mut self, text: &str) -> Result<Vec<u8>> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Committed text is an unidentified key whose text is the commit, so that the Kitty "associated text"
+        // report works. It is input, not a paste: nothing is bracketed.
+        self.encode_event(
+            Action::Press,
+            Key::Unidentified,
+            key::Mods::empty(),
+            key::Mods::empty(),
+            false,
+            None,
+            Some(text),
+        )
     }
 
     fn paste(&mut self, _text: &str, _allow_unsafe: bool) -> Result<PasteOutcome> {

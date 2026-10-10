@@ -218,9 +218,100 @@ impl KeyEvent {
         KeyEvent::from_dom_on(dom, option_as_alt, cfg!(target_os = "macos"))
     }
 
-    fn from_dom_on(dom: &DomKey, _option_as_alt: bool, _macos: bool) -> KeyEvent {
-        KeyEvent { code: dom.code.clone(), ..KeyEvent::default() }
+    fn from_dom_on(dom: &DomKey, option_as_alt: bool, macos: bool) -> KeyEvent {
+        let action = if dom.release {
+            KeyAction::Release
+        } else if dom.repeat {
+            KeyAction::Repeat
+        } else {
+            KeyAction::Press
+        };
+        // A release never carries text: the engine reports it from the key alone.
+        let text = if dom.release { None } else { key_text(&dom.key) };
+        let unshifted = us_unshifted(&dom.code).or_else(|| text.as_deref().and_then(lowercase_char));
+
+        let mut consumed = Mods::NONE;
+        if text.is_some() {
+            if dom.mods.contains(Mods::SHIFT) {
+                consumed |= Mods::SHIFT;
+            }
+            // On macOS Option composes characters; unless it is meant as Alt, the composition used it up.
+            if macos && !option_as_alt && dom.mods.contains(Mods::ALT) {
+                consumed |= Mods::ALT;
+            }
+        }
+
+        KeyEvent {
+            code: dom.code.clone(),
+            text,
+            unshifted,
+            mods: dom.mods,
+            consumed,
+            action,
+            composing: dom.composing,
+        }
     }
+}
+
+/// The text of a `KeyboardEvent.key` when it is a single printable character.
+///
+/// Exactly one code point (counted as code points, not UTF-16 units: an emoji is one), not a C0 control or DEL, and
+/// not in the macOS function-key private-use range U+F700..=U+F8FF, which the library refuses as text. Everything
+/// else (`Enter`, `Dead`, `F5`, the empty string) is a key without text and is encoded from the key itself.
+fn key_text(key: &str) -> Option<String> {
+    let mut chars = key.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    let code = u32::from(c);
+    if code <= 0x1f || code == 0x7f || (0xf700..=0xf8ff).contains(&code) {
+        return None;
+    }
+    Some(key.to_owned())
+}
+
+/// The character a physical key types without Shift on a US layout.
+///
+/// The DOM has no layout-independent value, so the US layout is the reference, as it is for Kitty's alternate key
+/// reports. Keys outside the table return `None` and the caller falls back to the lowercased text.
+fn us_unshifted(code: &str) -> Option<char> {
+    if let Some(rest) = code.strip_prefix("Key") {
+        let mut it = rest.chars();
+        return match (it.next(), it.next()) {
+            (Some(c), None) if c.is_ascii_uppercase() => Some(c.to_ascii_lowercase()),
+            _ => None,
+        };
+    }
+    if let Some(rest) = code.strip_prefix("Digit") {
+        let mut it = rest.chars();
+        return match (it.next(), it.next()) {
+            (Some(c), None) if c.is_ascii_digit() => Some(c),
+            _ => None,
+        };
+    }
+    Some(match code {
+        "Minus" => '-',
+        "Equal" => '=',
+        "BracketLeft" => '[',
+        "BracketRight" => ']',
+        "Backslash" => '\\',
+        "Semicolon" => ';',
+        "Quote" => '\'',
+        "Backquote" => '`',
+        "Comma" => ',',
+        "Period" => '.',
+        "Slash" => '/',
+        "Space" => ' ',
+        _ => return None,
+    })
+}
+
+/// The lower-case form of a single character, when it is again a single character.
+fn lowercase_char(text: &str) -> Option<char> {
+    let mut lower = text.chars().next()?.to_lowercase();
+    let c = lower.next()?;
+    if lower.next().is_some() { None } else { Some(c) }
 }
 
 /// What a paste did.
@@ -430,7 +521,9 @@ pub trait TerminalEngine {
     /// modifyOtherKeys). The result may be empty: key releases and composing keys send nothing in legacy mode.
     fn encode_key(&mut self, event: &KeyEvent) -> Result<Vec<u8>>;
 
-    /// Encode committed text (an IME commit, a dead-key result) as input. It is not a paste and is never bracketed.
+    /// Encode committed text (an IME commit, a dead-key result) as input. It is not a paste and is never bracketed,
+    /// and it is not sanitised either: it is what the user typed. Clipboard content goes through
+    /// [`TerminalEngine::paste`].
     fn encode_text(&mut self, text: &str) -> Result<Vec<u8>>;
 
     /// Paste `text` the way the program asked for it: sanitised always, bracketed when mode 2004 is on. The bytes
