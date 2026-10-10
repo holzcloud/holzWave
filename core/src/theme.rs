@@ -188,6 +188,37 @@ impl Theme {
     }
 }
 
+impl Theme {
+    /// The neutral dark grey built-in (D-20).
+    pub fn schiefer() -> Theme {
+        Theme::default()
+    }
+
+    /// The light built-in (D-20).
+    pub fn papier() -> Theme {
+        Theme::default()
+    }
+}
+
+/// The WCAG 2 contrast ratio of two colours, from 1.0 (identical) to 21.0 (black on white). Symmetric.
+pub fn contrast(_a: Rgb, _b: Rgb) -> f64 {
+    0.0
+}
+
+/// `top` drawn over `bottom` at opacity `alpha` (0.0 to 1.0, clamped), per channel, rounded to the nearest value.
+pub fn blend(top: Rgb, _alpha: f32, _bottom: Rgb) -> Rgb {
+    top
+}
+
+/// One entry of [`ThemeRegistry::list`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ThemeInfo {
+    pub name: String,
+    pub kind: ThemeKind,
+    /// `true` for the themes that ship with the app, `false` for the ones from the themes directory.
+    pub builtin: bool,
+}
+
 /// The built-in themes and the ones the user added.
 #[derive(Clone, Debug)]
 pub struct ThemeRegistry {
@@ -198,6 +229,11 @@ impl ThemeRegistry {
     /// A registry with the built-in themes only.
     pub fn builtin() -> ThemeRegistry {
         ThemeRegistry { themes: vec![Theme::aubergine()] }
+    }
+
+    /// Every theme, built-ins first, aubergine first of all.
+    pub fn list(&self) -> Vec<ThemeInfo> {
+        self.themes.iter().map(|t| ThemeInfo { name: t.name.clone(), kind: t.kind, builtin: true }).collect()
     }
 
     /// The theme called `name`; aubergine when there is none.
