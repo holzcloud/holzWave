@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { applyFrame, gridText, toRenderFrame } from "../../dist/frames.js";
+import { applyFrame, gridText, spansSignature, toRenderFrame, visibleSpans } from "../../dist/frames.js";
 
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/frames.json", import.meta.url), "utf8"));
 
@@ -176,4 +176,31 @@ test("gridText decodes spacers, tails and trailing blanks", () => {
     full({ cols: 8, rows: 2, changed: [row(0, "日\0本\0!  ", [[4, "̈"]]), row(1, "   ")] }),
   ).mirror;
   assert.deepEqual(gridText(mirror), ["日本!̈", ""]);
+});
+
+test("spansSignature is equal for equal spans and different for any difference", () => {
+  assert.ok(spansSignature([]) === "", "an empty list has the empty signature");
+  assert.ok(spansSignature(undefined) === "", "a missing list has the empty signature");
+  const a = spansSignature([[1, 0, 3]]);
+  assert.ok(a !== "", "a span has a signature");
+  assert.ok(spansSignature([[1, 0, 3]]) === a, "equal lists, equal signatures");
+  for (const other of [[[1, 0, 4]], [[1, 1, 3]], [[2, 0, 3]], [[1, 0, 3], [2, 0, 3]], [[2, 0, 3], [1, 0, 3]]]) {
+    assert.ok(spansSignature(other) !== a, `${JSON.stringify(other)} has the signature of [[1, 0, 3]]`);
+  }
+  // The row boundary is not ambiguous: [1, 20, 3] and [12, 0, 3] must not collide.
+  assert.ok(spansSignature([[1, 20, 3]]) !== spansSignature([[12, 0, 3]]), "the fields run together");
+});
+
+test("visibleSpans keeps spans inside the grid and clamps their ends", () => {
+  const spans = [
+    [1, 0, 3], [2, 5, 99], [3, -4, 2], [4, 0, 0], // kept or clamped; row 4 is outside a 4-row grid
+    [0, 5, 2], [-1, 0, 3], [1.5, 0, 3], [0, NaN, 3], [0, 0, Infinity], "row", null, [1, 2],
+  ];
+  const mirror = applyFrame(undefined, full({ cols: 10, rows: 4, selection: spans })).mirror;
+  const got = JSON.stringify(visibleSpans(mirror));
+  assert.ok(got === JSON.stringify([[1, 0, 3], [2, 5, 9], [3, 0, 2]]), `visibleSpans gave ${got}`);
+});
+
+test("visibleSpans of a mirror without a selection is empty", () => {
+  assert.deepEqual(visibleSpans(applyFrame(undefined, full()).mirror), []);
 });

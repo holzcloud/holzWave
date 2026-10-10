@@ -179,3 +179,19 @@ export function gridText(mirror: PaneMirror): string[] {
   for (let y = 0; y < mirror.rows; y++) out.push(rowText(mirror.rows_[y], mirror.cols));
   return out;
 }
+
+/**
+ * A cheap signature of a span list: equal lists give equal strings and different lists different ones. The empty
+ * list (and anything that is not a list) is the empty string.
+ */
+export function spansSignature(_spans: readonly SpanMsg[] | undefined): string {
+  return "";
+}
+
+/**
+ * The spans of the mirror that can be drawn: whole numbers, a row inside the grid, the ends clamped to the columns
+ * of the grid. A span that is empty after clamping, or malformed, is dropped.
+ */
+export function visibleSpans(_mirror: PaneMirror): SpanMsg[] {
+  return [];
+}

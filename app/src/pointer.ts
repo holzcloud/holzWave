@@ -39,6 +39,22 @@ function selectedText(): string {
   return lines.join("\n");
 }
 
+// ---- handler stack -------------------------------------------------------------------------------
+
+/** The cell under a pointer event, in the viewport of the pane it is in. */
+export interface PointerHit {
+  pane: number;
+  cell: [number, number];
+}
+
+/** Return true to consume the event: no older handler and not the selection gesture see it. */
+export type PointerHandler = (e: PointerEvent, hit: PointerHit | null) => boolean;
+
+/** Put `fn` on top of the handler stack. The returned function removes exactly this push. */
+export function pushPointerHandler(_fn: PointerHandler): () => void {
+  return () => {};
+}
+
 // ---- gestures ------------------------------------------------------------------------------------
 
 let dragging = false;
