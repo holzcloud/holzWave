@@ -230,3 +230,189 @@ fn sequence_numbers_start_at_one_and_skip_nothing() {
     assert!(none >= 3, "empty updates are not emitted");
     assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>());
 }
+
+// ---- Task 3: one code point per cell, tails in extras ------------------------------------------------------------
+
+use holzwave_core::wire::Run;
+
+/// Turn grapheme clustering on (DECSET 2027) the way a program that wants clusters does.
+const CLUSTERING: &[u8] = b"\x1b[?2027h";
+
+/// Feed `bytes` to a fresh 20x5 engine with clustering on and return the first row of the resulting frame.
+fn first_row_of(bytes: &str) -> RowMsg {
+    let mut e = engine(20, 5);
+    let mut enc = FrameEncoder::new(1);
+    next_frame(&mut e, &mut enc).expect("first");
+    e.feed(CLUSTERING);
+    e.feed(bytes.as_bytes());
+    let f = next_frame(&mut e, &mut enc).expect("frame");
+    f.changed.into_iter().find(|r| r.y == 0).expect("row 0")
+}
+
+/// The text of all runs of a row.
+fn run_text(row: &RowMsg) -> String {
+    row.runs.iter().map(|r| r.0.as_str()).collect()
+}
+
+/// The invariant of the protocol: a run's text has exactly one code point per cell it covers, and a row never covers
+/// more cells than the grid is wide.
+fn assert_one_code_point_per_cell(row: &RowMsg, cols: u16) {
+    let mut covered = 0usize;
+    for Run(text, cells, ..) in &row.runs {
+        assert_eq!(text.chars().count(), usize::from(*cells), "row {}: run {text:?} covers {cells} cells", row.y);
+        covered += usize::from(*cells);
+    }
+    assert!(covered <= usize::from(cols), "row {}: {covered} cells in a grid {cols} wide", row.y);
+    for (x, tail) in &row.extras {
+        assert!(!tail.is_empty(), "row {}: empty tail at {x}", row.y);
+        assert!(usize::from(*x) < covered, "row {}: tail at {x} outside the runs", row.y);
+        let at = run_text(row).chars().nth(usize::from(*x)).expect("cell");
+        assert_ne!(at, '\0', "row {}: a tail sits on a spacer at {x}", row.y);
+    }
+}
+
+#[test]
+fn a_combining_mark_is_the_tail_of_its_cell() {
+    let row = first_row_of("e\u{0301}x");
+    assert!(run_text(&row).starts_with("ex"), "text {:?}", run_text(&row));
+    assert_eq!(row.extras, vec![(0, "\u{0301}".to_string())]);
+    assert_one_code_point_per_cell(&row, 20);
+}
+
+#[test]
+fn a_zwj_family_is_one_wide_cell_with_the_rest_as_its_tail() {
+    let row = first_row_of("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}z");
+    // The first code point, a spacer for the second column, then the next cell.
+    assert!(run_text(&row).starts_with("\u{1F468}\0z"), "text {:?}", run_text(&row));
+    assert_eq!(row.extras, vec![(0, "\u{200D}\u{1F469}\u{200D}\u{1F467}".to_string())]);
+    assert_one_code_point_per_cell(&row, 20);
+}
+
+#[test]
+fn a_flag_and_wide_cjk_keep_one_code_point_per_cell() {
+    let flag = first_row_of("\u{1F1E9}\u{1F1EA}q");
+    assert!(run_text(&flag).starts_with("\u{1F1E9}\0q"), "text {:?}", run_text(&flag));
+    assert_eq!(flag.extras, vec![(0, "\u{1F1EA}".to_string())]);
+    assert_one_code_point_per_cell(&flag, 20);
+
+    let cjk = first_row_of("日本y");
+    assert!(run_text(&cjk).starts_with("日\0本\0y"), "text {:?}", run_text(&cjk));
+    assert!(cjk.extras.is_empty());
+    assert_one_code_point_per_cell(&cjk, 20);
+}
+
+#[test]
+fn a_plain_ascii_cell_has_no_extras() {
+    let row = first_row_of("plain text");
+    assert!(row.extras.is_empty());
+    assert!(run_text(&row).starts_with("plain text"));
+    assert_one_code_point_per_cell(&row, 20);
+}
+
+#[test]
+fn an_empty_cell_inside_styled_text_is_a_single_space() {
+    // Red background on a blank, then text: the blank is part of the row's runs as a space.
+    let row = first_row_of("\x1b[41m \x1b[0mx");
+    assert!(run_text(&row).starts_with(" x"), "text {:?}", run_text(&row));
+    assert_eq!(row.runs[0].0, " ");
+    assert_eq!(row.runs[0].1, 1);
+    assert_one_code_point_per_cell(&row, 20);
+}
+
+#[test]
+fn the_cell_count_invariant_holds_with_clustering_off_and_on() {
+    let text = "e\u{0301}\u{1F468}\u{200D}\u{1F469}\u{1F1E9}\u{1F1EA}日本o\u{0308}\u{0323}\u{1F44D}\u{1F3FD}x";
+    for clustering in [false, true] {
+        let mut e = engine(40, 5);
+        let mut enc = FrameEncoder::new(1);
+        next_frame(&mut e, &mut enc).expect("first");
+        if clustering {
+            e.feed(CLUSTERING);
+        }
+        e.feed(text.as_bytes());
+        let f = next_frame(&mut e, &mut enc).expect("frame");
+        for row in &f.changed {
+            assert_one_code_point_per_cell(row, 40);
+        }
+    }
+}
+
+// ---- Task 3: the golden fixture shared with the TypeScript patcher test ------------------------------------------
+
+#[derive(serde::Serialize)]
+struct Step {
+    name: &'static str,
+    /// The bytes fed, ASCII-escaped.
+    input: String,
+    /// The new grid size when the step is a resize.
+    resize: Option<(u16, u16)>,
+    /// `null` when the step produced no frame.
+    frame: Option<FrameMsg>,
+    /// The expected grid after the step: one plain-text line per row, spacers dropped, tails appended, trailing
+    /// blanks trimmed.
+    grid: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct Fixture {
+    version: u32,
+    cols: u16,
+    rows: u16,
+    steps: Vec<Step>,
+}
+
+fn scenario() -> Fixture {
+    let (cols, rows) = (20, 5);
+    let mut e = engine(cols, rows);
+    let mut enc = FrameEncoder::new(1);
+    let mut steps = Vec::new();
+
+    let mut step = |name: &'static str, input: &[u8], resize: Option<(u16, u16)>, e: &mut holzwave_core::GhosttyEngine| {
+        e.feed(input);
+        if let Some((c, r)) = resize {
+            e.resize(c, r, (0, 0)).expect("resize");
+        }
+        let frame = enc.encode(e.update().expect("update"));
+        let text = e.screen().expect("screen").to_text();
+        let grid = text.strip_suffix('\n').unwrap_or(&text).split('\n').map(str::to_string).collect();
+        steps.push(Step { name, input: input.escape_ascii().to_string(), resize, frame, grid });
+    };
+
+    step("initial", b"", None, &mut e);
+    step("typing", b"hello", None, &mut e);
+    step("newline and scroll", b"\r\nworld\r\nthree\r\nfour\r\nfive\r\nsix", None, &mut e);
+    step("colours and styles", b"\r\n\x1b[1;31mred\x1b[0m \x1b[4;42mu\x1b[0m \x1b[3;7mit\x1b[0m", None, &mut e);
+    step("wide cjk pair", b"\r\n\xe6\x97\xa5\xe6\x9c\xac!", None, &mut e);
+    step("emoji with clustering", "\u{1b}[?2027h\r\n\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} ok".as_bytes(), None, &mut e);
+    step("combining sequence", "\r\ne\u{0301}o\u{0308}x".as_bytes(), None, &mut e);
+    step("resize to 24x6", b"", Some((24, 6)), &mut e);
+    step("alternate screen enter", b"\x1b[?1049h\x1b[HALT", None, &mut e);
+    step("alternate screen leave", b"\x1b[?1049l", None, &mut e);
+    step("cursor hide", b"\x1b[?25l", None, &mut e);
+    step("erase display", b"\x1b[2J", None, &mut e);
+
+    Fixture { version: 1, cols, rows, steps }
+}
+
+#[test]
+fn fixtures_frames_json_is_the_golden_sequence_for_the_patcher() {
+    let fixture = scenario();
+    for step in &fixture.steps {
+        let Some(frame) = &step.frame else { continue };
+        for row in &frame.changed {
+            assert_one_code_point_per_cell(row, frame.cols);
+        }
+    }
+    let mut json = serde_json::to_string_pretty(&fixture).expect("json");
+    json.push('\n');
+
+    let path = common::fixtures_dir().join("frames.json");
+    if common::update_fixtures() {
+        std::fs::create_dir_all(path.parent().expect("dir")).expect("create fixtures dir");
+        std::fs::write(&path, &json).expect("write frames.json");
+        return;
+    }
+    let on_disk = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} is missing ({e}); run with UPDATE_FIXTURES=1", path.display()));
+    assert!(on_disk == json, "frames.json differs from the regenerated sequence; run with UPDATE_FIXTURES=1 and review");
+}
