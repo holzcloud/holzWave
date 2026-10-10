@@ -1,6 +1,7 @@
 // The frontend's preserved behaviour after the main.ts split: shortcuts, plain keys, paste and the key handler
 // stack. Every case drives the real page against the Tauri stub and reads the commands the page sent.
 import assert from "node:assert/strict";
+import { callsOf } from "./lib.mjs";
 
 /** Open the app against the stub and wait until the layout is on screen and every pane was started. */
 async function open(page, url) {
@@ -25,6 +26,165 @@ export default async function ({ page, url }) {
   await shortcutCase(page, url);
   await plainKeyCase(page, url);
   await handlerStackCase(page, url);
+  await barCase(page, url);
+  await pointerCase(page, url);
+  await wheelCase(page, url);
+  await copyCase(page, url);
+  await resizeCase(page, url);
+}
+
+const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
+const ROW_PX = 18; // one cell row: ceil(14 px font * 1.25)
+
+/** Two workspaces, three tabs and one pane. */
+const BAR_VIEW = {
+  workspaces: [{ name: "alpha", active: true }, { name: "beta", active: false }],
+  tabs: [{ title: "one", active: true }, { title: "two", active: false }, { title: "three", active: false }],
+  focus: 1,
+  panes: [[1, { x: 0, y: 0, w: 1, h: 1 }]],
+  dividers: [],
+};
+
+/** Show `view` the way the core would announce a new layout. */
+async function showView(page, view) {
+  await page.evaluate((v) => window.__MOCK__.setView(v), view);
+  await page.evaluate((v) => window.__MOCK__.emit("layout", v), view);
+}
+
+/** The page position of the canvas' top-left corner. */
+const canvasOrigin = (page) =>
+  page.evaluate(() => {
+    const r = document.getElementById("term").getBoundingClientRect();
+    return { left: r.left, top: r.top, width: r.width };
+  });
+
+async function barCase(page, url) {
+  await open(page, url);
+  await showView(page, BAR_VIEW);
+  const labels = () => page.locator("#bar button").allTextContents();
+  assert.deepEqual(await labels(), ["alpha", "beta", "+", "one", "two", "three", "+"], "the bar shows the names");
+  assert.deepEqual(
+    await page.locator("#bar button.active").allTextContents(),
+    ["alpha", "one"],
+    "the active workspace and tab are marked",
+  );
+
+  const buttons = page.locator("#bar button");
+  await buttons.nth(4).click(); // tab "two"
+  assert.deepEqual((await callsOf(page, "select_tab")).at(-1), { index: 1 });
+  await buttons.nth(1).click(); // workspace "beta"
+  assert.deepEqual((await callsOf(page, "select_workspace")).at(-1), { index: 1 });
+  await page.locator("#bar button.plus").nth(0).click();
+  assert.deepEqual((await callsOf(page, "new_workspace")).at(-1), { name: "ws 3" }, "the first plus adds a workspace");
+  await page.locator("#bar button.plus").nth(1).click();
+  assert.equal((await callsOf(page, "new_tab")).length, 1, "the second plus adds a tab");
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.id),
+    "term",
+    "a bar button gives the keyboard back to the canvas",
+  );
+
+  // Names are text, never markup (T-02-84).
+  const hostile = structuredClone(BAR_VIEW);
+  hostile.workspaces[0].name = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
+  hostile.tabs[0].title = "<script>window.__pwned=1</script>";
+  await showView(page, hostile);
+  assert.equal(await page.locator("#bar img, #bar b, #bar script").count(), 0, "a name was parsed as markup");
+  assert.equal((await labels())[0], '<img src=x onerror="window.__pwned=1"><b>bold</b>');
+  assert.equal(await page.evaluate(() => window.__pwned), undefined);
+}
+
+async function pointerCase(page, url) {
+  await open(page, url);
+  const c = await canvasOrigin(page);
+  const y = c.top + PAD + ROW_PX / 2;
+  // Pane 1 is the left half and pane 2 (focused) the right half of the default stub layout.
+  const drag = async (fromX, toX) => {
+    await page.mouse.move(fromX, y);
+    await page.mouse.down();
+    await page.mouse.move(toX, y, { steps: 4 });
+    await page.mouse.up();
+  };
+
+  const before = (await sent(page)).length;
+  await drag(c.left + c.width / 2 + PAD + 4, c.left + c.width / 2 + PAD + 44);
+  assert.deepEqual((await sent(page)).slice(before), [], "selecting in the focused pane sends no command");
+  assert.ok((await page.locator("#overlay .sel").count()) >= 1, "the drag leaves a selection box");
+
+  await page.mouse.click(c.left + PAD + 4, y); // a plain click is not a selection
+  assert.equal(await page.locator("#overlay .sel").count(), 0, "a plain click must not leave a selection");
+  const calls = (await sent(page)).slice(before);
+  assert.deepEqual(calls, [["focus_pane", { pane: 1 }]], "a click in the other pane only focuses it");
+
+  const mid = (await sent(page)).length;
+  await drag(c.left + PAD + 4, c.left + PAD + 44);
+  assert.ok((await page.locator("#overlay .sel").count()) >= 1, "a drag in the left pane selects");
+  const extra = (await sent(page)).slice(mid).filter(([cmd]) => cmd !== "focus_pane");
+  assert.deepEqual(extra, [], "a selection drag must send nothing but the legacy focus command");
+}
+
+async function wheelCase(page, url) {
+  await open(page, url);
+  const c = await canvasOrigin(page);
+  await page.mouse.move(c.left + c.width * 0.75, 200);
+  await page.mouse.wheel(0, 120);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("scroll").length >= 1, undefined, { timeout: 5000 });
+  const down = (await callsOf(page, "scroll")).at(-1);
+  assert.equal(down.pane, 2, "the wheel scrolls the pane under the pointer");
+  assert.ok(down.rows > 0, `a downward wheel gave ${down.rows} rows`);
+
+  await page.mouse.move(c.left + c.width * 0.25, 200);
+  await page.mouse.wheel(0, -120);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("scroll").length >= 2, undefined, { timeout: 5000 });
+  const up = (await callsOf(page, "scroll")).at(-1);
+  assert.equal(up.pane, 1, "the wheel follows the pointer to the other pane");
+  assert.ok(up.rows < 0, `an upward wheel gave ${up.rows} rows`);
+}
+
+async function copyCase(page, url) {
+  await open(page, url);
+  // The page writes to the clipboard through navigator.clipboard; record what it writes.
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (t) => { window.__copied = t; } },
+    });
+  });
+  const run = (text, cols) => [[text, cols, 0xf6efe6, 0x14091a, 0]];
+  await page.evaluate((frame) => window.__MOCK__.emit("screen", { pane: 2, frame }), {
+    cols: 60,
+    rows: 4,
+    cursor: null,
+    fg: 0xf6efe6,
+    bg: 0x14091a,
+    lines: [run("hello world", 11), run("second row", 10), [], []],
+    scrollbar: [0, 4, 4],
+  });
+  const c = await canvasOrigin(page);
+  const x0 = c.left + c.width / 2 + PAD + 2;
+  const y = c.top + PAD + ROW_PX / 2;
+  const before = (await sent(page)).length;
+  await page.mouse.move(x0, y);
+  await page.mouse.down();
+  await page.mouse.move(x0 + 300, y, { steps: 4 });
+  await page.mouse.up();
+  await page.keyboard.press("Meta+c");
+  assert.equal(await page.evaluate(() => window.__copied), "hello world", "Cmd+C copies the selected text");
+  assert.deepEqual((await sent(page)).slice(before), [], "Cmd+C must not reach the shell");
+}
+
+async function resizeCase(page, url) {
+  await open(page, url);
+  const started = (await callsOf(page, "start_pane")).sort((a, b) => a.pane - b.pane);
+  assert.equal(started.length, 2);
+  await page.setViewportSize({ width: 700, height: 500 });
+  await page.waitForFunction(() => window.__MOCK__.callsOf("resize").length >= 2, undefined, { timeout: 5000 });
+  const resized = (await callsOf(page, "resize")).sort((a, b) => a.pane - b.pane);
+  assert.deepEqual(resized.map((r) => r.pane), [1, 2], "every pane is told its new size once");
+  for (const [i, r] of resized.entries()) {
+    assert.ok(r.cols < started[i].cols, `pane ${r.pane} has ${r.cols} columns, it started with ${started[i].cols}`);
+    assert.ok(r.rows < started[i].rows, `pane ${r.pane} has ${r.rows} rows, it started with ${started[i].rows}`);
+  }
 }
 
 async function shortcutCase(page, url) {
