@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p . && node scripts/copy-static.mjs",
+    "build": "node scripts/clean.mjs && tsc -p . && node scripts/copy-static.mjs",
+    "test": "npm run build && node --test tests/unit/*.test.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {
