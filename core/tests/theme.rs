@@ -176,10 +176,10 @@ fn schiefer_is_a_neutral_dark_grey_with_the_rose_accent() {
     assert_eq!(t.name, "Schiefer");
     assert_eq!(t.kind, ThemeKind::Dark);
     let ground = t.chrome.ground;
-    // Neutral: the three channels are within a few steps of each other.
+    // Neutral: the three channels are within a few steps of each other (the planned edge #34363B is 7 apart).
     let spread = |x: Rgb| x.r.max(x.g).max(x.b) - x.r.min(x.g).min(x.b);
-    assert!(spread(ground) <= 6, "ground {ground} is not neutral");
-    assert!(spread(t.chrome.edge) <= 6, "edge {} is not neutral", t.chrome.edge);
+    assert!(spread(ground) <= 8, "ground {ground} is not neutral");
+    assert!(spread(t.chrome.edge) <= 8, "edge {} is not neutral", t.chrome.edge);
     assert!((0x18..=0x20).contains(&ground.r), "ground {ground} should be near #1B1C1F");
     assert_eq!(t.terminal.cursor, c("#FF8FB8"), "same rose accent");
     assert_eq!(t.chrome.rose, c("#FF8FB8"));

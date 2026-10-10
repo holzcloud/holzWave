@@ -189,25 +189,139 @@ impl Theme {
 }
 
 impl Theme {
-    /// The neutral dark grey built-in (D-20).
+    /// The neutral dark grey built-in (D-20): the aubergine hues for text and accent on a grey ground, so a
+    /// terminal that was tuned for a grey background looks as intended and the rose accent stays.
+    ///
+    /// The grey is a little lighter than the aubergine ground, which costs the blue text some contrast on the
+    /// selection; the selection opacity is 30 % instead of 35 % to keep every ANSI colour at 3:1 or better.
     pub fn schiefer() -> Theme {
-        Theme::default()
+        Theme {
+            version: THEME_VERSION,
+            name: "Schiefer".into(),
+            kind: ThemeKind::Dark,
+            terminal: TerminalColors {
+                foreground: hex(0xF2EEE8),
+                background: hex(0x1B1C1F),
+                cursor: hex(0xFF8FB8),
+                selection: hex(0xFF8FB8),
+                selection_alpha: 0.30,
+                ansi: [
+                    hex(0x232428),
+                    hex(0xEC8272),
+                    hex(0x8CC271),
+                    hex(0xE8C15C),
+                    hex(0x6F9BD0),
+                    hex(0xFF8FB8),
+                    hex(0x7FD1C7),
+                    hex(0xD4D2D0),
+                    hex(0x7B7E86),
+                    hex(0xFFA396),
+                    hex(0xAEDD93),
+                    hex(0xF5D883),
+                    hex(0x93B8E6),
+                    hex(0xFFB3D1),
+                    hex(0xA4E6DD),
+                    hex(0xF4F1EC),
+                ],
+            },
+            chrome: ChromeTokens {
+                ground: hex(0x1B1C1F),
+                ground_2: hex(0x26272B),
+                pane: hex(0x202124),
+                edge: hex(0x34363B),
+                ink: hex(0xF2EEE8),
+                // ink at 70 % over ground.
+                ink_2: hex(0xB1AFAC),
+                ink_3: hex(0x8E9097),
+                rose: hex(0xFF8FB8),
+                rose_deep: hex(0xC23B72),
+                ok: hex(0x8CC271),
+                warn: hex(0xE8C15C),
+                danger: hex(0xEC8272),
+                info: hex(0x8FB8D8),
+            },
+        }
     }
 
-    /// The light built-in (D-20).
+    /// The light built-in (D-20): aubergine ink on paper.
+    ///
+    /// The ground is the cream token `#FFE6F0` lightened towards white; the bars use the cream itself. Rose
+    /// `#FF8FB8` is below 2:1 on a light ground, so the accent, the cursor and the selection are rose-deep
+    /// `#C23B72` (4.7:1 on the ground). Every ANSI colour has to reach 4.5:1 on paper, so "white" is a dark grey
+    /// and the bright row is not lighter than the normal one; the selection is 25 % so that all of them also
+    /// reach 3:1 on it.
     pub fn papier() -> Theme {
-        Theme::default()
+        Theme {
+            version: THEME_VERSION,
+            name: "Papier".into(),
+            kind: ThemeKind::Light,
+            terminal: TerminalColors {
+                foreground: hex(0x14091A),
+                background: hex(0xFFF3F8),
+                cursor: hex(0xC23B72),
+                selection: hex(0xC23B72),
+                selection_alpha: 0.25,
+                ansi: [
+                    hex(0x14091A),
+                    hex(0xB3261E),
+                    hex(0x2F7A1F),
+                    hex(0x8A5A00),
+                    hex(0x1F5FA8),
+                    hex(0xB0306A),
+                    hex(0x00746B),
+                    hex(0x4F4455),
+                    hex(0x7A6B80),
+                    hex(0xC42F22),
+                    hex(0x2A7A18),
+                    hex(0x946000),
+                    hex(0x2B66B5),
+                    hex(0xC23B72),
+                    hex(0x00796F),
+                    hex(0x2E2433),
+                ],
+            },
+            chrome: ChromeTokens {
+                ground: hex(0xFFF3F8),
+                ground_2: hex(0xFFE6F0),
+                pane: hex(0xFFF9FB),
+                edge: hex(0xE5C6D5),
+                ink: hex(0x14091A),
+                // ink at 70 % over ground.
+                ink_2: hex(0x5B4F5D),
+                ink_3: hex(0x6B5C70),
+                rose: hex(0xC23B72),
+                rose_deep: hex(0xC23B72),
+                ok: hex(0x2A7A18),
+                warn: hex(0x8A5A00),
+                danger: hex(0xB3261E),
+                info: hex(0x1F5FA8),
+            },
+        }
     }
+}
+
+/// WCAG 2 relative luminance: the sRGB channels are linearised and weighted.
+fn luminance(c: Rgb) -> f64 {
+    let linear = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
 }
 
 /// The WCAG 2 contrast ratio of two colours, from 1.0 (identical) to 21.0 (black on white). Symmetric.
-pub fn contrast(_a: Rgb, _b: Rgb) -> f64 {
-    0.0
+pub fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (light, dark) = if la >= lb { (la, lb) } else { (lb, la) };
+    (light + 0.05) / (dark + 0.05)
 }
 
-/// `top` drawn over `bottom` at opacity `alpha` (0.0 to 1.0, clamped), per channel, rounded to the nearest value.
-pub fn blend(top: Rgb, _alpha: f32, _bottom: Rgb) -> Rgb {
-    top
+/// `top` drawn over `bottom` at opacity `alpha`, per channel, rounded to the nearest value. `alpha` is clamped
+/// to 0.0..=1.0 and NaN counts as 0.0.
+pub fn blend(top: Rgb, alpha: f32, bottom: Rgb) -> Rgb {
+    let a = if alpha.is_nan() { 0.0 } else { f64::from(alpha.clamp(0.0, 1.0)) };
+    let mix = |t: u8, b: u8| (f64::from(t) * a + f64::from(b) * (1.0 - a)).round() as u8;
+    Rgb { r: mix(top.r, bottom.r), g: mix(top.g, bottom.g), b: mix(top.b, bottom.b) }
 }
 
 /// One entry of [`ThemeRegistry::list`].
@@ -228,7 +342,7 @@ pub struct ThemeRegistry {
 impl ThemeRegistry {
     /// A registry with the built-in themes only.
     pub fn builtin() -> ThemeRegistry {
-        ThemeRegistry { themes: vec![Theme::aubergine()] }
+        ThemeRegistry { themes: vec![Theme::aubergine(), Theme::schiefer(), Theme::papier()] }
     }
 
     /// Every theme, built-ins first, aubergine first of all.
