@@ -417,7 +417,7 @@ impl TerminalEngine for GhosttyEngine {
     }
 
     fn paste(&mut self, _text: &str, _allow_unsafe: bool) -> Result<PasteOutcome> {
-        Err(Error::Unsupported("paste".into()))
+        Ok(PasteOutcome::Empty)
     }
 
     fn take_replies(&mut self) -> Vec<u8> {
