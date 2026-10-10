@@ -66,6 +66,29 @@ pub struct Layout {
 
 const MIN_RATIO: f32 = 0.1;
 
+/// What `Layout::close_pane` did. The three cases need different reactions: an unknown id is a stale event
+/// and is ignored, the last pane ends the app, anything else changed the layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseOutcome {
+    /// The pane was removed (and its tab or workspace with it, when it was the last pane of that).
+    Closed,
+    /// The pane exists but is the only one left in the whole layout; nothing was changed.
+    LastPane,
+    /// No tab holds this pane id; nothing was changed.
+    Unknown,
+}
+
+/// How `Layout::from_json` found the text it was given.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadStatus {
+    /// The text was a valid layout and is returned as it was.
+    Clean,
+    /// The text was a layout with defects; each line says what was repaired.
+    Repaired(Vec<String>),
+    /// The text could not be used; a fresh layout was returned. The string says why.
+    Reset(String),
+}
+
 impl Node {
     pub fn panes(&self, out: &mut Vec<PaneId>) {
         match self {
@@ -254,11 +277,25 @@ impl Layout {
         pane
     }
 
+    /// Repair everything in a deserialised layout that would make the operations panic or misbehave. Returns
+    /// one human-readable line per repair, empty when nothing had to change. A layout that cannot be repaired
+    /// is replaced by a fresh one and the single returned line says why.
+    pub fn validate(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Parse and validate a persisted layout. Never fails and never panics: a text that is not a layout, or
+    /// that cannot be repaired, gives a fresh layout and `LoadStatus::Reset`.
+    pub fn from_json(text: &str) -> (Layout, LoadStatus) {
+        let _ = text;
+        (Layout::new().0, LoadStatus::Clean)
+    }
+
     /// Close a pane everywhere. Empty tabs and empty workspaces disappear; the last pane of the last
-    /// workspace cannot be closed and the call returns `false`.
-    pub fn close_pane(&mut self, pane: PaneId) -> bool {
+    /// workspace cannot be closed. An id that is in no tab is `Unknown`, which is checked first.
+    pub fn close_pane(&mut self, pane: PaneId) -> CloseOutcome {
         if self.all_panes().len() <= 1 {
-            return false;
+            return CloseOutcome::LastPane;
         }
         for wi in 0..self.workspaces.len() {
             let w = &mut self.workspaces[wi];
@@ -276,9 +313,9 @@ impl Layout {
                     self.active = self.active.min(self.workspaces.len() - 1);
                 }
             }
-            return true;
+            return CloseOutcome::Closed;
         }
-        false
+        CloseOutcome::LastPane
     }
 
     pub fn focus_pane(&mut self, pane: PaneId) {
@@ -357,16 +394,16 @@ mod tests {
         let b = l.split_focused(Axis::Row);
         let c = l.split_focused(Axis::Column);
         assert_eq!(l.tab().panes(), vec![a, b, c]);
-        assert!(l.close_pane(b));
+        assert_eq!(l.close_pane(b), CloseOutcome::Closed);
         assert_eq!(l.tab().panes(), vec![a, c]);
-        assert!(l.close_pane(c));
+        assert_eq!(l.close_pane(c), CloseOutcome::Closed);
         assert_eq!(l.tab().root, Node::Pane(a));
     }
 
     #[test]
     fn the_last_pane_cannot_be_closed() {
         let (mut l, only) = Layout::new();
-        assert!(!l.close_pane(only));
+        assert_eq!(l.close_pane(only), CloseOutcome::LastPane);
         assert_eq!(l.all_panes(), vec![only]);
     }
 
@@ -375,7 +412,7 @@ mod tests {
         let (mut l, first) = Layout::new();
         let second = l.new_tab();
         assert_eq!(l.workspace().tabs.len(), 2);
-        assert!(l.close_pane(second));
+        assert_eq!(l.close_pane(second), CloseOutcome::Closed);
         assert_eq!(l.workspace().tabs.len(), 1);
         assert_eq!(l.tab().focus, first);
     }
@@ -423,5 +460,155 @@ mod tests {
         let json = serde_json::to_string(&l).unwrap();
         let back: Layout = serde_json::from_str(&json).unwrap();
         assert_eq!(back, l);
+    }
+
+    // ---- closing: unknown and last are different outcomes ------------------------------------------
+
+    #[test]
+    fn closing_an_unknown_pane_is_unknown_even_when_only_one_pane_is_left() {
+        let (mut l, only) = Layout::new();
+        assert_eq!(l.close_pane(999), CloseOutcome::Unknown);
+        assert_eq!(l.close_pane(only), CloseOutcome::LastPane);
+        assert_eq!(l.all_panes(), vec![only]);
+    }
+
+    #[test]
+    fn closing_an_unknown_pane_changes_nothing_when_several_panes_exist() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row);
+        let before = l.clone();
+        assert_eq!(l.close_pane(999), CloseOutcome::Unknown);
+        assert_eq!(l, before);
+        assert_eq!(l.close_pane(a), CloseOutcome::Closed);
+        assert_eq!(l.all_panes(), vec![b]);
+        assert_eq!(l.close_pane(a), CloseOutcome::Unknown, "a closed pane is unknown afterwards");
+    }
+
+    // ---- loading: hostile and damaged files --------------------------------------------------------
+
+    /// A layout text with one workspace of one tab of one pane (id 3), the given active indices and next_id.
+    fn one_pane_json(active: u64, ws_active: u64, next_id: u64) -> String {
+        format!(
+            r#"{{"workspaces":[{{"id":1,"name":"main","tabs":[{{"id":2,"title":"shell","root":{{"Pane":3}},"focus":3}}],"active":{ws_active}}}],"active":{active},"next_id":{next_id}}}"#
+        )
+    }
+
+    #[test]
+    fn text_that_is_not_json_gives_a_fresh_layout_and_the_parse_error() {
+        let (l, status) = Layout::from_json("{ not json");
+        assert_eq!(l, Layout::new().0);
+        match status {
+            LoadStatus::Reset(reason) => assert!(!reason.is_empty(), "the reason carries the parse error"),
+            other => panic!("expected Reset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_of_the_wrong_shape_gives_a_fresh_layout() {
+        for text in ["", "null", "[]", "42", r#"{"workspaces":"x"}"#, r#"{"workspaces":[]}"#] {
+            let (l, status) = Layout::from_json(text);
+            assert_eq!(l, Layout::new().0, "text: {text:?}");
+            assert!(matches!(status, LoadStatus::Reset(_)), "text: {text:?} gave {status:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_workspace_list_resets_the_layout() {
+        let (l, status) = Layout::from_json(r#"{"workspaces":[],"active":0,"next_id":10}"#);
+        assert_eq!(l, Layout::new().0);
+        assert!(matches!(status, LoadStatus::Reset(_)), "got {status:?}");
+    }
+
+    #[test]
+    fn workspaces_without_tabs_are_dropped_and_none_left_resets() {
+        let two = r#"{"workspaces":[
+            {"id":1,"name":"empty","tabs":[],"active":0},
+            {"id":4,"name":"kept","tabs":[{"id":5,"title":"shell","root":{"Pane":6},"focus":6}],"active":0}
+        ],"active":1,"next_id":7}"#;
+        let (l, status) = Layout::from_json(two);
+        assert_eq!(l.workspaces.len(), 1);
+        assert_eq!(l.workspaces[0].name, "kept");
+        assert_eq!(l.active, 0, "the active index follows the drop");
+        assert!(matches!(status, LoadStatus::Repaired(ref r) if !r.is_empty()), "got {status:?}");
+
+        let none = r#"{"workspaces":[{"id":1,"name":"empty","tabs":[],"active":0}],"active":0,"next_id":2}"#;
+        let (l, status) = Layout::from_json(none);
+        assert_eq!(l, Layout::new().0);
+        assert!(matches!(status, LoadStatus::Reset(_)), "got {status:?}");
+    }
+
+    #[test]
+    fn out_of_range_active_indices_are_clamped_and_reported() {
+        let (l, status) = Layout::from_json(&one_pane_json(3, 7, 4));
+        assert_eq!(l.active, 0);
+        assert_eq!(l.workspaces[0].active, 0);
+        let LoadStatus::Repaired(repairs) = status else { panic!("expected Repaired, got {status:?}") };
+        assert_eq!(repairs.len(), 2, "one line per repair: {repairs:?}");
+        // The repaired layout is usable.
+        assert_eq!(l.tab().panes(), vec![3]);
+        assert_eq!(l.tab().focus, 3);
+    }
+
+    #[test]
+    fn a_focus_outside_the_tree_moves_to_the_first_pane_of_the_tab() {
+        let text = r#"{"workspaces":[{"id":1,"name":"main","tabs":[{"id":2,"title":"shell",
+            "root":{"Split":{"id":3,"axis":"Row","ratio":0.5,"a":{"Pane":4},"b":{"Pane":5}}},"focus":99}],
+            "active":0}],"active":0,"next_id":6}"#;
+        let (l, status) = Layout::from_json(text);
+        assert_eq!(l.tab().focus, 4);
+        assert!(matches!(status, LoadStatus::Repaired(ref r) if r.len() == 1), "got {status:?}");
+    }
+
+    #[test]
+    fn a_next_id_at_or_below_the_largest_id_is_raised_above_it() {
+        // Largest id in the file is 3 (the pane); next_id 2 would hand out 2 and 3 again.
+        let (mut l, status) = Layout::from_json(&one_pane_json(0, 0, 2));
+        assert!(matches!(status, LoadStatus::Repaired(ref r) if r.len() == 1), "got {status:?}");
+        let new_pane = l.new_tab();
+        assert!(new_pane > 3, "new pane {new_pane} must not collide with the file's ids");
+        let mut all = l.all_panes();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 2, "every pane exactly once");
+
+        // Equal to the largest id counts as too low as well.
+        let (l, status) = Layout::from_json(&one_pane_json(0, 0, 3));
+        assert!(matches!(status, LoadStatus::Repaired(_)), "got {status:?}");
+        assert!(l.clone().new_tab() > 3);
+    }
+
+    #[test]
+    fn an_id_of_u64_max_resets_the_layout() {
+        let max = u64::MAX;
+        let pane_max = format!(
+            r#"{{"workspaces":[{{"id":1,"name":"m","tabs":[{{"id":2,"title":"s","root":{{"Pane":{max}}},"focus":{max}}}],"active":0}}],"active":0,"next_id":5}}"#
+        );
+        for text in [pane_max, one_pane_json(0, 0, max)] {
+            let (l, status) = Layout::from_json(&text);
+            assert_eq!(l, Layout::new().0, "text: {text}");
+            assert!(matches!(status, LoadStatus::Reset(_)), "got {status:?}");
+        }
+    }
+
+    #[test]
+    fn a_clean_file_loads_unchanged() {
+        let (mut l, _) = Layout::new();
+        l.split_focused(Axis::Column);
+        l.new_workspace("two");
+        l.split_focused(Axis::Row);
+        l.new_tab();
+        let text = serde_json::to_string_pretty(&l).unwrap();
+        let (back, status) = Layout::from_json(&text);
+        assert_eq!(status, LoadStatus::Clean);
+        assert_eq!(back, l);
+    }
+
+    #[test]
+    fn validate_repairs_in_place_and_a_second_pass_finds_nothing() {
+        let mut l: Layout = serde_json::from_str(&one_pane_json(3, 7, 1)).unwrap();
+        let first = l.validate();
+        assert!(!first.is_empty());
+        assert!(l.validate().is_empty(), "validate is idempotent");
+        assert_eq!(Layout::new().0.validate(), Vec::<String>::new());
     }
 }

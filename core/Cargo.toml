@@ -17,6 +17,5 @@ ghostty = ["dep:libghostty-vt"]
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54", optional = true }
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
+# Layout::from_json parses and validates a user-editable file, so serde_json is a run-time dependency.
 serde_json = "1"

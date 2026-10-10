@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use holzwave_core::layout::{Axis, Divider, Layout, PaneId, Rect, SplitId};
+use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, PaneId, Rect, SplitId};
 use holzwave_core::pty::Pty;
 use holzwave_core::{GhosttyEngine, Screen, TerminalEngine, Width};
 use serde::Serialize;
@@ -252,7 +252,7 @@ fn pane_gone(app: &AppHandle, pane: PaneId) {
     let state = app.state::<App>();
     state.sessions.lock().unwrap().remove(&pane);
     let mut layout = state.layout.lock().unwrap();
-    if layout.close_pane(pane) {
+    if layout.close_pane(pane) == CloseOutcome::Closed {
         state.save(&layout);
         let _ = app.emit("layout", view(&layout));
     } else {
@@ -336,7 +336,7 @@ fn new_workspace(state: State<App>, name: String) -> View {
 fn close_pane(app: AppHandle, state: State<App>, pane: PaneId) -> View {
     state.sessions.lock().unwrap().remove(&pane);
     let mut layout = state.layout.lock().unwrap();
-    if !layout.close_pane(pane) {
+    if layout.close_pane(pane) != CloseOutcome::Closed {
         drop(layout);
         app.exit(0);
         return View { workspaces: vec![], tabs: vec![], focus: 0, panes: vec![], dividers: vec![] };
@@ -431,6 +431,36 @@ mod tests {
 
         let app = App::load(path);
         assert_eq!(app.layout.lock().unwrap().all_panes().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("layout.json.bad")).unwrap(),
+            "{ not json",
+            "the damaged file is kept next to the layout"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_layout_with_out_of_range_indices_loads_and_keeps_a_bad_copy() {
+        let dir = std::env::temp_dir().join(format!("holzwave-badcopy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("layout.json");
+        let damaged = r#"{"workspaces":[{"id":1,"name":"main","tabs":[{"id":2,"title":"shell","root":{"Pane":3},"focus":3}],"active":7}],"active":3,"next_id":4}"#;
+        std::fs::write(&path, damaged).unwrap();
+
+        let app = App::load(path.clone());
+        {
+            let l = app.layout.lock().unwrap();
+            assert_eq!(l.active, 0);
+            assert_eq!(l.workspace().active, 0);
+            assert_eq!(l.all_panes(), vec![3], "the repaired layout keeps the file's pane");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("layout.json.bad")).unwrap(),
+            damaged,
+            "the original bytes are kept before the first save can overwrite them"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), damaged, "loading alone does not rewrite the file");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
