@@ -1,8 +1,9 @@
 // Renderer benchmark: the same synthetic frames through both renderers, no Tauri needed.
-// Open dist/bench.html in a browser. `?renderer=canvas|webgl&scenario=full|sparse`.
-import { Canvas2DRenderer } from "./canvas2d.js";
-import { Frame, Metrics, Renderer, Run } from "./frame.js";
-import { WebGLRenderer } from "./webgl.js";
+// Build with `npm run bench:build --prefix app`, then open dist-bench/index.html in a browser.
+// `?renderer=canvas|webgl&scenario=full|sparse`, optionally `&dpr=2`. It is not part of the shipped bundle.
+import { Canvas2DRenderer } from "../src/canvas2d.js";
+import { Frame, Metrics, Renderer, Run } from "../src/frame.js";
+import { WebGLRenderer } from "../src/webgl.js";
 
 const COLS = 160, ROWS = 50;
 const PALETTE = [0xe6e0ea, 0xff8fb8, 0x8cc271, 0xe8c15c, 0x8fb8d8, 0xec8272];

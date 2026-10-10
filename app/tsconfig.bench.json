@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-bench"
+  },
+  "include": ["src/frame.ts", "src/webgl.ts", "src/canvas2d.ts", "bench/bench.ts"]
+}

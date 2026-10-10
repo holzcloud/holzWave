@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/clean.mjs && tsc -p . && node scripts/copy-static.mjs",
+    "bench:build": "tsc -p tsconfig.bench.json && node scripts/copy-bench.mjs",
     "test": "npm run build && node --test tests/unit/*.test.mjs",
     "test:browser": "npm run build && node tests/browser/run.mjs",
     "tauri": "tauri"
