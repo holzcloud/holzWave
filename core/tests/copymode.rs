@@ -419,7 +419,7 @@ fn nothing_panics_without_enter_on_the_alternate_screen_in_a_tiny_grid_or_with_e
     for motion in ALL_MOTIONS {
         mv(&mut tiny, motion);
     }
-    assert_eq!(cursor(&mut tiny).map(|(x, y)| (x, y)), Some((0, 0)));
+    assert_eq!(cursor(&mut tiny), Some((0, 0)));
     assert_eq!(op(&mut tiny, CopyOp::Yank).yanked.as_deref(), Some("x"));
 
     // A resize in copy mode keeps things working.

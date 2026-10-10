@@ -16,9 +16,9 @@ use libghostty_vt::terminal::{
 use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::engine::{
-    Cell, Color, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent, MAX_SEARCH_BYTES, MatchSpan,
-    Modes, Mods, PasteOutcome, RowUpdate, Screen, Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span,
-    TerminalEngine, Update, Width, sanitize_program_text,
+    Cell, Color, CopyMotion, CopyOp, CopyState, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent,
+    MAX_SEARCH_BYTES, MatchSpan, Modes, Mods, PasteOutcome, RowUpdate, Screen, Scrollbar, SearchOp, SearchState,
+    SelectMode, SelectOp, Span, TerminalEngine, Update, Width, sanitize_program_text,
 };
 use crate::{Error, Result};
 
@@ -402,6 +402,44 @@ fn restore_selection(search: &mut Search<'_, '_>, terminal: &mut Terminal<'_, '_
     Ok(())
 }
 
+/// The most cells a word motion looks at before it gives up and leaves the cursor where it is.
+const MAX_COPY_SCAN: usize = 1 << 16;
+
+/// A cell in screen coordinates: the column and the row counted from the top of the scrollback.
+type ScreenCell = (u16, u32);
+
+/// The cell after `at` in reading order, `None` at the very last cell.
+fn next_cell(at: ScreenCell, cols: u16, last_row: u32) -> Option<ScreenCell> {
+    let (x, y) = at;
+    if x.saturating_add(1) < cols {
+        Some((x + 1, y))
+    } else if y < last_row {
+        Some((0, y + 1))
+    } else {
+        None
+    }
+}
+
+/// The cell before `at` in reading order, `None` at the very first cell.
+fn prev_cell(at: ScreenCell, cols: u16) -> Option<ScreenCell> {
+    let (x, y) = at;
+    if x > 0 {
+        Some((x - 1, y))
+    } else if y > 0 {
+        Some((cols.saturating_sub(1), y - 1))
+    } else {
+        None
+    }
+}
+
+/// Copy mode: the keyboard cursor is the end of the terminal's own selection, which the library keeps attached to
+/// the text, so output and scrolling never move it off what it points at.
+#[derive(Clone, Copy, Debug)]
+struct CopyModeState {
+    /// Motions extend the selection from the anchor; otherwise the selection is the one cell under the cursor.
+    selecting: bool,
+}
+
 /// [`TerminalEngine`] backed by `libghostty-vt`.
 pub struct GhosttyEngine {
     terminal: Terminal<'static, 'static>,
@@ -413,6 +451,8 @@ pub struct GhosttyEngine {
     /// The place in reading order of the current match as last seen, so that it can be put back when the library
     /// drops its selection (a resize does).
     search_memo: Option<usize>,
+    /// `Some` while copy mode is active.
+    copy: Option<CopyModeState>,
     render: RenderState<'static>,
     rows_iter: RowIterator<'static>,
     cells_iter: CellIterator<'static>,
@@ -523,6 +563,7 @@ impl GhosttyEngine {
             search: None,
             match_buf: MatchBuffer::new(),
             search_memo: None,
+            copy: None,
         })
     }
 }
@@ -539,6 +580,19 @@ impl GhosttyEngine {
             x: x.min(cols.saturating_sub(1)),
             y: u32::from(y.min(rows.saturating_sub(1))),
         }))
+    }
+
+    /// The copy cursor on the viewport; `None` outside copy mode and when the cursor is scrolled out of sight.
+    fn copy_cursor_in_viewport(&self) -> Result<Option<(u16, u16)>> {
+        if self.copy.is_none() {
+            return Ok(None);
+        }
+        let Some(selection) = self.terminal.selection().map_err(eng)? else { return Ok(None) };
+        let rows = self.terminal.rows().map_err(eng)?;
+        Ok(match viewport_edge(&self.terminal, &selection.end(), rows)? {
+            Edge::In(x, y) => Some((x, y)),
+            Edge::Above | Edge::Below => None,
+        })
     }
 
     /// The state of the active search, `None` without one. Reads what the library last saw: callers that need it
@@ -615,6 +669,159 @@ impl GhosttyEngine {
         let last_top = self.terminal.total_rows().map_err(eng)?.saturating_sub(rows);
         self.terminal.scroll_viewport(ScrollViewport::Row(top.min(last_top)));
         Ok(())
+    }
+
+    /// The grid reference of a screen cell.
+    fn screen_ref(&self, at: ScreenCell) -> Result<GridRef<'_>> {
+        self.terminal.grid_ref(Point::Screen(PointCoordinate { x: at.0, y: at.1 })).map_err(eng)
+    }
+
+    /// A reference converted to screen coordinates; `None` when the library cannot place it.
+    fn screen_point(&self, at: &GridRef<'_>) -> Result<Option<ScreenCell>> {
+        let point = self.terminal.point_from_grid_ref(at, PointSpace::Screen).map_err(eng)?;
+        Ok(point.map(|p| (p.x, p.y)))
+    }
+
+    /// The last row of the screen, counting the scrollback.
+    fn last_screen_row(&self) -> Result<u32> {
+        let total = self.terminal.total_rows().map_err(eng)?;
+        Ok(u32::try_from(total.saturating_sub(1)).unwrap_or(u32::MAX))
+    }
+
+    /// Whether a cell shows nothing: never written, or a blank. A spacer half of a wide character counts as blank,
+    /// its head cell is the one with text.
+    fn cell_is_blank(&self, at: ScreenCell) -> Result<bool> {
+        let cell = self.screen_ref(at)?.cell().map_err(eng)?;
+        if !cell.has_text().map_err(eng)? {
+            return Ok(true);
+        }
+        Ok(char::from_u32(cell.codepoint().map_err(eng)?).is_none_or(char::is_whitespace))
+    }
+
+    /// The copy cursor in screen coordinates: the end of the terminal's selection.
+    fn copy_cursor_cell(&self) -> Result<Option<ScreenCell>> {
+        let Some(selection) = self.terminal.selection().map_err(eng)? else { return Ok(None) };
+        self.screen_point(&selection.end())
+    }
+
+    /// Install the copy selection from `anchor` to `cursor` (both on the screen). The cursor is the end that moves.
+    fn install_copy_selection(&self, anchor: ScreenCell, cursor: ScreenCell) -> Result<()> {
+        let selection = Selection::new(self.screen_ref(anchor)?, self.screen_ref(cursor)?, false);
+        self.terminal.set_selection(Some(&selection)).map_err(eng)?;
+        Ok(())
+    }
+
+    /// Scroll the viewport the least that puts screen row `y` on it; nothing when it already is.
+    fn reveal_row(&mut self, y: u32) -> Result<()> {
+        let bar = self.terminal.scrollbar().map_err(eng)?;
+        let y = u64::from(y);
+        let top = if y < bar.offset {
+            y
+        } else if y >= bar.offset + bar.len {
+            y + 1 - bar.len
+        } else {
+            return Ok(());
+        };
+        self.terminal.scroll_viewport(ScrollViewport::Row(usize::try_from(top).unwrap_or(usize::MAX)));
+        Ok(())
+    }
+
+    /// Start copy mode (or start it again after the library dropped the selection): a one-cell selection on the
+    /// terminal's cursor, or on the first column of the last row when the cursor is hidden.
+    fn copy_enter(&mut self) -> Result<()> {
+        let rows = self.terminal.rows().map_err(eng)?;
+        let at = if self.terminal.is_cursor_visible().map_err(eng)? {
+            PointCoordinate {
+                x: self.terminal.cursor_x().map_err(eng)?,
+                y: u32::from(self.terminal.cursor_y().map_err(eng)?),
+            }
+        } else {
+            PointCoordinate { x: 0, y: u32::from(rows.saturating_sub(1)) }
+        };
+        let start = self.terminal.grid_ref(Point::Active(at)).map_err(eng)?;
+        let Some(cell) = self.screen_point(&start)? else {
+            return Err(Error::Engine("the cursor is not on the screen".into()));
+        };
+        self.install_copy_selection(cell, cell)?;
+        self.copy = Some(CopyModeState { selecting: false });
+        self.reveal_row(cell.1)
+    }
+
+    /// The word under `at`, as its first and last cell (the library's own notion of a word, which also covers soft
+    /// wraps). A run of blanks or of separators is a "word" of its own; a cell that was never written has none.
+    fn word_at(&self, at: ScreenCell) -> Result<Option<(ScreenCell, ScreenCell)>> {
+        let Some(word) = self.terminal.select_word(SelectWordOptions::new(self.screen_ref(at)?)).map_err(eng)? else {
+            return Ok(None);
+        };
+        Ok(self.screen_point(&word.start())?.zip(self.screen_point(&word.end())?))
+    }
+
+    /// The first (`last` false) or last non-blank cell of a row.
+    fn row_edge(&self, y: u32, last: bool, cols: u16) -> Result<Option<u16>> {
+        let mut found = None;
+        for x in 0..cols {
+            if !self.cell_is_blank((x, y))? {
+                found = Some(x);
+                if !last {
+                    break;
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Where a motion takes the cursor from `from`. Always a cell inside the screen.
+    fn copy_target(&self, from: ScreenCell, motion: CopyMotion) -> Result<ScreenCell> {
+        let cols = self.terminal.cols().map_err(eng)?;
+        let rows = u32::from(self.terminal.rows().map_err(eng)?);
+        let last_row = self.last_screen_row()?;
+        let last_col = cols.saturating_sub(1);
+        // A column or row from before a resize is brought back into the grid first.
+        let (x, y) = (from.0.min(last_col), from.1.min(last_row));
+        Ok(match motion {
+            CopyMotion::Left => (x.saturating_sub(1), y),
+            CopyMotion::Right => (x.saturating_add(1).min(last_col), y),
+            CopyMotion::Up => (x, y.saturating_sub(1)),
+            CopyMotion::Down => (x, y.saturating_add(1).min(last_row)),
+            CopyMotion::LineStart => (self.row_edge(y, false, cols)?.unwrap_or(0), y),
+            CopyMotion::LineEnd => (self.row_edge(y, true, cols)?.unwrap_or(0), y),
+            CopyMotion::Top => (0, 0),
+            CopyMotion::Bottom => (0, last_row),
+            CopyMotion::PageUp => (x, y.saturating_sub(rows)),
+            CopyMotion::PageDown => (x, y.saturating_add(rows).min(last_row)),
+            CopyMotion::WordForward => {
+                // Past the end of the word under the cursor, then past blanks (and over line ends) to the first
+                // non-blank cell. Nothing after it: the cursor stays.
+                let mut at = self.word_at((x, y))?.map_or((x, y), |(_, end)| end);
+                let mut found = None;
+                for _ in 0..MAX_COPY_SCAN {
+                    let Some(next) = next_cell(at, cols, last_row) else { break };
+                    at = next;
+                    if !self.cell_is_blank(at)? {
+                        found = Some(at);
+                        break;
+                    }
+                }
+                found.unwrap_or((x, y))
+            }
+            CopyMotion::WordBack => {
+                // Back over blanks to the last cell of the previous word, then to that word's first cell. From the
+                // middle of a word the cell before is in the same word, so that is this word's start.
+                let Some(mut at) = prev_cell((x, y), cols) else { return Ok((x, y)) };
+                let mut steps = 0;
+                while self.cell_is_blank(at)? {
+                    match prev_cell(at, cols) {
+                        Some(before) => at = before,
+                        None => return Ok((0, 0)),
+                    }
+                    steps += 1;
+                    if steps > MAX_COPY_SCAN {
+                        return Ok((x, y));
+                    }
+                }
+                self.word_at(at)?.map_or(at, |(start, _)| start)
+            }
+        })
     }
 
     /// Fill the reusable key event and run the encoder against the terminal's current modes.
@@ -770,6 +977,7 @@ impl TerminalEngine for GhosttyEngine {
     fn update(&mut self) -> Result<Update> {
         // The search is caught up first: it needs the terminal exclusively, which the render state below borrows.
         let (matches, search) = self.search_view()?;
+        let copy_cursor = self.copy_cursor_in_viewport()?;
         // The scrollbar is read at the same moment as the render-state update (render.rs docs).
         let sb = self.terminal.scrollbar().map_err(eng)?;
         let modes = Modes {
@@ -846,7 +1054,7 @@ impl TerminalEngine for GhosttyEngine {
             selection,
             matches,
             search,
-            copy_cursor: None,
+            copy_cursor,
         })
     }
 
@@ -973,6 +1181,74 @@ impl TerminalEngine for GhosttyEngine {
             }
         }
         Ok(self.search_state()?.unwrap_or_default())
+    }
+
+    fn copy_mode(&mut self, op: CopyOp) -> Result<CopyState> {
+        let mut yanked = None;
+        match op {
+            CopyOp::Enter => {
+                // Entering again keeps the cursor where it is, unless the library dropped the selection meanwhile.
+                if self.copy.is_none() || self.copy_cursor_cell()?.is_none() {
+                    self.copy_enter()?;
+                }
+            }
+            CopyOp::Exit => {
+                // Only a selection copy mode made is cleared: outside copy mode the selection is the pointer's.
+                if self.copy.take().is_some() {
+                    self.terminal.set_selection(None).map_err(eng)?;
+                }
+            }
+            CopyOp::Yank => {
+                if self.copy.take().is_some() {
+                    yanked = self.selection_text()?;
+                    self.terminal.set_selection(None).map_err(eng)?;
+                }
+            }
+            CopyOp::ToggleSelection => {
+                if let Some(state) = self.copy {
+                    // Turning it on anchors at the cursor, which is already the one selected cell; turning it off
+                    // collapses to the cursor cell.
+                    let selecting = !state.selecting;
+                    match self.copy_cursor_cell()? {
+                        Some(cursor) => {
+                            if !selecting {
+                                self.install_copy_selection(cursor, cursor)?;
+                            }
+                            self.copy = Some(CopyModeState { selecting });
+                        }
+                        None => self.copy_enter()?,
+                    }
+                }
+            }
+            CopyOp::Move(motion) => {
+                if let Some(state) = self.copy {
+                    match self.copy_cursor_cell()? {
+                        // The selection is gone (the other screen was shown, or the program cleared it): start again
+                        // at the terminal's cursor instead of guessing.
+                        None => self.copy_enter()?,
+                        Some(from) => {
+                            let to = self.copy_target(from, motion)?;
+                            let anchor = if state.selecting {
+                                let selection = self.terminal.selection().map_err(eng)?;
+                                match selection {
+                                    Some(selection) => self.screen_point(&selection.start())?.unwrap_or(to),
+                                    None => to,
+                                }
+                            } else {
+                                to
+                            };
+                            self.install_copy_selection(anchor, to)?;
+                            self.reveal_row(to.1)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(CopyState {
+            active: self.copy.is_some(),
+            selecting: self.copy.is_some_and(|state| state.selecting),
+            yanked,
+        })
     }
 
     fn selection_text(&mut self) -> Result<Option<String>> {

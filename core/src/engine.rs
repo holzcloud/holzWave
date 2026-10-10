@@ -522,30 +522,48 @@ pub struct SearchState {
 }
 
 /// A cursor movement in copy mode.
+///
+/// The cursor moves over the whole screen, scrollback included, and the viewport follows it. Every motion stops at
+/// the edges: nothing wraps and nothing goes past the first or the last cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopyMotion {
+    /// One cell left or right.
     Left,
     Right,
+    /// One row up or down, blank rows included.
     Up,
     Down,
+    /// The first and the last non-blank cell of the row (column 0 on a blank row).
     LineStart,
     LineEnd,
+    /// The first cell of the scrollback and column 0 of the last row.
     Top,
     Bottom,
+    /// One screen height up or down, in the same column.
     PageUp,
     PageDown,
+    /// The first character of the next word, over blanks and line ends; the first character of this word, or of the
+    /// previous one when already on a word start. A word is the library's own: what a double click selects.
     WordForward,
     WordBack,
 }
 
 /// An operation of the keyboard-driven copy mode.
+///
+/// The cursor is the moving end of the terminal's own selection, so it is tracked: output and scrolling leave it on
+/// the text it points at. Without a selection in progress the selection is the one cell under the cursor. Every
+/// operation but `Enter` does nothing outside copy mode, and none of them can fail on an out-of-range position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopyOp {
+    /// Start at the terminal's cursor (column 0 of the last row when it is hidden), replacing any selection.
     Enter,
+    /// Leave without yanking and clear the selection.
     Exit,
     Move(CopyMotion),
+    /// Anchor a selection at the cursor, or collapse the selection to the cursor cell.
     ToggleSelection,
-    /// Leave copy mode and hand back the selected text in [`CopyState::yanked`].
+    /// Leave copy mode and hand back the selected text in [`CopyState::yanked`] (soft wraps joined, trailing blanks
+    /// trimmed); `None` when the selection holds no text.
     Yank,
 }
 
