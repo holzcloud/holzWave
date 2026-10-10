@@ -303,6 +303,9 @@ pub struct GhosttyEngine {
     /// The next `update` reports every row and tells the consumer to start over: true at the start and after
     /// `request_full`.
     force_full: bool,
+    /// The grid size at the previous `update`, so that a size change resets the consumer even when libghostty
+    /// reports nothing.
+    last_size: Option<(u16, u16)>,
 }
 
 impl GhosttyEngine {
@@ -357,6 +360,7 @@ impl GhosttyEngine {
             key_event: key::Event::new().map_err(eng)?,
             option_as_alt: false,
             force_full: true,
+            last_size: None,
         })
     }
 }
@@ -405,6 +409,17 @@ impl TerminalEngine for GhosttyEngine {
     }
 
     fn resize(&mut self, cols: u16, rows: u16, cell_px: (u32, u32)) -> Result<()> {
+        // The pinned libghostty revision trips its PageList integrity assertion (an abort of the whole process in a
+        // debug build, an inconsistent viewport otherwise) when the row count grows while the viewport is scrolled
+        // into history and the grown screen needs more rows than exist. Measured: it needs rows to grow, the view to
+        // be scrolled back and too little content; shrinking and column changes never trigger it. Growing from the
+        // live screen is safe, so a grow while scrolled back first returns to the live screen.
+        if rows > self.terminal.rows().map_err(eng)? {
+            let sb = self.terminal.scrollbar().map_err(eng)?;
+            if sb.offset + sb.len < sb.total {
+                self.terminal.scroll_viewport(ScrollViewport::Bottom);
+            }
+        }
         self.terminal.resize(cols, rows, cell_px.0, cell_px.1).map_err(eng)
     }
 
@@ -512,7 +527,7 @@ impl TerminalEngine for GhosttyEngine {
         let snapshot = self.render.update(&self.terminal).map_err(eng)?;
         let colors = snapshot.colors().map_err(eng)?;
         let (cols, rows) = (snapshot.cols().map_err(eng)?, snapshot.rows().map_err(eng)?);
-        let reset = self.force_full;
+        let reset = self.force_full || self.last_size != Some((cols, rows));
         let full = reset || snapshot.dirty().map_err(eng)? == Dirty::Full;
         let cursor = read_cursor(&snapshot)?;
 
@@ -539,6 +554,7 @@ impl TerminalEngine for GhosttyEngine {
         // Only after the rows were consumed: clean() clears the global and the per-row flags.
         snapshot.clean().map_err(eng)?;
         self.force_full = false;
+        self.last_size = Some((cols, rows));
 
         Ok(Update {
             full,

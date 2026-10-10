@@ -382,3 +382,22 @@ fn a_mirror_built_only_from_frames_equals_the_screen_after_every_operation() {
         }
     }
 }
+
+#[test]
+fn growing_the_grid_while_scrolled_back_does_not_abort_and_shows_the_live_screen() {
+    // The pinned libghostty aborts the process in this case (PageList integrity check) unless the view first returns
+    // to the live screen: rows grow, the view is scrolled into history, and the grown screen needs more rows than
+    // the history holds.
+    let mut e = engine(20, 5);
+    for i in 0..3 {
+        e.feed(format!("line {i}\r\n").as_bytes());
+    }
+    update(&mut e);
+    e.scroll(-1);
+    e.resize(20, 15, (0, 0)).expect("resize");
+    let u = update(&mut e);
+    assert!(u.reset);
+    assert_eq!((u.cols, u.rows), (20, 15));
+    assert_eq!(u.changed.len(), 15);
+    assert!(row_text(&u, 0).starts_with("line 0"), "row 0 is {:?}", row_text(&u, 0));
+}

@@ -91,10 +91,10 @@ fn encode_row(y: u16, cells: &[Cell], cols: usize, default_bg: u32) -> RowMsg {
     let mut runs: Vec<Run> = Vec::new();
     let mut extras: Vec<(u16, String)> = Vec::new();
     for (x, cell) in cells.iter().take(cols).enumerate() {
-        let flags = u8::from(cell.bold) * BOLD
-            | u8::from(cell.italic) * ITALIC
-            | u8::from(cell.underline) * UNDERLINE
-            | u8::from(cell.inverse) * INVERSE;
+        let flags = (u8::from(cell.bold) * BOLD)
+            | (u8::from(cell.italic) * ITALIC)
+            | (u8::from(cell.underline) * UNDERLINE)
+            | (u8::from(cell.inverse) * INVERSE);
         let (fg, bg) = (rgb(cell.fg), rgb(cell.bg));
         let mut chars = cell.text.chars();
         let first = match cell.width {
@@ -133,41 +133,31 @@ fn encode_row(y: u16, cells: &[Cell], cols: usize, default_bg: u32) -> RowMsg {
     RowMsg { y, runs, extras }
 }
 
-/// Turns engine updates into frames for one pane.
-#[derive(Debug)]
-pub struct FrameEncoder {
-    pane: u64,
-    seq: u64,
-    first: bool,
+/// Everything in a frame except the rows. Two consecutive frames with the same header and no changed rows carry no
+/// information, so the encoder does not emit the second one.
+#[derive(Clone, Debug, PartialEq)]
+struct Header {
+    cols: u16,
+    rows: u16,
+    fg: u32,
+    bg: u32,
+    cursor: Option<CursorMsg>,
+    scrollbar: (u64, u64, u64),
+    selection: Vec<(u16, u16, u16)>,
+    matches: Vec<(u16, u16, u16, bool)>,
+    search: Option<SearchMsg>,
+    copy_cursor: Option<(u16, u16)>,
+    modes: ModesMsg,
 }
 
-impl FrameEncoder {
-    pub fn new(pane: u64) -> Self {
-        Self { pane, seq: 0, first: true }
-    }
-
-    pub fn request_full(&mut self) {}
-
-    /// Encode one engine update. `None` when there is nothing to tell the webview.
-    pub fn encode(&mut self, update: Update) -> Option<FrameMsg> {
-        let full = self.first || update.reset;
-        let default_bg = rgb(update.default_bg);
-        let cols = usize::from(update.cols);
-        let changed: Vec<RowMsg> =
-            update.changed.iter().map(|r| encode_row(r.y, &r.cells, cols, default_bg)).collect();
-        if !full && changed.is_empty() {
-            return None;
-        }
-        self.first = false;
-        self.seq += 1;
-        Some(FrameMsg {
-            pane: self.pane,
-            seq: self.seq,
-            full,
+impl Header {
+    fn of(update: &Update) -> Header {
+        Header {
             cols: update.cols,
             rows: update.rows,
             fg: rgb(update.default_fg),
-            bg: default_bg,
+            bg: rgb(update.default_bg),
+            // A hidden cursor is not on the wire: the webview draws a cursor exactly when there is one.
             cursor: update.cursor.filter(|c| c.visible).map(|c| CursorMsg {
                 x: c.x,
                 y: c.y,
@@ -189,7 +179,109 @@ impl FrameEncoder {
                 bracketed_paste: update.modes.bracketed_paste,
                 mouse: update.modes.mouse_tracking,
             },
+        }
+    }
+
+    fn into_frame(self, pane: u64, seq: u64, full: bool, changed: Vec<RowMsg>) -> FrameMsg {
+        FrameMsg {
+            pane,
+            seq,
+            full,
+            cols: self.cols,
+            rows: self.rows,
+            fg: self.fg,
+            bg: self.bg,
+            cursor: self.cursor,
+            scrollbar: self.scrollbar,
+            selection: self.selection,
+            matches: self.matches,
+            search: self.search,
+            copy_cursor: self.copy_cursor,
+            modes: self.modes,
             changed,
-        })
+        }
+    }
+}
+
+fn blank_row(y: u16) -> RowMsg {
+    RowMsg { y, runs: Vec::new(), extras: Vec::new() }
+}
+
+/// Turns the updates of one engine into the frames of one pane.
+///
+/// What the webview holds is exactly what the encoder last sent, so the encoder keeps the rows it sent and the
+/// header it sent, and compares every incoming row with them. libghostty reports a full redraw for every scroll
+/// (RESEARCH Pitfall 7); the comparison is what turns that back into "only the rows that differ" (D-11).
+///
+/// A frame says `full` only when the consumer must replace everything: the first frame, a size change, a theme change
+/// (the engine's `reset`) and a [`FrameEncoder::request_full`] (webview reconnect or a gap in the sequence numbers,
+/// D-09). The encoder is created together with its engine; one created later should be paired with
+/// `engine.request_full()` so that its first frame has every row.
+#[derive(Debug)]
+pub struct FrameEncoder {
+    pane: u64,
+    seq: u64,
+    /// The next frame is full, whatever the update says.
+    request: bool,
+    /// The header of the last frame sent; `None` before the first.
+    header: Option<Header>,
+    /// The rows of the last frame sent, by `y`.
+    rows: Vec<RowMsg>,
+}
+
+impl FrameEncoder {
+    pub fn new(pane: u64) -> Self {
+        Self { pane, seq: 0, request: false, header: None, rows: Vec::new() }
+    }
+
+    /// Make the next frame full: every row, resent from what was sent before. The webview asks for this when it
+    /// reconnects or notices a gap in the sequence numbers.
+    pub fn request_full(&mut self) {
+        self.request = true;
+    }
+
+    /// Encode one engine update. `None` when there is nothing to tell the webview: no row differs from the last
+    /// frame and the header is the same. A frame that is not emitted does not use up a sequence number.
+    pub fn encode(&mut self, update: Update) -> Option<FrameMsg> {
+        let header = Header::of(&update);
+        let size_changed =
+            self.header.as_ref().is_none_or(|h| h.cols != header.cols || h.rows != header.rows);
+        let full = update.reset || self.request || size_changed;
+        let (cols, rows) = (usize::from(update.cols), usize::from(update.rows));
+
+        let mut changed: Vec<RowMsg> = Vec::new();
+        if full {
+            // Start from what the webview holds when the grid is the same (an encoder-side request), else from
+            // blank rows; the update's rows replace theirs. An engine update after a reset carries every row.
+            let mut all = if size_changed { Vec::new() } else { std::mem::take(&mut self.rows) };
+            all.truncate(rows);
+            while all.len() < rows {
+                all.push(blank_row(all.len() as u16));
+            }
+            for r in &update.changed {
+                if let Some(slot) = all.get_mut(usize::from(r.y)) {
+                    *slot = encode_row(r.y, &r.cells, cols, header.bg);
+                }
+            }
+            changed.clone_from(&all);
+            self.rows = all;
+        } else {
+            for r in &update.changed {
+                let Some(held) = self.rows.get_mut(usize::from(r.y)) else { continue };
+                let row = encode_row(r.y, &r.cells, cols, header.bg);
+                if *held != row {
+                    *held = row.clone();
+                    changed.push(row);
+                }
+            }
+        }
+
+        if !full && changed.is_empty() && self.header.as_ref() == Some(&header) {
+            return None;
+        }
+        self.request = false;
+        self.header = Some(header.clone());
+        self.seq += 1;
+        Some(header.into_frame(self.pane, self.seq, full, changed))
     }
 }
