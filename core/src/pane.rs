@@ -36,13 +36,13 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::engine::{DomKey, EngineEvent, EngineTheme, KeyEvent, TerminalEngine};
+use crate::engine::{DomKey, EngineEvent, EngineTheme, KeyEvent, PasteOutcome, TerminalEngine};
 use crate::layout::PaneId;
 use crate::pty::{Pty, SpawnOptions};
 use crate::queue::{PaneQueue, Popped};
@@ -63,6 +63,16 @@ pub const REPLY_BACKLOG: usize = 256 * 1024;
 /// The most bytes of one text input ([`PaneHandle::text`]) the actor accepts. It is what a person typed or an IME
 /// committed, so this is generous.
 pub const MAX_TEXT_BYTES: usize = 1 << 20;
+
+/// The most bytes of one paste ([`PaneHandle::paste`]) the actor accepts (T-02-42).
+pub const MAX_PASTE_BYTES: usize = 16 << 20;
+
+/// How long a call that waits for the engine thread's answer waits at most.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The largest cell size in pixels and the largest scroll step a caller can ask for; larger values are clamped.
+const MAX_CELL_PX: u32 = 1024;
+const MAX_SCROLL_ROWS: isize = 1_000_000;
 
 /// The longest `code` or `key` string of a [`DomKey`] the actor accepts. The longest real value is a named key.
 const MAX_KEY_FIELD_BYTES: usize = 256;
@@ -151,6 +161,11 @@ pub enum PaneEvent {
 enum Control {
     Key(DomKey),
     Text(String),
+    /// The engine's answer travels back over `reply`; a dropped sender tells the caller the pane is gone.
+    Paste { text: String, allow_unsafe: bool, reply: Sender<Result<PasteOutcome>> },
+    Resize { cols: u16, rows: u16, cell_px: (u32, u32) },
+    Scroll(isize),
+    RequestFull,
     Close,
 }
 
@@ -261,29 +276,55 @@ impl PaneHandle {
         self.send(Control::Text(text))
     }
 
-    /// Skeleton: not implemented yet.
-    pub fn paste(&self, _text: String, _allow_unsafe: bool) -> Result<crate::engine::PasteOutcome> {
-        Err(Error::Unsupported("paste".into()))
+    /// Send a request and wait for the engine thread's answer, at most [`REPLY_TIMEOUT`].
+    fn request<T>(&self, make: impl FnOnce(Sender<Result<T>>) -> Control) -> Result<T> {
+        let (tx, rx) = mpsc::channel();
+        self.send(make(tx))?;
+        match rx.recv_timeout(REPLY_TIMEOUT) {
+            Ok(answer) => answer,
+            Err(RecvTimeoutError::Timeout) => Err(Error::Pty("pane busy".into())),
+            // The pane ended with the request still queued.
+            Err(RecvTimeoutError::Disconnected) => Err(Error::Pty("the pane is closed".into())),
+        }
     }
 
-    /// Skeleton: not implemented yet.
-    pub fn resize(&self, _cols: u16, _rows: u16, _cell_px: (u32, u32)) -> Result<()> {
-        Err(Error::Unsupported("resize".into()))
+    /// Paste clipboard text the way the program asked for it (bracketed when it enabled mode 2004).
+    ///
+    /// Waits for the engine thread's answer for up to two seconds and gives `Error::Pty("pane busy")` after that,
+    /// so it must not be called on the Tauri main thread. [`PasteOutcome::Rejected`] means the text could inject
+    /// commands and nothing was written; the caller asks the user and repeats the call with `allow_unsafe`. Text
+    /// over [`MAX_PASTE_BYTES`] is refused here.
+    pub fn paste(&self, text: String, allow_unsafe: bool) -> Result<PasteOutcome> {
+        if text.len() > MAX_PASTE_BYTES {
+            return Err(Error::Pty(format!("paste too large (more than {MAX_PASTE_BYTES} bytes)")));
+        }
+        self.request(|reply| Control::Paste { text, allow_unsafe, reply })
     }
 
-    /// Skeleton: not implemented yet.
-    pub fn scroll(&self, _rows: isize) -> Result<()> {
-        Err(Error::Unsupported("scroll".into()))
+    /// Change the grid. The size is clamped to a sane range first; the PTY is resized with pixel dimensions and the
+    /// next frame is a full one.
+    pub fn resize(&self, cols: u16, rows: u16, cell_px: (u32, u32)) -> Result<()> {
+        self.send(Control::Resize {
+            cols: cols.clamp(MIN_COLS, MAX_DIM),
+            rows: rows.clamp(MIN_ROWS, MAX_DIM),
+            cell_px: (cell_px.0.min(MAX_CELL_PX), cell_px.1.min(MAX_CELL_PX)),
+        })
     }
 
-    /// Skeleton: not implemented yet.
+    /// Scroll the viewport by `rows`; negative is towards older output.
+    pub fn scroll(&self, rows: isize) -> Result<()> {
+        self.send(Control::Scroll(rows.clamp(-MAX_SCROLL_ROWS, MAX_SCROLL_ROWS)))
+    }
+
+    /// Make the next frame a full one: the webview reconnected or saw a gap in the sequence numbers.
     pub fn request_full(&self) -> Result<()> {
-        Err(Error::Unsupported("request_full".into()))
+        self.send(Control::RequestFull)
     }
 
-    /// Skeleton: not implemented yet.
+    /// The most output bytes that were ever queued between the PTY reader and the engine thread at once. It exists
+    /// for tests and diagnostics: it is how the byte bound of the queue is observed from outside.
     pub fn queue_high_water(&self) -> usize {
-        0
+        self.shared.queue.high_water()
     }
 
     /// End the pane: the shell is killed and reaped on the engine thread and one `Exited` event follows. Does not
@@ -353,14 +394,23 @@ impl Writer {
     }
 }
 
-fn reader_main(mut reader: Box<dyn Read + Send>, queue: Arc<PaneQueue<Control>>) {
+/// Read the PTY into the queue until the end of the output.
+///
+/// After the queue was closed (the pane is being closed) the thread keeps reading and throws the output away until
+/// the end or until `reaped` is set. That is not tidiness: a child that is being killed while its output is
+/// unread cannot finish exiting on macOS, because closing a tty waits for its output to drain, and `Pty::close`
+/// waits for the child. Draining is what lets a shell be closed in the middle of a flood.
+fn reader_main(mut reader: Box<dyn Read + Send>, queue: Arc<PaneQueue<Control>>, reaped: Arc<AtomicBool>) {
     let mut buf = vec![0u8; READ_CHUNK];
+    let mut draining = false;
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                if !queue.push_output(buf[..n].to_vec()) {
-                    // Closed: the pane is gone and nobody wants more.
+                if !draining && !queue.push_output(buf[..n].to_vec()) {
+                    draining = true;
+                }
+                if draining && reaped.load(Ordering::Relaxed) {
                     return;
                 }
             }
@@ -394,6 +444,8 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     encoder: FrameEncoder,
     writer: Writer,
     queue: Arc<PaneQueue<Control>>,
+    /// Set once the child was reaped: the reader thread may stop draining then.
+    reaped: Arc<AtomicBool>,
     sink: S,
     option_as_alt: bool,
     interval: Duration,
@@ -434,6 +486,31 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         match control {
             Control::Key(dom) => self.key(&dom),
             Control::Text(text) => self.text(&text),
+            Control::Paste { text, allow_unsafe, reply } => {
+                let outcome = self.engine.paste(&text, allow_unsafe);
+                // A paste comes out of the same buffer as the answers to queries: take it now, so nothing that
+                // happens later can pick it up again.
+                let bytes = self.engine.take_replies();
+                if matches!(outcome, Ok(PasteOutcome::Written)) {
+                    self.engine.scroll_to_bottom();
+                    self.dirty = true;
+                    self.writer.input(bytes);
+                } else {
+                    // Nothing was pasted; whatever else was in the buffer is an engine reply.
+                    self.writer.reply(bytes);
+                }
+                let _ = reply.send(outcome);
+            }
+            Control::Resize { cols, rows, cell_px } => self.resize(cols, rows, cell_px),
+            Control::Scroll(rows) => {
+                self.engine.scroll(rows);
+                self.dirty = true;
+            }
+            Control::RequestFull => {
+                self.encoder.request_full();
+                self.engine.request_full();
+                self.dirty = true;
+            }
             // `run` ends the loop on Close before it gets here.
             Control::Close => {}
         }
@@ -473,6 +550,24 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         self.writer.input(bytes);
     }
 
+    fn resize(&mut self, cols: u16, rows: u16, cell_px: (u32, u32)) {
+        let before = self.engine.size().ok();
+        if self.engine.resize(cols, rows, cell_px).is_err() {
+            return;
+        }
+        if let Some(pty) = &self.pty {
+            // The child learns the size in cells and in pixels (programs that draw images read the latter).
+            let px_w = cell_px.0.saturating_mul(u32::from(cols));
+            let px_h = cell_px.1.saturating_mul(u32::from(rows));
+            let _ = pty.resize_px(cols, rows, px_w, px_h);
+        }
+        if self.engine.size().ok() != before {
+            // A different grid is a reset for the webview.
+            self.encoder.request_full();
+        }
+        self.dirty = true;
+    }
+
     fn drain_events(&mut self) {
         for event in self.engine.take_events() {
             match event {
@@ -496,8 +591,9 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     fn finish(&mut self) {
         // Refuse further input and release a reader blocked on a full queue.
         self.queue.close();
-        // Kill and reap; the writer is dropped only after this.
+        // Kill and reap; the writer is dropped only after this. The reader thread keeps draining meanwhile.
         let code = self.pty.take().and_then(|pty| pty.close().ok());
+        self.reaped.store(true, Ordering::Relaxed);
         (self.sink)(PaneEvent::Exited { code });
         // Callers waiting for an answer must not wait for their timeout: dropping what is left drops their
         // reply channels.
@@ -512,6 +608,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Drop for Actor<E, S> {
         if let Some(pty) = self.pty.take() {
             let _ = pty.close();
         }
+        self.reaped.store(true, Ordering::Relaxed);
     }
 }
 
@@ -569,10 +666,12 @@ fn engine_main<E, F, S>(
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let pending = Arc::new(AtomicUsize::new(0));
     let reader_queue = queue.clone();
+    let reaped = Arc::new(AtomicBool::new(false));
+    let reader_reaped = reaped.clone();
     let writer_pending = pending.clone();
     let threads = thread::Builder::new()
         .name(format!("hw-pane-{pane}-reader"))
-        .spawn(move || reader_main(reader, reader_queue))
+        .spawn(move || reader_main(reader, reader_queue, reader_reaped))
         .and_then(|_| {
             thread::Builder::new()
                 .name(format!("hw-pane-{pane}-writer"))
@@ -589,6 +688,7 @@ fn engine_main<E, F, S>(
         encoder: FrameEncoder::new(pane),
         writer: Writer { tx, pending },
         queue,
+        reaped,
         sink,
         option_as_alt: spec.option_as_alt,
         interval: spec.frame_interval,

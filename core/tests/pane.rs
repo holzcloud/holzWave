@@ -387,6 +387,9 @@ impl TerminalEngine for CountingEngine {
     fn set_option_as_alt(&mut self, _on: bool) {}
 
     fn encode_key(&mut self, event: &KeyEvent) -> holzwave_core::Result<Vec<u8>> {
+        if event.code == "Enter" {
+            return Ok(b"\r".to_vec());
+        }
         Ok(event.text.clone().unwrap_or_default().into_bytes())
     }
 
@@ -463,15 +466,17 @@ fn pasted_text_is_not_replayed_into_the_replies_of_a_later_query() {
     // bytes stayed in the engine's reply buffer, the answer to the query would carry them: `cat -v` would print
     // "go" again.
     let pane = spawn(
-        spec_sh("stty -echo; printf ready; read -r go; printf '\\033[6n'; exec cat -v"),
+        spec_sh("stty -echo; printf ready; read -r go; printf '\\033[6n'; printf next; exec cat -v"),
         &probe,
     );
     assert!(wait_until(WAIT, || probe.has_text("ready")), "the child is not ready");
 
     assert_eq!(pane.paste("go\n".into(), true).expect("paste"), PasteOutcome::Written);
+    // "next" follows the query in the child's output, so once it is shown the answer is queued ahead of the Enter.
+    assert!(wait_until(WAIT, || probe.has_text("next")), "the child did not read the paste");
     pane.key(key("Enter", "Enter")).expect("enter");
 
-    // Cursor after "ready" is column 6 of row 1.
+    // The cursor was after "ready", column 6 of row 1, when the query came.
     assert!(wait_until(WAIT, || probe.has_text("^[[1;6R")), "the answer never arrived");
     assert!(!probe.has_text("go"), "the paste came back as a reply");
     pane.close();
@@ -514,9 +519,10 @@ fn a_100_mib_flood_keeps_the_queue_within_its_bound_and_ends_the_pane_cleanly() 
 #[test]
 fn input_resize_and_close_get_through_a_flood() {
     let probe = Probe::default();
-    // Endless output, so the flood is certainly still running whenever the pane is asked for something.
+    // Endless output from a background job, so the flood is certainly still running whenever the pane is asked for
+    // something, while the shell itself waits for one line of input and then reports it.
     let (pane, spy) = spawn_counting(
-        spec_sh("exec yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        spec_sh("stty -echo; yes aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa & read -r line; printf 'GOT-%s' \"$line\"; sleep 30"),
         &probe,
         SLOW_CONSUMER,
     );
@@ -535,9 +541,9 @@ fn input_resize_and_close_get_through_a_flood() {
         "the full-frame request starved behind the flood"
     );
 
-    // Nothing reads the input of `yes`, but the tty echoes it: the key is proven to get through when it comes back
-    // out of the flood.
+    // The line reaches the shell through the flood: it comes back as "GOT-Z" in the output.
     pane.key(shift("KeyZ", "Z")).expect("key");
+    pane.key(key("Enter", "Enter")).expect("enter");
     assert!(wait_until(Duration::from_secs(2), || spy.saw(b'Z')), "a key starved behind the flood");
     let high = pane.queue_high_water();
     assert!(high <= OUTPUT_LIMIT + CHUNK, "{high} queued bytes at once");
@@ -554,7 +560,9 @@ fn input_resize_and_close_get_through_a_flood() {
 #[test]
 fn a_4_mib_paste_into_cat_does_not_deadlock() {
     let probe = Probe::default();
-    let (pane, spy) = spawn_counting(PaneSpec::new("/bin/cat", 80, 24), &probe, SLOW_CONSUMER);
+    // Echo is off: the tty would otherwise echo every pasted line on top of what cat copies, and a terminal drops
+    // echo when its output queue is full, which would make the end of this test depend on that.
+    let (pane, spy) = spawn_counting(spec_sh("stty -echo; exec cat"), &probe, SLOW_CONSUMER);
 
     // 65 536 lines of 63 characters and a newline: short lines, because a terminal in canonical mode cuts long ones.
     // Lower case and digits only, so the capital Q typed afterwards can only come from the key.
@@ -563,7 +571,9 @@ fn a_4_mib_paste_into_cat_does_not_deadlock() {
     assert_eq!(text.len(), 4 << 20);
     assert_eq!(pane.paste(text, true).expect("paste"), PasteOutcome::Written);
 
+    // The key and its Enter queue up behind the paste; cat copies the line once the paste is through.
     pane.key(shift("KeyQ", "Q")).expect("key");
+    pane.key(key("Enter", "Enter")).expect("enter");
     assert!(
         wait_until(Duration::from_secs(20), || spy.saw(b'Q')),
         "a key after the paste never echoed: the pane is stuck ({} bytes fed)",
