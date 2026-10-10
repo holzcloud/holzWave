@@ -11,7 +11,7 @@ use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::engine::{
     Cell, Color, Cursor, CursorStyle, KeyAction, KeyEvent, Mods, PasteOutcome, Screen, Scrollbar,
-    TerminalEngine, Width,
+    TerminalEngine, Update, Width,
 };
 use crate::{Error, Result};
 
@@ -476,6 +476,11 @@ impl TerminalEngine for GhosttyEngine {
 
     fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut *self.replies.borrow_mut())
+    }
+
+    fn update(&mut self) -> Result<Update> {
+        // Skeleton for the RED commit: reports nothing.
+        Ok(Update::default())
     }
 }
 
