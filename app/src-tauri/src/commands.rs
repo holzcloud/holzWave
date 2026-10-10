@@ -21,9 +21,10 @@ use holzwave_core::engine::{
 use holzwave_core::layout::{PaneId, SplitId};
 use holzwave_core::wire::SearchMsg;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::State;
 
-use crate::state::{AppCore, View};
+use crate::state::{AppCore, SettingsView, View};
 
 // ---- wire types ------------------------------------------------------------------------------------------------
 
@@ -336,4 +337,32 @@ pub fn select_workspace(core: State<Arc<AppCore>>, index: usize) -> View {
 #[tauri::command(rename_all = "snake_case")]
 pub fn set_ratio(core: State<Arc<AppCore>>, split: SplitId, ratio: f32) -> View {
     core.set_ratio(split, ratio)
+}
+
+// ---- settings, themes and key bindings ----------------------------------------------------------------------------
+
+/// The settings, the themes, the theme in force and the key bindings. Reads memory only.
+#[tauri::command(rename_all = "snake_case")]
+pub fn get_settings(core: State<Arc<AppCore>>) -> SettingsView {
+    core.get_settings()
+}
+
+/// Set one setting (`key` is a field of `settings.json`, `value` its JSON value). Validated, written atomically,
+/// pushed to every live pane and announced as the `settings` event; the answer is the new view, or the reason why
+/// nothing changed. Writes a file, so it is async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn set_setting(core: State<Arc<AppCore>>, key: String, value: Value) -> Result<SettingsView, String> {
+    core.set_setting(&key, value)
+}
+
+/// Restore the default of one setting. Async for the same reason as `set_setting`.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn reset_setting(core: State<Arc<AppCore>>, key: String) -> Result<SettingsView, String> {
+    core.reset_setting(&key)
+}
+
+/// Re-read `settings.json` and `themes/` when a file changed; does nothing otherwise. Async: it inspects files.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn reload_settings(core: State<Arc<AppCore>>) -> SettingsView {
+    core.reload_settings()
 }

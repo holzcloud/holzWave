@@ -11,13 +11,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use holzwave_core::engine::{CopyOp, CopyState, DomKey, PasteOutcome, SearchOp, SearchState, SelectOp};
+use holzwave_core::engine::{CopyOp, CopyState, DomKey, EngineTheme, PasteOutcome, SearchOp, SearchState, SelectOp};
 use holzwave_core::keybindings::Keybindings;
 use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
-use holzwave_core::theme::{THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
+use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
 use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -145,44 +145,61 @@ struct Stamps {
     themes: Vec<(OsString, SystemTime, u64)>,
 }
 
+/// What a pane shows and how its keys behave, as far as the settings decide it: the part of the configuration that
+/// running panes are told about when it changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PaneLook {
+    theme: EngineTheme,
+    option_as_alt: bool,
+}
+
 /// The settings, the themes and the resolved key bindings that are in force.
 struct Config {
     settings: Settings,
     themes: ThemeRegistry,
     keybindings: Keybindings,
-    /// What loading `settings.json` and the theme files had to say, and the note about an unknown theme name.
-    load_notes: Vec<String>,
+    /// What loading `settings.json` and the theme files had to say.
+    file_notes: Vec<String>,
     /// What the key binding resolver refused.
     binding_notes: Vec<String>,
     stamps: Stamps,
 }
 
 impl Config {
-    fn new(settings: Settings, themes: ThemeRegistry, load_notes: Vec<String>, stamps: Stamps) -> Config {
-        let mut load_notes = load_notes;
-        if !themes.contains(&settings.theme) {
-            // The choice is kept as it is: a theme file that is missing for a moment must not rewrite it.
-            load_notes.push(format!(
-                "there is no theme called {:?}; {} is used",
-                settings.theme.chars().take(40).collect::<String>(),
-                holzwave_core::theme::DEFAULT_THEME
-            ));
-        }
+    fn new(settings: Settings, themes: ThemeRegistry, file_notes: Vec<String>, stamps: Stamps) -> Config {
         let (keybindings, binding_notes) = Keybindings::resolve(&settings.keybindings);
-        Config { settings, themes, keybindings, load_notes, binding_notes, stamps }
+        Config { settings, themes, keybindings, file_notes, binding_notes, stamps }
     }
 
     /// Read `settings.json` and `themes/` of `dir`. Never fails: what cannot be used is reported as a note.
     fn load(dir: &Path) -> Config {
+        // Stamped first: a file that changes while it is read is then seen as changed by the next reload.
+        let stamped = stamps(dir);
         let (settings, status) = Settings::load(dir);
         let mut notes = status_notes(SETTINGS_FILE, status);
         let (themes, theme_notes) = ThemeRegistry::load(dir);
         notes.extend(theme_notes);
-        Config::new(settings, themes, notes, stamps(dir))
+        Config::new(settings, themes, notes, stamped)
+    }
+
+    /// Replace the settings and resolve the key bindings again.
+    fn set_settings(&mut self, settings: Settings) {
+        let (keybindings, binding_notes) = Keybindings::resolve(&settings.keybindings);
+        self.settings = settings;
+        self.keybindings = keybindings;
+        self.binding_notes = binding_notes;
     }
 
     fn view(&self) -> SettingsView {
-        let mut warnings = self.load_notes.clone();
+        let mut warnings = self.file_notes.clone();
+        if !self.themes.contains(&self.settings.theme) {
+            // The choice is kept as it is: a theme file that is missing for a moment must not rewrite it.
+            warnings.push(format!(
+                "there is no theme called {:?}; {} is used",
+                self.settings.theme.chars().take(40).collect::<String>(),
+                DEFAULT_THEME
+            ));
+        }
         warnings.extend(self.binding_notes.iter().cloned());
         SettingsView::new(&self.settings, &self.themes, &self.keybindings, warnings)
     }
@@ -190,6 +207,10 @@ impl Config {
     /// The theme in force.
     fn theme(&self) -> &Theme {
         self.themes.get(&self.settings.theme)
+    }
+
+    fn look(&self) -> PaneLook {
+        PaneLook { theme: self.theme().engine_theme(), option_as_alt: self.settings.option_as_alt }
     }
 }
 
@@ -514,25 +535,112 @@ impl AppCore {
         lock(&self.config).view()
     }
 
-    /// Set one setting.
-    pub fn set_setting(&self, _key: &str, _value: Value) -> Result<SettingsView, String> {
-        Err("not implemented".into())
+    /// Set one setting: validated by the core (type, range, theme name), written to `settings.json` atomically,
+    /// then made current, pushed to every live pane and announced as `settings`. Any failure, including a write
+    /// that fails, returns the reason and leaves the settings, the file and the panes as they were.
+    ///
+    /// Writes a file, so the command is async.
+    pub fn set_setting(&self, key: &str, value: Value) -> Result<SettingsView, String> {
+        let _io = lock(&self.settings_io);
+        let next = {
+            let cfg = lock(&self.config);
+            let mut next = cfg.settings.clone();
+            next.set_value(key, value)?;
+            if key == "theme" && !cfg.themes.contains(&next.theme) {
+                return Err(format!("there is no theme called {:?}", next.theme.chars().take(40).collect::<String>()));
+            }
+            if next == cfg.settings {
+                return Ok(cfg.view());
+            }
+            next
+        };
+        next.save(&self.dir).map_err(|e| format!("cannot save {SETTINGS_FILE}: {e}"))?;
+        let saved = stamps(&self.dir).settings;
+
+        let (view, before, after) = {
+            let mut cfg = lock(&self.config);
+            let before = cfg.look();
+            cfg.set_settings(next);
+            cfg.stamps.settings = saved;
+            (cfg.view(), before, cfg.look())
+        };
+        self.push_to_panes(&before, &after);
+        self.sink.send(Out::Settings(view.clone()));
+        Ok(view)
     }
 
-    /// Restore the default of one setting.
-    pub fn reset_setting(&self, _key: &str) -> Result<SettingsView, String> {
-        Err("not implemented".into())
+    /// Restore the default of one setting; everything else about [`AppCore::set_setting`] applies.
+    pub fn reset_setting(&self, key: &str) -> Result<SettingsView, String> {
+        let default = match serde_json::to_value(Settings::default()) {
+            Ok(Value::Object(mut object)) => object.remove(key),
+            _ => None,
+        };
+        match default {
+            Some(value) => self.set_setting(key, value),
+            None => Err(format!("there is no setting called {:?}", key.chars().take(40).collect::<String>())),
+        }
     }
 
-    /// Pick up hand edits of `settings.json` and `themes/`.
+    /// Pick up hand edits of `settings.json` and `themes/*.json`. Looks at sizes and modification times only, and
+    /// reads the files, applies them to the panes and announces `settings` only when one of them changed. A
+    /// `settings.json` that cannot be used (a half-saved edit) leaves the settings in force and adds a warning.
     pub fn reload_settings(&self) -> SettingsView {
-        self.get_settings()
+        let _io = lock(&self.settings_io);
+        let now = stamps(&self.dir);
+        if lock(&self.config).stamps == now {
+            return self.get_settings();
+        }
+
+        let (loaded, status) = Settings::load(&self.dir);
+        let (themes, theme_notes) = ThemeRegistry::load(&self.dir);
+        let (view, before, after) = {
+            let mut cfg = lock(&self.config);
+            let before = cfg.look();
+            let (settings, mut notes) = match status {
+                LoadStatus::Reset(reason) => (
+                    cfg.settings.clone(),
+                    vec![format!("{SETTINGS_FILE}: {reason}; the settings in force are kept")],
+                ),
+                other => (loaded, status_notes(SETTINGS_FILE, other)),
+            };
+            notes.extend(theme_notes);
+            *cfg = Config::new(settings, themes, notes, now);
+            (cfg.view(), before, cfg.look())
+        };
+        self.push_to_panes(&before, &after);
+        self.sink.send(Out::Settings(view.clone()));
+        view
     }
 
-    /// How a new pane is started.
+    /// Tell every running pane what changed between two looks.
+    fn push_to_panes(&self, before: &PaneLook, after: &PaneLook) {
+        if before == after {
+            return;
+        }
+        for handle in self.running() {
+            Self::push_to_pane(&handle, before, after);
+        }
+    }
+
+    /// A pane that is closing refuses the message, which is fine: there is nothing left to tell.
+    fn push_to_pane(handle: &PaneHandle, before: &PaneLook, after: &PaneLook) {
+        if before.theme != after.theme {
+            let _ = handle.set_theme(after.theme);
+        }
+        if before.option_as_alt != after.option_as_alt {
+            let _ = handle.set_option_as_alt(after.option_as_alt);
+        }
+    }
+
+    /// How a new pane is started: the scrollback, the Option key and the theme palette come from the settings; the
+    /// working directory is decided by the caller.
     fn pane_spec(&self, cols: u16, rows: u16, cell: (u32, u32)) -> PaneSpec {
+        let cfg = lock(&self.config);
         let mut spec = PaneSpec::new(self.shell.program.clone(), cols, rows).args(self.shell.args.clone());
         spec.cell_px = cell;
+        spec.scrollback = cfg.settings.scrollback_lines as usize;
+        spec.option_as_alt = cfg.settings.option_as_alt;
+        spec.theme = Some(cfg.theme().engine_theme());
         spec
     }
 
@@ -621,6 +729,11 @@ impl AppCore {
 
         let (cols, rows) = clamp_grid(cols, rows);
         let spec = self.pane_spec(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h)));
+        // What the shell is started with; a settings change while it starts is pushed once it runs.
+        let started_with = PaneLook {
+            theme: spec.theme.unwrap_or_default(),
+            option_as_alt: spec.option_as_alt,
+        };
 
         // The sink runs on the pane's engine thread, possibly before `spawn_ghostty` has returned (a failed start
         // reports first), so it only holds the sink and a weak reference and never waits for the handle.
@@ -653,6 +766,10 @@ impl AppCore {
                             // The app began to end while this shell started; `shutdown` did not see it.
                             handle.close();
                         }
+                        drop(panes);
+                        // A setting changed between building the spec and now: `push_to_panes` did not see this pane.
+                        let now = lock(&self.config).look();
+                        Self::push_to_pane(&handle, &started_with, &now);
                     }
                     // The pane was closed (or ended, or the app is closing) while the shell started.
                     _ => {
@@ -1933,12 +2050,19 @@ mod protocol {
             changed: Vec::new(),
         };
         let view = sample_view();
+        let settings_view = SettingsView::new(
+            &Settings::default(),
+            &ThemeRegistry::builtin(),
+            &Keybindings::default(),
+            vec!["settings.json: font_size 9999 is outside 8..=40; 40 is used".into()],
+        );
         let events = [
             Out::Frame(frame),
             Out::Layout(view.clone()),
             Out::Title { pane: 3, title: "vim README.md".into() },
             Out::Cwd { pane: 3, cwd: "/Users/holz/Projects/holzWave".into() },
             Out::PaneExit { pane: 3, code: Some(0) },
+            Out::Settings(settings_view.clone()),
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -1973,7 +2097,9 @@ mod protocol {
                     payload(4),
                     to_value(&Out::PaneExit { pane: 3, code: None }),
                 ],
+                "settings": payload(5),
             },
+            "settings_view": to_value(&settings_view),
             "ops": {
                 "select": ops(vec![
                     SelectOpMsg::Begin { x: 3, y: 4, mode: SelectModeMsg::Cell },

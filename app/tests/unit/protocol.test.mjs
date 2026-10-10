@@ -40,7 +40,7 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings"]);
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
   assert.deepEqual(keys(golden.events.cwd), ["cwd", "pane"]);
   const exits = golden.events["pane-exit"];
@@ -48,6 +48,45 @@ test("the event names and the title, cwd and pane-exit payloads are pinned", () 
   for (const e of exits) assert.deepEqual(keys(e), ["code", "pane"]);
   assert.equal(typeof exits[0].code, "number");
   assert.equal(exits[1].code, null);
+});
+
+test("the settings view has exactly the documented keys at every level and the settings event carries it", () => {
+  const view = golden.settings_view;
+  assert.deepEqual(keys(view), ["keybindings", "settings", "theme", "themes", "warnings"]);
+  assert.deepEqual(golden.events.settings, view, "the settings event payload is the settings view");
+  assert.deepEqual(keys(view.settings), [
+    "confirm_multiline_paste", "contrast", "cursor_blink", "font_size", "keybindings", "motion", "option_as_alt",
+    "scrollback_lines", "theme", "ui_scale", "version",
+  ]);
+  assert.equal(typeof view.settings.theme, "string");
+  assert.equal(typeof view.settings.option_as_alt, "boolean");
+  assert.ok(view.themes.length >= 3);
+  for (const t of view.themes) {
+    assert.deepEqual(keys(t), ["builtin", "kind", "name"]);
+    assert.ok(t.kind === "dark" || t.kind === "light", t.kind);
+  }
+  assert.deepEqual(keys(view.theme), ["chrome", "kind", "name", "terminal", "version"]);
+  assert.deepEqual(keys(view.theme.terminal), ["ansi", "background", "cursor", "foreground", "selection", "selection_alpha"]);
+  assert.equal(view.theme.terminal.ansi.length, 16);
+  assert.deepEqual(keys(view.theme.chrome), [
+    "danger", "edge", "ground", "ground_2", "info", "ink", "ink_2", "ink_3", "ok", "pane", "rose", "rose_deep", "warn",
+  ]);
+  for (const color of [view.theme.terminal.foreground, ...view.theme.terminal.ansi, ...Object.values(view.theme.chrome)]) {
+    assert.match(color, /^#[0-9A-F]{6}$/, "every colour is #RRGGBB");
+  }
+  assert.ok(view.keybindings.length >= 30);
+  for (const row of view.keybindings) {
+    assert.deepEqual(keys(row), ["action", "chord", "is_default", "title"]);
+    assert.ok(row.chord === null || typeof row.chord === "string");
+  }
+  assert.ok(Array.isArray(view.warnings) && view.warnings.every((w) => typeof w === "string"));
+});
+
+test("the settings commands take snake_case arguments", () => {
+  assert.deepEqual(golden.commands.get_settings, []);
+  assert.deepEqual(golden.commands.set_setting, ["key", "value"]);
+  assert.deepEqual(golden.commands.reset_setting, ["key"]);
+  assert.deepEqual(golden.commands.reload_settings, []);
 });
 
 test("the op tags, modes and motions are the exact strings the page sends", () => {

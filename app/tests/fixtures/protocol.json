@@ -38,6 +38,7 @@
       "pane"
     ],
     "get_layout": [],
+    "get_settings": [],
     "key": [
       "pane",
       "code",
@@ -56,8 +57,12 @@
       "text",
       "allow_unsafe"
     ],
+    "reload_settings": [],
     "request_full": [
       "pane"
+    ],
+    "reset_setting": [
+      "key"
     ],
     "resize": [
       "pane",
@@ -94,6 +99,10 @@
       "split",
       "ratio"
     ],
+    "set_setting": [
+      "key",
+      "value"
+    ],
     "split": [
       "column"
     ],
@@ -119,7 +128,8 @@
       "layout",
       "title",
       "cwd",
-      "pane-exit"
+      "pane-exit",
+      "settings"
     ],
     "pane-exit": [
       {
@@ -131,6 +141,286 @@
         "pane": 3
       }
     ],
+    "settings": {
+      "keybindings": [
+        {
+          "action": "pane.split_right",
+          "chord": "Cmd+D",
+          "is_default": true,
+          "title": "Split pane right"
+        },
+        {
+          "action": "pane.split_down",
+          "chord": "Cmd+Shift+D",
+          "is_default": true,
+          "title": "Split pane down"
+        },
+        {
+          "action": "pane.close",
+          "chord": "Cmd+W",
+          "is_default": true,
+          "title": "Close pane"
+        },
+        {
+          "action": "pane.focus_next",
+          "chord": "Cmd+]",
+          "is_default": true,
+          "title": "Focus next pane"
+        },
+        {
+          "action": "pane.focus_prev",
+          "chord": "Cmd+[",
+          "is_default": true,
+          "title": "Focus previous pane"
+        },
+        {
+          "action": "tab.new",
+          "chord": "Cmd+T",
+          "is_default": true,
+          "title": "New tab"
+        },
+        {
+          "action": "tab.select_1",
+          "chord": "Cmd+1",
+          "is_default": true,
+          "title": "Select tab 1"
+        },
+        {
+          "action": "tab.select_2",
+          "chord": "Cmd+2",
+          "is_default": true,
+          "title": "Select tab 2"
+        },
+        {
+          "action": "tab.select_3",
+          "chord": "Cmd+3",
+          "is_default": true,
+          "title": "Select tab 3"
+        },
+        {
+          "action": "tab.select_4",
+          "chord": "Cmd+4",
+          "is_default": true,
+          "title": "Select tab 4"
+        },
+        {
+          "action": "tab.select_5",
+          "chord": "Cmd+5",
+          "is_default": true,
+          "title": "Select tab 5"
+        },
+        {
+          "action": "tab.select_6",
+          "chord": "Cmd+6",
+          "is_default": true,
+          "title": "Select tab 6"
+        },
+        {
+          "action": "tab.select_7",
+          "chord": "Cmd+7",
+          "is_default": true,
+          "title": "Select tab 7"
+        },
+        {
+          "action": "tab.select_8",
+          "chord": "Cmd+8",
+          "is_default": true,
+          "title": "Select tab 8"
+        },
+        {
+          "action": "tab.select_9",
+          "chord": "Cmd+9",
+          "is_default": true,
+          "title": "Select tab 9"
+        },
+        {
+          "action": "workspace.new",
+          "chord": "Cmd+Shift+N",
+          "is_default": true,
+          "title": "New workspace"
+        },
+        {
+          "action": "workspace.select_1",
+          "chord": "Cmd+Alt+1",
+          "is_default": true,
+          "title": "Select workspace 1"
+        },
+        {
+          "action": "workspace.select_2",
+          "chord": "Cmd+Alt+2",
+          "is_default": true,
+          "title": "Select workspace 2"
+        },
+        {
+          "action": "workspace.select_3",
+          "chord": "Cmd+Alt+3",
+          "is_default": true,
+          "title": "Select workspace 3"
+        },
+        {
+          "action": "workspace.select_4",
+          "chord": "Cmd+Alt+4",
+          "is_default": true,
+          "title": "Select workspace 4"
+        },
+        {
+          "action": "workspace.select_5",
+          "chord": "Cmd+Alt+5",
+          "is_default": true,
+          "title": "Select workspace 5"
+        },
+        {
+          "action": "workspace.select_6",
+          "chord": "Cmd+Alt+6",
+          "is_default": true,
+          "title": "Select workspace 6"
+        },
+        {
+          "action": "workspace.select_7",
+          "chord": "Cmd+Alt+7",
+          "is_default": true,
+          "title": "Select workspace 7"
+        },
+        {
+          "action": "workspace.select_8",
+          "chord": "Cmd+Alt+8",
+          "is_default": true,
+          "title": "Select workspace 8"
+        },
+        {
+          "action": "workspace.select_9",
+          "chord": "Cmd+Alt+9",
+          "is_default": true,
+          "title": "Select workspace 9"
+        },
+        {
+          "action": "palette.open",
+          "chord": "Cmd+K",
+          "is_default": true,
+          "title": "Open command palette"
+        },
+        {
+          "action": "search.open",
+          "chord": "Cmd+F",
+          "is_default": true,
+          "title": "Search in scrollback"
+        },
+        {
+          "action": "copy_mode.enter",
+          "chord": "Cmd+Shift+X",
+          "is_default": true,
+          "title": "Enter copy mode"
+        },
+        {
+          "action": "hints.open",
+          "chord": "Cmd+Shift+Space",
+          "is_default": true,
+          "title": "Show hints"
+        },
+        {
+          "action": "font.increase",
+          "chord": "Cmd+=",
+          "is_default": true,
+          "title": "Increase font size"
+        },
+        {
+          "action": "font.decrease",
+          "chord": "Cmd+-",
+          "is_default": true,
+          "title": "Decrease font size"
+        },
+        {
+          "action": "font.reset",
+          "chord": "Cmd+0",
+          "is_default": true,
+          "title": "Reset font size"
+        },
+        {
+          "action": "settings.open",
+          "chord": "Cmd+,",
+          "is_default": true,
+          "title": "Open settings"
+        }
+      ],
+      "settings": {
+        "confirm_multiline_paste": true,
+        "contrast": "system",
+        "cursor_blink": "system",
+        "font_size": 14,
+        "keybindings": {},
+        "motion": "system",
+        "option_as_alt": false,
+        "scrollback_lines": 10000,
+        "theme": "aubergine",
+        "ui_scale": 100,
+        "version": 1
+      },
+      "theme": {
+        "chrome": {
+          "danger": "#EC8272",
+          "edge": "#3A2144",
+          "ground": "#14091A",
+          "ground_2": "#1D0F26",
+          "info": "#8FB8D8",
+          "ink": "#F6EFE6",
+          "ink_2": "#B2AAA9",
+          "ink_3": "#9C8EA0",
+          "ok": "#8CC271",
+          "pane": "#1B0E20",
+          "rose": "#FF8FB8",
+          "rose_deep": "#C23B72",
+          "warn": "#E8C15C"
+        },
+        "kind": "dark",
+        "name": "aubergine",
+        "terminal": {
+          "ansi": [
+            "#1B0E20",
+            "#EC8272",
+            "#8CC271",
+            "#E8C15C",
+            "#6F9BD0",
+            "#FF8FB8",
+            "#7FD1C7",
+            "#D9C9D6",
+            "#7C6A86",
+            "#FFA396",
+            "#AEDD93",
+            "#F5D883",
+            "#93B8E6",
+            "#FFB3D1",
+            "#A4E6DD",
+            "#F6EFE6"
+          ],
+          "background": "#14091A",
+          "cursor": "#FF8FB8",
+          "foreground": "#F6EFE6",
+          "selection": "#FF8FB8",
+          "selection_alpha": 0.3499999940395355
+        },
+        "version": 1
+      },
+      "themes": [
+        {
+          "builtin": true,
+          "kind": "dark",
+          "name": "aubergine"
+        },
+        {
+          "builtin": true,
+          "kind": "dark",
+          "name": "Schiefer"
+        },
+        {
+          "builtin": true,
+          "kind": "light",
+          "name": "Papier"
+        }
+      ],
+      "warnings": [
+        "settings.json: font_size 9999 is outside 8..=40; 40 is used"
+      ]
+    },
     "title": {
       "pane": 3,
       "title": "vim README.md"
@@ -251,6 +541,286 @@
     "empty",
     "rejected"
   ],
+  "settings_view": {
+    "keybindings": [
+      {
+        "action": "pane.split_right",
+        "chord": "Cmd+D",
+        "is_default": true,
+        "title": "Split pane right"
+      },
+      {
+        "action": "pane.split_down",
+        "chord": "Cmd+Shift+D",
+        "is_default": true,
+        "title": "Split pane down"
+      },
+      {
+        "action": "pane.close",
+        "chord": "Cmd+W",
+        "is_default": true,
+        "title": "Close pane"
+      },
+      {
+        "action": "pane.focus_next",
+        "chord": "Cmd+]",
+        "is_default": true,
+        "title": "Focus next pane"
+      },
+      {
+        "action": "pane.focus_prev",
+        "chord": "Cmd+[",
+        "is_default": true,
+        "title": "Focus previous pane"
+      },
+      {
+        "action": "tab.new",
+        "chord": "Cmd+T",
+        "is_default": true,
+        "title": "New tab"
+      },
+      {
+        "action": "tab.select_1",
+        "chord": "Cmd+1",
+        "is_default": true,
+        "title": "Select tab 1"
+      },
+      {
+        "action": "tab.select_2",
+        "chord": "Cmd+2",
+        "is_default": true,
+        "title": "Select tab 2"
+      },
+      {
+        "action": "tab.select_3",
+        "chord": "Cmd+3",
+        "is_default": true,
+        "title": "Select tab 3"
+      },
+      {
+        "action": "tab.select_4",
+        "chord": "Cmd+4",
+        "is_default": true,
+        "title": "Select tab 4"
+      },
+      {
+        "action": "tab.select_5",
+        "chord": "Cmd+5",
+        "is_default": true,
+        "title": "Select tab 5"
+      },
+      {
+        "action": "tab.select_6",
+        "chord": "Cmd+6",
+        "is_default": true,
+        "title": "Select tab 6"
+      },
+      {
+        "action": "tab.select_7",
+        "chord": "Cmd+7",
+        "is_default": true,
+        "title": "Select tab 7"
+      },
+      {
+        "action": "tab.select_8",
+        "chord": "Cmd+8",
+        "is_default": true,
+        "title": "Select tab 8"
+      },
+      {
+        "action": "tab.select_9",
+        "chord": "Cmd+9",
+        "is_default": true,
+        "title": "Select tab 9"
+      },
+      {
+        "action": "workspace.new",
+        "chord": "Cmd+Shift+N",
+        "is_default": true,
+        "title": "New workspace"
+      },
+      {
+        "action": "workspace.select_1",
+        "chord": "Cmd+Alt+1",
+        "is_default": true,
+        "title": "Select workspace 1"
+      },
+      {
+        "action": "workspace.select_2",
+        "chord": "Cmd+Alt+2",
+        "is_default": true,
+        "title": "Select workspace 2"
+      },
+      {
+        "action": "workspace.select_3",
+        "chord": "Cmd+Alt+3",
+        "is_default": true,
+        "title": "Select workspace 3"
+      },
+      {
+        "action": "workspace.select_4",
+        "chord": "Cmd+Alt+4",
+        "is_default": true,
+        "title": "Select workspace 4"
+      },
+      {
+        "action": "workspace.select_5",
+        "chord": "Cmd+Alt+5",
+        "is_default": true,
+        "title": "Select workspace 5"
+      },
+      {
+        "action": "workspace.select_6",
+        "chord": "Cmd+Alt+6",
+        "is_default": true,
+        "title": "Select workspace 6"
+      },
+      {
+        "action": "workspace.select_7",
+        "chord": "Cmd+Alt+7",
+        "is_default": true,
+        "title": "Select workspace 7"
+      },
+      {
+        "action": "workspace.select_8",
+        "chord": "Cmd+Alt+8",
+        "is_default": true,
+        "title": "Select workspace 8"
+      },
+      {
+        "action": "workspace.select_9",
+        "chord": "Cmd+Alt+9",
+        "is_default": true,
+        "title": "Select workspace 9"
+      },
+      {
+        "action": "palette.open",
+        "chord": "Cmd+K",
+        "is_default": true,
+        "title": "Open command palette"
+      },
+      {
+        "action": "search.open",
+        "chord": "Cmd+F",
+        "is_default": true,
+        "title": "Search in scrollback"
+      },
+      {
+        "action": "copy_mode.enter",
+        "chord": "Cmd+Shift+X",
+        "is_default": true,
+        "title": "Enter copy mode"
+      },
+      {
+        "action": "hints.open",
+        "chord": "Cmd+Shift+Space",
+        "is_default": true,
+        "title": "Show hints"
+      },
+      {
+        "action": "font.increase",
+        "chord": "Cmd+=",
+        "is_default": true,
+        "title": "Increase font size"
+      },
+      {
+        "action": "font.decrease",
+        "chord": "Cmd+-",
+        "is_default": true,
+        "title": "Decrease font size"
+      },
+      {
+        "action": "font.reset",
+        "chord": "Cmd+0",
+        "is_default": true,
+        "title": "Reset font size"
+      },
+      {
+        "action": "settings.open",
+        "chord": "Cmd+,",
+        "is_default": true,
+        "title": "Open settings"
+      }
+    ],
+    "settings": {
+      "confirm_multiline_paste": true,
+      "contrast": "system",
+      "cursor_blink": "system",
+      "font_size": 14,
+      "keybindings": {},
+      "motion": "system",
+      "option_as_alt": false,
+      "scrollback_lines": 10000,
+      "theme": "aubergine",
+      "ui_scale": 100,
+      "version": 1
+    },
+    "theme": {
+      "chrome": {
+        "danger": "#EC8272",
+        "edge": "#3A2144",
+        "ground": "#14091A",
+        "ground_2": "#1D0F26",
+        "info": "#8FB8D8",
+        "ink": "#F6EFE6",
+        "ink_2": "#B2AAA9",
+        "ink_3": "#9C8EA0",
+        "ok": "#8CC271",
+        "pane": "#1B0E20",
+        "rose": "#FF8FB8",
+        "rose_deep": "#C23B72",
+        "warn": "#E8C15C"
+      },
+      "kind": "dark",
+      "name": "aubergine",
+      "terminal": {
+        "ansi": [
+          "#1B0E20",
+          "#EC8272",
+          "#8CC271",
+          "#E8C15C",
+          "#6F9BD0",
+          "#FF8FB8",
+          "#7FD1C7",
+          "#D9C9D6",
+          "#7C6A86",
+          "#FFA396",
+          "#AEDD93",
+          "#F5D883",
+          "#93B8E6",
+          "#FFB3D1",
+          "#A4E6DD",
+          "#F6EFE6"
+        ],
+        "background": "#14091A",
+        "cursor": "#FF8FB8",
+        "foreground": "#F6EFE6",
+        "selection": "#FF8FB8",
+        "selection_alpha": 0.3499999940395355
+      },
+      "version": 1
+    },
+    "themes": [
+      {
+        "builtin": true,
+        "kind": "dark",
+        "name": "aubergine"
+      },
+      {
+        "builtin": true,
+        "kind": "dark",
+        "name": "Schiefer"
+      },
+      {
+        "builtin": true,
+        "kind": "light",
+        "name": "Papier"
+      }
+    ],
+    "warnings": [
+      "settings.json: font_size 9999 is outside 8..=40; 40 is used"
+    ]
+  },
   "view": {
     "dividers": [
       {

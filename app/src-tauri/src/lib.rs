@@ -5,7 +5,8 @@
 //! core's [`state::Out`] events into Tauri events, and it registers the commands of [`commands`].
 //!
 //! Webview contract: the events are `frame` (a frame message of the core), `layout` (the view), `title`
-//! `{pane, title}`, `cwd` `{pane, cwd}` and `pane-exit` `{pane, code}`; command arguments are snake_case.
+//! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}` and `settings` (a settings view); command
+//! arguments are snake_case.
 
 mod commands;
 mod state;
@@ -71,6 +72,10 @@ pub fn run() {
             commands::select_tab,
             commands::select_workspace,
             commands::set_ratio,
+            commands::get_settings,
+            commands::set_setting,
+            commands::reset_setting,
+            commands::reload_settings,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")
