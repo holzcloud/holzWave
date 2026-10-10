@@ -1,18 +1,25 @@
-use std::cell::RefCell;
+use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
 use libghostty_vt::key::{self, Action, Key, OptionAsAlt};
+use libghostty_vt::paste::Options as PasteOptions;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::Underline;
-use libghostty_vt::terminal::ScrollViewport;
-use libghostty_vt::{RenderState, Terminal};
+use libghostty_vt::terminal::{ClipboardMime, ScrollViewport, SizeReportSize};
+use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::engine::{
     Cell, Color, Cursor, CursorStyle, KeyAction, KeyEvent, Mods, PasteOutcome, Screen, Scrollbar,
     TerminalEngine, Width,
 };
 use crate::{Error, Result};
+
+/// The most bytes of program-controlled replies that may wait for the PTY at once.
+///
+/// A program can ask for a reply with a few bytes of query; without a bound a flood of queries grows the buffer as
+/// fast as the program can write. User-controlled bytes (a paste) are not subject to it.
+const REPLY_CAP: usize = 64 * 1024;
 
 fn eng<E: std::fmt::Debug>(e: E) -> Error {
     Error::Engine(format!("{e:?}"))
@@ -234,6 +241,9 @@ pub struct GhosttyEngine {
     cells_iter: CellIterator<'static>,
     /// Bytes the terminal wants written to the PTY: query replies and paste output.
     replies: Rc<RefCell<Vec<u8>>>,
+    /// While `Some`, the reply buffer refuses whole replies that would grow it past the limit. Set around
+    /// `vt_write` only, so what `paste` writes is never cut.
+    reply_cap: Rc<StdCell<Option<usize>>>,
     encoder: key::Encoder<'static>,
     key_event: key::Event<'static>,
     option_as_alt: bool,
@@ -244,11 +254,41 @@ impl GhosttyEngine {
         let mut terminal = Terminal::new(cols, rows).map_err(eng)?;
         terminal.set_scrollback_max_lines(Some(max_scrollback)).map_err(eng)?;
         let replies: Rc<RefCell<Vec<u8>>> = Rc::default();
+        let reply_cap: Rc<StdCell<Option<usize>>> = Rc::default();
         {
+            // Callbacks run synchronously inside `vt_write`, `resize` and `paste`, and a panic inside one aborts
+            // the process: only plain pushes here, no unwrap, and a failed borrow cannot happen because the
+            // engine is single-threaded and the buffer is not borrowed across a library call.
             let sink = replies.clone();
+            let cap = reply_cap.clone();
             terminal
-                .on_pty_write(move |_t, data| sink.borrow_mut().extend_from_slice(data))
+                .on_pty_write(move |_t, data| {
+                    let mut buf = sink.borrow_mut();
+                    match cap.get() {
+                        // Whole replies only: a truncated sequence would corrupt what the program reads next.
+                        Some(limit) if buf.len() + data.len() > limit => {}
+                        _ => buf.extend_from_slice(data),
+                    }
+                })
                 .map_err(eng)?;
+
+            // XTWINOPS 14, 16 and 18 t: answered from the terminal's own geometry. Without this callback the
+            // library stays silent.
+            terminal
+                .on_size(|t| {
+                    let (cols, rows) = (t.cols().ok()?, t.rows().ok()?);
+                    let (w, h) = (t.width_px().ok()?, t.height_px().ok()?);
+                    Some(SizeReportSize {
+                        rows,
+                        columns: cols,
+                        cell_width: if cols > 0 { w / u32::from(cols) } else { 0 },
+                        cell_height: if rows > 0 { h / u32::from(rows) } else { 0 },
+                    })
+                })
+                .map_err(eng)?;
+            // Deliberately not installed: on_clipboard_read and on_clipboard_write (OSC 52 stays inert, and the
+            // read callback would turn on Kitty paste events), and title reports stay disabled (a program could
+            // put text into its own input with them).
         }
         Ok(Self {
             terminal,
@@ -256,6 +296,7 @@ impl GhosttyEngine {
             rows_iter: RowIterator::new().map_err(eng)?,
             cells_iter: CellIterator::new().map_err(eng)?,
             replies,
+            reply_cap,
             encoder: key::Encoder::new().map_err(eng)?,
             key_event: key::Event::new().map_err(eng)?,
             option_as_alt: false,
@@ -300,7 +341,10 @@ impl GhosttyEngine {
 
 impl TerminalEngine for GhosttyEngine {
     fn feed(&mut self, bytes: &[u8]) {
+        // Everything the terminal writes back while it parses program output is program-controlled: bound it.
+        self.reply_cap.set(Some(REPLY_CAP));
         self.terminal.vt_write(bytes);
+        self.reply_cap.set(None);
     }
 
     fn resize(&mut self, cols: u16, rows: u16, cell_px: (u32, u32)) -> Result<()> {
@@ -416,8 +460,18 @@ impl TerminalEngine for GhosttyEngine {
         )
     }
 
-    fn paste(&mut self, _text: &str, _allow_unsafe: bool) -> Result<PasteOutcome> {
-        Ok(PasteOutcome::Empty)
+    fn paste(&mut self, text: &str, allow_unsafe: bool) -> Result<PasteOutcome> {
+        // The library decides: bracketed or not by mode 2004, control bytes replaced, and text that could inject
+        // commands refused unless `allow_unsafe`. Nothing is written for an error. The output goes through the
+        // same reply buffer as query replies and is not capped.
+        let mimes = [ClipboardMime::new("text/plain")];
+        let options = PasteOptions::new().with_allow_unsafe(allow_unsafe);
+        match self.terminal.paste(options, &mimes, |_mime, out| out.write_all(text.as_bytes())) {
+            Ok(true) => Ok(PasteOutcome::Written),
+            Ok(false) => Ok(PasteOutcome::Empty),
+            Err(VtError::Rejected) => Ok(PasteOutcome::Rejected),
+            Err(e) => Err(eng(e)),
+        }
     }
 
     fn take_replies(&mut self) -> Vec<u8> {

@@ -73,7 +73,7 @@ fn size_reports_follow_a_resize() {
 #[test]
 fn a_flood_of_queries_cannot_grow_the_reply_buffer_past_64_kib() {
     const CAP: usize = 64 * 1024;
-    // XTVERSION is a 4 byte query with a 17 byte reply: 20 000 of them ask for 340 000 bytes.
+    // XTVERSION is a 4 byte query with a 16 byte reply: 20 000 of them ask for 320 000 bytes.
     let query = b"\x1b[>q".repeat(20_000);
     let mut e = engine(80, 24);
     e.feed(&query);
@@ -81,7 +81,7 @@ fn a_flood_of_queries_cannot_grow_the_reply_buffer_past_64_kib() {
     assert!(replies.len() <= CAP, "kept {} bytes", replies.len());
     assert!(!replies.is_empty(), "the first replies are kept");
     // Whole replies only: a cut-off sequence would corrupt the next thing the program reads.
-    assert_eq!(replies.len() % 17, 0, "a reply was cut in the middle");
+    assert_eq!(replies.len() % 16, 0, "a reply was cut in the middle");
     assert!(replies.starts_with(b"\x1bP>|libghostty\x1b\\"));
 
     // The buffer is drained and the engine keeps working.
