@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use crate::engine::{
     CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, MouseEvent, PasteOutcome, SearchOp, SearchState,
-    SelectOp, TerminalEngine, WheelEvent, parse_osc7,
+    SelectOp, TerminalEngine, WheelEvent, WheelOutcome, parse_osc7,
 };
 use crate::layout::PaneId;
 use crate::pty::{Pty, SpawnOptions, process_cwd};
@@ -171,6 +171,8 @@ enum Control {
     Paste { text: String, allow_unsafe: bool, reply: Sender<Result<PasteOutcome>> },
     Resize { cols: u16, rows: u16, cell_px: (u32, u32) },
     Scroll(isize),
+    Mouse(MouseEvent),
+    Wheel(WheelEvent),
     ScrollToBottom,
     RequestFull,
     SetTheme(EngineTheme),
@@ -282,16 +284,22 @@ impl PaneHandle {
         self.send(Control::Key(key))
     }
 
-    /// A mouse press, release or motion in device pixels relative to the grid origin.
+    /// A mouse press, release or motion, in device pixels relative to the origin of the grid.
+    ///
+    /// The engine decides from the live terminal modes whether the program hears of it: nothing is written when the
+    /// program did not ask for the mouse. A report is input but not typing: it neither clears the selection nor
+    /// returns the viewport to the live screen. Handled ahead of queued output, like a key.
     pub fn mouse(&self, event: MouseEvent) -> Result<()> {
-        let _ = event;
-        Ok(())
+        self.send(Control::Mouse(event))
     }
 
-    /// A wheel event.
+    /// A wheel event: `rows` negative towards older output. The engine decides what it means (wheel reports for a
+    /// program that tracks the mouse, arrow keys in the alternate screen, a local scroll otherwise; Shift always
+    /// scrolls locally) and at most ten reports or arrow sequences come out of one event. Handled ahead of queued
+    /// output, like a key.
     pub fn wheel(&self, event: WheelEvent) -> Result<()> {
-        let _ = event;
-        Ok(())
+        let rows = event.rows.clamp(-(MAX_SCROLL_ROWS as i32), MAX_SCROLL_ROWS as i32);
+        self.send(Control::Wheel(WheelEvent { rows, ..event }))
     }
 
     /// Committed text (an IME commit, a dead-key result) as input. At most [`MAX_TEXT_BYTES`].
@@ -586,6 +594,18 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 self.engine.scroll(rows);
                 self.dirty = true;
             }
+            Control::Mouse(event) => {
+                // Input for the program, not typing: the selection stays and the viewport stays where it is. The
+                // reply of the program arrives as output.
+                if let Ok(bytes) = self.engine.mouse(&event) {
+                    self.writer.input(bytes);
+                }
+            }
+            Control::Wheel(event) => match self.engine.wheel(&event) {
+                Ok(WheelOutcome::Bytes(bytes)) => self.writer.input(bytes),
+                Ok(WheelOutcome::Scrolled) => self.dirty = true,
+                Ok(WheelOutcome::Nothing) | Err(_) => {}
+            },
             Control::ScrollToBottom => {
                 self.engine.scroll_to_bottom();
                 self.dirty = true;

@@ -442,3 +442,19 @@ fn a_wheel_report_does_not_hide_the_next_motion_in_that_cell_or_hold_a_button() 
     assert_eq!(motion(&mut e, MouseButton::Left, centre(4, 2)), "");
     assert_eq!(motion(&mut e, MouseButton::Left, centre(5, 2)), r"\x1b[<32;6;3M");
 }
+
+#[test]
+fn the_legacy_format_has_wheel_buttons_and_x10_has_none() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1000h");
+    // Button 64 plus 32 is the backquote; column 5 and row 3 plus 32 are `%` and `#`.
+    assert_eq!(bytes_of(wheel(&mut e, -1, Mods::NONE, centre(4, 2))), r"\x1b[M`%#");
+
+    // X10 (DECSET 9) knows presses of the three buttons only. The program chose the mouse, so the wheel is neither
+    // reported nor turned into a local scroll behind its back.
+    let mut e = grid_with_history();
+    let bottom = offset(&mut e);
+    e.feed(b"\x1b[?9h");
+    assert_eq!(wheel(&mut e, -1, Mods::NONE, centre(4, 2)), WheelOutcome::Nothing);
+    assert_eq!(offset(&mut e), bottom);
+}

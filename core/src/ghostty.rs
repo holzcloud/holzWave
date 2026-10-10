@@ -19,8 +19,8 @@ use libghostty_vt::{Error as VtError, RenderState, Terminal};
 use crate::engine::{
     Cell, Color, CopyMotion, CopyOp, CopyState, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent,
     MAX_SEARCH_BYTES, MatchSpan, Modes, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, RowUpdate, Screen,
-    Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span, TerminalEngine, Update, Width,
-    sanitize_program_text,
+    Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span, TerminalEngine, Update, WheelEvent, WheelOutcome,
+    Width, sanitize_program_text,
 };
 use crate::{Error, Result};
 
@@ -257,6 +257,10 @@ fn key_mods(m: Mods) -> key::Mods {
     }
     out
 }
+
+/// The most wheel reports or arrow-key sequences one wheel event produces (T-02-93). A flood of rows from a fast
+/// trackpad becomes a bounded burst; the page sends the rest as further events.
+const MAX_WHEEL_REPORTS: u32 = 10;
 
 /// Bits of [`GhosttyEngine::buttons`].
 const BUTTON_LEFT: u8 = 1;
@@ -890,6 +894,12 @@ impl GhosttyEngine {
         Ok(out)
     }
 
+    /// Move the viewport for a wheel event. No cap: a viewport move costs the same for any distance.
+    fn scroll_locally(&mut self, rows: i32) -> WheelOutcome {
+        self.terminal.scroll_viewport(ScrollViewport::Delta(rows as isize));
+        WheelOutcome::Scrolled
+    }
+
     /// Encode one pointer event against the terminal's live mouse modes.
     ///
     /// The position is clamped onto the grid first. An unknown cell size is a documented case, not an error: the
@@ -1099,6 +1109,66 @@ impl TerminalEngine for GhosttyEngine {
 
     fn mouse(&mut self, event: &MouseEvent) -> Result<Vec<u8>> {
         self.encode_pointer(event)
+    }
+
+    fn wheel(&mut self, event: &WheelEvent) -> Result<WheelOutcome> {
+        if event.rows == 0 {
+            return Ok(WheelOutcome::Nothing);
+        }
+        // `unsigned_abs`: the most negative i32 has no positive twin.
+        let count = event.rows.unsigned_abs().min(MAX_WHEEL_REPORTS);
+        let up = event.rows < 0;
+
+        // Shift is the escape hatch of every terminal: the wheel moves this terminal's own scrollback, whatever the
+        // program asked for.
+        if event.mods.contains(Mods::SHIFT) {
+            return Ok(self.scroll_locally(event.rows));
+        }
+
+        if self.terminal.is_mouse_tracking().map_err(eng)? {
+            // Wheel up is button four, wheel down button five, one press per row. A wheel report is not a click: it
+            // holds no button and does not count as the last reported cell for motion.
+            let button = if up { mouse::Button::Four } else { mouse::Button::Five };
+            let last_cell = self.last_cell;
+            let mut bytes = Vec::new();
+            let mut result = Ok(());
+            for _ in 0..count {
+                match self.encode_pointer_at(mouse::Action::Press, Some(button), event.mods, event.x, event.y) {
+                    Ok(report) => bytes.extend_from_slice(&report),
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
+                }
+            }
+            self.last_cell = last_cell;
+            result?;
+            // A tracking mode with no wheel in it (X10): the program decided, nothing is scrolled behind its back.
+            return Ok(if bytes.is_empty() { WheelOutcome::Nothing } else { WheelOutcome::Bytes(bytes) });
+        }
+
+        let alternate = self.terminal.active_screen().map_err(eng)? == VtScreen::Alternate;
+        if alternate && self.terminal.mode(Mode::ALT_SCROLL).map_err(eng)? {
+            // The program has no scrollback to offer, so the wheel is the arrow keys, which also work in programs
+            // that never heard of the mouse. They are encoded like typed ones: application cursor mode applies.
+            let key = if up { Key::ArrowUp } else { Key::ArrowDown };
+            let mut bytes = Vec::new();
+            for _ in 0..count {
+                let arrow = self.encode_event(
+                    Action::Press,
+                    key,
+                    key_mods(event.mods),
+                    key::Mods::empty(),
+                    false,
+                    None,
+                    None,
+                )?;
+                bytes.extend_from_slice(&arrow);
+            }
+            return Ok(WheelOutcome::Bytes(bytes));
+        }
+
+        Ok(self.scroll_locally(event.rows))
     }
 
     fn paste(&mut self, text: &str, allow_unsafe: bool) -> Result<PasteOutcome> {
@@ -1430,6 +1500,19 @@ mod tests {
             seen += 1;
         }
         assert_eq!(seen, 176, "the pinned libghostty revision has 176 key variants");
+    }
+
+    #[test]
+    fn the_pinned_library_has_alternate_scroll_on_by_default() {
+        // The wheel policy relies on it: less and vim get arrow keys from the wheel without any setup by the program
+        // (D-24). A library bump that changes the default fails here instead of silently breaking the wheel.
+        let mut term = Terminal::new(10, 3).expect("terminal");
+        assert!(term.mode(Mode::ALT_SCROLL).expect("mode"), "alternate scroll is off in a new terminal");
+        term.vt_write(b"\x1b[?1007l");
+        assert!(!term.mode(Mode::ALT_SCROLL).expect("mode"));
+        // A reset (RIS) returns to the default.
+        term.vt_write(b"\x1bc");
+        assert!(term.mode(Mode::ALT_SCROLL).expect("mode"), "RIS must restore the default");
     }
 
     #[test]

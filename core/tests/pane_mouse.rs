@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use common::wait_until;
 use holzwave_core::engine::{
-    DomKey, EngineTheme, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, Screen, SelectMode,
+    DomKey, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, Screen, SelectMode,
     SelectOp, TerminalEngine, Update, WheelEvent, WheelOutcome,
 };
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
