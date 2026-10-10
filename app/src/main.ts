@@ -1,15 +1,8 @@
-// holzWave spike frontend: a canvas-2D renderer for the frames the Rust core sends.
+// holzWave spike frontend: renders the frames the Rust core sends.
 // No framework and no @tauri-apps/api: the Tauri global is enough for three commands and one event.
-
-type Run = [text: string, cols: number, fg: number, bg: number, flags: number];
-interface Frame {
-  cols: number;
-  rows: number;
-  cursor: [number, number] | null;
-  fg: number;
-  bg: number;
-  lines: Run[][];
-}
+import { Canvas2DRenderer } from "./canvas2d.js";
+import { FONT_PX, Frame, Metrics, Renderer, font } from "./frame.js";
+import { WebGLRenderer } from "./webgl.js";
 
 interface TauriGlobal {
   core: { invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> };
@@ -17,40 +10,48 @@ interface TauriGlobal {
 }
 const tauri = (window as unknown as { __TAURI__: TauriGlobal }).__TAURI__;
 
-const FONT_PX = 14;
-const FONT = `${FONT_PX}px "JetBrains Mono", "SF Mono", Menlo, monospace`;
-const BOLD = 1, ITALIC = 2, UNDERLINE = 4, INVERSE = 8;
-
 const canvas = document.getElementById("term") as HTMLCanvasElement;
 const stats = document.getElementById("stats") as HTMLDivElement;
-const ctx = canvas.getContext("2d", { alpha: false })!;
 
-let cellW = 8, cellH = 17, dpr = 1;
-let frame: Frame | null = null;
-let pending = false;
-
-const css = (c: number) => `#${c.toString(16).padStart(6, "0")}`;
-
-function measure() {
-  dpr = window.devicePixelRatio || 1;
-  ctx.font = FONT;
-  cellW = ctx.measureText("M").width;
-  cellH = Math.ceil(FONT_PX * 1.25);
+// `?renderer=canvas` or `?renderer=webgl`; WebGL2 is the default and canvas is the fallback.
+const wanted = new URLSearchParams(location.search).get("renderer");
+let renderer: Renderer;
+let rendererName = "canvas2d";
+try {
+  if (wanted === "canvas") throw new Error("canvas requested");
+  renderer = new WebGLRenderer(canvas);
+  rendererName = "webgl2";
+} catch {
+  renderer = new Canvas2DRenderer(canvas);
 }
 
-function gridSize() {
+function measure(): Metrics {
+  const dpr = window.devicePixelRatio || 1;
+  const probe = document.createElement("canvas").getContext("2d")!;
+  probe.font = font(0);
   return {
-    cols: Math.max(2, Math.floor(canvas.clientWidth / cellW)),
-    rows: Math.max(1, Math.floor(canvas.clientHeight / cellH)),
+    cellW: probe.measureText("M").width,
+    cellH: Math.ceil(FONT_PX * 1.25),
+    dpr,
+    width: canvas.clientWidth,
+    height: canvas.clientHeight,
   };
 }
 
+let metrics = measure();
+let frame: Frame | null = null;
+let pending = false;
 let lastSent = { cols: 0, rows: 0 };
+
 function fit() {
-  measure();
-  canvas.width = Math.round(canvas.clientWidth * dpr);
-  canvas.height = Math.round(canvas.clientHeight * dpr);
-  const g = gridSize();
+  metrics = measure();
+  canvas.width = Math.round(canvas.clientWidth * metrics.dpr);
+  canvas.height = Math.round(canvas.clientHeight * metrics.dpr);
+  renderer.configure(metrics);
+  const g = {
+    cols: Math.max(2, Math.floor(metrics.width / metrics.cellW)),
+    rows: Math.max(1, Math.floor(metrics.height / metrics.cellH)),
+  };
   if (g.cols !== lastSent.cols || g.rows !== lastSent.rows) {
     lastSent = g;
     void tauri.core.invoke("resize", g);
@@ -60,60 +61,21 @@ function fit() {
 
 // Frame timing, for the renderer decision.
 const draws: number[] = [];
-let frames = 0;
+let drawn = 0;
 const started = performance.now();
 
 function draw() {
   pending = false;
-  const f = frame;
-  if (!f) return;
+  if (!frame) return;
   const t0 = performance.now();
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.font = FONT;
-  ctx.textBaseline = "alphabetic";
-  ctx.fillStyle = css(f.bg);
-  ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-
-  const baseline = Math.round(cellH * 0.78);
-  for (let y = 0; y < f.lines.length; y++) {
-    const line = f.lines[y]!;
-    let col = 0;
-    for (const [text, cols, fg0, bg0, flags] of line) {
-      let fg = fg0, bg = bg0;
-      if (flags & INVERSE) [fg, bg] = [bg, fg];
-      const x = col * cellW;
-      if (bg !== f.bg) {
-        ctx.fillStyle = css(bg);
-        ctx.fillRect(x, y * cellH, cols * cellW, cellH);
-      }
-      if (text.trim() !== "" || flags & UNDERLINE) {
-        ctx.fillStyle = css(fg);
-        ctx.font = `${flags & ITALIC ? "italic " : ""}${flags & BOLD ? "bold " : ""}${FONT}`;
-        let c = col;
-        for (const ch of text) {
-          if (ch === "\0") { c += 1; continue; }
-          if (ch !== " ") ctx.fillText(ch, c * cellW, y * cellH + baseline);
-          c += 1;
-        }
-        if (flags & UNDERLINE) ctx.fillRect(x, y * cellH + cellH - 2, cols * cellW, 1);
-      }
-      col += cols;
-    }
-  }
-  if (f.cursor) {
-    ctx.fillStyle = "rgba(255, 143, 184, 0.85)";
-    ctx.fillRect(f.cursor[0] * cellW, f.cursor[1] * cellH, cellW, cellH);
-  }
-
-  const ms = performance.now() - t0;
-  draws.push(ms);
+  renderer.draw(frame);
+  draws.push(performance.now() - t0);
   if (draws.length > 120) draws.shift();
-  frames++;
-  if (frames % 30 === 0) {
+  drawn++;
+  if (drawn % 30 === 0) {
     const avg = draws.reduce((a, b) => a + b, 0) / draws.length;
-    const max = Math.max(...draws);
-    const fps = frames / ((performance.now() - started) / 1000);
-    stats.textContent = `${f.cols}x${f.rows}  draw avg ${avg.toFixed(2)} ms  max ${max.toFixed(2)} ms  ${fps.toFixed(0)} fps`;
+    const fps = drawn / ((performance.now() - started) / 1000);
+    stats.textContent = `${rendererName}  ${frame.cols}x${frame.rows}  cpu ${avg.toFixed(2)} ms  max ${Math.max(...draws).toFixed(2)} ms  ${fps.toFixed(0)} fps`;
   }
 }
 
@@ -161,5 +123,3 @@ async function main() {
   canvas.focus();
 }
 void main();
-
-export {};

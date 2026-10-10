@@ -27,9 +27,19 @@ for desktop, iOS and Android is thin, so a feature is written once.
 code talks to the trait (feed bytes, read the screen grid, resize, scrollback, selection), so swapping to
 `alacritty_terminal` is a change in one crate.
 
-**Rendering is a spike decision.** Ghostty's engine compiled to WASM inside the webview keeps one code path across
-platforms; an own WebGL renderer gives more control. The spike measures throughput, latency and memory for both and
-records the result here.
+**Rendering: own WebGL2 renderer, Canvas 2D as fallback (decided in the phase 1 spike).** The engine stays in the
+Rust core and sends the webview a run-length encoded frame; the frontend draws it. A WebGL2 renderer with a glyph
+atlas and one instanced draw per frame was measured against a plain Canvas 2D renderer on a 160x50 grid, 300 frames
+with a GPU sync after each:
+
+| Engine | Canvas 2D | WebGL2 |
+|---|---|---|
+| WebKit (WKWebView on macOS, what Tauri uses there) | 6.8 - 7.7 ms | 0.6 ms |
+| Chromium (WebView2 on Windows) with ANGLE/Metal | 4.6 - 6.0 ms | 0.64 ms |
+
+Timer resolution in WebKit is 1 ms, so those numbers are coarse. Compiling Ghostty's engine to WASM for the webview
+was not pursued: the core needs the native engine anyway (PTY, SSH, mobile), and a second engine in the webview would
+duplicate state. The benchmark is `app/src/bench.ts`.
 
 **One connection abstraction.** A "connection" (local, SSH, WSL, Docker) offers a shell *and* file access. The
 terminal block and the file previews both use it, so an editor on a remote file does not open a second login.
