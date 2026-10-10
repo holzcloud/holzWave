@@ -9,7 +9,7 @@ mod common;
 use common::{ascii, engine};
 use holzwave_core::GhosttyEngine;
 use holzwave_core::TerminalEngine;
-use holzwave_core::engine::{Mods, MouseAction, MouseButton, MouseEvent};
+use holzwave_core::engine::{Mods, MouseAction, MouseButton, MouseEvent, WheelEvent, WheelOutcome};
 
 /// The cell size of every test grid: 8 x 16 device pixels.
 const CELL: (u32, u32) = (8, 16);
@@ -279,4 +279,166 @@ fn a_resize_forgets_the_held_button_and_the_last_cell() {
     assert_eq!(motion(&mut e, MouseButton::None, (55.0, 50.0)), "");
     assert_eq!(press(&mut e, MouseButton::Left, (55.0, 50.0)), r"\x1b[<0;6;3M");
     assert_eq!(motion(&mut e, MouseButton::Left, (65.0, 50.0)), r"\x1b[<32;7;3M");
+}
+
+/// One wheel event of `rows` rows at the centre of a cell.
+fn wheel(e: &mut impl TerminalEngine, rows: i32, mods: Mods, at: (f32, f32)) -> WheelOutcome {
+    e.wheel(&WheelEvent { rows, mods, x: at.0, y: at.1 }).expect("wheel")
+}
+
+/// The bytes of an outcome that must be bytes, as readable ASCII.
+fn bytes_of(outcome: WheelOutcome) -> String {
+    match outcome {
+        WheelOutcome::Bytes(bytes) => ascii(&bytes),
+        other => panic!("expected bytes for the program, got {other:?}"),
+    }
+}
+
+/// The row at the top of the viewport.
+fn offset(e: &mut impl TerminalEngine) -> u64 {
+    e.screen().expect("screen").scrollbar.offset
+}
+
+/// A 40 x 10 grid with 60 lines of history, at the bottom.
+fn grid_with_history() -> GhosttyEngine {
+    let mut e = grid();
+    for i in 0..60 {
+        e.feed(format!("line {i}\r\n").as_bytes());
+    }
+    e
+}
+
+#[test]
+fn with_tracking_on_the_wheel_is_reported_as_buttons_four_and_five() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1000h\x1b[?1006h");
+    let at = centre(4, 2);
+
+    assert_eq!(bytes_of(wheel(&mut e, -1, Mods::NONE, at)), r"\x1b[<64;5;3M");
+    assert_eq!(bytes_of(wheel(&mut e, 1, Mods::NONE, at)), r"\x1b[<65;5;3M");
+    assert_eq!(
+        bytes_of(wheel(&mut e, -3, Mods::NONE, at)),
+        r"\x1b[<64;5;3M\x1b[<64;5;3M\x1b[<64;5;3M"
+    );
+    // Held modifiers go into the report like they do for a click.
+    assert_eq!(bytes_of(wheel(&mut e, 1, Mods::CTRL, at)), r"\x1b[<81;5;3M");
+}
+
+#[test]
+fn in_the_alternate_screen_the_wheel_becomes_arrow_keys() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1049h");
+    let at = centre(4, 2);
+
+    assert_eq!(bytes_of(wheel(&mut e, -2, Mods::NONE, at)), r"\x1b[A\x1b[A");
+    assert_eq!(bytes_of(wheel(&mut e, 1, Mods::NONE, at)), r"\x1b[B");
+
+    // Application cursor keys change the sequences, as they do for the keyboard.
+    e.feed(b"\x1b[?1h");
+    assert_eq!(bytes_of(wheel(&mut e, -2, Mods::NONE, at)), r"\x1bOA\x1bOA");
+    assert_eq!(bytes_of(wheel(&mut e, 1, Mods::NONE, at)), r"\x1bOB");
+}
+
+#[test]
+fn alternate_scroll_is_on_for_a_new_engine_and_a_program_can_turn_it_off() {
+    let mut e = grid_with_history();
+    e.feed(b"\x1b[?1049h");
+    let at = centre(4, 2);
+    // No setup by the program: less and vim get arrow keys from the wheel.
+    assert_eq!(bytes_of(wheel(&mut e, -1, Mods::NONE, at)), r"\x1b[A");
+
+    e.feed(b"\x1b[?1007l");
+    assert_eq!(wheel(&mut e, -1, Mods::NONE, at), WheelOutcome::Scrolled, "off: a local no-op in the alternate screen");
+
+    e.feed(b"\x1b[?1007h");
+    assert_eq!(bytes_of(wheel(&mut e, 1, Mods::NONE, at)), r"\x1b[B");
+}
+
+#[test]
+fn on_the_primary_screen_without_tracking_the_wheel_scrolls_the_scrollback() {
+    let mut e = grid_with_history();
+    let bottom = offset(&mut e);
+    assert!(bottom > 0, "the history exists");
+
+    assert_eq!(wheel(&mut e, -3, Mods::NONE, centre(4, 2)), WheelOutcome::Scrolled);
+    assert_eq!(offset(&mut e), bottom - 3);
+    assert_eq!(wheel(&mut e, 2, Mods::NONE, centre(4, 2)), WheelOutcome::Scrolled);
+    assert_eq!(offset(&mut e), bottom - 1);
+}
+
+#[test]
+fn shift_always_scrolls_locally_whatever_the_program_asked_for() {
+    // Tracking on, primary screen.
+    let mut e = grid_with_history();
+    e.feed(b"\x1b[?1000h\x1b[?1006h");
+    let bottom = offset(&mut e);
+    assert_eq!(wheel(&mut e, -4, Mods::SHIFT, centre(4, 2)), WheelOutcome::Scrolled);
+    assert_eq!(offset(&mut e), bottom - 4);
+
+    // Alternate screen with alternate scroll on.
+    let mut e = grid_with_history();
+    e.feed(b"\x1b[?1049h");
+    assert_eq!(wheel(&mut e, -1, Mods::SHIFT | Mods::CTRL, centre(4, 2)), WheelOutcome::Scrolled);
+}
+
+#[test]
+fn one_event_never_makes_more_than_ten_reports_or_arrow_sequences() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1000h\x1b[?1006h");
+    let out = bytes_of(wheel(&mut e, -500, Mods::NONE, centre(4, 2)));
+    assert_eq!(out.matches(r"\x1b[<64;5;3M").count(), 10);
+    assert_eq!(out.len(), 10 * r"\x1b[<64;5;3M".len());
+
+    let mut e = grid();
+    e.feed(b"\x1b[?1049h");
+    let out = bytes_of(wheel(&mut e, 500, Mods::NONE, centre(4, 2)));
+    assert_eq!(out, r"\x1b[B".repeat(10));
+
+    // The extremes of the type do not overflow on the way.
+    for rows in [i32::MIN, i32::MAX] {
+        let out = bytes_of(wheel(&mut e, rows, Mods::NONE, centre(4, 2)));
+        assert_eq!(out.matches(r"\x1b[").count(), 10, "{rows}");
+    }
+}
+
+#[test]
+fn tracking_in_the_alternate_screen_reports_buttons_and_not_arrows() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+
+    assert_eq!(bytes_of(wheel(&mut e, -1, Mods::NONE, centre(4, 2))), r"\x1b[<64;5;3M");
+}
+
+#[test]
+fn a_wheel_without_rows_does_nothing() {
+    let mut e = grid_with_history();
+    let bottom = offset(&mut e);
+    assert_eq!(wheel(&mut e, 0, Mods::NONE, centre(4, 2)), WheelOutcome::Nothing);
+    assert_eq!(offset(&mut e), bottom);
+}
+
+#[test]
+fn wheel_positions_are_clamped_like_pointer_positions() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1000h\x1b[?1006h");
+
+    assert_eq!(bytes_of(wheel(&mut e, -1, Mods::NONE, (f32::NAN, f32::INFINITY))), r"\x1b[<64;1;1M");
+    assert_eq!(bytes_of(wheel(&mut e, -1, Mods::NONE, (1.0e9, 1.0e9))), r"\x1b[<64;40;10M");
+}
+
+#[test]
+fn a_wheel_report_does_not_hide_the_next_motion_in_that_cell_or_hold_a_button() {
+    let mut e = grid();
+    e.feed(b"\x1b[?1002h\x1b[?1006h");
+    press(&mut e, MouseButton::Left, centre(1, 1));
+    release(&mut e, MouseButton::Left, centre(1, 1));
+
+    wheel(&mut e, -1, Mods::NONE, centre(4, 2));
+
+    // Nothing is held after the release, and the wheel did not hold anything: button mode stays silent.
+    assert_eq!(motion(&mut e, MouseButton::None, centre(4, 2)), "");
+    press(&mut e, MouseButton::Left, centre(4, 2));
+    // The press at (4, 2) is the last reported cell; the wheel report at the same cell changed nothing about that.
+    assert_eq!(motion(&mut e, MouseButton::Left, centre(4, 2)), "");
+    assert_eq!(motion(&mut e, MouseButton::Left, centre(5, 2)), r"\x1b[<32;6;3M");
 }

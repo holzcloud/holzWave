@@ -43,8 +43,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::engine::{
-    CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, PasteOutcome, SearchOp, SearchState, SelectOp,
-    TerminalEngine, parse_osc7,
+    CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, MouseEvent, PasteOutcome, SearchOp, SearchState,
+    SelectOp, TerminalEngine, WheelEvent, parse_osc7,
 };
 use crate::layout::PaneId;
 use crate::pty::{Pty, SpawnOptions, process_cwd};
@@ -280,6 +280,18 @@ impl PaneHandle {
             return Err(Error::Pty("key description too long".into()));
         }
         self.send(Control::Key(key))
+    }
+
+    /// A mouse press, release or motion in device pixels relative to the grid origin.
+    pub fn mouse(&self, event: MouseEvent) -> Result<()> {
+        let _ = event;
+        Ok(())
+    }
+
+    /// A wheel event.
+    pub fn wheel(&self, event: WheelEvent) -> Result<()> {
+        let _ = event;
+        Ok(())
     }
 
     /// Committed text (an IME commit, a dead-key result) as input. At most [`MAX_TEXT_BYTES`].
