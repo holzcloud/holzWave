@@ -208,6 +208,21 @@ pub struct DomKey {
     pub composing: bool,
 }
 
+impl KeyEvent {
+    /// Build the engine's key event from the facts the webview sent.
+    ///
+    /// The rules are pure and platform-independent except for one: on macOS the Option key composes text, so a held
+    /// Alt that produced text is a consumed modifier unless `option_as_alt` is on. Ctrl+[, Ctrl+I and Ctrl+M get no
+    /// special case: they are whatever the engine encodes (D-13).
+    pub fn from_dom(dom: &DomKey, option_as_alt: bool) -> KeyEvent {
+        KeyEvent::from_dom_on(dom, option_as_alt, cfg!(target_os = "macos"))
+    }
+
+    fn from_dom_on(dom: &DomKey, _option_as_alt: bool, _macos: bool) -> KeyEvent {
+        KeyEvent { code: dom.code.clone(), ..KeyEvent::default() }
+    }
+}
+
 /// What a paste did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasteOutcome {
@@ -462,5 +477,183 @@ pub trait TerminalEngine {
     /// Run a copy-mode operation and return its state.
     fn copy_mode(&mut self, _op: CopyOp) -> Result<CopyState> {
         Err(Error::Unsupported("copy_mode".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dom(code: &str, key: &str, mods: Mods) -> DomKey {
+        DomKey { code: code.into(), key: key.into(), mods, ..DomKey::default() }
+    }
+
+    fn event(code: &str, key: &str, mods: Mods) -> KeyEvent {
+        KeyEvent::from_dom_on(&dom(code, key, mods), false, false)
+    }
+
+    #[test]
+    fn a_printable_key_carries_its_text() {
+        assert_eq!(event("KeyA", "a", Mods::NONE).text.as_deref(), Some("a"));
+        assert_eq!(event("KeyA", "A", Mods::SHIFT).text.as_deref(), Some("A"));
+        assert_eq!(event("Space", " ", Mods::NONE).text.as_deref(), Some(" "));
+        assert_eq!(event("Digit7", "|", Mods::ALT).text.as_deref(), Some("|"));
+    }
+
+    #[test]
+    fn named_and_dead_keys_carry_no_text() {
+        assert_eq!(event("Enter", "Enter", Mods::NONE).text, None);
+        assert_eq!(event("Tab", "Tab", Mods::NONE).text, None);
+        assert_eq!(event("Backquote", "Dead", Mods::NONE).text, None);
+        assert_eq!(event("ArrowUp", "ArrowUp", Mods::NONE).text, None);
+        assert_eq!(event("F5", "F5", Mods::NONE).text, None);
+        assert_eq!(event("KeyA", "", Mods::NONE).text, None);
+    }
+
+    #[test]
+    fn exactly_one_code_point_counts_not_utf16_units() {
+        // One astral code point is two UTF-16 units: it is still one character.
+        assert_eq!(event("", "\u{1F600}", Mods::NONE).text.as_deref(), Some("\u{1F600}"));
+        // Two code points are not one key.
+        assert_eq!(event("", "ab", Mods::NONE).text, None);
+        assert_eq!(event("", "e\u{0301}", Mods::NONE).text, None);
+    }
+
+    #[test]
+    fn control_characters_and_function_key_private_use_carry_no_text() {
+        assert_eq!(event("KeyA", "\u{0001}", Mods::CTRL).text, None);
+        assert_eq!(event("Backspace", "\u{007F}", Mods::NONE).text, None);
+        assert_eq!(event("ArrowUp", "\u{F700}", Mods::NONE).text, None);
+        assert_eq!(event("F1", "\u{F8FF}", Mods::NONE).text, None);
+        // The edges: U+0020 and U+0080 and U+F6FF and U+F900 are all ordinary text.
+        assert!(event("Space", "\u{0020}", Mods::NONE).text.is_some());
+        assert!(event("", "\u{0080}", Mods::NONE).text.is_some());
+        assert!(event("", "\u{F6FF}", Mods::NONE).text.is_some());
+        assert!(event("", "\u{F900}", Mods::NONE).text.is_some());
+    }
+
+    #[test]
+    fn release_events_never_carry_text() {
+        let d = DomKey { release: true, ..dom("KeyA", "a", Mods::NONE) };
+        let e = KeyEvent::from_dom_on(&d, false, false);
+        assert_eq!(e.action, KeyAction::Release);
+        assert_eq!(e.text, None);
+        assert_eq!(e.consumed, Mods::NONE);
+    }
+
+    #[test]
+    fn action_follows_release_then_repeat() {
+        let press = KeyEvent::from_dom_on(&dom("KeyA", "a", Mods::NONE), false, false);
+        assert_eq!(press.action, KeyAction::Press);
+        let repeat = DomKey { repeat: true, ..dom("KeyA", "a", Mods::NONE) };
+        assert_eq!(KeyEvent::from_dom_on(&repeat, false, false).action, KeyAction::Repeat);
+        let both = DomKey { repeat: true, release: true, ..dom("KeyA", "a", Mods::NONE) };
+        assert_eq!(KeyEvent::from_dom_on(&both, false, false).action, KeyAction::Release);
+    }
+
+    #[test]
+    fn composing_is_copied() {
+        let d = DomKey { composing: true, ..dom("KeyA", "a", Mods::NONE) };
+        assert!(KeyEvent::from_dom_on(&d, false, false).composing);
+        assert!(!event("KeyA", "a", Mods::NONE).composing);
+    }
+
+    #[test]
+    fn unshifted_comes_from_the_us_layout_of_the_physical_key() {
+        for (code, key, expected) in [
+            ("KeyA", "A", 'a'),
+            ("KeyZ", "z", 'z'),
+            ("Digit0", ")", '0'),
+            ("Digit7", "/", '7'),
+            ("Minus", "_", '-'),
+            ("Equal", "+", '='),
+            ("BracketLeft", "{", '['),
+            ("BracketRight", "}", ']'),
+            ("Backslash", "|", '\\'),
+            ("Semicolon", ":", ';'),
+            ("Quote", "\"", '\''),
+            ("Backquote", "~", '`'),
+            ("Comma", "<", ','),
+            ("Period", ">", '.'),
+            ("Slash", "?", '/'),
+            ("Space", " ", ' '),
+        ] {
+            assert_eq!(event(code, key, Mods::SHIFT).unshifted, Some(expected), "{code}");
+        }
+    }
+
+    #[test]
+    fn unshifted_falls_back_to_the_lowercased_text_then_to_none() {
+        // A key outside the US table: the numpad, or a layout-specific key.
+        assert_eq!(event("Numpad5", "5", Mods::NONE).unshifted, Some('5'));
+        assert_eq!(event("IntlBackslash", "<", Mods::NONE).unshifted, Some('<'));
+        assert_eq!(event("", "\u{00C4}", Mods::SHIFT).unshifted, Some('\u{00E4}'));
+        // A character whose lower case is more than one code point is not guessed.
+        assert_eq!(event("", "\u{0130}", Mods::NONE).unshifted, None);
+        // No text and no US entry.
+        assert_eq!(event("Enter", "Enter", Mods::NONE).unshifted, None);
+        assert_eq!(event("ArrowUp", "ArrowUp", Mods::NONE).unshifted, None);
+    }
+
+    #[test]
+    fn consumed_holds_shift_when_shift_produced_text() {
+        assert_eq!(event("KeyA", "A", Mods::SHIFT).consumed, Mods::SHIFT);
+        // Shift on a key without text consumed nothing.
+        assert_eq!(event("Tab", "Tab", Mods::SHIFT).consumed, Mods::NONE);
+        assert_eq!(event("ArrowUp", "ArrowUp", Mods::SHIFT).consumed, Mods::NONE);
+        // Ctrl and Super are never consumed.
+        assert_eq!(event("KeyC", "c", Mods::CTRL).consumed, Mods::NONE);
+        assert_eq!(event("KeyC", "C", Mods::CTRL | Mods::SHIFT).consumed, Mods::SHIFT);
+        assert_eq!(event("KeyC", "c", Mods::SUPER).consumed, Mods::NONE);
+    }
+
+    #[test]
+    fn consumed_holds_alt_only_on_macos_when_option_composes_text() {
+        let d = dom("KeyF", "\u{0192}", Mods::ALT);
+        assert_eq!(KeyEvent::from_dom_on(&d, false, true).consumed, Mods::ALT);
+        // option-as-alt on: Option is Alt, nothing was composed away.
+        assert_eq!(KeyEvent::from_dom_on(&d, true, true).consumed, Mods::NONE);
+        // Not macOS: Alt is Alt.
+        assert_eq!(KeyEvent::from_dom_on(&d, false, false).consumed, Mods::NONE);
+        // No text: nothing to consume.
+        let arrow = dom("ArrowLeft", "ArrowLeft", Mods::ALT);
+        assert_eq!(KeyEvent::from_dom_on(&arrow, false, true).consumed, Mods::NONE);
+        // Alt not held: nothing to consume even on macOS.
+        let plain = dom("KeyF", "f", Mods::NONE);
+        assert_eq!(KeyEvent::from_dom_on(&plain, false, true).consumed, Mods::NONE);
+    }
+
+    #[test]
+    fn ctrl_bracket_ctrl_i_and_ctrl_m_are_not_special_cased() {
+        // D-13: the conversion is the same as for any other key; the engine decides what it encodes.
+        for (code, key) in [("BracketLeft", "["), ("KeyI", "i"), ("KeyM", "m")] {
+            let e = event(code, key, Mods::CTRL);
+            assert_eq!(e.code, code);
+            assert_eq!(e.text.as_deref(), Some(key));
+            assert_eq!(e.mods, Mods::CTRL);
+            assert_eq!(e.consumed, Mods::NONE);
+        }
+    }
+
+    #[test]
+    fn hostile_strings_are_handled_without_surprises() {
+        let huge = "x".repeat(1 << 20);
+        let e = event(&huge, &huge, Mods::NONE);
+        assert_eq!(e.text, None);
+        assert_eq!(e.unshifted, None);
+    }
+
+    #[test]
+    fn mods_are_a_bit_set_with_fixed_values() {
+        assert_eq!((Mods::SHIFT.0, Mods::ALT.0, Mods::CTRL.0, Mods::SUPER.0), (1, 2, 4, 8));
+        let both = Mods::SHIFT | Mods::CTRL;
+        assert_eq!(both.bits(), 5);
+        assert!(both.contains(Mods::SHIFT) && both.contains(Mods::CTRL));
+        assert!(!both.contains(Mods::ALT));
+        assert!(Mods::NONE.is_empty() && !both.is_empty());
+        assert_eq!(Mods::from_bits(0xff), Mods(15));
+        let mut m = Mods::NONE;
+        m |= Mods::SUPER;
+        assert_eq!(m, Mods::SUPER);
     }
 }

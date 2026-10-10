@@ -238,3 +238,37 @@ impl TerminalEngine for GhosttyEngine {
         std::mem::take(&mut *self.replies.borrow_mut())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The W3C code of a libghostty key: its variant name, with the single letters `A` to `Z` standing for
+    /// `KeyA` to `KeyZ`.
+    fn w3c_code(key: Key) -> String {
+        let name = format!("{key:?}");
+        if name.len() == 1 && name.as_bytes()[0].is_ascii_uppercase() { format!("Key{name}") } else { name }
+    }
+
+    #[test]
+    fn every_libghostty_key_has_its_w3c_code_mapped() {
+        // Walk the enum by number until the library stops knowing values. The count pins the revision: a newer
+        // libghostty with more keys fails here until the table in key_from_code is extended.
+        let mut seen = 0;
+        for i in 0.. {
+            let Ok(key) = Key::try_from(i) else { break };
+            let code = w3c_code(key);
+            assert_eq!(key_from_code(&code), key, "code {code} (variant {i}) is not mapped");
+            seen += 1;
+        }
+        assert_eq!(seen, 176, "the pinned libghostty revision has 176 key variants");
+    }
+
+    #[test]
+    fn unknown_and_hostile_codes_are_unidentified() {
+        for code in ["", "Bogus", "keya", "KeyAA", "Key", "Digit10", "F26", " ArrowUp"] {
+            assert_eq!(key_from_code(code), Key::Unidentified, "{code:?}");
+        }
+        assert_eq!(key_from_code(&"K".repeat(1 << 20)), Key::Unidentified);
+    }
+}
