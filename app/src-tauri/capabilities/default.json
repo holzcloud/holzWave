@@ -1,11 +1,43 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "the commands of the app and the drag region, for the main window only",
   "windows": [
     "main"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-start-dragging",
+    "allow-get-layout",
+    "allow-start-pane",
+    "allow-key",
+    "allow-text",
+    "allow-paste",
+    "allow-resize",
+    "allow-scroll",
+    "allow-scroll-to-bottom",
+    "allow-request-full",
+    "allow-select",
+    "allow-selection-text",
+    "allow-search",
+    "allow-copy-mode",
+    "allow-split",
+    "allow-new-tab",
+    "allow-new-workspace",
+    "allow-close-pane",
+    "allow-focus-pane",
+    "allow-cycle-focus",
+    "allow-select-tab",
+    "allow-select-workspace",
+    "allow-set-ratio",
+    "allow-get-settings",
+    "allow-set-setting",
+    "allow-reset-setting",
+    "allow-reload-settings",
+    "allow-app-info",
+    "allow-open-url",
+    "allow-reveal-path",
+    "allow-mouse",
+    "allow-wheel"
   ]
 }
