@@ -1,5 +1,41 @@
 //! The frame protocol between the core and the webview: how an engine update becomes a frame message with changed
 //! rows, a `full` flag and sequence numbers.
+//!
+//! # A frame
+//!
+//! One JSON object per pane and change: `pane`, `seq`, `full`, `cols`, `rows`, `fg`, `bg` (default colours as
+//! `0xRRGGBB`), `cursor` (`null` when hidden), `scrollbar` (`[offset, total, len]`), `selection`, `matches`,
+//! `search`, `copy_cursor`, `modes` and `changed`, the rows that differ from the previous frame.
+//!
+//! # Rows: one code point per cell
+//!
+//! A row is a list of runs `[text, cols, fg, bg, flags]`, each covering `cols` cells of one style, and an optional
+//! `extras` list. The rule that makes a row renderable without measuring text:
+//!
+//! - every cell contributes **exactly one code point** to its run's text: the first code point of its grapheme
+//!   cluster, a space for an empty cell, `\0` for the second column of a wide character;
+//! - the code points after the first (a combining mark, the rest of a ZWJ sequence, the second regional indicator of
+//!   a flag, a skin tone) travel in `extras` as `[column, tail]`;
+//! - so `text.chars().count() == cols` for every run, a row never has more cells than the grid is wide, and a
+//!   renderer that advances one cell per code point stays aligned (RESEARCH Pitfall 1 and 2b).
+//!
+//! Trailing blanks in the default background without flags are not sent; the consumer pads the row to `cols`.
+//!
+//! # Which frames are sent
+//!
+//! The engine reports what libghostty marked dirty, and libghostty calls every scroll a full redraw (RESEARCH
+//! Pitfall 7). The [`FrameEncoder`] therefore remembers the rows it last sent and sends only rows whose encoding
+//! differs. `full` is true only on the first frame, after a size change, after a theme change and after
+//! [`FrameEncoder::request_full`] (webview reconnect, or a gap in `seq`): the consumer then replaces everything.
+//! A frame with no changed rows is still sent when the header changed (cursor visibility and shape arrive from the
+//! engine as a clean snapshot), and nothing is sent, and no sequence number used, when neither changed.
+//!
+//! `seq` starts at 1 per pane and goes up by exactly one per emitted frame. A consumer that sees a gap asks for a full
+//! frame; it never patches over a gap.
+//!
+//! The golden sequence in `app/tests/fixtures/frames.json` is written by the `fixtures` test in `core/tests/wire.rs`
+//! (`UPDATE_FIXTURES=1`) and applied step by step by the frontend patcher test, so both languages are proven against
+//! the same bytes.
 
 use serde::Serialize;
 

@@ -1,0 +1,1274 @@
+{
+  "version": 1,
+  "cols": 20,
+  "rows": 5,
+  "steps": [
+    {
+      "name": "initial",
+      "input": "",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 1,
+        "full": true,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 0,
+          "y": 0,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          0,
+          5,
+          5
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": []
+          },
+          {
+            "y": 1,
+            "runs": []
+          },
+          {
+            "y": 2,
+            "runs": []
+          },
+          {
+            "y": 3,
+            "runs": []
+          },
+          {
+            "y": 4,
+            "runs": []
+          }
+        ]
+      },
+      "grid": [
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "typing",
+      "input": "hello",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 2,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 5,
+          "y": 0,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          0,
+          5,
+          5
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "hello               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "hello",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "newline and scroll",
+      "input": "\\r\\nworld\\r\\nthree\\r\\nfour\\r\\nfive\\r\\nsix",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 3,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 3,
+          "y": 4,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          1,
+          6,
+          5
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "world               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "three               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "four                ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 3,
+            "runs": [
+              [
+                "five                ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 4,
+            "runs": [
+              [
+                "six                 ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "world",
+        "three",
+        "four",
+        "five",
+        "six"
+      ]
+    },
+    {
+      "name": "colours and styles",
+      "input": "\\r\\n\\x1b[1;31mred\\x1b[0m \\x1b[4;42mu\\x1b[0m \\x1b[3;7mit\\x1b[0m",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 4,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 8,
+          "y": 4,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          2,
+          7,
+          5
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "three               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "four                ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "five                ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 3,
+            "runs": [
+              [
+                "six                 ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 4,
+            "runs": [
+              [
+                "red",
+                3,
+                13395558,
+                0,
+                1
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "u",
+                1,
+                16777215,
+                11910504,
+                4
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "it",
+                2,
+                16777215,
+                0,
+                10
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "three",
+        "four",
+        "five",
+        "six",
+        "red u it"
+      ]
+    },
+    {
+      "name": "wide cjk pair",
+      "input": "\\r\\n\\xe6\\x97\\xa5\\xe6\\x9c\\xac!",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 5,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 5,
+          "y": 4,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          3,
+          8,
+          5
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "four                ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "five                ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "six                 ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 3,
+            "runs": [
+              [
+                "red",
+                3,
+                13395558,
+                0,
+                1
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "u",
+                1,
+                16777215,
+                11910504,
+                4
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "it",
+                2,
+                16777215,
+                0,
+                10
+              ]
+            ]
+          },
+          {
+            "y": 4,
+            "runs": [
+              [
+                "日\u0000本\u0000!               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "four",
+        "five",
+        "six",
+        "red u it",
+        "日本!"
+      ]
+    },
+    {
+      "name": "emoji with clustering",
+      "input": "\\x1b[?2027h\\r\\n\\xf0\\x9f\\x91\\xa8\\xe2\\x80\\x8d\\xf0\\x9f\\x91\\xa9\\xe2\\x80\\x8d\\xf0\\x9f\\x91\\xa7 ok",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 6,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 5,
+          "y": 4,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          4,
+          9,
+          5
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "five                ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "six                 ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "red",
+                3,
+                13395558,
+                0,
+                1
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "u",
+                1,
+                16777215,
+                11910504,
+                4
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "it",
+                2,
+                16777215,
+                0,
+                10
+              ]
+            ]
+          },
+          {
+            "y": 3,
+            "runs": [
+              [
+                "日\u0000本\u0000!               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 4,
+            "runs": [
+              [
+                "👨\u0000 ok               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "‍👩‍👧"
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "five",
+        "six",
+        "red u it",
+        "日本!",
+        "👨‍👩‍👧 ok"
+      ]
+    },
+    {
+      "name": "combining sequence",
+      "input": "\\r\\ne\\xcc\\x81o\\xcc\\x88x",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 7,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 3,
+          "y": 4,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          10,
+          5
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "six                 ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "red",
+                3,
+                13395558,
+                0,
+                1
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "u",
+                1,
+                16777215,
+                11910504,
+                4
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "it",
+                2,
+                16777215,
+                0,
+                10
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "日\u0000本\u0000!               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 3,
+            "runs": [
+              [
+                "👨\u0000 ok               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "‍👩‍👧"
+              ]
+            ]
+          },
+          {
+            "y": 4,
+            "runs": [
+              [
+                "eox                 ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "́"
+              ],
+              [
+                1,
+                "̈"
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "six",
+        "red u it",
+        "日本!",
+        "👨‍👩‍👧 ok",
+        "éöx"
+      ]
+    },
+    {
+      "name": "resize to 24x6",
+      "input": "",
+      "resize": [
+        24,
+        6
+      ],
+      "frame": {
+        "pane": 1,
+        "seq": 8,
+        "full": true,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 3,
+          "y": 5,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          4,
+          10,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "five                    ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "six                     ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "red",
+                3,
+                13395558,
+                0,
+                1
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "u",
+                1,
+                16777215,
+                11910504,
+                4
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "it",
+                2,
+                16777215,
+                0,
+                10
+              ]
+            ]
+          },
+          {
+            "y": 3,
+            "runs": [
+              [
+                "日\u0000本\u0000!                   ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 4,
+            "runs": [
+              [
+                "👨\u0000 ok                   ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "‍👩‍👧"
+              ]
+            ]
+          },
+          {
+            "y": 5,
+            "runs": [
+              [
+                "eox                     ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "́"
+              ],
+              [
+                1,
+                "̈"
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "five",
+        "six",
+        "red u it",
+        "日本!",
+        "👨‍👩‍👧 ok",
+        "éöx"
+      ]
+    },
+    {
+      "name": "alternate screen enter",
+      "input": "\\x1b[?1049h\\x1b[HALT",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 9,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 3,
+          "y": 0,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          0,
+          6,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": true,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "ALT                     ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": []
+          },
+          {
+            "y": 2,
+            "runs": []
+          },
+          {
+            "y": 3,
+            "runs": []
+          },
+          {
+            "y": 4,
+            "runs": []
+          },
+          {
+            "y": 5,
+            "runs": []
+          }
+        ]
+      },
+      "grid": [
+        "ALT",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "alternate screen leave",
+      "input": "\\x1b[?1049l",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 10,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 3,
+          "y": 5,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          4,
+          10,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "five                    ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "six                     ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "red",
+                3,
+                13395558,
+                0,
+                1
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "u",
+                1,
+                16777215,
+                11910504,
+                4
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "it",
+                2,
+                16777215,
+                0,
+                10
+              ]
+            ]
+          },
+          {
+            "y": 3,
+            "runs": [
+              [
+                "日\u0000本\u0000!                   ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 4,
+            "runs": [
+              [
+                "👨\u0000 ok                   ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "‍👩‍👧"
+              ]
+            ]
+          },
+          {
+            "y": 5,
+            "runs": [
+              [
+                "eox                     ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "́"
+              ],
+              [
+                1,
+                "̈"
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "five",
+        "six",
+        "red u it",
+        "日本!",
+        "👨‍👩‍👧 ok",
+        "éöx"
+      ]
+    },
+    {
+      "name": "cursor hide",
+      "input": "\\x1b[?25l",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 11,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": null,
+        "scrollbar": [
+          4,
+          10,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": []
+      },
+      "grid": [
+        "five",
+        "six",
+        "red u it",
+        "日本!",
+        "👨‍👩‍👧 ok",
+        "éöx"
+      ]
+    },
+    {
+      "name": "erase display",
+      "input": "\\x1b[2J",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 12,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": null,
+        "scrollbar": [
+          4,
+          10,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": []
+          },
+          {
+            "y": 1,
+            "runs": []
+          },
+          {
+            "y": 2,
+            "runs": []
+          },
+          {
+            "y": 3,
+            "runs": []
+          },
+          {
+            "y": 4,
+            "runs": []
+          },
+          {
+            "y": 5,
+            "runs": []
+          }
+        ]
+      },
+      "grid": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    }
+  ]
+}
