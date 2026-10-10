@@ -66,6 +66,11 @@ pub struct Layout {
 
 const MIN_RATIO: f32 = 0.1;
 
+/// Ids stay below this. The webview receives ids as JSON numbers, and a JavaScript number holds integers
+/// exactly only up to 2^53, so a larger id would come back as a different pane. A file with ids at or above
+/// the limit (and with it `u64::MAX`, which `next_id` could never be raised above) is not repaired.
+const ID_CEILING: u64 = 1 << 53;
+
 /// What `Layout::close_pane` did. The three cases need different reactions: an unknown id is a stale event
 /// and is ignored, the last pane ends the app, anything else changed the layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +109,14 @@ impl Node {
         match self {
             Node::Pane(p) => *p == pane,
             Node::Split { a, b, .. } => a.contains(pane) || b.contains(pane),
+        }
+    }
+
+    fn split_ids(&self, out: &mut Vec<SplitId>) {
+        if let Node::Split { id, a, b, .. } = self {
+            out.push(*id);
+            a.split_ids(out);
+            b.split_ids(out);
         }
     }
 
@@ -281,19 +294,111 @@ impl Layout {
     /// one human-readable line per repair, empty when nothing had to change. A layout that cannot be repaired
     /// is replaced by a fresh one and the single returned line says why.
     pub fn validate(&mut self) -> Vec<String> {
-        Vec::new()
+        match self.check() {
+            Ok(repairs) => repairs,
+            Err(reason) => {
+                *self = Layout::new().0;
+                vec![format!("layout reset: {reason}")]
+            }
+        }
     }
 
     /// Parse and validate a persisted layout. Never fails and never panics: a text that is not a layout, or
     /// that cannot be repaired, gives a fresh layout and `LoadStatus::Reset`.
     pub fn from_json(text: &str) -> (Layout, LoadStatus) {
-        let _ = text;
-        (Layout::new().0, LoadStatus::Clean)
+        let mut layout: Layout = match serde_json::from_str(text) {
+            Ok(l) => l,
+            Err(e) => return (Layout::new().0, LoadStatus::Reset(format!("not a layout: {e}"))),
+        };
+        match layout.check() {
+            Ok(repairs) if repairs.is_empty() => (layout, LoadStatus::Clean),
+            Ok(repairs) => (layout, LoadStatus::Repaired(repairs)),
+            Err(reason) => (Layout::new().0, LoadStatus::Reset(reason)),
+        }
+    }
+
+    /// The repair pass. `Err` carries the reason when nothing usable is left; `self` is then unspecified.
+    fn check(&mut self) -> Result<Vec<String>, String> {
+        let mut repairs = Vec::new();
+
+        // Workspaces without tabs cannot be shown; the active index follows the workspace it pointed at.
+        let (old_active, old_len) = (self.active, self.workspaces.len());
+        let mut kept = Vec::with_capacity(old_len);
+        let mut new_active = None;
+        for (i, w) in std::mem::take(&mut self.workspaces).into_iter().enumerate() {
+            if w.tabs.is_empty() {
+                continue;
+            }
+            if i == old_active {
+                new_active = Some(kept.len());
+            }
+            kept.push(w);
+        }
+        self.workspaces = kept;
+        if self.workspaces.is_empty() {
+            return Err("no workspace with a tab".into());
+        }
+        if self.workspaces.len() < old_len {
+            repairs.push(format!("dropped {} workspace(s) without tabs", old_len - self.workspaces.len()));
+        }
+        let last = self.workspaces.len() - 1;
+        match new_active {
+            Some(a) => self.active = a,
+            None => {
+                self.active = old_active.min(last);
+                if old_active >= old_len {
+                    repairs.push(format!("active workspace {old_active} is out of range, set to {}", self.active));
+                }
+            }
+        }
+
+        for (wi, w) in self.workspaces.iter_mut().enumerate() {
+            if w.active >= w.tabs.len() {
+                let fixed = w.tabs.len() - 1;
+                repairs.push(format!("workspace {wi}: active tab {} is out of range, set to {fixed}", w.active));
+                w.active = fixed;
+            }
+            for (ti, tab) in w.tabs.iter_mut().enumerate() {
+                let panes = tab.panes();
+                if !panes.contains(&tab.focus) {
+                    repairs.push(format!(
+                        "workspace {wi} tab {ti}: focus {} is not in the tab, set to {}",
+                        tab.focus, panes[0]
+                    ));
+                    tab.focus = panes[0];
+                }
+            }
+        }
+
+        // Id counter: every id in the file must be below next_id, or a new pane could repeat an old id.
+        let mut max_id = 0;
+        for w in &self.workspaces {
+            max_id = max_id.max(w.id);
+            for t in &w.tabs {
+                max_id = max_id.max(t.id);
+                let (mut panes, mut splits) = (Vec::new(), Vec::new());
+                t.root.panes(&mut panes);
+                t.root.split_ids(&mut splits);
+                max_id = panes.into_iter().chain(splits).fold(max_id, u64::max);
+            }
+        }
+        if max_id >= ID_CEILING - 1 || self.next_id >= ID_CEILING {
+            return Err(format!("ids are out of range (largest {max_id}, next {})", self.next_id));
+        }
+        if self.next_id <= max_id {
+            repairs.push(format!("next id {} raised to {}", self.next_id, max_id + 1));
+            self.next_id = max_id + 1;
+        }
+
+        Ok(repairs)
     }
 
     /// Close a pane everywhere. Empty tabs and empty workspaces disappear; the last pane of the last
     /// workspace cannot be closed. An id that is in no tab is `Unknown`, which is checked first.
     pub fn close_pane(&mut self, pane: PaneId) -> CloseOutcome {
+        if !self.workspaces.iter().any(|w| w.tabs.iter().any(|t| t.root.contains(pane))) {
+            return CloseOutcome::Unknown;
+        }
         if self.all_panes().len() <= 1 {
             return CloseOutcome::LastPane;
         }
@@ -315,7 +420,7 @@ impl Layout {
             }
             return CloseOutcome::Closed;
         }
-        CloseOutcome::LastPane
+        CloseOutcome::Unknown
     }
 
     pub fn focus_pane(&mut self, pane: PaneId) {

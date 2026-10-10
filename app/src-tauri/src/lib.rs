@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, PaneId, Rect, SplitId};
+use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
 use holzwave_core::pty::Pty;
 use holzwave_core::{GhosttyEngine, Screen, TerminalEngine, Width};
 use serde::Serialize;
@@ -34,11 +34,35 @@ struct App {
 }
 
 impl App {
+    /// Read the layout file. A file that is missing gives a fresh layout; one that is damaged or inconsistent
+    /// is repaired or replaced, and its original bytes are copied to `<path>.bad` before anything can
+    /// overwrite them.
     fn load(path: PathBuf) -> Self {
-        let layout = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Layout>(&s).ok())
-            .unwrap_or_else(|| Layout::new().0);
+        let layout = match std::fs::read(&path) {
+            Ok(bytes) => {
+                let (layout, status) = match std::str::from_utf8(&bytes) {
+                    Ok(text) => Layout::from_json(text),
+                    Err(e) => (Layout::new().0, LoadStatus::Reset(format!("not UTF-8: {e}"))),
+                };
+                match &status {
+                    LoadStatus::Clean => {}
+                    LoadStatus::Repaired(repairs) => {
+                        eprintln!("holzwave: {} repaired: {}", path.display(), repairs.join("; "));
+                        keep_bad_copy(&path, &bytes);
+                    }
+                    LoadStatus::Reset(reason) => {
+                        eprintln!("holzwave: {} reset: {reason}", path.display());
+                        keep_bad_copy(&path, &bytes);
+                    }
+                }
+                layout
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Layout::new().0,
+            Err(e) => {
+                eprintln!("holzwave: cannot read {}: {e}", path.display());
+                Layout::new().0
+            }
+        };
         App { layout: Mutex::new(layout), sessions: Mutex::default(), path }
     }
 
@@ -53,6 +77,16 @@ impl App {
                 let _ = std::fs::rename(&tmp, &self.path);
             }
         }
+    }
+}
+
+/// Copy the bytes of a layout file that could not be used as they were to `<path>.bad`.
+fn keep_bad_copy(path: &std::path::Path, bytes: &[u8]) {
+    let mut name = path.file_name().map(std::ffi::OsString::from).unwrap_or_default();
+    name.push(".bad");
+    let bad = path.with_file_name(name);
+    if let Err(e) = std::fs::write(&bad, bytes) {
+        eprintln!("holzwave: cannot keep {}: {e}", bad.display());
     }
 }
 
