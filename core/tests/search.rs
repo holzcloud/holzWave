@@ -190,3 +190,201 @@ fn setting_a_needle_brings_the_newest_match_into_view() {
     assert_eq!(current.len(), 1, "the current match is on the screen, got {:?}", update.matches);
     assert!(current[0].y < 5);
 }
+
+// ---- Task 2: moving between matches, clearing, and surviving what the terminal does ------------------------------
+
+/// The one current span of the next update, with the text of its row.
+fn current_row(e: &mut impl TerminalEngine) -> (MatchSpan, String) {
+    let found = matches(e);
+    let current: Vec<MatchSpan> = found.iter().copied().filter(|m| m.current).collect();
+    assert_eq!(current.len(), 1, "exactly one current match on the screen, got {found:?}");
+    let screen = e.screen().expect("screen");
+    let m = current[0];
+    let row = usize::from(m.y) * usize::from(screen.cols);
+    let text: String = screen.cells[row..row + usize::from(screen.cols)].iter().map(|c| c.text.clone()).collect();
+    (m, text.trim_end().to_owned())
+}
+
+#[test]
+fn next_and_prev_move_one_match_at_a_time_and_wrap_around() {
+    let mut e = engine(20, 5);
+    hundred_lines(&mut e);
+    assert_eq!(set(&mut e, "hello").current, Some(9));
+
+    // Prev goes up (older), Next goes down (newer).
+    let state = run(&mut e, SearchOp::Prev);
+    assert_eq!(state, SearchState { total: 10, current: Some(8) });
+    let state = run(&mut e, SearchOp::Prev);
+    assert_eq!(state.current, Some(7));
+    let state = run(&mut e, SearchOp::Next);
+    assert_eq!(state.current, Some(8));
+    assert_eq!(run(&mut e, SearchOp::Next).current, Some(9));
+
+    // Last to first, and first to last.
+    assert_eq!(run(&mut e, SearchOp::Next).current, Some(0), "Next after the newest match wraps to the oldest");
+    assert_eq!(run(&mut e, SearchOp::Prev).current, Some(9), "Prev before the oldest match wraps to the newest");
+}
+
+#[test]
+fn the_current_match_is_on_the_screen_centred_after_a_move_and_reported_as_current() {
+    let mut e = engine(20, 5);
+    hundred_lines(&mut e);
+    set(&mut e, "hello");
+
+    // line090 is off screen (the viewport shows 096 to 100): the engine scrolls and centres it.
+    assert_eq!(run(&mut e, SearchOp::Prev).current, Some(8));
+    let (m, row) = current_row(&mut e);
+    assert_eq!(row, "line090 hello");
+    assert_eq!((m.y, m.x0, m.x1), (2, 8, 12), "centred: two rows above and two below");
+    assert!(row.starts_with("line090"));
+
+    // Wrapping from the oldest to the newest lands on the last page: the viewport cannot go past the end.
+    for _ in 0..8 {
+        run(&mut e, SearchOp::Prev);
+    }
+    assert_eq!(run(&mut e, SearchOp::Prev).current, Some(9));
+    let (m, row) = current_row(&mut e);
+    assert_eq!(row, "line100 hello");
+    assert_eq!(m.y, 4, "the newest match is on the last row; the viewport stops at the end");
+}
+
+#[test]
+fn a_match_that_is_already_visible_does_not_move_the_viewport() {
+    let mut e = engine(30, 5);
+    e.feed(b"hello one\r\nnothing\r\nhello two\r\nx\r\nlast");
+    set(&mut e, "hello");
+    let before = e.update().expect("update").scrollbar;
+
+    assert_eq!(run(&mut e, SearchOp::Prev).current, Some(0));
+    let update = e.update().expect("update");
+    assert_eq!(update.scrollbar, before, "both matches were on screen, nothing scrolls");
+    assert_eq!(update.matches, vec![span(0, 0, 4, true), span(2, 0, 4, false)]);
+}
+
+#[test]
+fn clear_removes_the_search_and_leaves_the_viewport_where_it_was() {
+    let mut e = engine(20, 5);
+    hundred_lines(&mut e);
+    set(&mut e, "hello");
+    run(&mut e, SearchOp::Prev);
+    let before = e.update().expect("update").scrollbar;
+    assert!(before.offset < 95, "the move scrolled up");
+
+    let state = run(&mut e, SearchOp::Clear);
+    assert_eq!(state, SearchState::default());
+    let update = e.update().expect("update");
+    assert_eq!(update.search, None);
+    assert!(update.matches.is_empty());
+    assert_eq!(update.scrollbar, before, "Clear does not scroll");
+}
+
+#[test]
+fn moving_and_clearing_without_a_search_is_not_an_error() {
+    let mut e = engine(20, 5);
+    for op in [SearchOp::Next, SearchOp::Prev, SearchOp::Clear] {
+        assert_eq!(run(&mut e, op), SearchState::default());
+    }
+    assert_eq!(e.update().expect("update").search, None);
+}
+
+#[test]
+fn more_output_with_the_needle_raises_the_total_without_a_call() {
+    let mut e = engine(20, 5);
+    hundred_lines(&mut e);
+    assert_eq!(set(&mut e, "hello").total, 10);
+
+    // Two lines with the needle, long after the search was set; nobody tells the search.
+    e.feed(b"\r\nmore hello\r\nand hello");
+    let search = e.update().expect("update").search.expect("the search goes on");
+    assert_eq!(search.total, 12);
+    assert_eq!(search.current, Some(9), "the current match is the same text, its place in reading order is unchanged");
+
+    // New output scrolls lines into the scrollback; matches that moved there are still counted.
+    for n in 0..30 {
+        e.feed(format!("\r\nfiller {n}").as_bytes());
+    }
+    assert_eq!(e.update().expect("update").search.expect("search").total, 12);
+}
+
+#[test]
+fn leaving_and_entering_the_alternate_screen_does_not_lose_the_search() {
+    let mut e = engine(20, 5);
+    hundred_lines(&mut e);
+    let before = set(&mut e, "hello");
+
+    // A full-screen program: the alternate screen is searched on its own and the search stays active.
+    e.feed(b"\x1b[?1049h\x1b[Hhello hello");
+    let alt = e.update().expect("update");
+    let on_alt = alt.search.expect("the search is still active on the alternate screen");
+    assert_eq!(on_alt.total, 2, "the alternate screen has its own two matches");
+    assert_eq!(alt.matches.len(), 2);
+
+    // Moving there works and cannot panic.
+    run(&mut e, SearchOp::Next);
+    run(&mut e, SearchOp::Prev);
+
+    e.feed(b"\x1b[?1049l");
+    let back = e.update().expect("update");
+    assert_eq!(back.search, Some(before), "the primary screen's total and current match are back");
+    assert_eq!(back.matches, vec![span(4, 8, 12, true)]);
+}
+
+#[test]
+fn a_search_on_an_empty_terminal_and_on_the_alternate_screen_never_fails() {
+    // No output, no scrollback.
+    let mut e = engine(20, 5);
+    assert_eq!(set(&mut e, "x"), SearchState { total: 0, current: None });
+    for op in [SearchOp::Next, SearchOp::Prev, SearchOp::Clear] {
+        run(&mut e, op);
+    }
+
+    // The alternate screen has no scrollback at all.
+    e.feed(b"\x1b[?1049h");
+    for needle in ["zz", "", "a"] {
+        set(&mut e, needle);
+        run(&mut e, SearchOp::Next);
+        run(&mut e, SearchOp::Prev);
+    }
+    run(&mut e, SearchOp::Clear);
+    e.update().expect("update");
+}
+
+#[test]
+fn resizing_keeps_the_search_working_and_the_spans_inside_the_grid() {
+    let mut e = engine(20, 5);
+    hundred_lines(&mut e);
+    let before = set(&mut e, "hello");
+
+    // Ten columns wrap `line100 hello` after `he`: the soft-wrapped line is still one match, now over two rows.
+    e.resize(10, 5, (0, 0)).expect("resize");
+    let update = e.update().expect("update");
+    assert_eq!(update.search, Some(before));
+    assert_eq!(update.matches, vec![span(3, 8, 9, true), span(4, 0, 2, true)]);
+
+    // Growing back, with more rows than before.
+    e.resize(30, 8, (0, 0)).expect("resize");
+    let update = e.update().expect("update");
+    assert_eq!(update.search, Some(before));
+    assert!(update.matches.iter().all(|m| m.y < 8 && m.x0 <= m.x1 && m.x1 < 30), "{:?}", update.matches);
+    assert!(update.matches.iter().any(|m| m.current));
+    assert_eq!(run(&mut e, SearchOp::Prev).current, Some(8));
+}
+
+#[test]
+fn a_match_cut_by_the_viewport_edge_is_clipped_to_the_rows_on_screen() {
+    // `a`, `b`, a `hello` that wraps (`hel` and `lo`), `c` and `d`: six rows in a three-row viewport.
+    let mut e = engine(20, 3);
+    e.feed(format!("a\r\nb\r\n{}hello\r\nc\r\nd", "x".repeat(17)).as_bytes());
+
+    // The match is above the viewport (`lo`, `c`, `d`) when the needle is set: it is scrolled in and centred.
+    assert_eq!(set(&mut e, "hello").total, 1);
+    assert_eq!(matches(&mut e), vec![span(1, 17, 19, true), span(2, 0, 1, true)]);
+
+    // Two rows down the first row of the match is above the viewport: only `lo` is left, on the first row.
+    e.scroll(2);
+    assert_eq!(matches(&mut e), vec![span(0, 0, 1, true)]);
+
+    // At the very top the last row of the match is below the viewport: only `hel` is left, on the last row.
+    e.scroll(-3);
+    assert_eq!(matches(&mut e), vec![span(2, 17, 19, true)]);
+}
