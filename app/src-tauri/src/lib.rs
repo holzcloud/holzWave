@@ -4,6 +4,9 @@
 //! engine and PTY writer, and everything reaches it through one channel: PTY output, keyboard input,
 //! resize, scroll. The engine thread coalesces output and emits at most one frame per `FRAME_INTERVAL`.
 
+#[allow(dead_code)]
+mod state;
+
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
