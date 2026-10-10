@@ -769,4 +769,52 @@ mod tests {
         }
         assert_eq!(key_from_code(&"K".repeat(1 << 20)), Key::Unidentified);
     }
+
+    /// The columns the cursor advances for `text`, summed over its grapheme clusters as the library measures them.
+    fn library_width(text: &str) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        let mut rest = chars.as_slice();
+        let mut total = 0;
+        while !rest.is_empty() {
+            let (consumed, width) = libghostty_vt::unicode::grapheme_width(rest);
+            assert!(consumed > 0, "the library consumes at least one character of {text:?}");
+            total += usize::from(width);
+            rest = &rest[consumed..];
+        }
+        total
+    }
+
+    #[test]
+    fn the_cursor_advances_by_the_librarys_grapheme_width() {
+        // The terminal's own layout and the function a UI can call must agree (DESK-27). Each text is fed at the
+        // start of an empty row.
+        let cases = [
+            "e\u{0301}",
+            "\u{65E5}\u{672C}",
+            "\u{1F600}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "\u{1F1E8}\u{1F1ED}",
+            "\u{2764}\u{FE0F}",
+            "\u{1F44D}\u{1F3FD}",
+            "\u{1112}\u{1161}\u{11AB}",
+            "\u{65E5}\u{0301}",
+            "abc",
+            "a\u{65E5}b\u{1F600}c",
+        ];
+        for text in cases {
+            let mut engine = GhosttyEngine::new(40, 3, 100).expect("engine");
+            engine.feed(text.as_bytes());
+            let advance = engine.update().expect("update").cursor.expect("cursor").x;
+            assert_eq!(usize::from(advance), library_width(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_single_cluster_is_consumed_whole() {
+        for text in ["\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F1E8}\u{1F1ED}", "e\u{0301}"] {
+            let chars: Vec<char> = text.chars().collect();
+            let (consumed, _) = libghostty_vt::unicode::grapheme_width(&chars);
+            assert_eq!(consumed, chars.len(), "{text:?} is one cluster");
+        }
+    }
 }
