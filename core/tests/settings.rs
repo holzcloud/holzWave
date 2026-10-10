@@ -205,3 +205,245 @@ fn rgb_refuses_everything_that_is_not_exactly_hash_and_six_hex_digits() {
         assert_eq!(Rgb::parse(bad), None, "{bad:?} must be refused");
     }
 }
+
+// ---- validation and clamping (task 3) -----------------------------------------------------------------
+
+mod validation {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sanitise_clamps_every_numeric_setting_and_notes_each_change() {
+        let mut s = Settings::default();
+        s.font_size = 3;
+        s.ui_scale = 500;
+        s.scrollback_lines = 5;
+        let notes = s.sanitise();
+        assert_eq!((s.font_size, s.ui_scale, s.scrollback_lines), (8, 200, 100));
+        assert_eq!(notes.len(), 3, "one note per change: {notes:?}");
+        assert!(notes[0].contains("font_size"), "{notes:?}");
+        assert!(notes[1].contains("ui_scale"), "{notes:?}");
+        assert!(notes[2].contains("scrollback_lines"), "{notes:?}");
+
+        s.font_size = 99;
+        s.ui_scale = 10;
+        s.scrollback_lines = 5_000_000;
+        assert_eq!(s.sanitise().len(), 3);
+        assert_eq!((s.font_size, s.ui_scale, s.scrollback_lines), (40, 75, 100_000));
+    }
+
+    #[test]
+    fn sanitise_keeps_values_on_the_bounds_and_says_nothing() {
+        let mut s = Settings::default();
+        for (font, scale, lines) in [(8, 75, 100), (40, 200, 100_000), (14, 100, 10_000)] {
+            s.font_size = font;
+            s.ui_scale = scale;
+            s.scrollback_lines = lines;
+            assert!(s.sanitise().is_empty());
+            assert_eq!((s.font_size, s.ui_scale, s.scrollback_lines), (font, scale, lines));
+        }
+    }
+
+    #[test]
+    fn sanitise_replaces_a_theme_name_that_cannot_be_a_theme_name() {
+        for bad in ["", "../../etc/passwd", "a/b", "<script>", "x\u{0}y", &"n".repeat(65), " padded"] {
+            let mut s = Settings::default();
+            s.theme = bad.into();
+            let notes = s.sanitise();
+            assert_eq!(s.theme, "aubergine", "{bad:?}");
+            assert_eq!(notes.len(), 1, "{bad:?}: {notes:?}");
+        }
+        let mut s = Settings::default();
+        s.theme = "My Theme_2-b".into();
+        assert!(s.sanitise().is_empty());
+        assert_eq!(s.theme, "My Theme_2-b", "a well formed name is kept even when no theme has it");
+    }
+
+    #[test]
+    fn sanitise_theme_resets_a_name_the_registry_does_not_know_and_keeps_known_ones() {
+        let registry = ThemeRegistry::builtin();
+        let mut s = Settings::default();
+        s.theme = "Schiefer".into();
+        assert_eq!(s.sanitise_theme(&registry), None);
+        assert_eq!(s.theme, "Schiefer");
+        s.theme = "Gone".into();
+        let note = s.sanitise_theme(&registry).expect("a note");
+        assert!(note.contains("Gone"), "{note}");
+        assert_eq!(s.theme, "aubergine");
+    }
+
+    #[test]
+    fn sanitise_bounds_the_key_binding_overrides() {
+        let mut s = Settings::default();
+        s.keybindings.insert("pane.close".into(), "Cmd+W".into());
+        s.keybindings.insert("pane.unbound".into(), String::new());
+        s.keybindings.insert("x".repeat(129), "Cmd+X".into());
+        s.keybindings.insert("pane.long".into(), "y".repeat(129));
+        s.keybindings.insert(String::new(), "Cmd+Z".into());
+        let notes = s.sanitise();
+        assert_eq!(notes.len(), 1, "one summary note: {notes:?}");
+        let kept: Vec<&str> = s.keybindings.keys().map(String::as_str).collect();
+        assert_eq!(kept, ["pane.close", "pane.unbound"], "an empty chord means unbound and is kept");
+
+        let mut many = Settings::default();
+        for i in 0..600 {
+            many.keybindings.insert(format!("action.{i:04}"), "Cmd+K".into());
+        }
+        assert_eq!(many.sanitise().len(), 1);
+        assert_eq!(many.keybindings.len(), 512);
+        assert!(many.keybindings.contains_key("action.0000"), "the first in key order are kept");
+    }
+
+    #[test]
+    fn from_json_clamps_and_reports_repaired() {
+        let (s, status) = Settings::from_json(r#"{"font_size": 99, "ui_scale": 10, "scrollback_lines": 1}"#);
+        assert_eq!((s.font_size, s.ui_scale, s.scrollback_lines), (40, 75, 100));
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+        assert_eq!(notes.len(), 3, "{notes:?}");
+    }
+
+    #[test]
+    fn numbers_beyond_the_field_type_are_clamped_not_rejected() {
+        let (s, status) = Settings::from_json(r#"{"font_size": 100000, "ui_scale": -5, "scrollback_lines": 99999999999}"#);
+        assert_eq!((s.font_size, s.ui_scale, s.scrollback_lines), (40, 75, 100_000));
+        assert!(matches!(status, LoadStatus::Repaired(ref n) if n.len() == 3), "{status:?}");
+    }
+
+    #[test]
+    fn one_wrong_typed_value_costs_only_that_value() {
+        let (s, status) = Settings::from_json(
+            r#"{"font_size": "big", "theme": "Schiefer", "option_as_alt": true, "cursor_blink": "sometimes"}"#,
+        );
+        assert_eq!(s.font_size, 14, "the default for the broken key");
+        assert_eq!(s.theme, "Schiefer", "the other keys are kept");
+        assert!(s.option_as_alt);
+        assert_eq!(s.cursor_blink, Blink::System);
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("font_size")));
+        assert!(notes.iter().any(|n| n.contains("cursor_blink")));
+    }
+
+    #[test]
+    fn a_json_document_that_is_not_an_object_is_reset() {
+        for text in ["[]", "null", "42", "\"theme\"", "true"] {
+            let (s, status) = Settings::from_json(text);
+            assert_eq!(s, Settings::default(), "{text}");
+            assert!(matches!(status, LoadStatus::Reset(_)), "{text}: {status:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_with_out_of_range_values_is_repaired_and_left_alone() {
+        let dir = scratch_dir("settings-range");
+        let text = r#"{"font_size": 99}"#;
+        std::fs::write(dir.join(SETTINGS_FILE), text).unwrap();
+        let (s, status) = Settings::load(&dir);
+        assert_eq!(s.font_size, 40);
+        assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
+        assert_eq!(std::fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap(), text);
+        assert!(!dir.join("settings.json.bad").exists(), "a repairable file needs no backup");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_is_not_utf8_is_reset_and_kept() {
+        let dir = scratch_dir("settings-utf8");
+        let bytes = [0xFF, 0xFE, b'{', b'}'];
+        std::fs::write(dir.join(SETTINGS_FILE), bytes).unwrap();
+        let (s, status) = Settings::load(&dir);
+        assert_eq!(s, Settings::default());
+        assert!(matches!(status, LoadStatus::Reset(_)), "{status:?}");
+        assert_eq!(std::fs::read(dir.join("settings.json.bad")).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_reset_and_moved_aside_without_being_read() {
+        let dir = scratch_dir("settings-huge");
+        let big = vec![b' '; 1024 * 1024 + 1];
+        std::fs::write(dir.join(SETTINGS_FILE), &big).unwrap();
+        let (s, status) = Settings::load(&dir);
+        assert_eq!(s, Settings::default());
+        assert!(matches!(status, LoadStatus::Reset(_)), "{status:?}");
+        assert_eq!(std::fs::metadata(dir.join("settings.json.bad")).unwrap().len(), big.len() as u64);
+        assert!(!dir.join(SETTINGS_FILE).exists(), "moved, so the next save does not destroy it");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn set_value_clamps_and_succeeds() {
+        let mut s = Settings::default();
+        s.set_value("font_size", json!(99)).unwrap();
+        assert_eq!(s.font_size, 40);
+        s.set_value("ui_scale", json!(1)).unwrap();
+        assert_eq!(s.ui_scale, 75);
+        s.set_value("scrollback_lines", json!(12345)).unwrap();
+        assert_eq!(s.scrollback_lines, 12_345);
+        s.set_value("font_size", json!(100_000)).unwrap();
+        assert_eq!(s.font_size, 40, "beyond the field type is clamped too");
+    }
+
+    #[test]
+    fn set_value_accepts_every_key_with_the_right_type() {
+        let mut s = Settings::default();
+        s.set_value("theme", json!("Papier")).unwrap();
+        s.set_value("option_as_alt", json!(true)).unwrap();
+        s.set_value("cursor_blink", json!("off")).unwrap();
+        s.set_value("motion", json!("reduce")).unwrap();
+        s.set_value("contrast", json!("high")).unwrap();
+        s.set_value("confirm_multiline_paste", json!(false)).unwrap();
+        s.set_value("keybindings", json!({"pane.split_right": "Cmd+D", "pane.close": ""})).unwrap();
+        assert_eq!(s.theme, "Papier");
+        assert!(s.option_as_alt);
+        assert_eq!((s.cursor_blink, s.motion, s.contrast), (Blink::Off, Motion::Reduce, Contrast::High));
+        assert!(!s.confirm_multiline_paste);
+        assert_eq!(s.keybindings.len(), 2);
+    }
+
+    #[test]
+    fn set_value_errors_leave_the_settings_unchanged() {
+        let mut s = Settings::default();
+        s.font_size = 17;
+        let before = s.clone();
+        let wrong = [
+            ("font_size", json!("x")),
+            ("font_size", json!(14.5)),
+            ("font_size", json!(null)),
+            ("option_as_alt", json!("yes")),
+            ("cursor_blink", json!("sometimes")),
+            ("keybindings", json!({"a": 5})),
+            ("keybindings", json!(["a"])),
+            ("theme", json!(7)),
+            ("theme", json!("../../etc/passwd")),
+            ("nope", json!(1)),
+            ("version", json!(2)),
+            ("", json!(1)),
+        ];
+        for (key, value) in wrong {
+            let result = s.set_value(key, value.clone());
+            assert!(result.is_err(), "{key} = {value} must be refused");
+            assert_eq!(s, before, "{key} = {value} must not change anything");
+        }
+    }
+
+    #[test]
+    fn set_value_errors_name_the_key_without_echoing_a_huge_one() {
+        let mut s = Settings::default();
+        let err = s.set_value("nope", json!(1)).unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+        let huge = "k".repeat(10_000);
+        let err = s.set_value(&huge, json!(1)).unwrap_err();
+        assert!(err.len() < 300, "the error stays short: {} bytes", err.len());
+    }
+
+    #[test]
+    fn set_value_bounds_the_keybinding_table() {
+        let mut s = Settings::default();
+        let big: serde_json::Map<String, serde_json::Value> =
+            (0..600).map(|i| (format!("action.{i:04}"), json!("Cmd+K"))).collect();
+        s.set_value("keybindings", serde_json::Value::Object(big)).unwrap();
+        assert_eq!(s.keybindings.len(), 512);
+        assert!(s.to_json().len() < 1024 * 1024, "a saved document always stays loadable");
+    }
+}

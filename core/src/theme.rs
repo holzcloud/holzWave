@@ -2,6 +2,7 @@
 //! handed to the engine.
 
 use std::fmt;
+use std::path::Path;
 
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
@@ -300,6 +301,19 @@ impl Theme {
     }
 }
 
+/// Whether `name` can be a theme name: 1 to 64 characters, letters, digits, space, dash or underscore, with no
+/// space at either end. Names are data; they are never used to build a path (T-02-23).
+pub fn valid_theme_name(_name: &str) -> bool {
+    true
+}
+
+impl Theme {
+    /// Check what the type system cannot: the version, the name and the selection opacity.
+    pub fn validate(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// WCAG 2 relative luminance: the sRGB channels are linearised and weighted.
 fn luminance(c: Rgb) -> f64 {
     let linear = |v: u8| {
@@ -343,6 +357,16 @@ impl ThemeRegistry {
     /// A registry with the built-in themes only.
     pub fn builtin() -> ThemeRegistry {
         ThemeRegistry { themes: vec![Theme::aubergine(), Theme::schiefer(), Theme::papier()] }
+    }
+
+    /// The built-ins plus every valid `*.json` file in `<dir>/themes`, and one warning per file that was skipped.
+    pub fn load(_dir: &Path) -> (ThemeRegistry, Vec<String>) {
+        (ThemeRegistry::builtin(), Vec::new())
+    }
+
+    /// Whether a theme called `name` exists.
+    pub fn contains(&self, _name: &str) -> bool {
+        false
     }
 
     /// Every theme, built-ins first, aubergine first of all.

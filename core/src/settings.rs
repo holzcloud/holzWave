@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::LoadStatus;
 use crate::persist::{backup_bad, read_limited, write_atomic};
-use crate::theme::DEFAULT_THEME;
+use crate::theme::{DEFAULT_THEME, ThemeRegistry};
 
 /// The settings format version that this build writes and reads.
 pub const SETTINGS_VERSION: u32 = 1;
@@ -102,6 +102,21 @@ impl Settings {
             Ok(settings) => (settings, LoadStatus::Clean),
             Err(e) => (Settings::default(), LoadStatus::Reset(format!("not a settings document: {e}"))),
         }
+    }
+
+    /// Bring every value into its range and report one note per change.
+    pub fn sanitise(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Replace a theme name that `registry` does not know with aubergine.
+    pub fn sanitise_theme(&mut self, _registry: &ThemeRegistry) -> Option<String> {
+        None
+    }
+
+    /// Set one setting from a JSON value, validated and clamped; on error nothing changes.
+    pub fn set_value(&mut self, _key: &str, _value: serde_json::Value) -> Result<(), String> {
+        Ok(())
     }
 
     /// The document as pretty printed JSON with a trailing newline.

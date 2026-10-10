@@ -1,5 +1,7 @@
 //! Tests for the themes: the three built-ins and their numeric contrast, the colour helpers, and the file format.
 
+mod common;
+
 use holzwave_core::theme::{ChromeTokens, Rgb, TerminalColors, Theme, ThemeKind, ThemeRegistry, blend, contrast};
 
 fn c(text: &str) -> Rgb {
@@ -245,4 +247,265 @@ fn engine_theme_carries_the_terminal_colours_unchanged() {
 fn the_data_types_are_nameable_for_the_wire_layer() {
     // The webview shape is built from these types; this keeps them public.
     let _ = (std::mem::size_of::<TerminalColors>(), std::mem::size_of::<ChromeTokens>());
+}
+
+// ---- user themes (task 3) -----------------------------------------------------------------------------------
+
+mod user_themes {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    use super::common::scratch_dir;
+    use holzwave_core::theme::valid_theme_name;
+
+    /// A valid theme document called `name`, as a user would write it.
+    fn theme_json(name: &str) -> String {
+        let mut t = Theme::papier();
+        t.name = name.into();
+        serde_json::to_string_pretty(&t).unwrap()
+    }
+
+    fn put(dir: &Path, file: &str, text: &str) {
+        let themes = dir.join("themes");
+        fs::create_dir_all(&themes).unwrap();
+        fs::write(themes.join(file), text).unwrap();
+    }
+
+    fn names(registry: &ThemeRegistry) -> Vec<String> {
+        registry.list().into_iter().map(|t| t.name).collect()
+    }
+
+    #[test]
+    fn theme_names_are_letters_digits_space_dash_underscore_up_to_64() {
+        for good in ["a", "Solarized Dark", "dark-2", "my_theme", "Größe", &"n".repeat(64)] {
+            assert!(valid_theme_name(good), "{good:?}");
+        }
+        for bad in ["", " ", " x", "x ", "a/b", "a\\b", "..", "a.b", "<b>", "a\nb", "a\u{0}b", &"n".repeat(65)] {
+            assert!(!valid_theme_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn validate_checks_version_name_and_selection_opacity() {
+        assert!(Theme::aubergine().validate().is_ok());
+        let mut t = Theme::papier();
+        t.version = 2;
+        assert!(t.validate().is_err(), "unknown version");
+        let mut t = Theme::papier();
+        t.name = "../x".into();
+        assert!(t.validate().is_err(), "bad name");
+        for alpha in [0.0, 0.04, 0.91, 1.0, f32::NAN, f32::INFINITY, -0.5] {
+            let mut t = Theme::papier();
+            t.terminal.selection_alpha = alpha;
+            assert!(t.validate().is_err(), "alpha {alpha}");
+        }
+        for alpha in [0.05, 0.5, 0.9] {
+            let mut t = Theme::papier();
+            t.terminal.selection_alpha = alpha;
+            assert!(t.validate().is_ok(), "alpha {alpha}");
+        }
+    }
+
+    #[test]
+    fn no_themes_directory_is_the_builtins_and_no_warnings() {
+        let dir = scratch_dir("themes-none");
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(names(&registry), ["aubergine", "Schiefer", "Papier"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_valid_user_theme_is_listed_after_the_builtins_and_resolves() {
+        let dir = scratch_dir("themes-valid");
+        put(&dir, "solar.json", &theme_json("Solar Flare"));
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let list = registry.list();
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[3].name, "Solar Flare");
+        assert!(!list[3].builtin);
+        assert!(list[..3].iter().all(|t| t.builtin));
+        assert_eq!(registry.get("Solar Flare").terminal.background, Theme::papier().terminal.background);
+        assert!(registry.contains("Solar Flare"));
+        assert!(!registry.contains("Nobody"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_theme_name_comes_from_the_file_content_and_the_file_name_is_irrelevant() {
+        let dir = scratch_dir("themes-names");
+        put(&dir, "whatever-it-is-called.json", &theme_json("Inside"));
+        let (registry, _) = ThemeRegistry::load(&dir);
+        assert!(registry.contains("Inside"));
+        assert!(!registry.contains("whatever-it-is-called"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn user_themes_are_listed_in_file_name_order() {
+        let dir = scratch_dir("themes-order");
+        put(&dir, "c.json", &theme_json("Third"));
+        put(&dir, "a.json", &theme_json("First"));
+        put(&dir, "b.json", &theme_json("Second"));
+        let (registry, _) = ThemeRegistry::load(&dir);
+        assert_eq!(names(&registry)[3..], ["First", "Second", "Third"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hostile_themes_are_skipped_with_one_warning_each() {
+        let dir = scratch_dir("themes-hostile");
+        let good = theme_json("Good One");
+        let with = |from: &str, to: &str| good.replace(from, to);
+        let cases: Vec<(&str, String)> = vec![
+            ("bad-colour.json", with("#FFF3F8", "red")),
+            ("css-injection.json", with("#FFF3F8", "url(javascript:alert(1))")),
+            ("short-colour.json", with("#FFF3F8", "#FFF")),
+            ("long-name.json", with("Good One", &"n".repeat(65))),
+            ("slash-name.json", with("Good One", "../../etc/passwd")),
+            ("html-name.json", with("Good One", "<img src=x>")),
+            ("empty-name.json", with("Good One", "")),
+            ("alpha-low.json", with("0.25", "0.01")),
+            ("alpha-high.json", with("0.25", "0.95")),
+            ("version.json", with("\"version\": 1", "\"version\": 7")),
+            ("not-json.json", "{ nope".into()),
+            ("array.json", "[1, 2, 3]".into()),
+            ("empty.json", String::new()),
+            ("shadow.json", with("Good One", "aubergine")),
+            ("shadow-case.json", with("Good One", "SCHIEFER")),
+        ];
+        for (file, text) in &cases {
+            put(&dir, file, text);
+        }
+        put(&dir, "zz-good.json", &good);
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(names(&registry), ["aubergine", "Schiefer", "Papier", "Good One"]);
+        assert_eq!(warnings.len(), cases.len(), "one warning per skipped file: {warnings:#?}");
+        for (file, _) in &cases {
+            assert!(warnings.iter().any(|w| w.contains(file)), "a warning names {file}: {warnings:#?}");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_wrong_number_of_ansi_colours_is_skipped() {
+        let dir = scratch_dir("themes-ansi");
+        let mut value: serde_json::Value = serde_json::from_str(&theme_json("Short Row")).unwrap();
+        value["terminal"]["ansi"].as_array_mut().unwrap().pop();
+        put(&dir, "short.json", &value.to_string());
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(registry.list().len(), 3);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_missing_version_means_the_current_one_and_unknown_keys_are_ignored() {
+        let dir = scratch_dir("themes-lenient");
+        let mut value: serde_json::Value = serde_json::from_str(&theme_json("Hand Made")).unwrap();
+        value.as_object_mut().unwrap().remove("version");
+        value["comment"] = "my own notes".into();
+        put(&dir, "hand.json", &value.to_string());
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(registry.get("Hand Made").version, 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_second_theme_with_the_same_name_is_skipped_even_in_another_case() {
+        let dir = scratch_dir("themes-dup");
+        put(&dir, "a.json", &theme_json("Twin"));
+        put(&dir, "b.json", &theme_json("twin"));
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(names(&registry)[3..], ["Twin"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("b.json"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_over_64_kib_is_skipped_unread() {
+        let dir = scratch_dir("themes-big");
+        let padding = " ".repeat(64 * 1024);
+        put(&dir, "big.json", &format!("{}{padding}", theme_json("Big One")));
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(registry.list().len(), 3);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn at_most_64_files_are_read_and_the_rest_cause_one_warning() {
+        let dir = scratch_dir("themes-many");
+        for i in 0..70 {
+            put(&dir, &format!("t{i:02}.json"), &theme_json(&format!("Theme {i:02}")));
+        }
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(registry.list().len(), 3 + 64);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(registry.contains("Theme 00") && registry.contains("Theme 63"));
+        assert!(!registry.contains("Theme 64"), "files are taken in name order");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn other_files_are_ignored_without_a_warning() {
+        let dir = scratch_dir("themes-other");
+        put(&dir, "README.txt", "notes");
+        put(&dir, ".DS_Store", "x");
+        put(&dir, "theme.json.bak", &theme_json("Backup"));
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(registry.list().len(), 3);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_directory_named_like_a_theme_is_skipped_with_a_warning() {
+        let dir = scratch_dir("themes-dir");
+        fs::create_dir_all(dir.join("themes").join("folder.json")).unwrap();
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(registry.list().len(), 3);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_is_not_followed() {
+        let dir = scratch_dir("themes-link");
+        let elsewhere = scratch_dir("themes-link-target");
+        fs::write(elsewhere.join("real.json"), theme_json("Linked")).unwrap();
+        fs::create_dir_all(dir.join("themes")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("real.json"), dir.join("themes").join("link.json")).unwrap();
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert!(!registry.contains("Linked"));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
+    }
+
+    #[test]
+    fn the_themes_path_being_a_file_is_a_warning_not_a_failure() {
+        let dir = scratch_dir("themes-file");
+        fs::write(dir.join("themes"), b"not a directory").unwrap();
+        let (registry, warnings) = ThemeRegistry::load(&dir);
+        assert_eq!(registry.list().len(), 3);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_name_still_falls_back_to_aubergine_with_user_themes_present() {
+        let dir = scratch_dir("themes-fallback");
+        put(&dir, "a.json", &theme_json("Mine"));
+        let (registry, _) = ThemeRegistry::load(&dir);
+        assert_eq!(registry.get("Mine").name, "Mine");
+        assert_eq!(registry.get("Nobody").name, "aubergine");
+        assert_eq!(registry.get("schiefer").name, "Schiefer", "a hand-typed lower case name still finds it");
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
