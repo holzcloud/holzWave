@@ -2,6 +2,7 @@ use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
 use libghostty_vt::key::{self, Action, Key, OptionAsAlt};
+use libghostty_vt::mouse::{self, EncoderSize};
 use libghostty_vt::paste::Options as PasteOptions;
 use libghostty_vt::render::{
     CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot,
@@ -17,8 +18,9 @@ use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::engine::{
     Cell, Color, CopyMotion, CopyOp, CopyState, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent,
-    MAX_SEARCH_BYTES, MatchSpan, Modes, Mods, PasteOutcome, RowUpdate, Screen, Scrollbar, SearchOp, SearchState,
-    SelectMode, SelectOp, Span, TerminalEngine, Update, Width, sanitize_program_text,
+    MAX_SEARCH_BYTES, MatchSpan, Modes, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, RowUpdate, Screen,
+    Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span, TerminalEngine, Update, Width,
+    sanitize_program_text,
 };
 use crate::{Error, Result};
 
@@ -256,6 +258,15 @@ fn key_mods(m: Mods) -> key::Mods {
     out
 }
 
+/// A pointer coordinate in device pixels brought into `0..extent`: a value that is not finite or negative becomes 0
+/// and one past the end becomes the last pixel, so the encoder only ever sees a position on the grid (T-02-94).
+fn clamp_px(value: f32, extent: u32) -> f32 {
+    if !value.is_finite() || value < 0.0 {
+        return 0.0;
+    }
+    value.min(extent.max(1).saturating_sub(1) as f32)
+}
+
 /// The cursor of a snapshot in viewport terms; `None` when it is outside the viewport.
 fn read_cursor(snapshot: &Snapshot<'static, '_>) -> Result<Option<Cursor>> {
     let c = snapshot.cursor().map_err(eng)?;
@@ -463,6 +474,10 @@ pub struct GhosttyEngine {
     reply_cap: Rc<StdCell<Option<usize>>>,
     encoder: key::Encoder<'static>,
     key_event: key::Event<'static>,
+    mouse_encoder: mouse::Encoder<'static>,
+    mouse_event: mouse::Event<'static>,
+    /// The cell size in device pixels as the last `resize` told it, `(0, 0)` while unknown.
+    cell_px: (u32, u32),
     option_as_alt: bool,
     /// The next `update` reports every row and tells the consumer to start over: true at the start and after
     /// `request_full`.
@@ -555,6 +570,9 @@ impl GhosttyEngine {
             reply_cap,
             encoder: key::Encoder::new().map_err(eng)?,
             key_event: key::Event::new().map_err(eng)?,
+            mouse_encoder: mouse::Encoder::new().map_err(eng)?,
+            mouse_event: mouse::Event::new().map_err(eng)?,
+            cell_px: (0, 0),
             option_as_alt: false,
             force_full: true,
             last_size: None,
@@ -856,6 +874,49 @@ impl GhosttyEngine {
             .map_err(eng)?;
         Ok(out)
     }
+
+    /// Encode one pointer event against the terminal's live mouse modes.
+    ///
+    /// The position is clamped onto the grid first. An unknown cell size is a documented case, not an error: the
+    /// encoder insists on a non-zero cell, so it gets a 1 x 1 pixel cell and the position is cell (0, 0).
+    fn encode_pointer(
+        &mut self,
+        action: mouse::Action,
+        button: Option<mouse::Button>,
+        mods: Mods,
+        x: f32,
+        y: f32,
+    ) -> Result<Vec<u8>> {
+        let cols = u32::from(self.terminal.cols().map_err(eng)?);
+        let rows = u32::from(self.terminal.rows().map_err(eng)?);
+        let known = self.cell_px.0 > 0 && self.cell_px.1 > 0;
+        let (cell_width, cell_height) = if known { self.cell_px } else { (1, 1) };
+        let size = EncoderSize {
+            screen_width: cols.saturating_mul(cell_width),
+            screen_height: rows.saturating_mul(cell_height),
+            cell_width,
+            cell_height,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        let (px, py) =
+            if known { (clamp_px(x, size.screen_width), clamp_px(y, size.screen_height)) } else { (0.0, 0.0) };
+
+        self.mouse_event
+            .set_action(action)
+            .set_button(button)
+            .set_mods(key_mods(mods))
+            .set_position(mouse::Position { x: px, y: py });
+        let mut out = Vec::with_capacity(32);
+        self.mouse_encoder
+            .set_options_from_terminal(&self.terminal)
+            .set_size(size)
+            .encode_to_vec(&self.mouse_event, &mut out)
+            .map_err(eng)?;
+        Ok(out)
+    }
 }
 
 impl TerminalEngine for GhosttyEngine {
@@ -878,7 +939,9 @@ impl TerminalEngine for GhosttyEngine {
                 self.terminal.scroll_viewport(ScrollViewport::Bottom);
             }
         }
-        self.terminal.resize(cols, rows, cell_px.0, cell_px.1).map_err(eng)
+        self.terminal.resize(cols, rows, cell_px.0, cell_px.1).map_err(eng)?;
+        self.cell_px = cell_px;
+        Ok(())
     }
 
     fn size(&self) -> Result<(u16, u16)> {
@@ -954,6 +1017,21 @@ impl TerminalEngine for GhosttyEngine {
             None,
             Some(text),
         )
+    }
+
+    fn mouse(&mut self, event: &MouseEvent) -> Result<Vec<u8>> {
+        let action = match event.action {
+            MouseAction::Press => mouse::Action::Press,
+            MouseAction::Release => mouse::Action::Release,
+            MouseAction::Motion => mouse::Action::Motion,
+        };
+        let button = match event.button {
+            MouseButton::None => None,
+            MouseButton::Left => Some(mouse::Button::Left),
+            MouseButton::Middle => Some(mouse::Button::Middle),
+            MouseButton::Right => Some(mouse::Button::Right),
+        };
+        self.encode_pointer(action, button, event.mods, event.x, event.y)
     }
 
     fn paste(&mut self, text: &str, allow_unsafe: bool) -> Result<PasteOutcome> {
