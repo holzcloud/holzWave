@@ -194,7 +194,9 @@ export default async function ({ page, url }) {
     for (const x of [1, 2]) {
       R.draw(h, { ...f, cursor: R.block(x, 0) });
       const img = R.pixels(h);
-      out[x] = { err: R.glError(h), cells: Array.from({ length: 5 }, (_, c) => R.pack(R.corner(h, img, c, 0))) };
+      // A dense wide glyph can cover most of a cell, so a cell counts as covered when any of it is the cursor colour.
+      const roseCount = (c) => R.cell(h, img, c, 0).filter(([, , rgb]) => R.same(rgb, [0xff, 0x8f, 0xb8])).length;
+      out[x] = { err: R.glError(h), cells: Array.from({ length: 5 }, (_, c) => roseCount(c) > 0) };
     }
     R.dispose(h);
     return out;
@@ -202,7 +204,7 @@ export default async function ({ page, url }) {
   for (const kind of ["webgl", "canvas"]) {
     for (const x of ["1", "2"]) {
       const r = wide[kind][x];
-      const want = [0x112233, 0xff8fb8, 0xff8fb8, 0x112233, 0x112233];
+      const want = [false, true, true, false, false];
       assert.equal(r.err, 0, `${kind}: wide cursor at ${x}: gl.getError()`);
       assert.deepEqual(r.cells, want, `${kind}: cursor at ${x} on a wide character must cover both cells and no other`);
     }

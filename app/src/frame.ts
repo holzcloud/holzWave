@@ -43,6 +43,44 @@ export interface LegacyFrame {
   lines: Run[][];
 }
 
+/** The most cells a renderer builds buffers for: 1 Mi cells is a 1024 x 1024 grid, far past any window. */
+export const MAX_CELLS = 1 << 20;
+
+/** The number of cells of a frame's grid, or null when it cannot be drawn: not whole positive numbers, or too many. */
+export function gridCells(f: Pick<Frame, "cols" | "rows">): number | null {
+  const { cols, rows } = f;
+  if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols <= 0 || rows <= 0) return null;
+  const cells = cols * rows;
+  return cells <= MAX_CELLS ? cells : null;
+}
+
+/** The cursor to draw: null when there is none or it lies outside the grid. */
+export function visibleCursor(f: Frame): CursorShape | null {
+  const c = f.cursor;
+  if (!c || !f.focused) return null;
+  const { x, y } = c;
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= f.cols || y >= f.rows) return null;
+  return c;
+}
+
+/** The longest cluster tail that is drawn, in code points; a longer one is cut. Real clusters stay below 16. */
+export const MAX_TAIL = 32;
+
+/** The cluster tails of row `y` by column, or null when the row has none. Malformed entries are ignored. */
+export function rowExtras(f: Frame, y: number): Map<number, string> | null {
+  const list = f.extras?.[y];
+  if (!list || list.length === 0) return null;
+  let out: Map<number, string> | null = null;
+  for (const e of list) {
+    if (!Array.isArray(e)) continue;
+    const [col, tail] = e;
+    if (!Number.isInteger(col) || col < 0 || typeof tail !== "string" || tail === "") continue;
+    const cut = tail.length > MAX_TAIL ? Array.from(tail).slice(0, MAX_TAIL).join("") : tail;
+    (out ??= new Map()).set(col, cut);
+  }
+  return out;
+}
+
 export const BOLD = 1, ITALIC = 2, UNDERLINE = 4, INVERSE = 8;
 export const CURSOR_COLOR = 0xff8fb8;
 

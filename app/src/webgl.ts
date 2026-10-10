@@ -1,4 +1,7 @@
-import { BOLD, CURSOR_COLOR, FONT_PX, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, font } from "./frame.js";
+import {
+  BOLD, CURSOR_COLOR, CursorShape, FONT_PX, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, font, gridCells,
+  visibleCursor,
+} from "./frame.js";
 
 // WebGL2 renderer: one instanced draw per frame. Every cell is an instance that carries its
 // glyph slot in a texture atlas plus foreground and background colour; the fragment shader mixes them.
@@ -179,64 +182,6 @@ export class WebGLRenderer implements Renderer {
 
   drawPane(f: Frame, r: PxRect) {
     const gl = this.gl;
-    const cells = f.cols * f.rows;
-    if (cells > this.capacity) {
-      this.capacity = cells;
-      this.words = new ArrayBuffer(cells * WORDS * 4);
-      this.f32 = new Float32Array(this.words);
-      this.u32 = new Uint32Array(this.words);
-    }
-    const { f32, u32 } = this;
-
-    let n = 0;
-    const put = (col: number, row: number, slot: number, fg: number, bg: number, flags: number) => {
-      const o = n * WORDS;
-      f32[o] = col;
-      f32[o + 1] = row;
-      u32[o + 2] = slot;
-      u32[o + 3] = fg;
-      u32[o + 4] = bg;
-      u32[o + 5] = flags;
-      n++;
-    };
-
-    for (let y = 0; y < f.lines.length; y++) {
-      const line = f.lines[y]!;
-      let col = 0;
-      for (const [text, cols, fg0, bg0, flags] of line) {
-        let fg = fg0, bg = bg0;
-        if (flags & INVERSE) [fg, bg] = [bg, fg];
-        const style = flags & (BOLD | ITALIC);
-        const underline = flags & UNDERLINE;
-        const chars = Array.from(text);
-        let c = col;
-        for (let i = 0; i < chars.length && c < f.cols; i++) {
-          const ch = chars[i]!;
-          if (ch === "\0") { c++; continue; } // spacer: drawn by the wide glyph's second slot
-          const wide = chars[i + 1] === "\0";
-          const blank = ch === " ";
-          const slot = blank ? 0 : this.slot(ch, style, wide);
-          put(c, y, slot, fg, bg, underline);
-          if (wide && c + 1 < f.cols) {
-            put(c + 1, y, slot + 1, fg, bg, underline);
-            i++;
-            c += 2;
-          } else {
-            c++;
-          }
-        }
-        // Cells past the end of the text keep the run's background (the run text covers `cols`).
-        col += cols;
-      }
-      // Cells the runs did not cover use the default background.
-      for (let c = col; c < f.cols; c++) put(c, y, 0, f.fg, f.bg, 0);
-    }
-    if (f.cursor && f.focused) {
-      const { x: cx, y: cy } = f.cursor;
-      // Overlay the cursor as one more instance on top, with the glyph below it dropped.
-      put(cx, cy, 0, f.bg, CURSOR_COLOR, 0);
-    }
-
     // The pane's rectangle in device pixels; the origin of a GL viewport is the bottom-left corner.
     const dpr = this.m.dpr;
     const vx = Math.round(r.x * dpr), vw = Math.round(r.w * dpr), vh = Math.round(r.h * dpr);
@@ -247,6 +192,18 @@ export class WebGLRenderer implements Renderer {
     // The grid covers whole cells only; the rest of the rectangle is the pane's background.
     gl.clearColor(((f.bg >> 16) & 255) / 255, ((f.bg >> 8) & 255) / 255, (f.bg & 255) / 255, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // A frame whose size is not a sane grid draws as its background only (the buffers are sized from it).
+    const cells = gridCells(f);
+    if (cells === null) return;
+    if (cells > this.capacity) {
+      this.capacity = cells;
+      this.words = new ArrayBuffer(cells * WORDS * 4);
+      this.f32 = new Float32Array(this.words);
+      this.u32 = new Uint32Array(this.words);
+    }
+    this.build(f, visibleCursor(f));
+
     gl.useProgram(this.prog);
     gl.uniform2f(this.uniforms.uCell!, this.cw, this.ch);
     gl.uniform2f(this.uniforms.uViewport!, vw, vh);
@@ -258,8 +215,83 @@ export class WebGLRenderer implements Renderer {
 
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
+    // One instance per cell, in row-major order, so the instance of cell (x, y) is y * cols + x; never more
+    // than the buffer holds.
+    const n = Math.min(cells, this.capacity);
     gl.bufferData(gl.ARRAY_BUFFER, this.f32.subarray(0, n * WORDS), gl.STREAM_DRAW);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+  }
+
+  /**
+   * Fill the instance array: exactly one instance per cell. A run's text has one code point per cell, so the
+   * column advance is one per code point and the cursor is a change to the instance of its cell, never an
+   * extra instance.
+   */
+  private build(f: Frame, cursor: CursorShape | null) {
+    const { f32, u32 } = this;
+    const { cols, rows } = f;
+    const put = (c: number, y: number, slot: number, fg: number, bg: number, flags: number) => {
+      const o = (y * cols + c) * WORDS;
+      f32[o] = c;
+      f32[o + 1] = y;
+      u32[o + 2] = slot;
+      u32[o + 3] = fg;
+      u32[o + 4] = bg;
+      u32[o + 5] = flags;
+    };
+    // Every cell starts as a blank in the default colours; the runs overwrite what they cover.
+    for (let y = 0; y < rows; y++) for (let c = 0; c < cols; c++) put(c, y, 0, f.fg, f.bg, 0);
+
+    // What the cursor's cell turned out to be: the first of a wide pair, or the spacer of one.
+    let cursorWide = false, cursorSpacer = false;
+    const lines = Math.min(rows, f.lines.length);
+    for (let y = 0; y < lines; y++) {
+      const line = f.lines[y]!;
+      let col = 0;
+      let wideSlot = -1; // the slot of the wide glyph whose spacer is expected at `col`
+      for (let ri = 0; ri < line.length; ri++) {
+        const [text, runCols, fg0, bg0, flags] = line[ri]!;
+        let fg = fg0, bg = bg0;
+        if (flags & INVERSE) [fg, bg] = [bg, fg];
+        const style = flags & (BOLD | ITALIC);
+        const underline = flags & UNDERLINE;
+        const chars = Array.from(text);
+        const end = Math.min(cols, col + runCols);
+        const next = line[ri + 1]?.[0];
+        for (let i = 0, c = col; c < end; i++, c++) {
+          const ch = chars[i];
+          if (ch === undefined) {
+            put(c, y, 0, fg, bg, underline); // the run claims more cells than its text has: blank, run colours
+            continue;
+          }
+          if (ch === "\0") {
+            // The second cell of a wide character: the glyph's second slot (or blank when nothing precedes it).
+            put(c, y, wideSlot >= 0 ? wideSlot + 1 : 0, fg, bg, underline);
+            if (cursor && y === cursor.y && c === cursor.x) cursorSpacer = true;
+            wideSlot = -1;
+            continue;
+          }
+          const wide = chars[i + 1] === "\0" || (i === chars.length - 1 && next !== undefined && next.startsWith("\0"));
+          const slot = ch === " " ? 0 : this.slot(ch, style, wide);
+          put(c, y, slot, fg, bg, underline);
+          wideSlot = wide ? slot : -1;
+          if (wide && cursor && y === cursor.y && c === cursor.x) cursorWide = true;
+        }
+        col = end;
+      }
+    }
+
+    if (cursor) {
+      // Block: the cell takes the cursor colour and its glyph the pane background, so the character stays
+      // readable. A wide character is covered as a whole, from either of its halves.
+      const first = cursorSpacer ? cursor.x - 1 : cursor.x;
+      const span = cursorWide || cursorSpacer ? 2 : 1;
+      for (let k = 0; k < span; k++) {
+        const o = (cursor.y * cols + first + k) * WORDS;
+        u32[o + 3] = f.bg;
+        u32[o + 4] = CURSOR_COLOR;
+      }
+    }
   }
 
   sync() {
