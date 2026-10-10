@@ -1,13 +1,18 @@
 //! Themes: the built-in and user-supplied sets of terminal palette and chrome tokens, and how one is resolved and
 //! handed to the engine.
 
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::Path;
 
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::engine::{Color, EngineTheme};
+use crate::persist::read_limited;
 
 /// An opaque colour, written as `#rrggbb`.
 ///
@@ -105,6 +110,8 @@ pub struct ChromeTokens {
 /// A complete theme: the terminal palette and the chrome tokens.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Theme {
+    /// The file format version; a hand-written file may leave it out.
+    #[serde(default = "current_version")]
     pub version: u32,
     pub name: String,
     pub kind: ThemeKind,
@@ -114,6 +121,26 @@ pub struct Theme {
 
 /// The theme file format version that this build writes and reads.
 pub const THEME_VERSION: u32 = 1;
+
+fn current_version() -> u32 {
+    THEME_VERSION
+}
+
+/// The directory inside the configuration directory that holds the user themes.
+pub const THEMES_DIR: &str = "themes";
+
+/// At most this many theme files are read (T-02-22).
+pub const MAX_THEME_FILES: usize = 64;
+
+/// The largest theme file that is read (T-02-22).
+pub const MAX_THEME_BYTES: u64 = 64 * 1024;
+
+/// The longest theme name, in characters.
+pub const MAX_THEME_NAME: usize = 64;
+
+/// The range of `selection_alpha` that a user theme may use. Below the range a selection cannot be seen, above it
+/// the text under it is lost.
+pub const SELECTION_ALPHA: std::ops::RangeInclusive<f32> = 0.05..=0.9;
 
 /// The name of the default theme, and the one that every unknown name falls back to.
 pub const DEFAULT_THEME: &str = "aubergine";
@@ -303,13 +330,35 @@ impl Theme {
 
 /// Whether `name` can be a theme name: 1 to 64 characters, letters, digits, space, dash or underscore, with no
 /// space at either end. Names are data; they are never used to build a path (T-02-23).
-pub fn valid_theme_name(_name: &str) -> bool {
-    true
+pub fn valid_theme_name(name: &str) -> bool {
+    let count = name.chars().count();
+    (1..=MAX_THEME_NAME).contains(&count)
+        && name.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        && !name.starts_with(' ')
+        && !name.ends_with(' ')
 }
 
 impl Theme {
-    /// Check what the type system cannot: the version, the name and the selection opacity.
+    /// Check what the type system cannot: the version, the name and the selection opacity. The colours are
+    /// already `#rrggbb` by construction (T-02-21).
     pub fn validate(&self) -> Result<(), String> {
+        if self.version != THEME_VERSION {
+            return Err(format!("theme version {} is not supported, this build reads version {THEME_VERSION}", self.version));
+        }
+        if !valid_theme_name(&self.name) {
+            return Err(format!(
+                "the name must be 1 to {MAX_THEME_NAME} letters, digits, spaces, dashes or underscores, without a space \
+                 at either end"
+            ));
+        }
+        let alpha = self.terminal.selection_alpha;
+        if !SELECTION_ALPHA.contains(&alpha) {
+            return Err(format!(
+                "selection_alpha must be between {} and {}",
+                SELECTION_ALPHA.start(),
+                SELECTION_ALPHA.end()
+            ));
+        }
         Ok(())
     }
 }
@@ -350,32 +399,134 @@ pub struct ThemeInfo {
 /// The built-in themes and the ones the user added.
 #[derive(Clone, Debug)]
 pub struct ThemeRegistry {
+    /// The built-ins first, then the user themes in file name order.
     themes: Vec<Theme>,
+    /// How many of `themes` are built-ins.
+    builtin: usize,
 }
 
 impl ThemeRegistry {
     /// A registry with the built-in themes only.
     pub fn builtin() -> ThemeRegistry {
-        ThemeRegistry { themes: vec![Theme::aubergine(), Theme::schiefer(), Theme::papier()] }
+        let themes = vec![Theme::aubergine(), Theme::schiefer(), Theme::papier()];
+        let builtin = themes.len();
+        ThemeRegistry { themes, builtin }
     }
 
     /// The built-ins plus every valid `*.json` file in `<dir>/themes`, and one warning per file that was skipped.
-    pub fn load(_dir: &Path) -> (ThemeRegistry, Vec<String>) {
-        (ThemeRegistry::builtin(), Vec::new())
+    ///
+    /// Never fails. At most [`MAX_THEME_FILES`] files are read, in file name order, each at most
+    /// [`MAX_THEME_BYTES`] and a regular file (a symbolic link is skipped). A theme with a name that is already
+    /// taken, by a built-in or by an earlier file and in any letter case, is skipped. The file name is never used
+    /// as the theme name and the theme name is never used as a path (T-02-23).
+    pub fn load(dir: &Path) -> (ThemeRegistry, Vec<String>) {
+        let mut registry = ThemeRegistry::builtin();
+        let mut warnings = Vec::new();
+        let themes_dir = dir.join(THEMES_DIR);
+        let entries = match fs::read_dir(&themes_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return (registry, warnings),
+            Err(e) => {
+                warnings.push(format!("{THEMES_DIR}: cannot be read: {e}"));
+                return (registry, warnings);
+            }
+        };
+
+        // Keep only the first MAX_THEME_FILES names in sorted order, however many files the directory holds, so
+        // that neither the memory used nor the work done grows with a hostile directory.
+        let mut files: BTreeSet<OsString> = BTreeSet::new();
+        let mut json_files = 0usize;
+        for entry in entries {
+            match entry {
+                Ok(entry) => {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().to_ascii_lowercase().ends_with(".json") {
+                        json_files += 1;
+                        files.insert(name);
+                        if files.len() > MAX_THEME_FILES {
+                            files.pop_last();
+                        }
+                    }
+                }
+                Err(e) => warnings.push(format!("{THEMES_DIR}: an entry could not be read: {e}")),
+            }
+        }
+        if json_files > MAX_THEME_FILES {
+            warnings.push(format!(
+                "{THEMES_DIR}: {json_files} theme files found, only the first {MAX_THEME_FILES} in name order are read"
+            ));
+        }
+
+        for name in files {
+            let shown = name.to_string_lossy().into_owned();
+            let theme = match read_theme(&themes_dir.join(&name)) {
+                Ok(theme) => theme,
+                Err(why) => {
+                    warnings.push(format!("{THEMES_DIR}/{shown}: skipped, {why}"));
+                    continue;
+                }
+            };
+            if let Some(i) = registry.position(&theme.name) {
+                let owner = if i < registry.builtin { "a built-in theme" } else { "an earlier theme file" };
+                warnings.push(format!(
+                    "{THEMES_DIR}/{shown}: skipped, the name {:?} is already used by {owner}",
+                    theme.name
+                ));
+                continue;
+            }
+            registry.themes.push(theme);
+        }
+        (registry, warnings)
     }
 
-    /// Whether a theme called `name` exists.
-    pub fn contains(&self, _name: &str) -> bool {
-        false
+    /// The index of the theme called `name`: an exact match first, then the first that differs only in ASCII
+    /// letter case.
+    fn position(&self, name: &str) -> Option<usize> {
+        self.themes
+            .iter()
+            .position(|t| t.name == name)
+            .or_else(|| self.themes.iter().position(|t| t.name.eq_ignore_ascii_case(name)))
+    }
+
+    /// The theme called `name`; aubergine when there is none. A name that differs only in letter case from a
+    /// theme's still finds it, so a hand-typed `schiefer` works.
+    pub fn get(&self, name: &str) -> &Theme {
+        self.position(name).map_or(&self.themes[0], |i| &self.themes[i])
+    }
+
+    /// Whether a theme called `name` exists (compared as in [`ThemeRegistry::get`]).
+    pub fn contains(&self, name: &str) -> bool {
+        self.position(name).is_some()
     }
 
     /// Every theme, built-ins first, aubergine first of all.
     pub fn list(&self) -> Vec<ThemeInfo> {
-        self.themes.iter().map(|t| ThemeInfo { name: t.name.clone(), kind: t.kind, builtin: true }).collect()
+        self.themes
+            .iter()
+            .enumerate()
+            .map(|(i, t)| ThemeInfo { name: t.name.clone(), kind: t.kind, builtin: i < self.builtin })
+            .collect()
     }
+}
 
-    /// The theme called `name`; aubergine when there is none.
-    pub fn get(&self, name: &str) -> &Theme {
-        self.themes.iter().find(|t| t.name == name).unwrap_or(&self.themes[0])
+/// Read and validate one user theme file. The error is a short reason for a warning.
+fn read_theme(path: &Path) -> Result<Theme, String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("it cannot be inspected: {e}"))?;
+    if meta.file_type().is_symlink() {
+        return Err("it is a symbolic link".into());
     }
+    if !meta.is_file() {
+        return Err("it is not a regular file".into());
+    }
+    let bytes = match read_limited(path, MAX_THEME_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Err("it disappeared while it was being read".into()),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(format!("it is larger than {} KiB", MAX_THEME_BYTES / 1024));
+        }
+        Err(e) => return Err(format!("it cannot be read: {e}")),
+    };
+    let theme: Theme = serde_json::from_slice(&bytes).map_err(|e| format!("it is not a theme: {e}"))?;
+    theme.validate()?;
+    Ok(theme)
 }
