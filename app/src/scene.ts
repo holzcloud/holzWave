@@ -2,14 +2,16 @@
 // change (the bar, the pane sizes the core is told, the overlay). It owns the canvas and its resize listener.
 // The canvas element can be replaced once, while the renderer is chosen (see `initScene`), so nobody keeps a
 // reference to it from before: modules that listen on it ask `canvas()` after `initScene` has run.
-import { call } from "./bridge.js";
+import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
-import { BOLD, FONT_PX, Frame, ITALIC, Metrics, Renderer, font } from "./frame.js";
+import { BOLD, FONT_PX, ITALIC, Metrics, Renderer, font } from "./frame.js";
+import { applyFrame, toRenderFrame } from "./frames.js";
+import type { FrameMsg } from "./frames.js";
 import { fitCells, gridRect } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
 import { state } from "./state.js";
-import type { PaneFrame, View } from "./types.js";
+import type { View } from "./types.js";
 import { WebGLRenderer } from "./webgl.js";
 
 const stats = document.getElementById("stats") as HTMLDivElement;
@@ -116,19 +118,28 @@ export function applyView(v: View): void {
   schedule();
 }
 
-/** Tell the core how many cells each visible pane has; the first call also starts its shell. */
+/**
+ * Tell the core how many cells each visible pane has and how big a cell is in device pixels (it answers size
+ * reports with it); the first call also starts its shell and then asks for a full frame, because a webview that
+ * reloaded attaches to a pane that is already running and may stay idle.
+ */
 function syncSizes(): void {
   const view = state.view;
   if (!view) return;
+  const m = state.metrics;
+  const cellW = Math.max(1, Math.round(m.cellW * m.dpr));
+  const cellH = Math.max(1, Math.round(m.cellH * m.dpr));
   for (const [id, r] of view.panes) {
-    const { cols, rows } = fitCells(state.metrics, r);
+    const { cols, rows } = fitCells(m, r);
     const prev = state.sizes.get(id);
     if (!prev) {
-      state.sizes.set(id, { cols, rows });
-      void call("start_pane", { pane: id, cols, rows });
-    } else if (prev.cols !== cols || prev.rows !== rows) {
-      state.sizes.set(id, { cols, rows });
-      void call("resize", { pane: id, cols, rows });
+      state.sizes.set(id, { cols, rows, cellW, cellH });
+      void call("start_pane", { pane: id, cols, rows, cell_w: cellW, cell_h: cellH })
+        .then(() => call("request_full", { pane: id }))
+        .catch(() => {}); // a pane that left the layout meanwhile is not an error of the page
+    } else if (prev.cols !== cols || prev.rows !== rows || prev.cellW !== cellW || prev.cellH !== cellH) {
+      state.sizes.set(id, { cols, rows, cellW, cellH });
+      void call("resize", { pane: id, cols, rows, cell_w: cellW, cell_h: cellH });
     }
   }
 }
@@ -146,28 +157,39 @@ export function fit(): void {
   schedule();
 }
 
+// ---- events of the core ---------------------------------------------------------------------------
+
+/** Panes whose sequence gap was reported: frames are ignored until the full frame that answers the request. */
+const waiting = new Set<number>();
+
+/** One `frame` event: patch the pane's mirror, or on a gap ask for a full frame (once) and wait for it. */
+function onFrame(msg: FrameMsg): void {
+  if (typeof msg !== "object" || msg === null || !Number.isSafeInteger(msg.pane)) return;
+  const pane = msg.pane;
+  if (!msg.full && waiting.has(pane)) return;
+  const { mirror, gap } = applyFrame(state.frames.get(pane), msg);
+  if (gap) {
+    waiting.add(pane);
+    void call("request_full", { pane }).catch(() => {});
+    return;
+  }
+  if (!mirror) return;
+  if (msg.full) waiting.delete(pane);
+  state.frames.set(pane, mirror);
+  schedule();
+}
+
+/** Listen to the events a pane produces. Call once at start-up, before the first layout is asked for. */
+export async function initEvents(): Promise<void> {
+  await listen<FrameMsg>("frame", onFrame);
+}
+
 // ---- drawing -------------------------------------------------------------------------------------
 
 const draws: number[] = [];
 let drawn = 0;
 let pending = false;
 const started = performance.now();
-
-/**
- * The one place the legacy `screen` payload (cursor as `[x, y]`, no extras, no focus) becomes the renderers' frame.
- * Plan 17 replaces the payload with the `frame` event and deletes this function.
- */
-export function fromLegacyFrame(f: PaneFrame["frame"], focused: boolean): Frame {
-  return {
-    cols: f.cols,
-    rows: f.rows,
-    cursor: f.cursor ? { x: f.cursor[0], y: f.cursor[1], style: "block", blink: false } : null,
-    focused,
-    fg: f.fg,
-    bg: f.bg,
-    lines: f.lines,
-  };
-}
 
 function draw(): void {
   pending = false;
@@ -177,9 +199,9 @@ function draw(): void {
   const first = view.panes.map(([id]) => state.frames.get(id)).find(Boolean);
   renderer.begin(first?.bg ?? 0x14091a);
   for (const [id, r] of view.panes) {
-    const f = state.frames.get(id);
-    if (!f) continue;
-    renderer.drawPane(fromLegacyFrame(f, id === view.focus), gridRect(state.metrics, r));
+    const mirror = state.frames.get(id);
+    if (!mirror) continue;
+    renderer.drawPane(toRenderFrame(mirror, id === view.focus), gridRect(state.metrics, r));
   }
   draws.push(performance.now() - t0);
   if (draws.length > 120) draws.shift();

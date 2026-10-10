@@ -156,7 +156,11 @@ async function defaultRendererCase(page, url, errors) {
 const PANE_1_BG = 0x6b2fa0;
 const PANE_2_BG = 0x2a6fdb;
 
-const stubFrame = (bg) => ({ cols: 20, rows: 4, cursor: null, fg: 0xffffff, bg, lines: [], scrollbar: [0, 0, 0] });
+const stubFrame = (pane, bg) => ({
+  pane, seq: 1, full: true, cols: 20, rows: 4, fg: 0xffffff, bg, cursor: null, scrollbar: [0, 4, 4],
+  selection: [], matches: [], search: null, copy_cursor: null,
+  modes: { alt: false, bracketed_paste: false, mouse: false }, changed: [],
+});
 
 /** One pixel of the 2D canvas as 0xRRGGBB; (x, y) are CSS pixels inside the canvas. */
 const pixel = (page, x, y) =>
@@ -225,10 +229,10 @@ async function fallbackCase(page, url, errors) {
   });
   await page.evaluate(
     ([a, b]) => {
-      window.__MOCK__.emit("screen", { pane: 1, frame: a });
-      window.__MOCK__.emit("screen", { pane: 2, frame: b });
+      window.__MOCK__.emit("frame", a);
+      window.__MOCK__.emit("frame", b);
     },
-    [stubFrame(PANE_1_BG), stubFrame(PANE_2_BG)],
+    [stubFrame(1, PANE_1_BG), stubFrame(2, PANE_2_BG)],
   );
   await page.waitForFunction(
     async () => {

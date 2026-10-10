@@ -150,15 +150,12 @@ async function copyCase(page, url) {
       value: { writeText: async (t) => { window.__copied = t; } },
     });
   });
-  const run = (text, cols) => [[text, cols, 0xf6efe6, 0x14091a, 0]];
-  await page.evaluate((frame) => window.__MOCK__.emit("screen", { pane: 2, frame }), {
-    cols: 60,
-    rows: 4,
-    cursor: null,
-    fg: 0xf6efe6,
-    bg: 0x14091a,
-    lines: [run("hello world", 11), run("second row", 10), [], []],
-    scrollbar: [0, 4, 4],
+  const row = (y, text) => ({ y, runs: [[text, text.length, 0xf6efe6, 0x14091a, 0]] });
+  await page.evaluate((frame) => window.__MOCK__.emit("frame", frame), {
+    pane: 2, seq: 1, full: true, cols: 60, rows: 4, fg: 0xf6efe6, bg: 0x14091a, cursor: null,
+    scrollbar: [0, 4, 4], selection: [], matches: [], search: null, copy_cursor: null,
+    modes: { alt: false, bracketed_paste: false, mouse: false },
+    changed: [row(0, "hello world"), row(1, "second row")],
   });
   const c = await canvasOrigin(page);
   const x0 = c.left + c.width / 2 + PAD + 2;

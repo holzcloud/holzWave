@@ -3,6 +3,7 @@
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import type { Frame } from "./frame.js";
+import { toRenderFrame } from "./frames.js";
 import { cellAt, ordered, paneAt } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
 import { canvas as sceneCanvas } from "./scene.js";
@@ -24,8 +25,9 @@ function rowCells(f: Pick<Frame, "cols" | "lines">, row: number): string[] {
 function selectedText(): string {
   const selection = state.selection;
   if (!selection) return "";
-  const f = state.frames.get(selection.pane);
-  if (!f) return "";
+  const mirror = state.frames.get(selection.pane);
+  if (!mirror) return "";
+  const f = toRenderFrame(mirror, false);
   const [s, e] = ordered(selection);
   const lines: string[] = [];
   for (let row = s[1]; row <= e[1] && row < f.rows; row++) {

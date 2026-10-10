@@ -6,19 +6,15 @@ import { call, listen } from "./bridge.js";
 import { initKeyboard } from "./keyboard.js";
 import { initOverlay } from "./overlay.js";
 import { initPointer } from "./pointer.js";
-import { applyView, fit, focusCanvas, initScene, schedule } from "./scene.js";
-import { state } from "./state.js";
-import type { PaneFrame, View } from "./types.js";
+import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
+import type { View } from "./types.js";
 
 async function main() {
   await initScene();
   initOverlay(applyView);
   initKeyboard(applyView);
   initPointer(applyView);
-  await listen<PaneFrame>("screen", (p) => {
-    state.frames.set(p.pane, p.frame);
-    schedule();
-  });
+  await initEvents();
   await listen<View>("layout", applyView);
   fit();
   applyView(await call("get_layout"));

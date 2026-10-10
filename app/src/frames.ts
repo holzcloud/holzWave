@@ -1,5 +1,6 @@
 // The webview's mirror of a pane: `frame` events patch it, the renderers draw from it. A pure module (no DOM, no
 // state): node imports it for the fixture-driven test and later plans read it for links and hints.
+import { gridCells } from "./frame.js";
 import type { CursorShape, Extra, Frame, Run } from "./frame.js";
 
 // ---- the wire ---------------------------------------------------------------------------------------
@@ -70,23 +71,111 @@ export interface PaneMirror {
   modes: ModesMsg;
 }
 
+const BLANK_MODES: ModesMsg = { alt: false, bracketed_paste: false, mouse: false };
+
+/** A row message that can be stored: an integer `y` inside the grid and a list of runs. Anything else is dropped. */
+function usableRow(row: unknown, rows: number): RowMsg | null {
+  if (typeof row !== "object" || row === null) return null;
+  const { y, runs, extras } = row as RowMsg;
+  if (!Number.isInteger(y) || y < 0 || y >= rows || !Array.isArray(runs)) return null;
+  return Array.isArray(extras) && extras.length > 0 ? { y, runs, extras } : { y, runs };
+}
+
+/** The mirror of `msg` with `rows_` as its grid; the header fields come from the message. */
+function build(msg: FrameMsg, rows_: (RowMsg | null)[]): PaneMirror {
+  return {
+    seq: msg.seq,
+    cols: msg.cols,
+    rows: msg.rows,
+    fg: msg.fg,
+    bg: msg.bg,
+    rows_,
+    cursor: msg.cursor ?? null,
+    scrollbar: Array.isArray(msg.scrollbar) ? msg.scrollbar : [0, msg.rows, msg.rows],
+    selection: Array.isArray(msg.selection) ? msg.selection : [],
+    matches: Array.isArray(msg.matches) ? msg.matches : [],
+    search: msg.search ?? null,
+    copyCursor: msg.copy_cursor ?? null,
+    modes: msg.modes ?? BLANK_MODES,
+  };
+}
+
 /**
  * Apply one frame. A full frame replaces the mirror (also for a pane that has none); any other frame must carry the
- * sequence number after the mirror's, else nothing is patched and `gap` is true: the caller asks for a full frame.
+ * sequence number after the mirror's and the mirror's size, else nothing is patched and `gap` is true: the caller
+ * asks for a full frame and ignores frames until it arrives. The mirror passed in is never changed.
+ *
+ * A frame whose size is not a sane grid (see `gridCells`) or whose sequence number is not a whole number is ignored
+ * as a whole, so nothing is ever allocated from a count the frame provides beyond the grid limit.
  */
 export function applyFrame(
   mirror: PaneMirror | undefined,
-  _msg: FrameMsg,
+  msg: FrameMsg,
 ): { mirror: PaneMirror | undefined; gap: boolean } {
-  return { mirror, gap: false };
+  if (msg.full) {
+    if (gridCells(msg) === null || !Number.isSafeInteger(msg.seq)) return { mirror, gap: false };
+    const rows_: (RowMsg | null)[] = Array.from({ length: msg.rows }, () => null);
+    for (const row of Array.isArray(msg.changed) ? msg.changed : []) {
+      const usable = usableRow(row, msg.rows);
+      if (usable) rows_[usable.y] = usable;
+    }
+    return { mirror: build(msg, rows_), gap: false };
+  }
+  if (!mirror || msg.seq !== mirror.seq + 1 || msg.cols !== mirror.cols || msg.rows !== mirror.rows) {
+    return { mirror, gap: true };
+  }
+  const rows_ = mirror.rows_.slice();
+  for (const row of Array.isArray(msg.changed) ? msg.changed : []) {
+    const usable = usableRow(row, mirror.rows);
+    if (usable) rows_[usable.y] = usable;
+  }
+  return { mirror: build(msg, rows_), gap: false };
 }
 
 /** The frame the renderers draw: rows never received are empty, cluster tails are aligned by row. */
 export function toRenderFrame(mirror: PaneMirror, focused: boolean): Frame {
-  return { cols: mirror.cols, rows: mirror.rows, cursor: null, focused, fg: 0, bg: 0, lines: [] };
+  const lines: Run[][] = [];
+  const extras: Extra[][] = [];
+  for (let y = 0; y < mirror.rows; y++) {
+    const row = mirror.rows_[y];
+    lines.push(row ? row.runs : []);
+    extras.push(row?.extras ?? []);
+  }
+  return {
+    cols: mirror.cols,
+    rows: mirror.rows,
+    cursor: mirror.cursor,
+    focused,
+    fg: mirror.fg,
+    bg: mirror.bg,
+    lines,
+    extras,
+  };
+}
+
+/** One row as plain text: one string per cell, the spacer of a wide character dropped, tails appended. */
+function rowText(row: RowMsg | null | undefined, cols: number): string {
+  if (!row) return "";
+  const cells: string[] = [];
+  fill: for (const run of row.runs) {
+    const text = Array.isArray(run) ? run[0] : undefined;
+    if (typeof text !== "string") continue;
+    for (const ch of text) {
+      if (cells.length >= cols) break fill;
+      cells.push(ch === "\0" ? "" : ch);
+    }
+  }
+  for (const extra of row.extras ?? []) {
+    if (!Array.isArray(extra)) continue;
+    const [col, tail] = extra;
+    if (Number.isInteger(col) && col >= 0 && col < cells.length && typeof tail === "string") cells[col] += tail;
+  }
+  return cells.join("").trimEnd();
 }
 
 /** The grid as plain text, one string per row: spacers dropped, tails appended, trailing blanks trimmed. */
-export function gridText(_mirror: PaneMirror): string[] {
-  return [];
+export function gridText(mirror: PaneMirror): string[] {
+  const out: string[] = [];
+  for (let y = 0; y < mirror.rows; y++) out.push(rowText(mirror.rows_[y], mirror.cols));
+  return out;
 }

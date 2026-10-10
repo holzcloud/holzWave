@@ -33,16 +33,6 @@ export interface Frame {
   extras?: Extra[][];
 }
 
-/** The `screen` payload of the legacy protocol (cursor as `[x, y]`, no extras); `scene.fromLegacyFrame` converts it. */
-export interface LegacyFrame {
-  cols: number;
-  rows: number;
-  cursor: [number, number] | null;
-  fg: number;
-  bg: number;
-  lines: Run[][];
-}
-
 /** The most cells a renderer builds buffers for: 1 Mi cells is a 1024 x 1024 grid, far past any window. */
 export const MAX_CELLS = 1 << 20;
 

@@ -554,22 +554,27 @@ export default async function ({ page, url }) {
     }
   }
 
-  // ---- the legacy payload is converted in exactly one place ------------------------------------------------
-  const legacy = await page.evaluate(async () => {
-    const { fromLegacyFrame } = await import("./scene.js");
-    const lines = [[["ab", 2, 1, 2, 0]]];
-    const f = { cols: 2, rows: 1, cursor: [1, 0], fg: 1, bg: 2, lines, scrollbar: [0, 0, 1] };
+  // ---- the wire frame becomes the renderers' frame in exactly one place --------------------------------------
+  const wire = await page.evaluate(async () => {
+    const { applyFrame, toRenderFrame } = await import("./frames.js");
+    const msg = {
+      pane: 1, seq: 1, full: true, cols: 2, rows: 1, fg: 1, bg: 2,
+      cursor: { x: 1, y: 0, style: "bar", blink: true }, scrollbar: [0, 1, 1], selection: [], matches: [],
+      search: null, copy_cursor: null, modes: { alt: false, bracketed_paste: false, mouse: false },
+      changed: [{ y: 0, runs: [["ab", 2, 1, 2, 0]] }],
+    };
+    const mirror = applyFrame(undefined, msg).mirror;
     return {
-      focused: fromLegacyFrame(f, true),
-      unfocused: fromLegacyFrame(f, false),
-      none: fromLegacyFrame({ ...f, cursor: null }, true),
+      focused: toRenderFrame(mirror, true),
+      unfocused: toRenderFrame(mirror, false),
+      none: toRenderFrame(applyFrame(undefined, { ...msg, cursor: null }).mirror, true),
     };
   });
-  assert.deepEqual(legacy.focused.cursor, { x: 1, y: 0, style: "block", blink: false });
-  assert.equal(legacy.focused.focused, true);
-  assert.equal(legacy.unfocused.focused, false);
-  assert.deepEqual(legacy.unfocused.cursor, { x: 1, y: 0, style: "block", blink: false }, "an unfocused pane keeps its cursor");
-  assert.equal(legacy.none.cursor, null);
-  assert.deepEqual(legacy.focused.lines, [[["ab", 2, 1, 2, 0]]]);
-  assert.equal("scrollbar" in legacy.focused, false, "the legacy scrollbar is not part of the renderer frame");
+  assert.deepEqual(wire.focused.cursor, { x: 1, y: 0, style: "bar", blink: true });
+  assert.equal(wire.focused.focused, true);
+  assert.equal(wire.unfocused.focused, false);
+  assert.deepEqual(wire.unfocused.cursor, { x: 1, y: 0, style: "bar", blink: true }, "an unfocused pane keeps its cursor");
+  assert.equal(wire.none.cursor, null);
+  assert.deepEqual(wire.focused.lines, [[["ab", 2, 1, 2, 0]]]);
+  assert.equal("scrollbar" in wire.focused, false, "the scrollbar is not part of the renderer frame");
 }

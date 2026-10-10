@@ -1,6 +1,4 @@
 // Types shared with the Rust side (the layout the core sends) and between the frontend modules.
-import type { LegacyFrame } from "./frame.js";
-
 /** A rectangle in unit coordinates: 0..1 of the canvas in both directions. */
 export interface UnitRect {
   x: number;
@@ -26,16 +24,16 @@ export interface View {
   dividers: Divider[];
 }
 
-/** The `screen` event payload of the legacy protocol; plan 17 replaces it with `frame`. */
-export interface PaneFrame {
-  pane: number;
-  frame: LegacyFrame & { scrollbar: [number, number, number] };
-}
-
 /** A pane's size in cells. */
 export interface CellSize {
   cols: number;
   rows: number;
+}
+
+/** What the core was told about a pane: its grid and the cell size in whole device pixels. */
+export interface PaneSize extends CellSize {
+  cellW: number;
+  cellH: number;
 }
 
 /** The legacy frontend selection: cell coordinates of the anchor `a` and the moving end `b`. */

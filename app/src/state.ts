@@ -1,14 +1,15 @@
 // The frontend's shared mutable state: one object, owned by the modules that import it.
 import type { Metrics } from "./frame.js";
-import type { CellSize, PaneFrame, Selection, View } from "./types.js";
+import type { PaneMirror } from "./frames.js";
+import type { PaneSize, Selection, View } from "./types.js";
 
 export interface State {
   /** The layout the core sent last; null until the first answer. */
   view: View | null;
-  /** The latest frame of every pane. */
-  frames: Map<number, PaneFrame["frame"]>;
-  /** The size in cells the core was told for every pane. */
-  sizes: Map<number, CellSize>;
+  /** The mirror of every pane the core has sent frames for, patched by `frame` events. */
+  frames: Map<number, PaneMirror>;
+  /** The size in cells and the cell size the core was told for every pane. */
+  sizes: Map<number, PaneSize>;
   /** Cell size, device pixel ratio and canvas size in CSS pixels. */
   metrics: Metrics;
   /** The legacy frontend selection; plan 17 replaces it with the core's tracked selection. */
