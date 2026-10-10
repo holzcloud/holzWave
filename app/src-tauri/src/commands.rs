@@ -18,7 +18,7 @@ use std::sync::Arc;
 use holzwave_core::engine::{
     CopyMotion, CopyOp, CopyState, DomKey, Mods, PasteOutcome, SearchOp, SelectMode, SelectOp,
 };
-use holzwave_core::layout::PaneId;
+use holzwave_core::layout::{PaneId, SplitId};
 use holzwave_core::wire::SearchMsg;
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -285,4 +285,55 @@ pub fn search(core: State<Arc<AppCore>>, pane: PaneId, op: SearchOpMsg) -> Resul
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn copy_mode(core: State<Arc<AppCore>>, pane: PaneId, op: CopyOpMsg) -> Result<CopyStateMsg, String> {
     core.copy_mode(pane, op.into()).map(CopyStateMsg::from)
+}
+
+// ---- layout commands: each answers with the new view -----------------------------------------------------------
+
+/// Split the focused pane; `column` stacks the panes, otherwise they sit side by side.
+#[tauri::command(rename_all = "snake_case")]
+pub fn split(core: State<Arc<AppCore>>, column: bool) -> View {
+    core.split(column)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn new_tab(core: State<Arc<AppCore>>) -> View {
+    core.new_tab()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn new_workspace(core: State<Arc<AppCore>>, name: String) -> View {
+    core.new_workspace(&name)
+}
+
+/// Close a pane and kill its shell. Only closing the last pane ends the app. Async because that exit path writes
+/// the layout.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn close_pane(core: State<Arc<AppCore>>, pane: PaneId) -> View {
+    core.close_pane(pane)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn focus_pane(core: State<Arc<AppCore>>, pane: PaneId) -> View {
+    core.focus_pane(pane)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn cycle_focus(core: State<Arc<AppCore>>, step: i32) -> View {
+    core.cycle_focus(step)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn select_tab(core: State<Arc<AppCore>>, index: usize) -> View {
+    core.select_tab(index)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn select_workspace(core: State<Arc<AppCore>>, index: usize) -> View {
+    core.select_workspace(index)
+}
+
+/// Move a divider. Only marks the layout dirty: a debounced saver writes it, so a drag costs one write per window.
+#[tauri::command(rename_all = "snake_case")]
+pub fn set_ratio(core: State<Arc<AppCore>>, split: SplitId, ratio: f32) -> View {
+    core.set_ratio(split, ratio)
 }

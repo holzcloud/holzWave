@@ -12,7 +12,7 @@ mod state;
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
 use state::{AppCore, Out, ShellSpec, Sink};
 
@@ -62,7 +62,24 @@ pub fn run() {
             commands::selection_text,
             commands::search,
             commands::copy_mode,
+            commands::split,
+            commands::new_tab,
+            commands::new_workspace,
+            commands::close_pane,
+            commands::focus_pane,
+            commands::cycle_focus,
+            commands::select_tab,
+            commands::select_workspace,
+            commands::set_ratio,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running holzWave");
+        .build(tauri::generate_context!())
+        .expect("error while building holzWave")
+        .run(|app, event| {
+            // The pending layout goes to disk and every shell ends before the process does (DESK-16, DESK-14).
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                if let Some(core) = app.try_state::<Arc<AppCore>>() {
+                    core.shutdown();
+                }
+            }
+        });
 }

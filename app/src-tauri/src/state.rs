@@ -8,16 +8,24 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use holzwave_core::engine::{CopyOp, CopyState, DomKey, PasteOutcome, SearchOp, SearchState, SelectOp};
 use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
-use holzwave_core::persist;
+use holzwave_core::persist::{self, Debounced};
 use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
 const MAX_LAYOUT_BYTES: u64 = 1 << 20;
+
+/// How long a layout change waits before it is written (RESEARCH Pitfall 3): a divider drag is hundreds of changes
+/// and costs one write per window.
+const SAVE_DELAY: Duration = Duration::from_millis(250);
+
+/// The most time `shutdown` spends waiting for the shells to end.
+const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
 
 // ---- what the webview sees -------------------------------------------------------------------------------------
 
@@ -143,6 +151,7 @@ pub struct ShellSpec {
 }
 
 impl ShellSpec {
+    #[cfg(test)]
     pub fn new(program: impl Into<String>, args: &[&str]) -> Self {
         Self { program: program.into(), args: args.iter().map(|a| (*a).to_owned()).collect() }
     }
@@ -168,14 +177,21 @@ enum Slot {
 }
 
 /// The state of the app: the layout, the running panes, and what is needed to start a pane.
+///
+/// Lock order: `layout` first, then `panes`; `panes` is never held while waiting for `layout`. `flush` runs the
+/// save job, which locks `layout`, so it is never called with `layout` held.
 pub struct AppCore {
     layout: Arc<Mutex<Layout>>,
     panes: Mutex<HashMap<PaneId, Slot>>,
     sink: Arc<dyn Sink>,
     shell: ShellSpec,
-    dir: PathBuf,
+    /// Writes the layout 250 ms after the first change of a burst and when flushed.
+    saver: Debounced,
+    /// How many times the saver job wrote the file, for tests.
+    writes: Arc<AtomicUsize>,
+    /// The app is ending (the last pane closed or ended, or `shutdown` ran): panes that end from now on stay in the
+    /// layout, so that what is saved is what the user had.
     exiting: AtomicBool,
-    writes: AtomicUsize,
     me: Weak<AppCore>,
 }
 
@@ -183,15 +199,34 @@ impl AppCore {
     /// Load the layout from `dir/layout.json` (a fresh one-pane layout when there is none or it is unusable) and
     /// start nothing: the webview starts each pane once it knows the pane's size.
     pub fn new(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec) -> Arc<AppCore> {
-        let layout = load_layout(&dir.join("layout.json"));
+        let path = dir.join("layout.json");
+        let layout = Arc::new(Mutex::new(load_layout(&path)));
+        let writes = Arc::new(AtomicUsize::new(0));
+
+        let job_layout = layout.clone();
+        let job_writes = writes.clone();
+        let saver = Debounced::new(SAVE_DELAY, move || {
+            // Serialise a copy: the layout is not locked while the file is written and synced.
+            let snapshot = lock(&job_layout).clone();
+            match serde_json::to_vec_pretty(&snapshot) {
+                Ok(json) => {
+                    job_writes.fetch_add(1, Ordering::SeqCst);
+                    if let Err(e) = persist::write_atomic(&path, &json) {
+                        eprintln!("holzwave: cannot save {}: {e}", path.display());
+                    }
+                }
+                Err(e) => eprintln!("holzwave: cannot serialise the layout: {e}"),
+            }
+        });
+
         Arc::new_cyclic(|me| AppCore {
-            layout: Arc::new(Mutex::new(layout)),
+            layout,
             panes: Mutex::new(HashMap::new()),
             sink,
             shell,
-            dir,
+            saver,
+            writes,
             exiting: AtomicBool::new(false),
-            writes: AtomicUsize::new(0),
             me: me.clone(),
         })
     }
@@ -200,23 +235,20 @@ impl AppCore {
         View::of(&lock(&self.layout))
     }
 
-    // Skeleton: the behaviour of the old shell. Every change is written at once, an unknown pane ends the app and
-    // nothing is flushed at the end.
+    // ---- layout commands: lock, mutate, mark dirty, answer with the new view. No disk IO, no waiting. ------------
 
-    fn save(&self, layout: &Layout) {
-        self.writes.fetch_add(1, Ordering::SeqCst);
-        if let Ok(json) = serde_json::to_vec_pretty(layout) {
-            let _ = persist::write_atomic(&self.dir.join("layout.json"), &json);
-        }
-    }
-
+    /// Apply a layout change, schedule a save and return the new view.
     fn change(&self, f: impl FnOnce(&mut Layout)) -> View {
-        let mut layout = lock(&self.layout);
-        f(&mut layout);
-        self.save(&layout);
-        View::of(&layout)
+        let view = {
+            let mut layout = lock(&self.layout);
+            f(&mut layout);
+            View::of(&layout)
+        };
+        self.saver.touch();
+        view
     }
 
+    /// Split the focused pane; the new pane gets the focus. At the pane limits the view comes back unchanged.
     pub fn split(&self, column: bool) -> View {
         self.change(|l| {
             l.split_focused(if column { Axis::Column } else { Axis::Row });
@@ -233,17 +265,6 @@ impl AppCore {
         self.change(|l| {
             l.new_workspace(name);
         })
-    }
-
-    pub fn close_pane(&self, pane: PaneId) -> View {
-        lock(&self.panes).remove(&pane);
-        let mut layout = lock(&self.layout);
-        if layout.close_pane(pane) != CloseOutcome::Closed {
-            self.sink.send(Out::Exit);
-            return View::of(&layout);
-        }
-        self.save(&layout);
-        View::of(&layout)
     }
 
     pub fn focus_pane(&self, pane: PaneId) -> View {
@@ -266,12 +287,102 @@ impl AppCore {
         self.change(|l| l.set_ratio(split, ratio))
     }
 
-    pub fn flush(&self) {}
+    /// Close a pane (RESEARCH Pitfall 4). The shell is killed on its own engine thread and the app keeps running;
+    /// only closing the last pane of the layout ends it, after the layout is on disk. An id that is in no tab
+    /// changes nothing.
+    ///
+    /// Not waiting for anything, but the exit path writes the layout, so the command is async.
+    pub fn close_pane(&self, pane: PaneId) -> View {
+        let mut layout = lock(&self.layout);
+        match layout.close_pane(pane) {
+            CloseOutcome::Closed => {
+                let view = View::of(&layout);
+                // Under the layout lock, so `pane_gone` of the same pane sees either both or neither of the changes.
+                let slot = lock(&self.panes).remove(&pane);
+                drop(layout);
+                let never_started = slot.is_none();
+                if let Some(Slot::Running(handle)) = &slot {
+                    // The actor kills and reaps the shell on its own thread (about 200 ms) and sends the PaneExit.
+                    handle.close();
+                }
+                drop(slot);
+                self.saver.touch();
+                self.sink.send(Out::Layout(view.clone()));
+                if never_started {
+                    // No shell, so no Exited event will come: the page still hears that the pane is gone.
+                    self.sink.send(Out::PaneExit { pane, code: None });
+                }
+                view
+            }
+            CloseOutcome::LastPane => {
+                let view = View::of(&layout);
+                drop(layout);
+                self.begin_exit();
+                view
+            }
+            CloseOutcome::Unknown => View::of(&layout),
+        }
+    }
 
-    pub fn shutdown(&self) {}
+    /// Write the pending layout now, on the calling thread. Never call it with the layout locked.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn flush(&self) {
+        self.saver.flush();
+    }
 
+    /// How many times the layout file was written; the tests count writes with it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn layout_writes(&self) -> usize {
         self.writes.load(Ordering::SeqCst)
+    }
+
+    // ---- ending ------------------------------------------------------------------------------------------------
+
+    /// The handles of every running pane.
+    fn running(&self) -> Vec<PaneHandle> {
+        lock(&self.panes)
+            .values()
+            .filter_map(|slot| match slot {
+                Slot::Running(handle) => Some(handle.clone()),
+                Slot::Starting => None,
+            })
+            .collect()
+    }
+
+    /// The exit path of the last pane: stop touching the layout, write it, ask every shell to end and tell the
+    /// shell of the app to exit. Does not wait for the shells; `shutdown` does that on the exit events.
+    fn begin_exit(&self) {
+        if self.exiting.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.saver.flush();
+        for handle in self.running() {
+            handle.close();
+        }
+        self.sink.send(Out::Exit);
+    }
+
+    /// End everything and wait, for at most three seconds: the layout is written, every shell is closed and joined.
+    /// Safe to call more than once, and from the exit events of the app. Called by `Drop` too.
+    pub fn shutdown(&self) {
+        // First: panes that end from now on are not taken out of the layout.
+        self.exiting.store(true, Ordering::SeqCst);
+        self.saver.flush();
+        let handles = self.running();
+        for handle in &handles {
+            handle.close();
+        }
+        // On an engine thread (the last reference dropped inside an event) a join would wait for itself.
+        let on_engine_thread = std::thread::current().name().is_some_and(|n| n.starts_with("hw-pane-"));
+        if !on_engine_thread {
+            let deadline = Instant::now() + SHUTDOWN_BOUND;
+            for handle in &handles {
+                if !handle.join(deadline.saturating_duration_since(Instant::now())) {
+                    eprintln!("holzwave: a shell did not end within the shutdown bound");
+                }
+            }
+        }
+        self.saver.flush();
     }
 
     /// The handle of a running pane. `None` for an unknown pane and for one that is still starting.
@@ -337,7 +448,13 @@ impl AppCore {
             Ok(handle) => {
                 let mut panes = lock(&self.panes);
                 match panes.get_mut(&pane) {
-                    Some(slot @ Slot::Starting) => *slot = Slot::Running(handle),
+                    Some(slot @ Slot::Starting) => {
+                        *slot = Slot::Running(handle.clone());
+                        if self.exiting.load(Ordering::SeqCst) {
+                            // The app began to end while this shell started; `shutdown` did not see it.
+                            handle.close();
+                        }
+                    }
                     // The pane was closed (or ended, or the app is closing) while the shell started.
                     _ => {
                         drop(panes);
@@ -351,11 +468,39 @@ impl AppCore {
         }
     }
 
-    /// The shell of a pane ended, or never started: forget the handle and tell the webview.
+    /// The shell of a pane ended, or never started (called from the pane's sink). Forgets the handle, takes the pane
+    /// out of the layout and tells the webview. A pane the user already closed is `Unknown` to the layout by now, so
+    /// this cannot end the app a second time (RESEARCH Pitfall 4); only the last pane of the layout ends it.
     fn pane_gone(&self, pane: PaneId, code: Option<u32>) {
-        let slot = lock(&self.panes).remove(&pane);
+        let (slot, outcome) = {
+            let mut layout = lock(&self.layout);
+            let slot = lock(&self.panes).remove(&pane);
+            let outcome = if self.exiting.load(Ordering::SeqCst) {
+                // The app is ending: what the user had stays in the layout.
+                None
+            } else {
+                match layout.close_pane(pane) {
+                    CloseOutcome::Closed => Some((CloseOutcome::Closed, Some(View::of(&layout)))),
+                    other => Some((other, None)),
+                }
+            };
+            (slot, outcome)
+        };
         drop(slot);
+
+        let mut last = false;
+        match outcome {
+            Some((CloseOutcome::Closed, Some(view))) => {
+                self.saver.touch();
+                self.sink.send(Out::Layout(view));
+            }
+            Some((CloseOutcome::LastPane, _)) => last = true,
+            _ => {}
+        }
         self.sink.send(Out::PaneExit { pane, code });
+        if last {
+            self.begin_exit();
+        }
     }
 
     /// A key press or release, as the webview saw it. The engine encodes it against the terminal's live modes.
@@ -437,6 +582,12 @@ impl AppCore {
     #[cfg(test)]
     fn pid(&self, pane: PaneId) -> Option<u32> {
         self.handle(pane)?.pid()
+    }
+}
+
+impl Drop for AppCore {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
