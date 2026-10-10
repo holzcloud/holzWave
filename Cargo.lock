@@ -1242,6 +1242,8 @@ version = "0.0.1"
 dependencies = [
  "libghostty-vt",
  "portable-pty",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

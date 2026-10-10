@@ -42,6 +42,24 @@ pub struct Cursor {
     pub visible: bool,
 }
 
+/// Where the viewport sits in the scrollable area, in rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scrollbar {
+    /// Rows in total: scrollback plus the screen.
+    pub total: u64,
+    /// Row at the top of the viewport.
+    pub offset: u64,
+    /// Rows in the viewport.
+    pub len: u64,
+}
+
+impl Scrollbar {
+    /// Whether the viewport is at the bottom, which is where new output appears.
+    pub fn at_bottom(&self) -> bool {
+        self.offset + self.len >= self.total
+    }
+}
+
 /// An owned, engine-independent copy of the visible screen.
 ///
 /// The renderer never sees an engine's own types, so an engine can be swapped
@@ -51,6 +69,7 @@ pub struct Screen {
     pub cols: u16,
     pub rows: u16,
     pub cursor: Option<Cursor>,
+    pub scrollbar: Scrollbar,
     pub default_fg: Color,
     pub default_bg: Color,
     /// Row-major, `rows * cols` cells.
@@ -90,6 +109,12 @@ pub trait TerminalEngine {
 
     /// The current grid size as `(cols, rows)`.
     fn size(&self) -> Result<(u16, u16)>;
+
+    /// Scroll the viewport by `rows`; negative is towards older output.
+    fn scroll(&mut self, rows: isize);
+
+    /// Jump back to the live screen at the bottom.
+    fn scroll_to_bottom(&mut self);
 
     /// Copy the visible screen out of the engine.
     fn screen(&mut self) -> Result<Screen>;

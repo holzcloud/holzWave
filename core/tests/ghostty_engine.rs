@@ -53,3 +53,23 @@ fn resize_changes_the_grid() {
     assert_eq!((s.cols, s.rows), (40, 10));
     assert_eq!(s.cells.len(), 400);
 }
+
+#[test]
+fn scrollback_can_be_scrolled_and_returns_to_bottom() {
+    let mut e = engine(20, 5);
+    for i in 0..100 {
+        e.feed(format!("line {i}\r\n").as_bytes());
+    }
+    let live = e.screen().unwrap();
+    assert!(live.scrollbar.at_bottom());
+    assert!(live.scrollbar.total > 100);
+
+    e.scroll(-10);
+    let up = e.screen().unwrap();
+    assert!(!up.scrollbar.at_bottom());
+    assert_eq!(up.scrollbar.offset + 10, live.scrollbar.offset);
+    assert_ne!(up.to_text(), live.to_text());
+
+    e.scroll_to_bottom();
+    assert_eq!(e.screen().unwrap().to_text(), live.to_text());
+}

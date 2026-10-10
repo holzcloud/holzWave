@@ -6,12 +6,13 @@
 
 mod engine;
 mod error;
+pub mod layout;
 pub mod pty;
 
 #[cfg(feature = "ghostty")]
 mod ghostty;
 
-pub use engine::{Cell, Color, Cursor, Screen, TerminalEngine, Width};
+pub use engine::{Cell, Color, Cursor, Screen, Scrollbar, TerminalEngine, Width};
 pub use error::{Error, Result};
 
 #[cfg(feature = "ghostty")]

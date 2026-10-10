@@ -1,9 +1,10 @@
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::Underline;
+use libghostty_vt::terminal::ScrollViewport;
 use libghostty_vt::{RenderState, Terminal};
 
-use crate::engine::{Cell, Color, Cursor, Screen, TerminalEngine, Width};
+use crate::engine::{Cell, Color, Cursor, Screen, Scrollbar, TerminalEngine, Width};
 use crate::{Error, Result};
 
 fn eng<E: std::fmt::Debug>(e: E) -> Error {
@@ -48,7 +49,16 @@ impl TerminalEngine for GhosttyEngine {
         Ok((self.terminal.cols().map_err(eng)?, self.terminal.rows().map_err(eng)?))
     }
 
+    fn scroll(&mut self, rows: isize) {
+        self.terminal.scroll_viewport(ScrollViewport::Delta(rows));
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
+    }
+
     fn screen(&mut self) -> Result<Screen> {
+        let sb = self.terminal.scrollbar().map_err(eng)?;
         let snapshot = self.render.update(&self.terminal).map_err(eng)?;
         let colors = snapshot.colors().map_err(eng)?;
         let (cols, rows) = (snapshot.cols().map_err(eng)?, snapshot.rows().map_err(eng)?);
@@ -92,6 +102,7 @@ impl TerminalEngine for GhosttyEngine {
             cols,
             rows,
             cursor,
+            scrollbar: Scrollbar { total: sb.total, offset: sb.offset, len: sb.len },
             default_fg: color(colors.foreground),
             default_bg: color(colors.background),
             cells,
