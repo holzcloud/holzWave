@@ -428,3 +428,17 @@ fn every_printable_ascii_key_parses_and_prints_back_idempotently() {
 fn spaces_around_the_plus_signs_are_tolerated() {
     assert_eq!(canon(" cmd + shift + d "), Ok("Cmd+Shift+D".to_string()));
 }
+
+// ---- the link to settings.json --------------------------------------------------------------------------
+
+#[test]
+fn overrides_in_settings_json_flow_into_the_resolved_table() {
+    use holzwave_core::settings::Settings;
+
+    let text = r#"{"version": 1, "keybindings": {"pane.split_right": "cmd+shift+enter", "palette.open": ""}}"#;
+    let (settings, _) = Settings::from_json(text);
+    let (kb, warnings) = Keybindings::resolve(&settings.keybindings);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(kb.action_of(&chord("Cmd+Shift+Enter")), Some("pane.split_right"));
+    assert_eq!(kb.chord_of("palette.open"), None, "the empty string unbinds");
+}
