@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { applyFrame, gridText, spansSignature, toRenderFrame, visibleSpans } from "../../dist/frames.js";
+import { RateMeter, applyFrame, forgetPane, gridText, spansSignature, toRenderFrame, visibleSpans } from "../../dist/frames.js";
 
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/frames.json", import.meta.url), "utf8"));
 
@@ -203,4 +203,45 @@ test("visibleSpans keeps spans inside the grid and clamps their ends", () => {
 
 test("visibleSpans of a mirror without a selection is empty", () => {
   assert.deepEqual(visibleSpans(applyFrame(undefined, full()).mirror), []);
+});
+
+test("forgetPane deletes every entry of the pane and records the exit", () => {
+  const stores = () => ({
+    frames: new Map([[1, "a"], [2, "b"]]),
+    sizes: new Map([[1, "a"], [2, "b"]]),
+    titles: new Map([[1, "vim"], [2, "zsh"]]),
+    cwds: new Map([[1, "/a"], [2, "/b"]]),
+    exited: new Set(),
+  });
+  const s = stores();
+  forgetPane(s, 2);
+  for (const name of ["frames", "sizes", "titles", "cwds"]) {
+    assert.ok(!s[name].has(2), `${name} still has pane 2`);
+    assert.ok(s[name].has(1), `${name} lost pane 1`);
+  }
+  assert.deepEqual([...s.exited], [2]);
+
+  forgetPane(s, 2); // twice is the same as once
+  forgetPane(s, 99); // a pane nobody heard of
+  assert.deepEqual([...s.exited].sort((a, b) => a - b), [2, 99]);
+  assert.equal(s.frames.size, 1);
+});
+
+test("RateMeter counts the events of the last window and scales to one second", () => {
+  const m = new RateMeter(1000);
+  assert.equal(m.perSecond(0), 0);
+  for (const t of [0, 100, 200]) m.note(t);
+  assert.equal(m.perSecond(250), 3);
+  assert.equal(m.perSecond(1100), 2, "the event at 0 is out of the window, 100 is on its edge");
+  assert.equal(m.perSecond(1150), 1);
+  assert.equal(m.perSecond(5000), 0);
+
+  const half = new RateMeter(500);
+  half.note(0);
+  half.note(100);
+  assert.equal(half.perSecond(200), 4, "two events in half a second is four per second");
+
+  const burst = new RateMeter(1000);
+  for (let i = 0; i < 500; i++) burst.note(i); // 500 events in 500 ms
+  assert.equal(burst.perSecond(499), 500);
 });

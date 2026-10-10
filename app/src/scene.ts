@@ -6,11 +6,11 @@ import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
 import { BOLD, FONT_PX, ITALIC, Metrics, Renderer, font } from "./frame.js";
-import { applyFrame, spansSignature, toRenderFrame } from "./frames.js";
+import { RateMeter, applyFrame, forgetPane, spansSignature, toRenderFrame } from "./frames.js";
 import type { FrameMsg } from "./frames.js";
 import { fitCells, gridRect } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
-import { onSelectionSpans } from "./selection.js";
+import { forgetSelection, onSelectionSpans } from "./selection.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
 import { WebGLRenderer } from "./webgl.js";
@@ -129,6 +129,7 @@ function syncSizes(): void {
   const cellW = Math.max(1, Math.round(m.cellW * m.dpr));
   const cellH = Math.max(1, Math.round(m.cellH * m.dpr));
   for (const [id, r] of view.panes) {
+    if (state.exited.has(id)) continue; // its exit may arrive before the layout that drops it
     const { cols, rows } = fitCells(m, r);
     const prev = state.sizes.get(id);
     if (!prev) {
@@ -161,10 +162,18 @@ export function fit(): void {
 /** Panes whose sequence gap was reported: frames are ignored until the full frame that answers the request. */
 const waiting = new Set<number>();
 
+/** When frame events arrived; `state.stats.fps` is its rate. */
+const arrivals = new RateMeter(1000);
+
+/** A pane id as the core sends it: a whole number (layout ids stay below 2^53). */
+const isPane = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
+
 /** One `frame` event: patch the pane's mirror, or on a gap ask for a full frame (once) and wait for it. */
 function onFrame(msg: FrameMsg): void {
-  if (typeof msg !== "object" || msg === null || !Number.isSafeInteger(msg.pane)) return;
+  arrivals.note(performance.now());
+  if (typeof msg !== "object" || msg === null || !isPane(msg.pane)) return;
   const pane = msg.pane;
+  if (state.exited.has(pane)) return; // a late frame of a pane that is gone must not bring it back
   if (!msg.full && waiting.has(pane)) return;
   const { mirror, gap } = applyFrame(state.frames.get(pane), msg);
   if (gap) {
@@ -182,17 +191,43 @@ function onFrame(msg: FrameMsg): void {
   schedule();
 }
 
+/** A program set a pane's title. The string was sanitised by the core and is only ever rendered as text. */
+function onTitle(p: { pane: number; title: string }): void {
+  if (typeof p !== "object" || p === null || !isPane(p.pane) || typeof p.title !== "string") return;
+  if (!state.exited.has(p.pane)) state.titles.set(p.pane, p.title);
+}
+
+/** A pane reported its working directory (OSC 7). Same rules as the title. */
+function onCwd(p: { pane: number; cwd: string }): void {
+  if (typeof p !== "object" || p === null || !isPane(p.pane) || typeof p.cwd !== "string") return;
+  if (!state.exited.has(p.pane)) state.cwds.set(p.pane, p.cwd);
+}
+
+/**
+ * A pane's shell ended or the pane was closed: forget everything the page holds for it. The signal is this event,
+ * not the layout: a layout only lists the panes of the active tab, and the panes of other tabs are still running.
+ */
+function onPaneExit(p: { pane: number; code: number | null }): void {
+  if (typeof p !== "object" || p === null || !isPane(p.pane)) return;
+  forgetPane(state, p.pane);
+  forgetSelection(p.pane);
+  waiting.delete(p.pane);
+  schedule();
+}
+
 /** Listen to the events a pane produces. Call once at start-up, before the first layout is asked for. */
 export async function initEvents(): Promise<void> {
   await listen<FrameMsg>("frame", onFrame);
+  await listen<{ pane: number; title: string }>("title", onTitle);
+  await listen<{ pane: number; cwd: string }>("cwd", onCwd);
+  await listen<{ pane: number; code: number | null }>("pane-exit", onPaneExit);
 }
 
 // ---- drawing -------------------------------------------------------------------------------------
 
-const draws: number[] = [];
-let drawn = 0;
+/** Draw times since the last stats update. */
+let batch: number[] = [];
 let pending = false;
-const started = performance.now();
 
 function draw(): void {
   pending = false;
@@ -206,15 +241,15 @@ function draw(): void {
     if (!mirror) continue;
     renderer.drawPane(toRenderFrame(mirror, id === view.focus), gridRect(state.metrics, r));
   }
-  draws.push(performance.now() - t0);
-  if (draws.length > 120) draws.shift();
-  drawn++;
-  if (drawn % 30 === 0) {
+  const now = performance.now();
+  batch.push(now - t0);
+  if (batch.length >= 30) {
     state.stats = {
-      avgMs: draws.reduce((a, b) => a + b, 0) / draws.length,
-      maxMs: Math.max(...draws),
-      fps: drawn / ((performance.now() - started) / 1000),
+      avgMs: batch.reduce((a, b) => a + b, 0) / batch.length,
+      maxMs: Math.max(...batch),
+      fps: arrivals.perSecond(now), // frame events that arrived, not frames that were drawn
     };
+    batch = [];
     const s = state.stats;
     stats.textContent = `${rendererName}  ${view.panes.length} pane(s)  cpu ${s.avgMs.toFixed(2)} ms  max ${s.maxMs.toFixed(2)} ms  ${s.fps.toFixed(0)} fps`;
   }

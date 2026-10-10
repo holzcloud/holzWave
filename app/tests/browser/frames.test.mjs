@@ -68,6 +68,8 @@ export default async function ({ page, url, errors }) {
   await drawCase(page, url, "");
   await gapCase(page, url);
   await legacyCase(page, url);
+  await lifecycleCase(page, url);
+  await statsCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -160,4 +162,106 @@ async function legacyCase(page, url) {
   await open(page, url);
   assert.equal(await emit(page, "screen", { pane: 1, frame: {} }), 0, "something still listens to the legacy screen event");
   assert.ok((await emit(page, "frame", fullFrame(1, 1, PANE_1_BG))) >= 1, "the frame event has a listener");
+}
+
+/** The page's stored state of a pane, read from the live state module. */
+const stored = (page, pane) =>
+  page.evaluate(async (id) => {
+    const { state } = await import(new URL("state.js", location.href).href);
+    return {
+      frame: state.frames.has(id),
+      size: state.sizes.has(id),
+      title: state.titles.get(id) ?? null,
+      cwd: state.cwds.get(id) ?? null,
+      exited: state.exited.has(id),
+    };
+  }, pane);
+
+/** Titles and cwds are kept per pane; an exited pane is forgotten everywhere and stays forgotten. */
+async function lifecycleCase(page, url) {
+  await open(page, url);
+  await page.evaluate(() => window.__MOCK__.on("selection_text", () => "selected"));
+  const copyText = () =>
+    page.evaluate(() => {
+      const dt = new DataTransfer();
+      document.getElementById("term").dispatchEvent(new ClipboardEvent("copy", { clipboardData: dt, cancelable: true, bubbles: true }));
+      return dt.getData("text/plain");
+    });
+
+  await emit(page, "frame", fullFrame(1, 1, PANE_1_BG));
+  await emit(page, "frame", frame(2, 1, { full: true, bg: PANE_2_BG, selection: [[0, 0, 3]] }));
+  await emit(page, "title", { pane: 2, title: "vim README.md" });
+  await emit(page, "cwd", { pane: 2, cwd: "/Users/holz/Projects" });
+  await emit(page, "title", { pane: 1, title: "zsh" });
+  assert.deepEqual(await stored(page, 2), { frame: true, size: true, title: "vim README.md", cwd: "/Users/holz/Projects", exited: false });
+  assert.equal((await stored(page, 1)).title, "zsh");
+  assert.equal((await stored(page, 1)).cwd, null);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("selection_text").length >= 1);
+  const deadline = Date.now() + 2000;
+  while ((await copyText()) !== "selected" && Date.now() < deadline) await page.waitForTimeout(20);
+  assert.equal(await copyText(), "selected", "the selection text was cached");
+
+  // Strings are kept as received: markup stays text.
+  await emit(page, "title", { pane: 1, title: "<img src=x onerror=window.__pwned=1>" });
+  assert.equal((await stored(page, 1)).title, "<img src=x onerror=window.__pwned=1>");
+  assert.equal(await page.locator("#bar img, #overlay img").count(), 0);
+  assert.equal(await page.evaluate(() => window.__pwned), undefined);
+
+  // Events that name no usable pane change nothing and throw nothing.
+  for (const [name, payload] of [
+    ["title", null], ["title", {}], ["title", { pane: "2", title: "x" }], ["title", { pane: 2, title: 7 }],
+    ["cwd", null], ["cwd", { pane: 2 }], ["cwd", { pane: 2.5, cwd: "/x" }], ["pane-exit", null], ["pane-exit", {}],
+    ["pane-exit", { pane: "2", code: 0 }], ["frame", null], ["frame", { pane: "2" }], ["frame", { pane: 2.5, seq: 1, full: true }],
+  ]) {
+    await emit(page, name, payload);
+  }
+  assert.deepEqual(await stored(page, 2), { frame: true, size: true, title: "vim README.md", cwd: "/Users/holz/Projects", exited: false });
+  // A title for a pane the page has not seen yet is not an error either.
+  await emit(page, "title", { pane: 77, title: "early" });
+  assert.equal((await stored(page, 77)).title, "early");
+
+  const starts = (await callsOf(page, "start_pane")).length;
+  const fulls = (await callsOf(page, "request_full")).length;
+  await emit(page, "pane-exit", { pane: 2, code: 0 });
+  assert.deepEqual(await stored(page, 2), { frame: false, size: false, title: null, cwd: null, exited: true });
+  assert.equal((await stored(page, 1)).title, "<img src=x onerror=window.__pwned=1>", "another pane is untouched");
+  assert.equal((await stored(page, 1)).frame, true, "another pane's mirror is untouched");
+  assert.equal(await copyText(), "", "the selection text of an exited pane is gone");
+
+  // Late events of the exited pane do not bring it back, and nothing is asked of the core for it.
+  await emit(page, "frame", frame(2, 2, { changed: [stripe(0, 3, GREEN)] }));
+  await emit(page, "frame", frame(2, 9, { full: true }));
+  await emit(page, "title", { pane: 2, title: "late" });
+  await emit(page, "cwd", { pane: 2, cwd: "/late" });
+  assert.deepEqual(await stored(page, 2), { frame: false, size: false, title: null, cwd: null, exited: true });
+  await page.setViewportSize({ width: 900, height: 600 }); // a resize syncs the sizes of the panes of the view
+  await page.waitForFunction(() => window.__MOCK__.callsOf("resize").length >= 1, undefined, { timeout: 5000 });
+  assert.equal((await callsOf(page, "start_pane")).length, starts, "an exited pane was started again");
+  assert.equal((await callsOf(page, "request_full")).length, fulls, "a full frame was asked for an exited pane");
+  assert.ok((await callsOf(page, "resize")).every((a) => a.pane !== 2), "an exited pane was resized");
+}
+
+/** `state.stats`: draw times per 30 draws and the arrival rate of frame events. */
+async function statsCase(page, url) {
+  await open(page, url);
+  const result = await page.evaluate(async () => {
+    const { state } = await import(new URL("state.js", location.href).href);
+    const msg = (seq, full) => ({
+      pane: 1, seq, full, cols: 20, rows: 4, fg: 0xffffff, bg: 0x14091a, cursor: null, scrollbar: [0, 4, 4],
+      selection: [], matches: [], search: null, copy_cursor: null,
+      modes: { alt: false, bracketed_paste: false, mouse: false }, changed: [],
+    });
+    let seq = 1;
+    window.__MOCK__.emit("frame", msg(seq++, true));
+    // Ten frame events for every draw: the arrival rate is far above what the display can draw.
+    for (let draw = 0; draw < 40; draw++) {
+      for (let i = 0; i < 10; i++) window.__MOCK__.emit("frame", msg(seq++, false));
+      await new Promise((done) => requestAnimationFrame(() => done()));
+    }
+    return { ...state.stats, text: document.getElementById("stats").textContent };
+  });
+  assert.ok(Number.isFinite(result.avgMs) && result.avgMs >= 0, `avgMs is ${result.avgMs}`);
+  assert.ok(Number.isFinite(result.maxMs) && result.maxMs >= result.avgMs, `maxMs is ${result.maxMs}`);
+  assert.ok(result.fps > 60, `fps ${result.fps} is the draw rate, not the arrival rate of frame events`);
+  assert.match(result.text, /ms/, "the stats label is still written");
 }

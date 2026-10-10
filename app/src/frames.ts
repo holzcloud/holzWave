@@ -206,3 +206,53 @@ export function visibleSpans(mirror: PaneMirror): SpanMsg[] {
   }
   return out;
 }
+
+// ---- pane lifecycle -----------------------------------------------------------------------------------
+
+/** The per-pane maps of the page's state that must not outlive a pane. */
+export interface PaneStores {
+  frames: { delete(pane: number): boolean };
+  sizes: { delete(pane: number): boolean };
+  titles: { delete(pane: number): boolean };
+  cwds: { delete(pane: number): boolean };
+  exited: { add(pane: number): unknown };
+}
+
+/**
+ * Forget a pane that exited: its mirror, size, title and cwd are deleted and its id is remembered as exited. The
+ * layout's own pane list is not the signal for this (it only lists the active tab's panes, and the panes of other
+ * tabs keep running), so the `pane-exit` event is. A pane nobody heard of is recorded as exited too.
+ */
+export function forgetPane(stores: PaneStores, pane: number): void {
+  stores.frames.delete(pane);
+  stores.sizes.delete(pane);
+  stores.titles.delete(pane);
+  stores.cwds.delete(pane);
+  stores.exited.add(pane);
+}
+
+/** Events per second over the last `windowMs`: the arrival rate of frame events, whatever gets drawn of them. */
+export class RateMeter {
+  private times: number[] = [];
+
+  constructor(private readonly windowMs = 1000) {}
+
+  /** Record one event at `now` (milliseconds on any clock that only goes forward). */
+  note(now: number): void {
+    this.times.push(now);
+    this.trim(now);
+  }
+
+  /** The events in the window ending at `now`, scaled to one second. */
+  perSecond(now: number): number {
+    this.trim(now);
+    return (this.times.length * 1000) / this.windowMs;
+  }
+
+  private trim(now: number): void {
+    const cutoff = now - this.windowMs;
+    let n = 0;
+    while (n < this.times.length && (this.times[n] ?? Infinity) < cutoff) n++;
+    if (n > 0) this.times.splice(0, n);
+  }
+}
