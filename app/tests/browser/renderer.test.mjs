@@ -67,7 +67,46 @@ async function installHarness(page) {
     };
     const corner = (h, img, cx, cy) => at(h, img, cx * CELL_W, cy * CELL_H);
 
-    window.__R = { make, dispose, draw, glError, pixels, at, same, pack, covered, block, cell, corner, CELL_W, CELL_H };
+    /** How many pixels of two images differ, over the whole canvas or the cells [c0, c1) of row 0 only. */
+    const diff = (a, b, from = 0, to = a.length / 4) => {
+      let n = 0;
+      for (let i = from; i < to; i++) {
+        const j = i * 4;
+        if (a[j] !== b[j] || a[j + 1] !== b[j + 1] || a[j + 2] !== b[j + 2]) n++;
+      }
+      return n;
+    };
+    /** Differing pixels between two same-size images inside the cell columns [c0, c1) of the pixel rows [y0, y1). */
+    const diffCols = (h, a, b, c0, c1, y0 = 0, y1 = h.canvas.height) => {
+      let n = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = c0 * CELL_W; x < c1 * CELL_W; x++) {
+          const i = (y * h.canvas.width + x) * 4;
+          if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) n++;
+        }
+      }
+      return n;
+    };
+    /** Pixels in the cell columns [c0, c1) that are not the colour `bg`. */
+    const ink = (h, img, c0, c1, bg) => {
+      let n = 0;
+      for (let y = 0; y < h.canvas.height; y++) {
+        for (let x = c0 * CELL_W; x < c1 * CELL_W; x++) if (!same(at(h, img, x, y), bg)) n++;
+      }
+      return n;
+    };
+    /** A frame of one run per row: `text` covers `cols` cells. */
+    const row = (text, cols, extras, bg = 0x000000) => ({
+      cols, rows: 1, cursor: null, focused: true, fg: WHITE, bg,
+      lines: [[[text, cols, WHITE, bg, 0]]], ...(extras ? { extras: [extras] } : {}),
+    });
+    /** The code point of the n-th distinct test glyph (the probe's mapping). */
+    const glyph = (n) => String.fromCodePoint(0x4e00 + n);
+
+    window.__R = {
+      make, dispose, draw, glError, pixels, at, same, pack, covered, block, cell, corner, diff, diffCols, ink, row, glyph,
+      CELL_W, CELL_H,
+    };
   });
 }
 
@@ -267,6 +306,239 @@ export default async function ({ page, url }) {
       assert.equal(r.err, 0, `${kind}: hostile frame ${i} left a GL error`);
     });
     assert.equal(hostile[kind].ok, 0xff8fb8, `${kind}: the renderer is unusable after hostile frames`);
+  }
+
+  // ---- the atlas never resets in the middle of a frame ------------------------------------------------------
+  // RESEARCH Pitfall 2: five 160x50 frames of unique glyphs on one renderer, the last frame's first row re-using
+  // glyphs of frame 0, must equal that frame on a fresh renderer. Three frames fit and always did.
+  const atlas = await page.evaluate(() => {
+    const R = window.__R;
+    const cols = 160, rows = 50;
+    const frameK = (k) => {
+      const lines = [];
+      for (let y = 0; y < rows; y++) {
+        const kk = y === 0 && k > 0 ? 0 : k;
+        let s = "";
+        for (let x = 0; x < cols; x++) s += R.glyph(kk * cols * rows + y * cols + x);
+        lines.push([[s, cols, 0xffffff, 0x000000, 0]]);
+      }
+      return { cols, rows, cursor: null, focused: true, fg: 0xffffff, bg: 0x000000, lines };
+    };
+    const out = {};
+    for (const frames of [3, 5]) {
+      const long = R.make("webgl", cols, rows);
+      let last;
+      for (let k = 0; k < frames; k++) {
+        last = frameK(k);
+        R.draw(long, last);
+      }
+      const a = R.pixels(long);
+      const errLong = R.glError(long);
+      const fresh = R.make("webgl", cols, rows);
+      R.draw(fresh, last);
+      const b = R.pixels(fresh);
+      out[frames] = { differing: R.diff(a, b), total: a.length / 4, errLong, errFresh: R.glError(fresh) };
+      R.dispose(long);
+      R.dispose(fresh);
+    }
+    return out;
+  });
+  for (const frames of ["3", "5"]) {
+    assert.equal(atlas[frames].errLong + atlas[frames].errFresh, 0, `${frames} frames: GL error`);
+    assert.equal(atlas[frames].differing, 0, `${frames} frames: pixels differ from a fresh renderer`);
+  }
+
+  // The same with a tiny atlas, so every frame resets it: a pane never sees half of a reset, and a pane with more
+  // distinct glyphs than the atlas holds draws the rest as blanks instead of looping.
+  const small = await page.evaluate(() => {
+    const R = window.__R;
+    const cols = 20, rows = 8; // 160 cells; an atlas of 128 x 128 px holds 16 x 8 = 128 slots, one of them blank
+    const mk = (offsets) => {
+      const lines = [];
+      for (let y = 0; y < rows; y++) {
+        let s = "";
+        for (let x = 0; x < cols; x++) s += R.glyph(offsets(y, x));
+        lines.push([[s, cols, 0xffffff, 0x000000, 0]]);
+      }
+      return { cols, rows, cursor: null, focused: true, fg: 0xffffff, bg: 0x000000, lines };
+    };
+    const half = (y, x) => y * cols + x; // 160 distinct glyphs
+    const fewer = (base) => (y, x) => base + ((y * cols + x) % 90); // 90 distinct glyphs
+    const out = {};
+
+    // (a) distinct sets that overflow mid-frame, the next frame re-using glyphs of the first
+    const tiny = R.make("webgl", cols, rows, { atlasSize: 128 });
+    const frames = [mk(fewer(0)), mk(fewer(1000)), mk(fewer(2000)), mk((y, x) => (y < 2 ? fewer(0)(y, x) : fewer(3000)(y, x)))];
+    for (const f of frames) R.draw(tiny, f);
+    const a = R.pixels(tiny);
+    const big = R.make("webgl", cols, rows);
+    R.draw(big, frames[3]);
+    out.mixed = { differing: R.diff(a, R.pixels(big)), err: R.glError(tiny) };
+
+    // (b) more distinct glyphs than the atlas holds: terminates, no error, the first glyphs are right, the rest blank
+    R.draw(tiny, mk(half));
+    const t = R.pixels(tiny);
+    const errB = R.glError(tiny);
+    R.draw(big, mk(half));
+    const g = R.pixels(big);
+    const slots = 127; // 128 slots, slot 0 stays blank
+    const w = tiny.canvas.width;
+    const firstRows = Math.floor(slots / cols); // complete rows that must be right
+    const wrongFirst = R.diffCols(tiny, t, g, 0, cols, 0, firstRows * 16);
+    let inkAfter = 0;
+    for (let y = (firstRows + 1) * 16; y < rows * 16; y++) {
+      for (let x = 0; x < w; x++) if (!R.same(R.at(tiny, t, x, y), [0, 0, 0])) inkAfter++;
+    }
+    out.overfull = { err: errB, wrongFirst, inkAfter, firstRows };
+    R.dispose(tiny);
+    R.dispose(big);
+    return out;
+  });
+  assert.equal(small.mixed.err, 0, "tiny atlas: GL error");
+  assert.equal(small.mixed.differing, 0, "tiny atlas: a frame after resets differs from a fresh renderer");
+  assert.equal(small.overfull.err, 0, "overfull atlas: GL error");
+  assert.equal(small.overfull.wrongFirst, 0, `overfull atlas: the first ${small.overfull.firstRows} rows are not right`);
+  assert.equal(small.overfull.inkAfter, 0, "overfull atlas: glyphs beyond the atlas are not blank");
+
+  // ---- a cluster is one cell: the cells after it stay aligned ------------------------------------------------
+  const align = await bothRenderers(page, (kind) => {
+    const R = window.__R;
+    const out = {};
+    const draw = (f) => {
+      const h = R.make(kind, f.cols, f.rows);
+      R.draw(h, f);
+      const img = R.pixels(h);
+      const err = R.glError(h);
+      return { h, img, err };
+    };
+    // "a", "o" + U+0308, "b" in three cells; the precomposed form is the reference for the cells around it.
+    const cluster = draw(R.row("aob      ", 9, [[1, "\u0308"]]));
+    const plain = draw(R.row("aob      ", 9));
+    const nfc = draw(R.row("a\u00f6b      ", 9));
+    out.err = cluster.err + plain.err + nfc.err;
+    out.leftOfCluster = R.diffCols(cluster.h, cluster.img, nfc.img, 0, 1);
+    out.rightOfCluster = R.diffCols(cluster.h, cluster.img, nfc.img, 2, 9);
+    out.clusterVsPlain = R.diffCols(cluster.h, cluster.img, plain.img, 1, 2);
+    out.clusterInk = R.ink(cluster.h, cluster.img, 1, 2, [0, 0, 0]);
+    out.plainInk = R.ink(plain.h, plain.img, 1, 2, [0, 0, 0]);
+    for (const x of [cluster, plain, nfc]) R.dispose(x.h);
+
+    // A ZWJ family and a flag, each a base code point plus its tail in extras, take their cell(s) and no more.
+    const sample = (base, tail) => {
+      const withTail = draw(R.row(`${base}\0b      `, 9, [[0, tail]]));
+      const withoutTail = draw(R.row(`${base}\0b      `, 9));
+      const blank = draw(R.row("  b      ", 9));
+      const r = {
+        err: withTail.err + withoutTail.err + blank.err,
+        right: R.diffCols(withTail.h, withTail.img, blank.img, 2, 9),
+        tailChangesGlyph: R.diffCols(withTail.h, withTail.img, withoutTail.img, 0, 2),
+        ink: R.ink(withTail.h, withTail.img, 0, 2, [0, 0, 0]),
+      };
+      for (const x of [withTail, withoutTail, blank]) R.dispose(x.h);
+      return r;
+    };
+    out.family = sample("\u{1F468}", "\u200D\u{1F469}\u200D\u{1F467}");
+    out.flag = sample("\u{1F1E9}", "\u{1F1EA}");
+    return out;
+  });
+  for (const kind of ["webgl", "canvas"]) {
+    const a = align[kind];
+    assert.equal(a.err, 0, `${kind}: GL error`);
+    assert.equal(a.leftOfCluster, 0, `${kind}: the cell before a cluster changed`);
+    assert.equal(a.rightOfCluster, 0, `${kind}: cells right of a combining cluster are not aligned`);
+    assert.ok(a.clusterInk > 0, `${kind}: the cluster cell has no ink`);
+    assert.ok(a.clusterVsPlain > 0 && a.clusterInk > a.plainInk, `${kind}: the combining mark was not drawn`);
+    for (const name of ["family", "flag"]) {
+      const c = a[name];
+      assert.equal(c.err, 0, `${kind}: ${name}: GL error`);
+      assert.equal(c.right, 0, `${kind}: ${name}: cells after the cluster are not unaffected`);
+      assert.ok(c.ink > 0, `${kind}: ${name}: no ink`);
+      assert.ok(c.tailChangesGlyph > 0, `${kind}: ${name}: the tail was not drawn with its base`);
+    }
+  }
+
+  // ---- cursor shapes ----------------------------------------------------------------------------------------
+  // Bar: the leftmost 2 device px of the cell. Underline: the bottom 2. Hollow: a 1 px border, interior unchanged.
+  // An unfocused pane shows its cursor hollow whatever its style. Each is exactly that region and nothing else.
+  const shapes = await bothRenderers(page, (kind) => {
+    const R = window.__R;
+    const base = R.covered(40, 6, 0x112233);
+    const h = R.make(kind, 40, 6);
+    R.draw(h, base);
+    const plain = R.pixels(h);
+    const out = {};
+    const region = {
+      bar: (x, y) => x < 2,
+      underline: (x, y) => y >= 14,
+      hollow: (x, y) => x === 0 || x === 7 || y === 0 || y === 15,
+    };
+    const check = (name, frame, inRegion) => {
+      R.draw(h, frame);
+      const err = R.glError(h);
+      const img = R.pixels(h);
+      let wrongIn = 0, wrongOut = 0, outsideCell = 0;
+      for (let y = 0; y < h.canvas.height; y++) {
+        for (let x = 0; x < h.canvas.width; x++) {
+          const p = R.at(h, plain, x, y), c = R.at(h, img, x, y);
+          const cx = x - 3 * 8, cy = y - 1 * 16;
+          const inCell = cx >= 0 && cx < 8 && cy >= 0 && cy < 16;
+          if (!inCell) {
+            if (!R.same(p, c)) outsideCell++;
+          } else if (inRegion(cx, cy)) {
+            if (!R.same(c, [0xff, 0x8f, 0xb8])) wrongIn++;
+          } else if (!R.same(p, c)) wrongOut++;
+        }
+      }
+      out[name] = { err, wrongIn, wrongOut, outsideCell };
+    };
+    const cur = (style) => ({ x: 3, y: 1, style, blink: false });
+    check("bar", { ...base, cursor: cur("bar") }, region.bar);
+    check("underline", { ...base, cursor: cur("underline") }, region.underline);
+    check("hollow", { ...base, cursor: cur("hollow") }, region.hollow);
+    check("unfocusedBlock", { ...base, focused: false, cursor: cur("block") }, region.hollow);
+    check("unfocusedBar", { ...base, focused: false, cursor: cur("bar") }, region.hollow);
+
+    // A wide cell: the bar is one cell's width, the underline spans both, the hollow border goes around both.
+    const wideBase = {
+      cols: 10, rows: 1, cursor: null, focused: true, fg: 0xffffff, bg: 0x000000,
+      // a, a wide character in cells 1 and 2, b, then blanks
+      lines: [[["a\u65e5\0b", 4, 0xffffff, 0x112233, 0], ["      ", 6, 0xffffff, 0x112233, 0]]],
+    };
+    const hw = R.make(kind, 10, 1);
+    R.draw(hw, wideBase);
+    const wplain = R.pixels(hw);
+    const wideCheck = (style, inRegion) => {
+      R.draw(hw, { ...wideBase, cursor: { x: 1, y: 0, style, blink: false } });
+      const img = R.pixels(hw);
+      let wrongIn = 0, wrongOut = 0;
+      for (let y = 0; y < 16; y++) {
+        for (let x = 0; x < 80; x++) {
+          const cx = x - 8; // relative to the wide character's first cell, 16 px wide
+          const inCell = cx >= 0 && cx < 16;
+          const want = inCell && inRegion(cx, y);
+          const c = R.at(hw, img, x, y), p = R.at(hw, wplain, x, y);
+          if (want) {
+            if (!R.same(c, [0xff, 0x8f, 0xb8])) wrongIn++;
+          } else if (!R.same(c, p)) wrongOut++;
+        }
+      }
+      return { wrongIn, wrongOut, err: R.glError(hw) };
+    };
+    out.wideBar = wideCheck("bar", (x, y) => x < 2);
+    out.wideUnderline = wideCheck("underline", (x, y) => y >= 14);
+    out.wideHollow = wideCheck("hollow", (x, y) => x === 0 || x === 15 || y === 0 || y === 15);
+    R.dispose(h);
+    R.dispose(hw);
+    return out;
+  });
+  for (const kind of ["webgl", "canvas"]) {
+    for (const [name, r] of Object.entries(shapes[kind])) {
+      const where = `${kind}: ${name}`;
+      assert.equal(r.err, 0, `${where}: GL error`);
+      assert.equal(r.wrongIn ?? 0, 0, `${where}: part of the shape is not the cursor colour`);
+      assert.equal(r.wrongOut ?? 0, 0, `${where}: the shape covers pixels it should not`);
+      assert.equal(r.outsideCell ?? 0, 0, `${where}: pixels outside the cursor cell changed`);
+    }
   }
 
   // ---- the legacy payload is converted in exactly one place ------------------------------------------------
