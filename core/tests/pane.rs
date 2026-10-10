@@ -231,6 +231,28 @@ fn the_sink_runs_on_the_engine_thread_and_the_handle_can_be_used_from_any_thread
 }
 
 #[test]
+fn a_title_the_program_sets_arrives_as_a_title_event() {
+    let probe = Probe::default();
+    // OSC 2 terminated by BEL; the engine sanitises and queues it, the actor forwards it.
+    let pane = spawn(spec_sh("printf '\\033]2;build done\\007'; sleep 3"), &probe);
+
+    let titles = || {
+        probe
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                PaneEvent::Title(t) => Some(t),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(wait_until(WAIT, || !titles().is_empty()), "no Title event: {:?}", probe.events());
+    assert_eq!(titles(), vec!["build done".to_string()]);
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
 fn frames_are_paced_to_the_interval_and_none_are_sent_while_nothing_changes() {
     let probe = Probe::default();
     let interval = Duration::from_millis(60);
