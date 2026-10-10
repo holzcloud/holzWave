@@ -1,8 +1,8 @@
 // The overlay above the canvas: divider hit areas, the focus box and the selection boxes.
 //
-// Dividers are a keyed set of elements (by split id) that is moved in place on every render. A divider must
-// survive every layout response, because the drag gesture lives on it: the gesture itself listens on `window`
-// and sends at most one `set_ratio` per animation frame.
+// Every element is keyed (dividers by split id, the focus box as "focus", selection boxes by row) and moved in
+// place on every render. A divider must survive every layout response, because the drag gesture lives on it:
+// the gesture itself listens on `window` and sends at most one `set_ratio` per animation frame.
 import { call } from "./bridge.js";
 import { el, setRect } from "./dom.js";
 import type { PxRect } from "./frame.js";
@@ -16,7 +16,8 @@ const focusLayer = el("div", "layer", root);
 const dividerLayer = el("div", "layer", root);
 const selectionLayer = el("div", "layer", root);
 
-const dividers = new Map<number, HTMLElement>();
+const dividers = new Map<number, HTMLElement>(); // split id -> divider element
+const boxes = new Map<string, HTMLElement>(); // "focus" and "sel-<row>" -> box
 let applyView: (v: View) => void = () => {};
 
 /** Hand over the function that takes a layout answer of the core (`set_ratio` answers with the new view). */
@@ -119,9 +120,9 @@ function beginDrag(split: number, node: HTMLElement, e: PointerEvent): void {
 
 // ---- rendering ----------------------------------------------------------------------------------
 
-function syncDividers(view: View): void {
+function syncDividers(view: View | null): void {
   const live = new Set<number>();
-  for (const d of view.dividers) {
+  for (const d of view?.dividers ?? []) {
     live.add(d.split);
     let node = dividers.get(d.split);
     if (!node) {
@@ -142,16 +143,35 @@ function syncDividers(view: View): void {
   if (drag && !live.has(drag.split)) endDrag();
 }
 
-function renderFocus(view: View): void {
-  focusLayer.replaceChildren();
-  if (view.panes.length < 2) return;
-  for (const [id, r] of view.panes) {
-    if (id === view.focus) setRect(el("div", "focus", focusLayer), paneRect(state.metrics, r));
+/** Place the box under `key` in `layer`, creating it on first use; the same element is moved on every render. */
+function place(keep: Set<string>, key: string, cls: string, layer: HTMLElement, r: PxRect): void {
+  keep.add(key);
+  let node = boxes.get(key);
+  if (!node) {
+    node = el("div", cls, layer);
+    boxes.set(key, node);
+  }
+  setRect(node, r);
+}
+
+/** Remove the boxes whose key was not placed in this render. */
+function sweep(keep: Set<string>): void {
+  for (const [key, node] of boxes) {
+    if (keep.has(key)) continue;
+    node.remove();
+    boxes.delete(key);
   }
 }
 
-function renderSelection(view: View): void {
-  selectionLayer.replaceChildren();
+/** The focus box: one element, only while more than one pane is visible. */
+function placeFocus(keep: Set<string>, view: View): void {
+  if (view.panes.length < 2) return;
+  const pane = view.panes.find(([id]) => id === view.focus);
+  if (pane) place(keep, "focus", "focus", focusLayer, paneRect(state.metrics, pane[1]));
+}
+
+/** One box per selected row, keyed by the row. */
+function placeSelection(keep: Set<string>, view: View): void {
   const sel = state.selection;
   if (!sel) return;
   const pane = view.panes.find(([id]) => id === sel.pane);
@@ -163,7 +183,7 @@ function renderSelection(view: View): void {
   for (let row = s[1]; row <= e[1]; row++) {
     const from = row === s[1] ? s[0] : 0;
     const to = row === e[1] ? e[0] : cols - 1;
-    setRect(el("div", "sel", selectionLayer), {
+    place(keep, `sel-${row}`, "sel", selectionLayer, {
       x: g.x + from * m.cellW,
       y: g.y + row * m.cellH,
       w: (to - from + 1) * m.cellW,
@@ -172,18 +192,17 @@ function renderSelection(view: View): void {
   }
 }
 
-/** Bring the overlay in line with `state.view` and `state.selection`. Dividers are moved, never rebuilt. */
+/**
+ * Bring the overlay in line with `state.view` and `state.selection`. Every element is looked up by a stable key
+ * and moved in place; one is created or removed only when its key appears or vanishes.
+ */
 export function renderOverlay(): void {
   const view = state.view;
-  if (!view) {
-    endDrag();
-    for (const node of dividers.values()) node.remove();
-    dividers.clear();
-    focusLayer.replaceChildren();
-    selectionLayer.replaceChildren();
-    return;
+  const keep = new Set<string>();
+  if (view) {
+    placeFocus(keep, view);
+    placeSelection(keep, view);
   }
+  sweep(keep);
   syncDividers(view);
-  renderFocus(view);
-  renderSelection(view);
 }
