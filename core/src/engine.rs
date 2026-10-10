@@ -316,6 +316,64 @@ fn lowercase_char(text: &str) -> Option<char> {
     if lower.next().is_some() { None } else { Some(c) }
 }
 
+/// What a mouse button or the pointer did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseAction {
+    #[default]
+    Press,
+    Release,
+    /// The pointer moved. The button field says which button is held, `MouseButton::None` for none.
+    Motion,
+}
+
+/// A mouse button. The wheel is not one of them: it arrives as a [`WheelEvent`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseButton {
+    /// No button: a motion with nothing held.
+    #[default]
+    None,
+    Left,
+    Middle,
+    Right,
+}
+
+/// A mouse event as the webview saw it.
+///
+/// `x` and `y` are **device pixels** relative to the origin of the pane's grid (the top left corner of the first
+/// cell), not cells: the engine converts with the cell size it learned from [`TerminalEngine::resize`], so the
+/// SGR-Pixels format and sub-cell positions are possible. A position that is not finite, negative or outside the grid
+/// is clamped into it; when the cell size is unknown (`(0, 0)`) the position is treated as cell (0, 0).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MouseEvent {
+    pub action: MouseAction,
+    pub button: MouseButton,
+    pub mods: Mods,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// One wheel event: `rows` is how many rows it moved, negative towards older output (up), positive towards newer
+/// output (down). What it means is decided by [`TerminalEngine::wheel`] from the live terminal modes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WheelEvent {
+    pub rows: i32,
+    pub mods: Mods,
+    /// Device pixels relative to the grid origin, as in [`MouseEvent`].
+    pub x: f32,
+    pub y: f32,
+}
+
+/// What a wheel event turned into.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WheelOutcome {
+    /// The program is to receive these bytes (wheel reports, or arrow keys in the alternate screen).
+    Bytes(Vec<u8>),
+    /// The viewport was scrolled locally; the screen changed.
+    Scrolled,
+    /// Nothing happened: no rows, or the program tracks the mouse in a format that has no wheel.
+    Nothing,
+}
+
 /// What a paste did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasteOutcome {
@@ -625,6 +683,24 @@ pub trait TerminalEngine {
     /// are queued for [`TerminalEngine::take_replies`]. Text that could inject commands is [`PasteOutcome::Rejected`]
     /// unless `allow_unsafe` is set.
     fn paste(&mut self, text: &str, allow_unsafe: bool) -> Result<PasteOutcome>;
+
+    /// Encode a mouse event the way the program asked for it (tracking mode and output format from the live terminal
+    /// modes). The result is empty when the program does not track the mouse, and also for events the mode does not
+    /// report (motion in normal mode, motion with no button in button mode).
+    ///
+    /// Positions are device pixels relative to the grid origin, see [`MouseEvent`]. An engine that reports nothing is
+    /// correct for an engine without mouse support, which is what the default is.
+    fn mouse(&mut self, _event: &MouseEvent) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+
+    /// Decide what a wheel event means right now. Policy, in order: Shift held scrolls the viewport; a program that
+    /// tracks the mouse gets wheel-button reports; the alternate screen with alternate scroll on gets arrow keys
+    /// (application cursor mode honoured); anything else scrolls the viewport. The default scrolls.
+    fn wheel(&mut self, event: &WheelEvent) -> Result<WheelOutcome> {
+        self.scroll(event.rows as isize);
+        Ok(WheelOutcome::Scrolled)
+    }
 
     /// Take every byte the engine wants written to the PTY.
     fn take_replies(&mut self) -> Vec<u8>;
