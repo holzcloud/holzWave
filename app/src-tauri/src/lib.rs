@@ -11,6 +11,7 @@ use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
+use holzwave_core::persist;
 use holzwave_core::pty::Pty;
 use holzwave_core::{GhosttyEngine, Screen, TerminalEngine, Width};
 use serde::Serialize;
@@ -36,12 +37,13 @@ struct App {
 }
 
 impl App {
-    /// Read the layout file. A file that is missing gives a fresh layout; one that is damaged or inconsistent
+    /// Read the layout file. A file that is missing gives a fresh layout. One that is damaged or inconsistent
     /// is repaired or replaced, and its original bytes are copied to `<path>.bad` before anything can
-    /// overwrite them.
+    /// overwrite them. One that is larger than `MAX_LAYOUT_BYTES` is not read; it is moved to `<path>.bad`.
     fn load(path: PathBuf) -> Self {
-        let layout = match std::fs::read(&path) {
-            Ok(bytes) => {
+        let layout = match persist::read_limited(&path, MAX_LAYOUT_BYTES) {
+            Ok(None) => Layout::new().0,
+            Ok(Some(bytes)) => {
                 let (layout, status) = match std::str::from_utf8(&bytes) {
                     Ok(text) => Layout::from_json(text),
                     Err(e) => (Layout::new().0, LoadStatus::Reset(format!("not UTF-8: {e}"))),
@@ -50,16 +52,23 @@ impl App {
                     LoadStatus::Clean => {}
                     LoadStatus::Repaired(repairs) => {
                         eprintln!("holzwave: {} repaired: {}", path.display(), repairs.join("; "));
-                        keep_bad_copy(&path, &bytes);
+                        keep_bad_copy(&path);
                     }
                     LoadStatus::Reset(reason) => {
                         eprintln!("holzwave: {} reset: {reason}", path.display());
-                        keep_bad_copy(&path, &bytes);
+                        keep_bad_copy(&path);
                     }
                 }
                 layout
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Layout::new().0,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                eprintln!("holzwave: {e}; set aside as .bad");
+                let bad = persist::bad_path(&path);
+                if let Err(e) = std::fs::rename(&path, &bad) {
+                    eprintln!("holzwave: cannot move {} to {}: {e}", path.display(), bad.display());
+                }
+                Layout::new().0
+            }
             Err(e) => {
                 eprintln!("holzwave: cannot read {}: {e}", path.display());
                 Layout::new().0
@@ -68,27 +77,24 @@ impl App {
         App { layout: Mutex::new(layout), sessions: Mutex::default(), path }
     }
 
-    /// Persist after every change; written to a temporary file first so a crash cannot truncate it.
+    /// Persist after every change: serialise here, write atomically (temporary file, fsync, rename). A
+    /// failure is logged, not dropped.
     fn save(&self, layout: &Layout) {
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = self.path.with_extension("json.tmp");
-        if let Ok(json) = serde_json::to_string_pretty(layout) {
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.path);
+        match serde_json::to_vec_pretty(layout) {
+            Ok(json) => {
+                if let Err(e) = persist::write_atomic(&self.path, &json) {
+                    eprintln!("holzwave: cannot save {}: {e}", self.path.display());
+                }
             }
+            Err(e) => eprintln!("holzwave: cannot serialise the layout: {e}"),
         }
     }
 }
 
-/// Copy the bytes of a layout file that could not be used as they were to `<path>.bad`.
-fn keep_bad_copy(path: &std::path::Path, bytes: &[u8]) {
-    let mut name = path.file_name().map(std::ffi::OsString::from).unwrap_or_default();
-    name.push(".bad");
-    let bad = path.with_file_name(name);
-    if let Err(e) = std::fs::write(&bad, bytes) {
-        eprintln!("holzwave: cannot keep {}: {e}", bad.display());
+/// Copy a layout file that could not be used as it was to `<path>.bad`.
+fn keep_bad_copy(path: &std::path::Path) {
+    if let Err(e) = persist::backup_bad(path) {
+        eprintln!("holzwave: cannot keep a copy of {}: {e}", path.display());
     }
 }
 
