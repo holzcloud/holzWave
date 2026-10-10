@@ -8,13 +8,13 @@ use libghostty_vt::render::{
 };
 use libghostty_vt::screen::{CellWide, Screen as VtScreen};
 use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
-use libghostty_vt::style::Underline;
+use libghostty_vt::style::{Palette, PaletteIndex, RgbColor, Underline};
 use libghostty_vt::terminal::{ClipboardMime, Mode, Point, PointCoordinate, ScrollViewport, SizeReportSize};
 use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::engine::{
-    Cell, Color, Cursor, CursorStyle, KeyAction, KeyEvent, Modes, Mods, PasteOutcome, RowUpdate, Screen,
-    Scrollbar, SelectMode, SelectOp, Span, TerminalEngine, Update, Width,
+    Cell, Color, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent, Modes, Mods, PasteOutcome,
+    RowUpdate, Screen, Scrollbar, SelectMode, SelectOp, Span, TerminalEngine, Update, Width, sanitize_program_text,
 };
 use crate::{Error, Result};
 
@@ -23,6 +23,22 @@ use crate::{Error, Result};
 /// A program can ask for a reply with a few bytes of query; without a bound a flood of queries grows the buffer as
 /// fast as the program can write. User-controlled bytes (a paste) are not subject to it.
 const REPLY_CAP: usize = 64 * 1024;
+
+/// The most events (titles, working directories) that wait for `take_events` at once. A program can change its title
+/// as fast as it can write; only the latest few matter, so the oldest are dropped.
+const MAX_PENDING_EVENTS: usize = 64;
+
+/// Queue an event from a program: dropped when it repeats the previous one, the oldest dropped when the queue is full.
+fn push_event(queue: &Rc<RefCell<Vec<EngineEvent>>>, event: EngineEvent) {
+    let mut queue = queue.borrow_mut();
+    if queue.last() == Some(&event) {
+        return;
+    }
+    if queue.len() >= MAX_PENDING_EVENTS {
+        queue.remove(0);
+    }
+    queue.push(event);
+}
 
 fn eng<E: std::fmt::Debug>(e: E) -> Error {
     Error::Engine(format!("{e:?}"))
@@ -313,6 +329,8 @@ pub struct GhosttyEngine {
     /// not change keeps its range. Setting or clearing a selection, scrolling and resizing are full passes that
     /// refresh every row.
     sel_cache: Vec<Option<(u16, u16)>>,
+    /// Titles and working directories the program set since the last `take_events`, already sanitised.
+    events: Rc<RefCell<Vec<EngineEvent>>>,
 }
 
 impl GhosttyEngine {
@@ -321,6 +339,7 @@ impl GhosttyEngine {
         terminal.set_scrollback_max_lines(Some(max_scrollback)).map_err(eng)?;
         let replies: Rc<RefCell<Vec<u8>>> = Rc::default();
         let reply_cap: Rc<StdCell<Option<usize>>> = Rc::default();
+        let events: Rc<RefCell<Vec<EngineEvent>>> = Rc::default();
         {
             // Callbacks run synchronously inside `vt_write`, `resize` and `paste`, and a panic inside one aborts
             // the process: only plain pushes here, no unwrap, and a failed borrow cannot happen because the
@@ -352,9 +371,28 @@ impl GhosttyEngine {
                     })
                 })
                 .map_err(eng)?;
-            // Deliberately not installed: on_clipboard_read and on_clipboard_write (OSC 52 stays inert, and the
-            // read callback would turn on Kitty paste events), and title reports stay disabled (a program could
-            // put text into its own input with them).
+            // Title (OSC 0 and 2) and working directory (OSC 7): program-controlled strings, sanitised here at the
+            // boundary (length cap, no control characters) before anything else sees them. Same rule as above: plain
+            // pushes only, a panic in a callback aborts the process.
+            let queue = events.clone();
+            terminal
+                .on_title_changed(move |t| {
+                    if let Ok(title) = t.title() {
+                        push_event(&queue, EngineEvent::Title(sanitize_program_text(title)));
+                    }
+                })
+                .map_err(eng)?;
+            let queue = events.clone();
+            terminal
+                .on_pwd_changed(move |t| {
+                    if let Ok(pwd) = t.pwd() {
+                        push_event(&queue, EngineEvent::Pwd(sanitize_program_text(pwd)));
+                    }
+                })
+                .map_err(eng)?;
+            // Deliberately not installed: on_bell (nothing in the shell reacts to it yet), on_clipboard_read and
+            // on_clipboard_write (OSC 52 stays inert, and the read callback would turn on Kitty paste events), and
+            // title reports stay disabled (a program could put text into its own input with them).
         }
         Ok(Self {
             terminal,
@@ -369,6 +407,7 @@ impl GhosttyEngine {
             force_full: true,
             last_size: None,
             sel_cache: Vec::new(),
+            events,
         })
     }
 }
@@ -620,6 +659,33 @@ impl TerminalEngine for GhosttyEngine {
 
     fn request_full(&mut self) {
         self.force_full = true;
+    }
+
+    fn set_theme(&mut self, theme: &EngineTheme) -> Result<()> {
+        let rgb = |c: Color| RgbColor { r: c.r, g: c.g, b: c.b };
+        // The sixteen colours of the theme go into a default palette, and the 6x6x6 cube and the grey ramp are
+        // derived from background and foreground (interpolated, entries 0 to 15 are kept).
+        let mut base = Palette::default();
+        for (i, c) in theme.ansi.iter().enumerate() {
+            base.set(PaletteIndex(i as u8), rgb(*c));
+        }
+        let palette = Palette::generate(Some(&base), None, rgb(theme.bg), rgb(theme.fg), true);
+        self.terminal
+            .set_default_fg_color(Some(rgb(theme.fg)))
+            .map_err(eng)?
+            .set_default_bg_color(Some(rgb(theme.bg)))
+            .map_err(eng)?
+            .set_default_cursor_color(Some(rgb(theme.cursor)))
+            .map_err(eng)?
+            .set_default_color_palette(Some(palette))
+            .map_err(eng)?;
+        // Everything is dirty after this; the consumer replaces its mirror.
+        self.force_full = true;
+        Ok(())
+    }
+
+    fn take_events(&mut self) -> Vec<EngineEvent> {
+        std::mem::take(&mut *self.events.borrow_mut())
     }
 
     fn select(&mut self, op: SelectOp) -> Result<()> {

@@ -771,32 +771,94 @@
       ]
     },
     {
-      "name": "resize to 24x6",
+      "name": "select two rows",
       "input": "",
-      "resize": [
-        24,
-        6
-      ],
+      "select": "[Begin { x: 0, y: 3, mode: Cell }, Extend { x: 3, y: 4 }]",
+      "resize": null,
       "frame": {
         "pane": 1,
         "seq": 8,
-        "full": true,
-        "cols": 24,
-        "rows": 6,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
         "fg": 16777215,
         "bg": 0,
         "cursor": {
           "x": 3,
-          "y": 5,
+          "y": 4,
           "style": "block",
           "blink": false
         },
         "scrollbar": [
-          4,
+          5,
           10,
-          6
+          5
         ],
-        "selection": [],
+        "selection": [
+          [
+            3,
+            0,
+            19
+          ],
+          [
+            4,
+            0,
+            3
+          ]
+        ],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": []
+      },
+      "grid": [
+        "six",
+        "red u it",
+        "日本!",
+        "👨‍👩‍👧 ok",
+        "éöx"
+      ]
+    },
+    {
+      "name": "selection follows a scroll",
+      "input": "\\r\\nmore",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 9,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 4,
+          "y": 4,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          6,
+          11,
+          5
+        ],
+        "selection": [
+          [
+            2,
+            0,
+            19
+          ],
+          [
+            3,
+            0,
+            3
+          ]
+        ],
         "matches": [],
         "search": null,
         "copy_cursor": null,
@@ -808,30 +870,6 @@
         "changed": [
           {
             "y": 0,
-            "runs": [
-              [
-                "five                    ",
-                24,
-                16777215,
-                0,
-                0
-              ]
-            ]
-          },
-          {
-            "y": 1,
-            "runs": [
-              [
-                "six                     ",
-                24,
-                16777215,
-                0,
-                0
-              ]
-            ]
-          },
-          {
-            "y": 2,
             "runs": [
               [
                 "red",
@@ -871,7 +909,212 @@
             ]
           },
           {
+            "y": 1,
+            "runs": [
+              [
+                "日\u0000本\u0000!               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "👨\u0000 ok               ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "‍👩‍👧"
+              ]
+            ]
+          },
+          {
             "y": 3,
+            "runs": [
+              [
+                "eox                 ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "extras": [
+              [
+                0,
+                "́"
+              ],
+              [
+                1,
+                "̈"
+              ]
+            ]
+          },
+          {
+            "y": 4,
+            "runs": [
+              [
+                "more                ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "red u it",
+        "日本!",
+        "👨‍👩‍👧 ok",
+        "éöx",
+        "more"
+      ]
+    },
+    {
+      "name": "selection cleared",
+      "input": "",
+      "select": "[Clear]",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 10,
+        "full": false,
+        "cols": 20,
+        "rows": 5,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 4,
+          "y": 4,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          6,
+          11,
+          5
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": []
+      },
+      "grid": [
+        "red u it",
+        "日本!",
+        "👨‍👩‍👧 ok",
+        "éöx",
+        "more"
+      ]
+    },
+    {
+      "name": "resize to 24x6",
+      "input": "",
+      "resize": [
+        24,
+        6
+      ],
+      "frame": {
+        "pane": 1,
+        "seq": 11,
+        "full": true,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 4,
+          "y": 5,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "six                     ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "red",
+                3,
+                13395558,
+                0,
+                1
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "u",
+                1,
+                16777215,
+                11910504,
+                4
+              ],
+              [
+                " ",
+                1,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "it",
+                2,
+                16777215,
+                0,
+                10
+              ]
+            ]
+          },
+          {
+            "y": 2,
             "runs": [
               [
                 "日\u0000本\u0000!                   ",
@@ -883,7 +1126,7 @@
             ]
           },
           {
-            "y": 4,
+            "y": 3,
             "runs": [
               [
                 "👨\u0000 ok                   ",
@@ -901,7 +1144,7 @@
             ]
           },
           {
-            "y": 5,
+            "y": 4,
             "runs": [
               [
                 "eox                     ",
@@ -921,16 +1164,28 @@
                 "̈"
               ]
             ]
+          },
+          {
+            "y": 5,
+            "runs": [
+              [
+                "more                    ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
           }
         ]
       },
       "grid": [
-        "five",
         "six",
         "red u it",
         "日本!",
         "👨‍👩‍👧 ok",
-        "éöx"
+        "éöx",
+        "more"
       ]
     },
     {
@@ -939,7 +1194,7 @@
       "resize": null,
       "frame": {
         "pane": 1,
-        "seq": 9,
+        "seq": 12,
         "full": false,
         "cols": 24,
         "rows": 6,
@@ -1015,21 +1270,21 @@
       "resize": null,
       "frame": {
         "pane": 1,
-        "seq": 10,
+        "seq": 13,
         "full": false,
         "cols": 24,
         "rows": 6,
         "fg": 16777215,
         "bg": 0,
         "cursor": {
-          "x": 3,
+          "x": 4,
           "y": 5,
           "style": "block",
           "blink": false
         },
         "scrollbar": [
-          4,
-          10,
+          5,
+          11,
           6
         ],
         "selection": [],
@@ -1046,18 +1301,6 @@
             "y": 0,
             "runs": [
               [
-                "five                    ",
-                24,
-                16777215,
-                0,
-                0
-              ]
-            ]
-          },
-          {
-            "y": 1,
-            "runs": [
-              [
                 "six                     ",
                 24,
                 16777215,
@@ -1067,7 +1310,7 @@
             ]
           },
           {
-            "y": 2,
+            "y": 1,
             "runs": [
               [
                 "red",
@@ -1107,7 +1350,7 @@
             ]
           },
           {
-            "y": 3,
+            "y": 2,
             "runs": [
               [
                 "日\u0000本\u0000!                   ",
@@ -1119,7 +1362,7 @@
             ]
           },
           {
-            "y": 4,
+            "y": 3,
             "runs": [
               [
                 "👨\u0000 ok                   ",
@@ -1137,7 +1380,7 @@
             ]
           },
           {
-            "y": 5,
+            "y": 4,
             "runs": [
               [
                 "eox                     ",
@@ -1157,16 +1400,28 @@
                 "̈"
               ]
             ]
+          },
+          {
+            "y": 5,
+            "runs": [
+              [
+                "more                    ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
           }
         ]
       },
       "grid": [
-        "five",
         "six",
         "red u it",
         "日本!",
         "👨‍👩‍👧 ok",
-        "éöx"
+        "éöx",
+        "more"
       ]
     },
     {
@@ -1175,7 +1430,7 @@
       "resize": null,
       "frame": {
         "pane": 1,
-        "seq": 11,
+        "seq": 14,
         "full": false,
         "cols": 24,
         "rows": 6,
@@ -1183,8 +1438,8 @@
         "bg": 0,
         "cursor": null,
         "scrollbar": [
-          4,
-          10,
+          5,
+          11,
           6
         ],
         "selection": [],
@@ -1199,12 +1454,12 @@
         "changed": []
       },
       "grid": [
-        "five",
         "six",
         "red u it",
         "日本!",
         "👨‍👩‍👧 ok",
-        "éöx"
+        "éöx",
+        "more"
       ]
     },
     {
@@ -1213,7 +1468,7 @@
       "resize": null,
       "frame": {
         "pane": 1,
-        "seq": 12,
+        "seq": 15,
         "full": false,
         "cols": 24,
         "rows": 6,
@@ -1221,8 +1476,8 @@
         "bg": 0,
         "cursor": null,
         "scrollbar": [
-          4,
-          10,
+          5,
+          11,
           6
         ],
         "selection": [],

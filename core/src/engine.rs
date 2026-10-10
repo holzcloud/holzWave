@@ -414,17 +414,68 @@ pub const MAX_EVENT_BYTES: usize = 4096;
 /// Make text that a program controls safe to hand to the UI: control characters (C0, DEL and C1) are removed and the
 /// result is cut to [`MAX_EVENT_BYTES`] on a character boundary.
 pub fn sanitize_program_text(text: &str) -> String {
-    // Skeleton: the behaviour arrives with the plan's GREEN step.
-    text.to_owned()
+    let mut out = String::with_capacity(text.len().min(MAX_EVENT_BYTES));
+    for c in text.chars().filter(|c| !c.is_control()) {
+        if out.len() + c.len_utf8() > MAX_EVENT_BYTES {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The value of one hex digit.
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decode `%XX` escapes. `None` for a truncated or non-hex escape and for bytes that are not UTF-8 afterwards.
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = hex_value(*bytes.get(i + 1)?)?;
+            let lo = hex_value(*bytes.get(i + 2)?)?;
+            out.push(hi << 4 | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The host and the absolute path of an OSC 7 value (`file://host/path`, percent-encoded).
 ///
 /// `None` unless the scheme is `file`, the path is absolute and has no `..` segment after decoding, and nothing in
-/// the value is a control character.
-pub fn parse_osc7(_value: &str) -> Option<(String, PathBuf)> {
-    // Skeleton: the behaviour arrives with the plan's GREEN step.
-    None
+/// the value is a control character. The result names a working directory for a new shell, so it must never be able
+/// to point somewhere the program did not already have access to by walking up with `..` (T-02-35). The path is
+/// returned as written otherwise: `?` and `#` are part of a name, not a query or a fragment.
+pub fn parse_osc7(value: &str) -> Option<(String, PathBuf)> {
+    if value.len() > MAX_EVENT_BYTES || value.chars().any(char::is_control) {
+        return None;
+    }
+    let scheme = value.get(..7)?;
+    if !scheme.eq_ignore_ascii_case("file://") {
+        return None;
+    }
+    let rest = &value[7..];
+    let slash = rest.find('/')?;
+    let (host, path) = rest.split_at(slash);
+    let path = percent_decode(path)?;
+    // After decoding, so that %2e%2e and %2F cannot smuggle a segment past the check.
+    if path.chars().any(char::is_control) || path.split('/').any(|segment| segment == "..") {
+        return None;
+    }
+    Some((host.to_owned(), PathBuf::from(path)))
 }
 
 /// How far a pointer selection grows.

@@ -85,19 +85,23 @@ fn the_cube_and_the_grey_ramp_exist_and_differ_from_the_engine_defaults() {
 }
 
 #[test]
-fn colour_queries_are_answered_with_the_theme() {
+fn colour_queries_are_answered_with_the_theme_and_the_queries_own_terminator() {
+    // The reply ends the way the query ended (BEL for BEL, ST for ST), as xterm does; the colour is the theme's.
     let mut e = themed();
     e.take_replies();
 
     e.feed(b"\x1b]11;?\x07");
-    assert_eq!(ascii(&e.take_replies()), r"\x1b]11;rgb:4444/5555/6666\x1b\\", "OSC 11 is the background");
+    assert_eq!(ascii(&e.take_replies()), r"\x1b]11;rgb:4444/5555/6666\x07", "OSC 11 is the background");
     e.feed(b"\x1b]10;?\x07");
-    assert_eq!(ascii(&e.take_replies()), r"\x1b]10;rgb:1111/2222/3333\x1b\\", "OSC 10 is the foreground");
+    assert_eq!(ascii(&e.take_replies()), r"\x1b]10;rgb:1111/2222/3333\x07", "OSC 10 is the foreground");
     e.feed(b"\x1b]12;?\x07");
-    assert_eq!(ascii(&e.take_replies()), r"\x1b]12;rgb:7777/8888/9999\x1b\\", "OSC 12 is the cursor");
+    assert_eq!(ascii(&e.take_replies()), r"\x1b]12;rgb:7777/8888/9999\x07", "OSC 12 is the cursor");
+
+    e.feed(b"\x1b]11;?\x1b\\");
+    assert_eq!(ascii(&e.take_replies()), r"\x1b]11;rgb:4444/5555/6666\x1b\\", "an ST query gets an ST reply");
 
     let a1 = theme().ansi[1];
-    e.feed(b"\x1b]4;1;?\x07");
+    e.feed(b"\x1b]4;1;?\x1b\\");
     let expected = format!(
         r"\x1b]4;1;rgb:{0:02x}{0:02x}/{1:02x}{1:02x}/{2:02x}{2:02x}\x1b\\",
         a1.r, a1.g, a1.b
@@ -119,7 +123,7 @@ fn a_programs_own_background_wins_over_the_theme_until_osc_111() {
     assert_eq!(overridden.default_bg, c(0xff, 0, 0), "the program's colour stays");
     e.take_replies();
     e.feed(b"\x1b]11;?\x07");
-    assert_eq!(ascii(&e.take_replies()), r"\x1b]11;rgb:ffff/0000/0000\x1b\\");
+    assert_eq!(ascii(&e.take_replies()), r"\x1b]11;rgb:ffff/0000/0000\x07");
 
     e.feed(b"\x1b]111\x07");
     let restored = e.update().expect("update");
