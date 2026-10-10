@@ -23,7 +23,13 @@
       }
     ]
   },
+  "app_info": {
+    "hostname": "holz-mac.local",
+    "os": "macos",
+    "version": "0.0.1-alpha1"
+  },
   "commands": {
+    "app_info": [],
     "close_pane": [
       "pane"
     ],
@@ -48,9 +54,20 @@
       "release",
       "composing"
     ],
+    "mouse": [
+      "pane",
+      "action",
+      "button",
+      "x",
+      "y",
+      "mods"
+    ],
     "new_tab": [],
     "new_workspace": [
       "name"
+    ],
+    "open_url": [
+      "url"
     ],
     "paste": [
       "pane",
@@ -70,6 +87,10 @@
       "rows",
       "cell_w",
       "cell_h"
+    ],
+    "reveal_path": [
+      "path",
+      "base"
     ],
     "scroll": [
       "pane",
@@ -116,6 +137,13 @@
     "text": [
       "pane",
       "text"
+    ],
+    "wheel": [
+      "pane",
+      "rows",
+      "x",
+      "y",
+      "mods"
     ]
   },
   "events": {
@@ -425,6 +453,19 @@
       "pane": 3,
       "title": "vim README.md"
     }
+  },
+  "mouse": {
+    "actions": [
+      "press",
+      "release",
+      "motion"
+    ],
+    "buttons": [
+      "left",
+      "middle",
+      "right",
+      "none"
+    ]
   },
   "ops": {
     "copy_mode": [

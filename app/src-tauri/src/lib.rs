@@ -76,6 +76,11 @@ pub fn run() {
             commands::set_setting,
             commands::reset_setting,
             commands::reload_settings,
+            commands::app_info,
+            commands::open_url,
+            commands::reveal_path,
+            commands::mouse,
+            commands::wheel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")

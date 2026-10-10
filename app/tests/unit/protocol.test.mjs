@@ -82,6 +82,21 @@ test("the settings view has exactly the documented keys at every level and the s
   assert.ok(Array.isArray(view.warnings) && view.warnings.every((w) => typeof w === "string"));
 });
 
+test("the app info and the pointer commands are pinned", () => {
+  assert.deepEqual(keys(golden.app_info), ["hostname", "os", "version"]);
+  for (const value of Object.values(golden.app_info)) assert.equal(typeof value, "string");
+  assert.deepEqual(golden.mouse.actions, ["press", "release", "motion"]);
+  assert.deepEqual(golden.mouse.buttons, ["left", "middle", "right", "none"]);
+  assert.deepEqual(golden.commands.app_info, []);
+  assert.deepEqual(golden.commands.open_url, ["url"]);
+  assert.deepEqual(golden.commands.reveal_path, ["path", "base"]);
+  assert.deepEqual(golden.commands.mouse, ["pane", "action", "button", "x", "y", "mods"]);
+  assert.deepEqual(golden.commands.wheel, ["pane", "rows", "x", "y", "mods"]);
+  for (const name of ["note_window", "placement"]) {
+    assert.ok(!(name in golden.commands), `${name} is a method of the core, not a command`);
+  }
+});
+
 test("the settings commands take snake_case arguments", () => {
   assert.deepEqual(golden.commands.get_settings, []);
   assert.deepEqual(golden.commands.set_setting, ["key", "value"]);

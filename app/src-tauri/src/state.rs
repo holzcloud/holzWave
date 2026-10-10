@@ -657,31 +657,73 @@ impl AppCore {
 
     // ---- links, paths, app info and the pointer ------------------------------------------------------------
 
-    /// Open a link with the platform opener. Only http, https and mailto links are opened.
-    ///
-    /// Starts a process, so the command is async.
-    pub fn open_url(&self, _url: &str) -> Result<(), String> {
-        Err("not implemented".into())
+    /// Start `launch` through the configured launcher.
+    fn launch(&self, launch: &Launch) -> Result<(), String> {
+        let run = *lock(&self.launcher);
+        run(launch)
     }
 
-    /// Reveal a file or folder in the platform file manager without ever running it.
+    /// Open a link with the platform opener. Only http, https and mailto links are opened; the length, the
+    /// characters and the shape are checked first, and nothing is started for a link that fails (T-02-52).
+    ///
+    /// Starts a process, so the command is async.
+    pub fn open_url(&self, url: &str) -> Result<(), String> {
+        let launch = open_launch(std::env::consts::OS, url)?;
+        self.launch(&launch)
+    }
+
+    /// Reveal a file or folder in the platform file manager. `path` is absolute, starts with `~/`, or is relative
+    /// to `base` (the working directory of the pane); it has to exist. What is revealed is shown and never run
+    /// (T-02-52).
     ///
     /// Touches the file system and starts a process, so the command is async.
-    pub fn reveal_path(&self, _path: &str, _base: Option<&str>) -> Result<(), String> {
-        Err("not implemented".into())
+    pub fn reveal_path(&self, path: &str, base: Option<&str>) -> Result<(), String> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let resolved = resolve_reveal(path, base, home.as_deref())?;
+        let launch = reveal_launch(std::env::consts::OS, &resolved)?;
+        self.launch(&launch)
     }
 
     /// The version of the app, the operating system and the name of the machine.
+    ///
+    /// Runs a program on macOS, so the command is async.
     pub fn app_info(&self) -> AppInfo {
-        AppInfo { version: String::new(), os: String::new(), hostname: String::new() }
+        AppInfo {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            os: std::env::consts::OS.to_owned(),
+            hostname: read_hostname(),
+        }
     }
 
-    /// A mouse press, release or motion at device pixels `x`, `y` from the origin of the pane's grid. Only pushes
-    /// to the pane's queue.
-    pub fn mouse(&self, _pane: PaneId, _action: MouseAction, _button: MouseButton, _x: f64, _y: f64, _mods: u32) {}
+    /// A mouse press, release or motion at device pixels `x`, `y` from the origin of the pane's grid. The numbers
+    /// are bounded here (T-02-90) and the event only goes to the pane's queue: whether the program hears of it is
+    /// the engine's decision. An unknown pane, or one that is closing, is ignored.
+    pub fn mouse(&self, pane: PaneId, action: MouseAction, button: MouseButton, x: f64, y: f64, mods: u32) {
+        if let Some(handle) = self.handle(pane) {
+            let event = MouseEvent {
+                action,
+                button,
+                mods: pointer_mods(mods),
+                x: clamp_pointer(x),
+                y: clamp_pointer(y),
+            };
+            let _ = handle.mouse(event);
+        }
+    }
 
-    /// A wheel event of `rows` rows (negative towards older output) at `x`, `y`. Only pushes to the pane's queue.
-    pub fn wheel(&self, _pane: PaneId, _rows: i32, _x: f64, _y: f64, _mods: u32) {}
+    /// A wheel event of `rows` rows (negative towards older output) at `x`, `y`. Bounded like [`AppCore::mouse`]
+    /// and only pushed to the pane's queue.
+    pub fn wheel(&self, pane: PaneId, rows: i32, x: f64, y: f64, mods: u32) {
+        if let Some(handle) = self.handle(pane) {
+            let event = WheelEvent {
+                rows: clamp_rows(rows),
+                mods: pointer_mods(mods),
+                x: clamp_pointer(x),
+                y: clamp_pointer(y),
+            };
+            let _ = handle.wheel(event);
+        }
+    }
 
     // ---- settings, themes and key bindings ---------------------------------------------------------------------
 
@@ -1166,43 +1208,176 @@ const MAX_POINTER_PX: f64 = 100_000.0;
 /// The most rows one wheel event moves, in either direction.
 const MAX_WHEEL_ROWS: i32 = 100;
 
+/// The first part of text that came from outside, for a message.
+fn short(text: &str) -> String {
+    text.chars().take(40).collect()
+}
+
+/// Whether `url` is a link that may be opened: at most [`MAX_URL_BYTES`], no control or blank character, and the
+/// scheme http or https with a host, or mailto with an address. The text is never interpreted further.
+fn check_link(url: &str) -> Result<(), String> {
+    if url.len() > MAX_URL_BYTES {
+        return Err(format!("the link is longer than {MAX_URL_BYTES} bytes"));
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("the link has a control or blank character".into());
+    }
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return Err("the link has no scheme".into());
+    };
+    let names_something = match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => rest.strip_prefix("//").is_some_and(|host| !host.is_empty() && !host.starts_with('/')),
+        "mailto" => !rest.is_empty(),
+        _ => {
+            return Err(format!(
+                "links of the kind {:?} are not opened, only http, https and mailto",
+                short(scheme)
+            ));
+        }
+    };
+    if names_something { Ok(()) } else { Err("the link names nothing to open".into()) }
+}
+
 /// How the platform opens a link: validated first, then one fixed program with the link as its only argument.
-fn open_launch(_os: &str, _url: &str) -> Result<Launch, String> {
-    Err("not implemented".into())
+/// macOS uses `/usr/bin/open` by absolute path; Linux uses `xdg-open`, the one program that is looked up through
+/// PATH (there is no fixed place for it). Other platforms follow in phase 2.2.
+fn open_launch(os: &str, url: &str) -> Result<Launch, String> {
+    check_link(url)?;
+    match os {
+        "macos" => Ok(Launch { program: "/usr/bin/open", args: vec![url.to_owned()] }),
+        "linux" => Ok(Launch { program: "xdg-open", args: vec![url.to_owned()] }),
+        other => Err(format!("opening links is not supported on {other} yet")),
+    }
 }
 
-/// The path a `reveal_path` call means: absolute, `~/` from the home directory, or relative to `base`. It has to
-/// exist.
-fn resolve_reveal(_path: &str, _base: Option<&str>, _home: Option<&Path>) -> Result<PathBuf, String> {
-    Err("not implemented".into())
+/// Whether `text` can be a path from the webview: not empty, at most [`MAX_PATH_BYTES`], no control character.
+fn check_path_text(what: &str, text: &str) -> Result<(), String> {
+    if text.is_empty() {
+        Err(format!("{what} is empty"))
+    } else if text.len() > MAX_PATH_BYTES {
+        Err(format!("{what} is longer than {MAX_PATH_BYTES} bytes"))
+    } else if text.chars().any(char::is_control) {
+        Err(format!("{what} has a control character"))
+    } else {
+        Ok(())
+    }
 }
 
-/// How the platform shows an existing absolute path in the file manager, without running it.
-fn reveal_launch(_os: &str, _path: &Path) -> Result<Launch, String> {
-    Err("not implemented".into())
+/// The path a `reveal_path` call means: absolute, `~/` from the home directory, or relative to `base`, which has to
+/// be absolute. The result is absolute (so it can never be taken for an option) and has to exist; a symbolic link
+/// counts as what it is and is not followed.
+fn resolve_reveal(path: &str, base: Option<&str>, home: Option<&Path>) -> Result<PathBuf, String> {
+    check_path_text("the path", path)?;
+    let resolved = if let Some(rest) = path.strip_prefix("~/") {
+        let home = home.filter(|h| h.is_absolute()).ok_or("the home directory is not known")?;
+        // `~//etc` is below the home directory, not the root: a joined absolute path would replace it.
+        home.join(rest.trim_start_matches('/'))
+    } else if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        let base = base.ok_or("a relative path needs the working directory of the pane")?;
+        check_path_text("the working directory", base)?;
+        let base = Path::new(base);
+        if !base.is_absolute() {
+            return Err("the working directory is not an absolute path".into());
+        }
+        base.join(path)
+    };
+    if !resolved.is_absolute() {
+        return Err("the path is not absolute".into());
+    }
+    std::fs::symlink_metadata(&resolved).map_err(|_| "there is no such file or folder".to_owned())?;
+    Ok(resolved)
+}
+
+/// How the platform shows an existing absolute path in the file manager, without running it. macOS reveals the item
+/// in Finder (`open -R`); Linux has no reveal, so the folder that holds a file is opened and a folder is opened as it
+/// is. The opener is only ever given the path as an argument (T-02-52).
+fn reveal_launch(os: &str, path: &Path) -> Result<Launch, String> {
+    if !path.is_absolute() {
+        return Err("the path is not absolute".into());
+    }
+    let text = |p: &Path| p.to_str().map(str::to_owned).ok_or_else(|| "the path is not valid text".to_owned());
+    match os {
+        "macos" => Ok(Launch { program: "/usr/bin/open", args: vec!["-R".into(), text(path)?] }),
+        "linux" => {
+            let target = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+            Ok(Launch { program: "xdg-open", args: vec![text(target)?] })
+        }
+        other => Err(format!("revealing files is not supported on {other} yet")),
+    }
 }
 
 /// Start `launch` and do not wait for it: a browser that is started anew can run for as long as the user keeps it.
-fn spawn_launch(_launch: &Launch) -> Result<(), String> {
-    Err("not implemented".into())
+/// Its status is collected on a thread of its own so that no zombie is left.
+fn spawn_launch(launch: &Launch) -> Result<(), String> {
+    let mut child = std::process::Command::new(launch.program)
+        .args(&launch.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", launch.program))?;
+    let reaper = std::thread::Builder::new().name("hw-opener".into()).spawn(move || {
+        let _ = child.wait();
+    });
+    if let Err(e) = reaper {
+        eprintln!("holzwave: cannot start the thread that collects the opener: {e}");
+    }
+    Ok(())
 }
 
-/// A pointer coordinate as the engine gets it: finite and between 0 and [`MAX_POINTER_PX`].
+/// A pointer coordinate as the engine gets it: finite and between 0 and [`MAX_POINTER_PX`]. A value that is not
+/// finite is 0, as in the engine.
 fn clamp_pointer(value: f64) -> f32 {
-    value as f32
+    if value.is_finite() { value.clamp(0.0, MAX_POINTER_PX) as f32 } else { 0.0 }
 }
 
+/// Wheel rows within the bounds of [`MAX_WHEEL_ROWS`], either direction.
 fn clamp_rows(rows: i32) -> i32 {
-    rows
+    rows.clamp(-MAX_WHEEL_ROWS, MAX_WHEEL_ROWS)
 }
 
+/// The low four bits (shift, alt, ctrl, super) of what the page sent.
 fn pointer_mods(mods: u32) -> Mods {
-    Mods::from_bits(mods as u8)
+    Mods::from_bits((mods & 0xFF) as u8)
 }
 
-/// The host name from what the platform gave: the first line, without control characters, at most 255 characters.
-fn clean_hostname(_raw: &[u8]) -> String {
-    String::new()
+/// The host name from what the platform gave: the first line that is not blank, without control characters, at most
+/// 255 characters. Text that is not UTF-8 is no name.
+fn clean_hostname(raw: &[u8]) -> String {
+    let Ok(text) = std::str::from_utf8(raw) else { return String::new() };
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    line.chars().filter(|c| !c.is_control()).take(255).collect()
+}
+
+/// The name of the machine. macOS asks `/bin/hostname` by absolute path, Linux reads `/etc/hostname`; nothing is
+/// looked up through PATH (T-02-89). Empty when it cannot be read.
+fn read_hostname() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("/bin/hostname")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| clean_hostname(&output.stdout))
+            .unwrap_or_default()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        persist::read_limited(Path::new("/etc/hostname"), 1024)
+            .ok()
+            .flatten()
+            .map(|bytes| clean_hostname(&bytes))
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        String::new()
+    }
 }
 
 /// Read the session file. There is no error case: a file that cannot be used costs the hints in it and nothing else,
@@ -2775,7 +2950,8 @@ mod protocol {
     use serde_json::{Value, json};
 
     use crate::commands::{
-        CopyMotionMsg, CopyOpMsg, CopyStateMsg, PasteOutcomeMsg, SearchOpMsg, SelectModeMsg, SelectOpMsg,
+        CopyMotionMsg, CopyOpMsg, CopyStateMsg, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg, SearchOpMsg,
+        SelectModeMsg, SelectOpMsg,
     };
     use holzwave_core::layout::Axis;
     use holzwave_core::wire::{ModesMsg, SearchMsg};
@@ -2979,6 +3155,20 @@ mod protocol {
                 "settings": payload(5),
             },
             "settings_view": to_value(&settings_view),
+            "app_info": to_value(&AppInfo {
+                version: "0.0.1-alpha1".into(),
+                os: "macos".into(),
+                hostname: "holz-mac.local".into(),
+            }),
+            "mouse": {
+                "actions": ops(vec![MouseActionMsg::Press, MouseActionMsg::Release, MouseActionMsg::Motion]),
+                "buttons": ops(vec![
+                    MouseButtonMsg::Left,
+                    MouseButtonMsg::Middle,
+                    MouseButtonMsg::Right,
+                    MouseButtonMsg::None,
+                ]),
+            },
             "ops": {
                 "select": ops(vec![
                     SelectOpMsg::Begin { x: 3, y: 4, mode: SelectModeMsg::Cell },

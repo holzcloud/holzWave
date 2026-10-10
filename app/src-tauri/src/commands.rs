@@ -16,7 +16,8 @@
 use std::sync::Arc;
 
 use holzwave_core::engine::{
-    CopyMotion, CopyOp, CopyState, DomKey, Mods, PasteOutcome, SearchOp, SelectMode, SelectOp,
+    CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode,
+    SelectOp,
 };
 use holzwave_core::layout::{PaneId, SplitId};
 use holzwave_core::wire::SearchMsg;
@@ -24,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::State;
 
-use crate::state::{AppCore, SettingsView, View};
+use crate::state::{AppCore, AppInfo, SettingsView, View};
 
 // ---- wire types ------------------------------------------------------------------------------------------------
 
@@ -163,6 +164,46 @@ impl From<PasteOutcome> for PasteOutcomeMsg {
             PasteOutcome::Written => PasteOutcomeMsg::Written,
             PasteOutcome::Empty => PasteOutcomeMsg::Empty,
             PasteOutcome::Rejected => PasteOutcomeMsg::Rejected,
+        }
+    }
+}
+
+/// What a pointer button did: `press`, `release` or `motion`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseActionMsg {
+    Press,
+    Release,
+    Motion,
+}
+
+impl From<MouseActionMsg> for MouseAction {
+    fn from(action: MouseActionMsg) -> Self {
+        match action {
+            MouseActionMsg::Press => MouseAction::Press,
+            MouseActionMsg::Release => MouseAction::Release,
+            MouseActionMsg::Motion => MouseAction::Motion,
+        }
+    }
+}
+
+/// Which button: `left`, `middle`, `right`, or `none` for a motion with nothing held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseButtonMsg {
+    Left,
+    Middle,
+    Right,
+    None,
+}
+
+impl From<MouseButtonMsg> for MouseButton {
+    fn from(button: MouseButtonMsg) -> Self {
+        match button {
+            MouseButtonMsg::Left => MouseButton::Left,
+            MouseButtonMsg::Middle => MouseButton::Middle,
+            MouseButtonMsg::Right => MouseButton::Right,
+            MouseButtonMsg::None => MouseButton::None,
         }
     }
 }
@@ -365,4 +406,48 @@ pub fn reset_setting(core: State<Arc<AppCore>>, key: String) -> Result<SettingsV
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn reload_settings(core: State<Arc<AppCore>>) -> SettingsView {
     core.reload_settings()
+}
+
+// ---- links, paths, app info and the pointer -----------------------------------------------------------------------
+
+/// Open a link with the platform opener. Only http, https and mailto links up to 2048 bytes are opened. Async: it
+/// starts a process.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn open_url(core: State<Arc<AppCore>>, url: String) -> Result<(), String> {
+    core.open_url(&url)
+}
+
+/// Reveal a file or folder in the file manager and never run it. `path` is absolute, `~/...` or relative to `base`
+/// (the pane's working directory); it has to exist. Async: it starts a process.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn reveal_path(core: State<Arc<AppCore>>, path: String, base: Option<String>) -> Result<(), String> {
+    core.reveal_path(&path, base.as_deref())
+}
+
+/// The version, the operating system and the host name. Async: it may run a program.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn app_info(core: State<Arc<AppCore>>) -> AppInfo {
+    core.app_info()
+}
+
+/// A pointer press, release or motion at `x`, `y` device pixels from the origin of the pane's grid; `mods` is
+/// SHIFT 1, ALT 2, CTRL 4, SUPER 8. Hot path: bounds the numbers and pushes to the pane's queue, nothing else, so
+/// it is synchronous and never waits.
+#[tauri::command(rename_all = "snake_case")]
+pub fn mouse(
+    core: State<Arc<AppCore>>,
+    pane: PaneId,
+    action: MouseActionMsg,
+    button: MouseButtonMsg,
+    x: f64,
+    y: f64,
+    mods: u32,
+) {
+    core.mouse(pane, action.into(), button.into(), x, y, mods);
+}
+
+/// A wheel event of `rows` rows (negative towards older output) at `x`, `y`. Hot path like `mouse`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn wheel(core: State<Arc<AppCore>>, pane: PaneId, rows: i32, x: f64, y: f64, mods: u32) {
+    core.wheel(pane, rows, x, y, mods);
 }
