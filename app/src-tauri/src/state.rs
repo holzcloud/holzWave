@@ -16,7 +16,8 @@ use holzwave_core::keybindings::Keybindings;
 use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
-use holzwave_core::session::{MonitorRect, Placement, WindowState};
+use holzwave_core::pty::process_cwd;
+use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
 use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
 use holzwave_core::wire::FrameMsg;
@@ -29,6 +30,10 @@ const MAX_LAYOUT_BYTES: u64 = 1 << 20;
 /// How long a layout change waits before it is written (RESEARCH Pitfall 3): a divider drag is hundreds of changes
 /// and costs one write per window.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
+
+/// How long a change of a working directory or of the window waits before the session is written. The session is a
+/// hint for the next start, so it can be slower than the layout.
+const SESSION_DELAY: Duration = Duration::from_secs(2);
 
 /// The most time `shutdown` spends waiting for the shells to end.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
@@ -365,7 +370,7 @@ pub struct AppCore {
     /// The app data directory: `layout.json`, `settings.json`, `session.json` and `themes/` live in it.
     dir: PathBuf,
     layout: Arc<Mutex<Layout>>,
-    panes: Mutex<HashMap<PaneId, Slot>>,
+    panes: Arc<Mutex<HashMap<PaneId, Slot>>>,
     /// The settings, themes and key bindings in force. Locked briefly and never across file IO or a wait.
     config: Mutex<Config>,
     /// Serialises the commands that write `settings.json` or reload it, so the file, the memory and the events
@@ -373,6 +378,12 @@ pub struct AppCore {
     settings_io: Mutex<()>,
     /// The last working directory each pane reported (its `Cwd` events).
     last_cwd: Arc<Mutex<HashMap<PaneId, String>>>,
+    /// The directory a pane that has not started yet is to inherit, recorded when its split or tab was made.
+    starts: Mutex<HashMap<PaneId, String>>,
+    /// What is restored on the next start: working directory per pane and the window geometry.
+    session: Arc<Mutex<Session>>,
+    /// Writes `session.json` two seconds after the first change of a burst, and when flushed.
+    session_saver: Debounced,
     sink: Arc<dyn Sink>,
     shell: ShellSpec,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
@@ -411,13 +422,30 @@ impl AppCore {
 
         let config = Mutex::new(Config::load(&dir));
 
+        let panes = Arc::new(Mutex::new(HashMap::new()));
+        let last_cwd = Arc::new(Mutex::new(HashMap::new()));
+        let session = {
+            let mut session = load_session(&dir.join(SESSION_FILE));
+            // A directory of a pane that is not in the layout is of no use and must not be written back.
+            session.sanitise(&lock(&layout).all_panes());
+            Arc::new(Mutex::new(session))
+        };
+        let session_saver = {
+            let path = dir.join(SESSION_FILE);
+            let (layout, panes, session, last_cwd) = (layout.clone(), panes.clone(), session.clone(), last_cwd.clone());
+            Debounced::new(SESSION_DELAY, move || write_session(&path, &layout, &panes, &session, &last_cwd))
+        };
+
         Arc::new_cyclic(|me| AppCore {
             dir,
             layout,
-            panes: Mutex::new(HashMap::new()),
+            panes,
             config,
             settings_io: Mutex::new(()),
-            last_cwd: Arc::new(Mutex::new(HashMap::new())),
+            last_cwd,
+            starts: Mutex::new(HashMap::new()),
+            session,
+            session_saver,
             sink,
             shell,
             saver,
@@ -444,15 +472,40 @@ impl AppCore {
         view
     }
 
-    /// Split the focused pane; the new pane gets the focus. At the pane limits the view comes back unchanged.
+    /// Like [`AppCore::change`] for a change that makes a pane out of the focused one: the new pane is to start in
+    /// the directory the focused pane was last known to be in, which is recorded now because the focus and the
+    /// directory may both have moved by the time the webview starts the new pane.
+    fn change_inheriting(&self, f: impl FnOnce(&mut Layout)) -> View {
+        let (view, creator, created) = {
+            let mut layout = lock(&self.layout);
+            let before = layout.all_panes();
+            let creator = layout.tab().focus;
+            f(&mut layout);
+            let created = layout.all_panes().into_iter().find(|p| !before.contains(p));
+            (View::of(&layout), creator, created)
+        };
+        if let Some(pane) = created {
+            let known = lock(&self.last_cwd).get(&creator).cloned();
+            let cwd = known.or_else(|| lock(&self.session).cwds.get(&creator).cloned());
+            if let Some(cwd) = cwd {
+                lock(&self.starts).insert(pane, cwd);
+            }
+        }
+        self.saver.touch();
+        view
+    }
+
+    /// Split the focused pane; the new pane gets the focus and starts where the focused pane is. At the pane limits
+    /// the view comes back unchanged.
     pub fn split(&self, column: bool) -> View {
-        self.change(|l| {
+        self.change_inheriting(|l| {
             l.split_focused(if column { Axis::Column } else { Axis::Row });
         })
     }
 
+    /// A new tab with one pane that starts where the focused pane is.
     pub fn new_tab(&self) -> View {
-        self.change(|l| {
+        self.change_inheriting(|l| {
             l.new_tab();
         })
     }
@@ -496,6 +549,7 @@ impl AppCore {
                 // Under the layout lock, so `pane_gone` of the same pane sees either both or neither of the changes.
                 let slot = lock(&self.panes).remove(&pane);
                 drop(layout);
+                self.forget_directory(pane);
                 let never_started = slot.is_none();
                 if let Some(Slot::Running(handle)) = &slot {
                     // The actor kills and reaps the shell on its own thread (about 200 ms) and sends the PaneExit.
@@ -520,10 +574,24 @@ impl AppCore {
         }
     }
 
-    /// Write the pending layout now, on the calling thread. Never call it with the layout locked.
+    /// Write the pending layout and session now, on the calling thread. Never call it with the layout locked.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn flush(&self) {
         self.saver.flush();
+        self.flush_session();
+    }
+
+    /// Write the session if a change is pending, or if a running pane never reported its directory (the process is
+    /// asked for it then). Does nothing when there is nothing to record.
+    fn flush_session(&self) {
+        let silent = {
+            let known = lock(&self.last_cwd);
+            lock(&self.panes).iter().any(|(pane, slot)| matches!(slot, Slot::Running(_)) && !known.contains_key(pane))
+        };
+        if silent {
+            self.session_saver.touch();
+        }
+        self.session_saver.flush();
     }
 
     /// How many times the layout file was written; the tests count writes with it.
@@ -534,17 +602,51 @@ impl AppCore {
 
     // ---- session and window --------------------------------------------------------------------------------
 
-    /// The directory a new shell of `pane` starts in; `None` for the default directory.
-    fn start_dir(&self, _pane: PaneId) -> Option<PathBuf> {
-        None
+    /// The directory a new shell of `pane` starts in: the one saved for that pane id in the session, otherwise the
+    /// one it inherits from the pane it was made from. Only a directory that exists now counts; `None` starts the
+    /// shell in the default directory.
+    fn start_dir(&self, pane: PaneId) -> Option<PathBuf> {
+        if let Some(dir) = lock(&self.session).cwd_for(pane) {
+            return Some(dir);
+        }
+        let inherited = lock(&self.starts).get(&pane).cloned()?;
+        // The same rules as a saved directory (absolute, bounded, no control characters, exists), without a second
+        // copy of them: a throwaway session is asked.
+        let mut probe = Session::default();
+        if probe.set_cwd(pane, &inherited) { probe.cwd_for(pane) } else { None }
     }
 
-    /// Remember the window geometry for the next start.
-    pub fn note_window(&self, _window: WindowState) {}
+    /// A pane reported its working directory (from its sink, on the engine thread of the pane).
+    fn cwd_reported(&self, pane: PaneId, cwd: &str) {
+        // A pane that is already out of the map (closed) is not remembered again by a late event, and once the app
+        // is ending the session has been written: a later event would only bring a write after the exit.
+        if self.exiting.load(Ordering::SeqCst) || !lock(&self.panes).contains_key(&pane) {
+            return;
+        }
+        lock(&self.last_cwd).insert(pane, cwd.to_owned());
+        self.session_saver.touch();
+    }
 
-    /// Where and how large the window opens, given the monitors that are connected now.
-    pub fn placement(&self, _monitors: &[MonitorRect]) -> Placement {
-        Placement { size: (0, 0), position: None, maximized: false }
+    /// A pane left the layout: what is remembered of its directory goes, and the session is written without it.
+    fn forget_directory(&self, pane: PaneId) {
+        lock(&self.last_cwd).remove(&pane);
+        lock(&self.starts).remove(&pane);
+        self.session_saver.touch();
+    }
+
+    /// Remember the window geometry for the next start. Clamped into range by the session; only touches the
+    /// debounced saver, so it is cheap on the thread of the window events.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn note_window(&self, window: WindowState) {
+        lock(&self.session).set_window(window);
+        self.session_saver.touch();
+    }
+
+    /// Where and how large the window opens, given the monitors that are connected now: the saved size, and the
+    /// saved position only if enough of the window is on one of them.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn placement(&self, monitors: &[MonitorRect]) -> Placement {
+        lock(&self.session).placement(monitors)
     }
 
     // ---- settings, themes and key bindings ---------------------------------------------------------------------
@@ -683,6 +785,8 @@ impl AppCore {
             return;
         }
         self.saver.flush();
+        // Before the shells are asked to end, while their directories can still be read.
+        self.flush_session();
         for handle in self.running() {
             handle.close();
         }
@@ -695,6 +799,7 @@ impl AppCore {
         // First: panes that end from now on are not taken out of the layout.
         self.exiting.store(true, Ordering::SeqCst);
         self.saver.flush();
+        self.flush_session();
         let handles = self.running();
         for handle in &handles {
             handle.close();
@@ -747,7 +852,9 @@ impl AppCore {
         }
 
         let (cols, rows) = clamp_grid(cols, rows);
-        let spec = self.pane_spec(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h)));
+        let mut spec = self.pane_spec(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h)));
+        spec.cwd = self.start_dir(pane);
+        lock(&self.starts).remove(&pane);
         // What the shell is started with; a settings change while it starts is pushed once it runs.
         let started_with = PaneLook {
             theme: spec.theme.unwrap_or_default(),
@@ -761,7 +868,13 @@ impl AppCore {
         let started = PaneHandle::spawn_ghostty(pane, spec, move |event| match event {
             PaneEvent::Frame(frame) => sink.send(Out::Frame(frame)),
             PaneEvent::Title(title) => sink.send(Out::Title { pane, title }),
-            PaneEvent::Cwd(cwd) => sink.send(Out::Cwd { pane, cwd }),
+            PaneEvent::Cwd(cwd) => {
+                // Recorded before the webview hears of it, so that a split made on seeing it inherits it.
+                if let Some(core) = me.upgrade() {
+                    core.cwd_reported(pane, &cwd);
+                }
+                sink.send(Out::Cwd { pane, cwd });
+            }
             PaneEvent::Exited { code } => {
                 if let Some(core) = me.upgrade() {
                     core.pane_gone(pane, code);
@@ -826,6 +939,7 @@ impl AppCore {
         let mut last = false;
         match outcome {
             Some((CloseOutcome::Closed, Some(view))) => {
+                self.forget_directory(pane);
                 self.saver.touch();
                 self.sink.send(Out::Layout(view));
             }
@@ -986,6 +1100,67 @@ fn keep_bad_copy(path: &Path) {
     }
 }
 
+/// Read the session file. There is no error case: a file that cannot be used costs the hints in it and nothing else,
+/// and what could not be used is kept next to it as `.bad` before the next save can overwrite it.
+fn load_session(path: &Path) -> Session {
+    let Some(dir) = path.parent() else { return Session::default() };
+    let (session, status) = Session::load(dir);
+    match status {
+        LoadStatus::Clean => {}
+        LoadStatus::Repaired(notes) => {
+            eprintln!("holzwave: {} repaired: {}", path.display(), notes.join("; "));
+            keep_bad_copy(path);
+        }
+        // `Session::load` kept the copy already.
+        LoadStatus::Reset(reason) => eprintln!("holzwave: {} reset: {reason}", path.display()),
+    }
+    session
+}
+
+/// Write the session: the window geometry and the working directory of every pane of the layout. A pane's directory
+/// is its last `Cwd` event; a running pane that never reported is asked for it, with no lock held because that can
+/// start a process. A directory of a pane that is no longer in the layout is dropped.
+fn write_session(
+    path: &Path,
+    layout: &Mutex<Layout>,
+    panes: &Mutex<HashMap<PaneId, Slot>>,
+    session: &Mutex<Session>,
+    last_cwd: &Mutex<HashMap<PaneId, String>>,
+) {
+    let live = lock(layout).all_panes();
+    let mut cwds = lock(last_cwd).clone();
+    let silent: Vec<(PaneId, u32)> = {
+        let panes = lock(panes);
+        live.iter()
+            .filter(|pane| !cwds.contains_key(pane))
+            .filter_map(|pane| match panes.get(pane) {
+                Some(Slot::Running(handle)) => handle.pid().map(|pid| (*pane, pid)),
+                _ => None,
+            })
+            .collect()
+    };
+    for (pane, pid) in silent {
+        if let Some(dir) = process_cwd(pid) {
+            cwds.insert(pane, dir.to_string_lossy().into_owned());
+        }
+    }
+
+    let snapshot = {
+        let mut session = lock(session);
+        for pane in &live {
+            if let Some(cwd) = cwds.get(pane) {
+                // A directory that fails the rules (control characters, too long) is simply not remembered.
+                session.set_cwd(*pane, cwd);
+            }
+        }
+        session.sanitise(&live);
+        session.clone()
+    };
+    if let Err(e) = persist::write_atomic(path, snapshot.to_json().as_bytes()) {
+        eprintln!("holzwave: cannot save {}: {e}", path.display());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,8 +1243,9 @@ mod tests {
         }
     }
 
-    /// A fresh scratch directory, removed at the end of the test.
-    struct Scratch(PathBuf);
+    /// A fresh scratch directory, removed at the end of the test. A core attached to it is shut down first, so that
+    /// a pending session write cannot bring the directory back.
+    struct Scratch(PathBuf, Mutex<Option<Weak<AppCore>>>);
 
     impl Scratch {
         fn new(tag: &str) -> Scratch {
@@ -1078,16 +1254,23 @@ mod tests {
             let path = std::env::temp_dir().join(format!("holzwave-app-{tag}-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir(&path).expect("scratch dir");
-            Scratch(path)
+            Scratch(path, Mutex::new(None))
         }
 
         fn layout_file(&self) -> PathBuf {
             self.0.join("layout.json")
         }
+
+        fn attach(&self, core: &Arc<AppCore>) {
+            *lock(&self.1) = Some(Arc::downgrade(core));
+        }
     }
 
     impl Drop for Scratch {
         fn drop(&mut self) {
+            if let Some(core) = lock(&self.1).take().and_then(|weak| weak.upgrade()) {
+                core.shutdown();
+            }
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
@@ -1097,6 +1280,7 @@ mod tests {
         let dir = Scratch::new("core");
         let rec = Arc::new(Recorder::default());
         let core = AppCore::new(dir.0.clone(), rec.clone(), ShellSpec::new(program, args));
+        dir.attach(&core);
         (core, rec, dir)
     }
 
@@ -1652,6 +1836,7 @@ mod tests {
     fn core_in(dir: &Scratch, program: &str, args: &[&str]) -> (Arc<AppCore>, Arc<Recorder>) {
         let rec = Arc::new(Recorder::default());
         let core = AppCore::new(dir.0.clone(), rec.clone(), ShellSpec::new(program, args));
+        dir.attach(&core);
         (core, rec)
     }
 
@@ -1962,7 +2147,7 @@ mod tests {
         .unwrap();
         let (core, rec) = core_in(&dir, "/bin/sh", &["-c", "echo \"in:$(pwd)\"; sleep 30"]);
 
-        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        core.start_pane(pane, 400, 24, 0, 0).expect("starts");
 
         let needle = format!("in:{}", saved.display());
         assert!(wait_until(WAIT, || rec.has_text(pane, &needle)), "the shell did not start in {saved:?}");
@@ -1994,13 +2179,13 @@ mod tests {
         let script = two_directory_script(&dir.0.join("marker"), &a, &b);
         let (core, rec) = core_in(&dir, "/bin/sh", &["-c", &script]);
         let first = only_pane(&core);
-        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(first, 400, 24, 0, 0).expect("starts");
         let a_text = a.display().to_string();
         assert!(wait_until(WAIT, || rec.cwds(first).contains(&a_text)), "no cwd event: {:?}", rec.cwds(first));
 
         let second = core.split(false).focus;
         assert_ne!(second, first);
-        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        core.start_pane(second, 400, 24, 0, 0).expect("starts");
 
         let needle = format!("start:{a_text}");
         assert!(wait_until(WAIT, || rec.has_text(second, &needle)), "the split did not start in {a_text}");
@@ -2013,40 +2198,50 @@ mod tests {
         let script = two_directory_script(&dir.0.join("marker"), &a, &b);
         let (core, rec) = core_in(&dir, "/bin/sh", &["-c", &script]);
         let first = only_pane(&core);
-        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(first, 400, 24, 0, 0).expect("starts");
         let a_text = a.display().to_string();
         assert!(wait_until(WAIT, || rec.cwds(first).contains(&a_text)), "no cwd event");
 
         let tab_pane = core.new_tab().focus;
         assert_ne!(tab_pane, first);
-        core.start_pane(tab_pane, 80, 24, 0, 0).expect("starts");
+        core.start_pane(tab_pane, 400, 24, 0, 0).expect("starts");
 
         let needle = format!("start:{a_text}");
         assert!(wait_until(WAIT, || rec.has_text(tab_pane, &needle)), "the new tab did not start in {a_text}");
     }
 
     #[test]
-    fn a_directory_saved_for_the_new_pane_wins_over_the_one_it_would_inherit() {
-        let (dir, first) = dir_with_one_pane("saved-wins");
-        // The id the split will give: the same layout split on a copy.
-        let (layout, _) = Layout::new();
-        let mut probe = layout.clone();
-        probe.split_focused(Axis::Row);
-        let predicted = probe.tab().focus;
+    fn a_directory_saved_for_the_pane_wins_over_the_one_it_would_inherit() {
+        let dir = Scratch::new("saved-wins");
+        let (mut layout, _) = Layout::new();
+        layout.split_focused(Axis::Row);
+        let second = layout.tab().focus;
+        std::fs::write(dir.layout_file(), serde_json::to_vec_pretty(&layout).unwrap()).unwrap();
         let saved = real_dir(&dir, "saved");
         let inherited = real_dir(&dir, "inherited");
         std::fs::write(
             dir.0.join("session.json"),
-            format!(r#"{{"version": 1, "cwds": {{"{predicted}": {:?}}}}}"#, saved.to_str().unwrap()),
+            format!(r#"{{"version": 1, "cwds": {{"{second}": {:?}}}}}"#, saved.to_str().unwrap()),
         )
         .unwrap();
         let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
-        lock(&core.last_cwd).insert(first, inherited.display().to_string());
+        lock(&core.starts).insert(second, inherited.display().to_string());
 
-        let second = core.split(false).focus;
-
-        assert_eq!(second, predicted);
         assert_eq!(core.start_dir(second), Some(saved));
+    }
+
+    #[test]
+    fn an_inherited_directory_is_used_only_while_it_exists() {
+        let (dir, pane) = dir_with_one_pane("inherit-gone");
+        let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+        let gone = real_dir(&dir, "soon-gone");
+        lock(&core.starts).insert(pane, gone.display().to_string());
+        assert_eq!(core.start_dir(pane), Some(gone.clone()));
+
+        std::fs::remove_dir(&gone).unwrap();
+        assert_eq!(core.start_dir(pane), None, "a directory that is gone is not a start directory");
+        lock(&core.starts).insert(pane, "relative/dir".into());
+        assert_eq!(core.start_dir(pane), None, "a relative path is not one either");
     }
 
     #[test]
@@ -2104,14 +2299,16 @@ mod tests {
     fn a_pane_that_reported_nothing_is_asked_for_its_directory_when_the_session_is_written() {
         let (dir, pane) = dir_with_one_pane("session-process");
         let (core, _rec) = core_in(&dir, "/bin/sh", &["-c", "sleep 30"]);
+        let start = real_dir(&dir, "start-here");
+        lock(&core.starts).insert(pane, start.display().to_string());
         core.start_pane(pane, 80, 24, 0, 0).expect("starts");
 
+        // Before the pane's first report (150 ms of quiet): only the process knows where it is.
         core.shutdown();
 
-        let expected = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
         let session = session_on_disk(&dir);
         let got = session.cwds.get(&pane).map(std::fs::canonicalize);
-        assert_eq!(got.and_then(Result::ok), Some(expected), "{:?}", session.cwds);
+        assert_eq!(got.and_then(Result::ok), Some(start), "{:?}", session.cwds);
     }
 
     #[test]
