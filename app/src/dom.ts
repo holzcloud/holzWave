@@ -14,6 +14,45 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+const sheets = new Map<string, Promise<void>>();
+
+/**
+ * Load a stylesheet once. A later feature adds its own file with this instead of editing index.html or app.css,
+ * so the page keeps no inline style. Resolves when the sheet applied; rejects when it cannot be loaded. The same
+ * href (resolved against the page) gives the same promise and never a second `<link>`; a sheet the page already
+ * links counts as loaded. A failed load is forgotten, so a later call can try again.
+ */
+export function loadStyles(href: string): Promise<void> {
+  const url = new URL(href, document.baseURI).href;
+  const known = sheets.get(url);
+  if (known) return known;
+
+  const done = new Promise<void>((resolve, reject) => {
+    const present = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')).find(
+      (l) => l.href === url,
+    );
+    const link = present ?? document.createElement("link");
+    if (present?.sheet) return resolve();
+    link.addEventListener("load", () => resolve(), { once: true });
+    link.addEventListener(
+      "error",
+      () => {
+        sheets.delete(url); // a later call may try again with a fresh link
+        if (!present) link.remove();
+        reject(new Error(`stylesheet ${href} could not be loaded`));
+      },
+      { once: true },
+    );
+    if (!present) {
+      link.rel = "stylesheet";
+      link.href = url;
+      document.head.append(link);
+    }
+  });
+  sheets.set(url, done);
+  return done;
+}
+
 /** Place an absolutely positioned element at `r` (CSS pixels). */
 export function setRect(node: HTMLElement, r: PxRect): void {
   node.style.left = `${r.x}px`;
