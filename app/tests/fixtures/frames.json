@@ -1524,6 +1524,274 @@
         "",
         ""
       ]
+    },
+    {
+      "name": "text to search",
+      "input": "\\x1b[?25h\\x1b[H\\x1b[2Jfind me\\r\\nother\\r\\nand find again\\r\\nFIND last",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 16,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 9,
+          "y": 3,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "find me                 ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": [
+              [
+                "other                   ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 2,
+            "runs": [
+              [
+                "and find again          ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          },
+          {
+            "y": 3,
+            "runs": [
+              [
+                "FIND last               ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "find me",
+        "other",
+        "and find again",
+        "FIND last",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "search set",
+      "input": "",
+      "search": "[Set(\"find\")]",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 17,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 9,
+          "y": 3,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [
+          [
+            0,
+            0,
+            3,
+            false
+          ],
+          [
+            2,
+            4,
+            7,
+            false
+          ],
+          [
+            3,
+            0,
+            3,
+            true
+          ]
+        ],
+        "search": {
+          "total": 3,
+          "current": 2
+        },
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": []
+      },
+      "grid": [
+        "find me",
+        "other",
+        "and find again",
+        "FIND last",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "search next wraps to the first",
+      "input": "",
+      "search": "[Next]",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 18,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 9,
+          "y": 3,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [
+          [
+            0,
+            0,
+            3,
+            true
+          ],
+          [
+            2,
+            4,
+            7,
+            false
+          ],
+          [
+            3,
+            0,
+            3,
+            false
+          ]
+        ],
+        "search": {
+          "total": 3,
+          "current": 0
+        },
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": []
+      },
+      "grid": [
+        "find me",
+        "other",
+        "and find again",
+        "FIND last",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "search clear",
+      "input": "",
+      "search": "[Clear]",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 19,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 9,
+          "y": 3,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": []
+      },
+      "grid": [
+        "find me",
+        "other",
+        "and find again",
+        "FIND last",
+        "",
+        ""
+      ]
     }
   ]
 }

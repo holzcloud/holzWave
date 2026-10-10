@@ -366,6 +366,42 @@ fn viewport_edge(term: &Terminal<'_, '_>, at: &GridRef<'_>, rows: u16) -> Result
     })
 }
 
+/// The most `select_next` and `select_prev` steps spent putting a lost selection back (see [`restore_selection`]).
+const MAX_RESTORE_STEPS: usize = 4096;
+
+/// Put the selected match back after the library dropped it.
+///
+/// A resize clears the library's selected match although the matches themselves survive, and a find bar that shows
+/// "- of 10" while the window is dragged is not what a search should do. `memo` is the place in reading order the
+/// engine last saw; it is re-selected by stepping from whichever end of the list is nearer (`select_prev` from no
+/// selection lands on the oldest match, `select_next` on the newest). A match list so long that this would take more
+/// than [`MAX_RESTORE_STEPS`] steps is left alone: the current match stays unset until the user moves.
+fn restore_selection(search: &mut Search<'_, '_>, terminal: &mut Terminal<'_, '_>, memo: Option<usize>) -> Result<()> {
+    let Some(place) = memo else { return Ok(()) };
+    if search.selected_index().map_err(eng)?.is_some() {
+        return Ok(());
+    }
+    let total = search.total_matches().map_err(eng)?;
+    if total == 0 {
+        return Ok(());
+    }
+    let place = place.min(total - 1);
+    let (from_oldest, from_newest) = (place + 1, total - place);
+    if from_oldest.min(from_newest) > MAX_RESTORE_STEPS {
+        return Ok(());
+    }
+    if from_oldest <= from_newest {
+        for _ in 0..from_oldest {
+            search.select_prev(terminal).map_err(eng)?;
+        }
+    } else {
+        for _ in 0..from_newest {
+            search.select_next(terminal).map_err(eng)?;
+        }
+    }
+    Ok(())
+}
+
 /// [`TerminalEngine`] backed by `libghostty-vt`.
 pub struct GhosttyEngine {
     terminal: Terminal<'static, 'static>,
@@ -374,6 +410,9 @@ pub struct GhosttyEngine {
     search: Option<Search<'static, 'static>>,
     /// Storage for the matches of one update, reused so a frame does not allocate.
     match_buf: MatchBuffer,
+    /// The place in reading order of the current match as last seen, so that it can be put back when the library
+    /// drops its selection (a resize does).
+    search_memo: Option<usize>,
     render: RenderState<'static>,
     rows_iter: RowIterator<'static>,
     cells_iter: CellIterator<'static>,
@@ -483,6 +522,7 @@ impl GhosttyEngine {
             events,
             search: None,
             match_buf: MatchBuffer::new(),
+            search_memo: None,
         })
     }
 }
@@ -503,11 +543,14 @@ impl GhosttyEngine {
 
     /// The state of the active search, `None` without one. Reads what the library last saw: callers that need it
     /// current have run the search first.
-    fn search_state(&self) -> Result<Option<SearchState>> {
+    fn search_state(&mut self) -> Result<Option<SearchState>> {
         let Some(search) = &self.search else { return Ok(None) };
         let total = search.total_matches().map_err(eng)?;
         // The library counts from the newest match; the engine's contract counts in reading order.
         let current = search.selected_index().map_err(eng)?.and_then(|newest_first| total.checked_sub(newest_first + 1));
+        if current.is_some() {
+            self.search_memo = current;
+        }
         Ok(Some(SearchState { total, current }))
     }
 
@@ -522,8 +565,12 @@ impl GhosttyEngine {
         // Output, resizes and screen switches reach the search only through a feed; `run` feeds and ticks until the
         // search has caught up with the terminal.
         search.run(&mut self.terminal).map_err(eng)?;
+        restore_selection(search, &mut self.terminal, self.search_memo)?;
         let total = search.total_matches().map_err(eng)?;
         let current = search.selected_index().map_err(eng)?.and_then(|newest_first| total.checked_sub(newest_first + 1));
+        if current.is_some() {
+            self.search_memo = current;
+        }
 
         let snapshot = search.snapshot(&mut self.terminal).map_err(eng)?;
         let term = snapshot.terminal();
@@ -873,7 +920,7 @@ impl TerminalEngine for GhosttyEngine {
     }
 
     fn search(&mut self, op: SearchOp) -> Result<SearchState> {
-        match op {
+        match &op {
             SearchOp::Set(needle) => {
                 if needle.len() > MAX_SEARCH_BYTES {
                     // Before anything is touched: the earlier search stays as it was.
@@ -884,6 +931,7 @@ impl TerminalEngine for GhosttyEngine {
                 }
                 if needle.is_empty() {
                     self.search = None;
+                    self.search_memo = None;
                     return Ok(SearchState::default());
                 }
                 // A fresh search every time: results of an equal needle would be kept by the library, but the
@@ -897,10 +945,31 @@ impl TerminalEngine for GhosttyEngine {
                 // The first step goes to the newest match, the one nearest the prompt.
                 fresh.select_next(&mut self.terminal).map_err(eng)?;
                 self.search = Some(fresh);
+                self.search_memo = None;
                 self.reveal_selected()?;
             }
-            SearchOp::Next | SearchOp::Prev | SearchOp::Clear => {
-                return Err(Error::Unsupported("search navigation".into()));
+            SearchOp::Next | SearchOp::Prev => {
+                let Some(search) = self.search.as_mut() else { return Ok(SearchState::default()) };
+                // The selection may have been dropped by a resize since the last update; the step must count from
+                // where the user was.
+                search.run(&mut self.terminal).map_err(eng)?;
+                restore_selection(search, &mut self.terminal, self.search_memo)?;
+                // The library orders from the newest match: its "next" is older, which is the engine's `Prev`.
+                let moved = if op == SearchOp::Next {
+                    search.select_prev(&mut self.terminal)
+                } else {
+                    search.select_next(&mut self.terminal)
+                }
+                .map_err(eng)?;
+                if moved {
+                    self.reveal_selected()?;
+                }
+            }
+            SearchOp::Clear => {
+                // Dropping the search releases the library's tracked state. The viewport stays where it is.
+                self.search = None;
+                self.search_memo = None;
+                return Ok(SearchState::default());
             }
         }
         Ok(self.search_state()?.unwrap_or_default())
