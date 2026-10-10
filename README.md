@@ -55,7 +55,7 @@ Deliberately **not** included: a web browser block.
 | Core | One Rust crate, shared by every platform |
 | Terminal engine | `libghostty-vt` behind a `TerminalEngine` trait, with `alacritty_terminal` as the fallback |
 | PTY / SSH | `portable-pty` / `russh` |
-| App shell | Tauri 2 for desktop, iOS and Android |
+| App shell | Tauri 3 (alpha) for desktop, iOS and Android |
 | UI | TypeScript with React or Solid, decided in the spike |
 | Rendering | ghostty compiled to WASM in the webview, or an own WebGL renderer, decided in the spike |
 | Persistence | SQLite |
