@@ -63,10 +63,10 @@ export class Canvas2DRenderer implements Renderer {
         col += cols;
       }
     }
-    if (f.cursor) {
+    if (f.cursor && f.focused) {
       ctx.fillStyle = css(CURSOR_COLOR);
       ctx.globalAlpha = 0.85;
-      ctx.fillRect(f.cursor[0] * cellW, f.cursor[1] * cellH, cellW, cellH);
+      ctx.fillRect(f.cursor.x * cellW, f.cursor.y * cellH, cellW, cellH);
       ctx.globalAlpha = 1;
     }
     ctx.restore();

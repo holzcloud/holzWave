@@ -29,7 +29,10 @@ function line(): Run[] {
 }
 
 function frame(): Frame {
-  return { cols: COLS, rows: ROWS, cursor: [3, 7], fg: 0xe6e0ea, bg: 0x14091a, lines: Array.from({ length: ROWS }, line) };
+  return {
+    cols: COLS, rows: ROWS, cursor: { x: 3, y: 7, style: "block", blink: false }, focused: true,
+    fg: 0xe6e0ea, bg: 0x14091a, lines: Array.from({ length: ROWS }, line),
+  };
 }
 
 const q = new URLSearchParams(location.search);
@@ -84,7 +87,7 @@ if (q.get("check")) {
   const r2 = which === "canvas" ? new Canvas2DRenderer(canvas) : new WebGLRenderer(canvas);
   r2.configure(m);
   const solid = (bg: number): Frame => ({
-    cols: 20, rows: 4, cursor: null, fg: 0xffffff, bg,
+    cols: 20, rows: 4, cursor: null, focused: true, fg: 0xffffff, bg,
     lines: [[["hello", 5, 0xffffff, bg, 0]], [], [], []],
   });
   const half = m.width / 2;

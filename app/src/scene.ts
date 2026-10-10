@@ -5,11 +5,11 @@
 import { call } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
-import { FONT_PX, Metrics, Renderer, font } from "./frame.js";
+import { FONT_PX, Frame, Metrics, Renderer, font } from "./frame.js";
 import { fitCells, gridRect } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
 import { state } from "./state.js";
-import type { View } from "./types.js";
+import type { PaneFrame, View } from "./types.js";
 import { WebGLRenderer } from "./webgl.js";
 
 const stats = document.getElementById("stats") as HTMLDivElement;
@@ -133,6 +133,22 @@ let drawn = 0;
 let pending = false;
 const started = performance.now();
 
+/**
+ * The one place the legacy `screen` payload (cursor as `[x, y]`, no extras, no focus) becomes the renderers' frame.
+ * Plan 17 replaces the payload with the `frame` event and deletes this function.
+ */
+export function fromLegacyFrame(f: PaneFrame["frame"], focused: boolean): Frame {
+  return {
+    cols: f.cols,
+    rows: f.rows,
+    cursor: f.cursor ? { x: f.cursor[0], y: f.cursor[1], style: "block", blink: false } : null,
+    focused,
+    fg: f.fg,
+    bg: f.bg,
+    lines: f.lines,
+  };
+}
+
 function draw(): void {
   pending = false;
   const view = state.view;
@@ -143,7 +159,7 @@ function draw(): void {
   for (const [id, r] of view.panes) {
     const f = state.frames.get(id);
     if (!f) continue;
-    renderer.drawPane(id === view.focus ? f : { ...f, cursor: null }, gridRect(state.metrics, r));
+    renderer.drawPane(fromLegacyFrame(f, id === view.focus), gridRect(state.metrics, r));
   }
   draws.push(performance.now() - t0);
   if (draws.length > 120) draws.shift();

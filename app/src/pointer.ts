@@ -12,7 +12,7 @@ import type { View } from "./types.js";
 // ---- selection text ------------------------------------------------------------------------------
 
 /** The text of one row of a frame, one string element per cell column. */
-function rowCells(f: Frame, row: number): string[] {
+function rowCells(f: Pick<Frame, "cols" | "lines">, row: number): string[] {
   const out: string[] = [];
   for (const [text] of f.lines[row] ?? []) {
     for (const ch of text) out.push(ch);

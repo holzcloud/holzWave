@@ -231,8 +231,8 @@ export class WebGLRenderer implements Renderer {
       // Cells the runs did not cover use the default background.
       for (let c = col; c < f.cols; c++) put(c, y, 0, f.fg, f.bg, 0);
     }
-    if (f.cursor) {
-      const [cx, cy] = f.cursor;
+    if (f.cursor && f.focused) {
+      const { x: cx, y: cy } = f.cursor;
       // Overlay the cursor as one more instance on top, with the glyph below it dropped.
       put(cx, cy, 0, f.bg, CURSOR_COLOR, 0);
     }
