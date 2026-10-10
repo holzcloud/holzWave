@@ -5,17 +5,22 @@
 //! events. That is what makes the shell testable headless, with a recording sink and real shells.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use holzwave_core::engine::{CopyOp, CopyState, DomKey, PasteOutcome, SearchOp, SearchState, SelectOp};
+use holzwave_core::keybindings::Keybindings;
 use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
+use holzwave_core::settings::{SETTINGS_FILE, Settings};
+use holzwave_core::theme::{THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
 use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
+use serde_json::Value;
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
 const MAX_LAYOUT_BYTES: u64 = 1 << 20;
@@ -79,6 +84,156 @@ impl View {
     }
 }
 
+// ---- settings, themes and key bindings ---------------------------------------------------------------------------
+
+/// One row of the key binding editor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct KeybindingView {
+    pub action: String,
+    pub title: String,
+    /// The chord in force in its canonical spelling, `null` when the action is unbound.
+    pub chord: Option<String>,
+    pub is_default: bool,
+}
+
+/// What the webview needs to draw the settings, the theme menu and the key binding editor, and to paint with the
+/// theme in force. Every field is data from the core; the page decides nothing about validity.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SettingsView {
+    pub settings: Settings,
+    /// Every theme, built-ins first.
+    pub themes: Vec<ThemeInfo>,
+    /// The theme in force: the one `settings.theme` names, aubergine when there is none of that name.
+    pub theme: Theme,
+    pub keybindings: Vec<KeybindingView>,
+    /// Plain sentences about what could not be used: load notes of `settings.json` and the theme files, and the
+    /// key binding overrides that the resolver refused.
+    pub warnings: Vec<String>,
+}
+
+impl SettingsView {
+    pub fn new(
+        settings: &Settings,
+        themes: &ThemeRegistry,
+        keybindings: &Keybindings,
+        warnings: Vec<String>,
+    ) -> SettingsView {
+        SettingsView {
+            settings: settings.clone(),
+            themes: themes.list(),
+            theme: themes.get(&settings.theme).clone(),
+            keybindings: keybindings
+                .table()
+                .into_iter()
+                .map(|row| KeybindingView {
+                    action: row.action.to_owned(),
+                    title: row.title.to_owned(),
+                    chord: row.chord,
+                    is_default: row.is_default,
+                })
+                .collect(),
+            warnings,
+        }
+    }
+}
+
+/// How many bytes and when each configuration file was last changed, so that a reload can tell whether anything
+/// changed without reading a file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Stamps {
+    settings: Option<(SystemTime, u64)>,
+    themes: Vec<(OsString, SystemTime, u64)>,
+}
+
+/// The settings, the themes and the resolved key bindings that are in force.
+struct Config {
+    settings: Settings,
+    themes: ThemeRegistry,
+    keybindings: Keybindings,
+    /// What loading `settings.json` and the theme files had to say, and the note about an unknown theme name.
+    load_notes: Vec<String>,
+    /// What the key binding resolver refused.
+    binding_notes: Vec<String>,
+    stamps: Stamps,
+}
+
+impl Config {
+    fn new(settings: Settings, themes: ThemeRegistry, load_notes: Vec<String>, stamps: Stamps) -> Config {
+        let mut load_notes = load_notes;
+        if !themes.contains(&settings.theme) {
+            // The choice is kept as it is: a theme file that is missing for a moment must not rewrite it.
+            load_notes.push(format!(
+                "there is no theme called {:?}; {} is used",
+                settings.theme.chars().take(40).collect::<String>(),
+                holzwave_core::theme::DEFAULT_THEME
+            ));
+        }
+        let (keybindings, binding_notes) = Keybindings::resolve(&settings.keybindings);
+        Config { settings, themes, keybindings, load_notes, binding_notes, stamps }
+    }
+
+    /// Read `settings.json` and `themes/` of `dir`. Never fails: what cannot be used is reported as a note.
+    fn load(dir: &Path) -> Config {
+        let (settings, status) = Settings::load(dir);
+        let mut notes = status_notes(SETTINGS_FILE, status);
+        let (themes, theme_notes) = ThemeRegistry::load(dir);
+        notes.extend(theme_notes);
+        Config::new(settings, themes, notes, stamps(dir))
+    }
+
+    fn view(&self) -> SettingsView {
+        let mut warnings = self.load_notes.clone();
+        warnings.extend(self.binding_notes.iter().cloned());
+        SettingsView::new(&self.settings, &self.themes, &self.keybindings, warnings)
+    }
+
+    /// The theme in force.
+    fn theme(&self) -> &Theme {
+        self.themes.get(&self.settings.theme)
+    }
+}
+
+/// One sentence per defect of a loaded document; nothing for a clean load.
+fn status_notes(file: &str, status: LoadStatus) -> Vec<String> {
+    match status {
+        LoadStatus::Clean => Vec::new(),
+        LoadStatus::Repaired(notes) => notes.into_iter().map(|n| format!("{file}: {n}")).collect(),
+        LoadStatus::Reset(reason) => vec![format!("{file}: {reason}; the defaults are used")],
+    }
+}
+
+/// The size and modification time of `settings.json` and of every `themes/*.json` of `dir`. Only metadata is read, and
+/// at most as many theme files as the registry reads.
+fn stamps(dir: &Path) -> Stamps {
+    use holzwave_core::theme::MAX_THEME_FILES;
+    use std::collections::BTreeSet;
+
+    let stamp = |meta: &std::fs::Metadata| (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
+    let settings = std::fs::metadata(dir.join(SETTINGS_FILE)).ok().map(|m| stamp(&m));
+
+    let mut names: BTreeSet<OsString> = BTreeSet::new();
+    if let Ok(entries) = std::fs::read_dir(dir.join(THEMES_DIR)) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().to_ascii_lowercase().ends_with(".json") {
+                names.insert(name);
+                if names.len() > MAX_THEME_FILES {
+                    names.pop_last();
+                }
+            }
+        }
+    }
+    let themes = names
+        .into_iter()
+        .filter_map(|name| {
+            let meta = std::fs::symlink_metadata(dir.join(THEMES_DIR).join(&name)).ok()?;
+            let (modified, len) = stamp(&meta);
+            Some((name, modified, len))
+        })
+        .collect();
+    Stamps { settings, themes }
+}
+
 /// Everything the core tells the webview.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Out {
@@ -87,6 +242,8 @@ pub enum Out {
     Title { pane: PaneId, title: String },
     Cwd { pane: PaneId, cwd: String },
     PaneExit { pane: PaneId, code: Option<u32> },
+    /// The settings, the theme or the key bindings changed (a command, or a hand edit that was picked up).
+    Settings(SettingsView),
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -100,6 +257,7 @@ impl Out {
             Out::Title { .. } => "title",
             Out::Cwd { .. } => "cwd",
             Out::PaneExit { .. } => "pane-exit",
+            Out::Settings(_) => "settings",
             Out::Exit => "exit",
         }
     }
@@ -132,6 +290,7 @@ impl Serialize for Out {
             Out::Title { pane, title } => TitlePayload { pane: *pane, title }.serialize(serializer),
             Out::Cwd { pane, cwd } => CwdPayload { pane: *pane, cwd }.serialize(serializer),
             Out::PaneExit { pane, code } => PaneExitPayload { pane: *pane, code: *code }.serialize(serializer),
+            Out::Settings(view) => view.serialize(serializer),
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -181,8 +340,15 @@ enum Slot {
 /// Lock order: `layout` first, then `panes`; `panes` is never held while waiting for `layout`. `flush` runs the
 /// save job, which locks `layout`, so it is never called with `layout` held.
 pub struct AppCore {
+    /// The app data directory: `layout.json`, `settings.json`, `session.json` and `themes/` live in it.
+    dir: PathBuf,
     layout: Arc<Mutex<Layout>>,
     panes: Mutex<HashMap<PaneId, Slot>>,
+    /// The settings, themes and key bindings in force. Locked briefly and never across file IO or a wait.
+    config: Mutex<Config>,
+    /// Serialises the commands that write `settings.json` or reload it, so the file, the memory and the events
+    /// of two of them never interleave. Held across the file IO; `config` is not.
+    settings_io: Mutex<()>,
     sink: Arc<dyn Sink>,
     shell: ShellSpec,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
@@ -219,9 +385,14 @@ impl AppCore {
             }
         });
 
+        let config = Mutex::new(Config::load(&dir));
+
         Arc::new_cyclic(|me| AppCore {
+            dir,
             layout,
             panes: Mutex::new(HashMap::new()),
+            config,
+            settings_io: Mutex::new(()),
             sink,
             shell,
             saver,
@@ -336,6 +507,35 @@ impl AppCore {
         self.writes.load(Ordering::SeqCst)
     }
 
+    // ---- settings, themes and key bindings ---------------------------------------------------------------------
+
+    /// The settings, themes and key bindings in force.
+    pub fn get_settings(&self) -> SettingsView {
+        lock(&self.config).view()
+    }
+
+    /// Set one setting.
+    pub fn set_setting(&self, _key: &str, _value: Value) -> Result<SettingsView, String> {
+        Err("not implemented".into())
+    }
+
+    /// Restore the default of one setting.
+    pub fn reset_setting(&self, _key: &str) -> Result<SettingsView, String> {
+        Err("not implemented".into())
+    }
+
+    /// Pick up hand edits of `settings.json` and `themes/`.
+    pub fn reload_settings(&self) -> SettingsView {
+        self.get_settings()
+    }
+
+    /// How a new pane is started.
+    fn pane_spec(&self, cols: u16, rows: u16, cell: (u32, u32)) -> PaneSpec {
+        let mut spec = PaneSpec::new(self.shell.program.clone(), cols, rows).args(self.shell.args.clone());
+        spec.cell_px = cell;
+        spec
+    }
+
     // ---- ending ------------------------------------------------------------------------------------------------
 
     /// The handles of every running pane.
@@ -420,8 +620,7 @@ impl AppCore {
         }
 
         let (cols, rows) = clamp_grid(cols, rows);
-        let mut spec = PaneSpec::new(self.shell.program.clone(), cols, rows).args(self.shell.args.clone());
-        spec.cell_px = (clamp_cell(cell_w), clamp_cell(cell_h));
+        let spec = self.pane_spec(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h)));
 
         // The sink runs on the pane's engine thread, possibly before `spawn_ghostty` has returned (a failed start
         // reports first), so it only holds the sink and a weak reference and never waits for the handle.
@@ -1286,6 +1485,285 @@ mod tests {
             "loading alone does not rewrite the file"
         );
     }
+    // ---- settings, themes and key bindings (plan 23, task 1) -----------------------------------------------------
+
+    use holzwave_core::keybindings::actions;
+    use holzwave_core::theme::Rgb;
+    use serde_json::json;
+
+    impl Recorder {
+        fn settings_events(&self) -> Vec<SettingsView> {
+            self.all()
+                .into_iter()
+                .filter_map(|o| match o {
+                    Out::Settings(view) => Some(view),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Whether a frame of the pane at or after `skip` is a full one with this default background.
+        fn has_full_frame_with_bg(&self, pane: PaneId, skip: usize, bg: u32) -> bool {
+            self.frames(pane).iter().skip(skip).any(|f| f.full && f.bg == bg)
+        }
+    }
+
+    fn packed(c: Rgb) -> u32 {
+        u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
+    }
+
+    /// A core over an existing scratch directory, so that a test can put files there first.
+    fn core_in(dir: &Scratch, program: &str, args: &[&str]) -> (Arc<AppCore>, Arc<Recorder>) {
+        let rec = Arc::new(Recorder::default());
+        let core = AppCore::new(dir.0.clone(), rec.clone(), ShellSpec::new(program, args));
+        (core, rec)
+    }
+
+    fn theme_file(dir: &Scratch, file: &str, theme: &Theme) {
+        let themes = dir.0.join("themes");
+        std::fs::create_dir_all(&themes).expect("themes dir");
+        std::fs::write(themes.join(file), serde_json::to_string(theme).expect("theme json")).expect("theme file");
+    }
+
+    #[test]
+    fn with_no_files_the_settings_view_is_the_defaults_the_three_built_in_themes_and_every_action() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+
+        let view = core.get_settings();
+
+        assert_eq!(view.settings, Settings::default());
+        assert_eq!(view.themes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["aubergine", "Schiefer", "Papier"]);
+        assert!(view.themes.iter().all(|t| t.builtin));
+        assert_eq!(view.theme, Theme::aubergine());
+        assert_eq!(view.keybindings.len(), actions().len());
+        assert!(view.keybindings.iter().all(|row| row.is_default && row.chord.is_some()));
+        assert_eq!(view.warnings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_warnings_carry_the_load_notes_of_the_files_and_the_refused_key_bindings() {
+        let dir = Scratch::new("warnings");
+        std::fs::write(
+            dir.0.join("settings.json"),
+            r#"{"font_size": 9999, "keybindings": {"pane.close": "x", "no.such.action": "Cmd+J"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(dir.0.join("themes")).unwrap();
+        std::fs::write(dir.0.join("themes").join("broken.json"), "{ nope").unwrap();
+
+        let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+        let view = core.get_settings();
+
+        assert_eq!(view.settings.font_size, 40, "the number is clamped");
+        let said = |needle: &str| view.warnings.iter().any(|w| w.contains(needle));
+        assert!(said("font_size"), "{:?}", view.warnings);
+        assert!(said("broken.json"), "{:?}", view.warnings);
+        assert!(said("pane.close"), "the refused chord is named: {:?}", view.warnings);
+        assert!(said("no.such.action"), "{:?}", view.warnings);
+        let close = view.keybindings.iter().find(|r| r.action == "pane.close").expect("row");
+        assert_eq!(close.chord.as_deref(), Some("Cmd+W"), "the refused override leaves the default");
+    }
+
+    #[test]
+    fn a_damaged_settings_file_starts_with_the_defaults_and_is_kept_as_bad() {
+        let dir = Scratch::new("badsettings");
+        std::fs::write(dir.0.join("settings.json"), "{ not json").unwrap();
+
+        let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+
+        assert_eq!(core.get_settings().settings, Settings::default());
+        assert!(core.get_settings().warnings.iter().any(|w| w.contains("settings.json")));
+        assert_eq!(std::fs::read_to_string(dir.0.join("settings.json.bad")).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn a_new_pane_is_built_from_the_settings_and_its_first_frame_has_the_theme_colours() {
+        let dir = Scratch::new("spec");
+        std::fs::write(
+            dir.0.join("settings.json"),
+            r#"{"theme": "Schiefer", "option_as_alt": true, "scrollback_lines": 500}"#,
+        )
+        .unwrap();
+        let (core, rec) = core_in(&dir, "/bin/cat", &[]);
+
+        let spec = core.pane_spec(80, 24, (9, 18));
+
+        assert_eq!(spec.scrollback, 500);
+        assert!(spec.option_as_alt);
+        assert_eq!(spec.theme, Some(Theme::schiefer().engine_theme()));
+        assert_eq!(spec.cell_px, (9, 18));
+        let pane = only_pane(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        let bg = packed(Theme::schiefer().terminal.background);
+        assert!(wait_until(WAIT, || rec.has_full_frame_with_bg(pane, 0, bg)), "the first frame lacks the theme");
+    }
+
+    #[test]
+    fn set_setting_theme_persists_pushes_a_full_frame_with_the_new_colours_and_emits_settings() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || !rec.frames(pane).is_empty()), "no first frame");
+        let before = rec.frames(pane).len();
+
+        let view = core.set_setting("theme", json!("Schiefer")).expect("a known theme is accepted");
+
+        assert_eq!(view.settings.theme, "Schiefer");
+        assert_eq!(view.theme.name, "Schiefer");
+        let schiefer = packed(Theme::schiefer().terminal.background);
+        assert!(
+            wait_until(WAIT, || rec.has_full_frame_with_bg(pane, before, schiefer)),
+            "no full frame with the new colours arrived"
+        );
+        let (saved, status) = Settings::load(&dir.0);
+        assert_eq!(status, LoadStatus::Clean, "what the core writes loads clean");
+        assert_eq!(saved.theme, "Schiefer");
+        assert!(!dir.0.join("settings.json.tmp").exists(), "the write went through a temporary file that is gone");
+        assert_eq!(rec.settings_events(), vec![view.clone()]);
+        assert_eq!(core.get_settings(), view);
+    }
+
+    #[test]
+    fn a_wrong_type_an_unknown_key_or_an_unknown_theme_is_an_error_and_changes_nothing() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        let before = core.get_settings();
+
+        for (key, value) in [
+            ("font_size", json!("big")),
+            ("nonsense", json!(1)),
+            ("version", json!(7)),
+            ("theme", json!("No Such Theme")),
+            ("theme", json!(5)),
+            ("keybindings", json!(["x"])),
+            ("option_as_alt", json!("yes")),
+        ] {
+            assert!(core.set_setting(key, value.clone()).is_err(), "{key} = {value} must be refused");
+        }
+
+        assert_eq!(core.get_settings(), before);
+        assert!(!dir.0.join("settings.json").exists(), "a refused change writes nothing");
+        assert!(rec.settings_events().is_empty(), "a refused change tells nobody");
+    }
+
+    #[test]
+    fn a_setting_that_cannot_be_saved_is_an_error_and_the_memory_keeps_the_old_value() {
+        let dir = Scratch::new("unsavable");
+        // A directory where the file belongs: the atomic rename onto it cannot succeed.
+        std::fs::create_dir(dir.0.join("settings.json")).unwrap();
+        let (core, rec) = core_in(&dir, "/bin/cat", &[]);
+
+        let result = core.set_setting("font_size", json!(20));
+
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(core.get_settings().settings.font_size, Settings::default().font_size);
+        assert!(rec.settings_events().is_empty());
+        let names: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(!names.iter().any(|n| n.ends_with(".tmp")), "no temporary file is left: {names:?}");
+    }
+
+    #[test]
+    fn option_as_alt_reaches_a_live_pane_so_that_alt_f_is_escape_f() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        // What the keyboard produces for Option+F on macOS with the default layout; plain f elsewhere.
+        let produced = if cfg!(target_os = "macos") { "\u{0192}" } else { "f" };
+        let alt_f = DomKey { code: "KeyF".into(), key: produced.into(), mods: Mods::ALT, ..DomKey::default() };
+        if cfg!(target_os = "macos") {
+            core.key(pane, alt_f.clone()).expect("key");
+            assert!(wait_until(WAIT, || rec.has_text(pane, "\u{0192}")), "option composes by default (D-12)");
+        }
+
+        core.set_setting("option_as_alt", json!(true)).expect("accepted");
+        core.key(pane, alt_f).expect("key");
+
+        // The tty echoes ESC as ^[.
+        assert!(wait_until(WAIT, || rec.has_text(pane, "^[f")), "no ESC f: {:?}", rec.all().len());
+    }
+
+    #[test]
+    fn keybindings_are_validated_by_the_resolver_and_the_view_reflects_the_result() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+
+        let view = core
+            .set_setting("keybindings", json!({"pane.close": "Cmd+Shift+W", "tab.new": "x", "pane.split_right": ""}))
+            .expect("the map has the right type, so it is accepted; the resolver reports what it refuses");
+
+        let row = |action: &str| view.keybindings.iter().find(|r| r.action == action).cloned().expect("row");
+        assert_eq!(row("pane.close").chord.as_deref(), Some("Cmd+Shift+W"));
+        assert!(!row("pane.close").is_default);
+        assert_eq!(row("tab.new").chord.as_deref(), Some("Cmd+T"), "a plain key is refused, the default stays");
+        assert_eq!(row("pane.split_right").chord, None, "the empty chord unbinds");
+        assert!(view.warnings.iter().any(|w| w.contains("tab.new")), "{:?}", view.warnings);
+        assert_eq!(view.settings.keybindings.len(), 3, "the settings keep what the user typed");
+        assert!(Settings::load(&dir.0).0.keybindings.contains_key("pane.close"));
+        assert_eq!(rec.settings_events().len(), 1);
+    }
+
+    #[test]
+    fn reset_setting_restores_the_default_of_one_key_and_leaves_the_others() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        core.set_setting("font_size", json!(22)).expect("font size");
+        core.set_setting("option_as_alt", json!(true)).expect("option");
+
+        let view = core.reset_setting("font_size").expect("reset");
+
+        assert_eq!(view.settings.font_size, Settings::default().font_size);
+        assert!(view.settings.option_as_alt, "the other key is untouched");
+        assert_eq!(Settings::load(&dir.0).0.font_size, Settings::default().font_size);
+        assert_eq!(rec.settings_events().len(), 3);
+        assert!(core.reset_setting("version").is_err());
+        assert!(core.reset_setting("nonsense").is_err());
+    }
+
+    #[test]
+    fn reload_settings_picks_up_hand_edits_only_when_a_file_changed() {
+        let dir = Scratch::new("reload");
+        let (core, rec) = core_in(&dir, "/bin/cat", &[]);
+        let pane = only_pane(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || !rec.frames(pane).is_empty()), "no first frame");
+        let before = rec.frames(pane).len();
+
+        assert_eq!(core.reload_settings(), core.get_settings());
+        assert!(rec.settings_events().is_empty(), "nothing changed, nothing is announced");
+
+        let mine = Theme { name: "Mine".into(), ..Theme::papier() };
+        std::fs::write(dir.0.join("settings.json"), r#"{"theme": "Mine", "font_size": 22}"#).unwrap();
+        theme_file(&dir, "Mine.json", &mine);
+        let view = core.reload_settings();
+
+        assert_eq!(view.settings.font_size, 22);
+        assert_eq!(view.theme.name, "Mine");
+        assert!(view.themes.iter().any(|t| t.name == "Mine" && !t.builtin));
+        assert_eq!(rec.settings_events().len(), 1);
+        let papier = packed(mine.terminal.background);
+        assert!(wait_until(WAIT, || rec.has_full_frame_with_bg(pane, before, papier)), "the pane did not get the theme");
+
+        core.reload_settings();
+        assert_eq!(rec.settings_events().len(), 1, "an unchanged file is not read again");
+        core.set_setting("font_size", json!(18)).expect("set");
+        assert_eq!(rec.settings_events().len(), 2);
+        core.reload_settings();
+        assert_eq!(rec.settings_events().len(), 2, "the app's own save is not mistaken for a hand edit");
+    }
+
+    #[test]
+    fn a_reload_that_finds_a_damaged_file_keeps_the_settings_in_force_and_says_so() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        core.set_setting("font_size", json!(22)).expect("set");
+        std::fs::write(dir.0.join("settings.json"), "{ half an edit").unwrap();
+
+        let view = core.reload_settings();
+
+        assert_eq!(view.settings.font_size, 22, "a half-written edit does not reset the running app");
+        assert!(view.warnings.iter().any(|w| w.contains("settings.json")), "{:?}", view.warnings);
+        assert_eq!(rec.settings_events().len(), 2);
+    }
+
 }
 
 /// The protocol golden (`app/tests/fixtures/protocol.json`): what the webview depends on, generated from the real
