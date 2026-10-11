@@ -2,11 +2,15 @@
 // renderer's cursor colour, and the actions that ask the core to change something. The core owns every value
 // (D-06): the page sends `set_setting` and then shows what the core answered, never what it asked for. The pure
 // rules (colour validation, reading the view) are in settings-model.ts, which node can import.
-import { replaceAction, unregisterAction } from "./actions.js";
+import { registerAction, replaceAction, unregisterAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
-import { CURSOR_COLOR } from "./frame.js";
-import { colorSchemeOf, cursorColorOf, readSettingsView, tokenEntries } from "./settings-model.js";
-import type { SettingsView, ThemeInfo } from "./settings-model.js";
+import { CURSOR_COLOR, FONT_PX, setFontPx } from "./frame.js";
+import { focusInput, setPasteConfirm } from "./keyboard.js";
+import {
+  DEFAULT_FONT_SIZE, colorSchemeOf, cursorColorOf, fontStep, lookOf, readSettingsView, rootFontPx, tokenEntries,
+} from "./settings-model.js";
+import type { Look, SettingsView, ThemeInfo } from "./settings-model.js";
+import { openSettings } from "./settings-ui.js";
 import { state } from "./state.js";
 
 export { parseHex, tokenEntries } from "./settings-model.js";
@@ -17,9 +21,14 @@ export interface SettingsHost {
   setCursorColor(rgb: number): void;
   /** Ask for a draw on the next animation frame. */
   schedule(): void;
+  /** The font size or the root font size changed: measure again, tell the renderer and send `resize` to the panes. */
+  refit(): void;
 }
 
 let host: SettingsHost | null = null;
+
+/** The first views arrive before the scene has measured: only a later change needs a refit. */
+let live = false;
 
 // ---- the theme -----------------------------------------------------------------------------------
 
@@ -52,6 +61,32 @@ export function applyTheme(view: SettingsView): void {
   host?.schedule();
 }
 
+// ---- font size and UI scale ----------------------------------------------------------------------
+
+/** The look the metrics were last taken for. */
+let look: Look = { fontPx: FONT_PX, uiScale: 100 };
+
+/**
+ * Follow the font size and the UI scale of the view. The UI scale is the root font size (12 px at 100 %): every
+ * chrome size is in rem and the pane header is derived from it, so one change moves chrome, headers and grid
+ * together. A value that is not in the core's range keeps the previous one. A change after start-up asks the scene
+ * to measure again, which sends `resize` to every visible pane.
+ */
+function applyLook(view: SettingsView): void {
+  const next = lookOf(view.settings, look);
+  const fontChanged = next.fontPx !== look.fontPx;
+  const scaleChanged = next.uiScale !== look.uiScale;
+  if (!fontChanged && !scaleChanged) return;
+  look = next;
+  if (fontChanged) setFontPx(next.fontPx);
+  if (scaleChanged) {
+    const root = document.documentElement;
+    if (next.uiScale === 100) root.style.removeProperty("font-size"); // the stylesheet's 12 px
+    else root.style.setProperty("font-size", `${rootFontPx(next.uiScale)}px`);
+  }
+  if (live) host?.refit();
+}
+
 // ---- the actions ---------------------------------------------------------------------------------
 
 /** The ids of the theme actions registered now, in the core's order. */
@@ -79,6 +114,9 @@ function syncThemeActions(themes: ThemeInfo[]): void {
 /** The JSON of the view in force: a view the core repeats (a reload that found nothing) changes nothing. */
 let lastJson = "";
 
+/** What follows a new view besides the page itself: the settings dialog re-renders from the state. */
+const watchers = new Set<() => void>();
+
 /** Take a view the core sent: keep it in the state and make everything that follows from it current. */
 function accept(raw: unknown): SettingsView | null {
   const view = readSettingsView(raw);
@@ -88,7 +126,10 @@ function accept(raw: unknown): SettingsView | null {
   lastJson = json;
   state.settings = view;
   applyTheme(view);
+  applyLook(view);
+  setPasteConfirm(view.settings.confirm_multiline_paste);
   syncThemeActions(view.themes);
+  for (const fn of [...watchers]) fn();
   return view;
 }
 
@@ -113,13 +154,74 @@ export function change(key: string, value: () => unknown): Promise<string | null
   return run;
 }
 
-/** The theme and the settings: get the core's view once at start-up, then follow its `settings` events. */
+/** Ask the core to look at the settings and theme files now. Resolves like `change`; a view that changed is applied. */
+export async function reload(): Promise<string | null> {
+  try {
+    accept(await call<unknown>("reload_settings"));
+    return null;
+  } catch (e) {
+    return typeof e === "string" ? e : e instanceof Error ? e.message : "the settings could not be reloaded";
+  }
+}
+
+/** Window focus reloads, at most once a second: the core compares modification times before it reads anything. */
+const RELOAD_MIN_MS = 1000;
+let lastReload = Number.NEGATIVE_INFINITY;
+
+function reloadOnFocus(): void {
+  const now = performance.now();
+  if (now - lastReload < RELOAD_MIN_MS) return;
+  lastReload = now;
+  void reload();
+}
+
+/** Open the dialog and give the keyboard back to the terminal when it closes. */
+function openDialog(): void {
+  void openSettings({
+    change,
+    reload,
+    watch: (fn) => {
+      watchers.add(fn);
+      return () => void watchers.delete(fn);
+    },
+  }).then(focusInput);
+}
+
+/** The size now, for the actions that step it; NaN when the core has not said (`fontStep` then starts at 14). */
+const currentFont = (): number => state.settings?.settings.font_size ?? Number.NaN;
+
+function registerSettingsActions(): void {
+  registerAction({
+    id: "font.increase",
+    title: "Increase font size",
+    run: () => void change("font_size", () => fontStep(currentFont(), 1)),
+  });
+  registerAction({
+    id: "font.decrease",
+    title: "Decrease font size",
+    run: () => void change("font_size", () => fontStep(currentFont(), -1)),
+  });
+  registerAction({
+    id: "font.reset",
+    title: "Reset font size",
+    run: () => void change("font_size", () => DEFAULT_FONT_SIZE),
+  });
+  registerAction({ id: "settings.open", title: "Open settings", run: openDialog });
+}
+
+/**
+ * The theme and the settings: register the actions, get the core's view once, then follow its `settings` events and
+ * the window focus. Call before the first measurement, so the font size and the UI scale are in force when it runs.
+ */
 export async function initSettings(h: SettingsHost): Promise<void> {
   host = h;
+  registerSettingsActions();
   await listen<unknown>("settings", (raw) => void accept(raw));
   try {
     accept(await call<unknown>("get_settings"));
   } catch {
     // A core that cannot answer leaves the built-in look and the default sizes; the page still works.
   }
+  live = true;
+  window.addEventListener("focus", reloadOnFocus);
 }

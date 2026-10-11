@@ -88,6 +88,11 @@ async function open(page, url, view = AUBERGINE(), query = "?renderer=canvas") {
 
 const dialog = (page) => page.getByRole("dialog", { name: "Settings" });
 const field = (page, label) => dialog(page).getByLabel(label, { exact: true });
+/** A choice is a group of radio buttons named by its legend (WebKit reports a CSP violation for a `<select>`). */
+const choice = (page, name) => dialog(page).getByRole("group", { name, exact: true });
+const options = (page, name) => choice(page, name).locator("label").allTextContents();
+const chosen = (page, name) => choice(page, name).locator("input:checked").inputValue();
+const pick = (page, name, label) => choice(page, name).getByRole("radio", { name: label, exact: true }).click();
 const status = (page) => dialog(page).getByRole("status");
 const activeId = (page) => page.evaluate(() => document.activeElement && document.activeElement.id);
 const settle = (page) =>
@@ -127,21 +132,18 @@ async function openCase(page, url) {
   assert.equal(await dialog(page).getAttribute("aria-modal"), "true");
 
   // Every control has a label of its own and shows what the core said.
-  assert.equal(await field(page, "Theme").inputValue(), "aubergine");
-  assert.deepEqual(
-    await field(page, "Theme").locator("option").allTextContents(),
-    ["aubergine", "Schiefer", "Papier"],
-    "the theme list is the core's, in its order",
-  );
+  assert.equal(await chosen(page, "Theme"), "aubergine");
+  assert.deepEqual(await options(page, "Theme"), ["aubergine", "Schiefer", "Papier"], "the theme list is the core's, in its order");
   assert.equal(await field(page, "Font size").inputValue(), "14");
   assert.equal(await field(page, "UI scale").inputValue(), "100");
   assert.equal(await field(page, "Option as Alt").isChecked(), false);
-  assert.equal(await field(page, "Cursor blink").inputValue(), "system");
-  assert.deepEqual(await field(page, "Cursor blink").locator("option").allTextContents(), ["System", "On", "Off"]);
-  assert.equal(await field(page, "Motion").inputValue(), "system");
-  assert.deepEqual(await field(page, "Motion").locator("option").allTextContents(), ["System", "Reduce", "Full"]);
-  assert.equal(await field(page, "Contrast").inputValue(), "system");
-  assert.deepEqual(await field(page, "Contrast").locator("option").allTextContents(), ["System", "Normal", "High"]);
+  assert.equal(await chosen(page, "Cursor blink"), "system");
+  assert.deepEqual(await options(page, "Cursor blink"), ["System", "On", "Off"]);
+  assert.equal(await chosen(page, "Motion"), "system");
+  assert.deepEqual(await options(page, "Motion"), ["System", "Reduce", "Full"]);
+  assert.equal(await chosen(page, "Contrast"), "system");
+  assert.deepEqual(await options(page, "Contrast"), ["System", "Normal", "High"]);
+  assert.equal(await dialog(page).locator("select").count(), 0, "no <select>: WebKit reports an inline style for it");
   assert.equal(await field(page, "Confirm multi-line paste").isChecked(), true);
   assert.equal(await field(page, "Scrollback lines").inputValue(), "10000");
   assert.equal(await dialog(page).getByRole("button", { name: "Reload from file" }).count(), 1);
@@ -179,7 +181,7 @@ async function controlsCase(page, url) {
     return calls[n - 1];
   };
 
-  await field(page, "Theme").selectOption("Papier");
+  await pick(page, "Theme", "Papier");
   assert.deepEqual(await last(1), { key: "theme", value: "Papier" });
   await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue("--hw-ground").trim() === "#fff3f8");
 
@@ -195,13 +197,13 @@ async function controlsCase(page, url) {
   await field(page, "Option as Alt").check();
   assert.deepEqual(await last(4), { key: "option_as_alt", value: true });
 
-  await field(page, "Cursor blink").selectOption("off");
+  await pick(page, "Cursor blink", "Off");
   assert.deepEqual(await last(5), { key: "cursor_blink", value: "off" });
 
-  await field(page, "Motion").selectOption("reduce");
+  await pick(page, "Motion", "Reduce");
   assert.deepEqual(await last(6), { key: "motion", value: "reduce" });
 
-  await field(page, "Contrast").selectOption("high");
+  await pick(page, "Contrast", "High");
   assert.deepEqual(await last(7), { key: "contrast", value: "high" });
 
   await field(page, "Confirm multi-line paste").uncheck();
@@ -219,7 +221,7 @@ async function controlsCase(page, url) {
   // The dialog shows what the core answered.
   assert.equal(await field(page, "Font size").inputValue(), "18");
   assert.equal(await field(page, "UI scale").inputValue(), "150");
-  assert.equal(await field(page, "Theme").inputValue(), "Papier");
+  assert.equal(await chosen(page, "Theme"), "Papier");
   assert.equal(await field(page, "Option as Alt").isChecked(), true);
   assert.equal(await field(page, "Confirm multi-line paste").isChecked(), false);
   assert.equal(await pageState(page, "settings.settings.font_size"), 18);
@@ -231,11 +233,11 @@ async function controlsCase(page, url) {
   await page.waitForFunction(() => document.getElementById("set-font-size")?.value === "40");
   assert.equal(await field(page, "Font size").inputValue(), "40", "the control shows the core's value, not the typed one");
 
-  // Something that is not a number sends nothing and returns to the last good value.
-  await field(page, "Font size").fill("big");
+  // A field with no number in it (a number input holds nothing else) sends nothing and returns to the last good value.
+  await field(page, "Font size").fill("");
   await field(page, "Font size").press("Enter");
   await settle(page);
-  assert.equal((await settingCalls(page)).length, 10, "text in a number field must not be sent");
+  assert.equal((await settingCalls(page)).length, 10, "an empty number field must not be sent");
   assert.equal(await field(page, "Font size").inputValue(), "40");
 }
 
@@ -255,19 +257,19 @@ async function errorCase(page, url) {
   assert.equal(await field(page, "Font size").inputValue(), "14", "a rejected value must not stay in the control");
   assert.equal(await pageState(page, "settings.settings.font_size"), 14, "the page's state is the core's");
 
-  // A select returns to the last good value as well.
+  // A choice returns to the last good value as well.
   await page.evaluate(() => {
     window.__core.fail = { key: "theme", message: 'there is no theme called "Papier"' };
   });
-  await field(page, "Theme").selectOption("Papier");
+  await pick(page, "Theme", "Papier");
   await status(page).filter({ hasText: "there is no theme called" }).waitFor();
-  assert.equal(await field(page, "Theme").inputValue(), "aubergine");
+  assert.equal(await chosen(page, "Theme"), "aubergine", "a refused choice goes back to the last good one");
 
   // The reason is text: markup in it is shown as it is.
   await page.evaluate(() => {
     window.__core.fail = { key: "contrast", message: "<img src=x onerror=alert(1)>" };
   });
-  await field(page, "Contrast").selectOption("high");
+  await pick(page, "Contrast", "High");
   await status(page).filter({ hasText: "<img src=x" }).waitFor();
   assert.equal(await dialog(page).locator("img").count(), 0, "an error message is never markup");
 }
@@ -291,6 +293,13 @@ async function keyboardCase(page, url) {
     seen.add(where);
   }
   assert.ok(seen.size >= 10, `Tab visited only ${seen.size} controls: ${[...seen].join(", ")}`);
+  assert.ok(![...seen].some((id) => /^set-theme-[12]$/.test(id)), "a radio group is one tab stop");
+
+  // The arrow keys move inside a group and choose, one request each.
+  await choice(page, "Motion").getByRole("radio", { name: "System", exact: true }).focus();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("set_setting").length >= 1);
+  assert.deepEqual((await settingCalls(page)).at(-1), { key: "motion", value: "reduce" });
 
   // Shift+Tab wraps backwards.
   await page.keyboard.press("Shift+Tab");
@@ -299,7 +308,7 @@ async function keyboardCase(page, url) {
   // A checkbox works from the keyboard: Space toggles and sends once.
   await field(page, "Option as Alt").focus();
   await page.keyboard.press("Space");
-  await page.waitForFunction(() => window.__MOCK__.callsOf("set_setting").length >= 1);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("set_setting").length >= 2);
   assert.deepEqual((await settingCalls(page)).at(-1), { key: "option_as_alt", value: true });
 
   // Typed characters belong to the field: nothing reaches the terminal.

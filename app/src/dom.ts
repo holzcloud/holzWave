@@ -1,5 +1,5 @@
-// DOM helpers. Styles are assigned one property at a time, never through `cssText` or `setAttribute("style")`:
-// that keeps a strict `style-src` (no `unsafe-inline`) possible.
+// DOM helpers. Styles are assigned one property at a time through the style object, never as one piece of text
+// or a style attribute: that keeps a strict `style-src` (no `unsafe-inline`) possible.
 import type { PxRect } from "./frame.js";
 
 /** Create an element with a class name, optionally appended to `parent`. */

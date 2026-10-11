@@ -197,14 +197,37 @@ export interface Look {
   uiScale: number;
 }
 
-export function lookOf(_s: Pick<SettingsValues, "font_size" | "ui_scale">, _previous: Look): Look {
-  return { fontPx: Number.NaN, uiScale: Number.NaN };
+/**
+ * The look a view asks for. Each value stands for itself: one that is not a number, or is outside its range, keeps
+ * the previous one, so a bad scale never costs a good font size. A fraction is rounded to the whole number the
+ * core stores.
+ */
+export function lookOf(s: { font_size: unknown; ui_scale: unknown }, previous: Look): Look {
+  const pick = (value: unknown, range: readonly [number, number], keep: number): number => {
+    if (!finite(value)) return keep;
+    const whole = Math.round(value);
+    return whole >= range[0] && whole <= range[1] ? whole : keep;
+  };
+  return {
+    fontPx: pick(s.font_size, FONT_SIZE_RANGE, previous.fontPx),
+    uiScale: pick(s.ui_scale, UI_SCALE_RANGE, previous.uiScale),
+  };
 }
 
-export function typedInteger(_text: string): number | null {
-  return null;
+const NUMBER_TEXT = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
+
+/**
+ * The whole number typed into a field, or null when the text is not a plain decimal number (no hex, no units, no
+ * infinity). A fraction is rounded; the range is the core's to enforce, it clamps.
+ */
+export function typedInteger(text: string): number | null {
+  const trimmed = text.trim();
+  if (!NUMBER_TEXT.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? Math.round(n) : null;
 }
 
-export function fontStep(_current: number, _delta: number): number {
-  return Number.NaN;
+/** The size a `font.increase` or `font.decrease` asks for: the size now plus `delta`, from the default if unknown. */
+export function fontStep(current: number, delta: number): number {
+  return (finite(current) ? current : DEFAULT_FONT_SIZE) + delta;
 }

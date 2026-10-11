@@ -51,7 +51,7 @@ export async function initScene(): Promise<void> {
   state.renderer = rendererName;
   await loadFonts();
   // The settings come before the first measurement: the font size and the UI scale decide the cell size.
-  await initSettings({ setCursorColor: (rgb) => renderer?.setCursorColor(rgb), schedule });
+  await initSettings({ setCursorColor: (rgb) => renderer?.setCursorColor(rgb), schedule, refit: fit });
   state.metrics = measure();
   window.addEventListener("resize", fit);
 }
