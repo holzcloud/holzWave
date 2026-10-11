@@ -31,9 +31,10 @@ test("labels are unique, prefix-free and as many as asked, for every count up to
 
 test("beyond the alphabet two letters are used, singles stay singles as far as possible", () => {
   const labels = hintLabels(27);
-  assert.equal(labels.filter((l) => l.length === 2).length, 26, "one prefix letter gives 26 two-letter labels");
-  assert.equal(labels.filter((l) => l.length === 1).length, 1);
+  assert.equal(labels.filter((l) => l.length === 2).length, 2, "one prefix letter, used as far as the count needs it");
+  assert.equal(labels.filter((l) => l.length === 1).length, 25);
   assert.deepEqual(labels.slice(0, 25), [...HINT_ALPHABET].slice(0, 25), "the first targets keep the single letters");
+  assert.deepEqual(labels.slice(25), ["za", "zb"]);
   assert.equal(hintLabels(676).every((l) => l.length === 2), true, "at the limit every label is two letters");
 });
 

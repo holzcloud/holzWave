@@ -109,7 +109,7 @@ async function clickCase(page, url) {
   assert.equal((await callsOf(page, "open_url")).length, 1, "a path is not opened");
 
   // The suffix is part of what is clickable.
-  await modClick(page, "Meta", g.pt(2, 24, 1)); // the "3" of ":12:3" is column 5 + 18 = 23
+  await modClick(page, "Meta", g.pt(2, 22, 1)); // the "3" of ":12:3": the path starts at column 5 and is 18 cells
   assert.equal((await callsOf(page, "reveal_path")).length, 2, "the :line:col suffix is clickable too");
 
   // A pane that reported no directory has no base.

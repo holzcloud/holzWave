@@ -97,8 +97,11 @@ export function onSelectionSpans(pane: number, spans: readonly SpanMsg[], change
 
 // ---- clipboard -----------------------------------------------------------------------------------
 
-/** Put `text` on the clipboard from inside a user gesture; true when a copy was started. */
-function writeClipboard(text: string): boolean {
+/**
+ * Put `text` on the clipboard from inside a user gesture (a key or a click handler); true when a copy was started.
+ * Hint mode and copy mode copy text that is not the pointer's selection through this.
+ */
+export function writeClipboard(text: string): boolean {
   const previous = document.activeElement as HTMLElement | null;
   const box = el("textarea", "clipboard-buffer", document.body);
   box.value = text;

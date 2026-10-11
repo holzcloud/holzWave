@@ -6,7 +6,9 @@
 // starts them.
 import { call, listen } from "./bridge.js";
 import { initChrome } from "./chrome.js";
+import { initHints } from "./hints.js";
 import { initKeyboard } from "./keyboard.js";
+import { initLinks } from "./links.js";
 import { initOverlay } from "./overlay.js";
 import { initPointer } from "./pointer.js";
 import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
@@ -22,6 +24,8 @@ async function main() {
   initPointer(applyView);
   initSelection();
   await initSearch();
+  await initLinks();
+  await initHints();
   await initEvents();
   await listen<View>("layout", applyView);
   fit();

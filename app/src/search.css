@@ -37,3 +37,13 @@
 /* ---- boxes of other features ------------------------------------------------------------------------------- */
 
 .cellbox { position: absolute; box-sizing: border-box; }
+
+/* A link under the pointer while the modifier is held: an underline of the cells and the pointer cursor. */
+.linkhover { border-bottom: 2px solid var(--hw-rose); }
+#term.link-hover { cursor: pointer; }
+
+/* A hint label: filled, bold, over the first cells of its target. */
+.hint {
+  display: flex; align-items: center; justify-content: center; overflow: hidden; font-weight: 700; line-height: 1;
+  background: var(--hw-rose); color: var(--hw-ground); outline: 1px solid var(--hw-ground);
+}

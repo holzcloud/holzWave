@@ -82,7 +82,7 @@ test("a :line or :line:col suffix is captured and covered, not part of the path"
   assert.deepEqual({ ...one[0] }, { kind: "path", startCol: 3, endCol: 18, text: "./src/main.rs", line: 12 });
   const two = findTargets(row("/a/b.ts:120:34: error"));
   assert.equal(two.length, 1);
-  assert.deepEqual({ ...two[0] }, { kind: "path", startCol: 0, endCol: 14, text: "/a/b.ts", line: 120, col: 34 });
+  assert.deepEqual({ ...two[0] }, { kind: "path", startCol: 0, endCol: 13, text: "/a/b.ts", line: 120, col: 34 });
   const none = findTargets(row("/a/b.ts: error"));
   assert.equal(none[0].line, undefined);
   assert.equal(none[0].endCol, 6, "a colon without digits is not a suffix");
@@ -137,7 +137,7 @@ test("columns are cell columns: a wide character takes two", () => {
 
 test("a cluster tail inside a cell is part of the text and a control character ends a target", () => {
   const row1 = [...row("/tmp/e"), "é", ...row("x")];
-  assert.deepEqual(findTargets(row1).map((t) => [t.text, t.startCol, t.endCol]), [["/tmp/eéx", 0, 8]]);
+  assert.deepEqual(findTargets(row1).map((t) => [t.text, t.startCol, t.endCol]), [["/tmp/eéx", 0, 7]]);
   const bell = row("https://x.org/a\u0007b");
   assert.deepEqual(kinds(findTargets(bell)), ["url:https://x.org/a"]);
 });
