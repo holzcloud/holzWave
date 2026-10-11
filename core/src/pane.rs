@@ -181,6 +181,8 @@ enum Control {
     SelectionText(Sender<Result<Option<String>>>),
     Search(SearchOp, Sender<Result<SearchState>>),
     CopyMode(CopyOp, Sender<Result<CopyState>>),
+    /// The answer of a working-directory lookup, from the short-lived thread that ran it.
+    CwdFound(Option<PathBuf>),
     Close,
 }
 
@@ -562,10 +564,34 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             if self.dirty && self.last_emit.is_none_or(|last| last.elapsed() >= self.interval) {
                 self.emit_frame();
             }
-            let pid = self.pid;
-            if let Some(dir) = self.cwd.check(Instant::now(), || pid.and_then(process_cwd)) {
-                (self.sink)(PaneEvent::Cwd(dir));
+            if self.cwd.begin(Instant::now()) {
+                self.look_up_cwd();
             }
+        }
+    }
+
+    /// Ask for the shell's working directory without waiting for it. The lookup starts a process that can stall
+    /// (a stale network mount), so it runs on a thread of its own and its answer comes back as
+    /// [`Control::CwdFound`]: keys, resizes and frames of the pane never wait for it (WR-04).
+    fn look_up_cwd(&mut self) {
+        let Some(pid) = self.pid else {
+            self.report_cwd(None);
+            return;
+        };
+        let queue = self.queue.clone();
+        let started = thread::Builder::new().name("holzwave-cwd".into()).spawn(move || {
+            // A closed queue means the pane is gone: nobody wants the answer.
+            queue.push_control(Control::CwdFound(process_cwd(pid)));
+        });
+        if started.is_err() {
+            self.report_cwd(None);
+        }
+    }
+
+    /// The end of a lookup: report the directory when it differs from the last one reported.
+    fn report_cwd(&mut self, found: Option<PathBuf>) {
+        if let Some(dir) = self.cwd.finish(found) {
+            (self.sink)(PaneEvent::Cwd(dir));
         }
     }
 
@@ -610,6 +636,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 self.engine.scroll_to_bottom();
                 self.dirty = true;
             }
+            Control::CwdFound(found) => self.report_cwd(found),
             Control::RequestFull => {
                 self.encoder.request_full();
                 self.engine.request_full();
@@ -881,11 +908,17 @@ const CWD_MIN_GAP: Duration = Duration::from_secs(1);
 ///
 /// The lookup (`process_cwd`) can start a process, so it is rationed: it runs only when the output has been quiet
 /// for [`CWD_IDLE`] (a prompt was drawn; a flood never gets one) and at most once per [`CWD_MIN_GAP`]. A result
-/// that equals the last one reported is not reported again.
+/// that equals the last one reported is not reported again. One lookup is in flight at a time: [`begin`] starts
+/// it and [`finish`] takes its answer, whenever that comes.
+///
+/// [`begin`]: CwdTracker::begin
+/// [`finish`]: CwdTracker::finish
 struct CwdTracker {
     /// When the next check is wanted: [`CWD_IDLE`] after the last output.
     due: Option<Instant>,
     last_lookup: Option<Instant>,
+    /// A lookup was started and its answer has not come yet.
+    in_flight: bool,
     /// What was last reported.
     reported: Option<String>,
     /// The last directory a program announced with OSC 7.
@@ -896,7 +929,7 @@ impl CwdTracker {
     /// A tracker that wants a first look [`CWD_IDLE`] after `now`, so that a program that never prints still gets
     /// its starting directory reported.
     fn new(now: Instant) -> Self {
-        Self { due: Some(now + CWD_IDLE), last_lookup: None, reported: None, osc7: None }
+        Self { due: Some(now + CWD_IDLE), last_lookup: None, in_flight: false, reported: None, osc7: None }
     }
 
     /// Output arrived: the check moves to [`CWD_IDLE`] after it.
@@ -910,8 +943,12 @@ impl CwdTracker {
         self.due = Some(now);
     }
 
-    /// When the next lookup may run, `None` when none is wanted.
+    /// When the next lookup may run, `None` when none is wanted or one is still in flight (its answer wakes the
+    /// loop as a message).
     fn deadline(&self) -> Option<Instant> {
+        if self.in_flight {
+            return None;
+        }
         let due = self.due?;
         Some(match self.last_lookup {
             Some(last) => due.max(last + CWD_MIN_GAP),
@@ -919,21 +956,39 @@ impl CwdTracker {
         })
     }
 
-    /// Run the check if it is due at `now`. `lookup` is called at most once, and only when due. Returns the
-    /// directory to report when it differs from the last one reported.
-    fn check(&mut self, now: Instant, lookup: impl FnOnce() -> Option<PathBuf>) -> Option<String> {
+    /// Start a lookup if one is due at `now`: true means the caller runs it and passes the answer to
+    /// [`finish`](Self::finish), whatever it is.
+    fn begin(&mut self, now: Instant) -> bool {
         if self.deadline().is_none_or(|deadline| now < deadline) {
-            return None;
+            return false;
         }
         self.due = None;
         self.last_lookup = Some(now);
+        self.in_flight = true;
+        true
+    }
+
+    /// The answer of the lookup that [`begin`](Self::begin) started. Returns the directory to report when it
+    /// differs from the last one reported.
+    fn finish(&mut self, found: Option<PathBuf>) -> Option<String> {
+        self.in_flight = false;
         // The process is the truth; what the program announced is only for when the process cannot be read.
-        let current = lookup().map(|p| p.to_string_lossy().into_owned()).or_else(|| self.osc7.clone())?;
+        let current = found.map(|p| p.to_string_lossy().into_owned()).or_else(|| self.osc7.clone())?;
         if self.reported.as_deref() == Some(current.as_str()) {
             return None;
         }
         self.reported = Some(current.clone());
         Some(current)
+    }
+
+    /// A lookup that is done in place: [`begin`](Self::begin) and [`finish`](Self::finish) in one call, with
+    /// `lookup` called at most once and only when due. The rules are tested through it without a thread.
+    #[cfg(test)]
+    fn check(&mut self, now: Instant, lookup: impl FnOnce() -> Option<PathBuf>) -> Option<String> {
+        if !self.begin(now) {
+            return None;
+        }
+        self.finish(lookup())
     }
 }
 
@@ -1002,6 +1057,36 @@ mod tests {
             Some("/b".to_string())
         );
         assert_eq!(lookups, 2);
+    }
+
+    #[test]
+    fn a_lookup_in_flight_is_not_started_again_and_does_not_wake_the_loop() {
+        // The answer comes later, from another thread (WR-04): until it does, no second lookup starts and the
+        // loop has no deadline to wake for, however much output arrives.
+        let base = Instant::now();
+        let mut tracker = CwdTracker::new(base);
+        tracker.output(at(base, 0));
+        assert!(tracker.begin(at(base, 200)));
+        assert_eq!(tracker.deadline(), None);
+
+        tracker.output(at(base, 300));
+        assert_eq!(tracker.deadline(), None, "output during a lookup does not make the next one due yet");
+        assert!(!tracker.begin(at(base, 5000)), "a lookup is still in flight");
+
+        assert_eq!(tracker.finish(Some("/a".into())), Some("/a".to_string()));
+        assert_eq!(tracker.deadline(), Some(at(base, 1200)), "the output of the meantime is looked at, a second later");
+        assert!(tracker.begin(at(base, 1200)));
+        assert_eq!(tracker.finish(Some("/a".into())), None, "an unchanged directory is not reported again");
+    }
+
+    #[test]
+    fn a_lookup_that_found_nothing_ends_the_flight_and_falls_back_to_osc7() {
+        let base = Instant::now();
+        let mut tracker = CwdTracker::new(base);
+        tracker.announced("/remote".into(), at(base, 0));
+        assert!(tracker.begin(at(base, 0)));
+        assert_eq!(tracker.finish(None), Some("/remote".to_string()));
+        assert!(!tracker.begin(at(base, 10)), "nothing is due after the answer");
     }
 
     #[test]

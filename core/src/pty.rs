@@ -6,6 +6,10 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -144,22 +148,57 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("/usr/sbin/lsof")
-            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-            .env_clear()
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        parse_lsof_cwd(&output.stdout)
+        // `-b` keeps lsof from calling stat and readlink on the files it reports: those block for good on a stale
+        // network mount, which is where a shell's directory tends to be when something is wrong. The exit status
+        // is not read: `-b` makes lsof warn about what it skipped, and a missing process gives no `n` line.
+        let mut command = std::process::Command::new("/usr/sbin/lsof");
+        command.args(["-b", "-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).env_clear();
+        parse_lsof_cwd(&output_within(command, LOOKUP_DEADLINE)?)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         None
     }
+}
+
+/// The longest a helper process of [`process_cwd`] may run before it is given up.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const LOOKUP_DEADLINE: Duration = Duration::from_millis(750);
+
+/// The most output of a helper process that is read. It is far above what `lsof -Fn` of one directory prints.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const LOOKUP_OUTPUT_LIMIT: u64 = 64 * 1024;
+
+/// Run `command` and return what it wrote to stdout, or `None` when it could not be started or did not end within
+/// `deadline`. Stdin and stderr are closed.
+///
+/// A child that is over time is killed and reaped on a short-lived thread, so the caller never waits for it: a
+/// process in an uninterruptible kernel call does not die on a signal, and waiting for it would be the hang this
+/// function exists to avoid.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn output_within(mut command: Command, deadline: Duration) -> Option<Vec<u8>> {
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::Builder::new().name("holzwave-lookup".into()).spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.take(LOOKUP_OUTPUT_LIMIT).read_to_end(&mut out);
+        let _ = tx.send(out);
+    });
+    let output = match reader {
+        Ok(_) => rx.recv_timeout(deadline).ok(),
+        Err(_) => None,
+    };
+    // After the end of its output a child is gone or about to be; one that is not is killed like an overdue one.
+    if output.is_none() || !matches!(child.try_wait(), Ok(Some(_))) {
+        let _ = child.kill();
+        // Reaped on its own thread. Without a thread the child stays a zombie until the app ends, which is the
+        // lesser harm.
+        let _ = thread::Builder::new().name("holzwave-reap".into()).spawn(move || {
+            let _ = child.wait();
+        });
+    }
+    output
 }
 
 /// The path from the first `n` line of `lsof -Fn` output: lines are tagged by their first byte (`p` pid, `f`
@@ -304,5 +343,35 @@ mod tests {
         assert_eq!(parse_lsof_cwd(b""), None);
         assert_eq!(parse_lsof_cwd(b"p1234\nfcwd\n"), None);
         assert_eq!(parse_lsof_cwd(b"p1234\nfcwd\nnrelative\n"), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod lookup_tests {
+    use super::output_within;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_output_of_a_helper_that_ends_in_time_is_returned() {
+        let mut command = Command::new("/bin/echo");
+        command.arg("hello");
+        assert_eq!(output_within(command, Duration::from_secs(5)), Some(b"hello\n".to_vec()));
+    }
+
+    #[test]
+    fn a_helper_that_does_not_end_in_time_is_given_up_without_waiting_for_it() {
+        // `sleep` stands for an lsof that hangs on a stale mount (WR-04).
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let start = Instant::now();
+        assert_eq!(output_within(command, Duration::from_millis(200)), None);
+        assert!(start.elapsed() < Duration::from_secs(5), "waited {:?} for a helper that hangs", start.elapsed());
+    }
+
+    #[test]
+    fn a_helper_that_cannot_be_started_gives_none() {
+        let command = Command::new("/nonexistent/holzwave-helper");
+        assert_eq!(output_within(command, Duration::from_secs(1)), None);
     }
 }
