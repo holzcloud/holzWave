@@ -153,10 +153,14 @@ export function toRenderFrame(mirror: PaneMirror, focused: boolean): Frame {
   };
 }
 
-/** One row as plain text: one string per cell, the spacer of a wide character dropped, tails appended. */
-function rowText(row: RowMsg | null | undefined, cols: number): string {
-  if (!row) return "";
+/**
+ * One row as one string per cell column: a wide character is followed by an empty string for its spacer, a blank
+ * cell is a space, the tail of a grapheme cluster is appended to its cell. The list holds at most `cols` entries
+ * and may be shorter (columns a frame never sent are blank). Anything that is not a row gives an empty list.
+ */
+function cellsOf(row: RowMsg | null | undefined, cols: number): string[] {
   const cells: string[] = [];
+  if (!row) return cells;
   fill: for (const run of row.runs) {
     const text = Array.isArray(run) ? run[0] : undefined;
     if (typeof text !== "string") continue;
@@ -170,7 +174,18 @@ function rowText(row: RowMsg | null | undefined, cols: number): string {
     const [col, tail] = extra;
     if (Number.isInteger(col) && col >= 0 && col < cells.length && typeof tail === "string") cells[col] += tail;
   }
-  return cells.join("").trimEnd();
+  return cells;
+}
+
+/** Row `y` of the mirror as one string per cell column (see `cellsOf`); an unknown row is empty. */
+export function rowCells(mirror: PaneMirror, y: number): string[] {
+  if (!Number.isInteger(y) || y < 0 || y >= mirror.rows) return [];
+  return cellsOf(mirror.rows_[y], mirror.cols);
+}
+
+/** One row as plain text: spacers dropped, tails appended, trailing blanks trimmed. */
+function rowText(row: RowMsg | null | undefined, cols: number): string {
+  return cellsOf(row, cols).join("").trimEnd();
 }
 
 /** The grid as plain text, one string per row: spacers dropped, tails appended, trailing blanks trimmed. */
@@ -205,6 +220,39 @@ export function visibleSpans(mirror: PaneMirror): SpanMsg[] {
     if (from <= to) out.push([y, from, to]);
   }
   return out;
+}
+
+/**
+ * The search matches of the mirror that can be drawn: whole numbers, a row inside the grid, the ends clamped to the
+ * columns of the grid, `current` true only for `true`. A match that is empty after clamping, or malformed, is dropped.
+ */
+export function visibleMatches(mirror: PaneMirror): MatchMsg[] {
+  const out: MatchMsg[] = [];
+  for (const match of mirror.matches) {
+    if (!Array.isArray(match) || match.length < 3) continue;
+    const [y, x0, x1, current] = match;
+    if (!Number.isInteger(y) || !Number.isInteger(x0) || !Number.isInteger(x1)) continue;
+    if (y < 0 || y >= mirror.rows) continue;
+    const from = Math.max(0, x0);
+    const to = Math.min(mirror.cols - 1, x1);
+    if (from <= to) out.push([y, from, to, current === true]);
+  }
+  return out;
+}
+
+/**
+ * A signature of everything in a header that the overlay draws or shows besides the cells: the selection spans, the
+ * search matches, the search counter and the copy cursor. Equal headers give equal strings; a frame whose signature
+ * differs from the one before it needs an overlay render.
+ */
+export function decorationSignature(mirror: PaneMirror | undefined): string {
+  if (!mirror) return "";
+  const matches = Array.isArray(mirror.matches)
+    ? mirror.matches.map((m) => (Array.isArray(m) ? m.join(",") : "?")).join(";")
+    : "";
+  const search = mirror.search ? `${mirror.search.total}/${mirror.search.current ?? "-"}` : "-";
+  const cursor = Array.isArray(mirror.copyCursor) ? mirror.copyCursor.join(",") : "-";
+  return `${spansSignature(mirror.selection)}|${matches}|${search}|${cursor}`;
 }
 
 // ---- pane lifecycle -----------------------------------------------------------------------------------

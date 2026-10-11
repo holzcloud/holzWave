@@ -4,7 +4,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { RateMeter, applyFrame, forgetPane, gridText, spansSignature, toRenderFrame, visibleSpans } from "../../dist/frames.js";
+import {
+  RateMeter, applyFrame, decorationSignature, forgetPane, gridText, rowCells, spansSignature, toRenderFrame,
+  visibleMatches, visibleSpans,
+} from "../../dist/frames.js";
 
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/frames.json", import.meta.url), "utf8"));
 
@@ -244,4 +247,41 @@ test("RateMeter counts the events of the last window and scales to one second", 
   const burst = new RateMeter(1000);
   for (let i = 0; i < 500; i++) burst.note(i); // 500 events in 500 ms
   assert.equal(burst.perSecond(499), 500);
+});
+
+// ---- search matches, the overlay signature and per-cell rows (plan 21) ----------------------------------------
+
+test("visibleMatches keeps whole-number spans on the grid, clamps the ends and the current flag is true or false", () => {
+  const mirror = applyFrame(undefined, full({
+    matches: [[1, 2, 5, false], [2, -3, 99, true], [9, 0, 1, false], ["a", 0, 1, false], [0, 4, 2, false], [3, 0, 1, 1]],
+  })).mirror;
+  assert.deepEqual(visibleMatches(mirror), [[1, 2, 5, false], [2, 0, 9, true], [3, 0, 1, false]]);
+});
+
+test("decorationSignature differs when the matches, the counter or the copy cursor differ and not otherwise", () => {
+  const base = applyFrame(undefined, full()).mirror;
+  const sig = (over) => decorationSignature(applyFrame(undefined, full(over)).mirror);
+  assert.equal(decorationSignature(base), sig({}), "equal headers, equal signatures");
+  const variants = [
+    { matches: [[0, 0, 1, true]] },
+    { matches: [[0, 0, 1, false]] },
+    { search: { total: 1, current: 0 } },
+    { search: { total: 2, current: 0 } },
+    { copy_cursor: [1, 2] },
+    { selection: [[0, 0, 3]] },
+  ];
+  const seen = new Set([decorationSignature(base)]);
+  for (const v of variants) seen.add(sig(v));
+  assert.equal(seen.size, variants.length + 1, "every variant has its own signature");
+  assert.equal(decorationSignature(undefined), "");
+});
+
+test("rowCells gives one string per column with the wide character's spacer empty and cluster tails joined", () => {
+  const wide = { y: 0, runs: [["a", 1, 1, 0, 0], ["\u4e2d\0", 2, 1, 0, 0], ["b ", 2, 1, 0, 0]], extras: [[3, "\u0301"]] };
+  const mirror = applyFrame(undefined, full({ changed: [wide] })).mirror;
+  assert.deepEqual(rowCells(mirror, 0), ["a", "\u4e2d", "", "b\u0301", " "]);
+  assert.deepEqual(rowCells(mirror, 1), [], "a row no frame sent is empty");
+  assert.deepEqual(rowCells(mirror, 99), [], "a row outside the grid is empty");
+  assert.deepEqual(rowCells(mirror, -1), []);
+  assert.equal(gridText(mirror)[0], "a\u4e2db\u0301", "gridText is the same row joined and trimmed");
 });

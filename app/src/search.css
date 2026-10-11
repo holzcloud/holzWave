@@ -1,0 +1,39 @@
+/* Search, links, hints and copy mode (DESK-21). Loaded with `loadStyles("./search.css")` by search-ui.ts. Every
+   colour is a `--hw-*` token from app.css, every size is in rem so the UI scale moves it with the chrome. State is
+   never colour alone: the current match has an outline, a link under the pointer an underline, the copy cursor a
+   double border and a hint a letter. */
+
+/* ---- search bar -------------------------------------------------------------------------------------------- */
+
+/* The host covers the focused pane below its header and takes no pointer events; only the bar does. */
+.search-host { position: absolute; display: flex; justify-content: flex-end; align-items: flex-start; pointer-events: none; }
+.search-host[hidden] { display: none; }
+.search-bar {
+  box-sizing: border-box; display: flex; align-items: center; gap: .333rem; margin: .5rem; padding: .333rem .5rem;
+  pointer-events: auto; background: var(--hw-ground-2); color: var(--hw-ink); border: 1px solid var(--hw-edge);
+}
+.search-bar input {
+  box-sizing: border-box; width: 14rem; margin: 0; padding: .25rem .5rem; font: inherit; color: var(--hw-ink);
+  background: var(--hw-ground); border: 1px solid var(--hw-edge); border-radius: 0;
+}
+.search-bar input:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: -1px; }
+.search-count { min-width: 4.5rem; text-align: center; color: var(--hw-ink-2); font-variant-numeric: tabular-nums; }
+.search-bar button {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; margin: 0; padding: .25rem .5rem; font: inherit;
+  color: var(--hw-ink-2); background: none; border: 1px solid var(--hw-edge); border-radius: 0; cursor: pointer;
+}
+.search-bar button:hover { color: var(--hw-ink); background: var(--hw-rose-wash); }
+.search-bar button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 1px; }
+
+/* ---- matches ----------------------------------------------------------------------------------------------- */
+
+/* A wash of the warning colour over the matched cells. The current match is stronger and has a 2 px outline, so it
+   is told apart without colour. */
+.match { position: absolute; box-sizing: border-box; background: color-mix(in srgb, var(--hw-warn) 35%, transparent); }
+.match.current {
+  background: color-mix(in srgb, var(--hw-warn) 60%, transparent); outline: 2px solid var(--hw-ink); outline-offset: -2px;
+}
+
+/* ---- boxes of other features ------------------------------------------------------------------------------- */
+
+.cellbox { position: absolute; box-sizing: border-box; }

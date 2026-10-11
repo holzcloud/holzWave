@@ -6,7 +6,7 @@ import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
 import { BOLD, ITALIC, Metrics, Renderer, font, getFontPx } from "./frame.js";
-import { RateMeter, applyFrame, forgetPane, spansSignature, toRenderFrame } from "./frames.js";
+import { RateMeter, applyFrame, decorationSignature, forgetPane, toRenderFrame } from "./frames.js";
 import type { FrameMsg } from "./frames.js";
 import { fitCells, gridRect, headerHeight } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
@@ -196,11 +196,12 @@ function onFrame(msg: FrameMsg): void {
   }
   if (!mirror) return;
   if (msg.full) waiting.delete(pane);
-  const before = spansSignature(state.frames.get(pane)?.selection);
+  const before = decorationSignature(state.frames.get(pane));
   state.frames.set(pane, mirror);
-  // The cache of the selection's text follows the spans; the highlight is redrawn when the focused pane's change.
+  // The cache of the selection's text follows the spans; the overlay (selection, search matches and counter, copy
+  // cursor) is redrawn when what the focused pane's header says about them changes.
   onSelectionSpans(pane, mirror.selection, msg.changed);
-  if (pane === state.view?.focus && before !== spansSignature(mirror.selection)) renderOverlay();
+  if (pane === state.view?.focus && before !== decorationSignature(mirror)) renderOverlay();
   schedule();
 }
 
