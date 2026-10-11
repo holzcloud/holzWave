@@ -57,6 +57,7 @@ export async function initScene(): Promise<void> {
   await initSettings({ setCursorColor: (rgb) => renderer?.setCursorColor(rgb), schedule, refit: fit });
   state.metrics = measure();
   window.addEventListener("resize", fit);
+  watchDpr();
   // The cursor phase follows the preferences, and a key press (heard before any handler) restarts it.
   onPreferenceChange(syncBlink);
   window.addEventListener("keydown", restartBlink, true);
@@ -119,6 +120,25 @@ function measure(): Metrics {
     width: canvas().clientWidth,
     height: canvas().clientHeight,
   };
+}
+
+/**
+ * Follow the device pixel ratio. A window dragged to a display with another scale factor, or a change of the display
+ * scaling, changes it without a `resize` event when the CSS size of the window stays: the cell size, the canvas
+ * backing store and the glyph atlas would stay at the old ratio. The query matches only the ratio it was made for, so
+ * its `change` event is the end of that ratio, and the next one is watched after the re-measurement (WR-07).
+ */
+function watchDpr(): void {
+  if (typeof window.matchMedia !== "function") return;
+  const query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+  query.addEventListener(
+    "change",
+    () => {
+      fit();
+      watchDpr();
+    },
+    { once: true },
+  );
 }
 
 // ---- layout changes -----------------------------------------------------------------------------
