@@ -735,11 +735,15 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// use up the interval, or the echo of that key, arriving a fraction of a millisecond later, would wait for it.
     fn emit_frame(&mut self) {
         self.dirty = false;
-        if let Ok(update) = self.engine.update()
-            && let Some(frame) = self.encoder.encode(update)
-        {
-            (self.sink)(PaneEvent::Frame(frame));
-            self.last_emit = Some(Instant::now());
+        match self.engine.update() {
+            Ok(update) => {
+                if let Some(frame) = self.encoder.encode(update) {
+                    (self.sink)(PaneEvent::Frame(frame));
+                    self.last_emit = Some(Instant::now());
+                }
+            }
+            // No frame is the symptom of this; without a trace the pane just looks frozen.
+            Err(e) => eprintln!("holzwave: pane update failed: {e}"),
         }
     }
 

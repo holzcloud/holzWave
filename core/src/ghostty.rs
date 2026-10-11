@@ -50,6 +50,20 @@ fn eng<E: std::fmt::Debug>(e: E) -> Error {
     Error::Engine(format!("{e:?}"))
 }
 
+/// The value of a frame decoration, or what stands in for it when it cannot be read.
+///
+/// A decoration (match boxes, the copy cursor) is not worth the frame: an error is written to stderr, so it leaves a
+/// trace, and the frame goes out without it. `fallback` runs only for an error.
+fn degraded<T>(what: &str, result: Result<T>, fallback: impl FnOnce() -> T) -> T {
+    match result {
+        Ok(value) => value,
+        Err(e) => {
+            eprintln!("holzwave: {what}: {e}");
+            fallback()
+        }
+    }
+}
+
 fn color(c: libghostty_vt::style::RgbColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b }
 }
@@ -1191,8 +1205,13 @@ impl TerminalEngine for GhosttyEngine {
 
     fn update(&mut self) -> Result<Update> {
         // The search is caught up first: it needs the terminal exclusively, which the render state below borrows.
-        let (matches, search) = self.search_view()?;
-        let copy_cursor = self.copy_cursor_in_viewport()?;
+        // Match boxes and the copy cursor are decorations of the frame: when one cannot be read the frame still
+        // goes out without it, instead of the whole pane going without frames for as long as the state is bad.
+        let search_view = self.search_view();
+        // Without the view the counts are still read when the library lets them be, so the bar keeps its numbers.
+        let (matches, search) =
+            degraded("search view", search_view, || (Vec::new(), self.search_state().unwrap_or(None)));
+        let copy_cursor = degraded("copy cursor", self.copy_cursor_in_viewport(), || None);
         // The scrollbar is read at the same moment as the render-state update (render.rs docs).
         let sb = self.terminal.scrollbar().map_err(eng)?;
         let modes = Modes {
@@ -1569,5 +1588,22 @@ mod tests {
             let (consumed, _) = libghostty_vt::unicode::grapheme_width(&chars);
             assert_eq!(consumed, chars.len(), "{text:?} is one cluster");
         }
+    }
+
+    #[test]
+    fn a_decoration_that_cannot_be_read_degrades_to_its_stand_in_instead_of_failing_the_frame() {
+        // An error in the search view or the copy cursor must cost the match boxes or the cursor, never the frame
+        // (WR-02): the stand-in is used, and only for an error.
+        let spans: Result<Vec<u16>> = Err(Error::Engine("search broke".into()));
+        assert_eq!(degraded("search view", spans, || vec![9]), vec![9]);
+
+        let mut stand_in_runs = 0;
+        let read: Result<Option<(u16, u16)>> = Ok(Some((3, 4)));
+        let got = degraded("copy cursor", read, || {
+            stand_in_runs += 1;
+            None
+        });
+        assert_eq!(got, Some((3, 4)), "a value that was read is used as it is");
+        assert_eq!(stand_in_runs, 0, "the stand-in is not built when nothing failed");
     }
 }

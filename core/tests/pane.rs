@@ -344,6 +344,8 @@ struct Spy {
     resizes: Mutex<Vec<(u16, u16)>>,
     /// The engine calls of the routing tests, as text, in order.
     calls: Mutex<Vec<String>>,
+    /// How many of the next `update` calls fail. Each failing call takes one.
+    fail_updates: AtomicUsize,
 }
 
 impl Spy {
@@ -443,6 +445,10 @@ impl TerminalEngine for CountingEngine {
     }
 
     fn update(&mut self) -> holzwave_core::Result<Update> {
+        let failing = self.spy.fail_updates.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
+        if failing.is_ok() {
+            return Err(holzwave_core::Error::Engine("scripted update failure".into()));
+        }
         let reset = std::mem::take(&mut self.reset);
         Ok(Update { full: reset, reset, cols: self.size.0, rows: self.size.1, ..Update::default() })
     }
@@ -835,6 +841,33 @@ fn search_and_copy_mode_are_routed_to_the_engine_and_return_its_state() {
             "selection_text"
         ]
     );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn an_update_that_fails_costs_one_frame_and_not_the_pane() {
+    // WR-02: an error from the engine's update is written to stderr and the frame is skipped; the next change
+    // sends a frame as before, and the pane keeps answering.
+    let probe = Probe::default();
+    let spy = Arc::new(Spy::default());
+    spy.fail_updates.store(1, Ordering::Relaxed);
+    let engine_spy = spy.clone();
+    let pane = PaneHandle::spawn(
+        1,
+        PaneSpec::new("/bin/cat", 80, 24),
+        move |_| Ok(CountingEngine::new(engine_spy, Duration::ZERO)),
+        probe.sink(),
+    )
+    .expect("the pane starts");
+
+    pane.request_full().expect("request_full");
+    assert!(wait_until(WAIT, || spy.fail_updates.load(Ordering::Relaxed) == 0), "the update never ran");
+    // A second request is handled after the first one, so the failure is behind us when its frame arrives.
+    pane.request_full().expect("request_full");
+    assert!(wait_until(WAIT, || !probe.frames().is_empty()), "no frame after a failed update");
+    assert!(probe.exits().is_empty() && probe.failures().is_empty(), "the pane survived: {:?}", probe.events());
+    assert_eq!(pane.search(SearchOp::Next).expect("the pane answers"), SearchState { total: 7, current: Some(2) });
     pane.close();
     assert!(pane.join(Duration::from_secs(3)));
 }
