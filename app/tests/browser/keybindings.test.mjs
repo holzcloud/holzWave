@@ -376,7 +376,7 @@ async function settingsButtonCase(page, url) {
   assert.equal(await page.getByRole("dialog").count(), 1, "one dialog at a time");
   assert.ok(await page.evaluate(() => !!document.activeElement?.closest('[role="dialog"]')), "the keyboard is in the editor");
 
-  await dialog(page).getByRole("button", { name: "Close" }).click();
+  await dialog(page).getByRole("button", { name: "Close", exact: true }).click();
   await settle(page);
   assert.equal(await dialog(page).count(), 0);
   assert.equal(await activeId(page), "ime");

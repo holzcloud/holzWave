@@ -9,10 +9,20 @@ export interface SettingsView {
   settings: SettingsValues;
   themes: ThemeInfo[];
   theme: ThemeView;
+  /** The core's resolved key binding table, one row per action in the editor's order; empty when it sent none. */
+  keybindings: BindingRow[];
   warnings: string[];
 }
 
-/** The settings of the dialog. The key bindings belong to the editor of plan 24 and are not read here. */
+/** One row of the key binding table: the chord in force in the core's canonical spelling, null when unbound. */
+export interface BindingRow {
+  action: string;
+  title: string;
+  chord: string | null;
+  is_default: boolean;
+}
+
+/** The settings of the dialog. */
 export interface SettingsValues {
   theme: string;
   font_size: number;
@@ -23,6 +33,8 @@ export interface SettingsValues {
   contrast: "system" | "normal" | "high";
   scrollback_lines: number;
   confirm_multiline_paste: boolean;
+  /** The overrides as the user typed them: action id to chord text, the empty text meaning unbound. */
+  keybindings: Record<string, string>;
 }
 
 export interface ThemeInfo {
@@ -38,6 +50,12 @@ export interface ThemeView {
   terminal: Record<string, unknown>;
   chrome: Record<string, unknown>;
 }
+
+/** The most binding rows the page keeps: the core's table has a few dozen, a view with more is cut. */
+const MAX_BINDING_ROWS = 256;
+
+/** The most overrides the page keeps (the core's own bound, core/src/settings.rs). */
+const MAX_OVERRIDES = 512;
 
 /** The accepted ranges of the numeric settings (core/src/settings.rs); the core clamps, the page never sends beyond. */
 export const FONT_SIZE_RANGE: readonly [number, number] = [8, 40];
@@ -171,6 +189,8 @@ export function readSettingsView(raw: unknown): SettingsView | null {
     themes.push({ name: t.name, kind: t.kind, builtin: t.builtin === true });
   }
   const warnings = Array.isArray(raw.warnings) ? raw.warnings.filter((w): w is string => typeof w === "string") : [];
+  const keybindings = readBindingRows(raw.keybindings);
+  const overrides = readOverrides(s.keybindings);
   const theme = raw.theme;
   return {
     settings: {
@@ -183,6 +203,7 @@ export function readSettingsView(raw: unknown): SettingsView | null {
       contrast: s.contrast,
       scrollback_lines: s.scrollback_lines,
       confirm_multiline_paste: s.confirm_multiline_paste,
+      keybindings: overrides,
     },
     themes,
     theme: {
@@ -191,8 +212,38 @@ export function readSettingsView(raw: unknown): SettingsView | null {
       terminal: isObject(theme.terminal) ? theme.terminal : {},
       chrome: isObject(theme.chrome) ? theme.chrome : {},
     },
+    keybindings,
     warnings,
   };
+}
+
+/** The rows of the binding table: a row that is not `{action, title, chord, is_default}` or repeats an action is left out. */
+function readBindingRows(raw: unknown): BindingRow[] {
+  if (!Array.isArray(raw)) return [];
+  const rows: BindingRow[] = [];
+  const seen = new Set<string>();
+  for (const r of raw) {
+    if (rows.length >= MAX_BINDING_ROWS) break;
+    if (!isObject(r) || typeof r.action !== "string" || r.action === "" || typeof r.title !== "string") continue;
+    if (r.chord !== null && typeof r.chord !== "string") continue;
+    if (typeof r.is_default !== "boolean" || seen.has(r.action)) continue;
+    seen.add(r.action);
+    rows.push({ action: r.action, title: r.title, chord: r.chord, is_default: r.is_default });
+  }
+  return rows;
+}
+
+/** The overrides map: entries whose value is text, at most as many as the core keeps. */
+function readOverrides(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!isObject(raw)) return out;
+  let n = 0;
+  for (const [action, chord] of Object.entries(raw)) {
+    if (typeof chord !== "string" || action === "__proto__" || n >= MAX_OVERRIDES) continue;
+    out[action] = chord;
+    n++;
+  }
+  return out;
 }
 
 // ---- what a view means for the metrics and for the controls ------------------------------------------

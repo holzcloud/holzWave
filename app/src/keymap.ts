@@ -169,7 +169,19 @@ export function chordsOf(e: KeyLike): string[] {
   return out;
 }
 
-/** The chord a key press records in the binding editor (neutral placeholder until the next commit). */
-export function primaryChord(_e: KeyLike): string | null {
-  return null;
+/**
+ * The one chord a key press records in the binding editor, in the core's canonical spelling. It is the candidate of
+ * `chordsOf` that is least layout-dependent: the typed key for an ASCII letter or digit (a binding is written with
+ * the letter that is on the key cap), the physical key for everything else (punctuation, named keys, a character
+ * that Option or a national layout composed). A modifier on its own, a dead key with no physical name and a key
+ * the grammar has no name for give null, so the editor keeps waiting. What it returns is always one of the chords
+ * `chordsOf` offers for the same event, so a recorded binding matches the press that recorded it.
+ */
+export function primaryChord(e: KeyLike): string | null {
+  const key = typeof e.key === "string" ? e.key : "";
+  const name = /^[A-Za-z0-9]$/.test(key) ? key.toUpperCase() : (physicalKey(e.code) ?? logicalKey(key));
+  if (name === null) return null;
+  return (
+    (e.metaKey ? "Cmd+" : "") + (e.ctrlKey ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "") + name
+  );
 }

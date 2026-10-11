@@ -6,7 +6,8 @@ import { refresh as refreshPreferences, watch as watchPreferences } from "./a11y
 import { registerAction, replaceAction, unregisterAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { CURSOR_COLOR, FONT_PX, setFontPx } from "./frame.js";
-import { focusInput, setPasteConfirm } from "./keyboard.js";
+import { openKeybindings } from "./keybindings-ui.js";
+import { focusInput, setBindings, setPasteConfirm } from "./keyboard.js";
 import {
   DEFAULT_FONT_SIZE, colorSchemeOf, cursorColorOf, fontStep, lookOf, readSettingsView, rootFontPx, tokenEntries,
 } from "./settings-model.js";
@@ -130,6 +131,7 @@ function accept(raw: unknown): SettingsView | null {
   applyLook(view);
   refreshPreferences(); // motion, contrast and cursor blink: the setting against what the OS says
   setPasteConfirm(view.settings.confirm_multiline_paste);
+  setBindings(view.keybindings); // shortcut dispatch follows the core's resolved table (T-02-72)
   syncThemeActions(view.themes);
   for (const fn of [...watchers]) fn();
   return view;
@@ -177,16 +179,34 @@ function reloadOnFocus(): void {
   void reload();
 }
 
-/** Open the dialog and give the keyboard back to the terminal when it closes. */
+/** Call `fn` after every accepted view; the returned function stops it. */
+function watch(fn: () => void): () => void {
+  watchers.add(fn);
+  return () => void watchers.delete(fn);
+}
+
+/** Open the key binding editor and give the keyboard back to the terminal when it closes. */
+function openBindings(): void {
+  void openKeybindings({ change, watch }).then(focusInput);
+}
+
+/**
+ * Open the dialog and give the keyboard back to the terminal when it closes, unless the person asked for the
+ * key binding editor from it: the editor takes over then and returns the keyboard when it closes.
+ */
 function openDialog(): void {
+  let next = false;
   void openSettings({
     change,
     reload,
-    watch: (fn) => {
-      watchers.add(fn);
-      return () => void watchers.delete(fn);
+    watch,
+    editBindings: () => {
+      next = true;
     },
-  }).then(focusInput);
+  }).then(() => {
+    if (next) openBindings();
+    else focusInput();
+  });
 }
 
 /** The size now, for the actions that step it; NaN when the core has not said (`fontStep` then starts at 14). */
@@ -209,6 +229,7 @@ function registerSettingsActions(): void {
     run: () => void change("font_size", () => DEFAULT_FONT_SIZE),
   });
   registerAction({ id: "settings.open", title: "Open settings", run: openDialog });
+  registerAction({ id: "keybindings.open", title: "Edit key bindings", run: openBindings });
 }
 
 /**

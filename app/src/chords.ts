@@ -40,12 +40,7 @@ export const CHORDS: ReadonlyMap<string, string> = new Map([
   ["Cmd+,", "settings.open"],
 ]);
 
-/** The action id of a canonical chord, or undefined. */
-export function actionIdFor(chord: string): string | undefined {
-  return CHORDS.get(chord);
-}
-
-// ---- the core's resolved table (neutral placeholder until the next commit) --------------------------
+// ---- the core's resolved table --------------------------------------------------------------------
 
 /** One row of the core's binding table, as far as dispatch needs it. */
 export interface BindingRowLike {
@@ -60,13 +55,60 @@ export interface BindingConflict {
   dropped: string;
 }
 
-export function bindingIndex(_rows: readonly BindingRowLike[]): {
-  index: Map<string, string>;
-  conflicts: BindingConflict[];
-} {
-  return { index: new Map(), conflicts: [] };
+/**
+ * The lookup from a canonical chord to an action id for the rows of the core's table. An unbound row (chord null)
+ * has no entry, a row that is not a row is skipped, and when two rows carry the same chord the first keeps it and
+ * the later one is returned in `conflicts` (the core never sends this: it unbinds the displaced action).
+ */
+export function bindingIndex(rows: readonly BindingRowLike[]): { index: Map<string, string>; conflicts: BindingConflict[] } {
+  const index = new Map<string, string>();
+  const conflicts: BindingConflict[] = [];
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null || typeof row.action !== "string" || typeof row.chord !== "string") continue;
+    const kept = index.get(row.chord);
+    if (kept === undefined) index.set(row.chord, row.action);
+    else conflicts.push({ chord: row.chord, kept, dropped: row.action });
+  }
+  return { index, conflicts };
 }
 
-export function setBindingTable(_rows: readonly BindingRowLike[]): BindingConflict[] {
-  return [];
+/** What the core's last table says: chord to action, and the actions the table knows (bound or not). */
+let table: { index: Map<string, string>; actions: Set<string>; byAction: Map<string, string> } | null = null;
+
+/**
+ * Make the core's rows the source of shortcut dispatch. No rows (a core that sent none, or none yet) leaves the
+ * static table in force. Returns the conflicts of the index.
+ */
+export function setBindingTable(rows: readonly BindingRowLike[]): BindingConflict[] {
+  if (rows.length === 0) {
+    table = null;
+    return [];
+  }
+  const { index, conflicts } = bindingIndex(rows);
+  const actions = new Set<string>();
+  for (const row of rows) if (typeof row === "object" && row !== null && typeof row.action === "string") actions.add(row.action);
+  const byAction = new Map<string, string>();
+  for (const [chord, action] of index) byAction.set(action, chord);
+  table = { index, actions, byAction };
+  return conflicts;
+}
+
+/**
+ * The action id of a canonical chord, or undefined. With the core's table set, a chord is whatever the table binds.
+ * A chord of the static table whose action the core's table does not know (`edit.copy`, which is no rebindable
+ * action) stays a fixed shortcut; one whose action the table knows and left unbound or moved stays unowned.
+ */
+export function actionIdFor(chord: string): string | undefined {
+  if (!table) return CHORDS.get(chord);
+  const id = table.index.get(chord);
+  if (id !== undefined) return id;
+  const fixed = CHORDS.get(chord);
+  return fixed !== undefined && !table.actions.has(fixed) ? fixed : undefined;
+}
+
+/** The chord in force for an action: the core's table when set, else the static one; undefined when unbound. */
+export function chordFor(action: string): string | undefined {
+  if (table) return table.byAction.get(action);
+  for (const [chord, id] of CHORDS) if (id === action) return chord;
+  return undefined;
 }

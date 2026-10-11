@@ -197,11 +197,12 @@ function onKeyUp(e: KeyboardEvent): void {
 // ---- the binding table ---------------------------------------------------------------------------
 
 /**
- * Take the core's resolved binding table (placeholder until the next commit: the table is not used yet).
+ * Take the core's resolved binding table (the `keybindings` rows of every settings view) as the source of shortcut
+ * dispatch: a chord runs the action the table binds it to. Without rows (no settings yet, a core that sent none) the
+ * static table of chords.ts is in force. The page never applies a binding the core did not return (T-02-72).
  */
 export function setBindings(rows: readonly { action: string; chord: string | null }[]): void {
-  void rows;
-  void setBindingTable;
+  setBindingTable(rows);
 }
 
 // ---- paste ---------------------------------------------------------------------------------------

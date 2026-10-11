@@ -22,6 +22,8 @@ export interface SettingsApi {
   reload(): Promise<string | null>;
   /** Call `fn` whenever a new view was accepted; the returned function stops it. */
   watch(fn: () => void): () => void;
+  /** The person asked for the key binding editor: called as the dialog closes, which then opens the editor. */
+  editBindings(): void;
 }
 
 /** One control: the setting it shows, how to read what was entered and how to show the setting's value. */
@@ -235,6 +237,9 @@ async function show(api: SettingsApi): Promise<void> {
     const reload = el("button", "", actions);
     reload.type = "button";
     reload.textContent = "Reload from file";
+    const bindings = el("button", "", actions);
+    bindings.type = "button";
+    bindings.textContent = "Key bindings";
     const close = el("button", "dlg-ok", actions);
     close.type = "button";
     close.textContent = "Close";
@@ -284,6 +289,10 @@ async function show(api: SettingsApi): Promise<void> {
 
     stop = api.watch(render);
     close.addEventListener("click", finish);
+    bindings.addEventListener("click", () => {
+      api.editBindings();
+      finish();
+    });
     reload.addEventListener("click", () => {
       reload.disabled = true;
       void api.reload().then((reason) => {
