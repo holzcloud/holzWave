@@ -218,7 +218,9 @@ function onKey(e: KeyboardEvent): boolean {
   const chord = chordFor(PALETTE_ACTION);
   if (chord !== undefined && chordsOf(e).includes(chord)) {
     e.preventDefault();
-    closePalette();
+    // The chord that opened the dialog is still held down when the first repeat arrives: a repeat is not a second
+    // press and must not close it (or flip it on every repeat). Only a press that is not a repeat closes.
+    if (!e.repeat) closePalette();
     return true;
   }
   if (e.metaKey) {
