@@ -1,6 +1,6 @@
 // The TypeScript side of the protocol golden (tests/fixtures/protocol.json, written by the Rust test
 // `protocol_samples_match_golden`): the exact key sets and tags the page depends on, and a scan of every call site in
-// src/ against the argument names of the Rust commands. Nothing is imported from the app: the golden and the
+// src/ against the command names and the argument names of the Rust commands. Nothing is imported from the app: the golden and the
 // TypeScript sources are read as text.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -268,18 +268,27 @@ function callSites(text) {
   return sites;
 }
 
-/** The sites of `text` that pass an argument the Rust command does not have. Unknown commands are skipped. */
+/**
+ * The sites of `text` that name a command the golden does not have, or pass an argument the Rust command does not
+ * have. `Object.hasOwn` keeps names such as "constructor" from passing as commands.
+ */
 function violations(file, text, commands) {
   const bad = [];
   for (const site of callSites(text)) {
+    if (!Object.hasOwn(commands, site.command)) {
+      bad.push(`${file}:${site.line}: "${site.command}" is not a command of the protocol golden`);
+      continue;
+    }
     const args = commands[site.command];
-    if (!args) continue;
     for (const key of site.keys) {
       if (!args.includes(key)) bad.push(`${file}:${site.line}: ${site.command} has no argument "${key}" (${args.join(", ")})`);
     }
   }
   return bad;
 }
+
+/** `command: "name"` fields of action records (links.ts, hints.ts), which reach `call(action.command, ...)`. */
+const COMMAND_FIELD = /\bcommand\s*:\s*(["'`])([A-Za-z0-9_]+)\1/g;
 
 function sources(dir) {
   const out = [];
@@ -308,15 +317,47 @@ test("the scanner reads nested braces, strings, templates and generics", () => {
   assert.deepEqual(sites[3].keys, ["...spread", "[computed]", "last"]);
 });
 
-test("every call site in src/ uses only argument names of its Rust command", () => {
+test("every call site in src/ names a command of the golden and uses only its argument names", () => {
   let checked = 0;
   const bad = [];
   for (const file of sources(srcDir)) {
     const text = readFileSync(file, "utf8");
-    checked += callSites(text).filter((s) => golden.commands[s.command]).length;
+    checked += callSites(text).length;
     bad.push(...violations(file.slice(srcDir.length + 1), text, golden.commands));
   }
-  assert.ok(checked >= 10, `only ${checked} call sites of known commands were found: is the scanner broken?`);
+  assert.ok(checked >= 30, `only ${checked} call sites were found: is the scanner broken?`);
+  assert.deepEqual(bad, []);
+});
+
+test("every command named by an action record in src/ exists in the golden", () => {
+  let checked = 0;
+  const bad = [];
+  for (const file of sources(srcDir)) {
+    const text = readFileSync(file, "utf8");
+    for (const m of text.matchAll(COMMAND_FIELD)) {
+      checked += 1;
+      if (!Object.hasOwn(golden.commands, m[2])) bad.push(`${file.slice(srcDir.length + 1)}: ${m[2]}`);
+    }
+  }
+  assert.ok(checked >= 2, `only ${checked} command fields were found: is the scanner broken?`);
+  assert.deepEqual(bad, []);
+});
+
+test("an unknown command name and an inherited property name are reported", () => {
+  const bad = violations("x.ts", 'call("no_such_command", { pane: 1 });\ncall("constructor");', golden.commands);
+  assert.equal(bad.length, 2, bad.join("\n"));
+  assert.match(bad[0], /"no_such_command" is not a command/);
+  assert.match(bad[1], /"constructor" is not a command/);
+  assert.deepEqual(violations("x.ts", 'call("get_layout");', golden.commands), []);
+});
+
+test("the legacy input command is not called anywhere in src/", () => {
+  const bad = [];
+  for (const file of sources(srcDir)) {
+    for (const site of callSites(readFileSync(file, "utf8"))) {
+      if (site.command === "input") bad.push(`${file.slice(srcDir.length + 1)}:${site.line}`);
+    }
+  }
   assert.deepEqual(bad, []);
 });
 
