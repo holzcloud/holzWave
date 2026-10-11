@@ -2,6 +2,7 @@
 // property values, the ranges. No DOM and no bridge, so node can import it (the stateful half is settings.ts).
 // The core owns every value (D-06): nothing here decides what a setting is, it only refuses what is not shaped
 // like one, so that a value of the wrong type or a colour that is not #rrggbb never reaches a style.
+import { onAccentOf } from "./a11y.js";
 
 /** The view the core sends: `get_settings`, `set_setting`, `reset_setting`, `reload_settings` and the `settings` event. */
 export interface SettingsView {
@@ -95,9 +96,10 @@ const opacity = (a: number): string => String(Number(a.toFixed(3)));
 
 /**
  * The custom properties of a theme as `[name, value]` pairs: the thirteen chrome tokens, `--hw-selection` (the
- * terminal's selection colour at its opacity) and `--hw-rose-wash` (rose at the wash opacity, so a theme with
- * another rose has a matching wash). A colour that is not exactly `#rrggbb`, and an opacity outside 0..1, is left
- * out: what remains is built from numbers here, never copied from the theme's text.
+ * terminal's selection colour at its opacity), `--hw-rose-wash` (rose at the wash opacity, so a theme with
+ * another rose has a matching wash) and `--hw-on-accent` (the text on the rose-deep fill, measured). A colour that
+ * is not exactly `#rrggbb`, and an opacity outside 0..1, is left out: what remains is built from numbers here,
+ * never copied from the theme's text.
  */
 export function tokenEntries(theme: unknown): [string, string][] {
   const out: [string, string][] = [];
@@ -110,6 +112,10 @@ export function tokenEntries(theme: unknown): [string, string][] {
     }
     const rose = parseHex(chrome.rose);
     if (rose !== null) out.push(["--hw-rose-wash", rgbOf(rose, opacity(ROSE_WASH_ALPHA))]);
+    // The text on a solid rose-deep fill (the shown status segment): white or black, whichever measures higher
+    // against this theme's fill, so it reaches 4.5:1 whatever the fill is.
+    const deep = parseHex(chrome.rose_deep);
+    if (deep !== null) out.push(["--hw-on-accent", hexOf(onAccentOf(deep))]);
   }
   if (isObject(terminal)) {
     const rgb = parseHex(terminal.selection);

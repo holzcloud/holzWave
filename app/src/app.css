@@ -29,6 +29,7 @@
   --hw-ink-3: #9c8ea0;           /* tertiary text, disabled */
   --hw-rose: #ff8fb8;            /* focus, action, cursor: rationed */
   --hw-rose-deep: #c23b72;       /* fills and large type only (3.84:1 on the ground) */
+  --hw-on-accent: #ffffff;       /* text on a rose-deep fill: 5.05:1; a theme sets it from its own fill */
   --hw-rose-wash: rgb(255 143 184 / .14);
   --hw-selection: rgb(255 143 184 / .35);
   --hw-ok: #8cc271;
@@ -55,7 +56,7 @@ button { font: inherit; color: inherit; }
 .divider { position: absolute; pointer-events: auto; }
 .divider.row { cursor: col-resize; }
 .divider.column { cursor: row-resize; }
-.divider::after { content: ""; position: absolute; background: var(--hw-edge); }
+.divider::after { content: ""; position: absolute; background: var(--hw-line, var(--hw-edge)); }
 .divider.row::after { left: 50%; top: 0; bottom: 0; width: 1px; }
 .divider.column::after { top: 50%; left: 0; right: 0; height: 1px; }
 .divider:hover::after { background: var(--hw-rose); }

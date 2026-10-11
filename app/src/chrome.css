@@ -3,12 +3,21 @@
    app.css, every size is in rem (12 px at UI scale 100 %), so the UI scale setting moves it all together. The one
    exception is the room for the macOS traffic lights: the system draws those at a fixed size. */
 
+/* ---- derived tokens ----------------------------------------------------------------------------------------- */
+
+/* Hairlines and dim text are read through two derived tokens, so the look in force decides them in one place:
+   higher contrast (the root class `contrast-high` that a11y.ts sets from the OS and the setting) swaps them
+   without touching the theme's own values, which the theme writes inline on the root. The focus line is 1 px,
+   2 px in higher contrast. Every stylesheet reads --hw-line and --hw-dim, never --hw-edge or --hw-ink-3 for these. */
+:root { --hw-line: var(--hw-edge); --hw-dim: var(--hw-ink-3); --hw-focus-w: 1px; }
+:root.contrast-high { --hw-line: var(--hw-ink-3); --hw-dim: var(--hw-ink-2); --hw-focus-w: 2px; }
+
 /* ---- window bar -------------------------------------------------------------------------------------------- */
 
 #bar {
   --bar-line: calc(31rem / 12); /* the bar's height without its hairline: one line, so text sits in the middle */
   box-sizing: border-box; display: flex; align-items: stretch; flex: none; height: calc(32rem / 12);
-  padding: 0 .667rem; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-edge);
+  padding: 0 .667rem; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-line);
   user-select: none; -webkit-user-select: none; cursor: default;
 }
 /* The overlay title bar puts the traffic lights over the page's top left corner. */
@@ -16,16 +25,16 @@
 
 .bar-group { display: flex; align-items: stretch; flex: none; min-width: 0; }
 .bar-tabs { flex: 0 1 auto; overflow: hidden; }
-.bar-sep { flex: none; width: 1px; margin: .5rem .667rem; background: var(--hw-edge); }
+.bar-sep { flex: none; width: 1px; margin: .5rem .667rem; background: var(--hw-line); }
 .bar-fill { flex: 1 1 0; min-width: .667rem; }
-.bar-info { display: flex; align-items: center; flex: none; color: var(--hw-ink-3); white-space: nowrap; }
+.bar-info { display: flex; align-items: center; flex: none; color: var(--hw-dim); white-space: nowrap; }
 .bar-info .host { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; }
 .host:not(:empty) + .clock::before { content: "\00b7"; margin: 0 .5em; }
 
 #bar button {
   -webkit-appearance: none; appearance: none; box-sizing: border-box; display: block; flex: none;
   min-width: calc(28rem / 12); max-width: 18rem; margin: 0; padding: 0 .833rem; border: 0; border-radius: 0;
-  background: none; color: var(--hw-ink-3); line-height: var(--bar-line); white-space: nowrap;
+  background: none; color: var(--hw-dim); line-height: var(--bar-line); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; text-align: center; cursor: pointer;
 }
 #bar button.plus { padding: 0 .667rem; }
@@ -50,21 +59,23 @@
 
 #status {
   box-sizing: border-box; display: flex; align-items: stretch; flex: none; height: 2rem; min-width: 0; overflow: hidden;
-  background: var(--hw-ground-2); border-top: 1px solid var(--hw-edge); color: var(--hw-ink-3);
+  background: var(--hw-ground-2); border-top: 1px solid var(--hw-line); color: var(--hw-dim);
   user-select: none; -webkit-user-select: none; cursor: default;
 }
 #status .seg {
   display: block; flex: none; padding: 0 .833rem; line-height: calc(23rem / 12); white-space: nowrap;
-  border-right: 1px solid var(--hw-edge);
+  border-right: 1px solid var(--hw-line);
 }
 #status .seg:empty { display: none; }
 /* The shown workspace is a solid segment; bold type is its cue without colour. */
-#status .seg.ws.active { background: var(--hw-rose-deep); color: var(--hw-ink); font-weight: 700; }
-#status .seg.encoding { margin-left: auto; border-left: 1px solid var(--hw-edge); }
+#status .seg.ws.active { background: var(--hw-rose-deep); color: var(--hw-on-accent); font-weight: 700; }
+#status .seg.encoding { margin-left: auto; border-left: 1px solid var(--hw-line); }
 #status .seg:last-child { border-right: 0; }
 
-@media (prefers-reduced-motion: no-preference) {
-  #bar button { transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1); }
+/* Motion: 160 ms for hover and focus. The class is the one place that decides it (a11y.ts: the OS request for
+   reduced motion unless the setting says otherwise), so the setting can beat the OS in either direction. */
+:root:not(.motion-reduce) #bar button {
+  transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1);
 }
 
 /* ---- pane headers ------------------------------------------------------------------------------------------ */
@@ -78,17 +89,17 @@
   pointer-events: none; user-select: none; -webkit-user-select: none;
 }
 /* The focus line: the only rose in a header. */
-.panehead.focus-line { border-top-color: var(--hw-rose); }
+.panehead.focus-line { border-top-color: var(--hw-rose); border-top-width: var(--hw-focus-w); }
 
 /* The state dot: filled is the focused pane, hollow the others, hollow with a dash a pane that exited. */
 .ph-dot {
   position: relative; box-sizing: border-box; flex: none; width: .5rem; height: .5rem; border-radius: 50%;
-  border: 1px solid var(--hw-ink-3);
+  border: 1px solid var(--hw-dim);
 }
 .ph-dot[data-state="focused"] { background: var(--hw-ink); border-color: var(--hw-ink); }
 .ph-dot[data-state="exited"]::after {
   content: ""; position: absolute; left: -.25rem; right: -.25rem; top: calc(50% - .5px); height: 1px;
-  background: var(--hw-ink-3);
+  background: var(--hw-dim);
 }
 
 .ph-title { flex: 0 1 auto; min-width: 0; max-width: 70%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -99,7 +110,32 @@
    the characters in reading order. */
 .ph-ctx {
   flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-  direction: rtl; text-align: right; color: var(--hw-ink-3);
+  direction: rtl; text-align: right; color: var(--hw-dim);
 }
 .ph-ctx > span { direction: ltr; unicode-bidi: isolate; }
 .panehead.exited .ph-ctx { color: var(--hw-ink-2); }
+
+/* ---- higher contrast ---------------------------------------------------------------------------------------- */
+
+/* The tokens above already swap lines and dim text and widen the focus line. The shown status segment also gets
+   a border of its own, so it is told apart from its neighbours by more than a fill and bold type. */
+:root.contrast-high #status .seg.ws.active { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+
+/* ---- forced colours ----------------------------------------------------------------------------------------- */
+
+/* The browser replaces the colours of the chrome with the user's palette; this block only keeps the cues that
+   would vanish (a divider is a background, the focus line and the dots are borders) and names system colours
+   for them. Nothing here is a hard-coded colour. The terminal's grid is canvas pixels and keeps the theme, and so
+   do the boxes drawn over it: forced to Canvas, a selection box would hide the text under it. */
+@media (forced-colors: active) {
+  :root .sel, :root .match, :root .hint, :root .copycursor, :root .linkhover, :root .cellbox { forced-color-adjust: none; }
+  :root .divider::after { background: CanvasText; }
+  :root .divider:hover::after { background: Highlight; }
+  :root #bar button.active { text-decoration-color: Highlight; }
+  :root #bar .ws-chip.active::before { background: Highlight; }
+  :root #status .seg.ws.active { background: Highlight; color: HighlightText; }
+  :root .panehead.focus-line { border-top-color: Highlight; }
+  :root .ph-dot { border-color: CanvasText; }
+  :root .ph-dot[data-state="focused"] { background: CanvasText; }
+  :root .ph-dot[data-state="exited"]::after { background: CanvasText; }
+}

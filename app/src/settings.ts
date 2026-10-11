@@ -2,6 +2,7 @@
 // renderer's cursor colour, and the actions that ask the core to change something. The core owns every value
 // (D-06): the page sends `set_setting` and then shows what the core answered, never what it asked for. The pure
 // rules (colour validation, reading the view) are in settings-model.ts, which node can import.
+import { refresh as refreshPreferences, watch as watchPreferences } from "./a11y.js";
 import { registerAction, replaceAction, unregisterAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { CURSOR_COLOR, FONT_PX, setFontPx } from "./frame.js";
@@ -127,6 +128,7 @@ function accept(raw: unknown): SettingsView | null {
   state.settings = view;
   applyTheme(view);
   applyLook(view);
+  refreshPreferences(); // motion, contrast and cursor blink: the setting against what the OS says
   setPasteConfirm(view.settings.confirm_multiline_paste);
   syncThemeActions(view.themes);
   for (const fn of [...watchers]) fn();
@@ -216,6 +218,7 @@ function registerSettingsActions(): void {
 export async function initSettings(h: SettingsHost): Promise<void> {
   host = h;
   registerSettingsActions();
+  watchPreferences(); // before the first answer: a page whose core cannot answer still follows the OS
   await listen<unknown>("settings", (raw) => void accept(raw));
   try {
     accept(await call<unknown>("get_settings"));

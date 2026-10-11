@@ -6,16 +6,16 @@
 .settings .set-status { min-height: 1.4em; margin: 0 0 .5rem; color: var(--hw-warn); overflow-wrap: anywhere; }
 .settings .set-warnings { margin: 0 0 .667rem; padding: 0 0 0 1.25rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
 .settings .set-warnings:empty { display: none; }
-.settings .set-group { min-width: 0; margin: 0 0 .833rem; padding: .5rem .833rem .667rem; border: 1px solid var(--hw-edge);
+.settings .set-group { min-width: 0; margin: 0 0 .833rem; padding: .5rem .833rem .667rem; border: 1px solid var(--hw-line);
                        border-radius: .333rem; }
-.settings .set-group > legend { padding: 0 .333rem; color: var(--hw-ink-3); font-size: calc(11rem / 12);
+.settings .set-group > legend { padding: 0 .333rem; color: var(--hw-dim); font-size: calc(11rem / 12);
                                 letter-spacing: .1em; text-transform: uppercase; }
 .settings .set-row { display: flex; align-items: center; gap: .667rem; min-height: 2rem; }
 .settings .set-row label { flex: 0 0 12rem; color: var(--hw-ink-2); }
-.settings .set-unit { color: var(--hw-ink-3); }
+.settings .set-unit { color: var(--hw-dim); }
 .settings input[type="number"] { box-sizing: border-box; width: 7rem; min-width: 0; margin: 0; padding: .25rem .5rem;
                                  font: inherit; color: var(--hw-ink); background: var(--hw-ground);
-                                 border: 1px solid var(--hw-edge); border-radius: .333rem; }
+                                 border: 1px solid var(--hw-line); border-radius: .333rem; }
 .settings input[type="checkbox"], .settings input[type="radio"] { width: 1rem; height: 1rem; margin: 0;
                                                                    accent-color: var(--hw-rose); }
 .settings input:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
@@ -24,5 +24,5 @@
 .settings .set-choice > legend { padding: 0; color: var(--hw-ink-2); }
 .settings .set-options { display: flex; flex-wrap: wrap; gap: 0 1rem; }
 .settings .set-option { display: flex; align-items: center; gap: .5rem; min-height: 2rem; cursor: pointer; }
-.settings .set-hint { margin: .25rem 0 .333rem; color: var(--hw-ink-3); }
+.settings .set-hint { margin: .25rem 0 .333rem; color: var(--hw-dim); }
 .dlg.settings button { font-size: calc(11rem / 12); }
