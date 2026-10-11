@@ -44,6 +44,8 @@ export interface State {
    * settings dialog renders from this and nothing else.
    */
   settings: SettingsView | null;
+  /** The cursor blink phase of the focused pane (scene.ts): visible or not, and whether the phase timer exists. */
+  blink: { on: boolean; running: boolean };
 }
 
 export const state: State = {
@@ -62,4 +64,5 @@ export const state: State = {
   renderer: "canvas2d",
   headerPx: 20,
   settings: null,
+  blink: { on: true, running: false },
 };

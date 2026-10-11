@@ -13,6 +13,10 @@ export default async function ({ page, url, errors }) {
   await contrastCase(page, url);
   await forcedColoursCase(page, url);
   await accentCase(page, url);
+  await blinkCase(page, url);
+  await blinkResetCase(page, url);
+  await blinkPreferenceCase(page, url);
+  await blinkCursorCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -39,8 +43,10 @@ async function open(page, url, view = AUBERGINE(), query = "?renderer=canvas") {
   await page.goto(`${url}index.html${query}`);
   await page.waitForSelector(".divider");
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
-  await page.evaluate(() => {
+  await page.evaluate(async () => {
     window.__marker = "same page"; // a reload would lose it
+    // The page's own state module, for synchronous predicates (waitForFunction does not await an async one).
+    window.__state = (await import(new URL("state.js", location.href).href)).state;
   });
 }
 
@@ -233,4 +239,222 @@ async function accentCase(page, url) {
   const bare = await measure();
   assert.ok(ratio(bare.text, bare.fill) >= 4.5, `no core: ${bare.text} on ${bare.fill}`);
   assert.equal((await callsOf(page, "get_settings")).length, 1);
+}
+
+// ---- cursor blink --------------------------------------------------------------------------------------
+
+const CURSOR = 0xff8fb8; // the aubergine cursor colour
+const BG = 0x14091a;
+
+/** One full frame for `pane` (a 60 x 4 grid of blanks) with the cursor at (3, 1). */
+const frame = (pane, seq, cursor = { x: 3, y: 1, style: "block", blink: true }) => ({
+  pane, seq, full: true, cols: 60, rows: 4, fg: 0xf6efe6, bg: BG,
+  cursor,
+  scrollbar: [0, 4, 4], selection: [], matches: [], search: null, copy_cursor: null,
+  modes: { alt: false, bracketed_paste: false, mouse: false }, changed: [],
+});
+
+/** Count the intervals the page has running: a blink timer exists only while a cursor blinks. */
+function countIntervals() {
+  const live = new Set();
+  const set = window.setInterval.bind(window);
+  const clear = window.clearInterval.bind(window);
+  window.setInterval = (...args) => {
+    const id = set(...args);
+    live.add(id);
+    return id;
+  };
+  window.clearInterval = (id) => {
+    live.delete(id);
+    return clear(id);
+  };
+  window.__liveIntervals = () => live.size;
+}
+
+/** Open with the interval counter installed, a canvas 2D renderer (its pixels can be read at any time) and frames. */
+async function openBlink(page, url, { view = AUBERGINE() } = {}) {
+  await page.addInitScript(countIntervals);
+  await open(page, url, view);
+}
+
+const blink = (page) => page.evaluate(() => ({ on: window.__state.blink.on, running: window.__state.blink.running }));
+const intervals = (page) => page.evaluate(() => window.__liveIntervals());
+const settle = (page) =>
+  page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+async function waitBlink(page, want) {
+  try {
+    await page.waitForFunction(
+      (w) => window.__state.blink.on === w.on && window.__state.blink.running === w.running,
+      want,
+    );
+  } catch {
+    throw new Error(`the blink state never became ${JSON.stringify(want)}, it is ${JSON.stringify(await blink(page))}`);
+  }
+}
+
+/** The colour of the cell (x, y) of the focused pane as the canvas shows it now. */
+const cellColor = (page, x = 3, y = 1) =>
+  page.evaluate(
+    async ([cx, cy]) => {
+      const { state } = await import(new URL("state.js", location.href).href);
+      const { gridRect } = await import(new URL("geometry.js", location.href).href);
+      const entry = state.view.panes.find(([id]) => id === state.view.focus);
+      const g = gridRect(state.metrics, entry[1], state.headerPx);
+      const m = state.metrics;
+      const px = Math.floor((g.x + (cx + 0.5) * m.cellW) * m.dpr);
+      const py = Math.floor((g.y + (cy + 0.5) * m.cellH) * m.dpr);
+      const [r, gr, b] = document.getElementById("term").getContext("2d").getImageData(px, py, 1, 1).data;
+      return (r << 16) | (gr << 8) | b;
+    },
+    [x, y],
+  );
+
+/** The pixel of the cursor cell once the state has settled (two samples of the phase around it must agree). */
+async function shown(page) {
+  for (let i = 0; i < 8; i++) {
+    const before = await blink(page);
+    await settle(page);
+    const colour = await cellColor(page);
+    const after = await blink(page);
+    if (before.on === after.on) return { on: after.on, colour };
+  }
+  throw new Error("the blink phase never held still for a sample");
+}
+
+/** The engine's blinking cursor on the focused pane blinks with the 530 ms phase; solid means no timer. */
+async function blinkCase(page, url) {
+  await page.emulateMedia({ reducedMotion: "no-preference", contrast: "no-preference", forcedColors: null });
+  await openBlink(page, url);
+  const base = await intervals(page);
+
+  // Before any frame there is no cursor: no timer.
+  assert.deepEqual(await blink(page), { on: true, running: false });
+
+  await page.evaluate((f) => window.__MOCK__.emit("frame", f), frame(2, 1));
+  await waitBlink(page, { on: true, running: true });
+  assert.equal(await intervals(page), base + 1, "one timer while the cursor blinks");
+  const first = await shown(page);
+  if (first.on) assert.equal(first.colour, CURSOR, "the visible phase draws the cursor");
+
+  // The phase flips: the cursor cell is the pane background in the off phase and the cursor colour in the on phase.
+  await waitBlink(page, { on: false, running: true });
+  const off = await shown(page);
+  if (!off.on) assert.equal(off.colour, BG, "the off phase omits the cursor");
+  await waitBlink(page, { on: true, running: true });
+  const on = await shown(page);
+  if (on.on) assert.equal(on.colour, CURSOR);
+  assert.equal(await intervals(page), base + 1, "the phase does not stack timers");
+
+  // The engine says the cursor is steady: solid and no timer, whatever the setting.
+  await page.evaluate((f) => window.__MOCK__.emit("frame", f), frame(2, 2, { x: 3, y: 1, style: "block", blink: false }));
+  await waitBlink(page, { on: true, running: false });
+  assert.equal(await intervals(page), base, "a steady cursor runs no timer");
+  await page.waitForTimeout(700);
+  assert.deepEqual(await blink(page), { on: true, running: false });
+  assert.equal((await shown(page)).colour, CURSOR);
+}
+
+/** Output and keys restart the phase at visible, so a cursor never vanishes while typing. */
+async function blinkResetCase(page, url) {
+  await openBlink(page, url);
+  await page.evaluate((f) => window.__MOCK__.emit("frame", f), frame(2, 1));
+  await waitBlink(page, { on: false, running: true });
+
+  // A frame of the focused pane: visible at once, and it stays visible for most of a phase.
+  const afterFrame = await page.evaluate((f) => {
+    window.__MOCK__.emit("frame", f);
+    return window.__state.blink.on;
+  }, frame(2, 2));
+  assert.equal(afterFrame, true, "a frame restarts the phase at visible");
+  await page.waitForTimeout(250);
+  assert.equal((await blink(page)).on, true, "the restarted phase lasts a whole period");
+
+  // A key press does the same.
+  await waitBlink(page, { on: false, running: true });
+  await page.keyboard.press("a");
+  assert.equal((await blink(page)).on, true, "a key press restarts the phase at visible");
+  await page.waitForTimeout(250);
+  assert.equal((await blink(page)).on, true);
+
+  // A frame of a pane without the keyboard is not the focused cursor's output: it does not reset anything.
+  await waitBlink(page, { on: false, running: true });
+  const other = await page.evaluate((f) => {
+    window.__MOCK__.emit("frame", f);
+    return window.__state.blink.on;
+  }, frame(1, 1));
+  assert.equal(other, false, "output of another pane leaves the phase alone");
+}
+
+/** The setting and the OS preference start and stop the timer live. */
+async function blinkPreferenceCase(page, url) {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openBlink(page, url);
+  const base = await intervals(page);
+  await page.evaluate((f) => window.__MOCK__.emit("frame", f), frame(2, 1));
+  await waitBlink(page, { on: true, running: true });
+  assert.equal(await intervals(page), base + 1);
+
+  const setting = (value) => {
+    const v = AUBERGINE();
+    v.settings.cursor_blink = value;
+    return emit(page, "settings", v);
+  };
+
+  // off: solid at once, no timer, and the draw shows the cursor.
+  await setting("off");
+  await waitBlink(page, { on: true, running: false });
+  assert.equal(await intervals(page), base, "the setting off stops the timer");
+  await page.waitForTimeout(650);
+  assert.deepEqual(await blink(page), { on: true, running: false }, "and it stays solid");
+  assert.equal((await shown(page)).colour, CURSOR);
+
+  // system under reduced motion: solid; the OS changes while the page runs.
+  await emit(page, "settings", AUBERGINE());
+  await waitBlink(page, { on: true, running: true });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await waitBlink(page, { on: true, running: false });
+  assert.equal(await intervals(page), base, "reduced motion keeps the cursor solid");
+
+  // on: the user's choice blinks although the OS asks for reduced motion.
+  await setting("on");
+  await waitBlink(page, { on: true, running: true });
+  assert.equal(await intervals(page), base + 1);
+
+  // The Motion setting full beats the OS for system as well.
+  const full = AUBERGINE();
+  full.settings.motion = "full";
+  await emit(page, "settings", full);
+  await waitBlink(page, { on: true, running: true });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await emit(page, "settings", AUBERGINE());
+  await waitBlink(page, { on: true, running: true });
+  assert.equal(await page.evaluate(() => window.__marker), "same page", "the page was not reloaded");
+}
+
+/** Only the focused pane's own cursor counts: a hollow cursor of another pane and a cursor off the grid never blink. */
+async function blinkCursorCase(page, url) {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openBlink(page, url);
+  const base = await intervals(page);
+
+  // Pane 1 has no keyboard: its blinking cursor is drawn hollow and steady; pane 2 (focused) has none.
+  await page.evaluate((f) => window.__MOCK__.emit("frame", f), frame(1, 1));
+  await page.evaluate((f) => window.__MOCK__.emit("frame", f), frame(2, 1, null));
+  await settle(page);
+  assert.deepEqual(await blink(page), { on: true, running: false });
+  assert.equal(await intervals(page), base);
+
+  // Focus moves to pane 1: now its cursor qualifies.
+  await page.evaluate(() => {
+    const v = window.__MOCK__.view();
+    v.focus = 1;
+    window.__MOCK__.emit("layout", v);
+  });
+  await waitBlink(page, { on: true, running: true });
+  assert.equal(await intervals(page), base + 1);
+
+  // The focused pane exits: nothing blinks.
+  await page.evaluate(() => window.__MOCK__.emit("pane-exit", { pane: 1, code: 0 }));
+  await waitBlink(page, { on: true, running: false });
+  assert.equal(await intervals(page), base, "an exited pane leaves no timer");
 }
