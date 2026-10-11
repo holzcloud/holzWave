@@ -188,3 +188,23 @@ export function readSettingsView(raw: unknown): SettingsView | null {
     warnings,
   };
 }
+
+// ---- what a view means for the metrics and for the controls ------------------------------------------
+
+/** The two settings that change the metrics: the terminal font size and the UI scale (percent). */
+export interface Look {
+  fontPx: number;
+  uiScale: number;
+}
+
+export function lookOf(_s: Pick<SettingsValues, "font_size" | "ui_scale">, _previous: Look): Look {
+  return { fontPx: Number.NaN, uiScale: Number.NaN };
+}
+
+export function typedInteger(_text: string): number | null {
+  return null;
+}
+
+export function fontStep(_current: number, _delta: number): number {
+  return Number.NaN;
+}

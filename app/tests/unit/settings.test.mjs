@@ -5,7 +5,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { parseHex, readSettingsView, rootFontPx, tokenEntries } from "../../dist/settings-model.js";
+import {
+  DEFAULT_FONT_SIZE, fontStep, lookOf, parseHex, readSettingsView, rootFontPx, tokenEntries, typedInteger,
+} from "../../dist/settings-model.js";
 
 const golden = JSON.parse(readFileSync(fileURLToPath(new URL("../fixtures/protocol.json", import.meta.url)), "utf8"));
 const sample = () => structuredClone(golden.settings_view);
@@ -141,4 +143,39 @@ test("the UI scale is the root font size: 12 px at 100 %", () => {
   assert.equal(rootFontPx(75), 9);
   assert.equal(rootFontPx(200), 24);
   assert.equal(rootFontPx(110), 13.2);
+});
+
+test("a view that is in range is the new look; a value out of range or not a number keeps the previous one", () => {
+  const before = { fontPx: 14, uiScale: 100 };
+  assert.deepEqual(lookOf({ font_size: 20, ui_scale: 150 }, before), { fontPx: 20, uiScale: 150 });
+  assert.deepEqual(lookOf({ font_size: 8, ui_scale: 75 }, before), { fontPx: 8, uiScale: 75 });
+  assert.deepEqual(lookOf({ font_size: 40, ui_scale: 200 }, before), { fontPx: 40, uiScale: 200 });
+  // Each value stands for itself: a bad scale does not cost a good font size.
+  assert.deepEqual(lookOf({ font_size: 20, ui_scale: 9999 }, before), { fontPx: 20, uiScale: 100 });
+  assert.deepEqual(lookOf({ font_size: 7, ui_scale: 150 }, before), { fontPx: 14, uiScale: 150 });
+  assert.deepEqual(lookOf({ font_size: Number.NaN, ui_scale: Infinity }, before), before);
+  assert.deepEqual(lookOf({ font_size: "20", ui_scale: null }, before), before);
+  // A fractional value is rounded to the whole pixel the core stores.
+  assert.deepEqual(lookOf({ font_size: 14.4, ui_scale: 100.6 }, before), { fontPx: 14, uiScale: 101 });
+});
+
+test("a typed number is a whole number or nothing", () => {
+  assert.equal(typedInteger("18"), 18);
+  assert.equal(typedInteger(" 18 "), 18);
+  assert.equal(typedInteger("14.6"), 15);
+  assert.equal(typedInteger("-3"), -3);
+  assert.equal(typedInteger("0"), 0);
+  assert.equal(typedInteger("1e3"), 1000);
+  for (const text of ["", "   ", "abc", "1,5", "12px", "NaN", "Infinity", "-Infinity", "0x10", "1e999"]) {
+    assert.equal(typedInteger(text), null, JSON.stringify(text));
+  }
+});
+
+test("a font size step is the current size plus the step, from the default when there is none", () => {
+  assert.equal(fontStep(14, 1), 15);
+  assert.equal(fontStep(14, -1), 13);
+  assert.equal(fontStep(40, 1), 41, "the core clamps; the page asks for what the key means");
+  assert.equal(fontStep(Number.NaN, 1), DEFAULT_FONT_SIZE + 1);
+  assert.equal(fontStep(Infinity, -1), DEFAULT_FONT_SIZE - 1);
+  assert.equal(DEFAULT_FONT_SIZE, 14);
 });
