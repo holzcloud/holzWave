@@ -35,6 +35,7 @@ export default async function ({ page, url }) {
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
 const ROW_PX = 18; // one cell row: ceil(14 px font * 1.25)
+const HEADER = 20; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
 
 /** Two workspaces, three tabs and one pane. */
 const BAR_VIEW = {
@@ -106,7 +107,7 @@ async function barCase(page, url) {
 async function pointerCase(page, url) {
   await open(page, url);
   const c = await canvasOrigin(page);
-  const y = c.top + PAD + ROW_PX / 2;
+  const y = c.top + HEADER + ROW_PX / 2;
   // Pane 1 is the left half and pane 2 (focused) the right half of the default stub layout.
   const drag = async (fromX, toX) => {
     await page.mouse.move(fromX, y);

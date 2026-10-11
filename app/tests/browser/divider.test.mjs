@@ -1,6 +1,7 @@
 // DESK-16: dragging a divider follows the pointer for the whole gesture. Before the fix every set_ratio response
 // rebuilt the overlay, which destroyed the element that held the pointer capture: 20 moves gave 1 set_ratio.
-// The overlay is a keyed set of elements: a render that changes nothing replaces nothing.
+// The overlay is a keyed set of elements (dividers, pane headers, selection boxes): a render that changes nothing
+// replaces nothing.
 import assert from "node:assert/strict";
 import { callsOf, emit } from "./lib.mjs";
 
@@ -8,6 +9,7 @@ const MOVES = 20;
 const STEP_PX = 10;
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
 const ROW_PX = 18; // one cell row: ceil(14 px font * 1.25)
+const HEADER = 20; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
 
 /** Resolve after the next animation frame, so the page gets its one frame between two pointer moves. */
 const frame = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done())));
@@ -108,17 +110,18 @@ const tagsOf = (page, selector) =>
 
 async function rerenderCase(page, url) {
   await open(page, url);
-  assert.equal(await page.locator("#overlay .focus").count(), 1, "two panes: one focus box");
+  assert.equal(await page.locator("#overlay .panehead.focus-line").count(), 1, "two panes: one focus line");
+  assert.equal(await page.locator("#overlay .focus").count(), 0, "the focus box of the page is gone");
   await tagAll(page, ".divider", "divider");
-  await tagAll(page, ".focus", "focus");
+  await tagAll(page, ".panehead", "head");
 
   for (let i = 0; i < 3; i++) {
     await emit(page, "layout", await page.evaluate(() => window.__MOCK__.view()));
   }
   assert.deepEqual(await tagsOf(page, ".divider"), ["divider0"], "a render of the same view replaced the divider");
-  assert.deepEqual(await tagsOf(page, ".focus"), ["focus0"], "a render of the same view replaced the focus box");
+  assert.deepEqual(await tagsOf(page, ".panehead"), ["head0", "head1"], "a render of the same view replaced a header");
 
-  // One pane: no focus box and no divider.
+  // One pane: no focus line and no divider.
   const single = {
     workspaces: [{ name: "main", active: true }],
     tabs: [{ title: "shell", active: true }],
@@ -128,20 +131,21 @@ async function rerenderCase(page, url) {
   };
   await page.evaluate((v) => window.__MOCK__.setView(v), single);
   await emit(page, "layout", single);
-  assert.equal(await page.locator("#overlay .focus").count(), 0, "a single pane has no focus box");
+  assert.equal(await page.locator("#overlay .panehead").count(), 1, "a single pane has its header");
+  assert.equal(await page.locator("#overlay .panehead.focus-line").count(), 0, "a single pane has no focus line");
   assert.equal(await page.locator("#overlay .divider").count(), 0, "a vanished split removes its divider");
 
   // Two panes again: the elements come back.
   await page.evaluate(() => window.__MOCK__.reset());
   await emit(page, "layout", await page.evaluate(() => window.__MOCK__.view()));
-  assert.equal(await page.locator("#overlay .focus").count(), 1, "the focus box returns with the second pane");
+  assert.equal(await page.locator("#overlay .panehead.focus-line").count(), 1, "the focus line returns with the second pane");
   assert.equal(await page.locator("#overlay .divider").count(), 1, "the divider returns with its split");
 }
 
 async function selectionCase(page, url) {
   await open(page, url);
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
-  await tagAll(page, ".focus", "focus");
+  await tagAll(page, ".panehead", "head");
   await tagAll(page, ".divider", "divider");
   const canvas = await page.evaluate(() => {
     const r = document.getElementById("term").getBoundingClientRect();
@@ -175,7 +179,7 @@ async function selectionCase(page, url) {
 
   // A gesture on the pane changes no element: the answer to it is a frame, not a local selection.
   const x = canvas.left + canvas.width / 2 + PAD + 20;
-  const rowY = (r) => canvas.top + PAD + r * ROW_PX + ROW_PX / 2;
+  const rowY = (r) => canvas.top + HEADER + r * ROW_PX + ROW_PX / 2;
   await page.mouse.move(x, rowY(0));
   await page.mouse.down();
   await page.mouse.move(x + 120, rowY(2));
@@ -184,7 +188,7 @@ async function selectionCase(page, url) {
   await emit(page, "layout", await page.evaluate(() => window.__MOCK__.view()));
   await settle(page);
   assert.deepEqual(await tagsOf(page, ".sel"), ["row0", "row1"], "a render of the same view replaced a selection box");
-  assert.deepEqual(await tagsOf(page, ".focus"), ["focus0"], "the gesture replaced the focus box");
+  assert.deepEqual(await tagsOf(page, ".panehead"), ["head0", "head1"], "the gesture replaced a header");
   assert.deepEqual(await tagsOf(page, ".divider"), ["divider0"], "the selection gesture replaced the divider");
 
   // The spans go: so do the boxes.

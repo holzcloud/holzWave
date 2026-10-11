@@ -6,6 +6,14 @@ import type { CellSize, Divider, UnitRect, View } from "./types.js";
 /** CSS px between a pane's edge and its grid. */
 export const PAD = 6;
 
+/** The height of a pane's header strip in root font sizes: 20 px at the base size of 12 px. */
+export const HEADER_REM = 0;
+
+/** The header height in CSS px for a root font size, snapped to whole device pixels. */
+export function headerHeight(_rootFontPx: number, _dpr: number): number {
+  return 0;
+}
+
 /** CSS px of a divider's hit area across its axis. */
 export const DIVIDER_HIT = 8;
 

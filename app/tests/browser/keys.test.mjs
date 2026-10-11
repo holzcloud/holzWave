@@ -44,6 +44,7 @@ export default async function ({ page, url }) {
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
 const ROW_PX = 18; // one cell row: ceil(14 px font * 1.25)
+const HEADER = 20; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
 
 /** One frame message for `pane` with the cursor at (x, y) in a 60 x 4 grid. */
 const frame = (pane, seq, x, y) => ({
@@ -265,13 +266,13 @@ async function placementCase(page, url) {
   await page.evaluate((f) => window.__MOCK__.emit("frame", f), frame(2, 1, 5, 2));
   await settle(page);
   const a = await imeAt(page);
-  assert.equal(a.top, PAD + 2 * ROW_PX, "the row of the cursor cell");
+  assert.equal(a.top, HEADER + 2 * ROW_PX, "the row of the cursor cell");
   assert.equal(a.height, ROW_PX, "one cell high, so the candidate window opens under the cursor row");
 
   await page.evaluate((f) => window.__MOCK__.emit("frame", f), frame(2, 2, 15, 3));
   await settle(page);
   const b = await imeAt(page);
-  assert.equal(b.top, PAD + 3 * ROW_PX);
+  assert.equal(b.top, HEADER + 3 * ROW_PX);
   const cellW = (b.left - a.left) / 10;
   assert.ok(cellW > 3 && cellW < 30, `cell width ${cellW}`);
   const width = await page.evaluate(() => document.getElementById("term").getBoundingClientRect().width);

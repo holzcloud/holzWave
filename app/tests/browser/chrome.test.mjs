@@ -13,6 +13,11 @@ export default async function ({ page, url }) {
   await rendererCase(page, url);
   await hostileCase(page, url);
   await tokenCase(page, url);
+  await headerCase(page, url);
+  await headerStateCase(page, url);
+  await headerTextCase(page, url);
+  await gridCase(page, url);
+  await scaleCase(page, url);
   await clockCase(page, url); // last: it installs a fake clock that stays on the page
 }
 
@@ -30,6 +35,43 @@ const BAR_VIEW = {
 };
 
 const INFO = { version: "0.0.1-alpha1", os: "linux", hostname: "woodbox" };
+
+const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
+const ROW_PX = 18; // one cell row: ceil(14 px font * 1.25)
+const HEADER = 20; // CSS px of a pane's header strip at the base font size
+const ROSE = "rgb(255, 143, 184)";
+
+/** The canvas box in page pixels. */
+const canvasBox = (page) =>
+  page.evaluate(() => {
+    const r = document.getElementById("term").getBoundingClientRect();
+    return { left: r.left, top: r.top, width: r.width, height: r.height };
+  });
+
+/** Everything a test needs to know about the pane header strips, in DOM order. */
+const heads = (page) =>
+  page.evaluate(() =>
+    [...document.querySelectorAll("#overlay .panehead")].map((n) => {
+      const r = n.getBoundingClientRect();
+      const s = getComputedStyle(n);
+      const dot = n.querySelector(".ph-dot");
+      return {
+        pane: n.getAttribute("data-pane"),
+        left: r.left, top: r.top, width: r.width, height: r.height,
+        focused: n.classList.contains("focused"),
+        line: n.classList.contains("focus-line"),
+        exited: n.classList.contains("exited"),
+        lineColour: s.borderTopColor,
+        lineWidth: s.borderTopWidth,
+        events: s.pointerEvents,
+        title: n.querySelector(".ph-title")?.textContent,
+        ctx: n.querySelector(".ph-ctx")?.textContent,
+        state: dot?.getAttribute("data-state"),
+        dotFill: dot ? getComputedStyle(dot).backgroundColor : null,
+        dotMark: dot ? getComputedStyle(dot, "::after").content : null,
+      };
+    }),
+  );
 
 /**
  * Open the page against the stub. `info` is what `app_info` answers (null: the stub's own default). Every case
@@ -291,4 +333,208 @@ async function tokenCase(page, url) {
     const text = readFileSync(join(src, f), "utf8");
     assert.doesNotMatch(text, /\.(?:inner|outer)HTML\s*=|insertAdjacentHTML|document\.write\(/, `${f} builds markup`);
   }
+}
+
+/** One header strip per visible pane, over the pane's top edge, with the focus line only on the focused one. */
+async function headerCase(page, url) {
+  await open(page, url);
+  const c = await canvasBox(page);
+  const strips = await heads(page);
+  assert.deepEqual(strips.map((h) => h.pane), ["1", "2"], "one header per visible pane, in layout order");
+  for (const h of strips) {
+    assert.equal(h.height, HEADER, `pane ${h.pane}: the strip is as high as state.headerPx`);
+    assert.equal(h.top, c.top, `pane ${h.pane}: the strip sits on the pane's top edge`);
+    assert.equal(h.width, c.width / 2, `pane ${h.pane}: the strip is as wide as the pane`);
+    assert.equal(h.events, "none", `pane ${h.pane}: the strip must not take pointer events`);
+  }
+  assert.equal(strips[0].left, c.left);
+  assert.equal(strips[1].left, c.left + c.width / 2);
+
+  // Clicks go through the strip to the terminal.
+  const through = await page.evaluate(
+    ([x, y]) => document.elementFromPoint(x, y)?.id,
+    [c.left + c.width * 0.75, c.top + HEADER / 2],
+  );
+  assert.equal(through, "term", "a click on a header reaches the canvas");
+
+  // Pane 2 has the focus: a rose line and a filled dot. Pane 1 has neither.
+  assert.equal(strips[1].focused, true);
+  assert.equal(strips[1].line, true, "the focused pane has the focus line while two panes are visible");
+  assert.equal(strips[1].lineWidth, "1px");
+  assert.equal(strips[1].lineColour, ROSE, "the focus line is rose");
+  assert.equal(strips[0].focused, false);
+  assert.equal(strips[0].line, false);
+  assert.notEqual(strips[0].lineColour, ROSE, "an unfocused pane shows no rose");
+  assert.deepEqual(strips.map((h) => h.state), ["idle", "focused"]);
+  assert.notEqual(strips[1].dotFill, "rgba(0, 0, 0, 0)", "the focused dot is filled");
+  assert.equal(strips[0].dotFill, "rgba(0, 0, 0, 0)", "an unfocused dot is hollow");
+
+  // Rose is rationed: nothing else in a header is rose.
+  const rose = await page.evaluate((rose) => {
+    const out = [];
+    for (const n of document.querySelectorAll("#overlay .panehead, #overlay .panehead *")) {
+      const s = getComputedStyle(n);
+      for (const p of ["color", "backgroundColor", "borderBottomColor", "borderLeftColor", "borderRightColor"]) {
+        if (s[p] === rose) out.push(`${n.className}:${p}`);
+      }
+    }
+    return out;
+  }, ROSE);
+  assert.deepEqual(rose, [], "rose appears in a header outside the focus line");
+
+  // A single pane has no focus line (design.md section 5), but it is still the focused one.
+  const single = { ...BAR_VIEW, focus: 1 };
+  await showView(page, single);
+  const one = await heads(page);
+  assert.equal(one.length, 1);
+  assert.equal(one[0].line, false, "no focus line with a single pane");
+  assert.notEqual(one[0].lineColour, ROSE);
+  assert.equal(one[0].state, "focused");
+  assert.equal(one[0].width, c.width, "the single header spans the canvas");
+
+  // The headers are keyed: a pane that leaves takes its header, one that comes gets one.
+  await page.evaluate(() => window.__MOCK__.reset());
+  await emit(page, "layout", await page.evaluate(() => window.__MOCK__.view()));
+  assert.deepEqual((await heads(page)).map((h) => h.pane), ["1", "2"]);
+}
+
+/** State is never colour alone: the exited pane has its own dot shape and a label. */
+async function headerStateCase(page, url) {
+  await open(page, url);
+  await emit(page, "pane-exit", { pane: 1, code: 0 });
+  const [gone, live] = await heads(page);
+  assert.equal(gone.state, "exited");
+  assert.equal(gone.exited, true);
+  assert.equal(gone.ctx, "exited", "the context slot says it");
+  assert.equal(gone.dotFill, "rgba(0, 0, 0, 0)", "the exited dot is hollow");
+  assert.notEqual(gone.dotMark, "none", "the exited dot carries a dash");
+  assert.equal(live.dotMark, "none", "a live dot has no dash");
+  assert.equal(live.state, "focused");
+  assert.equal(live.exited, false);
+}
+
+/** Titles and working directories are text; long ones are cut by the style, never by the layout. */
+async function headerTextCase(page, url) {
+  await open(page, url);
+  const [a, b] = await heads(page);
+  assert.equal(a.title, "shell", "without a title event the header shows the tab's title");
+  assert.equal(b.title, "shell");
+  assert.equal(a.ctx, "", "no context before a working directory was reported");
+
+  await emit(page, "title", { pane: 2, title: "vim README.md" });
+  await emit(page, "cwd", { pane: 2, cwd: "/home/holz/src/app" });
+  await emit(page, "cwd", { pane: 1, cwd: "/etc/nginx" });
+  const [p1, p2] = await heads(page);
+  assert.equal(p2.title, "vim README.md");
+  assert.equal(p2.ctx, "~/src/app", "the home prefix is shown as ~");
+  assert.equal(p1.title, "shell", "the other pane keeps the tab's title");
+  assert.equal(p1.ctx, "/etc/nginx", "a path outside home is shown whole");
+
+  // Hostile and huge strings (T-02-68, T-02-70).
+  const bad = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
+  await emit(page, "title", { pane: 1, title: bad });
+  await emit(page, "cwd", { pane: 1, cwd: `/srv/${bad}` });
+  await emit(page, "title", { pane: 2, title: "t".repeat(4096) });
+  await emit(page, "cwd", { pane: 2, cwd: `/home/holz/${"d/".repeat(2000)}` });
+  assert.equal(await page.locator("#overlay img, #overlay b").count(), 0, "a title was parsed as markup");
+  assert.equal(await page.evaluate(() => window.__pwned), undefined);
+  const [h1, h2] = await heads(page);
+  assert.equal(h1.title, bad);
+  assert.equal(h1.ctx, `/srv/${bad}`);
+  assert.equal(h2.height, HEADER, "a huge title does not make the strip grow");
+  assert.equal(h2.width, (await canvasBox(page)).width / 2);
+
+  const style = await page.evaluate(() => {
+    const out = {};
+    for (const part of ["ph-title", "ph-ctx"]) {
+      const n = document.querySelectorAll(`#overlay .${part}`)[1];
+      const s = getComputedStyle(n);
+      out[part] = { overflow: s.overflow, wrap: s.whiteSpace, ellipsis: s.textOverflow, cut: n.scrollWidth > n.clientWidth };
+    }
+    return out;
+  });
+  for (const part of ["ph-title", "ph-ctx"]) {
+    assert.deepEqual(
+      [style[part].overflow, style[part].wrap, style[part].ellipsis, style[part].cut],
+      ["hidden", "nowrap", "ellipsis", true],
+      `${part}: cut with an ellipsis`,
+    );
+  }
+}
+
+/** The core is told grids that start below the header, and the pane's first row is drawn there. */
+async function gridCase(page, url) {
+  await open(page, url);
+  const c = await canvasBox(page);
+  const started = (await callsOf(page, "start_pane")).sort((a, b) => a.pane - b.pane);
+  const rows = Math.floor((c.height - HEADER - PAD) / ROW_PX);
+  assert.deepEqual(started.map((s) => s.rows), [rows, rows], "the grid is sized below the header");
+
+  // Row 0 of pane 1 is drawn right under the header: a coloured run shows there and not above it.
+  const RED = 0xff0000;
+  await page.evaluate(
+    ([red]) =>
+      window.__MOCK__.emit("frame", {
+        pane: 1, seq: 1, full: true, cols: 20, rows: 4, fg: 0xf6efe6, bg: 0x14091a, cursor: null,
+        scrollbar: [0, 4, 4], selection: [], matches: [], search: null, copy_cursor: null,
+        modes: { alt: false, bracketed_paste: false, mouse: false },
+        changed: [{ y: 0, runs: [[" ".repeat(10), 10, 0xf6efe6, red, 0]] }],
+      }),
+    [RED],
+  );
+  const pixel = (x, y) =>
+    page.evaluate(
+      ([px, py]) => {
+        const cv = document.getElementById("term");
+        const [r, g, b] = cv.getContext("2d").getImageData(px, py, 1, 1).data;
+        return (r << 16) | (g << 8) | b;
+      },
+      [x, y],
+    );
+  await page.waitForFunction(
+    async ([x, y]) => {
+      await new Promise((done) => requestAnimationFrame(() => done()));
+      const [r, g, b] = document.getElementById("term").getContext("2d").getImageData(x, y, 1, 1).data;
+      return r === 0xff && g === 0 && b === 0;
+    },
+    [PAD + 2, HEADER + 2],
+    { timeout: 5000 },
+  );
+  assert.equal(await pixel(PAD + 2, HEADER + 2), RED, "the first row starts at the header's lower edge");
+  assert.notEqual(await pixel(PAD + 2, HEADER - 2), RED, "nothing of the grid is drawn under the header");
+}
+
+/** The UI scale is the root font size: the header, the bar and the grid below the header follow it. */
+async function scaleCase(page, url) {
+  await open(page, url);
+  const scaled = async (px) => {
+    const before = (await callsOf(page, "resize")).length;
+    await page.evaluate((size) => {
+      document.documentElement.style.fontSize = `${size}px`;
+      window.dispatchEvent(new Event("resize"));
+    }, px);
+    await page.waitForFunction((n) => window.__MOCK__.callsOf("resize").length >= n + 2, before, { timeout: 5000 });
+    return page.evaluate(() => ({
+      token: getComputedStyle(document.documentElement).getPropertyValue("--hw-header").trim(),
+      head: document.querySelector("#overlay .panehead")?.getBoundingClientRect().height,
+      bar: document.getElementById("bar").getBoundingClientRect().height,
+      status: document.getElementById("status").getBoundingClientRect().height,
+      canvas: document.getElementById("term").getBoundingClientRect().height,
+      resizes: window.__MOCK__.callsOf("resize").slice(-2),
+    }));
+  };
+
+  const big = await scaled(18); // UI scale 150 %
+  assert.equal(big.token, "30px");
+  assert.equal(big.head, 30, "the header follows the root font size");
+  assert.equal(big.bar, 48, "the bar follows it too");
+  assert.equal(big.status, 36);
+  const rows = Math.floor((big.canvas - 30 - PAD) / ROW_PX);
+  assert.deepEqual(big.resizes.map((r) => r.rows), [rows, rows], "the resize payload is the grid below the header");
+
+  const odd = await scaled(13);
+  assert.equal(odd.token, "22px", "20/12 of 13 px, snapped to a device pixel");
+  assert.equal(odd.head, 22);
+  const rows13 = Math.floor((odd.canvas - 22 - PAD) / ROW_PX);
+  assert.deepEqual(odd.resizes.map((r) => r.rows), [rows13, rows13]);
 }

@@ -8,6 +8,7 @@ const PANE_1_BG = 0x6b2fa0;
 const PANE_2_BG = 0x2a6fdb;
 const GREEN = 0x00c040;
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
+const HEADER = 20; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
 
 const MODES = { alt: false, bracketed_paste: false, mouse: false };
 
@@ -100,8 +101,8 @@ async function drawCase(page, url, query) {
     const c = document.getElementById("term");
     return { w: c.clientWidth, h: c.clientHeight };
   });
-  const p1 = (col, row) => [PAD + (col + 0.5) * cw, PAD + (row + 0.5) * ch];
-  const p2 = (col, row) => [size.w / 2 + PAD + (col + 0.5) * cw, PAD + (row + 0.5) * ch];
+  const p1 = (col, row) => [PAD + (col + 0.5) * cw, HEADER + (row + 0.5) * ch];
+  const p2 = (col, row) => [size.w / 2 + PAD + (col + 0.5) * cw, HEADER + (row + 0.5) * ch];
 
   const at = (label, got, want) => assert.equal(hex(got), hex(want), `${query || "webgl"}: ${label}`);
 

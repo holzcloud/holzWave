@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { callsOf, emit } from "./lib.mjs";
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
+const HEADER = 20; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
 const BG = 0x14091a;
 const MODES = { alt: false, bracketed_paste: false, mouse: false };
 const golden = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
@@ -38,10 +39,10 @@ async function open(page, url) {
   const geo = {
     cw, ch,
     /** The page point at the centre of cell (cx, cy) of `pane`. */
-    pt: (pane, cx, cy) => [origin(pane) + (cx + 0.5) * cw, c.top + PAD + (cy + 0.5) * ch],
+    pt: (pane, cx, cy) => [origin(pane) + (cx + 0.5) * cw, c.top + HEADER + (cy + 0.5) * ch],
     /** The box of cell span (x0..x1, y) of `pane`. */
     box: (pane, y, x0, x1) => ({
-      x: origin(pane) + x0 * cw, y: c.top + PAD + y * ch, w: (x1 - x0 + 1) * cw, h: ch,
+      x: origin(pane) + x0 * cw, y: c.top + HEADER + y * ch, w: (x1 - x0 + 1) * cw, h: ch,
     }),
   };
   await emit(page, "frame", fullFrame(1, 1));
