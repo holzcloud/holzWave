@@ -100,6 +100,29 @@ No motion in the terminal grid itself. `prefers-reduced-motion` removes all tran
 **Accessibility:** every colour state has a second cue (underline, dot shape, label). The focus ring is 2 px for
 keyboard focus. Chrome text is at least 12 px. All chrome is operable from the keyboard.
 
+**Accessibility preferences (DESK-24).** Motion, contrast and cursor blink are each `system` or an explicit choice in
+the settings; an explicit choice beats the OS, in both directions, and a change of the OS preference is followed
+while the app runs.
+
+| Preference | OS signal the web view reports | Effect |
+|---|---|---|
+| Motion | `prefers-reduced-motion` | no chrome transitions (root class `motion-reduce`); the terminal grid never moves |
+| Contrast | `prefers-contrast: more` and `forced-colors` | hairlines use `--hw-ink-3`, dim text uses `--hw-ink-2`, the focus line is 2 px, the shown status segment gets a 2 px outline (root class `contrast-high`); under forced colours the chrome uses system colours |
+| Cursor blink | none of its own: it follows reduced motion | a cursor the program asked to blink does so with a 530 ms phase, unless the setting is `off`, or `system` with reduced motion; the phase restarts on output and on every key |
+| UI scale | **none** | the user's `ui_scale` (75 to 200 %) and the font size actions; see below |
+
+The web view reports no OS text-size preference on macOS, so the scalable UI font is the user's own setting rather than
+an OS signal. Windows and Linux get theirs in Phase 2.2. The requirement DESK-24 says so in its wording; nothing in
+the page pretends otherwise.
+
+**Text on the accent fill.** `--hw-rose-deep` is a fill, and the text on it is `--hw-on-accent`: white or black,
+whichever measures the higher WCAG ratio against the theme's own `rose_deep` (5.05:1 on all three built-in themes,
+at least 4.58:1 on any colour). It replaces `--hw-ink`, which measured 3.84:1 to 4.42:1 there.
+
+**Key bindings (DESK-25).** The core resolves the table (defaults, overrides, conflicts) and the page dispatches
+shortcuts through the rows it sends; the editor records a chord with the core's canonical spelling and shows the
+core's refusals. `Cmd+C` is a fixed shortcut: the core has no rebindable action for it.
+
 ## 6. Window direction: Terminal-modern
 
 The owner's brief ruled out the glass, plank and paper looks: they depend on effects (blur, texture) that differ per
