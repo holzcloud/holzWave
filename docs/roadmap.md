@@ -5,8 +5,9 @@ Rust core. [Wave Terminal](https://github.com/wavetermdev/waveterm) is the UX re
 ever taken over, its Apache-2.0 licence is checked first and the notices are kept.
 
 > [!NOTE]
-> This is a plan, not a status. Nothing below is built. The knowledge about `libghostty` and Apple's Foundation
-> Models framework dates from mid-2026; **both are re-checked against the current documentation in phase 1.**
+> This is a plan, not a status, except for the "Status" paragraph of Phase 2, which says what is built. The knowledge
+> about `libghostty` and Apple's Foundation Models framework dates from mid-2026; **both are re-checked against the
+> current documentation in phase 1.**
 
 ## Platforms
 
@@ -35,8 +36,26 @@ Done when: a shell runs in the window, the renderer is chosen with the measureme
 
 ## Phase 2 — Desktop MVP
 
-Status in `0.0.1-alpha1`: scrollback (wheel), selection and copy, paste, tiling with splits and draggable dividers,
-tabs, workspaces and a persisted layout exist. Themes, drag-and-drop of blocks, hyperlinks and the key encoder do not.
+Status in `0.0.1-alpha1` (macOS, from source; there is no release): implemented and covered by the automated suites.
+What no suite can see is the human checklist in [test-plan.md](test-plan.md), and it has not been run yet.
+
+Exists: the key encoder with Kitty keyboard and application modes (Option is not Alt by default), engine replies,
+dirty-row frames with sequence numbers, bounded panes that end their shell when closed, repaired layouts, three
+themes and user themes, the Terminal-modern chrome, mouse reports and the wheel policy for full-screen programs,
+selection tracked in the core, scrollback search, links, hints and copy mode, the command palette, the settings
+dialog and key binding editor, accessibility preferences, restore of directories and window frame, and a test that
+there is no telemetry and no account. The file formats are in [config.md](config.md), the measured budgets in
+[architecture.md](architecture.md) section 12.
+
+Does not exist yet:
+
+- **Phase 2.1:** drag-and-drop of panes, tear-off into a new window (DESK-20, DESK-29), smooth scrolling and cursor trail,
+  optional and off under reduced motion (DESK-28).
+- **Phase 2.2:** Windows (ConPTY, WebView2, installer) and Linux (X11 and Wayland, Flatpak, AppImage, deb and rpm),
+  with their own default key tables and the OS-driven UI font size (DESK-30, DESK-31). The owner runs the per-platform
+  list of [test-plan.md](test-plan.md) on their own hardware (D-22). No `0.0.1-alpha1` is released before this is done
+  (D-21).
+- **Phase 8:** the Kitty graphics protocol and OSC 8 hyperlinks (links in the text are detected and clickable today).
 
 - Local shell, scrollback, copy and paste, Unicode, resize, themes.
 - Block tiling with tabs and workspaces.

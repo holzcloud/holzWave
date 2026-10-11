@@ -12,14 +12,23 @@
 //! * the dependency closure of the app: no telemetry or network client crate, except the named, commented exceptions
 //!   with their exact set of parents;
 //! * the sources: no network API in first-party Rust (non-test code) or in the page;
-//! * the page policy (no remote origin in the CSP, no dev server URL, no updater) and the absence of CI (D-04).
+//! * the page policy (no remote origin in the CSP, no dev server URL, no updater) and the absence of CI (D-04);
+//! * the examples of `docs/config.md`, which are parsed by the real loaders, so the document cannot drift from the code.
 //!
 //! The capability allow-list and the exact CSP are pinned by `app/src-tauri/tests/acl.rs`; this file does not repeat
 //! them, it only re-checks the properties that DESK-26 depends on.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use holzwave_core::keybindings::{Keybindings, actions};
+use holzwave_core::layout::{Layout, LoadStatus};
+use holzwave_core::session::Session;
+use holzwave_core::settings::Settings;
+use holzwave_core::theme::{ThemeRegistry, blend, contrast};
 
 // ---- the policy -----------------------------------------------------------------------------------------
 
@@ -675,5 +684,77 @@ fn the_denylist_matches_names_and_prefixes() {
     }
     for name in ["tauri", "tauri-runtime-wry", "serde", "hyperlink", "portable-pty", "holzwave-core"] {
         assert!(!is_denied(name), "{name} should be allowed");
+    }
+}
+
+// ---- docs/config.md ---------------------------------------------------------------------------------------
+
+/// The JSON of the fenced block that follows the marker `<!-- example: NAME -->` in `docs/config.md`.
+fn documented_example(name: &str) -> String {
+    let doc = read("docs/config.md");
+    let marker = format!("<!-- example: {name} -->");
+    let after = doc.split_once(&marker).unwrap_or_else(|| panic!("docs/config.md has no example {name}")).1;
+    let fence = after.trim_start().strip_prefix("```json\n").unwrap_or_else(|| panic!("no json fence after {name}"));
+    fence.split_once("\n```").unwrap_or_else(|| panic!("the fence of {name} is not closed")).0.to_owned()
+}
+
+#[test]
+fn the_examples_of_config_md_load_cleanly_through_the_real_loaders() {
+    let (settings, status) = Settings::from_json(&documented_example("settings.json"));
+    assert_eq!(status, LoadStatus::Clean, "the settings example is not clean");
+    assert_eq!(settings.theme, "Schiefer");
+    assert_eq!(settings.keybindings.len(), 2);
+    let (_, warnings) = Keybindings::resolve(&settings.keybindings);
+    assert!(warnings.is_empty(), "the key binding example is refused: {warnings:?}");
+
+    let dir = common::scratch_dir("policy-docs");
+    let themes = dir.join("themes");
+    fs::create_dir(&themes).expect("themes directory");
+    fs::write(themes.join("moos.json"), documented_example("themes/moos.json")).expect("theme file");
+    let (registry, warnings) = ThemeRegistry::load(&dir);
+    fs::remove_dir_all(&dir).expect("remove scratch directory");
+    assert!(warnings.is_empty(), "the theme example is skipped: {warnings:?}");
+    assert!(registry.contains("Moos"), "the theme example is not listed");
+
+    // The contrast guidance of the document, held for the example it carries.
+    let theme = registry.get("Moos");
+    let (t, c) = (&theme.terminal, &theme.chrome);
+    let selected = blend(t.selection, t.selection_alpha, t.background);
+    assert!(contrast(t.foreground, t.background) >= 7.0);
+    assert!(contrast(t.foreground, selected) >= 3.0);
+    assert!(contrast(t.ansi[8], t.background) >= 3.0 && contrast(t.cursor, t.background) >= 3.0);
+    for i in (1..=7).chain(9..=15) {
+        assert!(contrast(t.ansi[i], t.background) >= 4.5, "ANSI {i} on the background");
+        assert!(contrast(t.ansi[i], selected) >= 3.0, "ANSI {i} on the selection");
+    }
+    assert!(contrast(c.ink, c.ground) >= 7.0 && contrast(c.ink_3, c.ground) >= 4.5);
+
+    let (session, status) = Session::from_json(&documented_example("session.json"));
+    assert_eq!(status, LoadStatus::Clean, "the session example is not clean");
+    assert_eq!(session.cwds.len(), 1);
+    assert!(session.window.is_some());
+
+    let (layout, status) = Layout::from_json(&documented_example("layout.json"));
+    assert_eq!(status, LoadStatus::Clean, "the layout example is not clean");
+    assert_eq!(layout.all_panes().len(), 2);
+}
+
+#[test]
+fn config_md_names_every_setting_and_every_action() {
+    let doc = read("docs/config.md");
+    let defaults = serde_json::to_value(Settings::default()).expect("settings serialise");
+    for key in defaults.as_object().expect("settings are an object").keys() {
+        assert!(doc.contains(&format!("`{key}`")), "docs/config.md does not document the setting {key}");
+    }
+    for action in actions() {
+        // Tab and workspace selection are one row each: `tab.select_1` to `_9`.
+        let numbered = action.id.rsplit_once('_').is_some_and(|(_, n)| matches!(n, "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+        if numbered {
+            continue;
+        }
+        assert!(doc.contains(&format!("`{}`", action.id)), "docs/config.md does not list the action {}", action.id);
+        if let Some(default) = action.default.filter(|_| !action.id.contains("select_")) {
+            assert!(doc.contains(&format!("`{default}`")), "docs/config.md does not list {default} for {}", action.id);
+        }
     }
 }
