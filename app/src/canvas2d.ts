@@ -34,6 +34,7 @@ function cellAt(f: Frame, y: number, x: number): { ch: string; flags: number; fi
 export class Canvas2DRenderer implements Renderer {
   private ctx: CanvasRenderingContext2D;
   private m: Metrics = { cellW: 8, cellH: 17, dpr: 1, width: 0, height: 0 };
+  private cursorColor = CURSOR_COLOR;
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext("2d", { alpha: false })!;
@@ -41,6 +42,10 @@ export class Canvas2DRenderer implements Renderer {
 
   configure(m: Metrics) {
     this.m = m;
+  }
+
+  setCursorColor(rgb: number) {
+    this.cursorColor = rgb & 0xffffff;
   }
 
   begin(bg: number) {
@@ -124,7 +129,7 @@ export class Canvas2DRenderer implements Renderer {
       const at = cellAt(f, cursor.y, cursor.x);
       const x = at.first * cellW, y = cursor.y * cellH, w = at.span * cellW;
       const t = 1 / m.dpr; // one device pixel in CSS pixels
-      ctx.fillStyle = css(CURSOR_COLOR);
+      ctx.fillStyle = css(this.cursorColor);
       switch (cursor.style) {
         case "block": {
           // A cursor-colour cell with its glyph redrawn in the pane background, so the character stays readable.

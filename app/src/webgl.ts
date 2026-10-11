@@ -1,5 +1,5 @@
 import {
-  BOLD, CURSOR_COLOR, CursorShape, FONT_PX, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, font, gridCells,
+  BOLD, CURSOR_COLOR, CursorShape, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, font, getFontPx, gridCells,
   rowExtras, visibleCursor,
 } from "./frame.js";
 
@@ -128,6 +128,7 @@ export class WebGLRenderer implements Renderer {
   private f32 = new Float32Array(0);
   private u32 = new Uint32Array(0);
   private capacity = 0;
+  private cursorColor = CURSOR_COLOR;
 
   constructor(private canvas: HTMLCanvasElement, options: WebGLOptions = {}) {
     const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, powerPreference: "high-performance" });
@@ -185,6 +186,10 @@ export class WebGLRenderer implements Renderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.atlasPx, this.atlasPx, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   }
 
+  setCursorColor(rgb: number) {
+    this.cursorColor = rgb & 0xffffff;
+  }
+
   /**
    * The atlas slot for a glyph, or -1 when the atlas is full. A new glyph is only given its slot here; its pixels
    * are rasterised and uploaded together with the frame's other new glyphs by `flushGlyphs`.
@@ -215,7 +220,7 @@ export class WebGLRenderer implements Renderer {
     const list = this.pending;
     if (list.length === 0) return;
     const { gl, sctx: c, strip, cw, ch, atlasCols } = this;
-    const px = Math.round(FONT_PX * this.m.dpr);
+    const px = Math.round(getFontPx() * this.m.dpr);
     const baseline = Math.round(ch * 0.78);
     gl.bindTexture(gl.TEXTURE_2D, this.atlasTex);
     for (let i = 0; i < list.length; ) {
@@ -310,7 +315,7 @@ export class WebGLRenderer implements Renderer {
     gl.uniform1ui(this.uniforms.uAtlasCols!, this.atlasCols);
     gl.uniform3f(
       this.uniforms.uCursor!,
-      ((CURSOR_COLOR >> 16) & 255) / 255, ((CURSOR_COLOR >> 8) & 255) / 255, (CURSOR_COLOR & 255) / 255,
+      ((this.cursorColor >> 16) & 255) / 255, ((this.cursorColor >> 8) & 255) / 255, (this.cursorColor & 255) / 255,
     );
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.atlasTex);
@@ -404,7 +409,7 @@ export class WebGLRenderer implements Renderer {
           case "block":
             // The cell takes the cursor colour and its glyph the pane background, so the character stays readable.
             u32[o + 3] = f.bg;
-            u32[o + 4] = CURSOR_COLOR;
+            u32[o + 4] = this.cursorColor;
             break;
           case "bar":
             if (k === 0) u32[o + 5] = u32[o + 5]! | F_CUR_BAR;

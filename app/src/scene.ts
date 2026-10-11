@@ -5,12 +5,13 @@
 import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
-import { BOLD, FONT_PX, ITALIC, Metrics, Renderer, font } from "./frame.js";
+import { BOLD, ITALIC, Metrics, Renderer, font, getFontPx } from "./frame.js";
 import { RateMeter, applyFrame, forgetPane, spansSignature, toRenderFrame } from "./frames.js";
 import type { FrameMsg } from "./frames.js";
 import { fitCells, gridRect, headerHeight } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
 import { renderPaneHeads } from "./panehead.js";
+import { initSettings } from "./settings.js";
 import { forgetSelection, onSelectionSpans } from "./selection.js";
 import { state } from "./state.js";
 import { renderStatus } from "./status.js";
@@ -49,6 +50,8 @@ export async function initScene(): Promise<void> {
   }
   state.renderer = rendererName;
   await loadFonts();
+  // The settings come before the first measurement: the font size and the UI scale decide the cell size.
+  await initSettings({ setCursorColor: (rgb) => renderer?.setCursorColor(rgb), schedule });
   state.metrics = measure();
   window.addEventListener("resize", fit);
 }
@@ -105,7 +108,7 @@ function measure(): Metrics {
   const snap = (cssPx: number) => Math.max(1, Math.round(cssPx * dpr)) / dpr;
   return {
     cellW: snap(probe.measureText("M").width),
-    cellH: snap(Math.ceil(FONT_PX * 1.25)),
+    cellH: snap(Math.ceil(getFontPx() * 1.25)),
     dpr,
     width: canvas().clientWidth,
     height: canvas().clientHeight,

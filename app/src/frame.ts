@@ -75,6 +75,7 @@ export function rowExtras(f: Frame, y: number): Map<number, string> | null {
 }
 
 export const BOLD = 1, ITALIC = 2, UNDERLINE = 4, INVERSE = 8;
+/** The cursor colour of the built-in aubergine theme; a renderer draws another one after `setCursorColor`. */
 export const CURSOR_COLOR = 0xff8fb8;
 
 export interface Metrics {
@@ -102,12 +103,28 @@ export interface Renderer {
   begin(bg: number): void;
   /** Draw one pane's grid into `rect`; the grid starts at the rect's top-left corner. */
   drawPane(frame: Frame, rect: PxRect): void;
+  /** Draw the cursor in this colour (0xRRGGBB) from the next frame on; the caller schedules that frame. */
+  setCursorColor(rgb: number): void;
   /** Block until the GPU has finished, so timings are real. Only used by the benchmark. */
   sync(): void;
 }
 
+/** The terminal font size in CSS pixels until the settings say another: the core's default. */
 export const FONT_PX = 14;
+let fontPx = FONT_PX;
+
+/** The terminal font size in CSS pixels now: what `font()` and the renderers draw with. */
+export const getFontPx = (): number => fontPx;
+
+/**
+ * Take a new terminal font size. The caller measures again afterwards (`scene.fit`): a cell size taken before
+ * stays the size of the old font. A value that is not a positive finite number is ignored.
+ */
+export function setFontPx(px: number): void {
+  if (Number.isFinite(px) && px > 0) fontPx = px;
+}
+
 export const FONT_FAMILY = '"JetBrains Mono", "SF Mono", Menlo, monospace';
-export const font = (flags: number, px = FONT_PX) =>
+export const font = (flags: number, px = fontPx) =>
   `${flags & ITALIC ? "italic " : ""}${flags & BOLD ? "bold " : ""}${px}px ${FONT_FAMILY}`;
 export const css = (c: number) => `#${c.toString(16).padStart(6, "0")}`;

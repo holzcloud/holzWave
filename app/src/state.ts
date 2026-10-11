@@ -1,6 +1,7 @@
 // The frontend's shared mutable state: one object, owned by the modules that import it.
 import type { Metrics } from "./frame.js";
 import type { PaneMirror } from "./frames.js";
+import type { SettingsView } from "./settings-model.js";
 import type { PaneSize, View } from "./types.js";
 
 export interface State {
@@ -37,6 +38,12 @@ export interface State {
    * snapped to device pixels by `scene.ts`. The grid of a pane starts below it, so the UI scale moves both.
    */
   headerPx: number;
+  /**
+   * The last settings view the core sent, as `settings.ts` accepted it; null until the first answer, and for good
+   * when the core cannot answer (the page then runs on the built-in aubergine look and default sizes). The
+   * settings dialog renders from this and nothing else.
+   */
+  settings: SettingsView | null;
 }
 
 export const state: State = {
@@ -54,4 +61,5 @@ export const state: State = {
   hostname: "",
   renderer: "canvas2d",
   headerPx: 20,
+  settings: null,
 };
