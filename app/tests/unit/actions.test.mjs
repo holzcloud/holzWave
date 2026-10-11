@@ -92,6 +92,39 @@ test("an action that throws is not swallowed", () => {
   assert.throws(() => runAction(id), /boom/);
 });
 
+// ---- key auto-repeat -----------------------------------------------------------------------------
+
+const REPEATABLE = ["pane.focus_next", "pane.focus_prev", "font.increase", "font.decrease"];
+
+test("an action that is not allowed to repeat is consumed on a repeat and runs once per press", () => {
+  const id = fresh("once");
+  let runs = 0;
+  registerAction({ id, title: "Once", run: () => void runs++ });
+  assert.equal(runAction(id, { repeat: true }), true, "a repeat of a known action is consumed, not unknown");
+  assert.equal(runs, 0, "the repeat did not run it");
+  assert.equal(runAction(id), true);
+  assert.equal(runs, 1, "a press without options runs it");
+  assert.equal(runAction(id, { repeat: false }), true);
+  assert.equal(runs, 2, "a press that is not a repeat runs it");
+});
+
+test("the four stepping actions run on every repeat", () => {
+  for (const id of REPEATABLE) {
+    let runs = 0;
+    // The page registers these ids; node has no page, so the case registers its own under the real id.
+    registerAction({ id, title: id, run: () => void runs++ });
+    assert.equal(runAction(id, { repeat: true }), true, id);
+    assert.equal(runAction(id, { repeat: true }), true, id);
+    assert.equal(runs, 2, `${id} ran on both repeats`);
+    assert.equal(unregisterAction(id), true);
+  }
+});
+
+test("an unknown id is false on a repeat as well", () => {
+  assert.equal(runAction("no.such.action", { repeat: true }), false);
+  assert.equal(runAction("constructor", { repeat: true }), false);
+});
+
 // ---- the chord table -----------------------------------------------------------------------------
 
 const EXPECTED = {

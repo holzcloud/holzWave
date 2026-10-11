@@ -34,6 +34,7 @@ export default async function ({ page, url }) {
   await plainKeyCase(page, url);
   await facts(page, url);
   await shortcutCase(page, url);
+  await repeatCase(page, url);
   await handlerCase(page, url);
   await inputElementCase(page, url);
   await composeCase(page, url);
@@ -145,6 +146,66 @@ async function shortcutCase(page, url) {
     ["cycle_focus", { step: 1 }],
     ["select_workspace", { index: 0 }],
   ], "shortcuts match by physical key");
+}
+
+/** One press of a chord, then `repeats` auto-repeat events of the held key; returns the commands they caused. */
+async function hold(page, init, repeats) {
+  const before = (await sent(page)).length;
+  await keydown(page, init);
+  for (let i = 0; i < repeats; i++) await keydown(page, { ...init, repeat: true });
+  return (await sent(page)).slice(before);
+}
+
+/**
+ * WR-01: a held shortcut runs once. Create and destroy actions ignore key auto-repeat, the four stepping actions
+ * keep stepping, a swallowed repeat is not terminal input, and keys for the program keep their repeat flag.
+ */
+async function repeatCase(page, url) {
+  const held = [
+    ["Cmd+W", { key: "w", code: "KeyW", metaKey: true }, ["close_pane"]],
+    ["Cmd+D", { key: "d", code: "KeyD", metaKey: true }, ["split"]],
+    ["Cmd+Shift+D", { key: "D", code: "KeyD", metaKey: true, shiftKey: true }, ["split"]],
+    ["Cmd+T", { key: "t", code: "KeyT", metaKey: true }, ["new_tab"]],
+    ["Cmd+Shift+N", { key: "N", code: "KeyN", metaKey: true, shiftKey: true }, ["new_workspace"]],
+  ];
+  for (const [name, init, cmds] of held) {
+    await open(page, url);
+    const calls = await hold(page, init, 5);
+    assert.deepEqual(calls.map(([c]) => c), cmds, `${name} held for six events runs once, got ${JSON.stringify(calls)}`);
+  }
+
+  // Both split directions are the one action each, with the direction of its chord.
+  await open(page, url);
+  assert.deepEqual(await hold(page, held[1][1], 5), [["split", { column: false }]], "Cmd+D splits right once");
+  await open(page, url);
+  assert.deepEqual(await hold(page, held[2][1], 5), [["split", { column: true }]], "Cmd+Shift+D splits down once");
+
+  // A repeat alone is consumed: no command, and not input for the shell either.
+  await open(page, url);
+  const before = (await sent(page)).length;
+  const prevented = await keydown(page, { ...held[0][1], repeat: true });
+  assert.equal(prevented, true, "a repeat of a page shortcut is preventDefault-ed");
+  assert.deepEqual((await sent(page)).slice(before), [], "a repeat of Cmd+W sends neither close_pane nor a key");
+
+  // The stepping chords keep stepping: Cmd+] three times in a row is three steps.
+  await open(page, url);
+  const steps = await hold(page, { key: "]", code: "BracketRight", metaKey: true }, 2);
+  assert.deepEqual(steps, [["cycle_focus", { step: 1 }], ["cycle_focus", { step: 1 }], ["cycle_focus", { step: 1 }]], "Cmd+] repeats");
+  const back = await hold(page, { key: "[", code: "BracketLeft", metaKey: true }, 2);
+  assert.deepEqual(back.map(([c, a]) => [c, a.step]), [["cycle_focus", -1], ["cycle_focus", -1], ["cycle_focus", -1]], "Cmd+[ repeats");
+
+  // Keys for the program: auto-repeat is the program's business, the flag goes to the core.
+  await open(page, url);
+  const typed = await hold(page, { key: "a", code: "KeyA" }, 2);
+  assert.deepEqual(
+    typed.map(([c, a]) => [c, a.repeat]),
+    [["key", false], ["key", true], ["key", true]],
+    "a held letter reaches the core with repeat set on the repeats",
+  );
+
+  // A Cmd chord nobody owns is neither a command nor input, repeated or not.
+  await open(page, url);
+  assert.deepEqual(await hold(page, { key: "j", code: "KeyJ", metaKey: true }, 3), [], "an unbound Cmd chord repeat sends nothing");
 }
 
 /** A pushed handler gets the key before the shortcut and the terminal; a handler that passes changes nothing. */

@@ -45,6 +45,7 @@ export default async function ({ page, url, errors }) {
   await emptyAndTrimCase(page, url);
   await clipCase(page, url);
   await navigateCase(page, url);
+  await heldEnterCase(page, url);
   await counterCase(page, url);
   await highlightCase(page, url);
   await closeCase(page, url);
@@ -179,6 +180,40 @@ async function navigateCase(page, url) {
     runAction("search.prev");
   });
   assert.deepEqual((await searchOps(page)).map((o) => o.kind), ["next", "prev"], "search.next and search.prev are actions");
+}
+
+/**
+ * A held Enter in the open bar keeps stepping through the matches: the key handler stack sees every repeat before the
+ * repeat policy of the shortcut dispatch, and the policy never touches a key the stack consumed (WR-01).
+ */
+async function heldEnterCase(page, url) {
+  await open(page, url);
+  await openBar(page);
+  await page.keyboard.type("foo");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("search").length >= 1);
+  await page.waitForTimeout(50);
+  await reset(page);
+
+  const prevented = await page.evaluate(() => {
+    const input = document.activeElement;
+    const out = [];
+    for (let i = 0; i < 3; i++) {
+      const e = new KeyboardEvent("keydown", {
+        key: "Enter", code: "Enter", repeat: true, bubbles: true, cancelable: true, composed: true,
+      });
+      input.dispatchEvent(e);
+      out.push(e.defaultPrevented);
+    }
+    return out;
+  });
+  assert.deepEqual(prevented, [true, true, true], "the bar consumes every repeat of Enter");
+  assert.deepEqual(
+    await searchOps(page),
+    [{ pane: 2, kind: "next" }, { pane: 2, kind: "next" }, { pane: 2, kind: "next" }],
+    "three repeats of Enter are three steps for the focused pane",
+  );
+  assert.deepEqual(await shellCalls(page), [], "no repeat reached the shell as key, text or paste");
+  await page.keyboard.press("Escape");
 }
 
 /** The counter reads current/total, 1-based, from the focused pane's frame header and follows later frames. */
