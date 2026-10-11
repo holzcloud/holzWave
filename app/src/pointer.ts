@@ -1,6 +1,13 @@
-// Pointer input on the canvas. The selection is the core's: a press sends `select` begin with the viewport cell
-// under the pointer (word on the second click, line on the third), moving sends `extend` at most once per
-// animation frame, and a click that never moved clears. Nothing about the selection is kept here.
+// Pointer input on the canvas. A gesture is either the program's or the user's, decided once at its press.
+//
+// The user's: the selection is the core's. A press sends `select` begin with the viewport cell under the pointer
+// (word on the second click, line on the third), moving sends `extend` at most once per animation frame, and a
+// click that never moved clears. Nothing about the selection is kept here.
+//
+// The program's: when the pane's frame header says the program tracks the mouse (`modes.mouse`) and Shift is not
+// held, press, release and motion go to the core as `mouse` commands in device pixels relative to the grid origin
+// and nothing is selected. Motion is one command per animation frame, and a pointer that is cancelled, loses its
+// capture or leaves with the window sends the release for the button it holds, so no button stays down.
 //
 // Handlers can be stacked in front of the gesture (`pushPointerHandler`): links, hints and copy mode take clicks
 // without this file knowing them. The wheel always goes to the core as a `wheel` command for the pane under the
@@ -134,6 +141,106 @@ function select(pane: number, op: Op): void {
   void call("select", { pane, op }).catch(() => {});
 }
 
+// ---- reporting -------------------------------------------------------------------------------------
+
+type Button = "left" | "middle" | "right";
+/** The `mouse` command's names for `PointerEvent.button` 0, 1 and 2; other buttons are not reported. */
+const BUTTONS: readonly Button[] = ["left", "middle", "right"];
+
+/** A gesture whose press went to the program: the release must follow, whatever happens to the pointer. */
+interface Report {
+  pane: number;
+  pointer: number;
+  button: Button;
+  /** Where the pointer was last and with which modifiers: what a release without an event of its own carries. */
+  x: number;
+  y: number;
+  mods: number;
+}
+
+let report: Report | null = null;
+/** The pointer of a press that only focused its pane: its moves and release belong to nobody. */
+let swallowed: number | null = null;
+/** The newest motion that has not been sent yet and the animation frame that sends it. */
+let motion: { pane: number; button: Button | "none"; x: number; y: number; mods: number } | null = null;
+let motionFrame = 0;
+
+/** Whether the program of a pane asked for the mouse, by the header of the pane's last frame. */
+const tracking = (pane: number): boolean => state.frames.get(pane)?.modes.mouse === true;
+
+/** Send one mouse event; a command that fails is the core's to report, not an error of the page. */
+function sendMouse(pane: number, action: "press" | "release" | "motion", button: Button | "none", x: number, y: number, mods: number): void {
+  void call("mouse", { pane, action, button, x, y, mods }).catch(() => {});
+}
+
+/** Forget the waiting motion and its animation frame. */
+function dropMotion(): void {
+  if (motionFrame !== 0) {
+    cancelAnimationFrame(motionFrame);
+    motionFrame = 0;
+  }
+  motion = null;
+}
+
+/** Send the waiting motion now. */
+function flushMotion(): void {
+  const m = motion;
+  dropMotion();
+  if (m) sendMouse(m.pane, "motion", m.button, m.x, m.y, m.mods);
+}
+
+/** Keep the newest motion and send it with the next animation frame; a motion for another pane goes out first. */
+function queueMotion(m: NonNullable<typeof motion>): void {
+  if (motion && motion.pane !== m.pane) flushMotion();
+  motion = m;
+  if (motionFrame === 0) {
+    motionFrame = requestAnimationFrame(() => {
+      motionFrame = 0;
+      flushMotion();
+    });
+  }
+}
+
+/** Give the pointer capture back; it may be gone with the pointer already. */
+function releaseCapture(canvas: HTMLCanvasElement, pointer: number): void {
+  try {
+    canvas.releasePointerCapture(pointer);
+  } catch {
+    // the capture ended with the pointer
+  }
+}
+
+/** Take the pointer capture: a convenience, moves outside the canvas then stop arriving without it. */
+function capture(canvas: HTMLCanvasElement, pointer: number): void {
+  try {
+    canvas.setPointerCapture(pointer);
+  } catch {
+    // no capture
+  }
+}
+
+/**
+ * Send the release of the held button, once: the gesture is over afterwards, so a second cancel, a lost capture or
+ * the release that follows finds nothing held. The position is the last one seen.
+ */
+function releaseReport(canvas: HTMLCanvasElement): void {
+  const r = report;
+  if (!r) return;
+  report = null;
+  dropMotion();
+  sendMouse(r.pane, "release", r.button, r.x, r.y, r.mods);
+  releaseCapture(canvas, r.pointer);
+}
+
+/** Remember where the pointer is for the gesture; false when its pane has left the layout. */
+function follow(r: Report, e: PointerEvent, canvas: HTMLCanvasElement): boolean {
+  const pane = state.view?.panes.find(([id]) => id === r.pane);
+  if (!pane) return false;
+  [r.x, r.y] = devicePoint(e, canvas, r.pane, pane[1]);
+  r.mods = modifierBits(e);
+  return true;
+}
+
 const same = (a: [number, number], b: [number, number]) => a[0] === b[0] && a[1] === b[1];
 
 /** The click count for a press: 1, 2 or 3 inside the window of the click before, else 1 (a fourth click starts over). */
@@ -185,11 +292,7 @@ function endGesture(canvas: HTMLCanvasElement): void {
   if (!g) return;
   if (g.frame !== 0) cancelAnimationFrame(g.frame);
   gesture = null;
-  try {
-    canvas.releasePointerCapture(g.pointer);
-  } catch {
-    // the capture ended with the pointer
-  }
+  releaseCapture(canvas, g.pointer);
 }
 
 /**
@@ -207,30 +310,86 @@ export function initPointer(applyView: (v: View) => void): void {
   });
 
   canvas.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0 || offer(e, canvas)) return;
+    swallowed = null;
+    if (report) releaseReport(canvas); // a press whose release never came
+    if (offer(e, canvas)) return;
     const hit = hitAt(e, canvas);
-    if (!hit) return;
+    const rect = canvas.getBoundingClientRect();
+    const at = paneAt(state.metrics, state.view, e.clientX - rect.left, e.clientY - rect.top);
+    if (!hit || !at) return;
+
+    // The program's gesture: it asked for the mouse and the user is not holding Shift.
+    if (tracking(hit.pane) && !e.shiftKey) {
+      endGesture(canvas);
+      lastClick = null;
+      if (state.view && hit.pane !== state.view.focus) {
+        // The first click on a pane only focuses it: the program there did not see the pointer arrive.
+        swallowed = e.pointerId;
+        void call("focus_pane", { pane: hit.pane }).then(applyView);
+        return;
+      }
+      const button = BUTTONS[e.button];
+      if (!button) return;
+      const [x, y] = devicePoint(e, canvas, hit.pane, at[1]);
+      const mods = modifierBits(e);
+      dropMotion();
+      sendMouse(hit.pane, "press", button, x, y, mods);
+      report = { pane: hit.pane, pointer: e.pointerId, button, x, y, mods };
+      capture(canvas, e.pointerId);
+      return;
+    }
+
+    // The user's gesture: only the primary button selects.
+    if (e.button !== 0) return;
     endGesture(canvas); // a press whose release never came
     const n = countClick(e, hit.pane);
     const mode: Mode = n === 1 ? "cell" : n === 2 ? "word" : "line";
     if (state.view && hit.pane !== state.view.focus) void call("focus_pane", { pane: hit.pane }).then(applyView);
     select(hit.pane, { kind: "begin", x: hit.cell[0], y: hit.cell[1], mode });
     gesture = { pane: hit.pane, pointer: e.pointerId, mode, last: hit.cell, pending: null, frame: 0, moved: false };
-    try {
-      canvas.setPointerCapture(e.pointerId);
-    } catch {
-      // Capture is a convenience: moves outside the canvas then stop arriving.
-    }
+    capture(canvas, e.pointerId);
   });
 
   canvas.addEventListener("pointermove", (e) => {
     if (offer(e, canvas)) return;
+    const r = report;
+    if (r) {
+      if (e.pointerId !== r.pointer) return;
+      // A move with no button down means the release was lost (no capture outside the window): send it now.
+      if (e.buttons === 0) {
+        follow(r, e, canvas);
+        releaseReport(canvas);
+      } else if (follow(r, e, canvas)) {
+        queueMotion({ pane: r.pane, button: r.button, x: r.x, y: r.y, mods: r.mods });
+      } else {
+        releaseReport(canvas); // the pane is gone from the layout
+      }
+      return;
+    }
     const g = gesture;
-    if (g && e.pointerId === g.pointer) track(g, e, canvas);
+    if (g) {
+      if (e.pointerId === g.pointer) track(g, e, canvas);
+      return;
+    }
+    // Hover: the pane under the pointer, when its program asked for the mouse and the user is not selecting.
+    if (e.buttons !== 0 || e.shiftKey || swallowed !== null) return;
+    const rect = canvas.getBoundingClientRect();
+    const at = paneAt(state.metrics, state.view, e.clientX - rect.left, e.clientY - rect.top);
+    if (!at || !tracking(at[0])) return;
+    const [x, y] = devicePoint(e, canvas, at[0], at[1]);
+    queueMotion({ pane: at[0], button: "none", x, y, mods: modifierBits(e) });
   });
 
   canvas.addEventListener("pointerup", (e) => {
     const consumed = offer(e, canvas);
+    if (e.pointerId === swallowed) swallowed = null;
+    const r = report;
+    if (r && e.pointerId === r.pointer) {
+      // The release is sent whether or not a handler took the event: a press the program saw must end.
+      follow(r, e, canvas);
+      releaseReport(canvas);
+      return;
+    }
     const g = gesture;
     if (!g || e.pointerId !== g.pointer) return;
     if (!consumed) {
@@ -244,7 +403,23 @@ export function initPointer(applyView: (v: View) => void): void {
 
   canvas.addEventListener("pointercancel", (e) => {
     offer(e, canvas);
+    if (e.pointerId === swallowed) swallowed = null;
+    if (report && e.pointerId === report.pointer) releaseReport(canvas);
     if (gesture && e.pointerId === gesture.pointer) endGesture(canvas);
+  });
+
+  canvas.addEventListener("lostpointercapture", (e) => {
+    if (report && e.pointerId === report.pointer) releaseReport(canvas);
+  });
+
+  // The window lost the keyboard focus: its pointer events stop, so a held button would never be released.
+  window.addEventListener("blur", () => releaseReport(canvas));
+
+  // The program that tracks the mouse owns the right button: no browser menu over its pane.
+  canvas.addEventListener("contextmenu", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const at = paneAt(state.metrics, state.view, e.clientX - rect.left, e.clientY - rect.top);
+    if (at && tracking(at[0])) e.preventDefault();
   });
 
   canvas.addEventListener(

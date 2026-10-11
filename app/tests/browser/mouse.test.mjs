@@ -340,6 +340,12 @@ async function cancelCase(page, url) {
     await pointer(page, "pointerdown", at, { button: 0, buttons: 1 });
     await fire(page);
     await fire(page); // a second one finds nothing held
+    // The release is already out before any pointerup could send it: a lost pointer never delivers one.
+    assert.deepEqual(
+      (await buttonCalls(page)).map((a) => [a.action, a.button]),
+      [["press", "left"], ["release", "left"]],
+      `${name}: the release is sent by the event itself`,
+    );
     await pointer(page, "pointerup", at, { button: 0, buttons: 0 });
     await frames(page);
     assert.deepEqual(
