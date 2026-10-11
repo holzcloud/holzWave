@@ -179,7 +179,9 @@ function setActive(at: number, reveal: boolean): void {
     const top = row.root.offsetTop;
     const bottom = top + row.root.offsetHeight;
     const list = ui.list;
-    if (top < list.scrollTop) list.scrollTop = top;
+    if (at === 0) list.scrollTop = 0; // the list's own padding above the first row comes with it
+    else if (at === ui.rows.length - 1) list.scrollTop = list.scrollHeight;
+    else if (top < list.scrollTop) list.scrollTop = top;
     else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
   }
 }

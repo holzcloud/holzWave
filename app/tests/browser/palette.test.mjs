@@ -1,6 +1,8 @@
 // The command palette (design.md section 6 rule 7): Cmd+K opens a fuzzy list of every registered action with its
 // section and chord, the keyboard drives it, Enter runs the highlighted action, Escape gives the terminal its
-// keyboard back, and while it is open no key reaches the program behind it. The browser stub plays the core.
+// keyboard back, and while it is open no key reaches the program behind it. It is a floating layer: an 8 px radius,
+// the only shadow of the page, a height of at most 60 % of the window, and 160 ms transitions only when motion is
+// allowed. The browser stub plays the core.
 import assert from "node:assert/strict";
 import { callsOf } from "./lib.mjs";
 
@@ -14,6 +16,11 @@ export default async function ({ page, url, errors }) {
   await emptyCase(page, url);
   await pointerCase(page, url);
   await toggleCase(page, url);
+  await radiusAndShadowCase(page, url);
+  await sizeAndScrollCase(page, url);
+  await lateRegistrationCase(page, url);
+  await motionCase(page, url);
+  await contrastCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -264,4 +271,204 @@ async function toggleCase(page, url) {
   await page.keyboard.press("Meta+k");
   assert.equal(await isOpen(page), false, "Cmd+K again closes");
   assert.equal(await page.evaluate(() => document.activeElement?.id), "ime");
+}
+
+// ---- the floating-layer rules ---------------------------------------------------------------------
+
+/** Register `count` actions the page itself does not have, so the list is longer than the dialog. */
+const registerMany = (page, count) =>
+  page.evaluate((n) => {
+    for (let i = 1; i <= n; i++) {
+      const id = `extra.item_${i}`;
+      if (!window.__registry.listActions().some((a) => a.id === id)) {
+        window.__registry.registerAction({ id, title: `Extra action ${i}`, run: () => {} });
+      }
+    }
+  }, count);
+
+/** The 8 px radius, and the only box-shadow of the whole document, held by the dialog. */
+async function radiusAndShadowCase(page, url) {
+  await open(page, url);
+  await openPalette(page);
+  const look = await page.evaluate(() => {
+    const dialog = document.querySelector(".palette");
+    const shadowed = [...document.querySelectorAll("*")]
+      .filter((n) => getComputedStyle(n).boxShadow !== "none")
+      .map((n) => (n.id ? `#${n.id}` : n.tagName.toLowerCase()) + (n.className ? `.${String(n.className).split(" ").join(".")}` : ""));
+    const radii = ["borderTopLeftRadius", "borderTopRightRadius", "borderBottomLeftRadius", "borderBottomRightRadius"].map(
+      (k) => getComputedStyle(dialog)[k],
+    );
+    return { shadowed, radii };
+  });
+  assert.deepEqual(look.radii, ["8px", "8px", "8px", "8px"], "the dialog has an 8 px radius");
+  assert.deepEqual(look.shadowed, ["div.palette"], "the dialog is the only element with a shadow");
+  await page.keyboard.press("Escape");
+  // A hidden element still reports its computed style, so only what is laid out counts.
+  const closed = await page.evaluate(
+    () =>
+      [...document.querySelectorAll("*")].filter(
+        (n) => n.getClientRects().length > 0 && getComputedStyle(n).boxShadow !== "none",
+      ).length,
+  );
+  assert.equal(closed, 0, "no element is drawn with a shadow while the palette is closed");
+}
+
+/** A long list scrolls inside a dialog of at most 60 % of the window, and the keyboard keeps the active row in view. */
+async function sizeAndScrollCase(page, url) {
+  await open(page, url);
+  await registerMany(page, 80);
+  await openPalette(page);
+
+  const size = await page.evaluate(() => {
+    const dialog = document.querySelector(".palette").getBoundingClientRect();
+    const list = document.querySelector(".palette-list");
+    return { h: dialog.height, win: innerHeight, scroll: list.scrollHeight, client: list.clientHeight, overflow: getComputedStyle(list).overflowY };
+  });
+  assert.ok(size.h <= size.win * 0.6 + 0.5, `the dialog is ${size.h} px high in a window of ${size.win} px`);
+  assert.ok(size.scroll > size.client, "the list is longer than its box");
+  assert.match(size.overflow, /auto|scroll/);
+
+  const geometry = () =>
+    page.evaluate(() => {
+      const list = document.querySelector(".palette-list").getBoundingClientRect();
+      const row = document.querySelector('.palette-row[aria-selected="true"]').getBoundingClientRect();
+      return { top: row.top - list.top, bottom: list.bottom - row.bottom, scrollTop: document.querySelector(".palette-list").scrollTop };
+    });
+  const visible = (g) => g.top >= -0.5 && g.bottom >= -0.5;
+
+  // Down through the whole list: every step leaves the active row inside the box and the list has scrolled.
+  const total = (await rows(page)).length;
+  for (let i = 0; i < total - 1; i++) {
+    await page.keyboard.press("ArrowDown");
+    if (i % 9 === 0 || i === total - 2) assert.ok(visible(await geometry()), `row ${i + 1} is in view`);
+  }
+  const end = await geometry();
+  assert.ok(end.scrollTop > 0, "the list scrolled");
+  assert.ok(visible(end));
+  assert.equal((await rows(page))[total - 1].selected, true, "the last row is active");
+
+  // Up and wrap: from the first row Up goes to the last, Down comes back to the first and the list is at the top.
+  await page.keyboard.press("ArrowDown");
+  const first = await geometry();
+  assert.equal(first.scrollTop, 0, "wrapping to the first row shows the top of the list");
+  assert.ok(visible(first));
+  await page.keyboard.press("ArrowUp");
+  assert.ok(visible(await geometry()));
+  assert.equal((await rows(page))[total - 1].selected, true);
+
+  // A page moves several rows, stops at the ends and keeps the row in view.
+  await page.keyboard.press("PageUp");
+  const afterPage = (await rows(page)).findIndex((r) => r.selected);
+  assert.ok(afterPage < total - 2 && afterPage > 0, `PageUp moved by a page (row ${afterPage} of ${total})`);
+  assert.ok(visible(await geometry()));
+  for (let i = 0; i < 40; i++) await page.keyboard.press("PageUp");
+  assert.equal((await rows(page))[0].selected, true, "PageUp stops at the first row");
+  assert.equal((await geometry()).scrollTop, 0);
+
+  // Typing a query that selects row 0 again returns the list to its top.
+  await page.keyboard.type("extra action 7");
+  assert.equal((await geometry()).scrollTop, 0);
+  assert.equal((await rows(page))[0].title, "Extra action 7");
+  await page.keyboard.press("Escape");
+}
+
+/** An action registered after boot, from outside the palette, is listed at the next open and runs. */
+async function lateRegistrationCase(page, url) {
+  await open(page, url);
+  await openPalette(page);
+  const before = (await rows(page)).length;
+  await page.keyboard.press("Escape");
+
+  await page.evaluate(() => {
+    window.__lateRuns = 0;
+    window.__registry.registerAction({ id: "late.arrival", title: "Late arrival", run: () => void window.__lateRuns++ });
+  });
+  await openPalette(page);
+  const after = await rows(page);
+  assert.equal(after.length, before + 1, "the late action is listed");
+  assert.deepEqual(after[after.length - 1], { ...after[after.length - 1], title: "Late arrival", section: "late", chord: "" });
+
+  await page.keyboard.type("late arr");
+  assert.equal((await rows(page))[0].title, "Late arrival");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.evaluate(() => window.__lateRuns), 1, "Enter ran it");
+  assert.equal(await isOpen(page), false);
+
+  // An action taken away is gone at the next open.
+  await page.evaluate(() => window.__registry.unregisterAction("late.arrival"));
+  await openPalette(page);
+  assert.equal((await rows(page)).length, before);
+  await page.keyboard.press("Escape");
+}
+
+/** The longest transition, in seconds, of the palette's own elements; `0` for none. */
+const longestTransition = (page) =>
+  page.evaluate(() => {
+    const parse = (v) => v.split(",").map((t) => (t.trim().endsWith("ms") ? parseFloat(t) / 1000 : parseFloat(t) || 0));
+    let longest = 0;
+    let count = 0;
+    for (const n of document.querySelectorAll(".palette-backdrop, .palette-backdrop *")) {
+      count++;
+      longest = Math.max(longest, ...parse(getComputedStyle(n).transitionDuration));
+    }
+    return { longest, count };
+  });
+
+const waitClass = (page, name, present) =>
+  page.waitForFunction(([n, p]) => document.documentElement.classList.contains(n) === p, [name, present]);
+
+/** 160 ms when motion is allowed; none when the OS or the setting asks for less, and the page follows live. */
+async function motionCase(page, url) {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await open(page, url);
+  await waitClass(page, "motion-reduce", false);
+  await openPalette(page);
+  const allowed = await longestTransition(page);
+  assert.ok(allowed.count > 3, "the palette has elements");
+  assert.equal(allowed.longest, 0.16, "opening uses 160 ms");
+  await page.keyboard.press("Escape");
+
+  // The OS asks for reduced motion while the page runs: the next opening has no transition.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await waitClass(page, "motion-reduce", true);
+  await openPalette(page);
+  assert.equal((await longestTransition(page)).longest, 0, "no palette element has a transition under reduced motion");
+  assert.equal(await page.locator(".palette").isVisible(), true, "and it is still shown");
+  await page.keyboard.press("Escape");
+
+  // Back to no preference: the 160 ms are back.
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await waitClass(page, "motion-reduce", false);
+  await openPalette(page);
+  assert.equal((await longestTransition(page)).longest, 0.16);
+  await page.keyboard.press("Escape");
+  await page.emulateMedia({ reducedMotion: null });
+}
+
+/** The colour a token resolves to, in the form getComputedStyle reports it. */
+const token = (page, name) =>
+  page.evaluate((n) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${n})`;
+    document.body.append(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  }, name);
+
+/** Higher contrast swaps the hairline of the dialog to the stronger token, as it does for the chrome. */
+async function contrastCase(page, url) {
+  await page.emulateMedia({ contrast: "no-preference", reducedMotion: null, forcedColors: null });
+  await open(page, url);
+  await openPalette(page);
+  const border = () => page.evaluate(() => getComputedStyle(document.querySelector(".palette")).borderTopColor);
+  assert.equal(await border(), await token(page, "--hw-edge"), "the normal hairline");
+  await page.keyboard.press("Escape");
+
+  await page.emulateMedia({ contrast: "more" });
+  await waitClass(page, "contrast-high", true);
+  await openPalette(page);
+  assert.equal(await border(), await token(page, "--hw-ink-3"), "the higher contrast hairline");
+  await page.keyboard.press("Escape");
+  await page.emulateMedia({ contrast: null });
 }
