@@ -141,8 +141,13 @@ parts kept.
    previews. Labels are uppercase and tracked, as in the holzcloud family.
 3. **Flat and hairline.** No shadows between panes, no gradients, no blur. Panes are separated by a 1 px
    `--hw-edge` line. Only floating layers (command palette) have a shadow and a 8 px radius.
-4. **Rose is rationed.** It appears for the prompt chevron, the cursor, the focused pane's top line, the active tab
-   marker and the active status segment. Everything else is warm grey.
+4. **Rose is rationed.** It is state, never decoration: it says where the user is and what the pointer is about to
+   act on. It appears for the prompt chevron, the cursor, text selection, the pane focus line (the focused pane's top
+   line), the active tab marker (wash, underline and the workspace diamond), the active status segment,
+   divider hover, button hover wash (bar, dialog and search buttons), the selected palette row (wash and left bar),
+   the focus ring of the palette and search inputs, the link underline (a link under the pointer with the modifier
+   held), hint labels, the key binding capture row, and the accent colour of settings checkboxes and radios.
+   Everything else is warm grey.
 5. **tmux-style status line.** A bottom strip of segments (`workspace`, panes, renderer, encoding, version); the
    active workspace is a solid rose segment.
 6. **Numbered tabs.** Tabs carry their number (`1 shell`) so `⌘1…9` is discoverable.
