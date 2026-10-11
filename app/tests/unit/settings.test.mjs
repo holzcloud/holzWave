@@ -35,7 +35,7 @@ test("parseHex rejects everything else", () => {
 test("the golden theme produces the thirteen chrome tokens, the selection and the rose wash", () => {
   const entries = tokenEntries(sample().theme);
   const names = entries.map(([name]) => name);
-  assert.deepEqual([...names].sort(), [...CHROME_TOKENS, "--hw-rose-wash", "--hw-selection"].sort());
+  assert.deepEqual([...names].sort(), [...CHROME_TOKENS, "--hw-on-accent", "--hw-rose-wash", "--hw-selection"].sort());
   assert.equal(new Set(names).size, names.length, "a token is set twice");
 
   const value = Object.fromEntries(entries);
@@ -44,6 +44,7 @@ test("the golden theme produces the thirteen chrome tokens, the selection and th
   assert.equal(value["--hw-ink-2"], "#b2aaa9");
   assert.equal(value["--hw-rose"], "#ff8fb8");
   assert.equal(value["--hw-rose-deep"], "#c23b72");
+  assert.equal(value["--hw-on-accent"], "#ffffff", "the text on the accent fill is measured against rose_deep");
   assert.equal(value["--hw-selection"], "rgb(255 143 184 / 0.35)");
   assert.equal(value["--hw-rose-wash"], "rgb(255 143 184 / 0.14)");
   for (const token of CHROME_TOKENS) assert.match(value[token], /^#[0-9a-f]{6}$/, `${token}: ${value[token]}`);
