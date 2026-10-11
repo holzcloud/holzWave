@@ -358,6 +358,15 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// What `AppCore::reserve` found.
+#[derive(Debug, PartialEq, Eq)]
+enum Reserved {
+    /// The pane has a `Slot::Starting` now and the caller starts its shell.
+    Now,
+    /// The pane already had a slot; nothing was changed.
+    Already,
+}
+
 /// What the map of panes holds for a pane id.
 enum Slot {
     /// A shell is being started; nothing is known of it yet.
@@ -912,17 +921,8 @@ impl AppCore {
         if self.exiting.load(Ordering::SeqCst) {
             return Err("the app is closing".into());
         }
-        // Checked and reserved under both locks, so that a concurrent close cannot slip in between.
-        {
-            let layout = lock(&self.layout);
-            if !layout.all_panes().contains(&pane) {
-                return Err("no such pane".into());
-            }
-            let mut panes = lock(&self.panes);
-            if panes.contains_key(&pane) {
-                return Ok(());
-            }
-            panes.insert(pane, Slot::Starting);
+        if self.reserve(pane)? == Reserved::Already {
+            return Ok(());
         }
 
         let (cols, rows) = clamp_grid(cols, rows);
@@ -964,29 +964,59 @@ impl AppCore {
         });
         match started {
             Ok(handle) => {
-                let mut panes = lock(&self.panes);
-                match panes.get_mut(&pane) {
-                    Some(slot @ Slot::Starting) => {
-                        *slot = Slot::Running(handle.clone());
-                        if self.exiting.load(Ordering::SeqCst) {
-                            // The app began to end while this shell started; `shutdown` did not see it.
-                            handle.close();
-                        }
-                        drop(panes);
-                        // A setting changed between building the spec and now: `push_to_panes` did not see this pane.
-                        let now = lock(&self.config).look();
-                        Self::push_to_pane(&handle, &started_with, &now);
-                    }
-                    // The pane was closed (or ended, or the app is closing) while the shell started.
-                    _ => {
-                        drop(panes);
-                        handle.close();
-                    }
-                }
+                self.promote(pane, handle, started_with);
                 Ok(())
             }
             // The sink was told, and `pane_gone` forgot the slot, before `spawn_ghostty` returned.
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Check that a pane is in the layout and give it a `Slot::Starting`, under both locks so that a concurrent
+    /// close cannot slip in between. A pane that already has a slot (running, or being started by another call) is
+    /// left alone and reported as such.
+    fn reserve(&self, pane: PaneId) -> Result<Reserved, String> {
+        let layout = lock(&self.layout);
+        if !layout.all_panes().contains(&pane) {
+            return Err("no such pane".into());
+        }
+        let mut panes = lock(&self.panes);
+        if panes.contains_key(&pane) {
+            return Ok(Reserved::Already);
+        }
+        panes.insert(pane, Slot::Starting);
+        Ok(Reserved::Now)
+    }
+
+    /// The shell of a reserved pane is up: its slot becomes `Running`. `started_with` is what the shell was started
+    /// with.
+    fn promote(&self, pane: PaneId, handle: PaneHandle, started_with: PaneLook) {
+        self.promote_with(pane, handle, started_with, || {});
+    }
+
+    /// [`AppCore::promote`], running `between` once right after the slot became `Running` and before anything is
+    /// sent to the handle. `between` runs with the `panes` lock held; it is the seam at which a test forces a command
+    /// to arrive in the middle of a promotion instead of hoping to hit the window by timing.
+    fn promote_with(&self, pane: PaneId, handle: PaneHandle, started_with: PaneLook, between: impl FnOnce()) {
+        let mut panes = lock(&self.panes);
+        match panes.get_mut(&pane) {
+            Some(slot @ Slot::Starting) => {
+                *slot = Slot::Running(handle.clone());
+                between();
+                if self.exiting.load(Ordering::SeqCst) {
+                    // The app began to end while this shell started; `shutdown` did not see it.
+                    handle.close();
+                }
+                drop(panes);
+                // A setting changed between building the spec and now: `push_to_panes` did not see this pane.
+                let now = lock(&self.config).look();
+                Self::push_to_pane(&handle, &started_with, &now);
+            }
+            // The pane was closed (or ended, or the app is closing) while the shell started.
+            _ => {
+                drop(panes);
+                handle.close();
+            }
         }
     }
 
