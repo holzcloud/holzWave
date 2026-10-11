@@ -559,6 +559,11 @@ impl Layout {
 
     /// Close a pane everywhere. Empty tabs and empty workspaces disappear; the last pane of the last
     /// workspace cannot be closed. An id that is in no tab is `Unknown`, which is checked first.
+    ///
+    /// What is shown stays shown: when a tab or workspace before the shown one disappears, the active index
+    /// moves with it and keeps pointing at the same one, so a shell that ends in the background changes
+    /// nothing the user looks at. Only when the shown one itself disappears is the one that followed it shown
+    /// (the new last one when it was the last).
     pub fn close_pane(&mut self, pane: PaneId) -> CloseOutcome {
         if !self.workspaces.iter().any(|w| w.tabs.iter().any(|t| t.root.contains(pane))) {
             return CloseOutcome::Unknown;
@@ -586,7 +591,12 @@ impl Layout {
                 }
                 if w.tabs.is_empty() {
                     self.workspaces.remove(wi);
-                    self.active = self.active.min(self.workspaces.len() - 1);
+                    if wi < self.active {
+                        // The shown workspace moved one place to the left with its siblings: it stays shown.
+                        self.active -= 1;
+                    } else {
+                        self.active = self.active.min(self.workspaces.len() - 1);
+                    }
                 }
             }
             return CloseOutcome::Closed;
