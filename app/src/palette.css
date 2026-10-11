@@ -1,0 +1,41 @@
+/* The command palette (docs/design.md section 6 rule 7). Loaded with `loadStyles("./palette.css")` by palette.ts.
+   Every colour is a `--hw-*` token, every size is in rem so the UI scale moves it with the chrome, and the hairline
+   and dim text come through the derived tokens that higher contrast swaps (chrome.css). The active row is told
+   apart by a left bar and a wash, never by colour alone. */
+
+.palette-backdrop {
+  position: fixed; inset: 0; z-index: 20; display: flex; align-items: flex-start; justify-content: center;
+  box-sizing: border-box; padding-top: 12vh; background: color-mix(in srgb, var(--hw-ground) 60%, transparent);
+}
+.palette-backdrop[hidden] { display: none; }
+
+.palette {
+  box-sizing: border-box; display: flex; flex-direction: column; width: min(40rem, calc(100vw - 4rem));
+  color: var(--hw-ink); background: var(--hw-ground-2); border: 1px solid var(--hw-line);
+}
+
+.palette-input {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; flex: none; width: 100%; margin: 0;
+  padding: .75rem 1rem; font: inherit; color: var(--hw-ink); background: transparent; border: 0;
+  border-bottom: 1px solid var(--hw-line); border-radius: 0;
+}
+.palette-input::placeholder { color: var(--hw-dim); opacity: 1; }
+.palette-input:focus-visible { outline: var(--hw-focus-w) solid var(--hw-rose); outline-offset: -2px; }
+
+.palette-list { position: relative; flex: 1 1 auto; min-height: 0; margin: 0; padding: .25rem 0; list-style: none; }
+.palette-list[hidden] { display: none; }
+
+.palette-row {
+  box-sizing: border-box; display: flex; align-items: center; gap: .75rem; min-height: calc(28rem / 12);
+  padding: .333rem 1rem .333rem calc(1rem - var(--hw-focus-w) - 2px); cursor: pointer; user-select: none;
+  -webkit-user-select: none; border-left: calc(var(--hw-focus-w) + 2px) solid transparent;
+}
+.palette-row[aria-selected="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
+
+.palette-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-section { flex: none; color: var(--hw-dim); }
+.palette-chord { flex: none; min-width: 5rem; font: inherit; text-align: right; color: var(--hw-ink-2); }
+.palette-chord[hidden] { display: none; }
+
+.palette-empty { margin: 0; padding: .75rem 1rem; color: var(--hw-dim); }
+.palette-empty[hidden] { display: none; }
