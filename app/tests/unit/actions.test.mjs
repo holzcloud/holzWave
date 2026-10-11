@@ -2,7 +2,7 @@
 // import and run them. Every case registers under its own ids because the registry is one module-level object.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { listActions, registerAction, replaceAction, runAction, unregisterAction } from "../../dist/actions.js";
+import { isRepeatable, listActions, registerAction, replaceAction, runAction, unregisterAction } from "../../dist/actions.js";
 import { CHORDS, actionIdFor } from "../../dist/chords.js";
 
 let n = 0;
@@ -123,6 +123,21 @@ test("the four stepping actions run on every repeat", () => {
 test("an unknown id is false on a repeat as well", () => {
   assert.equal(runAction("no.such.action", { repeat: true }), false);
   assert.equal(runAction("constructor", { repeat: true }), false);
+});
+
+test("isRepeatable is true for exactly the four stepping ids", () => {
+  for (const id of REPEATABLE) assert.equal(isRepeatable(id), true, id);
+  const once = [
+    "pane.close", "pane.split_right", "pane.split_down", "tab.new", "workspace.new", "palette.open", "font.reset",
+    "tab.select_1", "workspace.select_1", "search.next", "search.prev", "search.open", "copy_mode.enter", "edit.copy",
+    "settings.open", "no.such.action", "", "constructor", "__proto__",
+  ];
+  for (const id of once) assert.equal(isRepeatable(id), false, JSON.stringify(id));
+});
+
+test("every id isRepeatable accepts is a default action of the chord table", () => {
+  const defaults = new Set(CHORDS.values());
+  for (const id of REPEATABLE) assert.ok(defaults.has(id), `${id} is not bound in the chord table: a typo in the allowlist`);
 });
 
 // ---- the chord table -----------------------------------------------------------------------------

@@ -172,7 +172,9 @@ function onKeyDown(e: KeyboardEvent): void {
   }
   for (const chord of chordsOf(e)) {
     const id = actionIdFor(chord);
-    if (id !== undefined && runAction(id)) {
+    // The registry decides what a held key may repeat. A repeat it swallowed is consumed here as well, so it never
+    // reaches the encoder as terminal input.
+    if (id !== undefined && runAction(id, { repeat: e.repeat })) {
       e.preventDefault();
       return;
     }
