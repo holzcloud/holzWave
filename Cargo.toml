@@ -11,3 +11,8 @@ repository = "https://github.com/holzcloud/holzWave"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# libghostty-vt-sys follows cargo's DEBUG flag for the Zig optimize mode. Without this
+# the dev profile builds the terminal engine in Zig Debug mode (about 100 KB/s of feed).
+[profile.dev.package.libghostty-vt-sys]
+debug = false
