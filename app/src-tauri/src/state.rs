@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -59,8 +59,14 @@ pub struct TabView {
 
 /// The layout as the webview mirrors it: the workspaces, the tabs of the active workspace, and the panes and
 /// dividers of the active tab in unit coordinates.
+///
+/// A view reaches the page on more than one path (the answer of a command and the `layout` event), and the paths
+/// are not ordered against each other. `rev` is what orders them: it grows with every view the core builds, and
+/// the page drops a view that is older than the one it shows.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct View {
+    /// The place of this view in the order the core built them, from 1.
+    pub rev: u64,
     pub workspaces: Vec<WorkspaceView>,
     pub tabs: Vec<TabView>,
     pub focus: PaneId,
@@ -69,10 +75,12 @@ pub struct View {
 }
 
 impl View {
-    pub fn of(layout: &Layout) -> View {
+    /// The view of `layout`, stamped `rev`. Take `rev` with [`AppCore::view_of`], under the layout lock.
+    pub fn of(layout: &Layout, rev: u64) -> View {
         let (panes, dividers) = layout.tab().geometry();
         let active_tab = layout.workspace().active;
         View {
+            rev,
             workspaces: layout
                 .workspaces
                 .iter()
@@ -417,6 +425,9 @@ pub struct AppCore {
     /// The app is ending (the last pane closed or ended, or `shutdown` ran): panes that end from now on stay in the
     /// layout, so that what is saved is what the user had.
     exiting: AtomicBool,
+    /// The `rev` of the last view built. Counted under the layout lock, so the order of the revs is the order of the
+    /// states of the layout.
+    view_rev: AtomicU64,
     me: Weak<AppCore>,
 }
 
@@ -476,12 +487,19 @@ impl AppCore {
             saver,
             writes,
             exiting: AtomicBool::new(false),
+            view_rev: AtomicU64::new(0),
             me: me.clone(),
         })
     }
 
     pub fn view(&self) -> View {
-        View::of(&lock(&self.layout))
+        self.view_of(&lock(&self.layout))
+    }
+
+    /// The view of the layout, stamped with the next `rev`. The caller holds the layout lock (it has the `&Layout`
+    /// from the guard), so two views are stamped in the order their states happened.
+    fn view_of(&self, layout: &Layout) -> View {
+        View::of(layout, self.view_rev.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
     // ---- layout commands: lock, mutate, mark dirty, answer with the new view. No disk IO, no waiting. ------------
@@ -491,7 +509,7 @@ impl AppCore {
         let view = {
             let mut layout = lock(&self.layout);
             f(&mut layout);
-            View::of(&layout)
+            self.view_of(&layout)
         };
         self.saver.touch();
         view
@@ -507,7 +525,7 @@ impl AppCore {
             let creator = layout.tab().focus;
             f(&mut layout);
             let created = layout.all_panes().into_iter().find(|p| !before.contains(p));
-            (View::of(&layout), creator, created)
+            (self.view_of(&layout), creator, created)
         };
         if let Some(pane) = created {
             let known = lock(&self.last_cwd).get(&creator).cloned();
@@ -570,7 +588,7 @@ impl AppCore {
         let mut layout = lock(&self.layout);
         match layout.close_pane(pane) {
             CloseOutcome::Closed => {
-                let view = View::of(&layout);
+                let view = self.view_of(&layout);
                 // Under the layout lock, so `pane_gone` of the same pane sees either both or neither of the changes.
                 let slot = lock(&self.panes).remove(&pane);
                 drop(layout);
@@ -590,12 +608,12 @@ impl AppCore {
                 view
             }
             CloseOutcome::LastPane => {
-                let view = View::of(&layout);
+                let view = self.view_of(&layout);
                 drop(layout);
                 self.begin_exit();
                 view
             }
-            CloseOutcome::Unknown => View::of(&layout),
+            CloseOutcome::Unknown => self.view_of(&layout),
         }
     }
 
@@ -1052,7 +1070,7 @@ impl AppCore {
                 None
             } else {
                 match layout.close_pane(pane) {
-                    CloseOutcome::Closed => Some((CloseOutcome::Closed, Some(View::of(&layout)))),
+                    CloseOutcome::Closed => Some((CloseOutcome::Closed, Some(self.view_of(&layout)))),
                     other => Some((other, None)),
                 }
             };
@@ -1821,6 +1839,11 @@ mod tests {
         }
     }
 
+    /// A view with its `rev` zeroed: two views of the same layout are equal otherwise, whenever they were built.
+    fn without_rev(view: &View) -> View {
+        View { rev: 0, ..view.clone() }
+    }
+
     fn snapshot(core: &AppCore) -> Layout {
         lock(&core.layout).clone()
     }
@@ -1864,6 +1887,60 @@ mod tests {
         assert!(core.pid(first).is_some(), "the other pane keeps its shell");
     }
 
+    // ---- the order of the views (WR-06) -----------------------------------------------------------------------
+
+    #[test]
+    fn every_view_is_stamped_in_the_order_it_was_built_and_the_event_has_the_rev_of_the_answer() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let first = only_pane(&core);
+        let initial = core.view();
+        let split = core.split(false);
+        let second = split.focus;
+        let focused = core.focus_pane(first);
+        assert!(initial.rev < split.rev && split.rev < focused.rev, "{} {} {}", initial.rev, split.rev, focused.rev);
+
+        let closed = core.close_pane(second);
+        assert!(closed.rev > focused.rev);
+        assert!(core.view().rev > closed.rev, "a read is stamped too, and is newer than what it follows");
+        let events = rec.layouts();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], closed, "the event carries the view the answer carries, rev included");
+    }
+
+    #[test]
+    fn views_built_at_the_same_time_are_stamped_in_the_order_of_their_layout_states() {
+        // Three panes, and a focus that moves one pane further with every call. A view of rev r + 1 shows the focus
+        // one step after the view of rev r, however the calls of four threads interleave: the stamp is taken under
+        // the layout lock.
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        core.split(false);
+        core.split(false);
+        let base = core.view().rev;
+        let seen = Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..50 {
+                        let view = core.cycle_focus(1);
+                        lock(&seen).push((view.rev, view.focus));
+                    }
+                });
+            }
+        });
+        let mut seen = lock(&seen).clone();
+        seen.sort();
+        let revs: Vec<u64> = seen.iter().map(|(rev, _)| *rev).collect();
+        assert_eq!(revs, (base + 1..=base + 200).collect::<Vec<_>>(), "every view has a rev of its own");
+        for pair in seen.windows(3) {
+            assert_ne!(pair[0].1, pair[1].1);
+            assert_ne!(pair[0].1, pair[2].1);
+            assert_ne!(pair[1].1, pair[2].1);
+        }
+        for pair in seen.windows(4) {
+            assert_eq!(pair[0].1, pair[3].1, "the focus cycles through three panes in the order of the revs");
+        }
+    }
+
     #[test]
     fn a_pane_that_never_started_reports_its_exit_when_it_is_closed() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -1905,7 +1982,8 @@ mod tests {
 
         let after = core.close_pane(31_337);
 
-        assert_eq!(after, before);
+        assert_eq!(without_rev(&after), without_rev(&before), "the same layout");
+        assert!(after.rev > before.rev, "but a view of its own: it is the newest one");
         std::thread::sleep(Duration::from_millis(100));
         assert!(rec.all().is_empty(), "{:?}", rec.all());
         assert!(!dir.layout_file().exists(), "nothing changed, nothing is written");
@@ -2119,7 +2197,7 @@ mod tests {
         assert_eq!(view.tabs.len(), 2);
         assert!(view.tabs[0].active && !view.tabs[1].active, "the first of the two tabs is the shown one");
         assert_eq!(view.tabs[0].focus, b);
-        assert_eq!(rec.layouts().last(), Some(&view), "the page was told the same thing");
+        assert_eq!(rec.layouts().last().map(without_rev), Some(without_rev(&view)), "the page was told the same");
         assert_eq!(rec.exit_count(), 0);
 
         core.flush();
@@ -2149,7 +2227,7 @@ mod tests {
         assert_eq!(view.workspaces.len(), 2);
         assert!(view.workspaces[0].active && !view.workspaces[1].active, "the first of the two is the shown one");
         assert_eq!(view.workspaces[0].name, "one");
-        assert_eq!(rec.layouts().last(), Some(&view), "the page was told the same thing");
+        assert_eq!(rec.layouts().last().map(without_rev), Some(without_rev(&view)), "the page was told the same");
         assert_eq!(rec.exit_count(), 0);
 
         core.flush();
@@ -2253,7 +2331,9 @@ mod tests {
             view = core.split(k % 2 == 0);
         }
         assert_eq!(view.panes.len(), 64);
-        assert_eq!(core.split(false), view, "a split past the cap returns the unchanged view");
+        let past_the_cap = core.split(false);
+        assert_eq!(without_rev(&past_the_cap), without_rev(&view), "a split past the cap returns the same layout");
+        assert!(past_the_cap.rev > view.rev, "as a newer view");
     }
 
     #[test]
@@ -3343,7 +3423,7 @@ mod protocol {
         layout.select_tab(0);
         layout.new_workspace("notes");
         layout.select_workspace(0);
-        let view = View::of(&layout);
+        let view = View::of(&layout, 1);
         assert_eq!(view.workspaces.len(), 2);
         assert_eq!(view.tabs.len(), 3);
         assert_eq!(view.panes.len(), 2);

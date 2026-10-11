@@ -15,8 +15,13 @@ export interface Divider {
   ratio: number;
 }
 
-/** The layout the core sends: workspaces, tabs (with the pane that has each one's focus) and the panes of the active tab. */
+/**
+ * The layout the core sends: workspaces, tabs (with the pane that has each one's focus) and the panes of the active tab.
+ * `rev` is the place of the view in the order the core built them: the answer of a command and the `layout` event
+ * travel on different paths, so the page keeps the newest one and drops a view that is older than the one it shows.
+ */
 export interface View {
+  rev: number;
   workspaces: { name: string; active: boolean }[];
   tabs: { title: string; active: boolean; focus: number }[];
   focus: number;

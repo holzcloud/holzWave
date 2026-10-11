@@ -31,6 +31,7 @@ export default async function ({ page, url }) {
   await wheelCase(page, url);
   await copyCase(page, url);
   await resizeCase(page, url);
+  await staleViewCase(page, url);
 }
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
@@ -102,6 +103,32 @@ async function barCase(page, url) {
   assert.equal((await labels())[0], '<img src=x onerror="window.__pwned=1"><b>bold</b>');
   assert.equal((await labels())[3], "1 <script>window.__pwned=1</script>");
   assert.equal(await page.evaluate(() => window.__pwned), undefined);
+}
+
+/** A view that was built earlier and arrives later must not put the page back (WR-06). */
+async function staleViewCase(page, url) {
+  await open(page, url);
+  const named = (rev, name) => {
+    const view = structuredClone(BAR_VIEW);
+    view.rev = rev;
+    view.workspaces[0].name = name;
+    return view;
+  };
+  const emit = (view) => page.evaluate((v) => window.__MOCK__.emit("layout", v), view);
+  const first = () => page.locator("#bar button").first().textContent();
+
+  await emit(named(7, "newest"));
+  assert.equal(await first(), "newest");
+
+  // The answer of an earlier command, delivered after the event of a later one.
+  await emit(named(6, "stale"));
+  assert.equal(await first(), "newest", "a view with a lower rev than the shown one is dropped");
+
+  // The answer and the event of one change carry the same rev; both are applied.
+  await emit(named(7, "same"));
+  assert.equal(await first(), "same", "the same rev again is the same view");
+  await emit(named(8, "later"));
+  assert.equal(await first(), "later", "a higher rev is applied");
 }
 
 async function pointerCase(page, url) {

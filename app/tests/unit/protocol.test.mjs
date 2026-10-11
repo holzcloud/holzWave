@@ -18,7 +18,8 @@ const keys = (object) => Object.keys(object).sort();
 
 test("the view has exactly the documented keys at every level", () => {
   const view = golden.view;
-  assert.deepEqual(keys(view), ["dividers", "focus", "panes", "tabs", "workspaces"]);
+  assert.deepEqual(keys(view), ["dividers", "focus", "panes", "rev", "tabs", "workspaces"]);
+  assert.equal(typeof view.rev, "number", "the order of the views, newest wins");
   assert.equal(view.workspaces.length, 2);
   assert.equal(view.tabs.length, 3);
   assert.equal(view.panes.length, 2);

@@ -121,8 +121,23 @@ function measure(): Metrics {
 
 // ---- layout changes -----------------------------------------------------------------------------
 
-/** Take a new layout: the one place every answer and event of the core with a view ends up. */
+/** The `rev` of the view the page shows; 0 before the first one. */
+let shownRev = 0;
+
+/**
+ * Take a new layout: the one place every answer and event of the core with a view ends up.
+ *
+ * The answer of a command and the `layout` event of another take different paths, so one that was built earlier can
+ * arrive later. A view with a lower `rev` than the one shown is that: applying it would put the page back to a layout
+ * the core has left (WR-06). The same `rev` again is the same view (the answer and the event of one change) and is
+ * applied as it always was.
+ */
 export function applyView(v: View): void {
+  // A view without a number is not one of the core's; the page does not drop what it cannot order.
+  if (typeof v.rev === "number") {
+    if (v.rev < shownRev) return;
+    shownRev = v.rev;
+  }
   state.view = v;
   renderBar(v, applyView);
   renderStatus();
