@@ -2,6 +2,7 @@
 // change (the bar, the pane sizes the core is told, the overlay). It owns the canvas and its resize listener.
 // The canvas element can be replaced once, while the renderer is chosen (see `initScene`), so nobody keeps a
 // reference to it from before: modules that listen on it ask `canvas()` after `initScene` has run.
+import { blinkSetting, effectiveBlink, motionReduced, onPreferenceChange } from "./a11y.js";
 import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
@@ -54,6 +55,9 @@ export async function initScene(): Promise<void> {
   await initSettings({ setCursorColor: (rgb) => renderer?.setCursorColor(rgb), schedule, refit: fit });
   state.metrics = measure();
   window.addEventListener("resize", fit);
+  // The cursor phase follows the preferences, and a key press (heard before any handler) restarts it.
+  onPreferenceChange(syncBlink);
+  window.addEventListener("keydown", restartBlink, true);
 }
 
 /**
@@ -124,6 +128,7 @@ export function applyView(v: View): void {
   renderStatus();
   syncSizes();
   renderOverlay();
+  syncBlink(); // the focus may have moved to a pane whose cursor blinks, or away from one
   schedule();
 }
 
@@ -202,6 +207,10 @@ function onFrame(msg: FrameMsg): void {
   // cursor) is redrawn when what the focused pane's header says about them changes.
   onSelectionSpans(pane, mirror.selection, msg.changed);
   if (pane === state.view?.focus && before !== decorationSignature(mirror)) renderOverlay();
+  if (pane === state.view?.focus) {
+    syncBlink(); // the program may have changed the cursor's blink with DECSCUSR
+    restartBlink(); // output shows the cursor: a cursor does not vanish while the program writes
+  }
   schedule();
 }
 
@@ -237,6 +246,7 @@ function onPaneExit(p: { pane: number; code: number | null }): void {
   forgetSelection(p.pane);
   waiting.delete(p.pane);
   renderLabels();
+  syncBlink();
   schedule();
 }
 
@@ -246,6 +256,60 @@ export async function initEvents(): Promise<void> {
   await listen<{ pane: number; title: string }>("title", onTitle);
   await listen<{ pane: number; cwd: string }>("cwd", onCwd);
   await listen<{ pane: number; code: number | null }>("pane-exit", onPaneExit);
+}
+
+// ---- cursor blink --------------------------------------------------------------------------------
+
+/** Half a period of the blink: the cursor is shown for this long and then hidden for as long. */
+const BLINK_MS = 530;
+
+/** The phase timer; it exists only while the focused pane's cursor blinks, so a solid cursor costs nothing. */
+let blinkTimer: number | null = null;
+
+/** Whether the focused pane's cursor blinks: the engine asked for it and the setting and reduced motion allow it. */
+function blinkWanted(): boolean {
+  const view = state.view;
+  if (!view || state.exited.has(view.focus)) return false;
+  const cursor = state.frames.get(view.focus)?.cursor;
+  if (!cursor) return false;
+  return effectiveBlink(blinkSetting(), motionReduced(), cursor.blink === true);
+}
+
+/** Flip the phase and draw it. */
+function flipBlink(): void {
+  state.blink.on = !state.blink.on;
+  schedule();
+}
+
+/**
+ * Start or stop the phase timer to match `blinkWanted()`. Stopping leaves the cursor visible and draws it if it was
+ * in the off phase. Call after anything that can change the answer: focus, a frame's cursor, the preferences.
+ */
+function syncBlink(): void {
+  const want = blinkWanted();
+  if (want && blinkTimer === null) {
+    state.blink.on = true;
+    blinkTimer = window.setInterval(flipBlink, BLINK_MS);
+  } else if (!want && blinkTimer !== null) {
+    window.clearInterval(blinkTimer);
+    blinkTimer = null;
+    if (!state.blink.on) {
+      state.blink.on = true;
+      schedule();
+    }
+  }
+  state.blink.running = blinkTimer !== null;
+}
+
+/** Output or a key: show the cursor and start the phase over, so it never vanishes under the typist. */
+function restartBlink(): void {
+  if (blinkTimer === null) return;
+  window.clearInterval(blinkTimer);
+  blinkTimer = window.setInterval(flipBlink, BLINK_MS);
+  if (!state.blink.on) {
+    state.blink.on = true;
+    schedule();
+  }
 }
 
 // ---- drawing -------------------------------------------------------------------------------------
@@ -264,7 +328,11 @@ function draw(): void {
   for (const [id, r] of view.panes) {
     const mirror = state.frames.get(id);
     if (!mirror) continue;
-    renderer.drawPane(toRenderFrame(mirror, id === view.focus), gridRect(state.metrics, r, state.headerPx));
+    const focused = id === view.focus;
+    const frame = toRenderFrame(mirror, focused);
+    // The off phase of a blinking cursor: the focused pane is drawn without it.
+    if (focused && blinkTimer !== null && !state.blink.on) frame.cursor = null;
+    renderer.drawPane(frame, gridRect(state.metrics, r, state.headerPx));
   }
   const now = performance.now();
   batch.push(now - t0);
