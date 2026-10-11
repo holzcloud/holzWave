@@ -39,7 +39,11 @@ const ROW_PX = 18; // one cell row: ceil(14 px font * 1.25)
 /** Two workspaces, three tabs and one pane. */
 const BAR_VIEW = {
   workspaces: [{ name: "alpha", active: true }, { name: "beta", active: false }],
-  tabs: [{ title: "one", active: true }, { title: "two", active: false }, { title: "three", active: false }],
+  tabs: [
+    { title: "one", active: true, focus: 1 },
+    { title: "two", active: false, focus: 2 },
+    { title: "three", active: false, focus: 3 },
+  ],
   focus: 1,
   panes: [[1, { x: 0, y: 0, w: 1, h: 1 }]],
   dividers: [],
@@ -62,10 +66,14 @@ async function barCase(page, url) {
   await open(page, url);
   await showView(page, BAR_VIEW);
   const labels = () => page.locator("#bar button").allTextContents();
-  assert.deepEqual(await labels(), ["alpha", "beta", "+", "one", "two", "three", "+"], "the bar shows the names");
+  assert.deepEqual(
+    await labels(),
+    ["alpha", "beta", "+", "1 one", "2 two", "3 three", "+"],
+    "the bar shows the names, the tabs with their numbers",
+  );
   assert.deepEqual(
     await page.locator("#bar button.active").allTextContents(),
-    ["alpha", "one"],
+    ["alpha", "1 one"],
     "the active workspace and tab are marked",
   );
 
@@ -91,6 +99,7 @@ async function barCase(page, url) {
   await showView(page, hostile);
   assert.equal(await page.locator("#bar img, #bar b, #bar script").count(), 0, "a name was parsed as markup");
   assert.equal((await labels())[0], '<img src=x onerror="window.__pwned=1"><b>bold</b>');
+  assert.equal((await labels())[3], "1 <script>window.__pwned=1</script>");
   assert.equal(await page.evaluate(() => window.__pwned), undefined);
 }
 
