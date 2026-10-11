@@ -367,10 +367,20 @@ enum Reserved {
     Already,
 }
 
+/// The size the page asked for while a shell was still starting, already clamped like the running path clamps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WantedSize {
+    cols: u16,
+    rows: u16,
+    cell_px: (u32, u32),
+}
+
 /// What the map of panes holds for a pane id.
 enum Slot {
-    /// A shell is being started; nothing is known of it yet.
-    Starting,
+    /// A shell is being started; nothing is known of it yet, except the latest size the page asked for since. That
+    /// size lives and dies with the slot: a pane that is closed while it starts takes it along, and an older request
+    /// is replaced, so a flood of resizes costs no more than one value.
+    Starting(Option<WantedSize>),
     Running(PaneHandle),
 }
 
@@ -856,7 +866,7 @@ impl AppCore {
             .values()
             .filter_map(|slot| match slot {
                 Slot::Running(handle) => Some(handle.clone()),
-                Slot::Starting => None,
+                Slot::Starting(_) => None,
             })
             .collect()
     }
@@ -984,7 +994,7 @@ impl AppCore {
         if panes.contains_key(&pane) {
             return Ok(Reserved::Already);
         }
-        panes.insert(pane, Slot::Starting);
+        panes.insert(pane, Slot::Starting(None));
         Ok(Reserved::Now)
     }
 
@@ -1000,9 +1010,19 @@ impl AppCore {
     fn promote_with(&self, pane: PaneId, handle: PaneHandle, started_with: PaneLook, between: impl FnOnce()) {
         let mut panes = lock(&self.panes);
         match panes.get_mut(&pane) {
-            Some(slot @ Slot::Starting) => {
-                *slot = Slot::Running(handle.clone());
+            Some(slot) if matches!(slot, Slot::Starting(_)) => {
+                let wanted = match std::mem::replace(slot, Slot::Running(handle.clone())) {
+                    Slot::Starting(wanted) => wanted,
+                    Slot::Running(_) => None,
+                };
                 between();
+                // Made under the lock that made the slot Running: a `resize` can only see Running after this
+                // section, so whatever it sends comes after this replay, never before it; one that saw Starting
+                // stored its size before `wanted` was taken above. The send is a push on the pane's queue and never
+                // waits. A pane that is already closing refuses it, which is fine.
+                if let Some(size) = wanted {
+                    let _ = handle.resize(size.cols, size.rows, size.cell_px);
+                }
                 if self.exiting.load(Ordering::SeqCst) {
                     // The app began to end while this shell started; `shutdown` did not see it.
                     handle.close();
@@ -1081,10 +1101,22 @@ impl AppCore {
         self.handle_or_err(pane)?.paste(text, allow_unsafe).map_err(|e| e.to_string())
     }
 
+    /// Change the grid of a pane. A pane that is still starting remembers the latest size and gets it when it is
+    /// promoted (the page sends a size once and never again); a pane that is unknown is not an error.
     pub fn resize(&self, pane: PaneId, cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> Result<(), String> {
-        let Some(handle) = self.handle(pane) else { return Ok(()) };
         let (cols, rows) = clamp_grid(cols, rows);
-        handle.resize(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h))).map_err(|e| e.to_string())
+        let cell_px = (clamp_cell(cell_w), clamp_cell(cell_h));
+        // One look at the slot under the lock: a running pane's handle is used outside it, a starting pane stores
+        // the size in the slot, so the promotion that takes it and a resize that arrives later cannot both miss it.
+        let handle = match lock(&self.panes).get_mut(&pane) {
+            Some(Slot::Running(handle)) => handle.clone(),
+            Some(Slot::Starting(wanted)) => {
+                *wanted = Some(WantedSize { cols, rows, cell_px });
+                return Ok(());
+            }
+            None => return Ok(()),
+        };
+        handle.resize(cols, rows, cell_px).map_err(|e| e.to_string())
     }
 
     /// Scroll the viewport by `rows`; negative is towards older output.
@@ -2028,6 +2060,26 @@ mod tests {
             "a size was applied to a pane that was closed: {:?}",
             rec.frames(second).iter().map(|f| (f.cols, f.rows)).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_starting_pane_remembers_one_size_the_latest_and_clamped() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        assert_eq!(core.reserve(pane), Ok(Reserved::Now));
+        assert!(matches!(lock(&core.panes).get(&pane), Some(Slot::Starting(None))), "nothing is asked for yet");
+
+        core.resize(pane, 90, 20, 9, 18).expect("accepted");
+        core.resize(pane, 5_000, 0, 100_000, 18).expect("accepted");
+
+        match lock(&core.panes).get(&pane) {
+            Some(Slot::Starting(Some(size))) => {
+                assert_eq!(*size, WantedSize { cols: 1000, rows: 1, cell_px: (256, 18) });
+            }
+            _ => panic!("the slot should be Starting with a remembered size"),
+        }
+        assert_eq!(core.reserve(pane), Ok(Reserved::Already), "a second reservation leaves the slot alone");
+        assert!(matches!(lock(&core.panes).get(&pane), Some(Slot::Starting(Some(_)))));
     }
 
     #[test]
