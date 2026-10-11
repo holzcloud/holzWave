@@ -331,6 +331,33 @@ mod spawn_options {
         let _ = pty.close();
     }
 
+    /// `stty size` only shows rows and columns; the pixel fields (ws_xpixel, ws_ypixel) are read back here with
+    /// TIOCGWINSZ through python3 (standard library only). Skipped with a message when python3 is absent.
+    #[test]
+    fn resize_px_pixel_fields_reach_the_child_winsize() {
+        let has_python = Command::new("python3")
+            .args(["-c", "import fcntl, termios"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !has_python {
+            eprintln!("SKIPPED: python3 with fcntl/termios is not available; ws_xpixel/ws_ypixel not read back");
+            return;
+        }
+        let script = "import sys,fcntl,termios,struct\n\
+                      sys.stdin.readline()\n\
+                      r,c,x,y = struct.unpack('HHHH', fcntl.ioctl(0, termios.TIOCGWINSZ, b'\\0'*8))\n\
+                      print('WS %d %d %d %d' % (r,c,x,y), flush=True)\n";
+        let options = SpawnOptions::new("python3", 80, 24).cell_px(8, 16).args(["-c", script]);
+        let mut pty = Pty::spawn_with(&options).expect("spawn_with");
+        let events = watch(pty.take_reader().expect("reader"));
+        // Distinct values that differ from the spawn size (80x24, 640x384) in every field.
+        pty.resize_px(100, 30, 1234, 567).expect("resize with pixels must not error");
+        pty.write(b"\n").expect("write");
+        read_until(&events, "WS 30 100 1234 567");
+        let _ = pty.close();
+    }
+
     #[test]
     fn try_wait_reports_none_while_running_and_the_code_after_exit() {
         let mut running = Pty::spawn("/bin/sleep", &["1000"], 80, 24).expect("spawn");

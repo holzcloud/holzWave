@@ -335,11 +335,19 @@ async function fontActionCase(page, url) {
     await page.waitForFunction((count) => window.__MOCK__.callsOf("set_setting").length >= count, n);
     return (await settingCalls(page)).map((c) => [c.key, c.value]);
   };
-  const shown = (size) =>
-    page.waitForFunction(async (v) => {
+  // An awaited poll loop with a deadline. `waitForFunction(async ...)` would resolve at once (the promise is
+  // truthy), so a late or missing change would pass; here the last seen value decides and a miss fails the test.
+  const shown = async (size) => {
+    const seen = await page.evaluate(async (v) => {
       const { state } = await import(new URL("state.js", location.href).href);
-      return state.settings.settings.font_size === v;
+      const end = Date.now() + 3000;
+      while (state.settings.settings.font_size !== v && Date.now() < end) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return state.settings.settings.font_size;
     }, size);
+    assert.equal(seen, size, `the page's font_size must become ${size} within 3 s`);
+  };
 
   await page.keyboard.press("Meta+=");
   assert.deepEqual(await sent(1), [["font_size", 15]]);
