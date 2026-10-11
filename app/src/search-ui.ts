@@ -115,9 +115,9 @@ function sendNeedle(): void {
   void call("search", { pane, op }).catch(() => {});
 }
 
-/** Whether the input holds a needle the core has not heard yet. */
+/** Whether the open bar's input holds a needle the core has not heard yet. */
 function unsent(): boolean {
-  return bar !== null && clipNeedle(bar.input.value) !== sentNeedle;
+  return bar !== null && boundPane !== null && clipNeedle(bar.input.value) !== sentNeedle;
 }
 
 /** Move to the next (down in reading order) or previous match of the bound pane, or of the focused one. */

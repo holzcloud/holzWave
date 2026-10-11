@@ -93,8 +93,8 @@ async function keysCase(page, url) {
   await enter(page);
   const table = [
     ["h", "left"], ["ArrowLeft", "left"], ["j", "down"], ["ArrowDown", "down"], ["k", "up"], ["ArrowUp", "up"],
-    ["l", "right"], ["ArrowRight", "right"], ["0", "line_start"], ["Home", "line_start"], ["Shift+4", "line_end"],
-    ["End", "line_end"], ["g", "top"], ["Shift+g", "bottom"], ["w", "word_forward"], ["b", "word_back"],
+    ["l", "right"], ["ArrowRight", "right"], ["0", "line_start"], ["Home", "line_start"], ["$", "line_end"],
+    ["End", "line_end"], ["g", "top"], ["G", "bottom"], ["w", "word_forward"], ["b", "word_back"],
     ["Control+u", "page_up"], ["PageUp", "page_up"], ["Control+d", "page_down"], ["PageDown", "page_down"],
   ];
   for (const [key, motion] of table) {
@@ -142,9 +142,10 @@ async function exitCase(page, url) {
     await page.waitForFunction((k) => window.__MOCK__.callsOf("copy_mode").length > k, n);
     assert.deepEqual(await ops(page, n), [{ pane: 2, kind: "exit" }], `${key} sends exit`);
     await page.waitForFunction(() => document.querySelector("#status .seg.mode")?.textContent === "");
-    const before = (await shellCalls(page)).length;
+    const presses = async () => (await callsOf(page, "key")).filter((k) => !k.release).length;
+    const before = await presses();
     await page.keyboard.press("a");
-    assert.equal((await shellCalls(page)).length, before + 1, `after ${key} a key goes to the program`);
+    assert.equal(await presses(), before + 1, `after ${key} a key goes to the program`);
     assert.equal(await page.evaluate(() => document.activeElement.id), "ime");
   }
 }
@@ -264,9 +265,13 @@ async function searchCase(page, url) {
   await page.waitForFunction((k) => window.__MOCK__.callsOf("copy_mode").length > k, n);
   assert.deepEqual((await ops(page, n)).at(-1), { pane: 2, kind: "move", motion: "down" }, "the keys are copy mode's again");
 
+  // With the bar open and the keyboard back in the terminal, n and N walk the matches.
+  await page.keyboard.press("/");
+  await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Search scrollback");
+  await page.evaluate(() => document.getElementById("ime").focus());
   const s = (await callsOf(page, "search")).length;
   await page.keyboard.press("n");
-  await page.keyboard.press("Shift+n");
+  await page.keyboard.press("N");
   await page.waitForFunction((k) => window.__MOCK__.callsOf("search").length >= k + 2, s);
   assert.deepEqual((await callsOf(page, "search")).slice(s).map((a) => a.op.kind), ["next", "prev"], "n is next and N is previous");
   assert.deepEqual(await shellCalls(page), []);

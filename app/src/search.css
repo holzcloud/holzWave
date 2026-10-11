@@ -47,3 +47,10 @@
   display: flex; align-items: center; justify-content: center; overflow: hidden; font-weight: 700; line-height: 1;
   background: var(--hw-rose); color: var(--hw-ground); outline: 1px solid var(--hw-ground);
 }
+
+/* The copy cursor: a double border, so it differs from the selection (a fill) by more than colour. Three pixels is
+   the least a double border can show. */
+.copycursor { position: absolute; box-sizing: border-box; border: 3px double var(--hw-ink); pointer-events: none; }
+
+/* The mode segment of the status line: its word is the cue. */
+#status .seg.mode { color: var(--hw-ink); font-weight: 700; }

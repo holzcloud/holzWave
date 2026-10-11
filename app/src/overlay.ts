@@ -217,6 +217,28 @@ function placeMatches(keep: Set<string>, view: View): void {
   });
 }
 
+/**
+ * The copy cursor of the focused pane: the cell the core's copy mode is on, from the frame header. The box has a
+ * double border, so it differs from the selection under it by more than colour. It is null in the header while the
+ * cursor is scrolled out of sight, and then nothing is drawn.
+ */
+function placeCopyCursor(keep: Set<string>, view: View): void {
+  const pane = view.panes.find(([id]) => id === view.focus);
+  const mirror = state.frames.get(view.focus);
+  const c = mirror?.copyCursor;
+  if (!pane || !mirror || !Array.isArray(c)) return;
+  const [x, y] = c;
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= mirror.cols || y >= mirror.rows) return;
+  const m = state.metrics;
+  const g = gridRect(m, pane[1], state.headerPx);
+  place(keep, "copycursor", "copycursor", markLayer, {
+    x: g.x + x * m.cellW,
+    y: g.y + y * m.cellH,
+    w: m.cellW,
+    h: m.cellH,
+  });
+}
+
 // ---- boxes of other features ----------------------------------------------------------------------------
 
 /** A box over viewport cells of a pane (both ends inclusive) that a feature asks the overlay to draw. */
@@ -294,6 +316,7 @@ export function renderOverlay(): void {
     if (view) {
       placeMatches(keep, view);
       placeSelection(keep, view);
+      placeCopyCursor(keep, view);
       placeOwned(keep, view);
     }
     sweep(keep);

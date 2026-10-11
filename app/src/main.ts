@@ -6,6 +6,7 @@
 // starts them.
 import { call, listen } from "./bridge.js";
 import { initChrome } from "./chrome.js";
+import { initCopyMode } from "./copymode.js";
 import { initHints } from "./hints.js";
 import { initKeyboard } from "./keyboard.js";
 import { initLinks } from "./links.js";
@@ -14,6 +15,7 @@ import { initPointer } from "./pointer.js";
 import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
 import { initSearch } from "./search-ui.js";
 import { initSelection } from "./selection.js";
+import { renderStatus } from "./status.js";
 import type { View } from "./types.js";
 
 async function main() {
@@ -26,6 +28,7 @@ async function main() {
   await initSearch();
   await initLinks();
   await initHints();
+  initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);
   fit();
