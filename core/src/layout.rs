@@ -748,6 +748,55 @@ mod tests {
         assert_eq!(l.close_pane(a), CloseOutcome::Unknown, "a closed pane is unknown afterwards");
     }
 
+    // ---- closing keeps pointing at what was shown (CR-01) ------------------------------------------
+
+    /// One workspace with the tabs A, B, C and B shown. Returns the layout and the pane of each tab.
+    fn tabs_with_the_middle_one_shown() -> (Layout, PaneId, PaneId, PaneId) {
+        let (mut l, a) = Layout::new();
+        let b = l.new_tab().unwrap();
+        let c = l.new_tab().unwrap();
+        l.focus_pane(b);
+        assert_eq!(l.tab().panes(), vec![b]);
+        assert_eq!(l.workspace().active, 1);
+        (l, a, b, c)
+    }
+
+    #[test]
+    fn closing_a_tab_before_the_shown_one_keeps_the_shown_tab_shown() {
+        let (mut l, a, b, c) = tabs_with_the_middle_one_shown();
+
+        assert_eq!(l.close_pane(a), CloseOutcome::Closed);
+
+        assert_eq!(l.tab().panes(), vec![b], "tab B is still the shown one");
+        assert_eq!(l.workspace().active, 0, "the index follows B one place to the left");
+        assert_eq!(l.workspace().tabs.len(), 2);
+        assert_eq!(l.workspace().tabs[1].panes(), vec![c]);
+    }
+
+    #[test]
+    fn closing_the_shown_tab_shows_the_one_that_followed_or_the_new_last_one() {
+        let (mut l, a, b, c) = tabs_with_the_middle_one_shown();
+
+        assert_eq!(l.close_pane(b), CloseOutcome::Closed);
+        assert_eq!(l.tab().panes(), vec![c], "the tab that followed the shown one is shown");
+        assert_eq!(l.workspace().active, 1);
+
+        assert_eq!(l.close_pane(c), CloseOutcome::Closed);
+        assert_eq!(l.tab().panes(), vec![a], "the shown last tab was closed: the new last tab is shown");
+        assert_eq!(l.workspace().active, 0);
+    }
+
+    #[test]
+    fn closing_a_tab_after_the_shown_one_keeps_the_shown_tab_shown() {
+        let (mut l, a, b, c) = tabs_with_the_middle_one_shown();
+
+        assert_eq!(l.close_pane(c), CloseOutcome::Closed);
+
+        assert_eq!(l.tab().panes(), vec![b], "tab B is still the shown one");
+        assert_eq!(l.workspace().active, 1);
+        assert_eq!(l.workspace().tabs[0].panes(), vec![a]);
+    }
+
     // ---- loading: hostile and damaged files --------------------------------------------------------
 
     /// A layout text with one workspace of one tab of one pane (id 3), the given active indices and next_id.
