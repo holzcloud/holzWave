@@ -22,7 +22,8 @@
 //! `settings.json` is read key by key. A key that this build does not know is ignored, so a newer file still
 //! loads. A key with a value of the wrong type costs only that key, which keeps its default. A number outside its
 //! range is clamped. Each of those makes the load `Repaired` with one note per change; the file itself is not
-//! rewritten until the next save.
+//! rewritten until the next save. That save writes only what this build knows, so a `Repaired` file is copied to
+//! `settings.json.bad` when it is loaded: the ignored keys and the values that were repaired stay in the copy.
 
 use std::collections::BTreeMap;
 use std::fmt::Display;
@@ -161,7 +162,13 @@ impl Settings {
             }
             match settings.apply(&key, value) {
                 Ok(Some(note)) => notes.push(note),
-                Ok(None) | Err(KeyError::Unknown) => {}
+                Ok(None) => {}
+                // Ignored, but not silently: the next save leaves it out, so the load is `Repaired` and the file
+                // is kept as `.bad` (see `load`).
+                Err(KeyError::Unknown) => {
+                    let name = shown(&key);
+                    notes.push(format!("{name}: not a setting of this build; it is left out of the next save"));
+                }
                 Err(KeyError::Invalid(why)) => notes.push(format!("{}: {why}; the default is used", shown(&key))),
             }
         }
@@ -284,8 +291,10 @@ impl Settings {
     /// Read `<dir>/settings.json`.
     ///
     /// A missing file is the defaults and `Clean`. A file that cannot be used is the defaults and `Reset`, and its
-    /// bytes are copied to `settings.json.bad` first so that the next save does not destroy them. A file that is
-    /// valid is never written to.
+    /// bytes are copied to `settings.json.bad` first so that the next save does not destroy them. A `Repaired`
+    /// file (a wrong-typed or out-of-range value, a key this build does not know) is copied the same way: the
+    /// next save writes the repaired values and drops what this build does not know. The file itself is never
+    /// written to by a load.
     pub fn load(dir: &Path) -> (Settings, LoadStatus) {
         let path = dir.join(SETTINGS_FILE);
         let bytes = match read_limited(&path, MAX_SETTINGS_BYTES) {
@@ -315,6 +324,12 @@ impl Settings {
                     Err(e) => format!("{reason} (and the damaged file could not be kept: {e})"),
                 };
                 (settings, LoadStatus::Reset(reason))
+            }
+            LoadStatus::Repaired(mut notes) => {
+                if let Err(e) = backup_bad(&path) {
+                    notes.push(format!("the file as it was could not be kept: {e}"));
+                }
+                (settings, LoadStatus::Repaired(notes))
             }
             other => (settings, other),
         }

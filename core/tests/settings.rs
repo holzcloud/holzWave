@@ -97,10 +97,14 @@ fn a_partial_file_keeps_what_it_has_and_defaults_the_rest() {
 }
 
 #[test]
-fn unknown_keys_are_ignored() {
+fn unknown_keys_are_ignored_and_reported() {
+    // Not silently (WR-05): the next save leaves them out, so the load says so and the file is kept as `.bad`.
     let (s, status) = Settings::from_json(r#"{"font_size": 15, "future_thing": {"a": [1, 2]}, "another": true}"#);
     assert_eq!(s.font_size, 15);
-    assert_eq!(status, LoadStatus::Clean);
+    let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("future_thing")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("another")), "{notes:?}");
 }
 
 // ---- the file --------------------------------------------------------------------------------------
@@ -334,15 +338,36 @@ mod validation {
     }
 
     #[test]
-    fn a_file_with_out_of_range_values_is_repaired_and_left_alone() {
+    fn a_file_with_out_of_range_values_is_repaired_kept_and_left_alone() {
         let dir = scratch_dir("settings-range");
         let text = r#"{"font_size": 99}"#;
         std::fs::write(dir.join(SETTINGS_FILE), text).unwrap();
         let (s, status) = Settings::load(&dir);
         assert_eq!(s.font_size, 40);
         assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
-        assert_eq!(std::fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap(), text);
-        assert!(!dir.join("settings.json.bad").exists(), "a repairable file needs no backup");
+        assert_eq!(std::fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap(), text, "a load never writes the file");
+        // The next save writes 40 over it: the copy is what keeps the 99 (WR-05).
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), text);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_from_a_newer_build_survives_in_the_copy_when_the_next_save_drops_its_keys() {
+        let dir = scratch_dir("settings-newer");
+        let text = r#"{"font_size": 15, "future_thing": {"a": [1, 2]}}"#;
+        std::fs::write(dir.join(SETTINGS_FILE), text).unwrap();
+        let (s, status) = Settings::load(&dir);
+        assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
+
+        s.save(&dir).unwrap();
+        let saved = std::fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
+        assert!(!saved.contains("future_thing"), "this build writes only what it knows");
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), text);
+
+        // What this build wrote is clean: loading it again leaves the copy of the original alone.
+        let (_, again) = Settings::load(&dir);
+        assert_eq!(again, LoadStatus::Clean);
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), text);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
