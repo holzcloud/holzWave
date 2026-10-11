@@ -84,7 +84,7 @@ function placeInput(): void {
   const entry = view.panes.find(([id]) => id === view.focus);
   if (!entry) return;
   const m = state.metrics;
-  const grid = gridRect(m, entry[1]);
+  const grid = gridRect(m, entry[1], state.headerPx);
   const cursor = state.frames.get(view.focus)?.cursor;
   const x = cursor && Number.isFinite(cursor.x) ? Math.max(0, cursor.x) : 0;
   const y = cursor && Number.isFinite(cursor.y) ? Math.max(0, cursor.y) : 0;

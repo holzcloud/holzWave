@@ -59,7 +59,6 @@ button { font: inherit; color: inherit; }
 .divider.row::after { left: 50%; top: 0; bottom: 0; width: 1px; }
 .divider.column::after { top: 50%; left: 0; right: 0; height: 1px; }
 .divider:hover::after { background: var(--hw-rose); }
-.focus { position: absolute; box-sizing: border-box; border: 1px solid var(--hw-selection); border-radius: 3px; }
 .sel { position: absolute; background: var(--hw-selection); }
 /* The textarea `execCommand("copy")` needs: focusable and selectable, but out of sight and out of the layout. */
 .clipboard-buffer { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }

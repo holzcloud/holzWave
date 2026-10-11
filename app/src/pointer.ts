@@ -83,7 +83,7 @@ function clamp(pane: number, cell: [number, number]): [number, number] {
  * knows (the pane's grid rectangle when no frame or size is known yet).
  */
 function gridBox(pane: number, r: UnitRect): PxRect {
-  const g = gridRect(state.metrics, r);
+  const g = gridRect(state.metrics, r, state.headerPx);
   const cells = gridOf(pane);
   if (!cells) return g;
   return { x: g.x, y: g.y, w: cells.cols * state.metrics.cellW, h: cells.rows * state.metrics.cellH };
@@ -101,7 +101,7 @@ function hitAt(e: PointerEvent, canvas: HTMLCanvasElement): PointerHit | null {
   const y = e.clientY - rect.top;
   const at = paneAt(state.metrics, state.view, x, y);
   if (!at) return null;
-  return { pane: at[0], cell: clamp(at[0], cellAt(state.metrics, at[1], x, y)) };
+  return { pane: at[0], cell: clamp(at[0], cellAt(state.metrics, at[1], state.headerPx, x, y)) };
 }
 
 // ---- gestures ------------------------------------------------------------------------------------
@@ -276,7 +276,9 @@ function track(g: Gesture, e: PointerEvent, canvas: HTMLCanvasElement): void {
   const pane = state.view?.panes.find(([id]) => id === g.pane);
   if (!pane) return;
   const rect = canvas.getBoundingClientRect();
-  const cell = clamp(g.pane, cellAt(state.metrics, pane[1], e.clientX - rect.left, e.clientY - rect.top));
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const cell = clamp(g.pane, cellAt(state.metrics, pane[1], state.headerPx, x, y));
   if (same(cell, g.pending ?? g.last)) return;
   g.pending = cell;
   if (g.frame === 0) {

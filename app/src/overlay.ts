@@ -1,30 +1,34 @@
-// The overlay above the canvas: divider hit areas, the focus box and the selection boxes (from the frame spans).
+// The overlay above the canvas: the pane headers (with the focus line), divider hit areas and the selection boxes
+// (from the frame spans).
 //
-// Every element is keyed (dividers by split id, the focus box as "focus", selection boxes by row) and moved in
-// place on every render. A divider must survive every layout response, because the drag gesture lives on it:
+// Every element is keyed (headers by pane id, dividers by split id, selection boxes by row) and moved in place on
+// every render. A divider must survive every layout response, because the drag gesture lives on it:
 // the gesture itself listens on `window` and sends at most one `set_ratio` per animation frame.
 import { call } from "./bridge.js";
 import { el, setRect } from "./dom.js";
 import type { PxRect } from "./frame.js";
 import { visibleSpans } from "./frames.js";
 import { dividerRect, gridRect, paneRect, ratioAt } from "./geometry.js";
+import { initPaneHeads, renderPaneHeads } from "./panehead.js";
 import { state } from "./state.js";
 import type { Divider, View } from "./types.js";
 
 const root = document.getElementById("overlay") as HTMLDivElement;
-// Layers keep the paint order (focus, dividers, selection) whatever the creation order of the elements is.
-const focusLayer = el("div", "layer", root);
+// Layers keep the paint order (headers, dividers, selection) whatever the creation order of the elements is.
+const headLayer = el("div", "layer", root);
 const dividerLayer = el("div", "layer", root);
 const selectionLayer = el("div", "layer", root);
 
 const dividers = new Map<number, HTMLElement>(); // split id -> divider element
-const boxes = new Map<string, HTMLElement>(); // "focus" and "sel-<row>" -> box
+const boxes = new Map<string, HTMLElement>(); // "sel-<row>" -> box
 let applyView: (v: View) => void = () => {};
 
 /** Hand over the function that takes a layout answer of the core (`set_ratio` answers with the new view). */
 export function initOverlay(apply: (v: View) => void): void {
   applyView = apply;
 }
+
+initPaneHeads(headLayer);
 
 // ---- divider drag -------------------------------------------------------------------------------
 
@@ -164,13 +168,6 @@ function sweep(keep: Set<string>): void {
   }
 }
 
-/** The focus box: one element, only while more than one pane is visible. */
-function placeFocus(keep: Set<string>, view: View): void {
-  if (view.panes.length < 2) return;
-  const pane = view.panes.find(([id]) => id === view.focus);
-  if (pane) place(keep, "focus", "focus", focusLayer, paneRect(state.metrics, pane[1]));
-}
-
 /**
  * One box per selection span of the focused pane, as its latest frame carries them (viewport cells, both ends
  * inclusive). The core owns the selection: nothing is kept here, so a span that scrolls or ends is simply not in
@@ -181,7 +178,7 @@ function placeSelection(keep: Set<string>, view: View): void {
   const mirror = state.frames.get(view.focus);
   if (!pane || !mirror) return;
   const m = state.metrics;
-  const g = gridRect(m, pane[1]);
+  const g = gridRect(m, pane[1], state.headerPx);
   for (const [y, x0, x1] of visibleSpans(mirror)) {
     let key = `sel-${y}`;
     for (let i = 1; keep.has(key); i++) key = `sel-${y}-${i}`; // two spans on one row are legal on the wire
@@ -195,16 +192,14 @@ function placeSelection(keep: Set<string>, view: View): void {
 }
 
 /**
- * Bring the overlay in line with `state.view` and the focused pane's selection spans. Every element is looked up by a stable key
- * and moved in place; one is created or removed only when its key appears or vanishes.
+ * Bring the overlay in line with `state.view` and the focused pane's selection spans. Every element is looked up
+ * by a stable key and moved in place; one is created or removed only when its key appears or vanishes.
  */
 export function renderOverlay(): void {
   const view = state.view;
   const keep = new Set<string>();
-  if (view) {
-    placeFocus(keep, view);
-    placeSelection(keep, view);
-  }
+  if (view) placeSelection(keep, view);
   sweep(keep);
   syncDividers(view);
+  renderPaneHeads();
 }

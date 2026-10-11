@@ -8,8 +8,9 @@ import { renderBar } from "./chrome.js";
 import { BOLD, FONT_PX, ITALIC, Metrics, Renderer, font } from "./frame.js";
 import { RateMeter, applyFrame, forgetPane, spansSignature, toRenderFrame } from "./frames.js";
 import type { FrameMsg } from "./frames.js";
-import { fitCells, gridRect } from "./geometry.js";
+import { fitCells, gridRect, headerHeight } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
+import { renderPaneHeads } from "./panehead.js";
 import { forgetSelection, onSelectionSpans } from "./selection.js";
 import { state } from "./state.js";
 import { renderStatus } from "./status.js";
@@ -91,11 +92,16 @@ export function focusCanvas(): void {
 /**
  * Cell size in CSS pixels, snapped so that `cell * dpr` is a whole number of device pixels: the glyph grid the
  * renderers draw, the overlay and the hit tests then all use the same pitch (a fractional cell drifts at dpr 2).
+ * It also derives the pane header height from the root font size (`state.headerPx`, and `--hw-header` for the
+ * stylesheet), so the UI scale moves the header and the grid below it together.
  */
 function measure(): Metrics {
   const probe = document.createElement("canvas").getContext("2d")!;
   probe.font = font(0);
   const dpr = window.devicePixelRatio || 1;
+  const root = document.documentElement;
+  state.headerPx = headerHeight(parseFloat(getComputedStyle(root).fontSize), dpr);
+  root.style.setProperty("--hw-header", `${state.headerPx}px`);
   const snap = (cssPx: number) => Math.max(1, Math.round(cssPx * dpr)) / dpr;
   return {
     cellW: snap(probe.measureText("M").width),
@@ -131,7 +137,7 @@ function syncSizes(): void {
   const cellH = Math.max(1, Math.round(m.cellH * m.dpr));
   for (const [id, r] of view.panes) {
     if (state.exited.has(id)) continue; // its exit may arrive before the layout that drops it
-    const { cols, rows } = fitCells(m, r);
+    const { cols, rows } = fitCells(m, r, state.headerPx);
     const prev = state.sizes.get(id);
     if (!prev) {
       state.sizes.set(id, { cols, rows, cellW, cellH });
@@ -145,7 +151,10 @@ function syncSizes(): void {
   }
 }
 
-/** Re-measure after a window or font change: resize the canvas, tell the renderer and the core. */
+/**
+ * Re-measure after a window, font or UI scale change (the root font size): resize the canvas, derive the header
+ * height again, tell the renderer and the core.
+ */
 export function fit(): void {
   state.metrics = measure();
   const m = state.metrics;
@@ -195,6 +204,7 @@ function onFrame(msg: FrameMsg): void {
 /** Bring everything that shows a title, a working directory or an exit in line with the state. */
 function renderLabels(): void {
   if (state.view) renderBar(state.view, applyView);
+  renderPaneHeads();
 }
 
 /** A program set a pane's title. The string was sanitised by the core and is only ever rendered as text. */
@@ -250,7 +260,7 @@ function draw(): void {
   for (const [id, r] of view.panes) {
     const mirror = state.frames.get(id);
     if (!mirror) continue;
-    renderer.drawPane(toRenderFrame(mirror, id === view.focus), gridRect(state.metrics, r));
+    renderer.drawPane(toRenderFrame(mirror, id === view.focus), gridRect(state.metrics, r, state.headerPx));
   }
   const now = performance.now();
   batch.push(now - t0);

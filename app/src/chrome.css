@@ -29,6 +29,8 @@
   overflow: hidden; text-overflow: ellipsis; text-align: center; cursor: pointer;
 }
 #bar button.plus { padding: 0 .667rem; }
+/* Tabs give way to the host label by shortening their titles; the chips and plus buttons keep their size. */
+#bar .tab { flex: 0 1 auto; min-width: 3rem; }
 #bar button:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
 #bar button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
 /* The active workspace chip and tab: a wash, ink text and an underline in rose. The underline is also the cue
@@ -64,3 +66,40 @@
 @media (prefers-reduced-motion: no-preference) {
   #bar button { transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1); }
 }
+
+/* ---- pane headers ------------------------------------------------------------------------------------------ */
+
+/* One strip per visible pane, in the overlay. Its height is the root font size times 20/12, set from scene.ts as
+   --hw-header, and the pane's grid starts right below it. The strip takes no pointer events. */
+.panehead {
+  position: absolute; box-sizing: border-box; display: flex; align-items: center; gap: .5rem;
+  height: var(--hw-header); padding: 0 .667rem; overflow: hidden;
+  background: var(--hw-ground-2); border-top: 1px solid transparent; color: var(--hw-ink-2);
+  pointer-events: none; user-select: none; -webkit-user-select: none;
+}
+/* The focus line: the only rose in a header. */
+.panehead.focus-line { border-top-color: var(--hw-rose); }
+
+/* The state dot: filled is the focused pane, hollow the others, hollow with a dash a pane that exited. */
+.ph-dot {
+  position: relative; box-sizing: border-box; flex: none; width: .5rem; height: .5rem; border-radius: 50%;
+  border: 1px solid var(--hw-ink-3);
+}
+.ph-dot[data-state="focused"] { background: var(--hw-ink); border-color: var(--hw-ink); }
+.ph-dot[data-state="exited"]::after {
+  content: ""; position: absolute; left: -.25rem; right: -.25rem; top: calc(50% - .5px); height: 1px;
+  background: var(--hw-ink-3);
+}
+
+.ph-title { flex: 0 1 auto; min-width: 0; max-width: 70%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.panehead.focused .ph-title { color: var(--hw-ink); }
+
+/* The context is right-aligned and cut from the left, so the end of a path stays visible. The text sits in an
+   isolated left-to-right child of a right-to-left box: the box decides where the ellipsis goes, the child keeps
+   the characters in reading order. */
+.ph-ctx {
+  flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  direction: rtl; text-align: right; color: var(--hw-ink-3);
+}
+.ph-ctx > span { direction: ltr; unicode-bidi: isolate; }
+.panehead.exited .ph-ctx { color: var(--hw-ink-2); }
