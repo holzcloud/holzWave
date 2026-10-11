@@ -20,9 +20,23 @@ export interface State {
   metrics: Metrics;
   /**
    * Updated every 30 draws: the average and maximum draw time of those draws in milliseconds, and the arrival rate
-   * of `frame` events per second (events that came in, not frames that were drawn).
+   * of `frame` events per second (events that came in, not frames that were drawn). The draw times are NaN until
+   * the first update, so "not measured yet" differs from a timer that reads 0 ms.
    */
   stats: { avgMs: number; maxMs: number; fps: number };
+  /** The platform as `app_info` named it (`macos`, `windows`, `linux`); an empty string until it answers. */
+  os: string;
+  /** The app version from `app_info`; empty until it answers. Render with `textContent` only. */
+  version: string;
+  /** The machine's name from `app_info`; empty when unknown. Render with `textContent` only. */
+  hostname: string;
+  /** The renderer that draws the grid (`webgl2` or `canvas2d`). */
+  renderer: string;
+  /**
+   * Height in CSS pixels of the header strip above every pane's grid: the root font size times `HEADER_REM`,
+   * snapped to device pixels by `scene.ts`. The grid of a pane starts below it, so the UI scale moves both.
+   */
+  headerPx: number;
 }
 
 export const state: State = {
@@ -34,5 +48,10 @@ export const state: State = {
   exited: new Set(),
   // Replaced by the first measurement at start-up; a unit-size cell keeps divisions finite until then.
   metrics: { cellW: 1, cellH: 1, dpr: 1, width: 0, height: 0 },
-  stats: { avgMs: 0, maxMs: 0, fps: 0 },
+  stats: { avgMs: Number.NaN, maxMs: Number.NaN, fps: 0 },
+  os: "",
+  version: "",
+  hostname: "",
+  renderer: "canvas2d",
+  headerPx: 20,
 };

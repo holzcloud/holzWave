@@ -1,0 +1,66 @@
+/* The window chrome: the bar above the stage, the status line below it and the pane headers (docs/design.md
+   section 5 and 6). Loaded with `loadStyles("./chrome.css")` at start-up. Every colour is a `--hw-*` token from
+   app.css, every size is in rem (12 px at UI scale 100 %), so the UI scale setting moves it all together. The one
+   exception is the room for the macOS traffic lights: the system draws those at a fixed size. */
+
+/* ---- window bar -------------------------------------------------------------------------------------------- */
+
+#bar {
+  --bar-line: calc(31rem / 12); /* the bar's height without its hairline: one line, so text sits in the middle */
+  box-sizing: border-box; display: flex; align-items: stretch; flex: none; height: calc(32rem / 12);
+  padding: 0 .667rem; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-edge);
+  user-select: none; -webkit-user-select: none; cursor: default;
+}
+/* The overlay title bar puts the traffic lights over the page's top left corner. */
+.os-macos #bar { padding-left: 80px; }
+
+.bar-group { display: flex; align-items: stretch; flex: none; min-width: 0; }
+.bar-tabs { flex: 0 1 auto; overflow: hidden; }
+.bar-sep { flex: none; width: 1px; margin: .5rem .667rem; background: var(--hw-edge); }
+.bar-fill { flex: 1 1 0; min-width: .667rem; }
+.bar-info { display: flex; align-items: center; flex: none; color: var(--hw-ink-3); white-space: nowrap; }
+.bar-info .host { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; }
+.host:not(:empty) + .clock::before { content: "\00b7"; margin: 0 .5em; }
+
+#bar button {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; display: block; flex: none;
+  min-width: calc(28rem / 12); max-width: 18rem; margin: 0; padding: 0 .833rem; border: 0; border-radius: 0;
+  background: none; color: var(--hw-ink-3); line-height: var(--bar-line); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; text-align: center; cursor: pointer;
+}
+#bar button.plus { padding: 0 .667rem; }
+#bar button:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+#bar button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+/* The active workspace chip and tab: a wash, ink text and an underline in rose. The underline is also the cue
+   that does not depend on the colour. */
+#bar button.active {
+  background: var(--hw-rose-wash); color: var(--hw-ink);
+  text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: .417rem;
+  text-decoration-color: var(--hw-rose);
+}
+/* A small diamond marks the workspace that is shown; drawn, so it is the same on every platform. */
+#bar .ws-chip.active::before {
+  content: ""; display: inline-block; width: .5rem; height: .5rem; margin-right: .667rem; vertical-align: .08rem;
+  background: var(--hw-rose); transform: rotate(45deg);
+}
+
+/* ---- status line ------------------------------------------------------------------------------------------- */
+
+#status {
+  box-sizing: border-box; display: flex; align-items: stretch; flex: none; height: 2rem; min-width: 0; overflow: hidden;
+  background: var(--hw-ground-2); border-top: 1px solid var(--hw-edge); color: var(--hw-ink-3);
+  user-select: none; -webkit-user-select: none; cursor: default;
+}
+#status .seg {
+  display: block; flex: none; padding: 0 .833rem; line-height: calc(23rem / 12); white-space: nowrap;
+  border-right: 1px solid var(--hw-edge);
+}
+#status .seg:empty { display: none; }
+/* The shown workspace is a solid segment; bold type is its cue without colour. */
+#status .seg.ws.active { background: var(--hw-rose-deep); color: var(--hw-ink); font-weight: 700; }
+#status .seg.encoding { margin-left: auto; border-left: 1px solid var(--hw-edge); }
+#status .seg:last-child { border-right: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  #bar button { transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1); }
+}

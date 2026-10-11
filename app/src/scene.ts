@@ -12,10 +12,9 @@ import { fitCells, gridRect } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
 import { forgetSelection, onSelectionSpans } from "./selection.js";
 import { state } from "./state.js";
+import { renderStatus } from "./status.js";
 import type { View } from "./types.js";
 import { WebGLRenderer } from "./webgl.js";
-
-const stats = document.getElementById("stats") as HTMLDivElement;
 
 let renderer: Renderer | null = null;
 let rendererName = "canvas2d";
@@ -47,6 +46,7 @@ export async function initScene(): Promise<void> {
       renderer = new Canvas2DRenderer(replaceCanvas());
     }
   }
+  state.renderer = rendererName;
   await loadFonts();
   state.metrics = measure();
   window.addEventListener("resize", fit);
@@ -112,6 +112,7 @@ function measure(): Metrics {
 export function applyView(v: View): void {
   state.view = v;
   renderBar(v, applyView);
+  renderStatus();
   syncSizes();
   renderOverlay();
   schedule();
@@ -191,16 +192,25 @@ function onFrame(msg: FrameMsg): void {
   schedule();
 }
 
+/** Bring everything that shows a title, a working directory or an exit in line with the state. */
+function renderLabels(): void {
+  if (state.view) renderBar(state.view, applyView);
+}
+
 /** A program set a pane's title. The string was sanitised by the core and is only ever rendered as text. */
 function onTitle(p: { pane: number; title: string }): void {
   if (typeof p !== "object" || p === null || !isPane(p.pane) || typeof p.title !== "string") return;
-  if (!state.exited.has(p.pane)) state.titles.set(p.pane, p.title);
+  if (state.exited.has(p.pane)) return;
+  state.titles.set(p.pane, p.title);
+  renderLabels();
 }
 
 /** A pane reported its working directory (OSC 7). Same rules as the title. */
 function onCwd(p: { pane: number; cwd: string }): void {
   if (typeof p !== "object" || p === null || !isPane(p.pane) || typeof p.cwd !== "string") return;
-  if (!state.exited.has(p.pane)) state.cwds.set(p.pane, p.cwd);
+  if (state.exited.has(p.pane)) return;
+  state.cwds.set(p.pane, p.cwd);
+  renderLabels();
 }
 
 /**
@@ -212,6 +222,7 @@ function onPaneExit(p: { pane: number; code: number | null }): void {
   forgetPane(state, p.pane);
   forgetSelection(p.pane);
   waiting.delete(p.pane);
+  renderLabels();
   schedule();
 }
 
@@ -250,8 +261,7 @@ function draw(): void {
       fps: arrivals.perSecond(now), // frame events that arrived, not frames that were drawn
     };
     batch = [];
-    const s = state.stats;
-    stats.textContent = `${rendererName}  ${view.panes.length} pane(s)  cpu ${s.avgMs.toFixed(2)} ms  max ${s.maxMs.toFixed(2)} ms  ${s.fps.toFixed(0)} fps`;
+    renderStatus();
   }
 }
 

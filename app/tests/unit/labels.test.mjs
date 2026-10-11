@@ -93,7 +93,11 @@ test("the renderer segment is the name and the draw time", () => {
 });
 
 test("the renderer segment is the name alone before a draw time exists", () => {
-  assert.equal(rendererText("webgl2", 0), "webgl2");
   assert.equal(rendererText("webgl2", Number.NaN), "webgl2");
   assert.equal(rendererText("webgl2", -1), "webgl2");
+  assert.equal(rendererText("webgl2", Number.POSITIVE_INFINITY), "webgl2");
+});
+
+test("a draw time of zero is a measurement: a timer coarser than the draw reads 0 ms", () => {
+  assert.equal(rendererText("canvas2d", 0), "canvas2d 0.00 ms");
 });

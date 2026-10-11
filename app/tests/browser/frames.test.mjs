@@ -258,10 +258,10 @@ async function statsCase(page, url) {
       for (let i = 0; i < 10; i++) window.__MOCK__.emit("frame", msg(seq++, false));
       await new Promise((done) => requestAnimationFrame(() => done()));
     }
-    return { ...state.stats, text: document.getElementById("stats").textContent };
+    return { ...state.stats, text: document.querySelector("#status .seg.renderer").textContent };
   });
   assert.ok(Number.isFinite(result.avgMs) && result.avgMs >= 0, `avgMs is ${result.avgMs}`);
   assert.ok(Number.isFinite(result.maxMs) && result.maxMs >= result.avgMs, `maxMs is ${result.maxMs}`);
   assert.ok(result.fps > 60, `fps ${result.fps} is the draw rate, not the arrival rate of frame events`);
-  assert.match(result.text, /ms/, "the stats label is still written");
+  assert.match(result.text, / \d+\.\d{2} ms$/, "the renderer segment of the status line shows the draw time");
 }

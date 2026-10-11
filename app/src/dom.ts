@@ -53,6 +53,39 @@ export function loadStyles(href: string): Promise<void> {
   return done;
 }
 
+/** Set the text of `node` (never markup) when it differs: a render that changes nothing touches nothing. */
+export function setText(node: Node, text: string): void {
+  if (node.textContent !== text) node.textContent = text;
+}
+
+/** Set an attribute, or remove it for `null`, only when that changes it. */
+export function setAttr(node: Element, name: string, value: string | null): void {
+  if (value === null) {
+    if (node.hasAttribute(name)) node.removeAttribute(name);
+  } else if (node.getAttribute(name) !== value) {
+    node.setAttribute(name, value);
+  }
+}
+
+/**
+ * Keep `nodes` at `count` elements of `parent`: new ones come from `make` and go before `anchor` (the end of
+ * `parent` without one), surplus ones are removed from the end. The elements that stay are the same ones.
+ */
+export function fitNodes<T extends Element>(
+  parent: Element,
+  nodes: T[],
+  count: number,
+  make: () => T,
+  anchor: Node | null = null,
+): void {
+  while (nodes.length < count) {
+    const node = make();
+    parent.insertBefore(node, anchor);
+    nodes.push(node);
+  }
+  while (nodes.length > count) nodes.pop()?.remove();
+}
+
 /** Place an absolutely positioned element at `r` (CSS pixels). */
 export function setRect(node: HTMLElement, r: PxRect): void {
   node.style.left = `${r.x}px`;

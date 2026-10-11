@@ -16,20 +16,38 @@
   src: url("./fonts/JetBrainsMono-Italic.woff2") format("woff2");
 }
 
+/* The design tokens (docs/design.md section 2), defined once, here. Every other stylesheet uses `var(--hw-*)`; a
+   theme later (plan 20) replaces the values on :root and nothing else. */
 :root {
   color-scheme: dark;
-  --ground: #14091a; --bar: #1d0f26; --edge: #3a2144; --ink: #f6efe6; --ink2: #b9a3b6; --rose: #ff8fb8;
+  --hw-ground: #14091a;          /* window and terminal background */
+  --hw-ground-2: #1d0f26;        /* bars, headers */
+  --hw-pane: #1b0e20;            /* pane surface */
+  --hw-edge: #3a2144;            /* hairlines, dividers */
+  --hw-ink: #f6efe6;             /* primary text */
+  --hw-ink-2: rgb(246 239 230 / .7);
+  --hw-ink-3: #9c8ea0;           /* tertiary text, disabled */
+  --hw-rose: #ff8fb8;            /* focus, action, cursor: rationed */
+  --hw-rose-deep: #c23b72;       /* fills and large type only (3.84:1 on the ground) */
+  --hw-rose-wash: rgb(255 143 184 / .14);
+  --hw-selection: rgb(255 143 184 / .35);
+  --hw-ok: #8cc271;
+  --hw-warn: #e8c15c;
+  --hw-danger: #ec8272;
+  --hw-info: #8fb8d8;
+  /* The height of a pane's header strip in CSS px; scene.ts sets it from the root font size on every fit. */
+  --hw-header: 20px;
 }
-html, body { margin: 0; height: 100%; background: var(--ground); overflow: hidden;
-             font: 12px/1 "JetBrains Mono", ui-monospace, Menlo, monospace; color: var(--ink); }
+
+/* The root font size is the UI scale: 12 px at 100 %. Every chrome size is in rem, so changing it scales the
+   chrome and the pane headers together. */
+html { font: 12px/1 "JetBrains Mono", ui-monospace, Menlo, monospace; }
+html, body { margin: 0; height: 100%; background: var(--hw-ground); overflow: hidden; color: var(--hw-ink); }
+body { font: inherit; }
+button { font: inherit; color: inherit; }
+/* Labels: mono, 11 px at the base size, uppercase, tracked. */
+.label { font-size: calc(11rem / 12); text-transform: uppercase; letter-spacing: .1em; }
 #app { display: flex; flex-direction: column; height: 100%; }
-#bar { display: flex; align-items: center; gap: 4px; padding: 0 8px; height: 32px; flex: none;
-       background: var(--bar); border-bottom: 1px solid var(--edge); user-select: none; }
-#bar .sep { width: 1px; height: 16px; background: var(--edge); margin: 0 6px; }
-#bar button { all: unset; cursor: pointer; padding: 5px 10px; border-radius: 7px; color: var(--ink2); }
-#bar button:hover { background: rgba(255, 143, 184, .1); color: var(--ink); }
-#bar button.active { background: rgba(255, 143, 184, .18); color: var(--rose); }
-#bar button.plus { padding: 5px 8px; }
 #stage { position: relative; flex: 1; min-height: 0; }
 #term, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
 #term { display: block; }
@@ -37,12 +55,12 @@ html, body { margin: 0; height: 100%; background: var(--ground); overflow: hidde
 .divider { position: absolute; pointer-events: auto; }
 .divider.row { cursor: col-resize; }
 .divider.column { cursor: row-resize; }
-.divider::after { content: ""; position: absolute; background: var(--edge); }
+.divider::after { content: ""; position: absolute; background: var(--hw-edge); }
 .divider.row::after { left: 50%; top: 0; bottom: 0; width: 1px; }
 .divider.column::after { top: 50%; left: 0; right: 0; height: 1px; }
-.divider:hover::after { background: var(--rose); }
-.focus { position: absolute; box-sizing: border-box; border: 1px solid rgba(255, 143, 184, .55); border-radius: 3px; }
-.sel { position: absolute; background: rgba(255, 143, 184, .35); }
+.divider:hover::after { background: var(--hw-rose); }
+.focus { position: absolute; box-sizing: border-box; border: 1px solid var(--hw-selection); border-radius: 3px; }
+.sel { position: absolute; background: var(--hw-selection); }
 /* The textarea `execCommand("copy")` needs: focusable and selectable, but out of sight and out of the layout. */
 .clipboard-buffer { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
 /* The terminal's input element: every key goes through it so input methods and dead keys work. One pixel, not
@@ -50,5 +68,3 @@ html, body { margin: 0; height: 100%; background: var(--ground); overflow: hidde
 .ime { position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; padding: 0; border: 0; outline: none;
        resize: none; overflow: hidden; background: transparent; color: transparent; caret-color: transparent;
        opacity: 0; pointer-events: none; font: 14px/18px "JetBrains Mono", ui-monospace, Menlo, monospace; }
-#stats { position: absolute; right: 8px; bottom: 6px; font: 11px/1.2 "JetBrains Mono", ui-monospace, Menlo, monospace;
-         color: var(--rose); opacity: .7; pointer-events: none; white-space: pre; text-align: right; }

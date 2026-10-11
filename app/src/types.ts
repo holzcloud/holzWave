@@ -15,10 +15,10 @@ export interface Divider {
   ratio: number;
 }
 
-/** The layout the core sends: workspaces, tabs and the panes of the active tab. */
+/** The layout the core sends: workspaces, tabs (with the pane that has each one's focus) and the panes of the active tab. */
 export interface View {
   workspaces: { name: string; active: boolean }[];
-  tabs: { title: string; active: boolean }[];
+  tabs: { title: string; active: boolean; focus: number }[];
   focus: number;
   panes: [number, UnitRect][];
   dividers: Divider[];

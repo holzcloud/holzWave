@@ -188,11 +188,11 @@ async function statusCase(page, url) {
   assert.deepEqual(await texts(page, "#status .seg.panes"), ["1 pane"]);
   assert.match((await texts(page, "#status .seg.renderer"))[0], /^canvas2d\b/);
   assert.deepEqual(await texts(page, "#status .seg.encoding"), ["UTF-8"]);
-  assert.deepEqual(await texts(page, "#status .seg.version"), ["v0.0.1-alpha1"]);
+  assert.deepEqual(await texts(page, "#status .seg.version"), ["0.0.1-alpha1"]);
 
   // The order is the contract of the design: workspaces, panes, renderer, encoding, version.
   const order = await page.evaluate(() =>
-    [...document.querySelectorAll("#status .seg")].map((n) => [...n.classList].filter((c) => c !== "seg" && c !== "active")[0]),
+    [...document.querySelectorAll("#status .seg")].map((n) => [...n.classList].filter((c) => !["seg", "label", "active"].includes(c))[0]),
   );
   assert.deepEqual(order, ["ws", "ws", "panes", "renderer", "encoding", "version"]);
 
@@ -243,7 +243,7 @@ async function hostileCase(page, url) {
   assert.equal((await texts(page, "#bar .tab"))[0], "1 <script>window.__pwned=1</script>");
   assert.equal((await texts(page, "#bar .tab"))[1], `2 ${bad}`);
   assert.deepEqual(await texts(page, "#bar .host"), [bad]);
-  assert.deepEqual(await texts(page, "#status .seg.version"), ["v<i>v</i>"]);
+  assert.deepEqual(await texts(page, "#status .seg.version"), ["<i>v</i>"]);
   assert.equal(await page.evaluate(() => window.__pwned), undefined);
 }
 
