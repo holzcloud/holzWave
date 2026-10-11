@@ -94,6 +94,8 @@ function compile(gl: WebGL2RenderingContext, type: number, src: string) {
 export interface WebGLOptions {
   /** Edge of the glyph atlas in px (default 2048, at most the GPU's limit). Tests use a tiny one to force resets. */
   atlasSize?: number;
+  /** The GPU context was lost and is back and the renderer rebuilt its resources: the caller draws again. */
+  onRestored?: () => void;
 }
 
 /** A glyph that has a slot but is not in the texture yet. */
@@ -106,12 +108,15 @@ interface Pending {
 
 export class WebGLRenderer implements Renderer {
   private gl: WebGL2RenderingContext;
-  private prog: WebGLProgram;
-  private vao: WebGLVertexArrayObject;
-  private buf: WebGLBuffer;
-  private atlasTex: WebGLTexture;
+  // The GPU objects: all of them are gone with a lost context and are made again by `setup`.
+  private prog!: WebGLProgram;
+  private vao!: WebGLVertexArrayObject;
+  private buf!: WebGLBuffer;
+  private atlasTex!: WebGLTexture;
   private atlasPx: number;
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
+  /** The context is lost (a GPU reset, sleep and wake, a GPU switch): nothing is drawn until it is back. */
+  private lost = false;
 
   private m: Metrics = { cellW: 8, cellH: 17, dpr: 1, width: 0, height: 0 };
   private cw = 8; // device px
@@ -130,14 +135,26 @@ export class WebGLRenderer implements Renderer {
   private capacity = 0;
   private cursorColor = CURSOR_COLOR;
 
-  constructor(private canvas: HTMLCanvasElement, options: WebGLOptions = {}) {
+  constructor(private canvas: HTMLCanvasElement, private options: WebGLOptions = {}) {
     const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, powerPreference: "high-performance" });
     if (!gl) throw new Error("WebGL2 is not available");
     this.gl = gl;
     const limit = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || ATLAS;
     const wanted = Math.floor(options.atlasSize ?? ATLAS);
     this.atlasPx = Math.max(1, Math.min(limit, Number.isFinite(wanted) ? wanted : ATLAS));
+    this.setup();
+    this.sctx = this.strip.getContext("2d", { willReadFrequently: false })!;
+    // Without `preventDefault` on the loss the browser never restores the context.
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      this.lost = true;
+    });
+    canvas.addEventListener("webglcontextrestored", () => this.restore());
+  }
 
+  /** Build the GPU objects: the program, the instance buffer and the atlas texture. Throws when they cannot be. */
+  private setup() {
+    const gl = this.gl;
     const prog = gl.createProgram()!;
     gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VERT));
     gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FRAG));
@@ -168,8 +185,27 @@ export class WebGLRenderer implements Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  }
 
-    this.sctx = this.strip.getContext("2d", { willReadFrequently: false })!;
+  /** Whether the GPU context is gone: drawing then is a no-op, and so is every call that would reach the GPU. */
+  private get dead(): boolean {
+    return this.lost || this.gl.isContextLost();
+  }
+
+  /** The context is back: every GPU object is new, so make them again, with the glyph atlas empty. */
+  private restore() {
+    try {
+      this.setup();
+    } catch (e) {
+      // The same shaders compiled before; if they do not now the context is not usable and nothing is drawn. A
+      // Canvas 2D fallback is not possible here: a canvas that had a WebGL context never gives out a 2D one, and
+      // the page's listeners are on this element.
+      console.error("holzwave: the WebGL context came back unusable", e);
+      return;
+    }
+    this.lost = false;
+    this.configure(this.m);
+    this.options.onRestored?.();
   }
 
   configure(m: Metrics) {
@@ -181,6 +217,7 @@ export class WebGLRenderer implements Renderer {
     this.slots.clear();
     this.pending.length = 0;
     this.nextSlot = 1;
+    if (this.dead) return; // `restore` configures again with these metrics
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.atlasTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.atlasPx, this.atlasPx, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -268,6 +305,7 @@ export class WebGLRenderer implements Renderer {
   }
 
   begin(bg: number) {
+    if (this.dead) return;
     const gl = this.gl;
     gl.disable(gl.SCISSOR_TEST);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -276,6 +314,7 @@ export class WebGLRenderer implements Renderer {
   }
 
   drawPane(f: Frame, r: PxRect) {
+    if (this.dead) return;
     const gl = this.gl;
     // The pane's rectangle in device pixels; the origin of a GL viewport is the bottom-left corner.
     const dpr = this.m.dpr;
@@ -427,6 +466,7 @@ export class WebGLRenderer implements Renderer {
   }
 
   sync() {
+    if (this.dead) return;
     const px = new Uint8Array(4);
     this.gl.readPixels(0, 0, 1, 1, this.gl.RGBA, this.gl.UNSIGNED_BYTE, px);
   }

@@ -577,4 +577,56 @@ export default async function ({ page, url }) {
   assert.equal(wire.none.cursor, null);
   assert.deepEqual(wire.focused.lines, [[["ab", 2, 1, 2, 0]]]);
   assert.equal("scrollbar" in wire.focused, false, "the scrollbar is not part of the renderer frame");
+
+  // ---- a lost GPU context is rebuilt (WR-08) -------------------------------------------------------------------
+  // A GPU reset, a sleep and wake or a GPU switch loses the context. Nothing may be drawn or throw while it is
+  // lost, and once it is back the renderer draws the same image again from fresh GPU objects and a new atlas.
+  const lost = await page.evaluate(async () => {
+    const R = window.__R;
+    let restored = 0;
+    const h = R.make("webgl", 12, 2, { onRestored: () => restored++ });
+    const frame = R.row("hello wave!!", 12, undefined, 0x112233);
+    R.draw(h, frame);
+    const before = R.pixels(h);
+    const inked = R.ink(h, before, 0, 12, [0x11, 0x22, 0x33]);
+
+    const gl = h.canvas.getContext("webgl2");
+    const ext = gl.getExtension("WEBGL_lose_context");
+    const once = (name) => new Promise((resolve) => h.canvas.addEventListener(name, resolve, { once: true }));
+    const gone = once("webglcontextlost");
+    ext.loseContext();
+    const event = await gone;
+    // The browser allows `restoreContext` only after the loss event was dispatched, not in a microtask of it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    let threw = false;
+    try {
+      R.draw(h, frame);
+      h.r.configure(h.m);
+    } catch {
+      threw = true;
+    }
+    const back = once("webglcontextrestored");
+    ext.restoreContext();
+    await back; // the renderer's own listener was added first, so it has rebuilt by now
+
+    R.draw(h, frame);
+    const after = R.pixels(h);
+    const out = {
+      prevented: event.defaultPrevented,
+      threw,
+      restored,
+      inked,
+      differing: R.diff(before, after),
+      err: R.glError(h),
+    };
+    R.dispose(h);
+    return out;
+  });
+  assert.equal(lost.prevented, true, "a loss that is not prevented is never restored");
+  assert.equal(lost.threw, false, "drawing or configuring on a lost context must be a no-op");
+  assert.equal(lost.restored, 1, "the page is told once that it may draw again");
+  assert.ok(lost.inked > 0, "the first image has text, so the comparison means something");
+  assert.equal(lost.differing, 0, "the image after the restore differs from the one before the loss");
+  assert.equal(lost.err, 0, "GL error after the restore");
 }

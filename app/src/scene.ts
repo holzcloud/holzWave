@@ -41,7 +41,9 @@ export async function initScene(): Promise<void> {
     renderer = new Canvas2DRenderer(canvas());
   } else {
     try {
-      renderer = new WebGLRenderer(canvas());
+      // A lost context (GPU reset, sleep and wake, a GPU switch) is rebuilt by the renderer; the page then draws the
+      // frames it has again.
+      renderer = new WebGLRenderer(canvas(), { onRestored: schedule });
       rendererName = "webgl2";
     } catch {
       // A canvas that handed out a WebGL context never returns a 2D one, even when the program failed to link
