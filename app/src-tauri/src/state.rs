@@ -1901,6 +1901,153 @@ mod tests {
         assert_eq!(on_disk(&dir).all_panes(), vec![second], "the layout of the last pane is kept");
     }
 
+    // ---- a resize while the pane is still starting (WR-03) ------------------------------------------------------
+
+    /// A pane handle made the way `start_pane` makes one, whose frames land in the recorder. The window in which
+    /// the slot is `Starting` is held open by the test: it reserves, asks, and only then promotes this handle.
+    fn spawned_for(core: &AppCore, rec: &Arc<Recorder>, pane: PaneId) -> PaneHandle {
+        let spec = core.pane_spec(80, 24, (9, 18));
+        let rec = rec.clone();
+        PaneHandle::spawn_ghostty(pane, spec, move |event| {
+            if let PaneEvent::Frame(frame) = event {
+                rec.send(Out::Frame(frame));
+            }
+        })
+        .expect("the shell starts")
+    }
+
+    fn size_of_last_frame(rec: &Recorder, pane: PaneId) -> Option<(u16, u16)> {
+        rec.frames(pane).last().map(|f| (f.cols, f.rows))
+    }
+
+    #[test]
+    fn a_resize_that_arrives_while_the_pane_is_starting_is_applied_on_promotion() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        assert_eq!(core.reserve(pane), Ok(Reserved::Now));
+
+        // The page asks twice while the shell is being started; both are accepted.
+        core.resize(pane, 90, 20, 9, 18).expect("accepted while the pane is starting");
+        core.resize(pane, 100, 30, 9, 18).expect("accepted while the pane is starting");
+
+        let handle = spawned_for(&core, &rec, pane);
+        let look = lock(&core.config).look();
+        core.promote(pane, handle, look);
+
+        assert!(
+            wait_until(WAIT, || rec.frames(pane).iter().any(|f| (f.cols, f.rows) == (100, 30))),
+            "no frame at 100 x 30, the sizes seen: {:?}",
+            rec.frames(pane).iter().map(|f| (f.cols, f.rows)).collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            rec.frames(pane).iter().all(|f| (f.cols, f.rows) != (90, 20)),
+            "the older size was replayed: {:?}",
+            rec.frames(pane).iter().map(|f| (f.cols, f.rows)).collect::<Vec<_>>()
+        );
+        assert_eq!(size_of_last_frame(&rec, pane), Some((100, 30)));
+    }
+
+    #[test]
+    fn a_resize_that_overlaps_the_promotion_is_never_overtaken_by_the_replay() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        assert_eq!(core.reserve(pane), Ok(Reserved::Now));
+        core.resize(pane, 100, 30, 9, 18).expect("accepted while the pane is starting");
+
+        let handle = spawned_for(&core, &rec, pane);
+        let look = lock(&core.config).look();
+        let racer = core.clone();
+        let mut thread = None;
+        // The closure runs inside the promotion, after the slot became Running and before anything is sent to the
+        // handle: a second resize is issued from another thread exactly there. A correct promotion holds the
+        // `panes` lock, so that thread is blocked until the replay is made; the closure only gives a wrong order
+        // the time to show itself.
+        core.promote_with(pane, handle, look, || {
+            let spawned = std::thread::spawn(move || racer.resize(pane, 120, 40, 9, 18));
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while !spawned.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            thread = Some(spawned);
+        });
+        thread.expect("the closure ran").join().expect("no panic").expect("accepted");
+
+        assert!(
+            wait_until(WAIT, || rec.frames(pane).iter().any(|f| (f.cols, f.rows) == (120, 40))),
+            "no frame at 120 x 40, the sizes seen: {:?}",
+            rec.frames(pane).iter().map(|f| (f.cols, f.rows)).collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            size_of_last_frame(&rec, pane),
+            Some((120, 40)),
+            "the newer size must be the last one applied: {:?}",
+            rec.frames(pane).iter().map(|f| (f.cols, f.rows)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_size_asked_for_while_the_pane_is_starting_is_clamped_like_a_running_one() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        assert_eq!(core.reserve(pane), Ok(Reserved::Now));
+        core.resize(pane, 5_000, 0, 9, 18).expect("accepted while the pane is starting");
+
+        let handle = spawned_for(&core, &rec, pane);
+        let look = lock(&core.config).look();
+        core.promote(pane, handle, look);
+
+        assert!(
+            wait_until(WAIT, || rec.frames(pane).iter().any(|f| (f.cols, f.rows) == (1000, 1))),
+            "no frame at the clamped size 1000 x 1, the sizes seen: {:?}",
+            rec.frames(pane).iter().map(|f| (f.cols, f.rows)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_pane_that_is_closed_while_it_starts_leaves_no_size_behind() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let first = only_pane(&core);
+        let second = core.split(false).focus;
+        assert_ne!(first, second);
+        assert_eq!(core.reserve(second), Ok(Reserved::Now));
+        core.resize(second, 100, 30, 9, 18).expect("accepted while the pane is starting");
+
+        core.close_pane(second);
+        assert!(lock(&core.panes).get(&second).is_none(), "the slot, and the size it carried, are gone");
+
+        // The shell that was being started arrives late: it is closed and no size is applied to it.
+        let handle = spawned_for(&core, &rec, second);
+        let look = lock(&core.config).look();
+        core.promote(second, handle, look);
+        assert!(lock(&core.panes).get(&second).is_none());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            rec.frames(second).iter().all(|f| (f.cols, f.rows) != (100, 30)),
+            "a size was applied to a pane that was closed: {:?}",
+            rec.frames(second).iter().map(|f| (f.cols, f.rows)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_resize_for_a_running_pane_and_for_an_unknown_pane_behaves_as_before() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        assert_eq!(core.resize(31_337, 100, 30, 9, 18), Ok(()), "an unknown pane is not an error");
+        assert!(lock(&core.panes).is_empty(), "and no slot is made for it");
+
+        core.start_pane(pane, 80, 24, 9, 18).expect("starts");
+        assert!(wait_until(WAIT, || !rec.frames(pane).is_empty()), "no first frame");
+        core.resize(pane, 100, 30, 9, 18).expect("a running pane takes the size at once");
+
+        assert!(
+            wait_until(WAIT, || size_of_last_frame(&rec, pane) == Some((100, 30))),
+            "{:?}",
+            rec.frames(pane).iter().map(|f| (f.cols, f.rows)).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn a_shell_that_ends_in_a_background_tab_leaves_the_shown_tab_and_the_saved_layout_alone() {
         let (core, rec, dir) = sh("exit 0");
