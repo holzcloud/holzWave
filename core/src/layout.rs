@@ -576,7 +576,14 @@ impl Layout {
                 }
             } else {
                 w.tabs.remove(ti);
-                w.active = w.active.min(w.tabs.len().saturating_sub(1));
+                if ti < w.active {
+                    // The shown tab moved one place to the left with its siblings: it stays the shown one.
+                    w.active -= 1;
+                } else {
+                    // The shown tab itself went (the one that followed slides into the index, or the new last
+                    // one is shown), or a tab after it went and the index is still right.
+                    w.active = w.active.min(w.tabs.len().saturating_sub(1));
+                }
                 if w.tabs.is_empty() {
                     self.workspaces.remove(wi);
                     self.active = self.active.min(self.workspaces.len() - 1);
