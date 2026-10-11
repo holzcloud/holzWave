@@ -804,6 +804,62 @@ mod tests {
         assert_eq!(l.workspace().tabs[0].panes(), vec![a]);
     }
 
+    /// Three workspaces W0, W1, W2 with one pane each and W1 shown. Returns the layout and the three panes.
+    fn workspaces_with_the_middle_one_shown() -> (Layout, PaneId, PaneId, PaneId) {
+        let (mut l, a) = Layout::new();
+        let b = l.new_workspace("one").unwrap();
+        let c = l.new_workspace("two").unwrap();
+        l.select_workspace(1);
+        assert_eq!(l.tab().panes(), vec![b]);
+        assert_eq!(l.active, 1);
+        (l, a, b, c)
+    }
+
+    #[test]
+    fn closing_a_workspace_before_the_shown_one_keeps_the_shown_workspace_shown() {
+        let (mut l, a, b, c) = workspaces_with_the_middle_one_shown();
+        let shown = l.workspace().id;
+
+        assert_eq!(l.close_pane(a), CloseOutcome::Closed);
+
+        assert_eq!(l.workspace().id, shown, "workspace W1 is still the shown one");
+        assert_eq!(l.tab().panes(), vec![b]);
+        assert_eq!(l.active, 0, "the index follows W1 one place to the left");
+        assert_eq!(l.workspaces.len(), 2);
+        assert_eq!(l.workspaces[1].tabs[0].panes(), vec![c]);
+    }
+
+    #[test]
+    fn closing_the_shown_workspace_shows_the_one_that_followed_or_the_new_last_one() {
+        let (mut l, a, b, c) = workspaces_with_the_middle_one_shown();
+
+        assert_eq!(l.close_pane(b), CloseOutcome::Closed);
+        assert_eq!(l.tab().panes(), vec![c], "the workspace that followed the shown one is shown");
+        assert_eq!(l.active, 1);
+
+        assert_eq!(l.close_pane(c), CloseOutcome::Closed);
+        assert_eq!(l.tab().panes(), vec![a], "the shown last workspace was closed: the new last one is shown");
+        assert_eq!(l.active, 0);
+    }
+
+    #[test]
+    fn every_workspace_keeps_its_own_shown_tab_when_a_tab_before_it_is_removed() {
+        // W0 has the tabs T0, T1, T2 with T1 shown; W1 is the workspace the user looks at.
+        let (mut l, t0) = Layout::new();
+        let t1 = l.new_tab().unwrap();
+        let t2 = l.new_tab().unwrap();
+        l.focus_pane(t1);
+        let other = l.new_workspace("other").unwrap();
+        assert_eq!(l.active, 1);
+
+        assert_eq!(l.close_pane(t0), CloseOutcome::Closed);
+
+        assert_eq!(l.tab().panes(), vec![other], "the shown workspace did not change");
+        l.select_workspace(0);
+        assert_eq!(l.tab().panes(), vec![t1], "returning to W0 shows the tab it showed before");
+        assert_eq!(l.workspace().tabs[1].panes(), vec![t2]);
+    }
+
     // ---- loading: hostile and damaged files --------------------------------------------------------
 
     /// A layout text with one workspace of one tab of one pane (id 3), the given active indices and next_id.
@@ -1320,12 +1376,41 @@ mod tests {
         }
     }
 
+    /// What the user is looking at, by identity: the shown workspace and, for every workspace, its shown tab.
+    struct Shown {
+        workspace: u64,
+        tabs: Vec<(u64, u64)>,
+    }
+
+    impl Shown {
+        fn of(l: &Layout) -> Shown {
+            let tabs = l.workspaces.iter().map(|w| (w.id, w.tabs[w.active].id)).collect();
+            Shown { workspace: l.workspace().id, tabs }
+        }
+
+        /// What was shown before is still shown, as far as it still exists: an operation that does not select
+        /// anything on purpose may remove the shown workspace or tab (the next one is shown then) but must never
+        /// move the shown one to a neighbour.
+        fn assert_kept(&self, l: &Layout, context: &str) {
+            if l.workspaces.iter().any(|w| w.id == self.workspace) {
+                assert_eq!(l.workspace().id, self.workspace, "{context}: the shown workspace changed");
+            }
+            for (workspace, tab) in &self.tabs {
+                let Some(w) = l.workspaces.iter().find(|w| w.id == *workspace) else { continue };
+                if w.tabs.iter().any(|t| t.id == *tab) {
+                    assert_eq!(w.tabs[w.active].id, *tab, "{context}: workspace {workspace} shows another tab");
+                }
+            }
+        }
+    }
+
     #[test]
     fn random_operations_never_leave_an_invalid_layout() {
         for seed in 1..=20u64 {
             let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let (mut l, _) = Layout::new();
             for step in 0..2000 {
+                let shown = Shown::of(&l);
                 let panes = l.all_panes();
                 let pick = |rng: &mut Rng| panes[rng.below(panes.len())];
                 let op = rng.below(100);
@@ -1387,7 +1472,13 @@ mod tests {
                         "select_workspace"
                     }
                 };
-                assert_invariants(&l, &format!("seed {seed} step {step} after {name}"), step % 100 == 99);
+                let context = format!("seed {seed} step {step} after {name}");
+                assert_invariants(&l, &context, step % 100 == 99);
+                // Split, close, a close of an unknown id, cycling the focus and moving a divider must keep what is
+                // shown. Select, focus, new tab and new workspace change it on purpose and are exempt.
+                if matches!(name, "split" | "close" | "close unknown" | "cycle" | "set_ratio") {
+                    shown.assert_kept(&l, &context);
+                }
             }
         }
     }

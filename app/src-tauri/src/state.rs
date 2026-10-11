@@ -1902,6 +1902,36 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_that_ends_in_a_background_workspace_leaves_the_shown_workspace_and_the_saved_layout_alone() {
+        let (core, rec, dir) = sh("exit 0");
+        let a = only_pane(&core);
+        let b = core.new_workspace("one").focus;
+        let c = core.new_workspace("two").focus;
+        assert_eq!(core.select_workspace(1).focus, b, "workspace W1 is the one the user looks at");
+        assert!(a != b && b != c && a != c);
+
+        // Only the shell of W0 is started, so only it ends, while W1 is shown.
+        core.start_pane(a, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || !rec.layouts().is_empty()), "the pane stayed in the layout: {:?}", rec.all());
+
+        let view = core.view();
+        assert_eq!(view.focus, b, "the focus did not move");
+        assert_eq!(view.panes.iter().map(|p| p.0).collect::<Vec<_>>(), vec![b], "workspace W1 is still shown");
+        assert_eq!(view.workspaces.len(), 2);
+        assert!(view.workspaces[0].active && !view.workspaces[1].active, "the first of the two is the shown one");
+        assert_eq!(view.workspaces[0].name, "one");
+        assert_eq!(rec.layouts().last(), Some(&view), "the page was told the same thing");
+        assert_eq!(rec.exit_count(), 0);
+
+        core.flush();
+        let saved = on_disk(&dir);
+        assert_eq!(saved.tab().panes(), vec![b], "the saved layout names W1 as the shown workspace");
+        assert_eq!(saved.active, 0);
+        assert_eq!(saved.workspaces.len(), 2);
+        assert_eq!(saved.all_panes(), vec![b, c]);
+    }
+
+    #[test]
     fn a_burst_of_divider_moves_writes_at_most_twice_and_the_flushed_file_equals_memory() {
         let (core, _rec, dir) = core("/bin/cat", &[]);
         let split = core.split(false).dividers[0].split;
