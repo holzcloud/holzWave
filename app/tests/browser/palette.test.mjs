@@ -16,6 +16,7 @@ export default async function ({ page, url, errors }) {
   await emptyCase(page, url);
   await pointerCase(page, url);
   await toggleCase(page, url);
+  await heldChordCase(page, url);
   await radiusAndShadowCase(page, url);
   await sizeAndScrollCase(page, url);
   await lateRegistrationCase(page, url);
@@ -271,6 +272,46 @@ async function toggleCase(page, url) {
   await page.keyboard.press("Meta+k");
   assert.equal(await isOpen(page), false, "Cmd+K again closes");
   assert.equal(await page.evaluate(() => document.activeElement?.id), "ime");
+}
+
+/** Dispatch a keydown of Cmd+K on the focused element; true when the page prevented its default. */
+const chordK = (page, repeat) =>
+  page.evaluate((r) => {
+    const e = new KeyboardEvent("keydown", {
+      bubbles: true, cancelable: true, composed: true, metaKey: true, key: "k", code: "KeyK", repeat: r,
+    });
+    (document.activeElement ?? document.body).dispatchEvent(e);
+    return e.defaultPrevented;
+  }, repeat);
+
+/**
+ * A held Cmd+K does not flip the palette (WR-01): the chord that opened it is still down when the first repeat
+ * arrives. The repeats are consumed, and a press that is not a repeat closes it.
+ */
+async function heldChordCase(page, url) {
+  await open(page, url);
+
+  // Closed: repeats alone open nothing.
+  assert.equal(await chordK(page, true), true, "a repeat of Cmd+K is consumed with the palette closed");
+  assert.equal(await chordK(page, true), true);
+  assert.equal(await isOpen(page), false, "repeats alone do not open the palette");
+
+  await openPalette(page);
+  await reset(page);
+  for (let i = 0; i < 3; i++) {
+    assert.equal(await chordK(page, true), true, `repeat ${i + 1} is preventDefault-ed`);
+    assert.equal(await isOpen(page), true, `the palette is still open after repeat ${i + 1}`);
+  }
+  assert.ok(
+    await page.evaluate(() => document.activeElement?.classList.contains("palette-input") === true),
+    "the field keeps the keyboard",
+  );
+  assert.deepEqual(await shellCalls(page), [], "no repeat reached the shell");
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.calls.length), 0, "no command at all");
+
+  assert.equal(await chordK(page, false), true, "a press closes it");
+  assert.equal(await isOpen(page), false, "a Cmd+K that is not a repeat closes the palette");
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "ime", "the terminal input has the keyboard");
 }
 
 // ---- the floating-layer rules ---------------------------------------------------------------------
