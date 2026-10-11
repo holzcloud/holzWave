@@ -8,7 +8,7 @@
 // dead keys work, because composition events exist only on editable elements.
 import { registerAction, runAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
-import { actionIdFor } from "./chords.js";
+import { actionIdFor, setBindingTable } from "./chords.js";
 import { gridRect } from "./geometry.js";
 import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "./keymap.js";
 import { offerKey, pushKeyHandler } from "./keystack.js";
@@ -192,6 +192,16 @@ function onKeyUp(e: KeyboardEvent): void {
   const pane = state.view?.focus;
   if (pane === undefined) return;
   sendKey(pane, e, true);
+}
+
+// ---- the binding table ---------------------------------------------------------------------------
+
+/**
+ * Take the core's resolved binding table (placeholder until the next commit: the table is not used yet).
+ */
+export function setBindings(rows: readonly { action: string; chord: string | null }[]): void {
+  void rows;
+  void setBindingTable;
 }
 
 // ---- paste ---------------------------------------------------------------------------------------

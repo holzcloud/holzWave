@@ -44,3 +44,29 @@ export const CHORDS: ReadonlyMap<string, string> = new Map([
 export function actionIdFor(chord: string): string | undefined {
   return CHORDS.get(chord);
 }
+
+// ---- the core's resolved table (neutral placeholder until the next commit) --------------------------
+
+/** One row of the core's binding table, as far as dispatch needs it. */
+export interface BindingRowLike {
+  action: string;
+  chord: string | null;
+}
+
+/** Two rows that carry one chord: the first keeps it, the later one is reported and not indexed. */
+export interface BindingConflict {
+  chord: string;
+  kept: string;
+  dropped: string;
+}
+
+export function bindingIndex(_rows: readonly BindingRowLike[]): {
+  index: Map<string, string>;
+  conflicts: BindingConflict[];
+} {
+  return { index: new Map(), conflicts: [] };
+}
+
+export function setBindingTable(_rows: readonly BindingRowLike[]): BindingConflict[] {
+  return [];
+}

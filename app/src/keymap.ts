@@ -168,3 +168,8 @@ export function chordsOf(e: KeyLike): string[] {
   }
   return out;
 }
+
+/** The chord a key press records in the binding editor (neutral placeholder until the next commit). */
+export function primaryChord(_e: KeyLike): string | null {
+  return null;
+}

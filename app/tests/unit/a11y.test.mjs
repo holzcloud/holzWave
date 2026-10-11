@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { contrastRatio, effectiveBlink, effectiveContrast, effectiveMotion, onAccentOf } from "../../dist/a11y.js";
+import { CHORDS, actionIdFor, bindingIndex, setBindingTable } from "../../dist/chords.js";
+import { chordsOf, primaryChord } from "../../dist/keymap.js";
 import { readSettingsView, tokenEntries } from "../../dist/settings-model.js";
 
 const fromRoot = (path) => readFileSync(fileURLToPath(new URL(`../../../${path}`, import.meta.url)), "utf8");
@@ -116,4 +118,148 @@ test("the theme sets --hw-on-accent from its rose_deep and a bad rose_deep leave
     const names = tokenEntries(theme).map(([n]) => n);
     assert.equal(names.includes("--hw-on-accent"), false, `rose_deep ${JSON.stringify(bad)} set a token`);
   }
+});
+
+// ---- the binding index (DESK-25) -----------------------------------------------------------------------
+
+const row = (action, chord) => ({ action, title: action, chord, is_default: true });
+
+test("bindingIndex maps chords to action ids and skips unbound rows", () => {
+  const { index, conflicts } = bindingIndex([
+    row("pane.split_right", "Cmd+D"),
+    row("pane.close", null),
+    row("tab.new", "Cmd+T"),
+  ]);
+  assert.deepEqual([...index], [["Cmd+D", "pane.split_right"], ["Cmd+T", "tab.new"]]);
+  assert.deepEqual(conflicts, []);
+});
+
+test("two rows with the same chord keep the first and the later one is reported", () => {
+  const { index, conflicts } = bindingIndex([
+    row("pane.split_right", "Cmd+D"),
+    row("tab.new", "Cmd+D"),
+    row("pane.close", "Cmd+W"),
+  ]);
+  assert.equal(index.get("Cmd+D"), "pane.split_right");
+  assert.equal(index.size, 2);
+  assert.deepEqual(conflicts, [{ chord: "Cmd+D", kept: "pane.split_right", dropped: "tab.new" }]);
+});
+
+test("rows that are not rows are left out of the index", () => {
+  const { index } = bindingIndex([null, 7, {}, { action: "a" }, { action: 5, chord: "Cmd+A" }, row("ok", "Cmd+O")]);
+  assert.deepEqual([...index], [["Cmd+O", "ok"]]);
+});
+
+test("the static table agrees with the core's default table for every action the core knows", () => {
+  const rows = golden.settings_view.keybindings;
+  assert.equal(rows.length, 33);
+  const { index, conflicts } = bindingIndex(rows);
+  assert.deepEqual(conflicts, []);
+  for (const [chord, action] of CHORDS) {
+    if (action === "edit.copy") continue; // a fixed shortcut: the core has no such action to rebind
+    assert.equal(index.get(chord), action, `${chord} is ${action} in chords.ts but ${index.get(chord)} in the core`);
+  }
+  for (const r of rows) assert.equal(CHORDS.get(r.chord), r.action, `${r.action} has ${r.chord} in the core`);
+});
+
+test("dispatch uses the core's table once it is set and the static table before and after an empty one", () => {
+  assert.equal(actionIdFor("Cmd+D"), "pane.split_right", "static table before any settings");
+  const rows = golden.settings_view.keybindings.map((r) => ({ ...r }));
+  rows.find((r) => r.action === "pane.split_right").chord = "Cmd+Shift+Enter";
+  rows.find((r) => r.action === "pane.close").chord = null;
+  setBindingTable(rows);
+  try {
+    assert.equal(actionIdFor("Cmd+Shift+Enter"), "pane.split_right");
+    assert.equal(actionIdFor("Cmd+D"), undefined, "the old binding stops working");
+    assert.equal(actionIdFor("Cmd+W"), undefined, "an action the core left unbound is not revived by the static table");
+    assert.equal(actionIdFor("Cmd+T"), "tab.new", "the other rows are as the core said");
+    assert.equal(actionIdFor("Cmd+C"), "edit.copy", "a fixed shortcut the core's table does not know stays");
+    setBindingTable([]);
+    assert.equal(actionIdFor("Cmd+D"), "pane.split_right", "no rows: the static table again");
+  } finally {
+    setBindingTable([]);
+  }
+});
+
+// ---- the chord a press records ------------------------------------------------------------------------
+
+const ev = (code, key, extra = {}) => ({ code, key, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, ...extra });
+
+test("primaryChord is the core's canonical spelling: Cmd, Ctrl, Alt, Shift and then the key", () => {
+  assert.equal(primaryChord(ev("KeyD", "d", { metaKey: true, shiftKey: true })), "Cmd+Shift+D");
+  assert.equal(primaryChord(ev("KeyD", "D", { metaKey: true, shiftKey: true })), "Cmd+Shift+D", "Shift types a capital");
+  assert.equal(primaryChord(ev("KeyY", "y", { shiftKey: true, altKey: true, ctrlKey: true, metaKey: true })), "Cmd+Ctrl+Alt+Shift+Y");
+  assert.equal(primaryChord(ev("Enter", "Enter", { metaKey: true, shiftKey: true })), "Cmd+Shift+Enter");
+  assert.equal(primaryChord(ev("ArrowUp", "ArrowUp", { metaKey: true })), "Cmd+Up");
+  assert.equal(primaryChord(ev("Space", " ", { metaKey: true, shiftKey: true })), "Cmd+Shift+Space");
+  assert.equal(primaryChord(ev("F5", "F5", { metaKey: true })), "Cmd+F5");
+  assert.equal(primaryChord(ev("Digit1", "1", { metaKey: true, altKey: true })), "Cmd+Alt+1");
+});
+
+test("primaryChord takes the key for letters and digits and the physical key for everything else", () => {
+  assert.equal(primaryChord(ev("BracketLeft", "ü", { metaKey: true })), "Cmd+[", "a layout that types u-umlaut there");
+  assert.equal(primaryChord(ev("KeyA", "å", { metaKey: true, altKey: true })), "Cmd+Alt+A", "Option composes a character");
+  assert.equal(primaryChord(ev("Digit1", "&", { metaKey: true })), "Cmd+1", "AZERTY types & on the digit row");
+  assert.equal(primaryChord(ev("KeyQ", "a", { metaKey: true })), "Cmd+A", "AZERTY: the typed letter, as the core's chords are");
+  assert.equal(primaryChord(ev("Equal", "+", { metaKey: true, shiftKey: true })), "Cmd+Shift+=", "plus is never a key");
+  assert.equal(primaryChord(ev("Minus", "-", { metaKey: true })), "Cmd+-");
+});
+
+test("primaryChord is null for a modifier on its own and for a key the grammar has no name for", () => {
+  for (const [code, key] of [["MetaLeft", "Meta"], ["ShiftLeft", "Shift"], ["ControlLeft", "Control"], ["AltLeft", "Alt"], ["CapsLock", "CapsLock"]]) {
+    assert.equal(primaryChord(ev(code, key, { metaKey: true })), null, key);
+  }
+  assert.equal(primaryChord(ev("", "Unidentified")), null);
+  assert.equal(primaryChord(ev("MediaPlayPause", "MediaPlayPause", { metaKey: true })), null);
+});
+
+test("a recorded chord is one of the chords dispatch tries for the same event", () => {
+  const events = [
+    ev("KeyD", "d", { metaKey: true }),
+    ev("KeyD", "D", { metaKey: true, shiftKey: true }),
+    ev("BracketLeft", "ü", { metaKey: true }),
+    ev("KeyA", "å", { metaKey: true, altKey: true }),
+    ev("Digit1", "&", { metaKey: true }),
+    ev("Digit1", "1", { metaKey: true, altKey: true }),
+    ev("Equal", "=", { metaKey: true }),
+    ev("Enter", "Enter", { metaKey: true }),
+    ev("ArrowDown", "ArrowDown", { metaKey: true, altKey: true }),
+    ev("F12", "F12", { ctrlKey: true, altKey: true }),
+  ];
+  for (const e of events) {
+    const chord = primaryChord(e);
+    assert.ok(chord !== null && chordsOf(e).includes(chord), `${chord} is not among ${JSON.stringify(chordsOf(e))}`);
+  }
+});
+
+// ---- reading the table from the view -------------------------------------------------------------------
+
+test("the settings view carries the binding rows and the overrides the user typed", () => {
+  const raw = structuredClone(golden.settings_view);
+  raw.settings.keybindings = { "pane.close": "Cmd+Shift+W", "tab.new": "", broken: 5 };
+  const view = readSettingsView(raw);
+  assert.equal(view.keybindings.length, 33);
+  assert.deepEqual(view.keybindings[0], { action: "pane.split_right", title: "Split pane right", chord: "Cmd+D", is_default: true });
+  assert.deepEqual(view.settings.keybindings, { "pane.close": "Cmd+Shift+W", "tab.new": "" }, "a non-text value is left out");
+});
+
+test("a view without rows has none, and malformed or repeated rows are left out one by one", () => {
+  const plain = structuredClone(golden.settings_view);
+  delete plain.keybindings;
+  delete plain.settings.keybindings;
+  const none = readSettingsView(plain);
+  assert.deepEqual(none.keybindings, []);
+  assert.deepEqual(none.settings.keybindings, {});
+
+  const raw = structuredClone(golden.settings_view);
+  raw.keybindings = [
+    row("a", "Cmd+A"),
+    { action: "b", title: "B", chord: 5, is_default: true },
+    { action: "c", chord: "Cmd+C", is_default: true },
+    { action: "d", title: "D", chord: null, is_default: false },
+    row("a", "Cmd+Z"),
+    "x",
+  ];
+  const view = readSettingsView(raw);
+  assert.deepEqual(view.keybindings.map((r) => [r.action, r.chord]), [["a", "Cmd+A"], ["d", null]]);
 });
