@@ -49,6 +49,14 @@ fn windows_helper(env: &dyn Fn(&str) -> Option<String>) -> Helper {
     }
 }
 
+/// `gsettings get` of the GNOME interface schema's `text-scaling-factor`.
+fn gnome_helper() -> Helper {
+    Helper {
+        program: "/usr/bin/gsettings".to_owned(),
+        args: ["get", "org.gnome.desktop.interface", "text-scaling-factor"].map(str::to_owned).into(),
+    }
+}
+
 /// The percent in the output of `reg query ... /v TextScaleFactor`, whose value line reads
 /// `    TextScaleFactor    REG_DWORD    0x96` (hexadecimal; a decimal value is read too). A missing key or value
 /// (the tool prints an error text to the error stream and ends with status 1, so nothing is left here) and anything
@@ -70,6 +78,19 @@ fn parse_windows(output: &str) -> u32 {
         return parsed.map_or(NEUTRAL, |percent| percent.clamp(NEUTRAL, LIMIT));
     }
     NEUTRAL
+}
+
+/// The percent for the factor `gsettings get` prints, a plain decimal such as `1.25` or `1.0`. A type-tagged answer
+/// (`uint32 1`), an error text, an empty answer and anything else is 100; the factor is clamped to 1.0 to 3.0, so
+/// the chrome never goes below the user's own scale because of this source.
+fn parse_gsettings(output: &str) -> u32 {
+    let text = output.trim();
+    let digits = text.bytes().filter(u8::is_ascii_digit).count();
+    let plain = digits > 0 && text.bytes().all(|b| b.is_ascii_digit() || b == b'.') && text.matches('.').count() <= 1;
+    match text.parse::<f64>() {
+        Ok(factor) if plain && factor.is_finite() => ((factor * 100.0).round() as u32).clamp(NEUTRAL, LIMIT),
+        _ => NEUTRAL,
+    }
 }
 
 /// A command for `helper`: absolute program, no inherited environment, nothing on standard input or error.
@@ -120,6 +141,7 @@ fn output_within(mut command: Command, deadline: Duration) -> Option<Vec<u8>> {
 fn read_via(os: &str, env: &dyn Fn(&str) -> Option<String>, run: &dyn Fn(&Helper) -> Option<Vec<u8>>) -> u32 {
     let (helper, parse): (Helper, fn(&str) -> u32) = match os {
         "windows" => (windows_helper(env), parse_windows),
+        "linux" => (gnome_helper(), parse_gsettings),
         _ => return NEUTRAL,
     };
     run(&helper).map_or(NEUTRAL, |bytes| parse(&String::from_utf8_lossy(&bytes)))
@@ -196,6 +218,57 @@ mod tests {
         }
     }
 
+    // ---- GNOME: gsettings -----------------------------------------------------------------------------
+
+    #[test]
+    fn the_gsettings_factor_is_read_as_a_percent() {
+        assert_eq!(parse_gsettings("1.25\n"), 125);
+        assert_eq!(parse_gsettings("1.0\n"), 100);
+        assert_eq!(parse_gsettings("1.5"), 150);
+        assert_eq!(parse_gsettings("2.0\n"), 200);
+        assert_eq!(parse_gsettings("1.333\n"), 133);
+        assert_eq!(parse_gsettings("2\n"), 200, "a whole number without a point is a factor too");
+    }
+
+    #[test]
+    fn a_gsettings_answer_below_1_is_100_and_above_3_is_300() {
+        assert_eq!(parse_gsettings("0.5\n"), 100);
+        assert_eq!(parse_gsettings("0.0\n"), 100);
+        assert_eq!(parse_gsettings("9.0\n"), 300);
+        assert_eq!(parse_gsettings("4000000000000\n"), 300);
+    }
+
+    #[test]
+    fn gsettings_errors_type_tags_and_garbage_are_100() {
+        for text in [
+            "",
+            "\n",
+            "uint32 1\n",
+            "No such schema \u{201c}org.gnome.desktop.interface\u{201d}\n",
+            "No such key \u{201c}text-scaling-factor\u{201d}\n",
+            "Settings schema 'org.gnome.desktop.interface' is not installed\n",
+            "1.2.5\n",
+            "1e2\n",
+            "-1.5\n",
+            "+1.5\n",
+            ".\n",
+            "nan\n",
+            "inf\n",
+            "1,25\n",
+            "1.25 1.5\n",
+            "<1.25>\n",
+        ] {
+            assert_eq!(parse_gsettings(text), 100, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_gnome_helper_is_gsettings_by_absolute_path_with_its_exact_arguments() {
+        let helper = gnome_helper();
+        assert_eq!(helper.program, "/usr/bin/gsettings");
+        assert_eq!(helper.args, ["get", "org.gnome.desktop.interface", "text-scaling-factor"]);
+    }
+
     // ---- the reader -----------------------------------------------------------------------------------
 
     /// A runner that fails the test when it is called, and one that answers `text`.
@@ -206,7 +279,7 @@ mod tests {
     #[test]
     fn macos_and_every_other_platform_answer_100_without_starting_anything() {
         let none = |_: &str| None;
-        for os in ["macos", "linux", "freebsd", "ios", "", "WINDOWS"] {
+        for os in ["macos", "freebsd", "ios", "", "Linux", "WINDOWS"] {
             assert_eq!(read_via(os, &none, &never), 100, "{os:?}");
         }
         assert_eq!(read("macos"), 100);
@@ -220,13 +293,19 @@ mod tests {
             Some(REG_150.as_bytes().to_vec())
         };
         assert_eq!(read_via("windows", &none, &reg), 150);
+        let gsettings = |helper: &Helper| {
+            assert_eq!(helper.program, "/usr/bin/gsettings");
+            Some(b"1.25\n".to_vec())
+        };
+        assert_eq!(read_via("linux", &none, &gsettings), 125);
     }
 
     #[test]
     fn a_helper_that_did_not_answer_or_printed_garbage_gives_100() {
         let none = |_: &str| None;
         assert_eq!(read_via("windows", &none, &|_| None), 100);
-        assert_eq!(read_via("windows", &none, &|_| Some(vec![0xff, 0xfe, 0x00])), 100);
+        assert_eq!(read_via("linux", &none, &|_| None), 100);
+        assert_eq!(read_via("linux", &none, &|_| Some(vec![0xff, 0xfe, 0x00])), 100);
         assert_eq!(read_via("windows", &none, &|_| Some(Vec::new())), 100);
     }
 
@@ -234,5 +313,51 @@ mod tests {
     fn a_missing_helper_cannot_be_started_and_answers_none() {
         let helper = Helper { program: "/nonexistent/holzwave-helper".to_owned(), args: Vec::new() };
         assert_eq!(output_within(command_of(&helper), Duration::from_secs(1)), None);
+    }
+
+    // Unix test children only: the Windows test target has no `sleep` or `yes` (and still compiles this module).
+    #[cfg(unix)]
+    mod unix_children {
+        use std::time::Instant;
+
+        use super::*;
+
+        fn child(program: &str, args: &[&str]) -> Command {
+            let helper = Helper { program: program.to_owned(), args: args.iter().map(|a| (*a).to_owned()).collect() };
+            command_of(&helper)
+        }
+
+        #[test]
+        fn the_output_of_a_helper_that_ends_in_time_is_returned() {
+            let out = output_within(child("/bin/echo", &["1.25"]), Duration::from_secs(5));
+            assert_eq!(out, Some(b"1.25\n".to_vec()));
+        }
+
+        #[test]
+        fn a_hung_helper_is_killed_and_answers_100_within_the_limit() {
+            let start = Instant::now();
+            assert_eq!(output_within(child("/bin/sleep", &["30"]), Duration::from_millis(200)), None);
+            assert!(start.elapsed() < Duration::from_secs(5), "waited {:?} for a helper that hangs", start.elapsed());
+            let run = |_: &Helper| output_within(child("/bin/sleep", &["30"]), Duration::from_millis(200));
+            assert_eq!(read_via("linux", &|_| None, &run), 100);
+        }
+
+        #[test]
+        fn output_beyond_4_kib_is_cut_and_a_helper_that_never_stops_is_not_waited_for() {
+            let start = Instant::now();
+            let out = output_within(child("/usr/bin/yes", &[]), Duration::from_secs(5)).expect("the first kibibytes arrive");
+            assert_eq!(out.len(), 4096, "cut at the limit");
+            assert!(start.elapsed() < Duration::from_secs(4), "waited {:?} for endless output", start.elapsed());
+        }
+
+        #[test]
+        fn the_helper_gets_no_environment_and_no_standard_input() {
+            // `env` prints what it inherited: with a cleared environment there is nothing, and `cat` on a closed
+            // standard input ends at once instead of waiting for the terminal.
+            let out = output_within(child("/usr/bin/env", &[]), Duration::from_secs(5)).expect("env ran");
+            assert_eq!(out, Vec::<u8>::new(), "the environment was cleared");
+            let out = output_within(child("/bin/cat", &[]), Duration::from_secs(5)).expect("cat ran");
+            assert_eq!(out, Vec::<u8>::new(), "standard input is closed");
+        }
     }
 }
