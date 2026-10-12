@@ -116,6 +116,10 @@
     "selection_text": [
       "pane"
     ],
+    "send_edit": [
+      "pane",
+      "action"
+    ],
     "set_ratio": [
       "split",
       "ratio"
@@ -368,6 +372,42 @@
           "chord": "Cmd+,",
           "is_default": true,
           "title": "Open settings"
+        },
+        {
+          "action": "edit.word_back",
+          "chord": "Alt+Left",
+          "is_default": true,
+          "title": "Move one word back"
+        },
+        {
+          "action": "edit.word_forward",
+          "chord": "Alt+Right",
+          "is_default": true,
+          "title": "Move one word forward"
+        },
+        {
+          "action": "edit.line_start",
+          "chord": "Cmd+Left",
+          "is_default": true,
+          "title": "Move to the start of the line"
+        },
+        {
+          "action": "edit.line_end",
+          "chord": "Cmd+Right",
+          "is_default": true,
+          "title": "Move to the end of the line"
+        },
+        {
+          "action": "edit.delete_word_back",
+          "chord": "Alt+Backspace",
+          "is_default": true,
+          "title": "Delete the word before the cursor"
+        },
+        {
+          "action": "edit.delete_to_line_start",
+          "chord": "Cmd+Backspace",
+          "is_default": true,
+          "title": "Delete to the start of the line"
         }
       ],
       "settings": {
@@ -781,6 +821,42 @@
         "chord": "Cmd+,",
         "is_default": true,
         "title": "Open settings"
+      },
+      {
+        "action": "edit.word_back",
+        "chord": "Alt+Left",
+        "is_default": true,
+        "title": "Move one word back"
+      },
+      {
+        "action": "edit.word_forward",
+        "chord": "Alt+Right",
+        "is_default": true,
+        "title": "Move one word forward"
+      },
+      {
+        "action": "edit.line_start",
+        "chord": "Cmd+Left",
+        "is_default": true,
+        "title": "Move to the start of the line"
+      },
+      {
+        "action": "edit.line_end",
+        "chord": "Cmd+Right",
+        "is_default": true,
+        "title": "Move to the end of the line"
+      },
+      {
+        "action": "edit.delete_word_back",
+        "chord": "Alt+Backspace",
+        "is_default": true,
+        "title": "Delete the word before the cursor"
+      },
+      {
+        "action": "edit.delete_to_line_start",
+        "chord": "Cmd+Backspace",
+        "is_default": true,
+        "title": "Delete to the start of the line"
       }
     ],
     "settings": {

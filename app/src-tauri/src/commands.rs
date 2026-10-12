@@ -20,6 +20,7 @@ use holzwave_core::engine::{
     SelectOp,
 };
 use holzwave_core::layout::{PaneId, SplitId};
+use holzwave_core::pane::EditAction;
 use holzwave_core::wire::SearchMsg;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,6 +44,32 @@ impl From<SelectModeMsg> for SelectMode {
             SelectModeMsg::Cell => SelectMode::Cell,
             SelectModeMsg::Word => SelectMode::Word,
             SelectModeMsg::Line => SelectMode::Line,
+        }
+    }
+}
+
+/// The line-editing steps the page can ask for by name: `"word_back"`, `"word_forward"`, `"line_start"`, `"line_end"`,
+/// `"delete_word_back"`, `"delete_to_line_start"`. The core owns the bytes; an unknown name is refused by serde.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditActionMsg {
+    WordBack,
+    WordForward,
+    LineStart,
+    LineEnd,
+    DeleteWordBack,
+    DeleteToLineStart,
+}
+
+impl From<EditActionMsg> for EditAction {
+    fn from(action: EditActionMsg) -> Self {
+        match action {
+            EditActionMsg::WordBack => EditAction::WordBack,
+            EditActionMsg::WordForward => EditAction::WordForward,
+            EditActionMsg::LineStart => EditAction::LineStart,
+            EditActionMsg::LineEnd => EditAction::LineEnd,
+            EditActionMsg::DeleteWordBack => EditAction::DeleteWordBack,
+            EditActionMsg::DeleteToLineStart => EditAction::DeleteToLineStart,
         }
     }
 }
@@ -258,6 +285,14 @@ pub fn key(
 ) -> Result<(), String> {
     let dom = DomKey { code, key, mods: Mods::from_bits((mods & 0xFF) as u8), repeat, release, composing };
     core.key(pane, dom)
+}
+
+/// A line-editing step (word or line jump, delete word or line) for the shell's line editor. The page sends the
+/// name of the step, never bytes. It asks for this only on the normal screen; a program on the alternate screen
+/// gets the key through `key`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn send_edit(core: State<Arc<AppCore>>, pane: PaneId, action: EditActionMsg) -> Result<(), String> {
+    core.edit(pane, action.into())
 }
 
 /// Committed text (an IME commit, a dead-key result) as input.

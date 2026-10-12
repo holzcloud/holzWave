@@ -163,9 +163,38 @@ pub enum PaneEvent {
     Failed(String),
 }
 
+/// A line-editing step of the shell's line editor. The page names one of these, never the bytes: the core owns the
+/// bytes, so the page cannot send arbitrary input through this path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditAction {
+    WordBack,
+    WordForward,
+    LineStart,
+    LineEnd,
+    DeleteWordBack,
+    DeleteToLineStart,
+}
+
+impl EditAction {
+    /// What the shell receives. These are the readline and zsh defaults that Terminal.app and iTerm send for the same
+    /// keys: ESC b and ESC f move by word, Ctrl+A and Ctrl+E go to the ends of the line, ESC DEL kills the word
+    /// before the cursor and Ctrl+U kills to the start of the line.
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            EditAction::WordBack => b"\x1bb",
+            EditAction::WordForward => b"\x1bf",
+            EditAction::LineStart => b"\x01",
+            EditAction::LineEnd => b"\x05",
+            EditAction::DeleteWordBack => b"\x1b\x7f",
+            EditAction::DeleteToLineStart => b"\x15",
+        }
+    }
+}
+
 /// A message from the shell to the engine thread.
 enum Control {
     Key(DomKey),
+    Edit(EditAction),
     Text(String),
     /// The engine's answer travels back over `reply`; a dropped sender tells the caller the pane is gone.
     Paste { text: String, allow_unsafe: bool, reply: Sender<Result<PasteOutcome>> },
@@ -284,6 +313,13 @@ impl PaneHandle {
             return Err(Error::Pty("key description too long".into()));
         }
         self.send(Control::Key(key))
+    }
+
+    /// A line-editing step (word or line jump, delete word or line) as the fixed bytes of [`EditAction::bytes`].
+    /// Typing: it returns the viewport to the live screen. The page sends it only for the normal screen; a program
+    /// on the alternate screen gets the key through [`PaneHandle::key`] instead.
+    pub fn edit(&self, action: EditAction) -> Result<()> {
+        self.send(Control::Edit(action))
     }
 
     /// A mouse press, release or motion, in device pixels relative to the origin of the grid.
@@ -598,6 +634,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     fn handle(&mut self, control: Control) {
         match control {
             Control::Key(dom) => self.key(&dom),
+            Control::Edit(action) => self.edit(action),
             Control::Text(text) => self.text(&text),
             Control::Paste { text, allow_unsafe, reply } => {
                 let outcome = self.engine.paste(&text, allow_unsafe);
@@ -700,6 +737,13 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             self.dirty = true;
         }
         self.writer.input(bytes);
+    }
+
+    fn edit(&mut self, action: EditAction) {
+        self.clear_selection();
+        self.engine.scroll_to_bottom();
+        self.dirty = true;
+        self.writer.input(action.bytes().to_vec());
     }
 
     fn text(&mut self, text: &str) {

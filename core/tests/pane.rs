@@ -18,7 +18,7 @@ use holzwave_core::engine::{
     CopyOp, CopyState, DomKey, EngineTheme, KeyEvent, Mods, PasteOutcome, Screen, SearchOp, SearchState, SelectMode,
     SelectOp, TerminalEngine, Update,
 };
-use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
+use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::queue::OUTPUT_LIMIT;
 use holzwave_core::wire::{FrameMsg, RowMsg};
 use holzwave_core::Color;
@@ -994,4 +994,45 @@ fn a_key_that_changes_nothing_does_not_make_its_own_echo_wait_for_the_frame_inte
     );
     pane.close();
     assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn each_edit_action_writes_exactly_its_fixed_bytes() {
+    let probe = Probe::default();
+    // The tty is raw and silent, so the shell sees the bytes as they arrive and `od` prints them as hex.
+    let pane = spawn(spec_sh("stty raw -echo; printf READY; head -c 9 | od -An -tx1 -v; sleep 3"), &probe);
+    // The bytes are sent once the tty is raw: before that they would meet the line discipline in canonical mode.
+    assert!(wait_until(WAIT, || probe.has_text("READY")), "the shell never became ready");
+    for action in [
+        EditAction::WordBack,
+        EditAction::WordForward,
+        EditAction::LineStart,
+        EditAction::LineEnd,
+        EditAction::DeleteWordBack,
+        EditAction::DeleteToLineStart,
+    ] {
+        pane.edit(action).expect("edit");
+    }
+    assert!(
+        wait_until(WAIT, || {
+            // od pads its columns differently on macOS and Linux: compare the bytes, not the spacing.
+            probe.frames().iter().any(|f| {
+                f.changed.iter().any(|r| row_text(r).split_whitespace().collect::<Vec<_>>().join(" ").contains("1b 62 1b 66 01 05 1b 7f 15"))
+            })
+        }),
+        "the bytes did not arrive as ESC b, ESC f, ^A, ^E, ESC DEL, ^U: {:?}",
+        probe.frames().iter().flat_map(|f| f.changed.iter().map(row_text)).filter(|t| !t.is_empty()).collect::<Vec<_>>()
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn the_fixed_bytes_of_the_edit_actions() {
+    assert_eq!(EditAction::WordBack.bytes(), b"\x1bb");
+    assert_eq!(EditAction::WordForward.bytes(), b"\x1bf");
+    assert_eq!(EditAction::LineStart.bytes(), b"\x01");
+    assert_eq!(EditAction::LineEnd.bytes(), b"\x05");
+    assert_eq!(EditAction::DeleteWordBack.bytes(), b"\x1b\x7f");
+    assert_eq!(EditAction::DeleteToLineStart.bytes(), b"\x15");
 }

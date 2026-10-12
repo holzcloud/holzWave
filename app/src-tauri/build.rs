@@ -10,6 +10,7 @@ fn main() {
     "get_layout",
     "start_pane",
     "key",
+    "send_edit",
     "text",
     "paste",
     "resize",

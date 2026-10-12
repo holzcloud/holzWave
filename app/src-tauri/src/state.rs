@@ -17,7 +17,7 @@ use holzwave_core::engine::{
 };
 use holzwave_core::keybindings::Keybindings;
 use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
-use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
+use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
 use holzwave_core::pty::process_cwd;
 use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
@@ -1101,6 +1101,14 @@ impl AppCore {
         }
         match self.handle(pane) {
             Some(handle) => handle.key(key).map_err(|e| e.to_string()),
+            None => Ok(()),
+        }
+    }
+
+    /// A line-editing step (word or line jump, delete word or line). The core owns the bytes.
+    pub fn edit(&self, pane: PaneId, action: EditAction) -> Result<(), String> {
+        match self.handle(pane) {
+            Some(handle) => handle.edit(action).map_err(|e| e.to_string()),
             None => Ok(()),
         }
     }

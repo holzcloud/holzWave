@@ -193,6 +193,7 @@ pub fn run() {
             commands::get_layout,
             commands::start_pane,
             commands::key,
+            commands::send_edit,
             commands::text,
             commands::paste,
             commands::resize,

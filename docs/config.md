@@ -210,6 +210,24 @@ The defaults (the macOS table; Windows and Linux pick their own in Phase 2.2):
 | `font.decrease` | `Cmd+-` | `font.reset` | `Cmd+0` |
 | `settings.open` | `Cmd+,` | | |
 
+The line-editing actions send fixed bytes to the shell's line editor (`edit.word_back` and `edit.word_forward` send
+`ESC b` and `ESC f`, `edit.line_start` and `edit.line_end` send `Ctrl+A` and `Ctrl+E`, `edit.delete_word_back` sends
+`ESC DEL`, `edit.delete_to_line_start` sends `Ctrl+U`). Each platform has its own standard as the default, and every
+chord can be changed or unbound like any other. They apply on the normal screen only: a program on the alternate screen
+(vim, less, htop) gets the key itself.
+
+| Action id | macOS | Windows and Linux |
+|---|---|---|
+| `edit.word_back` | `Alt+Left` | `Ctrl+Left` |
+| `edit.word_forward` | `Alt+Right` | `Ctrl+Right` |
+| `edit.line_start` | `Cmd+Left` | none: `Home` already reaches the shell |
+| `edit.line_end` | `Cmd+Right` | none: `End` already reaches the shell |
+| `edit.delete_word_back` | `Alt+Backspace` | `Ctrl+Backspace` |
+| `edit.delete_to_line_start` | `Cmd+Backspace` | none |
+
+A single `Alt` or `Ctrl` is bindable on the navigation keys (`Left`, `Right`, `Up`, `Down`, `Home`, `End`,
+`Backspace`, `Delete`) and nowhere else, so `Option+7` on a Swiss layout still types its character.
+
 Actions without a chord in the table (`keybindings.open`, the theme entries of the palette) are reached from the
 palette and the dialogs and can be bound by adding them to the table in a later version.
 

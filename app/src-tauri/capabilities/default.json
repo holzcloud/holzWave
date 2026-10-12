@@ -11,6 +11,7 @@
     "allow-get-layout",
     "allow-start-pane",
     "allow-key",
+    "allow-send-edit",
     "allow-text",
     "allow-paste",
     "allow-resize",
