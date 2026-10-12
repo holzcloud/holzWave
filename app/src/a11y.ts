@@ -3,7 +3,8 @@
 // three media queries `prefers-reduced-motion`, `prefers-contrast` and `forced-colors` (nothing on macOS says how
 // large the system text is, so the scalable UI font is the user's `ui_scale` and the font size actions, not an OS
 // signal). The result is two classes on the root element, `motion-reduce` and `contrast-high`, that the
-// stylesheets key on, and the effective cursor blink the scene asks for.
+// stylesheets key on, the effective cursor blink the scene asks for, and whether the two optional grid effects of
+// DESK-28 (smooth scrolling, cursor trail) may run.
 //
 // The resolution functions are pure. Nothing here touches the DOM at import, so node can import the file.
 import { state } from "./state.js";
@@ -52,6 +53,14 @@ export function effectiveBlink(setting: BlinkSetting, motionReduced: boolean, en
   return !motionReduced;
 }
 
+/**
+ * Whether an optional grid effect (smooth scrolling, the cursor trail) runs: the user turned it on and motion is not
+ * reduced. Reduced motion wins over the setting, from the OS (`motion: "system"`) or from the app (`motion: "reduce"`).
+ */
+export function effectiveEffect(setting: boolean, motionReduced: boolean): boolean {
+  return setting && !motionReduced;
+}
+
 // ---- measured contrast ----------------------------------------------------------------------------
 
 /** WCAG relative luminance of 0xRRGGBB. */
@@ -80,14 +89,20 @@ export function onAccentOf(fill: number): number {
 
 // ---- what is in force ------------------------------------------------------------------------------
 
-/** What the page resolved: the classes on the root and the blink setting the scene reads. */
+/** What the page resolved: the classes on the root, the blink setting and the two grid effects the scene reads. */
 export interface Preferences {
   motionReduced: boolean;
   contrastHigh: boolean;
   blink: BlinkSetting;
+  /** Smooth scrolling is on and allowed (`smooth_scroll` and not reduced motion). */
+  smoothScroll: boolean;
+  /** The cursor trail is on and allowed (`cursor_trail` and not reduced motion). */
+  cursorTrail: boolean;
 }
 
-let current: Preferences = { motionReduced: false, contrastHigh: false, blink: "system" };
+let current: Preferences = {
+  motionReduced: false, contrastHigh: false, blink: "system", smoothScroll: false, cursorTrail: false,
+};
 const listeners = new Set<() => void>();
 let attached: MediaQueryList[] = [];
 
@@ -110,6 +125,12 @@ export function preferences(): Preferences {
 /** Whether chrome transitions are off. */
 export const motionReduced = (): boolean => current.motionReduced;
 
+/** Whether smooth scrolling may run now: the setting is on and motion is not reduced. */
+export const smoothScrollOn = (): boolean => current.smoothScroll;
+
+/** Whether the cursor trail may run now: the setting is on and motion is not reduced. */
+export const cursorTrailOn = (): boolean => current.cursorTrail;
+
 /** The cursor blink setting the core holds (`system` until it said). */
 export const blinkSetting = (): BlinkSetting => current.blink;
 
@@ -119,11 +140,14 @@ export const blinkSetting = (): BlinkSetting => current.blink;
  */
 export function refresh(): void {
   const s = state.settings?.settings;
+  const reduced = effectiveMotion((s?.motion ?? "system") as MotionSetting, os(QUERIES.reduce)) === "reduce";
   const next: Preferences = {
-    motionReduced: effectiveMotion((s?.motion ?? "system") as MotionSetting, os(QUERIES.reduce)) === "reduce",
+    motionReduced: reduced,
     contrastHigh:
       effectiveContrast((s?.contrast ?? "system") as ContrastSetting, os(QUERIES.more), os(QUERIES.forced)) === "high",
     blink: (s?.cursor_blink ?? "system") as BlinkSetting,
+    smoothScroll: effectiveEffect(s?.smooth_scroll === true, reduced),
+    cursorTrail: effectiveEffect(s?.cursor_trail === true, reduced),
   };
   const root = document.documentElement;
   root.classList.toggle(MOTION_CLASS, next.motionReduced);
@@ -131,7 +155,9 @@ export function refresh(): void {
   const changed =
     next.motionReduced !== current.motionReduced ||
     next.contrastHigh !== current.contrastHigh ||
-    next.blink !== current.blink;
+    next.blink !== current.blink ||
+    next.smoothScroll !== current.smoothScroll ||
+    next.cursorTrail !== current.cursorTrail;
   current = next;
   if (changed) for (const fn of [...listeners]) fn();
 }
@@ -152,7 +178,7 @@ export function watch(): () => void {
   };
 }
 
-/** Call `fn` when the motion, the contrast or the blink setting in force changed; the returned function stops it. */
+/** Call `fn` when the motion, the contrast, the blink or an effect in force changed; the returned function stops it. */
 export function onPreferenceChange(fn: () => void): () => void {
   listeners.add(fn);
   return () => void listeners.delete(fn);
