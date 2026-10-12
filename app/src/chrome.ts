@@ -1,14 +1,20 @@
 // The window bar above the stage: workspace chips, numbered tabs, and the host name and clock at the right. It is
 // drawn from `state.view` and the pane titles; the elements are keyed by position and updated in place, and every
 // name from the core is put in with `textContent`, never parsed as markup. The bar's free space drags the window.
+import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, fitNodes, loadStyles, setAttr, setText } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { clockText, tabLabel } from "./labels.js";
+import { renamePane, setPaneRenameHandler } from "./panehead.js";
+import { startRename } from "./rename.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
 
 const bar = document.getElementById("bar") as HTMLDivElement;
+
+/** The title a tab has until the user names it (core/src/layout.rs). */
+const AUTO_TAB = "shell";
 
 /** Mark an element of the bar as part of the window's drag region (Tauri reads the attribute of the target only). */
 function draggable<T extends HTMLElement>(node: T): T {
@@ -83,14 +89,71 @@ export function renderBar(view: View, apply: (v: View) => void): void {
   fitNodes(tabs, tabButtons, view.tabs.length, () => button("tab", (index) => call("select_tab", { index })), newTab);
   view.tabs.forEach((t, i) => {
     const tab = tabButtons[i] as HTMLButtonElement;
-    // The title the focus pane's program set wins over the tab's own title.
-    const label = tabLabel(i, state.titles.get(t.focus) || t.title);
+    // A name the user gave wins; a tab still called `shell` shows the title its focus pane's program set.
+    const label = tabLabel(i, t.title !== AUTO_TAB ? t.title : state.titles.get(t.focus) || t.title);
     setAttr(tab, "data-index", String(i));
     setText(tab, label);
     setAttr(tab, "title", label);
     setActive(tab, t.active, "page");
   });
 }
+
+// ---- renaming ---------------------------------------------------------------------------------------------
+
+/** Rename the tab at `index`: the editor opens over its button and the confirmed name goes to the core. */
+function renameTabAt(index: number): void {
+  const t = state.view?.tabs[index];
+  const node = tabButtons[index];
+  if (!t || !node) return;
+  startRename(node, t.title === AUTO_TAB ? "" : t.title, state.titles.get(t.focus) || AUTO_TAB, (name) =>
+    send(call("rename_tab", { index, name })),
+  );
+}
+
+/** Rename the workspace at `index`. */
+function renameWorkspaceAt(index: number): void {
+  const w = state.view?.workspaces[index];
+  const node = chips[index];
+  if (!w || !node) return;
+  const auto = `ws ${index + 1}`;
+  startRename(node, w.name === auto ? "" : w.name, auto, (name) => send(call("rename_workspace", { index, name })));
+}
+
+/** Rename a pane: the name goes to the core, which cleans it. */
+function renamePaneTo(pane: number, name: string): void {
+  send(call("rename_pane", { pane, name }));
+}
+
+/** Register the three rename actions (palette and key binding table, unbound by default). Call once at start-up. */
+function registerRenameActions(): void {
+  registerAction({
+    id: "tab.rename",
+    title: "Rename tab",
+    run: () => renameTabAt(state.view?.tabs.findIndex((t) => t.active) ?? -1),
+  });
+  registerAction({
+    id: "workspace.rename",
+    title: "Rename workspace",
+    run: () => renameWorkspaceAt(state.view?.workspaces.findIndex((w) => w.active) ?? -1),
+  });
+  registerAction({
+    id: "pane.rename",
+    title: "Rename pane",
+    run: () => {
+      if (state.view) renamePane(state.view.focus);
+    },
+  });
+}
+
+// A double click on a tab or a workspace chip renames it. The first click of the pair has already selected it.
+tabs.addEventListener("dblclick", (e) => {
+  const index = tabButtons.findIndex((b) => b === (e.target as Element).closest("button"));
+  if (index >= 0) renameTabAt(index);
+});
+workspaces.addEventListener("dblclick", (e) => {
+  const index = chips.findIndex((b) => b === (e.target as Element).closest("button"));
+  if (index >= 0) renameWorkspaceAt(index);
+});
 
 // The plus buttons send the layout commands without an index.
 newWorkspace.addEventListener("click", () => {
@@ -141,6 +204,8 @@ async function loadInfo(): Promise<void> {
  * the first measurement: the bar and the status line need their sizes by then.
  */
 export async function initChrome(): Promise<void> {
+  registerRenameActions();
+  setPaneRenameHandler(renamePaneTo);
   tick();
   setInterval(tick, CLOCK_MS);
   await Promise.all([

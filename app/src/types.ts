@@ -27,6 +27,8 @@ export interface View {
   focus: number;
   panes: [number, UnitRect][];
   dividers: Divider[];
+  /** The names the user gave to the panes of the shown tab. */
+  pane_names: [number, string][];
 }
 
 /** A pane's size in cells. */

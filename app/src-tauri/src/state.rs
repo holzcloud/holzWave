@@ -2558,7 +2558,9 @@ mod tests {
         assert!(view.themes.iter().all(|t| t.builtin));
         assert_eq!(view.theme, Theme::aubergine());
         assert_eq!(view.keybindings.len(), actions().len());
-        assert!(view.keybindings.iter().all(|row| row.is_default && row.chord.is_some()));
+        assert!(view.keybindings.iter().all(|row| row.is_default));
+        // Every action has a default chord but the rename actions and, off macOS, the line start and end ones.
+        assert!(view.keybindings.iter().all(|row| row.chord.is_some() || row.action.contains("rename") || row.action.starts_with("edit.line") || row.action == "edit.delete_to_line_start"));
         assert_eq!(view.warnings, Vec::<String>::new());
     }
 

@@ -8,6 +8,7 @@ import { APP_DIR, callsOf, emit } from "./lib.mjs";
 export default async function ({ page, url }) {
   await barCase(page, url);
   await titleCase(page, url);
+  await renameCase(page, url);
   await platformCase(page, url);
   await statusCase(page, url);
   await rendererCase(page, url);
@@ -159,15 +160,61 @@ async function barCase(page, url) {
 
 async function titleCase(page, url) {
   await open(page, url);
-  await showView(page, BAR_VIEW);
-  // A title the tab's focus pane set replaces the tab's own title; the other tabs keep theirs.
+  // A tab still called `shell` shows the title its focus pane's program set; a tab the user named keeps its name.
+  const auto = { ...BAR_VIEW, tabs: BAR_VIEW.tabs.map((t, i) => (i === 2 ? t : { ...t, title: "shell" })) };
+  await showView(page, auto);
   await emit(page, "title", { pane: 1, title: "vim README.md" });
-  assert.deepEqual(await texts(page, "#bar .tab"), ["1 vim README.md", "2 two", "3 three"]);
+  assert.deepEqual(await texts(page, "#bar .tab"), ["1 vim README.md", "2 shell", "3 three"]);
   await emit(page, "title", { pane: 2, title: "htop" });
   assert.deepEqual(await texts(page, "#bar .tab"), ["1 vim README.md", "2 htop", "3 three"]);
+  await emit(page, "title", { pane: 3, title: "top" });
+  assert.deepEqual(await texts(page, "#bar .tab"), ["1 vim README.md", "2 htop", "3 three"], "a named tab keeps its name");
   // A pane that exited forgets its title.
   await emit(page, "pane-exit", { pane: 1, code: 0 });
-  assert.deepEqual(await texts(page, "#bar .tab"), ["1 one", "2 htop", "3 three"]);
+  assert.deepEqual(await texts(page, "#bar .tab"), ["1 shell", "2 htop", "3 three"]);
+}
+
+/**
+ * DESK-32: a double click on a tab, a workspace chip or a pane header opens the name editor over it; Enter sends the
+ * name once, Escape sends nothing, the field takes no key for the terminal, and a name is only ever shown as text.
+ */
+async function renameCase(page, url) {
+  await open(page, url);
+  await showView(page, { ...BAR_VIEW, pane_names: [[1, "<b>api</b>"]] });
+  const sentCalls = (cmd) => callsOf(page, cmd);
+  const field = page.locator("input.rename-input");
+
+  await page.locator("#bar .tab").nth(1).dblclick();
+  assert.equal(await field.count(), 1, "the editor opens over the tab");
+  assert.equal(await field.inputValue(), "two", "it holds the current name");
+  // The text is selected when the editor opens, so typing replaces it.
+  await page.keyboard.type("docs");
+  assert.deepEqual(await sentCalls("key"), [], "typing in the editor sends no key to the terminal");
+  assert.deepEqual(await sentCalls("text"), [], "and no text");
+  await page.keyboard.press("Enter");
+  assert.equal(await field.count(), 0, "Enter closes the editor");
+  assert.deepEqual(await sentCalls("rename_tab"), [{ index: 1, name: "docs" }], "one rename_tab with the index and the text");
+
+  await page.locator("#bar .ws-chip").nth(1).dblclick();
+  await page.keyboard.type("holzWave");
+  await page.keyboard.press("Escape");
+  assert.equal(await field.count(), 0, "Escape closes the editor");
+  assert.deepEqual(await sentCalls("rename_workspace"), [], "Escape sends nothing");
+  await page.locator("#bar .ws-chip").nth(1).dblclick();
+  await page.keyboard.type("holzWave");
+  await page.keyboard.press("Enter");
+  assert.deepEqual(await sentCalls("rename_workspace"), [{ index: 1, name: "holzWave" }]);
+
+  // A pane header shows the name first as text, and a double click on it renames the pane.
+  const head = page.locator(".panehead .ph-title");
+  assert.equal(await head.textContent(), "<b>api</b>", "a name is text, never markup");
+  assert.equal(await page.locator(".panehead b").count(), 0);
+  await head.dblclick();
+  assert.equal(await field.inputValue(), "<b>api</b>");
+  await page.keyboard.press("Backspace");
+  await page.keyboard.press("Enter");
+  assert.deepEqual(await sentCalls("rename_pane"), [{ pane: 1, name: "" }], "an empty name asks for the automatic title");
+
 }
 
 async function clockCase(page, url) {
@@ -278,6 +325,7 @@ async function hostileCase(page, url) {
   const view = structuredClone(BAR_VIEW);
   view.workspaces[0].name = bad;
   view.tabs[0].title = "<script>window.__pwned=1</script>";
+  view.tabs[1].title = "shell"; // a tab still called shell shows the title its program set
   await showView(page, view);
   await emit(page, "title", { pane: 2, title: bad });
 

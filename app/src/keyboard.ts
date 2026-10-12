@@ -172,8 +172,9 @@ function onKeyDown(e: KeyboardEvent): void {
   }
   for (const chord of chordsOf(e)) {
     const id = actionIdFor(chord);
-    // A program on the alternate screen (vim, less, htop) reads these keys itself: the encoder gets them.
-    if (id !== undefined && EDIT_STEPS.has(id) && onAlternateScreen()) continue;
+    // A program on the alternate screen (vim, less, htop) reads these keys itself, and a text field of the page (the name
+    // editor, the search bar) edits its own line: neither gets the shell's line-editing bytes.
+    if (id !== undefined && EDIT_STEPS.has(id) && (onAlternateScreen() || inOtherField(e.target))) continue;
     // The registry decides what a held key may repeat. A repeat it swallowed is consumed here as well, so it never
     // reaches the encoder as terminal input.
     if (id !== undefined && runAction(id, { repeat: e.repeat })) {

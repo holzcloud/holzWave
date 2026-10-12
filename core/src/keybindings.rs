@@ -188,7 +188,7 @@ const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
 }
 
 /// The platform-independent part of the default table. Order is the order of the editor.
-static BASE_ACTIONS: [ActionInfo; 33] = [
+static BASE_ACTIONS: [ActionInfo; 36] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -222,6 +222,9 @@ static BASE_ACTIONS: [ActionInfo; 33] = [
     action("font.decrease", "Decrease font size", "Cmd+-"),
     action("font.reset", "Reset font size", "Cmd+0"),
     action("settings.open", "Open settings", "Cmd+,"),
+    unbound("tab.rename", "Rename tab"),
+    unbound("pane.rename", "Rename pane"),
+    unbound("workspace.rename", "Rename workspace"),
 ];
 
 /// The line-editing actions with the macOS standard as default: Option moves and deletes by word, Cmd by line.

@@ -16,7 +16,7 @@
 (() => {
   const LAYOUT_COMMANDS = new Set([
     "get_layout", "split", "new_tab", "new_workspace", "close_pane", "focus_pane",
-    "cycle_focus", "select_tab", "select_workspace", "set_ratio",
+    "cycle_focus", "select_tab", "select_workspace", "set_ratio", "rename_pane", "rename_tab", "rename_workspace",
   ]);
   const clamp = (r) => Math.min(0.9, Math.max(0.1, r));
 

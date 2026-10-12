@@ -139,3 +139,14 @@
   :root .ph-dot[data-state="focused"] { background: CanvasText; }
   :root .ph-dot[data-state="exited"]::after { background: CanvasText; }
 }
+
+/* The name editor: a text field over the label it renames. Square, hairline, mono like the rest of the chrome. */
+.rename-input {
+  position: fixed; z-index: 30; box-sizing: border-box; padding: 0 .5rem; margin: 0;
+  background: var(--hw-ground-2); color: var(--hw-ink); border: 1px solid var(--hw-ink); border-radius: 0;
+  font: inherit; outline: none;
+}
+.rename-input::placeholder { color: var(--hw-ink-2); }
+.ph-sub { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--hw-ink-2); margin-left: .667rem; }
+.ph-sub:empty { display: none; }
+.ph-title { pointer-events: auto; }

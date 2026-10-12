@@ -209,6 +209,8 @@ The defaults (the macOS table; Windows and Linux pick their own in Phase 2.2):
 | `tab.select_1` to `_9` | `Cmd+1` to `Cmd+9` | `font.increase` | `Cmd+=` |
 | `font.decrease` | `Cmd+-` | `font.reset` | `Cmd+0` |
 | `settings.open` | `Cmd+,` | | |
+| `tab.rename` | none | `pane.rename` | none |
+| `workspace.rename` | none | | |
 
 The line-editing actions send fixed bytes to the shell's line editor (`edit.word_back` and `edit.word_forward` send
 `ESC b` and `ESC f`, `edit.line_start` and `edit.line_end` send `Ctrl+A` and `Ctrl+E`, `edit.delete_word_back` sends
@@ -227,6 +229,11 @@ chord can be changed or unbound like any other. They apply on the normal screen 
 
 A single `Alt` or `Ctrl` is bindable on the navigation keys (`Left`, `Right`, `Up`, `Down`, `Home`, `End`,
 `Backspace`, `Delete`) and nowhere else, so `Option+7` on a Swiss layout still types its character.
+
+The three rename actions start the in-place editor on the shown tab, the focused pane and the shown workspace; a double
+click on a tab, a pane header or a workspace chip does the same. A name is cut to 128 characters, loses control
+characters and blanks at both ends, and the empty name gives the automatic one back (`shell`, the program's title,
+`ws N`). Names of panes are kept in `layout.json` (`pane_names`); tabs and workspaces keep theirs in their own entry.
 
 Actions without a chord in the table (`keybindings.open`, the theme entries of the palette) are reached from the
 palette and the dialogs and can be bound by adding them to the table in a later version.

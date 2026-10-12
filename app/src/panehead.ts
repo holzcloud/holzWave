@@ -9,12 +9,15 @@
 import { el, fitNodes, setAttr, setRect, setText } from "./dom.js";
 import { paneRect } from "./geometry.js";
 import { shortenHome } from "./labels.js";
+import { startRename } from "./rename.js";
 import { state } from "./state.js";
 
 interface Head {
   root: HTMLElement;
   dot: HTMLElement;
   title: HTMLElement;
+  /** The program's title, shown after a name the user gave. */
+  sub: HTMLElement;
   /** The text of the context lives in a child, so the cut can be made from the left (see chrome.css). */
   ctx: HTMLElement;
 }
@@ -33,9 +36,37 @@ function create(pane: number, parent: HTMLElement): Head {
   const dot = el("span", "ph-dot", root);
   dot.setAttribute("aria-hidden", "true");
   const title = el("span", "label ph-title", root);
+  const sub = el("span", "label ph-sub", root);
   const ctx = el("span", "ph-ctx", root);
   el("span", "", ctx);
-  return { root, dot, title, ctx };
+  title.addEventListener("dblclick", () => renamePane(pane));
+  return { root, dot, title, sub, ctx };
+}
+
+/** What a confirmed name is sent to; the chrome sets it, so this module does not import it. */
+let renameHandler: (pane: number, name: string) => void = () => {};
+
+/** Hand over the function that sends a pane's new name to the core. */
+export function setPaneRenameHandler(handler: (pane: number, name: string) => void): void {
+  renameHandler = handler;
+}
+
+/** The name the user gave to `pane`, or the empty string. */
+function nameOf(pane: number): string {
+  return state.view?.pane_names?.find(([id]) => id === pane)?.[1] ?? ""; // a view without the field has no names
+}
+
+/** Open the name editor over the pane's header title. */
+export function renamePane(pane: number): void {
+  const head = heads.get(pane);
+  if (!head) return;
+  startRename(head.title, nameOf(pane), automaticTitle(pane), (name) => renameHandler(pane, name));
+}
+
+/** The title a pane has without a name: what its program set, else the title of its tab. */
+function automaticTitle(pane: number): string {
+  const tab = state.view?.tabs.find((t) => t.active)?.title ?? "";
+  return titleOf(pane, tab);
 }
 
 /** The title of a pane's strip: what its program set, else the title of the tab the pane is in. */
@@ -69,7 +100,11 @@ export function renderPaneHeads(): void {
       head.root.classList.toggle("focus-line", focused && multiple && !exited);
       head.root.classList.toggle("exited", exited);
       setAttr(head.dot, "data-state", exited ? "exited" : focused ? "focused" : "idle");
-      setText(head.title, titleOf(id, tabTitle));
+      const name = nameOf(id);
+      const program = titleOf(id, tabTitle);
+      // A name the user gave comes first; the program's title stays visible after it, lighter.
+      setText(head.title, name === "" ? program : name);
+      setText(head.sub, name !== "" && program !== name ? program : "");
       const ctx = exited ? "exited" : shortenHome(state.cwds.get(id) ?? "", state.os);
       setText(head.ctx.firstElementChild as HTMLElement, ctx);
       setAttr(head.ctx, "title", ctx === "" ? null : ctx);

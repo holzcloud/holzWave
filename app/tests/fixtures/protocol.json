@@ -386,6 +386,24 @@
           "title": "Open settings"
         },
         {
+          "action": "tab.rename",
+          "chord": null,
+          "is_default": true,
+          "title": "Rename tab"
+        },
+        {
+          "action": "pane.rename",
+          "chord": null,
+          "is_default": true,
+          "title": "Rename pane"
+        },
+        {
+          "action": "workspace.rename",
+          "chord": null,
+          "is_default": true,
+          "title": "Rename workspace"
+        },
+        {
           "action": "edit.word_back",
           "chord": "Alt+Left",
           "is_default": true,
@@ -833,6 +851,24 @@
         "chord": "Cmd+,",
         "is_default": true,
         "title": "Open settings"
+      },
+      {
+        "action": "tab.rename",
+        "chord": null,
+        "is_default": true,
+        "title": "Rename tab"
+      },
+      {
+        "action": "pane.rename",
+        "chord": null,
+        "is_default": true,
+        "title": "Rename pane"
+      },
+      {
+        "action": "workspace.rename",
+        "chord": null,
+        "is_default": true,
+        "title": "Rename workspace"
       },
       {
         "action": "edit.word_back",
