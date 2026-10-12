@@ -2,7 +2,7 @@
 // (facts only) and which canonical chords an event can stand for. No DOM, so node imports it.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "../../dist/keymap.js";
+import { chordsOf, isComposingKey, isModifierKey, keyPayload, primaryChord } from "../../dist/keymap.js";
 
 /** A KeyboardEvent-like object; every modifier is off unless `extra` turns it on. */
 const ev = (code, key, extra = {}) => ({
@@ -133,4 +133,59 @@ test("a key name that is a property of Object.prototype is not a chord", () => {
 
 test("a dead key under Option still names the chord by its physical key", () => {
   assert.ok(chordsOf(ev("KeyE", "Dead", { metaKey: true, altKey: true })).includes("Cmd+Alt+E"));
+});
+
+// ---- AltGr (Phase 2.2: the Swiss and German layouts type @ \ | { } [ ] ~ € with it) ----------------------
+
+/** What a Chromium webview reports for AltGr on Windows: Ctrl and Alt both set, and the modifier state `AltGraph`. */
+const altGr = (code, key, extra = {}) => ev(code, key, {
+  ctrlKey: true, altKey: true, getModifierState: (name) => name === "AltGraph", ...extra,
+});
+
+test("altgr_drops_ctrl_and_alt_from_the_payload", () => {
+  // Swiss AltGr+7 types |.
+  const p = keyPayload(altGr("Digit7", "|"));
+  assert.equal(p.mods, 0, "no Ctrl and no Alt bit");
+  assert.equal(p.key, "|");
+  assert.ok(chordsOf(altGr("Digit7", "|")).every((c) => !c.includes("Ctrl") && !c.includes("Alt")));
+  // Shift stays; Super stays.
+  assert.equal(keyPayload(altGr("Digit7", "\\", { shiftKey: true })).mods, 1, "shift only");
+  assert.equal(keyPayload(altGr("Digit7", "|", { metaKey: true })).mods, 8, "super only");
+  // Every character of the Swiss set arrives with no modifier.
+  for (const [code, key] of [["Digit2", "@"], ["IntlBackslash", "\\"], ["Quote", "{"], ["Backslash", "}"], ["BracketLeft", "["], ["BracketRight", "]"], ["KeyE", "€"]]) {
+    assert.equal(keyPayload(altGr(code, key)).mods, 0, key);
+  }
+});
+
+test("a_real_ctrl_alt_chord_is_still_a_chord", () => {
+  const real = ev("Digit7", "7", { ctrlKey: true, altKey: true, getModifierState: () => false });
+  assert.equal(keyPayload(real).mods, 6, "Alt and Ctrl");
+  assert.ok(chordsOf(real).includes("Ctrl+Alt+7"));
+  assert.ok(chordsOf(ev("KeyC", "c", { ctrlKey: true, altKey: true, getModifierState: () => false })).includes("Ctrl+Alt+C"));
+  // An event object without getModifierState behaves as before.
+  assert.equal(keyPayload(ev("Digit7", "7", { ctrlKey: true, altKey: true })).mods, 6);
+  assert.ok(chordsOf(ev("Digit7", "7", { ctrlKey: true, altKey: true })).includes("Ctrl+Alt+7"));
+  // AltGr state without the two flags (X11, Wayland) changes nothing either.
+  assert.equal(keyPayload(ev("Digit7", "|", { getModifierState: (n) => n === "AltGraph" })).mods, 0);
+});
+
+test("altgr_keeps_the_typed_character_ahead_of_the_physical_key", () => {
+  // With a plain Alt the physical key comes first (a composed character is no use for a chord); AltGr is not Alt.
+  assert.deepEqual(chordsOf(altGr("Digit7", "|")), ["|", "7"]);
+  assert.deepEqual(chordsOf(ev("Digit7", "|", { altKey: true, getModifierState: () => false })), ["Alt+7", "Alt+|"]);
+});
+
+test("the_recorder_cannot_record_altgr_as_ctrl_alt", () => {
+  const swissPipe = altGr("Digit7", "|");
+  const recorded = primaryChord(swissPipe);
+  assert.ok(recorded === null || (!recorded.includes("Ctrl") && !recorded.includes("Alt")), String(recorded));
+  assert.equal(primaryChord(ev("Digit7", "7", { ctrlKey: true, altKey: true, getModifierState: () => false })), "Ctrl+Alt+7");
+  // AltGr plus a letter is the letter's own press, never Ctrl+Alt+letter.
+  assert.equal(primaryChord(altGr("KeyE", "e")), "E");
+});
+
+test("the_altgr_key_itself_is_a_modifier_and_is_not_forwarded", () => {
+  assert.equal(isModifierKey(ev("AltRight", "AltGraph")), true);
+  // Windows sends a Control keydown before the AltGraph one.
+  assert.equal(isModifierKey(ev("ControlLeft", "Control", { ctrlKey: true })), true);
 });

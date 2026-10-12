@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::platform::Os;
 use crate::{Error, Result};
 
 /// An RGB colour, already resolved against the palette.
@@ -148,6 +149,11 @@ impl Mods {
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
+
+    /// This set without the modifiers of `other`.
+    pub const fn without(self, other: Mods) -> Mods {
+        Mods(self.0 & !other.0)
+    }
 }
 
 impl std::ops::BitOr for Mods {
@@ -217,10 +223,12 @@ impl KeyEvent {
     /// Alt that produced text is a consumed modifier unless `option_as_alt` is on. Ctrl+[, Ctrl+I and Ctrl+M get no
     /// special case: they are whatever the engine encodes (D-13).
     pub fn from_dom(dom: &DomKey, option_as_alt: bool) -> KeyEvent {
-        KeyEvent::from_dom_on(dom, option_as_alt, cfg!(target_os = "macos"))
+        KeyEvent::from_dom_on(dom, option_as_alt, Os::current())
     }
 
-    fn from_dom_on(dom: &DomKey, option_as_alt: bool, macos: bool) -> KeyEvent {
+    /// [`from_dom`](Self::from_dom) for the rules of another platform, so that every platform's rule is testable on
+    /// any host.
+    pub fn from_dom_on(dom: &DomKey, option_as_alt: bool, os: Os) -> KeyEvent {
         let action = if dom.release {
             KeyAction::Release
         } else if dom.repeat {
@@ -232,14 +240,28 @@ impl KeyEvent {
         let text = if dom.release { None } else { key_text(&dom.key) };
         let unshifted = us_unshifted(&dom.code).or_else(|| text.as_deref().and_then(lowercase_char));
 
+        let mut mods = dom.mods;
         let mut consumed = Mods::NONE;
         if text.is_some() {
             if dom.mods.contains(Mods::SHIFT) {
                 consumed |= Mods::SHIFT;
             }
             // On macOS Option composes characters; unless it is meant as Alt, the composition used it up.
-            if macos && !option_as_alt && dom.mods.contains(Mods::ALT) {
+            if os == Os::Macos && !option_as_alt && dom.mods.contains(Mods::ALT) {
                 consumed |= Mods::ALT;
+            }
+            // On Windows AltGr arrives as Ctrl+Alt. The page drops both when the browser says AltGraph; this is the
+            // backstop for a webview that does not. Only text the layout composed counts: the lower-cased text is
+            // not the US character of the physical key (or the key has none). Ctrl+Alt+C on a US layout types `c`
+            // on the C key and stays a chord. The two modifiers are removed rather than marked consumed: the
+            // encoder's Ctrl-sequence rule reads every held modifier, so a consumed Ctrl would still turn `@` into NUL.
+            let altgr = Mods::CTRL | Mods::ALT;
+            if os == Os::Windows && mods.contains(altgr) {
+                let typed = text.as_deref().and_then(lowercase_char);
+                let us = us_unshifted(&dom.code);
+                if us.is_none() || us != typed {
+                    mods = mods.without(altgr);
+                }
             }
         }
 
@@ -247,7 +269,7 @@ impl KeyEvent {
             code: dom.code.clone(),
             text,
             unshifted,
-            mods: dom.mods,
+            mods,
             consumed,
             action,
             composing: dom.composing,
@@ -753,7 +775,7 @@ mod tests {
     }
 
     fn event(code: &str, key: &str, mods: Mods) -> KeyEvent {
-        KeyEvent::from_dom_on(&dom(code, key, mods), false, false)
+        KeyEvent::from_dom_on(&dom(code, key, mods), false, Os::Linux)
     }
 
     #[test]
@@ -799,7 +821,7 @@ mod tests {
     #[test]
     fn release_events_never_carry_text() {
         let d = DomKey { release: true, ..dom("KeyA", "a", Mods::NONE) };
-        let e = KeyEvent::from_dom_on(&d, false, false);
+        let e = KeyEvent::from_dom_on(&d, false, Os::Linux);
         assert_eq!(e.action, KeyAction::Release);
         assert_eq!(e.text, None);
         assert_eq!(e.consumed, Mods::NONE);
@@ -807,18 +829,18 @@ mod tests {
 
     #[test]
     fn action_follows_release_then_repeat() {
-        let press = KeyEvent::from_dom_on(&dom("KeyA", "a", Mods::NONE), false, false);
+        let press = KeyEvent::from_dom_on(&dom("KeyA", "a", Mods::NONE), false, Os::Linux);
         assert_eq!(press.action, KeyAction::Press);
         let repeat = DomKey { repeat: true, ..dom("KeyA", "a", Mods::NONE) };
-        assert_eq!(KeyEvent::from_dom_on(&repeat, false, false).action, KeyAction::Repeat);
+        assert_eq!(KeyEvent::from_dom_on(&repeat, false, Os::Linux).action, KeyAction::Repeat);
         let both = DomKey { repeat: true, release: true, ..dom("KeyA", "a", Mods::NONE) };
-        assert_eq!(KeyEvent::from_dom_on(&both, false, false).action, KeyAction::Release);
+        assert_eq!(KeyEvent::from_dom_on(&both, false, Os::Linux).action, KeyAction::Release);
     }
 
     #[test]
     fn composing_is_copied() {
         let d = DomKey { composing: true, ..dom("KeyA", "a", Mods::NONE) };
-        assert!(KeyEvent::from_dom_on(&d, false, false).composing);
+        assert!(KeyEvent::from_dom_on(&d, false, Os::Linux).composing);
         assert!(!event("KeyA", "a", Mods::NONE).composing);
     }
 
@@ -874,17 +896,63 @@ mod tests {
     #[test]
     fn consumed_holds_alt_only_on_macos_when_option_composes_text() {
         let d = dom("KeyF", "\u{0192}", Mods::ALT);
-        assert_eq!(KeyEvent::from_dom_on(&d, false, true).consumed, Mods::ALT);
+        assert_eq!(KeyEvent::from_dom_on(&d, false, Os::Macos).consumed, Mods::ALT);
         // option-as-alt on: Option is Alt, nothing was composed away.
-        assert_eq!(KeyEvent::from_dom_on(&d, true, true).consumed, Mods::NONE);
+        assert_eq!(KeyEvent::from_dom_on(&d, true, Os::Macos).consumed, Mods::NONE);
         // Not macOS: Alt is Alt.
-        assert_eq!(KeyEvent::from_dom_on(&d, false, false).consumed, Mods::NONE);
+        assert_eq!(KeyEvent::from_dom_on(&d, false, Os::Linux).consumed, Mods::NONE);
         // No text: nothing to consume.
         let arrow = dom("ArrowLeft", "ArrowLeft", Mods::ALT);
-        assert_eq!(KeyEvent::from_dom_on(&arrow, false, true).consumed, Mods::NONE);
+        assert_eq!(KeyEvent::from_dom_on(&arrow, false, Os::Macos).consumed, Mods::NONE);
         // Alt not held: nothing to consume even on macOS.
         let plain = dom("KeyF", "f", Mods::NONE);
-        assert_eq!(KeyEvent::from_dom_on(&plain, false, true).consumed, Mods::NONE);
+        assert_eq!(KeyEvent::from_dom_on(&plain, false, Os::Macos).consumed, Mods::NONE);
+    }
+
+    #[test]
+    fn windows_drops_ctrl_and_alt_when_the_layout_composed_the_text() {
+        // AltGr arrives as Ctrl+Alt: Swiss `|` on Digit7, German `@` on KeyQ, `@` on Digit2 of a US-based layout, `€`
+        // on KeyE. The text differs from the US character of the physical key, so the layout used both up.
+        let both = Mods::CTRL | Mods::ALT;
+        for (code, key) in [("Digit2", "@"), ("Digit7", "|"), ("KeyE", "\u{20AC}"), ("KeyQ", "@"), ("Digit8", "{")] {
+            let e = KeyEvent::from_dom_on(&dom(code, key, both), false, Os::Windows);
+            assert_eq!(e.mods, Mods::NONE, "{code} {key}");
+            assert_eq!(e.text.as_deref(), Some(key));
+        }
+        // A code with no US character and text present: the layout put something there.
+        let d = dom("IntlBackslash", "\\", both);
+        assert_eq!(KeyEvent::from_dom_on(&d, false, Os::Windows).mods, Mods::NONE);
+        // Shift stays next to them, and stays consumed as before.
+        let d = dom("Digit7", "\\", both | Mods::SHIFT);
+        let e = KeyEvent::from_dom_on(&d, false, Os::Windows);
+        assert_eq!((e.mods, e.consumed), (Mods::SHIFT, Mods::SHIFT));
+    }
+
+    #[test]
+    fn windows_keeps_a_real_ctrl_alt_chord_on_a_us_layout() {
+        let both = Mods::CTRL | Mods::ALT;
+        // Ctrl+Alt+C types `c` on the C key, and Shift on top types `C`: both are the US character of the key.
+        assert_eq!(KeyEvent::from_dom_on(&dom("KeyC", "c", both), false, Os::Windows).mods, both);
+        let shifted = KeyEvent::from_dom_on(&dom("KeyC", "C", both | Mods::SHIFT), false, Os::Windows);
+        assert_eq!((shifted.mods, shifted.consumed), (both | Mods::SHIFT, Mods::SHIFT));
+        // Only one of the two held, or no text: nothing is dropped.
+        assert_eq!(KeyEvent::from_dom_on(&dom("Digit7", "|", Mods::CTRL), false, Os::Windows).mods, Mods::CTRL);
+        assert_eq!(KeyEvent::from_dom_on(&dom("Digit7", "|", Mods::ALT), false, Os::Windows).mods, Mods::ALT);
+        assert_eq!(KeyEvent::from_dom_on(&dom("ArrowLeft", "ArrowLeft", both), false, Os::Windows).mods, both);
+    }
+
+    #[test]
+    fn macos_and_linux_keep_every_ctrl_alt_event_as_it_was() {
+        let both = Mods::CTRL | Mods::ALT;
+        for (code, key) in [("Digit2", "@"), ("Digit7", "|"), ("KeyC", "c"), ("IntlBackslash", "\\")] {
+            let d = dom(code, key, both);
+            assert_eq!(KeyEvent::from_dom_on(&d, true, Os::Macos).mods, both, "{code} on macOS with option as alt");
+            assert_eq!(KeyEvent::from_dom_on(&d, false, Os::Linux).mods, both, "{code} on Linux");
+            assert_eq!(KeyEvent::from_dom_on(&d, false, Os::Linux).consumed, Mods::NONE, "{code} on Linux");
+        }
+        // macOS without option-as-alt still consumes Alt only, as before.
+        let d = dom("Digit7", "|", both);
+        assert_eq!(KeyEvent::from_dom_on(&d, false, Os::Macos).consumed, Mods::ALT);
     }
 
     #[test]

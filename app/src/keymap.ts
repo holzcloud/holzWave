@@ -13,6 +13,8 @@ export interface KeyLike {
   repeat?: boolean;
   isComposing?: boolean;
   keyCode?: number;
+  /** The browser's modifier state by name; only `"AltGraph"` is asked. Absent on a plain object. */
+  getModifierState?(key: string): boolean;
 }
 
 /** What the page tells the core about one key event (the `key` command without the pane). */
@@ -31,9 +33,31 @@ const ALT = 2;
 const CTRL = 4;
 const SUPER = 8;
 
+/**
+ * AltGr is held. A layout with a third level (Swiss, German) types `@ \ | { } [ ] ~ €` with it, and Windows
+ * reports it as Ctrl and Alt together; the browser says `AltGraph` for it. That Ctrl and Alt belong to the layout, not
+ * to the user, so every reader below ignores them while AltGr is held. A real Ctrl+Alt chord has no AltGr and stays one.
+ */
+function altGraph(e: KeyLike): boolean {
+  return typeof e.getModifierState === "function" && e.getModifierState("AltGraph") === true;
+}
+
+/** The modifiers the user holds: Ctrl and Alt are not among them while AltGr is. */
+function held(e: KeyLike): { shift: boolean; ctrl: boolean; alt: boolean; meta: boolean; altGr: boolean } {
+  const altGr = altGraph(e);
+  return {
+    shift: e.shiftKey === true,
+    ctrl: e.ctrlKey === true && !altGr,
+    alt: e.altKey === true && !altGr,
+    meta: e.metaKey === true,
+    altGr,
+  };
+}
+
 /** The modifier bit set of an event, in the numbering of the `key` command. */
 function modsOf(e: KeyLike): number {
-  return (e.shiftKey ? SHIFT : 0) | (e.altKey ? ALT : 0) | (e.ctrlKey ? CTRL : 0) | (e.metaKey ? SUPER : 0);
+  const m = held(e);
+  return (m.shift ? SHIFT : 0) | (m.alt ? ALT : 0) | (m.ctrl ? CTRL : 0) | (m.meta ? SUPER : 0);
 }
 
 /**
@@ -147,19 +171,25 @@ function physicalKey(code: string): string | null {
   return PHYSICAL_NAMES.get(code) ?? null;
 }
 
+/** The modifier part of a canonical chord: `Cmd`, `Ctrl`, `Alt`, `Shift` in that order. */
+function chordPrefix(m: { shift: boolean; ctrl: boolean; alt: boolean; meta: boolean }): string {
+  return (m.meta ? "Cmd+" : "") + (m.ctrl ? "Ctrl+" : "") + (m.alt ? "Alt+" : "") + (m.shift ? "Shift+" : "");
+}
+
 /**
  * The canonical chords an event can stand for, most likely first: `Cmd`, `Ctrl`, `Alt`, `Shift` in that order and
  * then the key, letters in upper case. A binding matches by the key the layout typed or by the physical key, so
  * `Cmd+[` works on a layout that types something else there (Swiss) and `Cmd+Alt+1` works although Option changes
  * the typed character. With Option held the typed character is a composed one, so the physical key comes first.
- * A modifier on its own has no chord.
+ * With AltGr held Ctrl and Alt are not part of the event and the typed character stays first. A modifier on its own
+ * has no chord.
  */
 export function chordsOf(e: KeyLike): string[] {
   const logical = logicalKey(e.key);
   const physical = physicalKey(e.code);
-  const names = e.altKey ? [physical, logical] : [logical, physical];
-  const prefix =
-    (e.metaKey ? "Cmd+" : "") + (e.ctrlKey ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "");
+  const m = held(e);
+  const names = m.alt ? [physical, logical] : [logical, physical];
+  const prefix = chordPrefix(m);
   const out: string[] = [];
   for (const name of names) {
     if (name === null) continue;
@@ -179,9 +209,13 @@ export function chordsOf(e: KeyLike): string[] {
  */
 export function primaryChord(e: KeyLike): string | null {
   const key = typeof e.key === "string" ? e.key : "";
-  const name = /^[A-Za-z0-9]$/.test(key) ? key.toUpperCase() : (physicalKey(e.code) ?? logicalKey(key));
+  const m = held(e);
+  // With AltGr held the typed character is the layout's own, so it is the name and the physical key only a fallback.
+  const name = /^[A-Za-z0-9]$/.test(key)
+    ? key.toUpperCase()
+    : m.altGr
+      ? (logicalKey(key) ?? physicalKey(e.code))
+      : (physicalKey(e.code) ?? logicalKey(key));
   if (name === null) return null;
-  return (
-    (e.metaKey ? "Cmd+" : "") + (e.ctrlKey ? "Ctrl+" : "") + (e.altKey ? "Alt+" : "") + (e.shiftKey ? "Shift+" : "") + name
-  );
+  return chordPrefix(m) + name;
 }

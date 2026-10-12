@@ -9,6 +9,7 @@ mod common;
 use common::{ascii, engine};
 use holzwave_core::TerminalEngine;
 use holzwave_core::engine::{DomKey, KeyAction, KeyEvent, Mods};
+use holzwave_core::platform::Os;
 
 /// A press of the key with this W3C `code`, no text, no modifiers.
 fn press(code: &str) -> KeyEvent {
@@ -188,6 +189,56 @@ mod option_as_alt {
         e.set_option_as_alt(false);
         let ev = KeyEvent::from_dom(&dom("KeyF", "\u{0192}", Mods::ALT), false);
         assert_eq!(encode(&mut e, &ev), ascii("\u{0192}".as_bytes()));
+    }
+}
+
+/// Phase 2.2: AltGr on Windows arrives as Ctrl+Alt. The page drops both when the browser says AltGraph; the core
+/// backs it up with the Windows platform value, so these run the real encoder on any host.
+mod windows_altgr {
+    use super::*;
+
+    fn encode_on_windows(e: &mut impl TerminalEngine, d: &DomKey) -> String {
+        encode(e, &KeyEvent::from_dom_on(d, false, Os::Windows))
+    }
+
+    #[test]
+    fn the_swiss_altgr_characters_arrive_as_the_character() {
+        let both = Mods::CTRL | Mods::ALT;
+        let mut e = engine(20, 4);
+        // Swiss AltGr+2, +7, +< and the Swiss `{` and `}` keys, German AltGr+E and AltGr+Q: each types a character
+        // other than the US one of its physical key. (Swiss AltGr+ü is `[` on BracketLeft, the US character of that
+        // key: only the page's AltGraph rule can tell it from Ctrl+Alt+[; hardware row W4 covers it.)
+        for (code, key) in [
+            ("Digit2", "@"),
+            ("Digit7", "|"),
+            ("KeyE", "\u{20AC}"),
+            ("KeyQ", "@"),
+            ("IntlBackslash", "\\"),
+            ("Quote", "{"),
+            ("Backslash", "}"),
+            ("Equal", "~"),
+        ] {
+            let got = encode_on_windows(&mut e, &dom(code, key, both));
+            assert_eq!(got, ascii(key.as_bytes()), "{code} {key}");
+        }
+    }
+
+    #[test]
+    fn a_ctrl_alt_chord_of_a_us_layout_is_encoded_as_before() {
+        let mut e = engine(20, 4);
+        let d = dom("KeyC", "c", Mods::CTRL | Mods::ALT);
+        // The same bytes the other platforms produce: Windows changes nothing for this event.
+        let on_linux = encode(&mut e, &KeyEvent::from_dom_on(&d, false, Os::Linux));
+        assert_eq!(encode_on_windows(&mut e, &d), on_linux);
+        assert_ne!(on_linux, "c");
+    }
+
+    #[test]
+    fn linux_does_not_drop_anything_for_altgr() {
+        // Off Windows the page drops the bits; the core does not guess.
+        let mut e = engine(20, 4);
+        let d = dom("Digit7", "|", Mods::CTRL | Mods::ALT);
+        assert_ne!(encode(&mut e, &KeyEvent::from_dom_on(&d, false, Os::Linux)), "|");
     }
 }
 
