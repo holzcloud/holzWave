@@ -70,7 +70,7 @@ fn parse_exposes_modifiers_and_key_as_fields() {
 
 /// The action table, after checking that it is the full set: a loop over an empty table would pass vacuously.
 fn all_actions() -> &'static [holzwave_core::keybindings::ActionInfo] {
-    assert_eq!(actions().len(), 15 + 9 + 9, "the table holds 33 actions");
+    assert_eq!(actions().len(), 15 + 9 + 9 + 6, "the table holds 39 actions");
     actions()
 }
 
@@ -216,6 +216,56 @@ fn a_chord_is_bindable_with_cmd_or_with_two_modifiers_including_ctrl_or_alt() {
     ] {
         assert!(chord(text).is_bindable(), "{text} should be bindable");
     }
+}
+
+#[test]
+fn a_single_alt_or_ctrl_on_a_navigation_key_is_bindable_but_not_on_a_letter() {
+    for text in ["Alt+Left", "Alt+Right", "Ctrl+Left", "Ctrl+Right", "Alt+Backspace", "Ctrl+Backspace", "Alt+Home", "Ctrl+End", "Alt+Delete"] {
+        assert!(chord(text).is_bindable(), "{text} should be bindable");
+    }
+    // Option+7 types a bracket on a Swiss layout: a letter, digit or symbol with one Alt or Ctrl stays typing.
+    for text in ["Alt+D", "Alt+7", "Ctrl+D", "Alt+[", "Alt+Space", "Alt+Enter", "Alt+Tab", "Shift+Left", "Alt+F5"] {
+        assert!(!chord(text).is_bindable(), "{text} must stay with the terminal");
+    }
+}
+
+#[test]
+fn the_edit_actions_are_in_the_table_with_the_platform_standard_as_default() {
+    let ids = [
+        "edit.word_back",
+        "edit.word_forward",
+        "edit.line_start",
+        "edit.line_end",
+        "edit.delete_word_back",
+        "edit.delete_to_line_start",
+    ];
+    for id in ids {
+        assert!(actions().iter().any(|a| a.id == id), "{id} is missing from the table");
+    }
+    if cfg!(target_os = "macos") {
+        assert_eq!(default_of("edit.word_back"), Some("Alt+Left"));
+        assert_eq!(default_of("edit.word_forward"), Some("Alt+Right"));
+        assert_eq!(default_of("edit.line_start"), Some("Cmd+Left"));
+        assert_eq!(default_of("edit.line_end"), Some("Cmd+Right"));
+        assert_eq!(default_of("edit.delete_word_back"), Some("Alt+Backspace"));
+        assert_eq!(default_of("edit.delete_to_line_start"), Some("Cmd+Backspace"));
+    } else {
+        assert_eq!(default_of("edit.word_back"), Some("Ctrl+Left"));
+        assert_eq!(default_of("edit.word_forward"), Some("Ctrl+Right"));
+        assert_eq!(default_of("edit.delete_word_back"), Some("Ctrl+Backspace"));
+        // Home and End already work through the encoder.
+        assert_eq!(default_of("edit.line_start"), None);
+        assert_eq!(default_of("edit.line_end"), None);
+    }
+}
+
+#[test]
+fn an_edit_action_can_be_moved_and_unbound_like_any_other() {
+    let (table, warnings) =
+        Keybindings::resolve(&overrides(&[("edit.word_back", "Ctrl+Alt+B"), ("edit.word_forward", "")]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(table.chord_of("edit.word_back").map(ToString::to_string), Some("Ctrl+Alt+B".to_string()));
+    assert_eq!(table.chord_of("edit.word_forward"), None);
 }
 
 #[test]

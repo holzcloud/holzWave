@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::sync::OnceLock;
 
 /// The named (non-character) keys of the grammar, in their canonical spelling. `F1` to `F24` are handled apart.
 const NAMED_KEYS: &[&str] = &[
@@ -28,6 +29,10 @@ const NAMED_KEYS: &[&str] = &[
     "PageUp",
     "PageDown",
 ];
+
+/// The keys on which a single Ctrl or Alt is bindable: they move or delete in a line editor and type no character,
+/// so taking them does not take typing away (Option+7 on a Swiss layout stays with the encoder).
+const NAVIGATION_KEYS: &[&str] = &["Left", "Right", "Up", "Down", "Home", "End", "Backspace", "Delete"];
 
 /// Other spellings that are read as a named key.
 const KEY_ALIASES: &[(&str, &str)] = &[("return", "Enter"), ("esc", "Escape")];
@@ -92,10 +97,13 @@ impl Chord {
     /// Whether a user may bind this chord to an action.
     ///
     /// The terminal owns the plain keys: a binding must never swallow input that a program expects. So a chord
-    /// needs Cmd, or at least two modifiers one of which is Ctrl or Alt. `D`, `Shift+D`, `Ctrl+D`, `Alt+D` and
+    /// needs Cmd, or at least two modifiers one of which is Ctrl or Alt, or a single Ctrl or Alt on a navigation key
+    /// (`Alt+Left`, `Ctrl+Backspace`). `D`, `Shift+D`, `Ctrl+D`, `Alt+D` and
     /// `Escape` stay with the encoder; `Cmd+D`, `Ctrl+Alt+D` and `Ctrl+Shift+PageDown` are free to bind.
     pub fn is_bindable(&self) -> bool {
-        self.cmd || (self.modifier_count() >= 2 && (self.ctrl || self.alt))
+        self.cmd
+            || (self.modifier_count() >= 2 && (self.ctrl || self.alt))
+            || (self.modifier_count() == 1 && (self.ctrl || self.alt) && NAVIGATION_KEYS.contains(&self.key.as_str()))
     }
 
     /// How many of the four modifiers are held.
@@ -175,8 +183,12 @@ const fn action(id: &'static str, title: &'static str, default: &'static str) ->
     ActionInfo { id, title, default: Some(default) }
 }
 
-/// The macOS default table. Order is the order of the editor.
-static MACOS_ACTIONS: [ActionInfo; 33] = [
+const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
+    ActionInfo { id, title, default: None }
+}
+
+/// The platform-independent part of the default table. Order is the order of the editor.
+static BASE_ACTIONS: [ActionInfo; 33] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -212,10 +224,36 @@ static MACOS_ACTIONS: [ActionInfo; 33] = [
     action("settings.open", "Open settings", "Cmd+,"),
 ];
 
+/// The line-editing actions with the macOS standard as default: Option moves and deletes by word, Cmd by line.
+static EDIT_ACTIONS_MACOS: [ActionInfo; 6] = [
+    action("edit.word_back", "Move one word back", "Alt+Left"),
+    action("edit.word_forward", "Move one word forward", "Alt+Right"),
+    action("edit.line_start", "Move to the start of the line", "Cmd+Left"),
+    action("edit.line_end", "Move to the end of the line", "Cmd+Right"),
+    action("edit.delete_word_back", "Delete the word before the cursor", "Alt+Backspace"),
+    action("edit.delete_to_line_start", "Delete to the start of the line", "Cmd+Backspace"),
+];
+
+/// The line-editing actions with the Windows and Linux standard as default: Ctrl moves and deletes by word, and
+/// Home and End already reach the shell through the key encoder, so line start and end stay unbound.
+static EDIT_ACTIONS_OTHER: [ActionInfo; 6] = [
+    action("edit.word_back", "Move one word back", "Ctrl+Left"),
+    action("edit.word_forward", "Move one word forward", "Ctrl+Right"),
+    unbound("edit.line_start", "Move to the start of the line"),
+    unbound("edit.line_end", "Move to the end of the line"),
+    action("edit.delete_word_back", "Delete the word before the cursor", "Ctrl+Backspace"),
+    unbound("edit.delete_to_line_start", "Delete to the start of the line"),
+];
+
 /// Every action of this build with its default chord. The one place that chooses the default table for the
-/// platform: today the macOS set, Phase 2.2 adds the others here.
+/// platform: the platform-independent part, then the line-editing actions with the platform's standard chords.
+/// Phase 2.2 replaces the Cmd chords of the base part for the other platforms.
 pub fn actions() -> &'static [ActionInfo] {
-    &MACOS_ACTIONS
+    static TABLE: OnceLock<Vec<ActionInfo>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let edit: &[ActionInfo] = if cfg!(target_os = "macos") { &EDIT_ACTIONS_MACOS } else { &EDIT_ACTIONS_OTHER };
+        BASE_ACTIONS.iter().chain(edit).map(|a| ActionInfo { id: a.id, title: a.title, default: a.default }).collect()
+    })
 }
 
 /// One row of the key binding editor.
