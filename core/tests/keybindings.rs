@@ -70,7 +70,7 @@ fn parse_exposes_modifiers_and_key_as_fields() {
 
 /// The action table, after checking that it is the full set: a loop over an empty table would pass vacuously.
 fn all_actions() -> &'static [holzwave_core::keybindings::ActionInfo] {
-    assert_eq!(actions().len(), 15 + 9 + 9 + 3 + 6 + 3, "the table holds 45 actions");
+    assert_eq!(actions().len(), 15 + 9 + 9 + 3 + 6 + 3 + 2, "the table holds 47 actions");
     actions()
 }
 

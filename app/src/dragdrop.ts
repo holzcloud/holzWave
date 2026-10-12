@@ -6,13 +6,28 @@
 // Pointer events, not the HTML5 drag API (WKWebView handles that badly). A press on a header or a tab becomes a drag
 // after 4 px; before that it is an ordinary click. Escape and a drop on nothing cancel. The terminal gets nothing
 // of it: the header presses on the canvas are stopped here, and the outline is a box of the page.
+//
+// Between windows (DESK-29 part 2): a drag released at least 24 px outside the window sends only the pane's id
+// (`release_outside`); the shell reads the pointer and tears the pane or tab off into a window of its own, or hands the
+// drop to the window under the pointer, which gets `incoming-drop`, works out the zone here and answers with `attach_*`.
+// The page that let a pane go forgets it when the layout without it arrives (scene.ts).
 import { registerAction } from "./actions.js";
-import { call } from "./bridge.js";
+import { call, listen } from "./bridge.js";
 import { el } from "./dom.js";
-import { beyondSlop, dropZone, neighbour, outlineOf, type Zone } from "./dropzone.js";
+import {
+  attachFor,
+  beyondSlop,
+  dropZone,
+  leavingPanes,
+  neighbour,
+  outlineOf,
+  outsideBeyond,
+  type Under,
+  type Zone,
+} from "./dropzone.js";
 import { paneAt, paneRect } from "./geometry.js";
 import { focusInput } from "./keyboard.js";
-import { canvas } from "./scene.js";
+import { canvas, markLeaving, unmarkLeaving } from "./scene.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
 
@@ -166,7 +181,25 @@ function onUp(e: PointerEvent): void {
   }
   end();
   if (done.active && done.drop) void done.drop.send().then(applyView);
+  else if (done.active && outsideBeyond(e.clientX, e.clientY, window.innerWidth, window.innerHeight)) releaseOutside(done.source);
   if (done.active) focusInput();
+}
+
+/**
+ * The pointer was released well outside the window: tell the shell which pane (or which tab, by one of its panes).
+ * Panes that go are marked first, so that the layout without them, which can arrive before the answer, forgets them.
+ * Nothing moves when the shell cancels (a lone pane or tab, no other place to put it) or fails.
+ */
+function releaseOutside(source: Source): void {
+  const view = state.view;
+  const gone = view && leavingPanes(source, view);
+  if (!gone) return;
+  markLeaving(gone.ids);
+  call<{ outcome: string }>("release_outside", { pane: gone.pane, kind: gone.kind })
+    .then((r) => {
+      if (r?.outcome === "cancelled") unmarkLeaving(gone.ids);
+    })
+    .catch(() => unmarkLeaving(gone.ids));
 }
 
 function onCancel(e: PointerEvent): void {
@@ -215,7 +248,64 @@ function moveToTab(step: 1 | -1): void {
   if (target !== undefined) void call("move_pane", { pane: view.focus, target, edge: "right" }).then(applyView);
 }
 
-/** Listen for drags and register the three actions. `apply` takes the core's answer. Call once, after `initScene`. */
+// ---- tear off without the mouse ----------------------------------------------------------------------------
+
+/** Give the focused pane, or the shown tab, a window of its own, beside this one. A lone pane or tab is refused. */
+function moveToNewWindow(kind: "pane" | "tab"): void {
+  const view = state.view;
+  if (!view) return;
+  const ids = kind === "pane" ? [view.focus] : view.panes.map(([id]) => id);
+  markLeaving(ids);
+  call(kind === "pane" ? "tear_off_pane" : "tear_off_tab", { pane: view.focus, at_cursor: false })
+    .then(applyView)
+    .catch(() => unmarkLeaving(ids)); // refused: it stays where it is
+}
+
+// ---- a drop that comes from another window -------------------------------------------------------------------
+
+/** What is under the window point (x, y) of this window, for the zone of an incoming drop. */
+function underAt(x: number, y: number): Under {
+  const view = state.view;
+  const node = document.elementFromPoint(x, y);
+  if (!view || !node) return { part: "none" };
+  const tab = indexOf(node, ".tab");
+  if (tab >= 0) return { part: "tab", index: tab };
+  const chip = indexOf(node, ".ws-chip");
+  if (chip >= 0) return { part: "chip", index: chip };
+  if (node.closest("#bar")) return { part: "bar" };
+  const c = canvas().getBoundingClientRect();
+  if (x < c.left || x >= c.right || y < c.top || y >= c.bottom) return { part: "none" };
+  const at = paneAt(state.metrics, view, x - c.left, y - c.top);
+  if (!at) return { part: "none" };
+  return { part: "pane", pane: at[0], zone: dropZone(paneRect(state.metrics, at[1]), x - c.left, y - c.top) };
+}
+
+/** `incoming-drop`: a pane or tab of another window was released over this one. Answer where it goes, or say nothing. */
+function onIncomingDrop(p: { kind: string; pane: number; x: number; y: number }): void {
+  const view = state.view;
+  if (typeof p !== "object" || p === null || !view) return;
+  if (p.kind !== "pane" && p.kind !== "tab") return;
+  if (!Number.isSafeInteger(p.pane) || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+  const workspace = Math.max(0, view.workspaces.findIndex((w) => w.active));
+  const answer = attachFor(p.kind, p.pane, underAt(p.x, p.y), view.tabs, workspace);
+  if (!answer) return; // over no zone: nothing is sent and the drop lapses in the shell
+  // Dropped on the middle of a pane the two panes trade places: the one that was here goes to the other window.
+  const swapped = answer.cmd === "attach_pane" && "edge" in answer.args && answer.args.edge === "center" ? [answer.args.target] : [];
+  markLeaving(swapped);
+  call(answer.cmd, answer.args)
+    .then((v) => {
+      applyView(v);
+      if (swapped.some((id) => v.panes.some(([pane]) => pane === id))) unmarkLeaving(swapped); // refused: it stays
+    })
+    .catch(() => unmarkLeaving(swapped));
+}
+
+/** Listen for drops that come from other windows. Call once, with the other listeners, before `window_ready`. */
+export async function initDragDropEvents(): Promise<void> {
+  await listen("incoming-drop", onIncomingDrop);
+}
+
+/** Listen for drags and register the five actions. `apply` takes the core's answer. Call once, after `initScene`. */
 export function initDragDrop(apply: (v: View) => void): void {
   applyView = apply;
   // Capture, so a header press on the canvas is seen before the selection gesture.
@@ -223,4 +313,6 @@ export function initDragDrop(apply: (v: View) => void): void {
   registerAction({ id: "pane.swap_next", title: "Swap with next pane", run: swapWithNext });
   registerAction({ id: "pane.move_next_tab", title: "Move pane to next tab", run: () => moveToTab(1) });
   registerAction({ id: "pane.move_prev_tab", title: "Move pane to previous tab", run: () => moveToTab(-1) });
+  registerAction({ id: "pane.move_to_new_window", title: "Move pane to new window", run: () => moveToNewWindow("pane") });
+  registerAction({ id: "tab.move_to_new_window", title: "Move tab to new window", run: () => moveToNewWindow("tab") });
 }

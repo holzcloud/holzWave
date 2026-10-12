@@ -224,6 +224,7 @@ The defaults (the macOS table; Windows and Linux pick their own in Phase 2.2):
 | `tab.rename` | none | `pane.rename` | none |
 | `workspace.rename` | none | `pane.swap_next` | none |
 | `pane.move_next_tab` | none | `pane.move_prev_tab` | none |
+| `pane.move_to_new_window` | none | `tab.move_to_new_window` | none |
 
 The line-editing actions send fixed bytes to the shell's line editor (`edit.word_back` and `edit.word_forward` send
 `ESC b` and `ESC f`, `edit.line_start` and `edit.line_end` send `Ctrl+A` and `Ctrl+E`, `edit.delete_word_back` sends
@@ -254,6 +255,16 @@ a workspace chip to move into that workspace. Escape, or a drop on nothing, canc
 scrollback and its name; the core refuses a move that would pass the pane or depth limits and changes nothing. Without
 the mouse: `pane.swap_next` swaps the focused pane with the next one of the tab, `pane.move_next_tab` and
 `pane.move_prev_tab` move it into the next or previous tab (all three are unbound by default).
+
+Several windows: a pane or a tab dragged out of the window, and released at least 24 px beyond its edge, becomes a
+window of its own (the pointer decides where it opens); a release only just over the edge cancels. Released over
+another window of holzWave it moves into that window instead: onto the side or the middle of a pane (split or swap), onto
+a tab (next to that tab's pane), onto the free part of the tab strip (as a tab of its own), or onto a workspace chip (into
+that workspace; a tab goes into the workspace of the chip it is over, and into the shown one anywhere else in the
+window). A release over no drop zone changes nothing. Without the mouse: `pane.move_to_new_window` gives the focused
+pane, and `tab.move_to_new_window` the shown tab, a window beside this one (both unbound by default). The pane or tab
+keeps its shell, its scrollback and its name; a pane or tab that is alone in its window cannot be torn off, and moving
+the last pane out of a window closes that window.
 
 Actions without a chord in the table (`keybindings.open`, the theme entries of the palette) are reached from the
 palette and the dialogs and can be bound by adding them to the table in a later version.

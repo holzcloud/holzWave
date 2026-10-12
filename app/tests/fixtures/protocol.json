@@ -486,6 +486,18 @@
           "title": "Move pane to previous tab"
         },
         {
+          "action": "pane.move_to_new_window",
+          "chord": null,
+          "is_default": true,
+          "title": "Move pane to new window"
+        },
+        {
+          "action": "tab.move_to_new_window",
+          "chord": null,
+          "is_default": true,
+          "title": "Move tab to new window"
+        },
+        {
           "action": "edit.word_back",
           "chord": "Alt+Left",
           "is_default": true,
@@ -975,6 +987,18 @@
         "chord": null,
         "is_default": true,
         "title": "Move pane to previous tab"
+      },
+      {
+        "action": "pane.move_to_new_window",
+        "chord": null,
+        "is_default": true,
+        "title": "Move pane to new window"
+      },
+      {
+        "action": "tab.move_to_new_window",
+        "chord": null,
+        "is_default": true,
+        "title": "Move tab to new window"
       },
       {
         "action": "edit.word_back",

@@ -29,7 +29,7 @@ async function readyCase(page, url) {
   assert.equal(calls.filter((c) => c === "window_ready").length, 1, "once");
   assert.ok(calls.indexOf("window_ready") > calls.indexOf("get_layout"), "after the first layout was asked for and applied");
   assert.ok(await page.locator(".divider").count(), "the layout is drawn when the shell is told");
-  const listening = await page.evaluate(() => ["frame", "layout", "title", "cwd", "pane-exit"].map((n) => window.__MOCK__.listening(n)));
+  const listening = await page.evaluate(() => ["frame", "layout", "title", "cwd", "pane-exit", "incoming-drop"].map((n) => window.__MOCK__.listening(n)));
   assert.ok(listening.every((n) => n >= 1), `every listener existed by the time the shell was told: ${listening}`);
   assert.ok(calls.indexOf("window_ready") > calls.indexOf("start_pane"), "the panes were started by the layout that was applied");
 

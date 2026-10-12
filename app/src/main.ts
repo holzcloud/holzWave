@@ -13,7 +13,7 @@ import { initKeyboard } from "./keyboard.js";
 import { initLinks } from "./links.js";
 import { initOverlay } from "./overlay.js";
 import { initPalette } from "./palette.js";
-import { initDragDrop } from "./dragdrop.js";
+import { initDragDrop, initDragDropEvents } from "./dragdrop.js";
 import { initPointer } from "./pointer.js";
 import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
 import { initSearch } from "./search-ui.js";
@@ -42,6 +42,7 @@ async function main() {
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);
+  await initDragDropEvents();
   fit();
   applyView(await call("get_layout"));
   focusCanvas();
