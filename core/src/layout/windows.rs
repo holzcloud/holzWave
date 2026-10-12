@@ -200,6 +200,14 @@ impl WindowSet {
         self.windows.iter().find(|(_, layout)| layout.locate(pane).is_some()).map(|(label, _)| label.as_str())
     }
 
+    /// Where a pane is: its window and the indexes of its workspace and tab there. The page names a tab by any pane of
+    /// it, so a gesture between windows carries only pane ids; this turns one into the indexes the tab moves use.
+    pub fn locate(&self, pane: PaneId) -> Option<(&str, usize, usize)> {
+        self.windows
+            .iter()
+            .find_map(|(label, layout)| layout.locate(pane).map(|(workspace, tab)| (label.as_str(), workspace, tab)))
+    }
+
     /// Every pane of every window, window by window.
     pub fn all_panes(&self) -> Vec<PaneId> {
         self.windows.iter().flat_map(|(_, layout)| layout.all_panes()).collect()
@@ -645,6 +653,19 @@ mod tests {
         ] {
             assert!(!valid_window_label(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn locate_names_the_window_workspace_and_tab_of_a_pane() {
+        let (mut set, panes) = busy();
+        set.edit(MAIN_WINDOW, |l| l.new_workspace("two"));
+        let torn = set.tear_off_pane(panes[3]).unwrap();
+        assert_eq!(set.locate(panes[0]), Some((MAIN_WINDOW, 0, 0)));
+        assert_eq!(set.locate(panes[2]), Some((MAIN_WINDOW, 0, 0)), "any pane of a tab names the tab");
+        assert_eq!(set.locate(panes[3]), Some((torn.label.as_str(), 0, 0)));
+        assert_eq!(set.locate(9999), None);
+        let extra = set.layout(MAIN_WINDOW).unwrap().workspaces[1].tabs[0].panes()[0];
+        assert_eq!(set.locate(extra), Some((MAIN_WINDOW, 1, 0)));
     }
 
     #[test]
