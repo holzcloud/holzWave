@@ -1798,7 +1798,7 @@ impl AppCore {
         self.handle_or_err(pane)?.copy_mode(op).map_err(|e| e.to_string())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn pid(&self, pane: PaneId) -> Option<u32> {
         self.handle(pane)?.pid()
     }
@@ -2280,10 +2280,17 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use holzwave_core::engine::{CopyMotion, Mods, SelectMode};
+    use holzwave_core::engine::Mods;
+    #[cfg(unix)]
+    use holzwave_core::engine::{CopyMotion, SelectMode};
     use holzwave_core::layout::Axis;
 
+    #[cfg(unix)]
     const WAIT: Duration = Duration::from_secs(5);
+
+    // Every test that starts a pane starts a real POSIX shell (`/bin/cat`, `/bin/sh -c ...`), so those are
+    // `#[cfg(unix)]`; the tests that only build a core, a layout or a launch vector run everywhere. Real Windows
+    // panes are tested where the PTY is: `core/tests/conpty.rs` (phase 2.2, plan 04).
 
     /// Collects what the core tells the webviews, with the window each event is for, and the windows it asked the
     /// sink to close.
@@ -2353,6 +2360,7 @@ mod tests {
             lock(&self.closed).clone()
         }
 
+        #[cfg(unix)]
         fn frames(&self, pane: PaneId) -> Vec<FrameMsg> {
             self.all()
                 .into_iter()
@@ -2364,6 +2372,7 @@ mod tests {
         }
 
         /// Whether any frame of the pane carried a changed row with this text.
+        #[cfg(unix)]
         fn has_text(&self, pane: PaneId, needle: &str) -> bool {
             self.frames(pane).iter().any(|f| {
                 f.changed.iter().any(|row| {
@@ -2373,6 +2382,7 @@ mod tests {
             })
         }
 
+        #[cfg(unix)]
         fn titles(&self) -> Vec<(PaneId, String)> {
             self.all()
                 .into_iter()
@@ -2394,6 +2404,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -2525,6 +2536,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn key(code: &str, key: &str) -> DomKey {
         DomKey { code: code.into(), key: key.into(), mods: Mods::NONE, ..DomKey::default() }
     }
@@ -2592,6 +2604,7 @@ mod tests {
         assert_eq!(core.rename_pane(9999, "ghost").pane_names, vec![], "an unknown pane changes nothing");
     }
 
+    #[cfg(unix)]
     #[test]
     fn start_pane_starts_one_shell_that_streams_frames_and_a_second_call_changes_nothing() {
         let (core, rec, _dir) = sh("printf hello; sleep 5");
@@ -2607,6 +2620,7 @@ mod tests {
         assert!(rec.pane_exits().is_empty(), "the first shell was not replaced: {:?}", rec.all());
     }
 
+    #[cfg(unix)]
     #[test]
     fn start_pane_for_a_pane_that_is_not_in_the_layout_is_an_error_and_starts_nothing() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -2630,6 +2644,7 @@ mod tests {
         assert_eq!(clamp_cell(100_000), 256);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_started_with_a_zero_grid_gets_the_smallest_grid() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -2642,6 +2657,7 @@ mod tests {
         assert_eq!((first.cols, first.rows), (2, 1));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_cell_size_reaches_the_shell_in_size_reports() {
         // CSI 16 t asks for the cell size; the reply CSI 6 ; height ; width t arrives as tty input, which the tty
@@ -2658,6 +2674,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_key_for_a_cat_shell_comes_back_as_a_frame_with_the_character() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -2669,6 +2686,7 @@ mod tests {
         assert!(wait_until(WAIT, || rec.has_text(pane, "x")), "no echo: {:?}", rec.all());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_key_with_a_code_or_key_over_32_bytes_is_rejected_and_an_unknown_pane_is_a_no_op() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -2684,6 +2702,7 @@ mod tests {
         assert!(!rec.has_text(pane, "q"), "a rejected key must not reach the shell");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_title_and_the_end_of_the_shell_reach_the_sink() {
         let (core, rec, _dir) = sh("printf '\\033]2;build done\\007'; sleep 0.3; exit 3");
@@ -2697,6 +2716,7 @@ mod tests {
         assert_eq!(core.pid(pane), None, "the handle of an ended pane is gone");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_multi_line_paste_is_rejected_without_bracketed_mode_until_it_is_allowed() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -2710,6 +2730,7 @@ mod tests {
         assert!(core.paste(31_337, "x".into(), false).is_err(), "an unknown pane cannot be pasted into");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_selection_is_readable_and_the_search_and_copy_mode_answer_with_their_state() {
         let (core, rec, _dir) = sh("printf 'find me\\r\\nother\\r\\nfind again'; sleep 5");
@@ -2738,8 +2759,10 @@ mod tests {
     // ---- layout commands, closing, persistence (task 2) --------------------------------------------------------
 
     /// A shell that ignores SIGHUP and says when it is ready: only a real kill ends it.
+    #[cfg(unix)]
     const HUP_PROOF: &str = "trap '' HUP; echo ready; exec sleep 1000";
 
+    #[cfg(unix)]
     fn process_exists(pid: u32) -> bool {
         std::process::Command::new("/bin/sh")
             .args(["-c", "kill -0 \"$1\" 2>/dev/null", "sh", &pid.to_string()])
@@ -2780,6 +2803,7 @@ mod tests {
         layout
     }
 
+    #[cfg(unix)]
     #[test]
     fn closing_one_of_two_panes_kills_its_shell_removes_it_and_does_not_exit() {
         let (core, rec, _dir) = sh(HUP_PROOF);
@@ -2880,6 +2904,7 @@ mod tests {
         assert_eq!(rec.exit_count(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn closing_the_only_pane_flushes_emits_exit_once_and_kills_the_shell() {
         let (core, rec, dir) = sh(HUP_PROOF);
@@ -2914,6 +2939,7 @@ mod tests {
         assert!(!dir.layout_file().exists(), "nothing changed, nothing is written");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shell_that_exits_by_itself_closes_its_pane_and_only_the_last_one_ends_the_app() {
         let (core, rec, dir) = sh("exit 0");
@@ -2940,6 +2966,7 @@ mod tests {
 
     /// A pane handle made the way `start_pane` makes one, whose frames land in the recorder. The window in which
     /// the slot is `Starting` is held open by the test: it reserves, asks, and only then promotes this handle.
+    #[cfg(unix)]
     fn spawned_for(core: &AppCore, rec: &Arc<Recorder>, pane: PaneId) -> PaneHandle {
         let spec = core.pane_spec(80, 24, (9, 18));
         let rec = rec.clone();
@@ -2951,10 +2978,12 @@ mod tests {
         .expect("the shell starts")
     }
 
+    #[cfg(unix)]
     fn size_of_last_frame(rec: &Recorder, pane: PaneId) -> Option<(u16, u16)> {
         rec.frames(pane).last().map(|f| (f.cols, f.rows))
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_resize_that_arrives_while_the_pane_is_starting_is_applied_on_promotion() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -2983,6 +3012,7 @@ mod tests {
         assert_eq!(size_of_last_frame(&rec, pane), Some((100, 30)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_resize_that_overlaps_the_promotion_is_never_overtaken_by_the_replay() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -3022,6 +3052,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_size_asked_for_while_the_pane_is_starting_is_clamped_like_a_running_one() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -3040,6 +3071,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_that_is_closed_while_it_starts_leaves_no_size_behind() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -3085,6 +3117,7 @@ mod tests {
         assert!(matches!(lock(&core.panes).get(&pane), Some(Slot::Starting(Some(_)))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_resize_for_a_running_pane_and_for_an_unknown_pane_behaves_as_before() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -3103,6 +3136,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shell_that_ends_in_a_background_tab_leaves_the_shown_tab_and_the_saved_layout_alone() {
         let (core, rec, dir) = sh("exit 0");
@@ -3133,6 +3167,7 @@ mod tests {
         assert_eq!(saved.all_panes(), vec![b, c]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shell_that_ends_in_a_background_workspace_leaves_the_shown_workspace_and_the_saved_layout_alone() {
         let (core, rec, dir) = sh("exit 0");
@@ -3178,6 +3213,7 @@ mod tests {
         assert_eq!(on_disk(&dir), snapshot(&core));
     }
 
+    #[cfg(unix)]
     #[test]
     fn shutdown_writes_the_pending_layout_and_ends_every_shell_within_three_seconds() {
         let (core, rec, dir) = sh(HUP_PROOF);
@@ -3204,6 +3240,7 @@ mod tests {
         assert_eq!(rec.exit_count(), 0, "a shutdown is not asking the shell to exit again");
     }
 
+    #[cfg(unix)]
     #[test]
     fn dropping_the_core_writes_the_pending_layout_and_ends_every_shell() {
         let (core, rec, dir) = sh(HUP_PROOF);
@@ -3381,6 +3418,7 @@ mod tests {
     // ---- settings, themes and key bindings (plan 23, task 1) -----------------------------------------------------
 
     use holzwave_core::keybindings::actions;
+    #[cfg(unix)]
     use holzwave_core::theme::Rgb;
     use serde_json::json;
 
@@ -3396,11 +3434,13 @@ mod tests {
         }
 
         /// Whether a frame of the pane at or after `skip` is a full one with this default background.
+        #[cfg(unix)]
         fn has_full_frame_with_bg(&self, pane: PaneId, skip: usize, bg: u32) -> bool {
             self.frames(pane).iter().skip(skip).any(|f| f.full && f.bg == bg)
         }
     }
 
+    #[cfg(unix)]
     fn packed(c: Rgb) -> u32 {
         u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)
     }
@@ -3413,6 +3453,7 @@ mod tests {
         (core, rec)
     }
 
+    #[cfg(unix)]
     fn theme_file(dir: &Scratch, file: &str, theme: &Theme) {
         let themes = dir.0.join("themes");
         std::fs::create_dir_all(&themes).expect("themes dir");
@@ -3472,6 +3513,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.0.join("settings.json.bad")).unwrap(), "{ not json");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_new_pane_is_built_from_the_settings_and_its_first_frame_has_the_theme_colours() {
         let dir = Scratch::new("spec");
@@ -3494,6 +3536,7 @@ mod tests {
         assert!(wait_until(WAIT, || rec.has_full_frame_with_bg(pane, 0, bg)), "the first frame lacks the theme");
     }
 
+    #[cfg(unix)]
     #[test]
     fn set_setting_theme_persists_pushes_a_full_frame_with_the_new_colours_and_emits_settings() {
         let (core, rec, dir) = core("/bin/cat", &[]);
@@ -3560,6 +3603,7 @@ mod tests {
         assert!(!names.iter().any(|n| n.ends_with(".tmp")), "no temporary file is left: {names:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn option_as_alt_reaches_a_live_pane_so_that_alt_f_is_escape_f() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -3615,6 +3659,7 @@ mod tests {
         assert!(core.reset_setting("nonsense").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn reload_settings_picks_up_hand_edits_only_when_a_file_changed() {
         let dir = Scratch::new("reload");
@@ -3665,6 +3710,7 @@ mod tests {
     use holzwave_core::session::{Session, WindowState};
 
     impl Recorder {
+        #[cfg(unix)]
         fn cwds(&self, pane: PaneId) -> Vec<String> {
             self.all()
                 .into_iter()
@@ -3701,6 +3747,7 @@ mod tests {
 
     /// Prints where it starts, then goes to `a` (the first shell to get there) or `b`, announces that directory with
     /// OSC 7 and stays alive. The marker directory makes the choice atomic between two shells.
+    #[cfg(unix)]
     fn two_directory_script(marker: &Path, a: &Path, b: &Path) -> String {
         format!(
             "echo \"start:$(pwd)\"; if mkdir '{m}' 2>/dev/null; then d='{a}'; else d='{b}'; fi; cd \"$d\"; \
@@ -3711,6 +3758,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_starts_in_the_directory_the_session_saved_for_it() {
         let (dir, pane) = dir_with_one_pane("saved-cwd");
@@ -3728,6 +3776,7 @@ mod tests {
         assert!(wait_until(WAIT, || rec.has_text(pane, &needle)), "the shell did not start in {saved:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_saved_directory_that_no_longer_exists_does_not_break_the_start() {
         let (dir, pane) = dir_with_one_pane("gone-cwd");
@@ -3747,6 +3796,7 @@ mod tests {
         assert!(!rec.has_text(pane, &gone.display().to_string()), "it started in the missing directory");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_split_starts_in_the_last_known_directory_of_the_pane_that_was_focused() {
         let dir = Scratch::new("split-cwd");
@@ -3766,6 +3816,7 @@ mod tests {
         assert!(wait_until(WAIT, || rec.has_text(second, &needle)), "the split did not start in {a_text}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_new_tab_starts_in_the_last_known_directory_of_the_pane_that_was_focused() {
         let dir = Scratch::new("tab-cwd");
@@ -3819,6 +3870,7 @@ mod tests {
         assert_eq!(core.start_dir(pane), None, "a relative path is not one either");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_session_holds_the_directory_of_every_live_pane_after_shutdown() {
         let dir = Scratch::new("session-shutdown");
@@ -3849,6 +3901,7 @@ mod tests {
         assert_eq!(session.cwds.len(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_session_is_written_two_seconds_after_the_first_change_without_any_flush() {
         let (dir, pane) = dir_with_one_pane("session-debounce");
@@ -3870,6 +3923,7 @@ mod tests {
         drop(core);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_that_reported_nothing_is_asked_for_its_directory_when_the_session_is_written() {
         let (dir, pane) = dir_with_one_pane("session-process");
@@ -3886,6 +3940,7 @@ mod tests {
         assert_eq!(got.and_then(Result::ok), Some(start), "{:?}", session.cwds);
     }
 
+    #[cfg(unix)]
     #[test]
     fn closing_a_pane_takes_its_directory_out_of_the_session() {
         let dir = Scratch::new("session-close");
@@ -3944,6 +3999,7 @@ mod tests {
         assert_eq!((window.width, window.height), (200, 16384));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_session_file_that_is_not_json_or_holds_hostile_entries_never_fails_the_start() {
         let (dir, pane) = dir_with_one_pane("session-bad");
@@ -4425,6 +4481,7 @@ mod tests {
         assert_eq!(pointer_mods(8), Mods::SUPER);
     }
 
+    #[cfg(unix)]
     #[test]
     fn mouse_and_wheel_reach_a_program_that_asked_for_the_mouse() {
         let (core, rec, _dir) = sh("printf '\\033[?1000h\\033[?1006h'; echo ready; exec /bin/cat");
@@ -4442,6 +4499,7 @@ mod tests {
         assert!(wait_until(WAIT, || rec.has_text(pane, "^[[<64;5;3M")), "no wheel report");
     }
 
+    #[cfg(unix)]
     #[test]
     fn mouse_and_wheel_for_an_unknown_pane_or_with_hostile_numbers_change_nothing_and_do_not_panic() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -4465,6 +4523,7 @@ mod tests {
 
     impl Recorder {
         /// The frames of `pane` with the window each went to.
+        #[cfg(unix)]
         fn frame_targets(&self, pane: PaneId) -> Vec<Target> {
             self.sent()
                 .into_iter()
@@ -4506,6 +4565,7 @@ mod tests {
         panes
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_frame_goes_to_the_window_that_has_the_pane_and_to_no_other() {
         let (core, rec, _dir, first, second, label) = two_windows("printf hello; sleep 30");
@@ -4520,6 +4580,7 @@ mod tests {
         assert!(other_frames.iter().all(|t| *t == Target::window(&label)), "{other_frames:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_title_and_a_directory_go_to_the_window_that_has_the_pane_and_the_end_of_its_shell_too() {
         // The directory is polled from the process, so the shell stays a while before it ends.
@@ -4540,6 +4601,7 @@ mod tests {
         assert_eq!(exit.1, Out::PaneExit { pane: second, code: Some(3) });
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_layout_event_of_a_shell_that_ends_goes_to_its_window_only() {
         // Window `main` has two panes, the other window one; a pane of `main` ends.
@@ -4588,6 +4650,7 @@ mod tests {
         assert_eq!(core.view_in(MAIN_WINDOW).unwrap().tabs[0].title, "shell");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_new_pane_of_a_window_gets_a_route_to_that_window() {
         let (core, rec, _dir, _first, _second, label) = two_windows("printf made; sleep 30");
@@ -4642,6 +4705,7 @@ mod tests {
 
     // ---- the close rules --------------------------------------------------------------------------------------
 
+    #[cfg(unix)]
     #[test]
     fn closing_the_last_pane_of_a_window_that_is_not_the_last_closes_that_window() {
         let (core, rec, dir, first, second, label) = two_windows(HUP_PROOF);
@@ -4669,6 +4733,7 @@ mod tests {
         assert_eq!(on_disk(&dir).all_panes(), vec![first], "and the layout on disk is the one window of before");
     }
 
+    #[cfg(unix)]
     #[test]
     fn closing_the_last_pane_of_the_last_window_ends_the_app() {
         let (core, rec, dir, first, second, label) = two_windows(HUP_PROOF);
@@ -4685,6 +4750,7 @@ mod tests {
         assert_eq!(on_disk(&dir).all_panes(), vec![first]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_red_button_of_the_last_window_changes_nothing_on_disk() {
         let (dir, pane) = dir_with_one_pane("red-last");
@@ -4708,6 +4774,7 @@ mod tests {
         assert!(told.is_empty() && rec.closed_windows().is_empty(), "{told:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_red_button_of_another_window_ends_only_its_shells() {
         let (core, rec, dir, first, second, label) = two_windows(HUP_PROOF);
@@ -4748,6 +4815,7 @@ mod tests {
         assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn quitting_never_drops_windows() {
         let (core, rec, dir, first, second, label) = two_windows(HUP_PROOF);
@@ -4770,6 +4838,7 @@ mod tests {
         assert!(session_on_disk(&dir).window_for(&label).is_some(), "with their frames");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_end_of_the_app_through_the_last_pane_does_not_drop_windows_either() {
         let (core, rec, dir, first, _second, label) = two_windows("sleep 30");
@@ -4785,6 +4854,7 @@ mod tests {
         assert_eq!(saved.len(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_shell_that_ends_by_itself_closes_its_window_when_it_was_the_last_pane_of_it() {
         // Every shell ends at once. The pane of the other window goes first: its window closes. Then the last pane
@@ -4808,6 +4878,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_closed_by_the_user_reports_its_exit_to_the_window_that_closed_it() {
         let (core, rec, _dir, first, second, label) = two_windows(HUP_PROOF);
@@ -4827,6 +4898,7 @@ mod tests {
 
     // ---- title and directory replay ---------------------------------------------------------------------------
 
+    #[cfg(unix)]
     #[test]
     fn the_last_title_and_directory_of_a_pane_are_kept_and_replayed_to_a_window() {
         let script = "printf '\\033]2;one\\007\\033]2;two\\007\\033]7;file://localhost/tmp\\007'; sleep 30";
@@ -4853,6 +4925,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_that_never_had_a_title_replays_nothing_and_a_closed_pane_is_forgotten() {
         let (core, rec, _dir, first, second, label) = two_windows(HUP_PROOF);
@@ -4969,6 +5042,7 @@ mod tests {
     // ---- tear off, release outside, attach (plan 02.1-04, task 2) ---------------------------------------------
 
     /// Prints a title and a directory, then echoes what it is typed.
+    #[cfg(unix)]
     const TITLED_CAT: &str = "printf '\\033]2;t\\007\\033]7;file://localhost/tmp\\007'; exec cat";
 
     /// Lets the recorder look at the locks of `core` when the core asks it to open a window.
@@ -4991,6 +5065,7 @@ mod tests {
         (core, rec, dir, a, b, c, w)
     }
 
+    #[cfg(unix)]
     fn start_all(core: &AppCore, panes: &[PaneId]) {
         for pane in panes {
             core.start_pane(*pane, 80, 24, 0, 0).expect("starts");
@@ -5003,6 +5078,7 @@ mod tests {
         panes
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_tear_off_makes_a_window_of_its_own_with_the_same_shell_and_tells_the_window_the_pane_left() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -5052,6 +5128,7 @@ mod tests {
         assert_eq!(opened[0].1, Place::Cursor);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_window_is_built_while_no_lock_of_the_core_is_held() {
         let (core, rec, _dir) = core("/bin/cat", &[]);
@@ -5087,6 +5164,7 @@ mod tests {
         assert!(rec.layouts().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failed_window_build_puts_the_pane_back_and_answers_an_error() {
         let (core, rec, dir) = core("/bin/cat", &[]);
@@ -5253,6 +5331,7 @@ mod tests {
         assert_eq!(core.release_outside_in(MAIN_WINDOW, b, kind), Ok(Released::Handed { to: w.to_owned() }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pane_released_over_another_window_moves_there_with_its_shell_and_its_events_follow() {
         let (core, rec, dir, a, b, c, w) = three_panes(TITLED_CAT);
@@ -5349,6 +5428,7 @@ mod tests {
         assert_eq!(lock(&core.routes).live.get(&c).map(|l| l.to_string()), Some(MAIN_WINDOW.to_owned()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_tab_released_over_another_window_moves_there_with_all_its_panes() {
         let (core, rec, _dir, a, _b, _c, w) = three_panes(TITLED_CAT);
@@ -5434,6 +5514,7 @@ mod tests {
         assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_window_ready_page_is_told_the_last_title_and_directory_of_every_pane_it_holds() {
         let (core, rec, _dir, _a, _b, c, w) = three_panes(TITLED_CAT);
