@@ -8,6 +8,7 @@
 //!
 //! - [`engine`]: the [`TerminalEngine`] trait and the screen model it produces.
 //! - [`layout`]: the pure tab and pane layout model.
+//! - [`platform`]: the per-OS decisions (default shell, locale, polling) as pure functions of an `Os`.
 //! - [`pty`]: spawning a shell on a pseudo terminal.
 //! - [`persist`]: atomic file writes, bounded reads and the debounced saver.
 //! - [`settings`]: `settings.json`, typed, versioned and validated.
@@ -24,6 +25,7 @@ pub mod keybindings;
 pub mod layout;
 pub mod pane;
 pub mod persist;
+pub mod platform;
 pub mod pty;
 pub mod queue;
 pub mod session;

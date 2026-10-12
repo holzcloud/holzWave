@@ -13,15 +13,12 @@ use std::time::Duration;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::platform::{Os, utf8_locale};
 use crate::{Error, Result};
 
 fn pty<E: std::fmt::Display>(e: E) -> Error {
     Error::Pty(e.to_string())
 }
-
-/// The locale a child gets when the parent has none: a UTF-8 `LC_CTYPE`. A Finder-launched app has no `LANG`,
-/// and a shell without a UTF-8 locale mangles every non-ASCII character.
-const UTF8_LOCALE: &str = if cfg!(target_os = "macos") { "en_US.UTF-8" } else { "C.UTF-8" };
 
 /// How a pane's child process is started.
 ///
@@ -92,10 +89,17 @@ impl SpawnOptions {
     ///
     /// 1. `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=holzWave` and `TERM_PROGRAM_VERSION` with
     ///    this crate's version;
-    /// 2. a UTF-8 `LC_CTYPE`, only when the parent has none of `LANG`, `LC_ALL` and `LC_CTYPE` (unset or empty);
-    ///    a parent that has one is left alone;
+    /// 2. a UTF-8 `LC_CTYPE` ([`utf8_locale`]: none on Windows), only when the parent has none of `LANG`, `LC_ALL`
+    ///    and `LC_CTYPE` (unset or empty); a parent that has one is left alone;
     /// 3. the caller's pairs from [`env`](Self::env), which therefore win.
+    ///
+    /// The rules are those of the OS this build runs on, see [`child_env_on`](Self::child_env_on).
     pub fn child_env(&self, parent: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+        self.child_env_on(Os::current(), parent)
+    }
+
+    /// [`child_env`](Self::child_env) with the rules of `os`, so that a test on any host can pin them.
+    pub fn child_env_on(&self, os: Os, parent: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> = vec![
             ("TERM".into(), "xterm-256color".into()),
             ("COLORTERM".into(), "truecolor".into()),
@@ -105,8 +109,9 @@ impl SpawnOptions {
         let has_locale = ["LANG", "LC_ALL", "LC_CTYPE"]
             .iter()
             .any(|key| parent(key).is_some_and(|value| !value.is_empty()));
-        if !has_locale {
-            env.push(("LC_CTYPE".into(), UTF8_LOCALE.into()));
+        match utf8_locale(os) {
+            Some(locale) if !has_locale => env.push(("LC_CTYPE".into(), locale.into())),
+            _ => {}
         }
         env.extend(self.env.iter().cloned());
         env
@@ -136,7 +141,9 @@ fn pty_size(cols: u16, rows: u16, px_w: u32, px_h: u32) -> PtySize {
 ///
 /// Linux reads the `/proc/<pid>/cwd` link. macOS runs `/usr/sbin/lsof -a -p <pid> -d cwd -Fn` by absolute path,
 /// as an argument vector without a shell, and takes the `n` line; the result is only ever used as a [`PathBuf`].
-/// A process that does not exist, one that belongs to someone else, or any other platform gives `None`.
+/// A process that does not exist, one that belongs to someone else, or any other platform gives `None`. Windows has
+/// no lookup: a PowerShell does not even change its own process directory when it changes directory, so a pane
+/// there learns where its shell is from the shell's own OSC 7 report.
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     // A pid_t is an i32; 0 would mean "the calling process group" to some tools. Neither is a real child.
     if pid == 0 || i32::try_from(pid).is_err() {
@@ -301,11 +308,14 @@ impl Pty {
 
     /// End the child, reap it and release the PTY. Returns the child's exit code.
     ///
-    /// A child that has not exited gets SIGHUP, a short grace period and then SIGKILL (portable-pty's
+    /// On Unix a child that has not exited gets SIGHUP, a short grace period and then SIGKILL (portable-pty's
     /// `Child::kill`); `close` always waits afterwards, so no zombie remains, even for a shell that ignores
-    /// SIGHUP. The writer and the master are dropped only after the child is gone, in that order: the writer's
-    /// `Drop` writes a newline and EOF into the PTY, which would answer a live program's prompt. A writer that was
-    /// handed out with [`Pty::take_writer`] must be dropped by its owner after this call.
+    /// SIGHUP. Windows has no signals: `Child::kill` ends the shell with `TerminateProcess`, and the programs it
+    /// started get a close event when the pseudo console is released with the master.
+    ///
+    /// The writer and the master are dropped only after the child is gone, in that order: the writer's `Drop`
+    /// writes a newline and EOF into the PTY, which would answer a live program's prompt. A writer that was handed
+    /// out with [`Pty::take_writer`] must be dropped by its owner after this call.
     ///
     /// This blocks for up to about 200 ms while the child is given time to leave. Never call it on the Tauri main
     /// thread.
