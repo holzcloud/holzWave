@@ -12,6 +12,19 @@
         "yanked": "text"
       }
     ],
+    "release_outside": [
+      {
+        "label": "window-12",
+        "outcome": "torn_off"
+      },
+      {
+        "outcome": "handed",
+        "to": "main"
+      },
+      {
+        "outcome": "cancelled"
+      }
+    ],
     "search": [
       {
         "current": 1,
@@ -30,6 +43,16 @@
   },
   "commands": {
     "app_info": [],
+    "attach_pane": [
+      "pane",
+      "target",
+      "edge",
+      "workspace"
+    ],
+    "attach_tab": [
+      "pane",
+      "workspace"
+    ],
     "close_pane": [
       "pane"
     ],
@@ -86,6 +109,10 @@
       "pane",
       "text",
       "allow_unsafe"
+    ],
+    "release_outside": [
+      "pane",
+      "kind"
     ],
     "reload_settings": [],
     "rename_pane": [
@@ -163,6 +190,14 @@
       "cell_w",
       "cell_h"
     ],
+    "tear_off_pane": [
+      "pane",
+      "at_cursor"
+    ],
+    "tear_off_tab": [
+      "pane",
+      "at_cursor"
+    ],
     "text": [
       "pane",
       "text"
@@ -173,20 +208,34 @@
       "x",
       "y",
       "mods"
-    ]
+    ],
+    "window_ready": []
   },
   "events": {
     "cwd": {
       "cwd": "/Users/holz/Projects/holzWave",
       "pane": 3
     },
+    "incoming-drop": [
+      {
+        "kind": "pane",
+        "x": 412.5,
+        "y": 96.0
+      },
+      {
+        "kind": "tab",
+        "x": 40.0,
+        "y": 12.0
+      }
+    ],
     "names": [
       "frame",
       "layout",
       "title",
       "cwd",
       "pane-exit",
-      "settings"
+      "settings",
+      "incoming-drop"
     ],
     "pane-exit": [
       {
@@ -632,6 +681,10 @@
         "kind": "move",
         "motion": "word_back"
       }
+    ],
+    "drop_kind": [
+      "pane",
+      "tab"
     ],
     "search": [
       {

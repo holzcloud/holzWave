@@ -19,7 +19,7 @@ use holzwave_core::engine::{
 };
 use holzwave_core::keybindings::Keybindings;
 use holzwave_core::layout::{
-    AttachTo, Axis, Divider, Edge, Layout, LoadStatus, MAIN_WINDOW, PaneId, Rect, SetClose, SplitId, WindowSet,
+    AttachTo, Axis, Divider, Edge, Layout, LoadStatus, MAIN_WINDOW, Moved, PaneId, Rect, SetClose, SplitId, WindowSet,
 };
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
@@ -31,7 +31,7 @@ use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use crate::windows::{DropKind, Drops};
+use crate::windows::{CursorSpot, DropKind, Drops, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
 const MAX_LAYOUT_BYTES: u64 = 1 << 20;
@@ -383,6 +383,50 @@ pub trait Sink: Send + Sync + 'static {
 
     /// The window `label` is no longer in the set (its last pane went): destroy it. Does not ask again.
     fn close_window(&self, label: &str);
+
+    /// Create the window `label`, hidden: its page asks for its layout, which exists already, and the window is shown
+    /// when the page calls `window_ready`. An error means there is no window, and the caller puts the pane back.
+    fn open_window(&self, label: &str, place: &Place) -> Result<(), String>;
+
+    /// What is under the pointer now, other than the window `source`.
+    fn cursor_spot(&self, source: &str) -> CursorSpot;
+}
+
+/// What a tear off is about: one pane, or the tab that holds the pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Subject {
+    Pane(PaneId),
+    Tab(PaneId),
+}
+
+/// Why a tear off did not happen.
+#[derive(Debug, PartialEq, Eq)]
+enum TearOffError {
+    /// Not allowed (an unknown pane, a pane that is alone in its window, too many windows, the app is ending);
+    /// nothing changed.
+    Refused(String),
+    /// The window could not be built; the pane was put back.
+    Failed(String),
+}
+
+impl From<TearOffError> for String {
+    fn from(error: TearOffError) -> String {
+        match error {
+            TearOffError::Refused(reason) | TearOffError::Failed(reason) => reason,
+        }
+    }
+}
+
+/// What a pane or tab that was released outside its window came to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Released {
+    /// It has a window of its own now.
+    TornOff { label: String },
+    /// It was released over this other window, which has been asked where in it the pane goes.
+    Handed { to: String },
+    /// Nothing happened (the pointer is unknown, or a window of its own is not allowed).
+    Cancelled,
 }
 
 /// The program a pane runs.
@@ -871,7 +915,239 @@ impl AppCore {
         self.saver.touch();
     }
 
-    /// Write the pending layout and session now, on the calling thread. Never call it with the layout locked.
+    // ---- panes and tabs between windows (DESK-29 part 2) -------------------------------------------------------
+
+    /// The window `label` shows its first page: it asks for the last title and working directory of every pane it
+    /// holds, which the programs said once and the page has never heard (a window that is new, or restored). The
+    /// shell shows the window after this.
+    pub fn window_ready_in(&self, label: &str) -> Result<(), String> {
+        let panes = lock(&self.windows).layout(label).ok_or_else(no_such_window)?.all_panes();
+        self.replay(label, &panes);
+        Ok(())
+    }
+
+    /// Give a pane of the window `label` a window of its own. `at_cursor` opens it under the pointer, otherwise
+    /// beside the window it came from (the palette action). The answer is the view of the window the pane left.
+    ///
+    /// The set is changed first (the new window's page asks for its layout as its first call, so the entry has to
+    /// exist before the window does), then the lock is released, then the sink builds the window. If that fails the
+    /// pane is put back in the window it came from and the answer is an error. Refused (an error, nothing changes)
+    /// for a pane that is alone in its window: it would be the same window under another name.
+    pub fn tear_off_pane_in(&self, label: &str, pane: PaneId, at_cursor: bool) -> Result<View, String> {
+        let place = if at_cursor { Place::Cursor } else { Place::Beside(label.to_owned()) };
+        self.tear_off(label, Subject::Pane(pane), place).map(|(view, _)| view).map_err(String::from)
+    }
+
+    /// Like [`AppCore::tear_off_pane_in`] for the whole tab the pane `pane` is in (the shown workspace of the
+    /// window): its split tree, title and pane names go with it.
+    pub fn tear_off_tab_in(&self, label: &str, pane: PaneId, at_cursor: bool) -> Result<View, String> {
+        let place = if at_cursor { Place::Cursor } else { Place::Beside(label.to_owned()) };
+        self.tear_off(label, Subject::Tab(pane), place).map(|(view, _)| view).map_err(String::from)
+    }
+
+    fn tear_off(&self, label: &str, subject: Subject, place: Place) -> Result<(View, String), TearOffError> {
+        if self.exiting.load(Ordering::SeqCst) {
+            return Err(TearOffError::Refused("the app is closing".into()));
+        }
+        let (new_label, view) = {
+            let mut set = lock(&self.windows);
+            let layout = set.layout(label).ok_or_else(|| TearOffError::Refused(no_such_window()))?;
+            let torn = match subject {
+                Subject::Pane(pane) => {
+                    if set.window_of(pane) != Some(label) {
+                        return Err(TearOffError::Refused("no such pane".into()));
+                    }
+                    set.tear_off_pane(pane)
+                }
+                Subject::Tab(pane) => match set.locate(pane) {
+                    Some((owner, workspace, tab)) if owner == label && workspace == layout.active => {
+                        set.tear_off_tab(label, tab)
+                    }
+                    _ => return Err(TearOffError::Refused("no such tab".into())),
+                },
+            }
+            .ok_or_else(|| TearOffError::Refused("this cannot be a window of its own".into()))?;
+            self.sync_routes(&set);
+            let view = self.view_in_set(&set, label).map_err(TearOffError::Refused)?;
+            (torn.label, view)
+        };
+        self.saver.touch();
+
+        // No lock is held: the window is built on the main thread, whose window events take the locks of the core.
+        if let Err(reason) = self.sink.open_window(&new_label, &place) {
+            self.undo_tear_off(&new_label, label, subject);
+            return Err(TearOffError::Failed(format!("cannot open a window: {reason}")));
+        }
+        self.sink.send(Target::window(label), Out::Layout(view.clone()));
+        Ok((view, new_label))
+    }
+
+    /// The window `gone` could not be built: its pane or tab goes back into `home`, as a tab of the workspace that is
+    /// shown there (where in the window it sat is not remembered), or into another window when `home` is gone too.
+    /// The windows are told. If nothing takes it the entry stays and the next start opens it.
+    fn undo_tear_off(&self, gone: &str, home: &str, subject: Subject) {
+        let mut told: Vec<(String, View)> = Vec::new();
+        {
+            let mut set = lock(&self.windows);
+            let mut targets: Vec<String> = vec![home.to_owned()];
+            targets.extend(set.labels().into_iter().filter(|l| *l != home && *l != gone).map(str::to_owned));
+            let mut moved = None;
+            for target in targets {
+                let Some(workspace) = set.layout(&target).map(|l| l.active) else { continue };
+                moved = match subject {
+                    Subject::Pane(pane) => set.move_pane_to(pane, &target, AttachTo::Tab { workspace }),
+                    // The torn off tab is the one tab of the one workspace of the window that was not built.
+                    Subject::Tab(_) => set.move_tab_to(gone, 0, &target, workspace),
+                };
+                if moved.is_some() {
+                    break;
+                }
+            }
+            self.sync_routes(&set);
+            match moved {
+                Some(moved) => {
+                    if let Ok(view) = self.view_in_set(&set, &moved.to) {
+                        told.push((moved.to, view));
+                    }
+                }
+                None => eprintln!("holzwave: could not put {subject:?} back after the window {gone} failed to open"),
+            }
+        }
+        self.saver.touch();
+        for (label, view) in told {
+            self.sink.send(Target::Window(label.as_str().into()), Out::Layout(view));
+        }
+    }
+
+    /// The page of `label` released a pane (or a tab, named by one of its panes) outside its window; the core reads
+    /// the pointer, the page cannot say where it is. Over another window of the app that window is told with
+    /// `incoming-drop` and decides where in it the pane goes (`attach_pane` / `attach_tab`); the drop waits for that
+    /// answer for a few seconds. Over nothing the pane or tab becomes a window under the pointer. Where the pointer
+    /// cannot be read, or a window of its own is refused, nothing happens.
+    pub fn release_outside_in(&self, label: &str, pane: PaneId, kind: DropKind) -> Result<Released, String> {
+        if self.exiting.load(Ordering::SeqCst) {
+            return Err("the app is closing".into());
+        }
+        {
+            let set = lock(&self.windows);
+            let layout = set.layout(label).ok_or_else(no_such_window)?;
+            let owned = match kind {
+                DropKind::Pane => set.window_of(pane) == Some(label),
+                DropKind::Tab => set.locate(pane).is_some_and(|(owner, ws, _)| owner == label && ws == layout.active),
+            };
+            if !owned {
+                return Err("no such pane".into());
+            }
+        }
+        match self.sink.cursor_spot(label) {
+            CursorSpot::Window { label: to, x, y } => {
+                if to == label || lock(&self.windows).layout(&to).is_none() {
+                    return Ok(Released::Cancelled);
+                }
+                lock(&self.drops).begin(kind, pane, label, Instant::now());
+                self.sink.send(Target::window(&to), Out::IncomingDrop { kind, x, y });
+                Ok(Released::Handed { to })
+            }
+            CursorSpot::Nothing => {
+                let subject = match kind {
+                    DropKind::Pane => Subject::Pane(pane),
+                    DropKind::Tab => Subject::Tab(pane),
+                };
+                match self.tear_off(label, subject, Place::Cursor) {
+                    Ok((_, new_label)) => Ok(Released::TornOff { label: new_label }),
+                    Err(TearOffError::Refused(_)) => Ok(Released::Cancelled),
+                    Err(TearOffError::Failed(reason)) => Err(reason),
+                }
+            }
+            CursorSpot::Unknown => Ok(Released::Cancelled),
+        }
+    }
+
+    /// The page of `label` answers an `incoming-drop` of a pane: onto the pane `target` at `edge` (a side splits it,
+    /// the middle swaps the two), or as a tab of workspace `workspace`. Only the drop that is in flight, for this
+    /// very pane, counts; a stale, repeated or wrong answer changes nothing and answers the view as it is. The pane
+    /// keeps its id, so its shell, name and scrollback come along, and the page is told its last title and
+    /// directory. A window left without a pane closes.
+    pub fn attach_pane_in(
+        &self,
+        label: &str,
+        pane: PaneId,
+        target: Option<PaneId>,
+        edge: Option<Edge>,
+        workspace: Option<usize>,
+    ) -> Result<View, String> {
+        let at = match (target, edge, workspace) {
+            (Some(target), Some(edge), _) => AttachTo::Pane { target, edge },
+            (_, _, Some(workspace)) => AttachTo::Tab { workspace },
+            _ => return self.view_in(label),
+        };
+        self.attach(label, DropKind::Pane, pane, |set, from| {
+            // The pane has to be where the drop came from: it may have moved or closed since.
+            (set.window_of(pane) == Some(from)).then(|| set.move_pane_to(pane, label, at)).flatten().map(|m| (m, vec![pane]))
+        })
+    }
+
+    /// The page of `label` answers an `incoming-drop` of a tab (named by one of its panes): as the last tab of
+    /// workspace `workspace`. The same rules as [`AppCore::attach_pane_in`].
+    pub fn attach_tab_in(&self, label: &str, pane: PaneId, workspace: usize) -> Result<View, String> {
+        self.attach(label, DropKind::Tab, pane, |set, from| {
+            let (owner, ws, tab) = set.locate(pane)?;
+            let layout = set.layout(owner)?;
+            if owner != from || ws != layout.active {
+                return None;
+            }
+            let panes = layout.workspaces.get(ws)?.tabs.get(tab)?.panes();
+            let owner = owner.to_owned();
+            set.move_tab_to(&owner, tab, label, workspace).map(|m| (m, panes))
+        })
+    }
+
+    /// The common part of the two attach commands: check the drop, run `go` (which moves and answers what moved
+    /// and which panes came along), then tell the windows.
+    fn attach(
+        &self,
+        label: &str,
+        kind: DropKind,
+        pane: PaneId,
+        go: impl FnOnce(&mut WindowSet, &str) -> Option<(Moved, Vec<PaneId>)>,
+    ) -> Result<View, String> {
+        if self.exiting.load(Ordering::SeqCst) {
+            return Err("the app is closing".into());
+        }
+        let Some(from) = lock(&self.drops).source(kind, pane, Instant::now()) else {
+            return self.view_in(label);
+        };
+        let (moved, came, view, source_view) = {
+            let mut set = lock(&self.windows);
+            if set.layout(label).is_none() {
+                return Err(no_such_window());
+            }
+            let Some((moved, came)) = go(&mut set, &from) else {
+                return self.view_in_set(&set, label);
+            };
+            self.sync_routes(&set);
+            let view = self.view_in_set(&set, label)?;
+            let source_view = if moved.source_closed { None } else { self.view_in_set(&set, &moved.from).ok() };
+            (moved, came, view, source_view)
+        };
+        lock(&self.drops).finish(kind, pane);
+        self.saver.touch();
+        self.sink.send(Target::window(label), Out::Layout(view.clone()));
+        if let Some(source_view) = source_view {
+            self.sink.send(Target::window(&moved.from), Out::Layout(source_view));
+        }
+        if moved.source_closed {
+            self.window_removed(&moved.from);
+        }
+        // The page learns the pane after the layout that has it; a full frame makes sure it has something to draw.
+        self.replay(label, &came);
+        for pane in came {
+            let _ = self.request_full(pane);
+        }
+        Ok(view)
+    }
+
+    /// Write the pending layout and session now, on the calling thread. Never call it with the windows locked.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn flush(&self) {
         self.saver.flush();
@@ -1878,10 +2154,30 @@ mod tests {
 
     /// Collects what the core tells the webviews, with the window each event is for, and the windows it asked the
     /// sink to close.
-    #[derive(Default)]
     struct Recorder {
         log: Mutex<Vec<(Target, Out)>>,
         closed: Mutex<Vec<String>>,
+        /// The windows the core asked to have built, with where, and whether every lock of the core was free then.
+        opened: Mutex<Vec<(String, Place, bool)>>,
+        /// Make `open_window` fail, as a window system that refuses.
+        fail_open: AtomicBool,
+        /// What is under the pointer; the tests set it.
+        spot: Mutex<CursorSpot>,
+        /// The core, to look at its locks from inside `open_window`.
+        core: Mutex<Weak<AppCore>>,
+    }
+
+    impl Default for Recorder {
+        fn default() -> Self {
+            Recorder {
+                log: Mutex::default(),
+                closed: Mutex::default(),
+                opened: Mutex::default(),
+                fail_open: AtomicBool::new(false),
+                spot: Mutex::new(CursorSpot::Unknown),
+                core: Mutex::new(Weak::new()),
+            }
+        }
     }
 
     impl Sink for Recorder {
@@ -1891,6 +2187,20 @@ mod tests {
 
         fn close_window(&self, label: &str) {
             lock(&self.closed).push(label.to_owned());
+        }
+
+        fn open_window(&self, label: &str, place: &Place) -> Result<(), String> {
+            // The window is built on the main thread, which runs window events that take these locks: none may be
+            // held by the caller. `try_lock` fails for a lock that the calling thread itself holds, too.
+            let free = lock(&self.core).upgrade().is_none_or(|core| {
+                core.windows.try_lock().is_ok() && core.routes.try_lock().is_ok() && core.panes.try_lock().is_ok()
+            });
+            lock(&self.opened).push((label.to_owned(), place.clone(), free));
+            if self.fail_open.load(Ordering::SeqCst) { Err("the window system refused".into()) } else { Ok(()) }
+        }
+
+        fn cursor_spot(&self, _source: &str) -> CursorSpot {
+            lock(&self.spot).clone()
         }
     }
 
@@ -3854,7 +4164,8 @@ mod tests {
 
     #[test]
     fn a_title_and_a_directory_go_to_the_window_that_has_the_pane_and_the_end_of_its_shell_too() {
-        let script = "printf '\\033]2;build done\\007\\033]7;file://localhost/tmp\\007'; sleep 0.3; exit 3";
+        // The directory is polled from the process, so the shell stays a while before it ends.
+        let script = "printf '\\033]2;build done\\007\\033]7;file://localhost/tmp\\007'; sleep 1.5; exit 3";
         let (core, rec, _dir, _first, second, label) = two_windows(script);
         // A second pane keeps the window open when the shell of `second` ends.
         core.split_in(&label, true).unwrap();
@@ -4296,6 +4607,521 @@ mod tests {
         let two = std::fs::read_to_string(dir.layout_file()).unwrap();
         assert!(two.contains("\"version\": 2") && two.contains("\"windows\""), "{two}");
     }
+
+    // ---- tear off, release outside, attach (plan 02.1-04, task 2) ---------------------------------------------
+
+    /// Prints a title and a directory, then echoes what it is typed.
+    const TITLED_CAT: &str = "printf '\\033]2;t\\007\\033]7;file://localhost/tmp\\007'; exec cat";
+
+    /// Lets the recorder look at the locks of `core` when the core asks it to open a window.
+    fn watch(core: &Arc<AppCore>, rec: &Recorder) {
+        *lock(&rec.core) = Arc::downgrade(core);
+    }
+
+    fn over(rec: &Recorder, spot: CursorSpot) {
+        *lock(&rec.spot) = spot;
+    }
+
+    /// Two panes `a` and `b` in `main` and one pane `c` in the window `w`, running `script`.
+    fn three_panes(script: &str) -> (Arc<AppCore>, Arc<Recorder>, Scratch, PaneId, PaneId, PaneId, String) {
+        let (core, rec, dir) = sh(script);
+        watch(&core, &rec);
+        let a = only_pane(&core);
+        let b = core.split(false).focus;
+        let c = core.split(false).focus;
+        let w = raw_tear_off(&core, c);
+        (core, rec, dir, a, b, c, w)
+    }
+
+    fn start_all(core: &AppCore, panes: &[PaneId]) {
+        for pane in panes {
+            core.start_pane(*pane, 80, 24, 0, 0).expect("starts");
+        }
+    }
+
+    fn panes_in(core: &AppCore, label: &str) -> Vec<PaneId> {
+        let mut panes = lock(&core.windows).layout(label).expect("the window").all_panes();
+        panes.sort_unstable();
+        panes
+    }
+
+    #[test]
+    fn a_tear_off_makes_a_window_of_its_own_with_the_same_shell_and_tells_the_window_the_pane_left() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        watch(&core, &rec);
+        let first = only_pane(&core);
+        let second = core.split(false).focus;
+        start_all(&core, &[first, second]);
+        let pid = core.pid(second).expect("a shell");
+
+        let view = core.tear_off_pane_in(MAIN_WINDOW, second, false).expect("torn off");
+
+        assert_eq!(view_panes(&view), vec![first], "the answer is the view of the window the pane left");
+        let labels = core.window_labels();
+        assert_eq!(labels.len(), 2);
+        let label = labels[1].clone();
+        assert_eq!(panes_in(&core, &label), vec![second]);
+        assert_eq!(core.pid(second), Some(pid), "the same shell");
+        let opened = lock(&rec.opened).clone();
+        assert_eq!(opened, vec![(label.clone(), Place::Beside(MAIN_WINDOW.to_owned()), true)]);
+        assert_eq!(rec.layouts(), vec![view.clone()], "the window the pane left was told");
+        assert_eq!(rec.targets_of("layout", 0), vec![Target::window(MAIN_WINDOW)]);
+
+        // The pane's events go to its new window from now on, and to no other.
+        let mark = rec.sent().len();
+        core.key(second, key("KeyX", "x")).expect("accepted");
+        core.key(first, key("KeyY", "y")).expect("accepted");
+        assert!(wait_until(WAIT, || rec.has_text(second, "x") && rec.has_text(first, "y")), "no echo");
+        let after: Vec<(Target, Out)> = rec.sent().into_iter().skip(mark).collect();
+        for (target, out) in &after {
+            if let Out::Frame(f) = out {
+                let expected = if f.pane == second { &label } else { MAIN_WINDOW };
+                assert_eq!(*target, Target::window(expected), "frame of pane {}", f.pane);
+            }
+        }
+    }
+
+    #[test]
+    fn a_tear_off_at_the_pointer_opens_the_window_there() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let first = only_pane(&core);
+        core.split(false);
+
+        core.tear_off_pane_in(MAIN_WINDOW, first, true).expect("torn off");
+
+        let opened = lock(&rec.opened).clone();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].1, Place::Cursor);
+    }
+
+    #[test]
+    fn the_window_is_built_while_no_lock_of_the_core_is_held() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        watch(&core, &rec);
+        let first = only_pane(&core);
+        let second = core.split(false).focus;
+        start_all(&core, &[first, second]);
+
+        core.tear_off_pane_in(MAIN_WINDOW, second, false).expect("torn off");
+        let tab = core.new_tab().focus;
+        core.split(false);
+        core.tear_off_tab_in(MAIN_WINDOW, tab, false).expect("a tab torn off");
+
+        let opened = lock(&rec.opened).clone();
+        assert_eq!(opened.len(), 2);
+        assert!(opened.iter().all(|(_, _, free)| *free), "a lock was held while a window was built: {opened:?}");
+    }
+
+    #[test]
+    fn a_pane_that_cannot_be_a_window_of_its_own_is_refused_and_nothing_changes() {
+        let (core, rec, _dir, a, _b, c, w) = three_panes("sleep 30");
+
+        // alone in its window; unknown; of another window; no such window
+        assert!(core.tear_off_pane_in(&w, c, false).is_err());
+        assert!(core.tear_off_pane_in(MAIN_WINDOW, 9_999, false).is_err());
+        assert!(core.tear_off_pane_in(MAIN_WINDOW, c, false).is_err(), "a window tears off its own panes only");
+        assert!(core.tear_off_pane_in("window-404", a, false).is_err());
+        assert!(core.tear_off_tab_in(&w, c, false).is_err(), "the only tab of the only workspace");
+        assert!(core.tear_off_tab_in(MAIN_WINDOW, c, false).is_err(), "a tab of another window");
+
+        assert!(lock(&rec.opened).is_empty(), "no window was asked for");
+        assert_eq!(core.window_labels().len(), 2);
+        assert!(rec.layouts().is_empty());
+    }
+
+    #[test]
+    fn a_failed_window_build_puts_the_pane_back_and_answers_an_error() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        watch(&core, &rec);
+        let first = only_pane(&core);
+        let second = core.split(false).focus;
+        core.rename_pane(second, "db");
+        start_all(&core, &[first, second]);
+        let pid = core.pid(second).expect("a shell");
+        rec.fail_open.store(true, Ordering::SeqCst);
+
+        let answer = core.tear_off_pane_in(MAIN_WINDOW, second, true);
+
+        let error = answer.expect_err("the window could not be built");
+        assert!(error.contains("cannot open a window"), "{error}");
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()], "no entry for a window that does not exist");
+        assert_eq!(panes_in(&core, MAIN_WINDOW), vec![first, second], "the pane is back");
+        assert_eq!(core.pid(second), Some(pid), "with its shell");
+        assert_eq!(snapshot(&core).pane_name(second), Some("db"), "and its name");
+        assert_eq!(lock(&rec.opened).len(), 1, "the window was asked for once, with no lock held");
+        assert!(lock(&rec.opened)[0].2);
+        // The page is told the layout as it is now, and the pane's events still go to `main`.
+        assert_eq!(rec.layouts().last().map(without_rev), Some(without_rev(&core.view())));
+        assert_eq!(rec.targets_of("layout", 0), vec![Target::window(MAIN_WINDOW); rec.layouts().len()]);
+        let mark = rec.sent().len();
+        core.key(second, key("KeyX", "x")).expect("accepted");
+        assert!(wait_until(WAIT, || rec.has_text(second, "x")), "no echo");
+        assert!(rec.frame_targets(second).iter().skip(1).all(|t| *t == Target::window(MAIN_WINDOW)));
+        assert!(rec.sent().len() > mark);
+        core.flush();
+        let saved = std::fs::read_to_string(dir.layout_file()).unwrap();
+        assert!(!saved.contains("\"windows\""), "one window main is the plain layout again: {saved}");
+    }
+
+    #[test]
+    fn a_failed_window_build_puts_a_whole_tab_back_with_its_panes_and_title() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let first = only_pane(&core);
+        core.new_tab();
+        let inside = core.split(false).focus;
+        core.rename_tab(1, "logs");
+        let before = core.view();
+        assert_eq!(before.panes.len(), 2);
+        rec.fail_open.store(true, Ordering::SeqCst);
+
+        assert!(core.tear_off_tab_in(MAIN_WINDOW, inside, true).is_err());
+
+        let after = core.view();
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+        assert_eq!(view_panes(&after), view_panes(&before), "both panes of the tab are back and shown");
+        assert_eq!(after.tabs.len(), 2);
+        assert_eq!(after.tabs[1].title, "logs", "the tab kept its title");
+        assert!(panes_in(&core, MAIN_WINDOW).contains(&first));
+    }
+
+    #[test]
+    fn a_torn_off_tab_keeps_its_panes_its_title_and_the_names() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let first = only_pane(&core);
+        core.new_tab();
+        let inside = core.split(false).focus;
+        core.rename_pane(inside, "api");
+        core.rename_tab(1, "logs");
+        let tab_panes = view_panes(&core.view());
+
+        let view = core.tear_off_tab_in(MAIN_WINDOW, inside, false).expect("torn off");
+
+        assert_eq!(view.tabs.len(), 1, "`main` keeps the other tab");
+        assert_eq!(view_panes(&view), vec![first]);
+        let label = core.window_labels()[1].clone();
+        let torn = core.view_in(&label).expect("the new window");
+        assert_eq!(view_panes(&torn), tab_panes);
+        assert_eq!(torn.tabs.len(), 1);
+        assert_eq!(torn.tabs[0].title, "logs");
+        assert_eq!(torn.pane_names, vec![(inside, "api".to_string())]);
+        assert_eq!(lock(&rec.opened).len(), 1);
+    }
+
+    // ---- release outside --------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_release_over_another_window_hands_the_drop_to_that_window_and_changes_nothing_yet() {
+        let (core, rec, _dir, a, b, c, w) = three_panes("sleep 30");
+        over(&rec, CursorSpot::Window { label: w.clone(), x: 12.5, y: 30.0 });
+        let before = core.view();
+
+        let outcome = core.release_outside_in(MAIN_WINDOW, b, DropKind::Pane);
+
+        assert_eq!(outcome, Ok(Released::Handed { to: w.clone() }));
+        assert_eq!(
+            rec.sent(),
+            vec![(Target::window(&w), Out::IncomingDrop { kind: DropKind::Pane, x: 12.5, y: 30.0 })],
+            "only the window under the pointer is told, with the pointer in its coordinates"
+        );
+        assert_eq!(without_rev(&core.view()), without_rev(&before), "nothing moved before the other page answers");
+        assert_eq!(panes_in(&core, &w), vec![c]);
+        assert_eq!(lock(&core.drops).source(DropKind::Pane, b, Instant::now()).as_deref(), Some(MAIN_WINDOW));
+        assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a, b]);
+    }
+
+    #[test]
+    fn a_release_over_the_source_window_or_a_window_that_does_not_exist_is_cancelled() {
+        let (core, rec, _dir, _a, b, _c, w) = three_panes("sleep 30");
+
+        over(&rec, CursorSpot::Window { label: MAIN_WINDOW.into(), x: 1.0, y: 1.0 });
+        assert_eq!(core.release_outside_in(MAIN_WINDOW, b, DropKind::Pane), Ok(Released::Cancelled));
+        over(&rec, CursorSpot::Window { label: "window-404".into(), x: 1.0, y: 1.0 });
+        assert_eq!(core.release_outside_in(MAIN_WINDOW, b, DropKind::Pane), Ok(Released::Cancelled));
+        over(&rec, CursorSpot::Unknown);
+        assert_eq!(core.release_outside_in(MAIN_WINDOW, b, DropKind::Pane), Ok(Released::Cancelled));
+
+        assert!(rec.sent().is_empty() && lock(&rec.opened).is_empty());
+        assert!(lock(&core.drops).is_empty());
+        assert_eq!(core.window_labels().len(), 2);
+        assert!(core.view_in(&w).is_ok());
+    }
+
+    #[test]
+    fn a_release_over_nothing_tears_the_pane_or_the_tab_off_at_the_pointer() {
+        let (core, rec, _dir, a, b, c, _w) = three_panes("sleep 30");
+        over(&rec, CursorSpot::Nothing);
+
+        let outcome = core.release_outside_in(MAIN_WINDOW, b, DropKind::Pane).expect("answers");
+
+        let Released::TornOff { label } = outcome else { panic!("not torn off: {outcome:?}") };
+        assert_eq!(panes_in(&core, &label), vec![b]);
+        assert_eq!(lock(&rec.opened)[0].1, Place::Cursor);
+        assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a]);
+
+        // A pane that is alone in its window cannot leave it: cancelled, not an error.
+        assert_eq!(core.release_outside_in(MAIN_WINDOW, a, DropKind::Pane), Ok(Released::Cancelled));
+        assert_eq!(core.release_outside_in(MAIN_WINDOW, a, DropKind::Tab), Ok(Released::Cancelled));
+        assert_eq!(lock(&rec.opened).len(), 1);
+
+        // A tab, named by one of its panes.
+        core.new_tab();
+        let in_tab = core.split(false).focus;
+        let outcome = core.release_outside_in(MAIN_WINDOW, in_tab, DropKind::Tab).expect("answers");
+        assert!(matches!(outcome, Released::TornOff { .. }), "{outcome:?}");
+        assert_eq!(core.window_labels().len(), 4);
+        assert!(core.window_labels().iter().all(|l| core.view_in(l).is_ok()));
+        let _ = c;
+    }
+
+    #[test]
+    fn a_release_names_a_pane_of_the_calling_window_only() {
+        let (core, rec, _dir, a, _b, c, w) = three_panes("sleep 30");
+        over(&rec, CursorSpot::Nothing);
+
+        assert!(core.release_outside_in(MAIN_WINDOW, c, DropKind::Pane).is_err(), "c is in another window");
+        assert!(core.release_outside_in(MAIN_WINDOW, c, DropKind::Tab).is_err());
+        assert!(core.release_outside_in(&w, a, DropKind::Pane).is_err());
+        assert!(core.release_outside_in(MAIN_WINDOW, 9_999, DropKind::Pane).is_err());
+        assert!(core.release_outside_in("window-404", a, DropKind::Pane).is_err());
+
+        assert!(lock(&rec.opened).is_empty() && rec.sent().is_empty() && lock(&core.drops).is_empty());
+    }
+
+    // ---- attach -----------------------------------------------------------------------------------------------
+
+    /// `b` is released over the window `w` and handed to it.
+    fn hand_over(core: &AppCore, rec: &Recorder, b: PaneId, w: &str, kind: DropKind) {
+        over(rec, CursorSpot::Window { label: w.to_owned(), x: 5.0, y: 6.0 });
+        assert_eq!(core.release_outside_in(MAIN_WINDOW, b, kind), Ok(Released::Handed { to: w.to_owned() }));
+    }
+
+    #[test]
+    fn a_pane_released_over_another_window_moves_there_with_its_shell_and_its_events_follow() {
+        let (core, rec, dir, a, b, c, w) = three_panes(TITLED_CAT);
+        start_all(&core, &[a, b, c]);
+        assert!(wait_until(WAIT, || rec.cwds(b).len() == 1 && rec.titles().iter().any(|(p, _)| *p == b)), "no title");
+        let pid = core.pid(b).expect("a shell");
+        hand_over(&core, &rec, b, &w, DropKind::Pane);
+        let mark = rec.sent().len();
+
+        let view = core.attach_pane_in(&w, b, Some(c), Some(Edge::Right), None).expect("attached");
+
+        assert_eq!(view_panes(&view), vec![b, c], "the answer is the view of the window the pane came to");
+        assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a]);
+        assert_eq!(core.pid(b), Some(pid), "the shell went along");
+        // Both windows are told, the new owner first with what the answer says, and the title and directory of the
+        // pane follow the layout that has it.
+        let told: Vec<(Target, Out)> = rec.sent().into_iter().skip(mark).filter(|(_, o)| !matches!(o, Out::Frame(_))).collect();
+        let layout_new = told.iter().position(|(t, o)| *t == Target::window(&w) && *o == Out::Layout(view.clone()));
+        let layout_old = told.iter().position(|(t, o)| *t == Target::window(MAIN_WINDOW) && matches!(o, Out::Layout(_)));
+        let title = told.iter().position(|(t, o)| *t == Target::window(&w) && matches!(o, Out::Title { pane, .. } if *pane == b));
+        let cwd = told.iter().position(|(t, o)| *t == Target::window(&w) && matches!(o, Out::Cwd { pane, .. } if *pane == b));
+        assert!(layout_new.is_some() && layout_old.is_some(), "{told:?}");
+        assert!(title.is_some() && cwd.is_some(), "the title and the directory were replayed: {told:?}");
+        assert!(layout_new < title && layout_new < cwd, "the page hears of the pane before its title");
+        assert_eq!(told.iter().filter(|(_, o)| matches!(o, Out::Title { .. })).count(), 1, "to one window only");
+
+        // From now on the pane's frames go to the new owner only, the first one a full frame.
+        core.key(b, key("KeyX", "x")).expect("accepted");
+        assert!(wait_until(WAIT, || rec.frames(b).iter().skip(1).any(|f| f.changed.iter().any(|r| !r.runs.is_empty()))), "no echo");
+        let after: Vec<(Target, FrameMsg)> = rec
+            .sent()
+            .into_iter()
+            .skip(mark)
+            .filter_map(|(t, o)| match o {
+                Out::Frame(f) if f.pane == b => Some((t, f)),
+                _ => None,
+            })
+            .collect();
+        assert!(!after.is_empty());
+        assert!(after.iter().all(|(t, _)| *t == Target::window(&w)), "a frame of the moved pane went to the old window");
+        assert!(after.first().is_some_and(|(_, f)| f.full), "the new window's first frame is a full one");
+
+        // Both layouts are on disk.
+        core.flush();
+        let (saved, status) = WindowSet::from_json(&std::fs::read_to_string(dir.layout_file()).unwrap());
+        assert_eq!(status, LoadStatus::Clean);
+        assert_eq!(saved.window_of(b), Some(w.as_str()));
+        assert_eq!(saved.window_of(a), Some(MAIN_WINDOW));
+    }
+
+    #[test]
+    fn a_pane_dropped_on_the_middle_of_a_pane_of_another_window_swaps_them_and_their_routes() {
+        let (core, rec, _dir, a, b, c, w) = three_panes("sleep 30");
+        hand_over(&core, &rec, b, &w, DropKind::Pane);
+
+        let view = core.attach_pane_in(&w, b, Some(c), Some(Edge::Center), None).expect("swapped");
+
+        assert_eq!(view_panes(&view), vec![b], "`b` took the place of `c` in the other window");
+        assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a, c]);
+        assert_eq!(lock(&core.routes).live.get(&b).map(|l| l.to_string()), Some(w.clone()));
+        assert_eq!(lock(&core.routes).live.get(&c).map(|l| l.to_string()), Some(MAIN_WINDOW.to_owned()));
+    }
+
+    #[test]
+    fn a_pane_can_be_dropped_on_a_tab_strip_as_a_tab_of_a_workspace() {
+        let (core, rec, _dir, _a, b, c, w) = three_panes("sleep 30");
+        hand_over(&core, &rec, b, &w, DropKind::Pane);
+
+        let view = core.attach_pane_in(&w, b, None, None, Some(0)).expect("attached as a tab");
+
+        assert_eq!(view.tabs.len(), 2, "the pane is the last tab of the window's workspace");
+        assert!(view.tabs[1].active);
+        assert_eq!(view_panes(&view), vec![b], "and shown");
+        assert!(panes_in(&core, &w).contains(&c));
+    }
+
+    #[test]
+    fn the_last_pane_of_a_window_dropped_on_another_window_closes_the_source_window() {
+        let (core, rec, dir, a, b, c, w) = three_panes("sleep 30");
+        core.note_window(&w, WindowState { x: 40, y: 40, width: 900, height: 600, maximized: false });
+        over(&rec, CursorSpot::Window { label: MAIN_WINDOW.into(), x: 5.0, y: 6.0 });
+        assert_eq!(core.release_outside_in(&w, c, DropKind::Pane), Ok(Released::Handed { to: MAIN_WINDOW.into() }));
+        let mark = rec.sent().len();
+
+        let view = core.attach_pane_in(MAIN_WINDOW, c, Some(a), Some(Edge::Left), None).expect("attached");
+
+        assert_eq!(view_panes(&view), vec![a, b, c]);
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+        assert_eq!(rec.closed_windows(), vec![w.clone()], "the empty window is destroyed");
+        let told: Vec<_> = rec.sent().into_iter().skip(mark).filter(|(t, _)| *t == Target::window(&w)).collect();
+        assert!(told.iter().all(|(_, o)| !matches!(o, Out::Layout(_))), "no layout for a window that went: {told:?}");
+        core.flush();
+        assert_eq!(session_on_disk(&dir).window_for(&w), None, "its frame is forgotten");
+        assert_eq!(lock(&core.routes).live.get(&c).map(|l| l.to_string()), Some(MAIN_WINDOW.to_owned()));
+    }
+
+    #[test]
+    fn a_tab_released_over_another_window_moves_there_with_all_its_panes() {
+        let (core, rec, _dir, a, _b, _c, w) = three_panes(TITLED_CAT);
+        let tab_first = core.new_tab().focus;
+        let tab_second = core.split(false).focus;
+        start_all(&core, &[tab_first, tab_second]);
+        assert!(wait_until(WAIT, || rec.cwds(tab_first).len() == 1 && rec.cwds(tab_second).len() == 1), "no cwd");
+        hand_over(&core, &rec, tab_second, &w, DropKind::Tab);
+        let mark = rec.sent().len();
+
+        let view = core.attach_tab_in(&w, tab_second, 0).expect("attached");
+
+        assert_eq!(view.tabs.len(), 2);
+        assert_eq!(view_panes(&view), vec![tab_first, tab_second], "the tab with its split tree is shown");
+        assert!(!panes_in(&core, MAIN_WINDOW).contains(&tab_first));
+        assert!(panes_in(&core, MAIN_WINDOW).contains(&a));
+        for pane in [tab_first, tab_second] {
+            assert_eq!(lock(&core.routes).live.get(&pane).map(|l| l.to_string()), Some(w.clone()), "route of {pane}");
+        }
+        let replayed: Vec<PaneId> = rec
+            .sent()
+            .into_iter()
+            .skip(mark)
+            .filter_map(|(t, o)| match o {
+                Out::Cwd { pane, .. } if t == Target::window(&w) => Some(pane),
+                _ => None,
+            })
+            .collect();
+        assert!(replayed.contains(&tab_first) && replayed.contains(&tab_second), "{replayed:?}");
+    }
+
+    #[test]
+    fn a_stale_repeated_or_wrong_answer_changes_nothing() {
+        let (core, rec, _dir, a, b, c, w) = three_panes("sleep 30");
+        let (main_before, w_before) = (core.view(), core.view_in(&w).unwrap());
+        let unchanged = |core: &AppCore| {
+            assert_eq!(without_rev(&core.view()), without_rev(&main_before));
+            assert_eq!(without_rev(&core.view_in(&w).unwrap()), without_rev(&w_before));
+        };
+
+        // Nothing is in flight.
+        assert!(core.attach_pane_in(&w, b, Some(c), Some(Edge::Left), None).is_ok());
+        assert!(core.attach_tab_in(&w, b, 0).is_ok());
+        unchanged(&core);
+        assert!(rec.sent().is_empty());
+
+        // A drop of `b` is in flight; the answers are for something else.
+        hand_over(&core, &rec, b, &w, DropKind::Pane);
+        let mark = rec.sent().len();
+        assert!(core.attach_pane_in(&w, a, Some(c), Some(Edge::Left), None).is_ok(), "another pane");
+        assert!(core.attach_tab_in(&w, b, 0).is_ok(), "another kind");
+        assert!(core.attach_pane_in(&w, b, None, None, None).is_ok(), "no place named");
+        assert!(core.attach_pane_in(&w, b, Some(9_999), Some(Edge::Left), None).is_ok(), "a target that is not there");
+        assert!(core.attach_pane_in(&w, b, None, None, Some(7)).is_ok(), "a workspace that is not there");
+        assert!(core.attach_pane_in(MAIN_WINDOW, b, Some(a), Some(Edge::Left), None).is_ok(), "the window it came from");
+        assert!(core.attach_pane_in("window-404", b, Some(c), Some(Edge::Left), None).is_err(), "no such window");
+        unchanged(&core);
+        assert_eq!(rec.sent().len(), mark, "no event for an answer that changed nothing");
+        assert!(lock(&core.drops).source(DropKind::Pane, b, Instant::now()).is_some(), "the drop is still waiting");
+
+        // The right answer works once; the same answer again finds nothing.
+        core.attach_pane_in(&w, b, Some(c), Some(Edge::Left), None).expect("the right answer");
+        let after = (core.view(), core.view_in(&w).unwrap());
+        assert!(core.attach_pane_in(&w, b, Some(c), Some(Edge::Right), None).is_ok());
+        assert_eq!((without_rev(&core.view()), without_rev(&core.view_in(&w).unwrap())), (without_rev(&after.0), without_rev(&after.1)));
+    }
+
+    #[test]
+    fn a_drop_that_waited_too_long_or_whose_pane_went_elsewhere_is_not_answered() {
+        let (core, rec, _dir, a, b, c, w) = three_panes("sleep 30");
+
+        // Too old.
+        let long_ago = Instant::now().checked_sub(crate::windows::DROP_TTL * 2).expect("the clock has run that long");
+        lock(&core.drops).begin(DropKind::Pane, b, MAIN_WINDOW, long_ago);
+        core.attach_pane_in(&w, b, Some(c), Some(Edge::Left), None).expect("answers");
+        assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a, b], "an expired drop moves nothing");
+
+        // The pane was closed after the drop was handed over.
+        hand_over(&core, &rec, b, &w, DropKind::Pane);
+        core.close_pane(b);
+        core.attach_pane_in(&w, b, Some(c), Some(Edge::Left), None).expect("answers");
+        assert_eq!(panes_in(&core, &w), vec![c]);
+        assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a]);
+    }
+
+    #[test]
+    fn a_window_ready_page_is_told_the_last_title_and_directory_of_every_pane_it_holds() {
+        let (core, rec, _dir, _a, _b, c, w) = three_panes(TITLED_CAT);
+        let d = core.split_in(&w, true).unwrap().focus;
+        start_all(&core, &[c, d]);
+        assert!(wait_until(WAIT, || rec.cwds(c).len() == 1 && rec.cwds(d).len() == 1), "no cwd");
+        let mark = rec.sent().len();
+
+        core.window_ready_in(&w).expect("a window");
+
+        let replayed: Vec<(Target, Out)> = rec.sent().into_iter().skip(mark).collect();
+        let targets: Vec<&Target> = replayed.iter().map(|(t, _)| t).collect();
+        assert!(targets.iter().all(|t| **t == Target::window(&w)), "{targets:?}");
+        for pane in [c, d] {
+            assert!(replayed.iter().any(|(_, o)| matches!(o, Out::Title { pane: p, title } if *p == pane && title == "t")));
+            assert!(replayed.iter().any(|(_, o)| matches!(o, Out::Cwd { pane: p, .. } if *p == pane)));
+        }
+        assert_eq!(core.window_ready_in("window-404"), Err("no such window".to_owned()));
+    }
+
+    #[test]
+    fn restarting_after_a_tear_off_restores_the_new_window_with_its_layout_and_frame() {
+        let dir = Scratch::new("tear-off-restart");
+        let (second, label) = {
+            let (core, rec) = core_in(&dir, "/bin/cat", &[]);
+            let first = only_pane(&core);
+            let second = core.split(false).focus;
+            core.rename_pane(second, "db");
+            core.tear_off_pane_in(MAIN_WINDOW, second, false).expect("torn off");
+            let label = core.window_labels()[1].clone();
+            core.note_window(&label, WindowState { x: 1200, y: 60, width: 700, height: 500, maximized: false });
+            assert_eq!(lock(&rec.opened).len(), 1);
+            assert!(panes_in(&core, MAIN_WINDOW).contains(&first));
+            core.shutdown();
+            (second, label)
+        };
+
+        let (again, _rec) = core_in(&dir, "/bin/cat", &[]);
+
+        assert_eq!(again.restored_windows(), vec![label.clone()]);
+        assert_eq!(panes_in(&again, &label), vec![second]);
+        let placement = again.placement(&label, &TWO_MONITORS);
+        assert_eq!((placement.size, placement.position), ((700, 500), Some((1200, 60))));
+        let set = lock(&again.windows);
+        assert_eq!(set.layout(&label).unwrap().pane_name(second), Some("db"));
+    }
 }
 
 /// The protocol golden (`app/tests/fixtures/protocol.json`): what the webview depends on, generated from the real
@@ -4480,6 +5306,7 @@ mod protocol {
             Out::Cwd { pane: 3, cwd: "/Users/holz/Projects/holzWave".into() },
             Out::PaneExit { pane: 3, code: Some(0) },
             Out::Settings(settings_view.clone()),
+            Out::IncomingDrop { kind: DropKind::Pane, x: 412.5, y: 96.0 },
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -4515,6 +5342,10 @@ mod protocol {
                     to_value(&Out::PaneExit { pane: 3, code: None }),
                 ],
                 "settings": payload(5),
+                "incoming-drop": [
+                    payload(6),
+                    to_value(&Out::IncomingDrop { kind: DropKind::Tab, x: 40.0, y: 12.0 }),
+                ],
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {
@@ -4547,6 +5378,7 @@ mod protocol {
                     SearchOpMsg::Clear,
                 ]),
                 "copy_mode": ops(copy_ops),
+                "drop_kind": ops(vec![DropKind::Pane, DropKind::Tab]),
             },
             "paste": [
                 to_value(&PasteOutcomeMsg::from(PasteOutcome::Written)),
@@ -4561,6 +5393,11 @@ mod protocol {
                 "copy_mode": [
                     to_value(&CopyStateMsg { active: true, selecting: false, yanked: None }),
                     to_value(&CopyStateMsg { active: false, selecting: false, yanked: Some("text".into()) }),
+                ],
+                "release_outside": [
+                    to_value(&Released::TornOff { label: "window-12".into() }),
+                    to_value(&Released::Handed { to: "main".into() }),
+                    to_value(&Released::Cancelled),
                 ],
             },
         })
@@ -4647,6 +5484,17 @@ mod protocol {
             table["key"],
             json!(["pane", "code", "key", "mods", "repeat", "release", "composing"])
         );
+        // The calling window is not an argument: Tauri fills it in, so the page sends the same names as before.
+        assert_eq!(table["split"], json!(["column"]));
+        assert_eq!(table["get_layout"], json!([]));
+        assert_eq!(table["close_pane"], json!(["pane"]));
+        // The commands between windows carry pane ids and nothing about where the pointer is.
+        assert_eq!(table["tear_off_pane"], json!(["pane", "at_cursor"]));
+        assert_eq!(table["tear_off_tab"], json!(["pane", "at_cursor"]));
+        assert_eq!(table["release_outside"], json!(["pane", "kind"]));
+        assert_eq!(table["attach_pane"], json!(["pane", "target", "edge", "workspace"]));
+        assert_eq!(table["attach_tab"], json!(["pane", "workspace"]));
+        assert_eq!(table["window_ready"], json!([]));
 
         check(|doc| doc["commands"].clone(), "the command argument names");
     }

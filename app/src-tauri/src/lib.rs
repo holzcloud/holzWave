@@ -17,15 +17,22 @@ mod windows;
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, WebviewWindow, Window, WindowEvent};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, PhysicalSize, RunEvent, WebviewWindow,
+    WebviewWindowBuilder, Window, WindowEvent,
+};
 
 use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
 use state::{AppCore, Out, ShellSpec, Sink, Target};
-use windows::{Normal, WindowTracker};
+use windows::{
+    CursorSpot, Frame, Normal, Place, WindowTracker, position_beside, position_under_cursor, window_under,
+};
 
-/// Sends the core's events to the webview they are for. Frames are events and are measured (D-16).
+/// Sends the core's events to the webview they are for, and does what the core asks of the window system. Frames are
+/// events and are measured (D-16).
 struct TauriSink {
     app: AppHandle,
+    tracker: Arc<WindowTracker>,
 }
 
 impl Sink for TauriSink {
@@ -56,6 +63,91 @@ impl Sink for TauriSink {
             eprintln!("holzwave: cannot close the window {label}: {e}");
         }
     }
+
+    fn open_window(&self, label: &str, place: &Place) -> Result<(), String> {
+        let window = build_window(&self.app, label)?;
+        // A position is in logical points: a point of the desktop, whatever the density of the monitor it is on.
+        let at = match place {
+            Place::Cursor => pointer_in_points(&self.app).map(position_under_cursor),
+            Place::Beside(origin) => self
+                .app
+                .get_webview_window(origin)
+                .and_then(|origin| Some((origin.outer_position().ok()?, own_scale(&origin))))
+                .map(|(position, scale)| position_beside((f64::from(position.x) / scale, f64::from(position.y) / scale))),
+        };
+        if let Some((x, y)) = at
+            && let Err(e) = window.set_position(LogicalPosition::new(x, y))
+        {
+            // The window opens where the window system puts it; nothing is lost.
+            eprintln!("holzwave: cannot place the window {label}: {e}");
+        }
+        Ok(())
+    }
+
+    fn cursor_spot(&self, source: &str) -> CursorSpot {
+        let Some(cursor) = pointer_in_points(&self.app) else {
+            return CursorSpot::Unknown;
+        };
+        let frames: Vec<Frame> =
+            self.app.webview_windows().iter().filter_map(|(label, window)| frame_of(label, window)).collect();
+        match window_under(cursor, &frames, &self.tracker.order(), source) {
+            Some(frame) => {
+                let (x, y) = frame.client(cursor);
+                CursorSpot::Window { label: frame.label.clone(), x, y }
+            }
+            None => CursorSpot::Nothing,
+        }
+    }
+}
+
+// ---- windows: building them, and finding them under the pointer ---------------------------------------------------
+
+/// Build the window `label` like the one of the configuration (size, minimum size, overlay title bar), hidden: its page
+/// shows it with `window_ready` once it has drawn, so that it never flashes empty. A label that exists is an error.
+/// Never call it with a lock of the core held (a window event of the new window takes them), nor from a synchronous
+/// command (Windows deadlocks there, wry 583).
+fn build_window(app: &AppHandle, label: &str) -> Result<WebviewWindow, String> {
+    let mut conf = app.config().app.windows.first().cloned().ok_or("the configuration has no window")?;
+    conf.label = label.to_owned();
+    WebviewWindowBuilder::from_config(app, &conf)
+        .map_err(|e| e.to_string())?
+        .visible(false)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// The scale factor the pixels of a window's own coordinates are in. On macOS the position and size of a window are
+/// in the scale of the monitor it is on; elsewhere the numbers of all windows and of the pointer share one physical
+/// space (phase 2.2), so nothing is divided.
+fn own_scale(window: &WebviewWindow) -> f64 {
+    if cfg!(target_os = "macos") { window.scale_factor().unwrap_or(1.0) } else { 1.0 }
+}
+
+/// The pointer in logical points. macOS reports it relative to the primary monitor and in the primary monitor's scale,
+/// whatever monitor it is over, so it is divided by that scale and not by the scale of the window under it.
+fn pointer_in_points(app: &AppHandle) -> Option<(f64, f64)> {
+    let cursor = app.cursor_position().ok()?;
+    let scale = if cfg!(target_os = "macos") { app.primary_monitor().ok()??.scale_factor() } else { 1.0 };
+    Some((cursor.x / scale, cursor.y / scale))
+}
+
+/// The frame of a window that can be dropped on, in logical points; `None` for a window that is hidden or minimised.
+fn frame_of(label: &str, window: &WebviewWindow) -> Option<Frame> {
+    if !window.is_visible().ok()? || window.is_minimized().ok()? {
+        return None;
+    }
+    let scale = own_scale(window);
+    let (outer, size, inner) = (window.outer_position().ok()?, window.outer_size().ok()?, window.inner_position().ok()?);
+    let points = |v: f64| v / scale;
+    Some(Frame {
+        label: label.to_owned(),
+        x: points(f64::from(outer.x)),
+        y: points(f64::from(outer.y)),
+        width: points(f64::from(size.width)),
+        height: points(f64::from(size.height)),
+        inner_x: points(f64::from(inner.x)),
+        inner_y: points(f64::from(inner.y)),
+    })
 }
 
 // ---- the window frame (DESK-22) ----------------------------------------------------------------------------------
@@ -191,12 +283,22 @@ pub fn run() {
     builder
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
-            let sink = Arc::new(TauriSink { app: app.handle().clone() });
+            let tracker = Arc::new(WindowTracker::default());
+            app.manage(tracker.clone());
+            let sink = Arc::new(TauriSink { app: app.handle().clone(), tracker });
             let core = AppCore::new(dir, sink, ShellSpec::default());
             app.manage(core.clone());
-            app.manage(Arc::new(WindowTracker::default()));
             if let Some(window) = app.get_webview_window("main") {
                 restore_window(&window, &core, "main");
+            }
+            // The windows of the last session other than `main` (which the configuration makes): each is built
+            // hidden with its own frame, and shown when its page is ready. A window that cannot be built keeps its
+            // entry in the layout, so the next start tries again.
+            for label in core.restored_windows() {
+                match build_window(app.handle(), &label) {
+                    Ok(window) => restore_window(&window, &core, &label),
+                    Err(e) => eprintln!("holzwave: cannot restore the window {label}: {e}"),
+                }
             }
             Ok(())
         })
@@ -249,6 +351,12 @@ pub fn run() {
             commands::move_tab,
             commands::move_tab_to_workspace,
             commands::set_ratio,
+            commands::tear_off_pane,
+            commands::tear_off_tab,
+            commands::release_outside,
+            commands::attach_pane,
+            commands::attach_tab,
+            commands::window_ready,
             commands::get_settings,
             commands::set_setting,
             commands::reset_setting,

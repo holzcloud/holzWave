@@ -30,7 +30,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
-use crate::state::{AppCore, AppInfo, SettingsView, View};
+use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
+use crate::windows::DropKind;
 
 // ---- wire types ------------------------------------------------------------------------------------------------
 
@@ -470,6 +471,86 @@ pub fn move_tab_to_workspace(
 #[tauri::command(rename_all = "snake_case")]
 pub fn set_ratio(core: State<Arc<AppCore>>, window: WebviewWindow, split: SplitId, ratio: f32) -> Result<View, String> {
     core.set_ratio_in(window.label(), split, ratio)
+}
+
+// ---- panes and tabs between windows (DESK-29 part 2) ---------------------------------------------------------------
+//
+// All of them are async: they build, show or destroy a window, which waits for the main thread. The page never says
+// where the pointer is; the shell reads it.
+
+/// Give a pane of the calling window a window of its own: under the pointer (`at_cursor`), or beside this window
+/// (the palette action). A pane that is alone in its window is refused. Answers the view of the calling window.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn tear_off_pane(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    pane: PaneId,
+    at_cursor: bool,
+) -> Result<View, String> {
+    core.tear_off_pane_in(window.label(), pane, at_cursor)
+}
+
+/// Like `tear_off_pane` for the whole tab the pane is in. The tab is named by any of its panes.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn tear_off_tab(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    pane: PaneId,
+    at_cursor: bool,
+) -> Result<View, String> {
+    core.tear_off_tab_in(window.label(), pane, at_cursor)
+}
+
+/// A pane (`kind` `pane`) or the tab of a pane (`kind` `tab`) was released outside the calling window. The shell
+/// reads the pointer: over another window of the app that window is told with `incoming-drop`, over nothing the pane
+/// or tab gets a window under the pointer. Answers `{outcome: "torn_off", label}`, `{outcome: "handed", to}` or
+/// `{outcome: "cancelled"}`.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn release_outside(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    pane: PaneId,
+    kind: DropKind,
+) -> Result<Released, String> {
+    core.release_outside_in(window.label(), pane, kind)
+}
+
+/// The calling window answers an `incoming-drop` of a pane: onto the pane `target` at `edge`, or as a tab of
+/// `workspace`. Only the drop that is in flight for this pane counts. Answers the view of the calling window.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn attach_pane(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    pane: PaneId,
+    target: Option<PaneId>,
+    edge: Option<Edge>,
+    workspace: Option<usize>,
+) -> Result<View, String> {
+    core.attach_pane_in(window.label(), pane, target, edge, workspace)
+}
+
+/// The calling window answers an `incoming-drop` of a tab: as the last tab of `workspace`. Answers the view of the
+/// calling window.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn attach_tab(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    pane: PaneId,
+    workspace: usize,
+) -> Result<View, String> {
+    core.attach_tab_in(window.label(), pane, workspace)
+}
+
+/// The page of the calling window has applied its first layout: it is told the last title and directory of its
+/// panes, and a window that was created hidden is shown and focused.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn window_ready(core: State<Arc<AppCore>>, window: WebviewWindow) -> Result<(), String> {
+    core.window_ready_in(window.label())?;
+    if !window.is_visible().map_err(|e| e.to_string())? {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ---- settings, themes and key bindings ----------------------------------------------------------------------------

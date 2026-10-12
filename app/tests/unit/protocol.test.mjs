@@ -42,7 +42,7 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop"]);
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
   assert.deepEqual(keys(golden.events.cwd), ["cwd", "pane"]);
   const exits = golden.events["pane-exit"];
@@ -50,6 +50,36 @@ test("the event names and the title, cwd and pane-exit payloads are pinned", () 
   for (const e of exits) assert.deepEqual(keys(e), ["code", "pane"]);
   assert.equal(typeof exits[0].code, "number");
   assert.equal(exits[1].code, null);
+});
+
+test("the commands and events between windows are pinned (DESK-29 part 2)", () => {
+  // A release over another window reaches that window as `incoming-drop` with the pointer in its client coordinates.
+  const drops = golden.events["incoming-drop"];
+  assert.equal(drops.length, 2, "one sample for a pane and one for a tab");
+  assert.deepEqual(drops.map((d) => d.kind), ["pane", "tab"]);
+  for (const d of drops) {
+    assert.deepEqual(keys(d), ["kind", "x", "y"]);
+    assert.equal(typeof d.x, "number");
+    assert.equal(typeof d.y, "number");
+  }
+  assert.deepEqual(golden.ops.drop_kind, ["pane", "tab"]);
+  // The answers of release_outside: a window of its own, handed to another window, or nothing.
+  assert.deepEqual(golden.answers.release_outside.map((a) => a.outcome), ["torn_off", "handed", "cancelled"]);
+  assert.deepEqual(keys(golden.answers.release_outside[0]), ["label", "outcome"]);
+  assert.deepEqual(keys(golden.answers.release_outside[1]), ["outcome", "to"]);
+  assert.deepEqual(keys(golden.answers.release_outside[2]), ["outcome"]);
+  // The gestures carry pane ids and nothing about where the pointer is; the calling window is no argument.
+  assert.deepEqual(golden.commands.tear_off_pane, ["pane", "at_cursor"]);
+  assert.deepEqual(golden.commands.tear_off_tab, ["pane", "at_cursor"]);
+  assert.deepEqual(golden.commands.release_outside, ["pane", "kind"]);
+  assert.deepEqual(golden.commands.attach_pane, ["pane", "target", "edge", "workspace"]);
+  assert.deepEqual(golden.commands.attach_tab, ["pane", "workspace"]);
+  assert.deepEqual(golden.commands.window_ready, []);
+  for (const name of ["get_layout", "new_tab"]) assert.deepEqual(golden.commands[name], [], `${name} takes no argument`);
+  assert.deepEqual(golden.commands.split, ["column"]);
+  for (const [name, args] of Object.entries(golden.commands)) {
+    assert.ok(!args.includes("window"), `${name}: the calling window is filled in by Tauri, the page never sends it`);
+  }
 });
 
 test("the settings view has exactly the documented keys at every level and the settings event carries it", () => {

@@ -11,7 +11,7 @@ const MENU_RS: &str = include_str!("../src/menu.rs");
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
 const CAPABILITY: &str = include_str!("../capabilities/default.json");
 
-/// Permissions of the main window that are not commands of the app: the defaults of the core plugin set and the one
+/// Permissions of the windows that are not commands of the app: the defaults of the core plugin set and the one
 /// permission the own-drawn title bar needs (`data-tauri-drag-region`; `core:default` does not contain it).
 const FIXED_PERMISSIONS: [&str; 2] = ["core:default", "core:window:allow-start-dragging"];
 
@@ -107,8 +107,20 @@ fn handler_manifest_and_capability_list_the_same_commands() {
     assert!(problems.is_empty(), "the allow-list is out of step:\n  {}", problems.join("\n  "));
 }
 
+/// The window labels the capability grants: `main` and the pattern of the windows the app makes itself. Nothing else,
+/// and above all never a bare `*`: a label that is not made by the core has no permission to anything.
+const GRANTED_WINDOWS: [&str; 2] = ["main", "window-*"];
+
+/// Whether `label` matches one of the granted patterns (`window-*` is a prefix pattern, the others are exact).
+fn granted(label: &str) -> bool {
+    GRANTED_WINDOWS.iter().any(|pattern| match pattern.strip_suffix('*') {
+        Some(prefix) => label.starts_with(prefix),
+        None => label == *pattern,
+    })
+}
+
 #[test]
-fn the_capability_targets_only_the_main_window_and_no_remote_url() {
+fn the_capability_targets_only_main_and_the_windows_the_app_makes_and_no_remote_url() {
     let value = capability();
     let windows: Vec<&str> = value
         .get("windows")
@@ -117,12 +129,54 @@ fn the_capability_targets_only_the_main_window_and_no_remote_url() {
         .iter()
         .map(|w| w.as_str().expect("a window label is a string"))
         .collect();
-    assert_eq!(windows, ["main"], "the capability must grant the window labelled main and no other");
+    assert_eq!(windows, GRANTED_WINDOWS, "the capability must grant exactly main and window-*");
+    assert!(!windows.contains(&"*"), "a bare * would grant every window there is");
     for key in ["remote", "webviews", "platforms"] {
-        assert!(value.get(key).is_none(), "the capability has a {key} entry; it must grant the main window only");
+        assert!(value.get(key).is_none(), "the capability has a {key} entry; it must grant the app's own windows only");
     }
     assert!(!CAPABILITY.contains("http:"), "the capability names a remote URL");
     assert!(!CAPABILITY.contains("https:"), "the capability names a remote URL");
+}
+
+#[test]
+fn every_label_the_core_makes_is_granted_and_one_it_refuses_never_exists() {
+    use holzwave_core::layout::{MAIN_WINDOW, valid_window_label};
+
+    for label in [MAIN_WINDOW, "window-1", "window-4711", "window-1234567890123456"] {
+        assert!(valid_window_label(label), "{label} is a label the core makes");
+        assert!(granted(label), "{label} is made by the core but has no permissions");
+    }
+    // The pattern is wider than the labels the core makes (`window-*` also matches `window-evil`). That is safe only
+    // because the core refuses such labels, so no window can be given one, and the page cannot create windows.
+    for label in ["window-evil", "window-", "window-1x", "window-12345678901234567", "main2", "Main", " main", "*"] {
+        assert!(!valid_window_label(label), "{label} must not be a window label");
+    }
+    for label in ["main2", "Main", "other", "windows", "wind"] {
+        assert!(!granted(label), "{label} must not be granted");
+    }
+}
+
+#[test]
+fn the_page_cannot_create_windows_or_webviews() {
+    // A page that could make a window could make one of the label `window-evil` or open any URL in it. Windows are
+    // made by the shell only (`build_window` in lib.rs, from the one configured window, with its label from the core).
+    let permissions = capability_permissions().expect("capability permissions");
+    for permission in &permissions {
+        assert!(
+            !permission.contains("create") && !permission.contains("webview"),
+            "{permission} would let the page make a window or a webview"
+        );
+    }
+    let lib: String = code_lines(LIB_RS).join("\n");
+    assert!(lib.contains("WebviewWindowBuilder::from_config"), "a window is made from the configured window");
+    for forbidden in ["WebviewUrl::External", "WebviewUrl::CustomProtocol", ".navigate(", ".on_navigation("] {
+        assert!(!lib.contains(forbidden), "lib.rs uses {forbidden}: a window must load the app's own page only");
+    }
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    assert!(
+        !manifest.iter().any(|name| name.contains("create") || name.contains("open_window")),
+        "a command that makes a window would let the page make one"
+    );
 }
 
 #[test]
@@ -143,7 +197,7 @@ fn window_events_are_not_commands() {
     // note_window and placement are called by the Rust window handlers; granting them to the page would let a
     // script move the saved window.
     let manifest = manifest_commands(BUILD_RS).expect("manifest list");
-    for name in ["note_window", "placement", "shutdown"] {
+    for name in ["note_window", "placement", "shutdown", "window_closed", "restored_windows", "open_window", "close_window"] {
         assert!(!manifest.contains(name), "{name} is an AppCore method, not a page command");
     }
 }
@@ -268,6 +322,7 @@ fn the_policy_allows_nothing_inline_nothing_dynamic_and_no_remote_origin() {
 fn the_main_window_draws_its_own_title_bar_and_has_a_minimum_size() {
     let conf = tauri_conf();
     let windows = conf.pointer("/app/windows").and_then(|w| w.as_array()).expect("app.windows is an array");
+    // The other windows are made at run time from this one (`from_config`), with a label of the core's making.
     assert_eq!(windows.len(), 1, "one window is configured");
     let window = &windows[0];
     assert!(window.get("label").is_none_or(|l| l == "main"), "the configured window must be the one labelled main");
