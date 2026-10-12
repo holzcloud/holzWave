@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=holzWave
+Comment=Terminal emulator
+Exec=holzwave-app
+Icon=ch.holzcloud.holzwave
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;
+StartupWMClass=ch.holzcloud.holzwave

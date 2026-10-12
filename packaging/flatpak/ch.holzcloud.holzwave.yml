@@ -1,0 +1,93 @@
+# Flatpak manifest of holzWave, built locally from this repository (scripts/build-flatpak.sh). Never built for Flathub.
+#
+# Status: unverified. Flatpak ships in 0.0.1 only if it builds on the owner's Linux machine and row L10 of
+# docs/test-plan.md passes. See docs/flatpak.md.
+#
+# Runtime: the newest stable GNOME runtime of Flathub when this was written (org.gnome.Platform and org.gnome.Sdk 51,
+# on org.freedesktop 26.08), with the Rust and the Node SDK extensions of that freedesktop version. Sources: `flatpak
+# remote-ls --runtime flathub` and the Flathub API (flathub.org/api/v2/appstream/org.gnome.Platform) on 2026-10-12.
+app-id: ch.holzcloud.holzwave
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node26
+command: holzwave-app
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # The home folder is open, so that `~`, the directories of panes and "reveal in the file manager" resolve to the real
+  # ones. The sandbox is already open through the next permission, so this costs nothing more.
+  - --filesystem=home
+  # SANDBOX ESCAPE BY DESIGN. This permission lets the app run any command on the host with the user's rights
+  # (`flatpak-spawn --host`). A terminal in a sandbox sees only the runtime's /bin/sh and none of the user's tools,
+  # so it cannot be useful without it. The only host command holzWave starts is the user's login shell (or the
+  # program of the `shell` setting). The metainfo description and docs/flatpak.md say so too. If this is not
+  # acceptable, Flatpak is not for this app: it is then moved out of 0.0.1 (docs/flatpak.md).
+  - --talk-name=org.freedesktop.Flatpak
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node26/bin
+  env:
+    # Everything the build writes stays in the build directory, nothing in the user's home.
+    CARGO_HOME: /run/build/holzwave/.cargo
+    npm_config_cache: /run/build/holzwave/.npm
+    ZIG_GLOBAL_CACHE_DIR: /run/build/holzwave/.zig-cache
+
+modules:
+  # Zig exactly 0.16.0 (Phase 2 D-02), which the Ghostty engine is built with. A build tool only: nothing of it stays in
+  # the app. One archive per architecture; the checksums are those of https://ziglang.org/download/index.json. The
+  # aarch64 archive lets the same manifest build on an ARM machine (for 0.0.1 only x86_64 is a target).
+  - name: zig
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/opt/zig
+      - cp -a . /app/opt/zig
+    cleanup:
+      - /opt/zig
+    sources:
+      - type: archive
+        url: https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+        sha256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+        only-arches: [x86_64]
+      - type: archive
+        url: https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz
+        sha256: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+        only-arches: [aarch64]
+
+  # holzWave itself, from the sources of this repository, inside the SDK: a binary built outside the runtime could be
+  # ABI-incompatible with it. The build step needs the network (the crates of Cargo.lock, the npm packages of
+  # app/package-lock.json, and the Zig packages Ghostty fetches): a local build, never Flathub. The alternative of the
+  # Tauri guide (build the .deb elsewhere and unpack it into /app) carries that ABI risk and is not implemented here.
+  - name: holzwave
+    buildsystem: simple
+    build-options:
+      build-args:
+        - --share=network
+      append-path: /app/opt/zig
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - .planning
+          - target
+          - node_modules
+          - dist
+          - .flatpak-builder
+          - flatpak-build
+          - flatpak-repo
+    build-commands:
+      - npm --prefix app ci --ignore-scripts --no-audit --no-fund
+      - npm --prefix app run tauri -- build --no-bundle -- --locked
+      - install -Dm755 target/release/holzwave-app /app/bin/holzwave-app
+      - install -Dm644 packaging/flatpak/ch.holzcloud.holzwave.desktop /app/share/applications/ch.holzcloud.holzwave.desktop
+      - install -Dm644 packaging/flatpak/ch.holzcloud.holzwave.metainfo.xml /app/share/metainfo/ch.holzcloud.holzwave.metainfo.xml
+      - install -Dm644 app/src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/ch.holzcloud.holzwave.png
+      - install -Dm644 app/src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/ch.holzcloud.holzwave.png
+      - install -Dm644 app/src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/ch.holzcloud.holzwave.png
+      - install -Dm644 app/src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/ch.holzcloud.holzwave.png

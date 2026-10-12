@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>ch.holzcloud.holzwave</id>
+  <name>holzWave</name>
+  <summary>A terminal emulator</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="ch.holzcloud">
+    <name>holzcloud</name>
+  </developer>
+  <url type="homepage">https://holzcloud.ch/holzwave</url>
+  <description>
+    <p>holzWave is a terminal emulator written from scratch in Rust, with tiled panes and a layout that is restored on the next start.</p>
+    <p>A terminal is only useful when it runs the programs of the user's own system. In this Flatpak the shell therefore runs on the host, outside the sandbox: holzWave asks for permission to run commands on the host (flatpak-spawn --host, the permission org.freedesktop.Flatpak) and the only command it starts that way is your login shell. This removes the sandbox for this application. It also has access to your home folder.</p>
+    <p>This is a local build, not a Flathub package.</p>
+  </description>
+  <launchable type="desktop-id">ch.holzcloud.holzwave.desktop</launchable>
+  <provides>
+    <binary>holzwave-app</binary>
+  </provides>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.0.1-alpha1" date="2026-10-12"/>
+  </releases>
+</component>
