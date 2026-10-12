@@ -34,6 +34,7 @@ export default async function ({ page, url }) {
   await plainKeyCase(page, url);
   await facts(page, url);
   await shortcutCase(page, url);
+  await editCase(page, url);
   await repeatCase(page, url);
   await handlerCase(page, url);
   await inputElementCase(page, url);
@@ -146,6 +147,41 @@ async function shortcutCase(page, url) {
     ["cycle_focus", { step: 1 }],
     ["select_workspace", { index: 0 }],
   ], "shortcuts match by physical key");
+}
+
+/**
+ * Line editing (UAT 2026-10-12): Option and Cmd with the arrow keys and Backspace name a step for the core and send
+ * no key; held, they keep stepping; on the alternate screen the key goes to the program as it always did.
+ */
+async function editCase(page, url) {
+  await open(page, url);
+  const focus = await page.evaluate(() => window.__MOCK__.view().focus);
+  const arrow = (key, extra) => ({ key, code: key, ...extra });
+  const steps = async (init) => (await hold(page, init, 0)).map(([c, a]) => [c, a.action]);
+  assert.deepEqual(await steps(arrow("ArrowLeft", { altKey: true })), [["send_edit", "word_back"]], "Option+Left");
+  assert.deepEqual(await steps(arrow("ArrowRight", { altKey: true })), [["send_edit", "word_forward"]], "Option+Right");
+  assert.deepEqual(await steps(arrow("ArrowLeft", { metaKey: true })), [["send_edit", "line_start"]], "Cmd+Left");
+  assert.deepEqual(await steps(arrow("ArrowRight", { metaKey: true })), [["send_edit", "line_end"]], "Cmd+Right");
+  assert.deepEqual(await steps(arrow("Backspace", { altKey: true })), [["send_edit", "delete_word_back"]], "Option+Backspace");
+  assert.deepEqual(await steps(arrow("Backspace", { metaKey: true })), [["send_edit", "delete_to_line_start"]], "Cmd+Backspace");
+  const calls = await hold(page, arrow("ArrowLeft", { altKey: true }), 2);
+  assert.deepEqual(calls.map(([c]) => c), ["send_edit", "send_edit", "send_edit"], "a held Option+Left keeps stepping");
+  assert.equal(calls[0][1].pane, focus, "the step goes to the focused pane");
+  assert.deepEqual(await callsOf(page, "key"), [], "no edit step is also sent as a key");
+
+  // A full-screen program reads the arrow keys itself: the key goes to the encoder.
+  await page.evaluate(
+    (pane) => window.__MOCK__.emit("frame", {
+      pane, seq: 1, full: true, cols: 4, rows: 2, fg: 16777215, bg: 0, cursor: null, scrollbar: [0, 2, 2],
+      selection: [], matches: [], search: null, copy_cursor: null,
+      modes: { alt: true, bracketed_paste: false, mouse: false }, changed: [],
+    }),
+    focus,
+  );
+  const before = (await sent(page)).length;
+  await keydown(page, arrow("ArrowLeft", { altKey: true }));
+  const after = (await sent(page)).slice(before);
+  assert.deepEqual(after.map(([c]) => c), ["key"], "on the alternate screen Option+Left is a key for the program");
 }
 
 /** One press of a chord, then `repeats` auto-repeat events of the held key; returns the commands they caused. */

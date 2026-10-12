@@ -38,6 +38,13 @@ export const CHORDS: ReadonlyMap<string, string> = new Map([
   ["Cmd+-", "font.decrease"],
   ["Cmd+0", "font.reset"],
   ["Cmd+,", "settings.open"],
+  // Line editing, with the macOS standard: Option by word, Cmd by line.
+  ["Alt+Left", "edit.word_back"],
+  ["Alt+Right", "edit.word_forward"],
+  ["Cmd+Left", "edit.line_start"],
+  ["Cmd+Right", "edit.line_end"],
+  ["Alt+Backspace", "edit.delete_word_back"],
+  ["Cmd+Backspace", "edit.delete_to_line_start"],
 ]);
 
 // ---- the core's resolved table --------------------------------------------------------------------

@@ -32,7 +32,7 @@ export function unregisterAction(id: string): boolean {
 /**
  * The actions that run on every auto-repeat of a held shortcut. Everything else runs once per press (WR-01).
  *
- * These four are stepping actions: each step is cheap, creates and destroys nothing, and is bounded (focus wraps
+ * These are stepping actions (the four focus and font steps and the six line-editing steps): each step is cheap, creates and destroys nothing, and is bounded (focus wraps
  * over at most 64 panes, the core clamps the font size, and the settings calls are queued in order). A person
  * holding the key wants them to keep going. Create and destroy actions (split, close, new tab, new workspace),
  * toggles and openers (palette, search, copy mode, settings) and jumps (tab and workspace select, font reset, copy)
@@ -47,6 +47,13 @@ const REPEATABLE: ReadonlySet<string> = new Set([
   "pane.focus_prev",
   "font.increase",
   "font.decrease",
+  // Line editing: a step moves or deletes one word or line, so a held key keeps going like it does in any shell.
+  "edit.word_back",
+  "edit.word_forward",
+  "edit.line_start",
+  "edit.line_end",
+  "edit.delete_word_back",
+  "edit.delete_to_line_start",
 ]);
 
 /** Whether the action under `id` runs on each auto-repeat of its shortcut. Unknown ids are not. */

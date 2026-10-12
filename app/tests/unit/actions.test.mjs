@@ -94,7 +94,10 @@ test("an action that throws is not swallowed", () => {
 
 // ---- key auto-repeat -----------------------------------------------------------------------------
 
-const REPEATABLE = ["pane.focus_next", "pane.focus_prev", "font.increase", "font.decrease"];
+const REPEATABLE = [
+  "pane.focus_next", "pane.focus_prev", "font.increase", "font.decrease",
+  "edit.word_back", "edit.word_forward", "edit.line_start", "edit.line_end", "edit.delete_word_back", "edit.delete_to_line_start",
+];
 
 test("an action that is not allowed to repeat is consumed on a repeat and runs once per press", () => {
   const id = fresh("once");
@@ -125,7 +128,7 @@ test("an unknown id is false on a repeat as well", () => {
   assert.equal(runAction("constructor", { repeat: true }), false);
 });
 
-test("isRepeatable is true for exactly the four stepping ids", () => {
+test("isRepeatable is true for exactly the stepping ids", () => {
   for (const id of REPEATABLE) assert.equal(isRepeatable(id), true, id);
   const once = [
     "pane.close", "pane.split_right", "pane.split_down", "tab.new", "workspace.new", "palette.open", "font.reset",
@@ -159,6 +162,12 @@ const EXPECTED = {
   "Cmd+-": "font.decrease",
   "Cmd+0": "font.reset",
   "Cmd+,": "settings.open",
+  "Alt+Left": "edit.word_back",
+  "Alt+Right": "edit.word_forward",
+  "Cmd+Left": "edit.line_start",
+  "Cmd+Right": "edit.line_end",
+  "Alt+Backspace": "edit.delete_word_back",
+  "Cmd+Backspace": "edit.delete_to_line_start",
 };
 for (let i = 1; i <= 9; i++) {
   EXPECTED[`Cmd+${i}`] = `tab.select_${i}`;

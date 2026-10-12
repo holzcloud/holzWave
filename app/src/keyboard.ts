@@ -172,6 +172,8 @@ function onKeyDown(e: KeyboardEvent): void {
   }
   for (const chord of chordsOf(e)) {
     const id = actionIdFor(chord);
+    // A program on the alternate screen (vim, less, htop) reads these keys itself: the encoder gets them.
+    if (id !== undefined && EDIT_STEPS.has(id) && onAlternateScreen()) continue;
     // The registry decides what a held key may repeat. A repeat it swallowed is consumed here as well, so it never
     // reaches the encoder as terminal input.
     if (id !== undefined && runAction(id, { repeat: e.repeat })) {
@@ -286,9 +288,49 @@ function registerLayoutActions(apply: (v: View) => void): void {
   }
 }
 
+/** The line-editing steps the core knows, by action id. */
+const EDIT_STEPS: ReadonlyMap<string, string> = new Map([
+  ["edit.word_back", "word_back"],
+  ["edit.word_forward", "word_forward"],
+  ["edit.line_start", "line_start"],
+  ["edit.line_end", "line_end"],
+  ["edit.delete_word_back", "delete_word_back"],
+  ["edit.delete_to_line_start", "delete_to_line_start"],
+]);
+
+const EDIT_TITLES: ReadonlyMap<string, string> = new Map([
+  ["edit.word_back", "Move one word back"],
+  ["edit.word_forward", "Move one word forward"],
+  ["edit.line_start", "Move to the start of the line"],
+  ["edit.line_end", "Move to the end of the line"],
+  ["edit.delete_word_back", "Delete the word before the cursor"],
+  ["edit.delete_to_line_start", "Delete to the start of the line"],
+]);
+
+/** Whether the focused pane shows a full-screen program (alternate screen): it reads its keys itself. */
+function onAlternateScreen(): boolean {
+  const pane = state.view?.focus;
+  return pane !== undefined && state.frames.get(pane)?.modes.alt === true;
+}
+
+/** The line-editing actions: the page names the step, the core owns the bytes. */
+function registerEditActions(): void {
+  for (const [id, step] of EDIT_STEPS) {
+    registerAction({
+      id,
+      title: EDIT_TITLES.get(id) ?? id,
+      run: () => {
+        const pane = state.view?.focus;
+        if (pane !== undefined) void call("send_edit", { pane, action: step });
+      },
+    });
+  }
+}
+
 /** Register the layout actions and start listening to the keyboard and to paste. Call once at start-up. */
 export function initKeyboard(applyView: (v: View) => void): void {
   registerLayoutActions(applyView);
+  registerEditActions();
   ime = createInput();
   const box = ime;
   window.addEventListener("keydown", onKeyDown);
