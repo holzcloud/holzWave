@@ -5,6 +5,13 @@
 //! damaged or hostile file costs the hint and never the start: [`Session::load`] has no error case, a window
 //! that would be off screen is not restored, and a stored directory is only ever used as the working directory
 //! argument of a spawn (never as part of a command line), and only while it is still an absolute directory.
+//!
+//! **Windows.** The frame of the first window, `main`, is the `window` entry, as it always was. The frames of the
+//! other windows are the `windows` entry, a table by window label (`window-<n>`, see
+//! [`crate::layout::valid_window_label`]). A session with such a table is version 2, any other is version 1 and is
+//! byte for byte what a build without windows wrote, so a file moves between the two without a note. Which windows
+//! exist and what is in them is `layout.json`'s business; here is only where each one sat, as a hint: the frame of
+//! a label that no window has any more is dropped by [`Session::sanitise_windows`].
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,13 +21,16 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::layout::{LoadStatus, PaneId};
+use crate::layout::{LoadStatus, MAIN_WINDOW, MAX_WINDOWS, PaneId, valid_window_label};
 use crate::persist::{backup_bad, bad_path, read_limited, write_atomic};
 
 /// The file name inside the app data directory.
 pub const SESSION_FILE: &str = "session.json";
-/// The format version this build writes and reads.
+/// The format version of a session of one window (no `windows` table); also what [`Session::default`] has.
 pub const SESSION_VERSION: u32 = 1;
+/// The format version of a session with the frames of more than one window (a `windows` table). Version 1 files
+/// are read as they are.
+pub const SESSION_VERSION_WINDOWS: u32 = 2;
 /// The largest `session.json` that is read.
 pub const MAX_SESSION_BYTES: u64 = 1024 * 1024;
 /// The longest stored working directory, in bytes.
@@ -67,14 +77,20 @@ pub struct Placement {
 /// The machine-local state restored on the next start.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Session {
+    /// [`SESSION_VERSION`] while `windows` is empty and [`SESSION_VERSION_WINDOWS`] otherwise; kept so by the
+    /// methods and by loading, so set it through them.
     pub version: u32,
+    /// The frame of the window `main`.
     pub window: Option<WindowState>,
+    /// The frames of the other windows by label. Left out of the file while empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub windows: BTreeMap<String, WindowState>,
     pub cwds: BTreeMap<PaneId, String>,
 }
 
 impl Default for Session {
     fn default() -> Self {
-        Session { version: SESSION_VERSION, window: None, cwds: BTreeMap::new() }
+        Session { version: SESSION_VERSION, window: None, windows: BTreeMap::new(), cwds: BTreeMap::new() }
     }
 }
 
@@ -163,6 +179,27 @@ impl Session {
                 Some(window) => session.window = Some(window),
                 None => notes.push("the window entry is not usable and was dropped".to_string()),
             },
+        }
+        match object.get("windows") {
+            None | Some(Value::Null) => {}
+            Some(Value::Object(map)) => {
+                let mut unusable = 0usize;
+                for (label, value) in map {
+                    match read_window(value) {
+                        Some(window) if valid_window_label(label) && label != MAIN_WINDOW => {
+                            session.windows.insert(label.clone(), window);
+                        }
+                        _ => unusable += 1,
+                    }
+                }
+                if unusable > 0 {
+                    notes.push(format!(
+                        "{unusable} window frame(s) were dropped: the label is not a window label other than main \
+                         or the frame is not usable"
+                    ));
+                }
+            }
+            Some(_) => notes.push("the windows table is not an object and was dropped".to_string()),
         }
         match object.get("cwds") {
             None | Some(Value::Null) => {}
@@ -261,10 +298,31 @@ impl Session {
     /// The rules that need no knowledge of the live panes.
     fn repair(&mut self) -> Vec<String> {
         let mut notes = Vec::new();
-        if self.version != SESSION_VERSION {
-            notes.push(format!("version {} is not {SESSION_VERSION}; read as version {SESSION_VERSION}", self.version));
-            self.version = SESSION_VERSION;
+        // Version 1 and 2 are both read as they are; what is written follows from the content (see the module docs).
+        let version = if self.windows.is_empty() { SESSION_VERSION } else { SESSION_VERSION_WINDOWS };
+        if self.version != SESSION_VERSION && self.version != SESSION_VERSION_WINDOWS {
+            notes.push(format!(
+                "version {} is not {SESSION_VERSION} or {SESSION_VERSION_WINDOWS}; read as version {version}",
+                self.version
+            ));
         }
+        self.version = version;
+        let before = self.windows.len();
+        self.windows.retain(|label, _| valid_window_label(label) && label != MAIN_WINDOW);
+        while self.windows.len() > MAX_WINDOWS - 1 {
+            self.windows.pop_last();
+        }
+        if self.windows.len() != before {
+            notes.push(format!("{} window frame(s) beyond the usable ones were dropped", before - self.windows.len()));
+        }
+        let clamped_before = self.windows.clone();
+        for window in self.windows.values_mut() {
+            *window = window.clamped();
+        }
+        if clamped_before != self.windows {
+            notes.push("a window geometry was outside the accepted range and was clamped".to_string());
+        }
+        self.version = if self.windows.is_empty() { SESSION_VERSION } else { SESSION_VERSION_WINDOWS };
         if let Some(window) = self.window {
             let clamped = window.clamped();
             if clamped != window {
@@ -321,20 +379,72 @@ impl Session {
         path.is_dir().then_some(path)
     }
 
-    /// Where and how large to open the window, given the monitors that are connected now.
+    /// Where and how large to open the window `main`, given the monitors that are connected now.
     ///
     /// The size is always kept (clamped). The position is kept only when at least [`MIN_VISIBLE`] of the window
     /// is inside one monitor; a window that was on a monitor that has been unplugged, or any window when no
     /// monitor is known, is left to the window system. With nothing saved the result is [`DEFAULT_SIZE`].
     pub fn placement(&self, monitors: &[MonitorRect]) -> Placement {
-        let Some(window) = self.window.map(WindowState::clamped) else {
-            return Placement { size: DEFAULT_SIZE, position: None, maximized: false };
-        };
-        let visible = monitors.iter().any(|m| window.is_visible_on(m));
-        Placement {
-            size: (window.width, window.height),
-            position: visible.then_some((window.x, window.y)),
-            maximized: window.maximized,
+        placement_of(self.window, monitors)
+    }
+
+    /// The saved frame of the window `label`: the `window` entry for `main`, the `windows` table for the others.
+    pub fn window_for(&self, label: &str) -> Option<WindowState> {
+        if label == MAIN_WINDOW { self.window } else { self.windows.get(label).copied() }
+    }
+
+    /// [`Session::placement`] for any window. A label without a saved frame gets the default size and the position
+    /// the window system chooses.
+    pub fn placement_for(&self, label: &str, monitors: &[MonitorRect]) -> Placement {
+        placement_of(self.window_for(label), monitors)
+    }
+
+    /// Remember the frame of the window `label`, clamped into range. False, and nothing changes, for a label that
+    /// is not a window label, and for a new label when [`MAX_WINDOWS`] frames are kept already.
+    pub fn set_window_for(&mut self, label: &str, window: WindowState) -> bool {
+        if label == MAIN_WINDOW {
+            self.set_window(window);
+            return true;
         }
+        if !valid_window_label(label) || (self.windows.len() >= MAX_WINDOWS - 1 && !self.windows.contains_key(label)) {
+            return false;
+        }
+        self.windows.insert(label.to_owned(), window.clamped());
+        self.version = SESSION_VERSION_WINDOWS;
+        true
+    }
+
+    /// Forget the frame of a window that is gone. `main` is kept: the first window of the next start takes its frame.
+    pub fn forget_window(&mut self, label: &str) {
+        self.windows.remove(label);
+        if self.windows.is_empty() {
+            self.version = SESSION_VERSION;
+        }
+    }
+
+    /// Drop the frames of windows that are not in `live`, so that a closed window does not leave its frame behind,
+    /// and say what changed. Call it before a save, like [`Session::sanitise`].
+    pub fn sanitise_windows(&mut self, live: &[&str]) -> Vec<String> {
+        let before = self.windows.len();
+        self.windows.retain(|label, _| live.contains(&label.as_str()));
+        let mut notes = Vec::new();
+        if self.windows.len() != before {
+            notes.push(format!("{} frame(s) of windows that no longer exist were dropped", before - self.windows.len()));
+        }
+        notes.extend(self.repair());
+        notes
+    }
+}
+
+/// The placement for a saved frame, if any, against the monitors connected now.
+fn placement_of(window: Option<WindowState>, monitors: &[MonitorRect]) -> Placement {
+    let Some(window) = window.map(WindowState::clamped) else {
+        return Placement { size: DEFAULT_SIZE, position: None, maximized: false };
+    };
+    let visible = monitors.iter().any(|m| window.is_visible_on(m));
+    Placement {
+        size: (window.width, window.height),
+        position: visible.then_some((window.x, window.y)),
+        maximized: window.maximized,
     }
 }

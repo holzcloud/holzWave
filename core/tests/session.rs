@@ -6,7 +6,7 @@ mod common;
 use std::fs;
 
 use common::scratch_dir;
-use holzwave_core::layout::LoadStatus;
+use holzwave_core::layout::{LoadStatus, MAX_WINDOWS};
 use holzwave_core::session::{
     MAX_CWD_BYTES, MAX_CWDS, MonitorRect, Placement, SESSION_FILE, Session, WindowState,
 };
@@ -351,4 +351,189 @@ fn placement_clamps_a_size_that_was_set_by_hand() {
     let s = session_with_window(window(0, 0, 4, 4_000_000_000));
     let p = s.placement(&[monitor(0, 0, 1920, 1080)]);
     assert_eq!(p.size, (200, 16384));
+}
+
+// ---- several windows ------------------------------------------------------------------------------------
+
+#[test]
+fn a_session_without_other_windows_is_written_exactly_as_before_windows_existed() {
+    let mut session = session_with_window(window(10, 20, 1000, 640));
+    session.cwds.insert(4, "/tmp".into());
+    let text = session.to_json();
+    assert!(text.contains("\"version\": 1"), "{text}");
+    assert!(!text.contains("windows"), "no table for no other windows: {text}");
+    let (back, status) = Session::from_json(&text);
+    assert_eq!((back, status), (session, LoadStatus::Clean));
+}
+
+#[test]
+fn a_version_1_file_loads_as_one_window_without_a_note() {
+    let text = r#"{"version": 1, "window": {"x": 10, "y": 20, "width": 1100, "height": 700, "maximized": true}, "cwds": {"3": "/tmp"}}"#;
+    let (session, status) = Session::from_json(text);
+    assert_eq!(status, LoadStatus::Clean);
+    assert_eq!(session.version, 1);
+    assert_eq!(session.window_for("main"), Some(WindowState { x: 10, y: 20, width: 1100, height: 700, maximized: true }));
+    assert!(session.windows.is_empty());
+    assert_eq!(session.window_for("window-5"), None);
+}
+
+#[test]
+fn the_frames_of_other_windows_make_a_version_2_file_that_round_trips() {
+    let mut session = session_with_window(window(0, 0, 1000, 640));
+    assert!(session.set_window_for("window-7", window(1100, 40, 800, 600)));
+    assert!(session.set_window_for("window-12", WindowState { maximized: true, ..window(5, 6, 700, 500) }));
+    assert_eq!(session.version, 2);
+    let text = session.to_json();
+    assert!(text.contains("\"version\": 2") && text.contains("\"window-7\""), "{text}");
+    let (back, status) = Session::from_json(&text);
+    assert_eq!(status, LoadStatus::Clean);
+    assert_eq!(back, session);
+    assert_eq!(back.window_for("window-7"), Some(window(1100, 40, 800, 600)));
+    assert_eq!(back.window_for("main"), Some(window(0, 0, 1000, 640)));
+}
+
+#[test]
+fn a_frame_is_set_per_label_and_a_bad_label_or_a_full_table_changes_nothing() {
+    let mut session = Session::default();
+    assert!(session.set_window_for("main", window(1, 2, 800, 600)));
+    assert_eq!(session.window, Some(window(1, 2, 800, 600)), "main is the window entry");
+    assert!(session.windows.is_empty());
+    assert_eq!(session.version, 1);
+    for bad in ["", "window-", "window-*", "Window-1", "other", "window-1/../x"] {
+        assert!(!session.set_window_for(bad, window(0, 0, 800, 600)), "{bad:?}");
+    }
+    assert!(session.windows.is_empty());
+    for n in 1..MAX_WINDOWS {
+        assert!(session.set_window_for(&format!("window-{n}"), window(0, 0, 800, 600)));
+    }
+    let before = session.clone();
+    assert!(!session.set_window_for("window-99", window(0, 0, 800, 600)), "one frame too many");
+    assert_eq!(session, before);
+    assert!(session.set_window_for("window-1", window(9, 9, 900, 900)), "a known label can always be updated");
+}
+
+#[test]
+fn a_frame_is_clamped_like_the_main_one() {
+    let mut session = Session::default();
+    session.set_window_for("window-3", window(1_000_000, -1_000_000, 5, 99_999_999));
+    let frame = session.window_for("window-3").unwrap();
+    assert_eq!((frame.x, frame.y, frame.width, frame.height), (32768, -32768, 200, 16384));
+}
+
+#[test]
+fn placement_for_uses_the_frame_of_that_window_and_the_default_for_an_unknown_one() {
+    let screen = [monitor(0, 0, 1920, 1080)];
+    let mut session = session_with_window(window(10, 10, 800, 600));
+    session.set_window_for("window-4", window(900, 100, 700, 500));
+    assert_eq!(session.placement_for("main", &screen), session.placement(&screen));
+    assert_eq!(
+        session.placement_for("window-4", &screen),
+        Placement { size: (700, 500), position: Some((900, 100)), maximized: false }
+    );
+    assert_eq!(
+        session.placement_for("window-5", &screen),
+        Placement { size: holzwave_core::session::DEFAULT_SIZE, position: None, maximized: false }
+    );
+    // An off-screen window keeps its size and loses its position, as the main one does.
+    session.set_window_for("window-6", window(9000, 100, 700, 500));
+    assert_eq!(session.placement_for("window-6", &screen).position, None);
+    assert_eq!(session.placement_for("window-6", &screen).size, (700, 500));
+}
+
+#[test]
+fn the_frame_of_a_window_that_is_gone_is_forgotten_and_the_version_goes_back_to_1() {
+    let mut session = session_with_window(window(0, 0, 800, 600));
+    session.set_window_for("window-1", window(0, 0, 800, 600));
+    session.set_window_for("window-2", window(0, 0, 800, 600));
+    let notes = session.sanitise_windows(&["main", "window-2"]);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(session.windows.contains_key("window-2") && !session.windows.contains_key("window-1"));
+    assert_eq!(session.version, 2);
+    session.forget_window("window-2");
+    assert_eq!(session.version, 1);
+    assert!(session.sanitise_windows(&["main"]).is_empty());
+    assert_eq!(session.window, Some(window(0, 0, 800, 600)), "the main frame stays");
+}
+
+#[test]
+fn bad_entries_of_the_windows_table_are_dropped_one_by_one_with_a_note() {
+    let text = r#"{"version": 2, "window": {"x": 1, "y": 2, "width": 800, "height": 600},
+        "windows": {
+          "window-1": {"x": 5, "y": 6, "width": 700, "height": 500},
+          "window-2": {"x": "left", "y": 6, "width": 700, "height": 500},
+          "main": {"x": 5, "y": 6, "width": 123, "height": 456},
+          "window-*": {"x": 5, "y": 6, "width": 700, "height": 500},
+          "nope": {"x": 5, "y": 6, "width": 700, "height": 500},
+          "window-3": 7
+        }}"#;
+    let (session, status) = Session::from_json(text);
+    assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
+    assert_eq!(session.windows.keys().map(String::as_str).collect::<Vec<_>>(), ["window-1"]);
+    assert_eq!(session.window, Some(window(1, 2, 800, 600)), "a `main` in the table does not replace the window entry");
+    assert_eq!(session.version, 2);
+}
+
+#[test]
+fn a_windows_table_that_is_not_an_object_is_dropped_and_the_rest_is_kept() {
+    for table in ["[]", "7", "\"x\"", "true"] {
+        let text = format!(r#"{{"version": 2, "window": {{"x": 1, "y": 2, "width": 800, "height": 600}}, "windows": {table}}}"#);
+        let (session, status) = Session::from_json(&text);
+        assert!(matches!(status, LoadStatus::Repaired(_)), "{table}: {status:?}");
+        assert_eq!(session.window, Some(window(1, 2, 800, 600)));
+        assert!(session.windows.is_empty());
+        assert_eq!(session.version, 1, "nothing left of the table, so a session of one window");
+    }
+}
+
+#[test]
+fn a_windows_table_beyond_the_limit_is_cut() {
+    let entries: Vec<String> =
+        (1..=40).map(|n| format!(r#""window-{n}": {{"x": 0, "y": 0, "width": 800, "height": 600}}"#)).collect();
+    let (session, status) = Session::from_json(&format!(r#"{{"version": 2, "windows": {{{}}}}}"#, entries.join(",")));
+    assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
+    assert_eq!(session.windows.len(), MAX_WINDOWS - 1);
+}
+
+#[test]
+fn a_frame_in_the_table_is_clamped_with_a_note() {
+    let text = r#"{"version": 2, "windows": {"window-1": {"x": 99999999, "y": 0, "width": 1, "height": 800}}}"#;
+    let (session, status) = Session::from_json(text);
+    assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
+    let frame = session.window_for("window-1").unwrap();
+    assert_eq!((frame.x, frame.width), (32768, 200));
+}
+
+#[test]
+fn an_unknown_version_with_a_table_is_read_as_version_2_with_a_note() {
+    let text = r#"{"version": 9, "windows": {"window-1": {"x": 0, "y": 0, "width": 800, "height": 600}}}"#;
+    let (session, status) = Session::from_json(text);
+    assert_eq!(session.version, 2);
+    assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
+    assert_eq!(session.windows.len(), 1);
+}
+
+#[test]
+fn a_session_with_windows_survives_save_and_load_and_damaged_copies_never_panic() {
+    let dir = scratch_dir("session-windows");
+    let mut session = session_with_window(window(0, 0, 1000, 640));
+    session.set_window_for("window-8", window(50, 60, 900, 700));
+    session.cwds.insert(2, "/tmp".into());
+    session.save(&dir).unwrap();
+    let (back, status) = Session::load(&dir);
+    assert_eq!((back, status), (session.clone(), LoadStatus::Clean));
+
+    let text = session.to_json();
+    for end in (0..text.len()).filter(|e| text.is_char_boundary(*e)) {
+        let (back, _) = Session::from_json(&text[..end]);
+        assert!(back.windows.len() < MAX_WINDOWS);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    for i in 0..chars.len() {
+        for bad in ['}', '-', '"', '9', '[', 'x'] {
+            let mut copy = chars.clone();
+            copy[i] = bad;
+            let (back, _) = Session::from_json(&copy.iter().collect::<String>());
+            assert!(back.windows.keys().all(|l| holzwave_core::layout::valid_window_label(l)));
+        }
+    }
 }
