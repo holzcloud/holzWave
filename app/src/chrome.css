@@ -154,6 +154,6 @@
 /* Drag and drop (DESK-20): the box shows what the dragged pane would take; nothing else of the page changes. */
 .drop-outline {
   position: fixed; z-index: 50; box-sizing: border-box; pointer-events: none;
-  border: 2px solid var(--hw-ink); background: color-mix(in srgb, var(--hw-ink) 12%, transparent);
+  border: 2px solid var(--hw-ink); outline: 1px solid var(--hw-ground-2); outline-offset: -3px;
 }
 :root.dragging, :root.dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
