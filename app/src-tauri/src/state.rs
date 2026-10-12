@@ -1265,7 +1265,7 @@ impl AppCore {
     ///
     /// Starts a process, so the command is async.
     pub fn open_url(&self, url: &str) -> Result<(), String> {
-        let launch = open_launch(std::env::consts::OS, url)?;
+        let launch = open_launch(std::env::consts::OS, url, &process_env)?;
         self.launch(&launch)
     }
 
@@ -1275,9 +1275,10 @@ impl AppCore {
     ///
     /// Touches the file system and starts a process, so the command is async.
     pub fn reveal_path(&self, path: &str, base: Option<&str>) -> Result<(), String> {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let resolved = resolve_reveal(path, base, home.as_deref())?;
-        let launch = reveal_launch(std::env::consts::OS, &resolved)?;
+        let os = std::env::consts::OS;
+        let home = home_dir(os, &process_env);
+        let resolved = resolve_reveal(os, path, base, home.as_deref())?;
+        let launch = reveal_launch(os, &resolved, resolved.is_dir(), &process_env)?;
         self.launch(&launch)
     }
 
@@ -1888,10 +1889,22 @@ pub struct AppInfo {
 
 /// A program of the platform to start and its arguments, one entry per argument: never a shell and never a string
 /// that is split (V5).
+///
+/// The program is an owned string because a Windows launcher is `<SystemRoot>\System32\...`, known only at run
+/// time. `raw_args` is for the one argument Windows cannot take quoted by the standard rules (the Explorer
+/// `/select,"<path>"`); it is empty everywhere else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Launch {
-    program: &'static str,
+    program: String,
     args: Vec<String>,
+    raw_args: Vec<String>,
+}
+
+impl Launch {
+    /// A launch with normal arguments only.
+    fn plain(program: &str, args: Vec<String>) -> Self {
+        Self { program: program.to_owned(), args, raw_args: Vec::new() }
+    }
 }
 
 /// The longest link that is opened, in bytes.
@@ -1909,6 +1922,11 @@ const MAX_WHEEL_ROWS: i32 = 100;
 /// The first part of text that came from outside, for a message.
 fn short(text: &str) -> String {
     text.chars().take(40).collect()
+}
+
+/// A variable of the process environment, for the pure functions that take a lookup.
+fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
 }
 
 /// Whether `url` is a link that may be opened: at most [`MAX_URL_BYTES`], no control or blank character, and the
@@ -1938,13 +1956,62 @@ fn check_link(url: &str) -> Result<(), String> {
 
 /// How the platform opens a link: validated first, then one fixed program with the link as its only argument.
 /// macOS uses `/usr/bin/open` by absolute path; Linux uses `xdg-open`, the one program that is looked up through
-/// PATH (there is no fixed place for it). Other platforms follow in phase 2.2.
-fn open_launch(os: &str, url: &str) -> Result<Launch, String> {
+/// PATH (there is no fixed place for it). Windows hands the link to the URL handler of `url.dll` through
+/// `rundll32.exe` under `%SystemRoot%\System32`: no `cmd`, no shell string, so `&` and `^` of a link are plain text.
+/// A double quote is refused there because the argument is rebuilt into a command line.
+///
+/// `env` looks up a variable of the process; only the Windows launcher reads it.
+fn open_launch(os: &str, url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Launch, String> {
     check_link(url)?;
     match os {
-        "macos" => Ok(Launch { program: "/usr/bin/open", args: vec![url.to_owned()] }),
-        "linux" => Ok(Launch { program: "xdg-open", args: vec![url.to_owned()] }),
-        other => Err(format!("opening links is not supported on {other} yet")),
+        "macos" => Ok(Launch::plain("/usr/bin/open", vec![url.to_owned()])),
+        "linux" => Ok(Launch::plain("xdg-open", vec![url.to_owned()])),
+        "windows" => {
+            if url.contains('"') {
+                return Err("the link has a double quote".into());
+            }
+            let rundll32 = format!(r"{}\System32\rundll32.exe", system_root(env));
+            Ok(Launch::plain(&rundll32, vec!["url.dll,FileProtocolHandler".into(), url.to_owned()]))
+        }
+        other => Err(format!("opening links is not supported on {other}")),
+    }
+}
+
+/// The Windows directory: `SystemRoot` if it is a drive path, else `C:\Windows`. A relative or network value of the
+/// variable is not taken, so the launchers never leave the local drive.
+fn system_root(env: &dyn Fn(&str) -> Option<String>) -> String {
+    const DEFAULT: &str = r"C:\Windows";
+    match env("SystemRoot") {
+        Some(root) if is_drive_path(&root) => root.trim_end_matches(['\\', '/']).to_owned(),
+        _ => DEFAULT.to_owned(),
+    }
+}
+
+/// Whether `text` starts with a drive letter, a colon and a separator (`C:\` or `C:/`).
+fn is_drive_path(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// Whether `text` is an absolute path on `os`. Windows is decided by the text (a drive path), so it is the same on
+/// every host; elsewhere it is the host's rule.
+fn is_absolute_on(os: &str, text: &str) -> bool {
+    if os == "windows" { is_drive_path(text) } else { Path::new(text).is_absolute() }
+}
+
+/// The reason a path of Windows must not be given to the file system, if there is one. A path that starts with two
+/// separators (`\\server\share`, `//server/share`, `\\?\` and `\\.\` too) names another machine, and Windows
+/// authenticates to it when the path is merely checked (T-2.2-10). A double quote would end the quoting of the raw
+/// Explorer argument and add arguments of its own (T-2.2-11).
+fn windows_path_refusal(text: &str) -> Option<&'static str> {
+    let mut chars = text.chars();
+    let separator = |c: Option<char>| matches!(c, Some('\\' | '/'));
+    if separator(chars.next()) && separator(chars.next()) {
+        Some("a network or device path is not revealed")
+    } else if text.contains('"') {
+        Some("the path has a double quote")
+    } else {
+        None
     }
 }
 
@@ -1961,27 +2028,48 @@ fn check_path_text(what: &str, text: &str) -> Result<(), String> {
     }
 }
 
+/// The home directory for `~/`: `HOME`, and on Windows `USERPROFILE`. An empty value is no value.
+fn home_dir(os: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let name = if os == "windows" { "USERPROFILE" } else { "HOME" };
+    env(name).filter(|home| !home.is_empty()).map(PathBuf::from)
+}
+
 /// The path a `reveal_path` call means: absolute, `~/` from the home directory, or relative to `base`, which has to
 /// be absolute. The result is absolute (so it can never be taken for an option) and has to exist; a symbolic link
 /// counts as what it is and is not followed.
-fn resolve_reveal(path: &str, base: Option<&str>, home: Option<&Path>) -> Result<PathBuf, String> {
+///
+/// On Windows the text of the path, the base and the result are refused before the file system is asked if they are
+/// a network or device path or hold a double quote: even the existence check of `\\server\share` would contact the
+/// server.
+fn resolve_reveal(os: &str, path: &str, base: Option<&str>, home: Option<&Path>) -> Result<PathBuf, String> {
+    let refuse = |text: &str| match os {
+        "windows" => windows_path_refusal(text).map_or(Ok(()), |reason| Err(reason.to_owned())),
+        _ => Ok(()),
+    };
     check_path_text("the path", path)?;
+    refuse(path)?;
     let resolved = if let Some(rest) = path.strip_prefix("~/") {
-        let home = home.filter(|h| h.is_absolute()).ok_or("the home directory is not known")?;
+        let home = home
+            .filter(|h| h.to_str().map_or_else(|| h.is_absolute(), |t| is_absolute_on(os, t)))
+            .ok_or("the home directory is not known")?;
         // `~//etc` is below the home directory, not the root: a joined absolute path would replace it.
         home.join(rest.trim_start_matches('/'))
-    } else if Path::new(path).is_absolute() {
+    } else if is_absolute_on(os, path) {
         PathBuf::from(path)
     } else {
         let base = base.ok_or("a relative path needs the working directory of the pane")?;
         check_path_text("the working directory", base)?;
-        let base = Path::new(base);
-        if !base.is_absolute() {
+        refuse(base)?;
+        if !is_absolute_on(os, base) {
             return Err("the working directory is not an absolute path".into());
         }
-        base.join(path)
+        Path::new(base).join(path)
     };
-    if !resolved.is_absolute() {
+    let text = resolved.to_str();
+    if let Some(text) = text {
+        refuse(text)?;
+    }
+    if !text.map_or_else(|| resolved.is_absolute(), |t| is_absolute_on(os, t)) {
         return Err("the path is not absolute".into());
     }
     std::fs::symlink_metadata(&resolved).map_err(|_| "there is no such file or folder".to_owned())?;
@@ -1990,32 +2078,63 @@ fn resolve_reveal(path: &str, base: Option<&str>, home: Option<&Path>) -> Result
 
 /// How the platform shows an existing absolute path in the file manager, without running it. macOS reveals the item
 /// in Finder (`open -R`); Linux has no reveal, so the folder that holds a file is opened and a folder is opened as it
-/// is. The opener is only ever given the path as an argument (T-02-52).
-fn reveal_launch(os: &str, path: &Path) -> Result<Launch, String> {
-    if !path.is_absolute() {
+/// is. Windows starts `explorer.exe` under `%SystemRoot%`: for a file `/select,"<path>"`, as the one raw argument
+/// and the only place a quote is allowed (the path holds none), for a folder the folder. The opener is only ever
+/// given the path as an argument (T-02-52). `is_dir` says what the path is.
+fn reveal_launch(
+    os: &str,
+    path: &Path,
+    is_dir: bool,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Launch, String> {
+    let text = |p: &Path| p.to_str().map(str::to_owned).ok_or_else(|| "the path is not valid text".to_owned());
+    if !is_absolute_on(os, &text(path)?) {
         return Err("the path is not absolute".into());
     }
-    let text = |p: &Path| p.to_str().map(str::to_owned).ok_or_else(|| "the path is not valid text".to_owned());
     match os {
-        "macos" => Ok(Launch { program: "/usr/bin/open", args: vec!["-R".into(), text(path)?] }),
+        "macos" => Ok(Launch::plain("/usr/bin/open", vec!["-R".into(), text(path)?])),
         "linux" => {
-            let target = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
-            Ok(Launch { program: "xdg-open", args: vec![text(target)?] })
+            let target = if is_dir { path } else { path.parent().unwrap_or(path) };
+            Ok(Launch::plain("xdg-open", vec![text(target)?]))
         }
-        other => Err(format!("revealing files is not supported on {other} yet")),
+        "windows" => {
+            let path = text(path)?;
+            if let Some(reason) = windows_path_refusal(&path) {
+                return Err(reason.into());
+            }
+            let path = path.replace('/', "\\");
+            let explorer = format!(r"{}\explorer.exe", system_root(env));
+            if is_dir {
+                // A trailing separator would escape the closing quote Rust puts around a path with a blank.
+                let folder = if path.len() > 3 { path.trim_end_matches('\\') } else { &path };
+                Ok(Launch::plain(&explorer, vec![folder.to_owned()]))
+            } else {
+                Ok(Launch { program: explorer, args: Vec::new(), raw_args: vec![format!("/select,\"{path}\"")] })
+            }
+        }
+        other => Err(format!("revealing files is not supported on {other}")),
     }
 }
 
 /// Start `launch` and do not wait for it: a browser that is started anew can run for as long as the user keeps it.
 /// Its status is collected on a thread of its own so that no zombie is left.
 fn spawn_launch(launch: &Launch) -> Result<(), String> {
-    let mut child = std::process::Command::new(launch.program)
+    let mut command = std::process::Command::new(&launch.program);
+    command
         .args(&launch.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", launch.program))?;
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        for raw in &launch.raw_args {
+            command.raw_arg(raw);
+        }
+    }
+    #[cfg(not(windows))]
+    debug_assert!(launch.raw_args.is_empty(), "a raw argument exists only on Windows");
+    let mut child = command.spawn().map_err(|e| format!("cannot start {}: {e}", launch.program))?;
     let reaper = std::thread::Builder::new().name("hw-opener".into()).spawn(move || {
         let _ = child.wait();
     });
@@ -3841,6 +3960,9 @@ mod tests {
 
     static LAUNCHED: Mutex<Vec<Launch>> = Mutex::new(Vec::new());
 
+    /// The platform the tests run on, for those that use the real file system.
+    const OS: &str = std::env::consts::OS;
+
     /// Stands in for the opener: records instead of starting a process.
     fn record_launch(launch: &Launch) -> Result<(), String> {
         lock(&LAUNCHED).push(launch.clone());
@@ -3904,17 +4026,65 @@ mod tests {
         }
     }
 
+    /// A process environment that has nothing in it.
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn the_opener_is_one_fixed_program_with_the_link_as_a_single_argument() {
         let url = "https://example.org/a?b=c&d=e";
 
-        assert_eq!(
-            open_launch("macos", url),
-            Ok(Launch { program: "/usr/bin/open", args: vec![url.to_owned()] })
-        );
-        assert_eq!(open_launch("linux", url), Ok(Launch { program: "xdg-open", args: vec![url.to_owned()] }));
-        assert!(open_launch("windows", url).is_err(), "no opener on this platform until phase 2.2");
-        assert!(open_launch("macos", "file:///etc/passwd").is_err());
+        assert_eq!(open_launch("macos", url, &no_env), Ok(Launch::plain("/usr/bin/open", vec![url.to_owned()])));
+        assert_eq!(open_launch("linux", url, &no_env), Ok(Launch::plain("xdg-open", vec![url.to_owned()])));
+        assert!(open_launch("macos", "file:///etc/passwd", &no_env).is_err());
+        assert!(open_launch("plan9", url, &no_env).is_err(), "a platform nobody wrote an opener for");
+    }
+
+    #[test]
+    fn windows_launch_of_a_link_is_rundll32_with_the_link_unchanged_as_the_second_argument() {
+        let url = "https://example.org/a?b=1&c=2^d";
+
+        let launch = open_launch("windows", url, &no_env).expect("a link opens on Windows");
+
+        assert_eq!(launch.program, r"C:\Windows\System32\rundll32.exe", r"SystemRoot defaults to C:\Windows");
+        assert_eq!(launch.args, ["url.dll,FileProtocolHandler", url], "exactly two arguments, the link untouched");
+        assert!(launch.raw_args.is_empty());
+        let root = |name: &str| (name == "SystemRoot").then(|| r"D:\WinNT\".to_owned());
+        assert_eq!(open_launch("windows", url, &root).unwrap().program, r"D:\WinNT\System32\rundll32.exe");
+    }
+
+    #[test]
+    fn windows_launch_of_a_link_with_an_ampersand_or_a_caret_never_goes_through_a_shell() {
+        // `&` and `^` are legal in a link and are metacharacters of cmd: no cmd, no command string, one argument.
+        for url in ["https://example.org/?a=1&b=2", "https://example.org/a^b", "https://example.org/?a=1&calc.exe"] {
+            let launch = open_launch("windows", url, &no_env).expect(url);
+            assert!(launch.program.ends_with(r"\rundll32.exe"), "{launch:?}");
+            assert!(!launch.program.to_ascii_lowercase().contains("cmd"), "{launch:?}");
+            assert_eq!(launch.args.len(), 2, "{launch:?}");
+            assert_eq!(launch.args[1], url, "the link is one argument");
+        }
+    }
+
+    #[test]
+    fn windows_launch_of_a_link_refuses_a_double_quote_and_what_every_platform_refuses() {
+        assert!(open_launch("windows", "https://example.org/a\"b", &no_env).is_err(), "a double quote");
+        assert!(open_launch("macos", "https://example.org/a\"b", &no_env).is_ok(), "only Windows rebuilds a command line");
+        assert!(open_launch("windows", "file:///C:/Windows/System32/calc.exe", &no_env).is_err(), "a scheme");
+        assert!(open_launch("windows", "https://example.org/a b", &no_env).is_err(), "a blank");
+        assert!(open_launch("windows", "https://example.org/a\u{1b}b", &no_env).is_err(), "a control character");
+        let too_long = format!("https://example.org/{}", "b".repeat(MAX_URL_BYTES));
+        assert!(open_launch("windows", &too_long, &no_env).is_err(), "over {MAX_URL_BYTES} bytes");
+    }
+
+    #[test]
+    fn windows_launch_ignores_a_system_root_that_is_not_a_drive_path() {
+        let url = "https://example.org/";
+        for hostile in [r"\\evil\share", "//evil/share", "relative", "", r"\\?\C:\Windows"] {
+            let env = |name: &str| (name == "SystemRoot").then(|| hostile.to_owned());
+            let program = open_launch("windows", url, &env).unwrap().program;
+            assert_eq!(program, r"C:\Windows\System32\rundll32.exe", "SystemRoot {hostile:?}");
+        }
     }
 
     #[test]
@@ -3929,27 +4099,27 @@ mod tests {
         let file = base.join("main.rs");
         let text = |p: &Path| p.to_str().unwrap().to_owned();
 
-        assert_eq!(resolve_reveal(&text(&file), None, None), Ok(file.clone()), "absolute");
+        assert_eq!(resolve_reveal(OS, &text(&file), None, None), Ok(file.clone()), "absolute");
         assert_eq!(
-            resolve_reveal("~/docs/note.txt", None, Some(&home)),
+            resolve_reveal(OS, "~/docs/note.txt", None, Some(&home)),
             Ok(home.join("docs").join("note.txt")),
             "home"
         );
-        assert_eq!(resolve_reveal("main.rs", Some(&text(&base)), None), Ok(file.clone()), "relative to the base");
+        assert_eq!(resolve_reveal(OS, "main.rs", Some(&text(&base)), None), Ok(file.clone()), "relative to the base");
         assert_eq!(
-            resolve_reveal("-rf", Some(&text(&base)), None),
+            resolve_reveal(OS, "-rf", Some(&text(&base)), None),
             Ok(base.join("-rf")),
             "a name that looks like an option is a path below the base, so it is absolute when it is revealed"
         );
 
-        assert!(resolve_reveal(&text(&base.join("missing.rs")), None, None).is_err(), "missing");
-        assert!(resolve_reveal("main.rs", None, None).is_err(), "relative without a base");
-        assert!(resolve_reveal("main.rs", Some("relative/base"), None).is_err(), "a base that is not absolute");
-        assert!(resolve_reveal("~/docs/note.txt", None, None).is_err(), "no home directory known");
-        assert!(resolve_reveal("", Some(&text(&base)), None).is_err());
-        assert!(resolve_reveal("main.rs\u{0}", Some(&text(&base)), None).is_err(), "control character");
-        assert!(resolve_reveal("main\n.rs", Some(&text(&base)), None).is_err(), "control character");
-        assert!(resolve_reveal(&"a".repeat(MAX_PATH_BYTES + 1), Some(&text(&base)), None).is_err(), "too long");
+        assert!(resolve_reveal(OS, &text(&base.join("missing.rs")), None, None).is_err(), "missing");
+        assert!(resolve_reveal(OS, "main.rs", None, None).is_err(), "relative without a base");
+        assert!(resolve_reveal(OS, "main.rs", Some("relative/base"), None).is_err(), "a base that is not absolute");
+        assert!(resolve_reveal(OS, "~/docs/note.txt", None, None).is_err(), "no home directory known");
+        assert!(resolve_reveal(OS, "", Some(&text(&base)), None).is_err());
+        assert!(resolve_reveal(OS, "main.rs\u{0}", Some(&text(&base)), None).is_err(), "control character");
+        assert!(resolve_reveal(OS, "main\n.rs", Some(&text(&base)), None).is_err(), "control character");
+        assert!(resolve_reveal(OS, &"a".repeat(MAX_PATH_BYTES + 1), Some(&text(&base)), None).is_err(), "too long");
     }
 
     #[test]
@@ -3959,23 +4129,146 @@ mod tests {
         let file = root.join("tool.sh");
         std::fs::write(&file, "x").unwrap();
         let target = file.to_str().unwrap().to_owned();
+        let folder = root.to_str().unwrap().to_owned();
 
         assert_eq!(
-            reveal_launch("macos", &file),
-            Ok(Launch { program: "/usr/bin/open", args: vec!["-R".into(), target.clone()] })
+            reveal_launch("macos", &file, false, &no_env),
+            Ok(Launch::plain("/usr/bin/open", vec!["-R".into(), target.clone()]))
         );
         // Linux has no reveal: the folder that holds a file is opened, a folder is opened as it is.
-        assert_eq!(
-            reveal_launch("linux", &file),
-            Ok(Launch { program: "xdg-open", args: vec![root.to_str().unwrap().to_owned()] })
-        );
-        assert_eq!(
-            reveal_launch("linux", &root),
-            Ok(Launch { program: "xdg-open", args: vec![root.to_str().unwrap().to_owned()] })
-        );
-        assert!(reveal_launch("windows", &file).is_err());
+        assert_eq!(reveal_launch("linux", &file, false, &no_env), Ok(Launch::plain("xdg-open", vec![folder.clone()])));
+        assert_eq!(reveal_launch("linux", &root, true, &no_env), Ok(Launch::plain("xdg-open", vec![folder])));
+        assert!(reveal_launch("plan9", &file, false, &no_env).is_err(), "a platform nobody wrote a reveal for");
+        assert!(reveal_launch("macos", Path::new("relative/file"), false, &no_env).is_err(), "never a relative path");
     }
 
+    #[test]
+    fn windows_reveal_of_a_file_is_explorer_with_one_raw_select_argument() {
+        let launch = reveal_launch("windows", Path::new(r"C:\a b\c.txt"), false, &no_env).expect("a drive path");
+
+        assert_eq!(launch.program, r"C:\Windows\explorer.exe");
+        assert!(launch.args.is_empty(), "no normal argument: the quoting is in the raw one");
+        assert_eq!(launch.raw_args, [r#"/select,"C:\a b\c.txt""#], "a space in a path stays inside the quotes");
+        let root = |name: &str| (name == "SystemRoot").then(|| r"D:\WinNT".to_owned());
+        let launch = reveal_launch("windows", Path::new("C:/forward/slashes.txt"), false, &root).unwrap();
+        assert_eq!(launch.program, r"D:\WinNT\explorer.exe");
+        assert_eq!(launch.raw_args, [r#"/select,"C:\forward\slashes.txt""#], "forward slashes become backslashes");
+    }
+
+    #[test]
+    fn windows_reveal_of_a_comma_stays_inside_the_quotes_of_the_one_raw_argument() {
+        // `/select,` ends at its comma; a comma in the path must not start another argument.
+        let launch = reveal_launch("windows", Path::new(r"C:\a,b\c,d.txt"), false, &no_env).unwrap();
+        assert_eq!(launch.raw_args, [r#"/select,"C:\a,b\c,d.txt""#]);
+        assert!(launch.args.is_empty());
+    }
+
+    #[test]
+    fn windows_reveal_of_a_folder_passes_the_folder_as_a_normal_argument() {
+        let launch = reveal_launch("windows", Path::new(r"C:\a b\folder"), true, &no_env).unwrap();
+        assert_eq!(launch, Launch::plain(r"C:\Windows\explorer.exe", vec![r"C:\a b\folder".into()]));
+        let slashes = reveal_launch("windows", Path::new("C:/a b/folder/"), true, &no_env).unwrap();
+        assert_eq!(slashes.args, [r"C:\a b\folder"], "backslashes, and no separator that would escape the quote");
+        let drive = reveal_launch("windows", Path::new(r"C:\"), true, &no_env).unwrap();
+        assert_eq!(drive.args, [r"C:\"], "the root of a drive keeps its separator");
+        assert!(drive.raw_args.is_empty());
+    }
+
+    #[test]
+    fn windows_reveal_refuses_a_double_quote_in_the_path_before_any_program_is_built() {
+        // A quote would end the quoting of the raw argument and add arguments of its own (T-2.2-11).
+        for path in [r#"C:\a"b\c.txt"#, r#"C:\a\c.txt" /x"#, r#"C:\a\"," /root,"\\evil\share"#] {
+            assert!(reveal_launch("windows", Path::new(path), false, &no_env).is_err(), "{path}");
+            assert!(reveal_launch("windows", Path::new(path), true, &no_env).is_err(), "{path} as a folder");
+        }
+        assert!(
+            reveal_launch("linux", Path::new("/tmp/a\"b"), true, &no_env).is_ok(),
+            "a quote is an ordinary character of a path elsewhere"
+        );
+    }
+
+    #[test]
+    fn windows_reveal_of_a_unc_or_device_path_is_refused_in_every_spelling() {
+        for path in [r"\\server\share\x", "//server/share/x", r"\\?\C:\x", r"\\.\C:\x", r"\/server\share", r"/\server/share"] {
+            assert!(reveal_launch("windows", Path::new(path), false, &no_env).is_err(), "{path}");
+        }
+        assert!(reveal_launch("windows", Path::new(r"C:\ordinary\x"), false, &no_env).is_ok());
+    }
+
+    #[test]
+    fn reveal_of_a_unc_path_on_windows_is_refused_before_the_file_system_is_asked() {
+        // On a Windows host even `symlink_metadata` of `\\server\share` would make Windows authenticate to `server`
+        // (T-2.2-10). The refusal says why; a path that reached the file system says "no such file" instead.
+        let refused = |result: Result<PathBuf, String>| result.expect_err("refused").contains("network or device");
+        for path in [r"\\server\share\x", "//server/share/x", r"\\?\C:\x", r"\\.\PhysicalDrive0", r"\/server\share", "//"] {
+            assert!(refused(resolve_reveal("windows", path, None, None)), "{path}");
+            assert!(refused(resolve_reveal("windows", path, Some(r"C:\work"), None)), "{path} with a base");
+        }
+        assert!(refused(resolve_reveal("windows", "x.txt", Some(r"\\server\share"), None)), "a network base");
+        assert!(refused(resolve_reveal("windows", "x.txt", Some("//server/share"), None)), "a network base, slashes");
+        let home = Path::new(r"\\server\home\me");
+        assert_eq!(
+            resolve_reveal("windows", "~/x.txt", None, Some(home)),
+            Err("the home directory is not known".to_owned()),
+            "a network home directory is no home directory: only a drive path is one"
+        );
+    }
+
+    #[test]
+    fn reveal_of_an_ordinary_drive_path_on_windows_does_reach_the_file_system() {
+        // The counterpart of the refusals above: the resolver is not refusing everything on Windows.
+        let local = resolve_reveal("windows", r"C:\no\such\folder-reveal-1", None, None).expect_err("not there");
+        assert_eq!(local, "there is no such file or folder");
+        let relative = resolve_reveal("windows", "x.txt", Some(r"C:\no\such\base-reveal-2"), None).expect_err("not there");
+        assert_eq!(relative, "there is no such file or folder");
+        let home = resolve_reveal("windows", "~/x.txt", None, Some(Path::new(r"C:\Users\nobody-reveal-3")));
+        assert_eq!(home, Err("there is no such file or folder".to_owned()), "~/ below the profile directory");
+        assert_eq!(
+            resolve_reveal("windows", "x.txt", Some("relative"), None),
+            Err("the working directory is not an absolute path".to_owned())
+        );
+    }
+
+    #[test]
+    fn reveal_of_a_path_with_a_double_quote_on_windows_is_refused_by_the_resolver() {
+        let refused = |result: Result<PathBuf, String>| result.expect_err("refused").contains("double quote");
+        assert!(refused(resolve_reveal("windows", r#"C:\a"b.txt"#, None, None)));
+        assert!(refused(resolve_reveal("windows", "a\"b.txt", Some(r"C:\work"), None)), "a quote in a relative path");
+        assert!(refused(resolve_reveal("windows", "x.txt", Some(r#"C:\wo"rk"#), None)), "a quote in the base");
+    }
+
+    #[test]
+    fn reveal_of_the_same_text_is_an_ordinary_path_on_linux_and_macos() {
+        let dir = Scratch::new("reveal-ordinary");
+        let root = real_dir(&dir, "root");
+        let text = root.to_str().unwrap();
+        let quoted = root.join("a\"b");
+        std::fs::write(&quoted, "x").unwrap();
+
+        // Two leading slashes are the root on Unix: `//tmp/x` is `/tmp/x`.
+        let doubled = format!("/{text}");
+        for os in ["linux", "macos"] {
+            assert_eq!(resolve_reveal(os, &doubled, None, None), Ok(PathBuf::from(&doubled)), "{os}");
+            assert_eq!(resolve_reveal(os, "a\"b", Some(text), None), Ok(quoted.clone()), "{os}");
+        }
+    }
+
+    #[test]
+    fn a_home_path_is_resolved_from_home_and_on_windows_from_userprofile() {
+        let env = |name: &str| match name {
+            "HOME" => Some("/home/me".to_owned()),
+            "USERPROFILE" => Some(r"C:\Users\me".to_owned()),
+            _ => None,
+        };
+        assert_eq!(home_dir("linux", &env), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir("macos", &env), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir("windows", &env), Some(PathBuf::from(r"C:\Users\me")), "USERPROFILE, not HOME");
+        assert_eq!(home_dir("windows", &|n: &str| (n == "HOME").then(|| "/home/me".to_owned())), None);
+        assert_eq!(home_dir("linux", &|n: &str| (n == "HOME").then(String::new)), None, "empty is no value");
+        assert_eq!(home_dir("linux", &no_env), None);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn reveal_path_of_an_executable_starts_the_opener_not_the_file() {
         use std::os::unix::fs::PermissionsExt;
@@ -3989,10 +4282,12 @@ mod tests {
 
         assert_eq!(core.reveal_path(&target, None), Ok(()));
 
-        let launches = launches_with(&target);
+        // macOS selects the file; Linux has no reveal and opens the folder that holds it.
+        let shown = if cfg!(target_os = "macos") { target.clone() } else { root.to_str().unwrap().to_owned() };
+        let launches = launches_with(&shown);
         assert_eq!(launches.len(), 1, "the recorder saw one launch");
         assert_ne!(launches[0].program, target, "the file itself is never the program");
-        assert!(matches!(launches[0].program, "/usr/bin/open" | "xdg-open"), "{:?}", launches[0]);
+        assert!(matches!(launches[0].program.as_str(), "/usr/bin/open" | "xdg-open"), "{:?}", launches[0]);
         std::thread::sleep(Duration::from_millis(150));
         assert!(!marker.exists(), "the file was executed");
     }
@@ -4042,7 +4337,7 @@ mod tests {
         let source = include_str!("state.rs");
         let production = source.split("#[cfg(test)]\nmod tests").next().expect("production part");
         let mut programs = Vec::new();
-        for marker in ["program: \"", "Command::new(\""] {
+        for marker in ["Launch::plain(\"", "Command::new(\""] {
             for part in production.split(marker).skip(1) {
                 programs.push(part.split('"').next().unwrap_or_default().to_owned());
             }
@@ -4053,6 +4348,20 @@ mod tests {
                 program.starts_with('/') || program == "xdg-open",
                 "{program:?} is looked up through PATH"
             );
+        }
+        // The Windows programs are built at run time from the system directory, so they are checked as built: a
+        // drive path to a program of that directory, whatever the environment says.
+        let hostile = |_: &str| Some(r"\\evil\share".to_owned());
+        let windows = [
+            open_launch("windows", "https://example.org/", &no_env),
+            open_launch("windows", "https://example.org/", &hostile),
+            reveal_launch("windows", Path::new(r"C:\a\b.txt"), false, &no_env),
+            reveal_launch("windows", Path::new(r"C:\a"), true, &hostile),
+        ];
+        for launch in windows {
+            let program = launch.expect("a Windows launch").program;
+            assert!(is_drive_path(&program) && program.starts_with(r"C:\Windows\"), "{program:?}");
+            assert!(program.ends_with(".exe"), "{program:?}");
         }
     }
 
