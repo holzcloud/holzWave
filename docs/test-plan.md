@@ -1,7 +1,8 @@
 # Test plan
 
-Three parts: how to run everything locally, the per-platform manual list for hardware the owner owns, and the record of
-the macOS acceptance of Phase 2. All of it runs locally; nothing here needs GitHub (D-04).
+Four parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
+macOS acceptance of Phase 2, and the Windows and Linux list of Phase 2.2 (Part 4). All of it runs locally; nothing here
+needs GitHub (D-04).
 
 ## Part 1: run everything locally
 
@@ -18,6 +19,19 @@ cargo test --release -p holzwave-core --offline --test budget -- --ignored --noc
 npm run bench:build --prefix app      # builds app/dist-bench/index.html, the renderer benchmark (open it in a browser)
 cargo run -p holzwave-app             # the app itself, for the lists below
 ```
+
+From the Mac, without a Windows or Linux machine (these prove that the code compiles and that the Unix half passes on
+Linux; they do not replace Part 4):
+
+```sh
+sh scripts/cross-check.sh all                 # cargo check of every test target for Windows (GNU ABI) and Linux; app for Windows
+sh scripts/linux-container-test.sh all        # core and app tests in an Ubuntu container (Docker): core, app or all
+sh scripts/linux-container-bundle.sh          # deb and rpm built and inspected in the container, AppImage tried
+```
+
+Each prints `ok` as its last line and exits non-zero otherwise. The container is arm64 on an Apple Silicon Mac: a proxy
+for structure and tests, not for graphics. On Windows and Linux machines the same build is described in
+[build-windows.md](build-windows.md) and [build-linux.md](build-linux.md).
 
 Notes:
 
@@ -36,8 +50,13 @@ Notes:
 ## Part 2: per-platform manual list
 
 The same numbered list for macOS, Windows and Linux (X11 and Wayland), so Phase 2.2 only has to run it. Every item has
-an expected result. Where the list says `Cmd+W`, Windows and Linux use the table that Phase 2.2 ships
-(`Ctrl+Shift+W` is the plan); `Option` is `Alt` there, and a layout's third level is `AltGr`.
+an expected result. Where the list says `Cmd+W`, Windows and Linux use their own tables of [config.md](config.md)
+(`Ctrl+Shift+W`; tab numbers are `Alt+Shift+1` to `9` there, and the line-editing keys are the shell's own on Windows).
+`Option` is `Alt` there and the Option-as-Alt setting exists only on macOS; a layout's third level is `AltGr`, which
+Windows reports as `Ctrl` and `Alt` together and which holzWave types as the character, never as a chord (item 7 on a
+Swiss or German layout is the test; its second half, `option_as_alt`, is macOS only). Copy and paste are `Ctrl+Shift+C` and `Ctrl+Shift+V` (also `Ctrl+Insert`,
+`Shift+Insert`, and `Ctrl+V` on Windows); plain `Ctrl+C` always reaches the program. Where an item says `pgrep`, use
+`tasklist` on Windows.
 
 | # | What to do | Expected |
 |---|---|---|
@@ -115,7 +134,49 @@ Run: date ____ machine ____ macOS ____ build commit ____ (`git rev-parse --short
 | F6 | The everyday behaviour is intact: tabs, workspaces, shortcuts, wheel scroll, resize, copy | Part 2 items 8, 10, 12 | As in those items | |
 | F7 | Idle CPU | Part 2 item 17 | Near zero; the number is noted: ____ % | |
 
-### What to expect
+## Part 4: Windows and Linux (Phase 2.2)
+
+The list the owner runs on their own Windows and Linux machines (Phase 2 D-22). It is run **in addition to** Part 2,
+whose rows 1 to 19 are run on both platforms. Windows and Linux were written and cross-checked on a Mac and have never
+been run on their own platform: **nothing in this part is verified**, and the Result column is empty until the owner has
+run the row. Write `pass`, or `fail` with a line of what was seen; a row that is not run stays empty. A failing row
+becomes a gap plan (`/gsd-plan-phase --gaps`); the requirements DESK-30 (Windows) and DESK-31 (Linux) are marked done
+only when their rows pass.
+
+Run: date ____ machine ____ OS and build ____ GPU and driver ____ session (X11 or Wayland) ____ build commit ____
+(`git rev-parse --short HEAD`, built as [build-windows.md](build-windows.md) or [build-linux.md](build-linux.md) says)
+
+The Plan column names the plan that built the behaviour, so the intent can be found in its summary. Every behaviour that
+differs from macOS on purpose is listed in [design.md](design.md) section 7 and in "What to expect" below: a row that
+fails because of one of those is not a defect of the row.
+
+| # | Plan | What to do | Expected | Result |
+|---|---|---|---|---|
+| W1 | 02.2-04, 02.2-05, 02.2-07 | On a clean user account follow [build-windows.md](build-windows.md) from the top: the prerequisites, `env.ps1 -InstallZig`, `npm --prefix app ci`, `cargo test --workspace`, `cargo test -p holzwave-core --test conpty -- --nocapture`, `cargo run -p holzwave-app`. Open the first pane. Then check the shell: with only Windows PowerShell installed, with PowerShell 7 installed, and with `"shell": "C:\\Windows\\System32\\cmd.exe"` in `settings.json` (new panes only); then with `"shell": "C:\\nope.exe"`. Open the web inspector of the debug build if it opens and read its console | The guide works as written (a step that failed is noted with its message). The MSVC build of the engine finishes. Every `conpty` case passes or says why it skipped. The first prompt appears within about 2 s, typing echoes, nothing hangs and the page is not blank. The default shell is PowerShell 7, else Windows PowerShell, else `cmd`; the `shell` setting is used for panes started afterwards and a running pane keeps its shell; an unusable path falls back to the default shell, the pane's first line says so and the app does not close. The console shows no Content-Security-Policy message (the policy names `http://ipc.localhost`, which WebView2 serves the page from; assumed until this row) |  |
+| W2 | 02.2-04 | Type `exit` in a PowerShell pane, then in a `cmd.exe` pane (`"shell"` as in W1, or run `cmd` inside a pane and then `exit` twice). Close the last pane of the app with `exit` | The pane closes within about 1 s of `exit` each time; closing the last pane closes the app. A frozen pane after `exit` means the exit poll did not see the shell end (assumption A3) |  |
+| W3 | 02.2-04 | In a pane run `ping -t localhost`, close the pane, and look in Task Manager or `tasklist`. Repeat and quit the app instead of closing the pane | No `ping.exe` and no shell of the app is left, in both cases. A survivor means the pane needs a job object (a follow-up plan) |  |
+| W4 | 02.2-02 | On a Swiss or German layout type `@ \ \| { } [ ] ~ €` with AltGr, also AltGr+`ü` and AltGr+`¨` (the brackets of the Swiss layout), and try `Ctrl+Alt` combinations. Then open the key binding editor, press Change on an action and press AltGr+7 | Every character types exactly once, nothing arrives as an escape sequence. A real `Ctrl+Alt` press without AltGr still reaches a program as a chord. The editor does not record `Ctrl+Alt+7` from AltGr+7 (it never sees a chord) |  |
+| W5 | 02.2-04 | Resize the window while `dir C:\Windows\System32` output or `vim` is shown; maximise and restore. In PowerShell read `$Host.UI.RawUI.WindowSize`, or run `mode con` in `cmd` | No duplicated lines in the scrollback after a resize (assumption A8, the repaint of ConPTY), the reported size equals the grid, no corrupted screen after maximise and restore |  |
+| W6 | 02.2-02 | Select text and copy it with `Ctrl+Shift+C` and with `Ctrl+Insert`; paste with `Ctrl+Shift+V`, `Ctrl+V` and `Shift+Insert`, also text copied in another app, one chord at a time. Run a command and press plain `Ctrl+C` | Each paste arrives exactly once; several lines ask first as in Part 2 item 9; plain `Ctrl+C` interrupts and never copies. `Ctrl+V` pastes as in Windows Terminal (a program that wants that key itself, such as vim's visual block, does not get it: a known limit). Whether the first paste asks for a clipboard permission is noted |  |
+| W7 | 02.2-04, 02.2-05 | In PowerShell 7 and in Windows PowerShell 5.1: `cd` into a folder with a space and one with a non-ASCII name, split the pane, open a tab, quit and relaunch. Then the same in `cmd.exe`. With a prompt framework (Starship or oh-my-posh) if you use one | PowerShell: the new panes and the restored panes start in the folder, the prompt looks as it does outside holzWave, and the framework still draws its prompt. `cmd.exe`: a split and a restored pane start in the home directory (documented; there is no directory report). The prompt wrapper does not preserve `$?` for the original prompt (documented) |  |
+| W8 | 02.2-02 | Open the palette (`Ctrl+Shift+P`), search (`Ctrl+Shift+F`), hints (`Ctrl+Shift+Space`) and copy mode (`Ctrl+Shift+X`); switch tabs with `Alt+Shift+1` to `9`. Use a Japanese input method, and check the keyboard layout does not change while using these chords | Every chord works; the input method and the keyboard layout are not toggled by a holzWave chord (assumption A5: `Ctrl+Shift` and `Alt+Shift` can be the Windows layout switch; if one is, note which and a different default is a follow-up) |  |
+| W9 | 02.2-02 | In PowerShell and in `cmd` press `Ctrl+Left`, `Ctrl+Right`, `Ctrl+Backspace`, `Home` and `End` on a line of several words. Then in `vim` | The cursor moves by word and to the line ends as PSReadLine does, the delete works, nothing is sent twice and nothing like `;5D` is printed; `vim` gets the keys itself. (Windows has no default for the six line-editing actions on purpose.) |  |
+| W10 | 02.2-03 | At display scales 100, 125 and 150 %, and with two monitors of different scales: tear a pane off by dragging its header beyond the window edge, drop a pane or tab on another window | The new window opens under the pointer and the drop zone is where the pointer is, at every scale and across monitors (the pointer and window positions share one physical space; assumption of plan 03) |  |
+| W11 | 02.2-03 | Click a URL (also one with `&` in it) and a file path in the terminal with the link modifier (`Ctrl`). Try a path with a space and one with a comma, and the text `\\server\share\x` | The default browser opens the URL whole; Explorer opens with the file selected; paths with a space and a comma work; the text `\\server\share\x` is not opened or revealed. If `rundll32` does not start the browser, `explorer.exe <url>` is the documented alternative and a follow-up |  |
+| W12 | 02.2-06, 02.2-09, 02.2-07 | Run the NSIS installer from `target\release\bundle\nsis\` (SmartScreen: More info, Run anyway), start holzWave, look in `%APPDATA%\ch.holzcloud.holzwave\`, uninstall. Look at the window: one native title bar, the page's bar below it; drag by each, double-click each, maximise, restore, snap. Set Settings, Accessibility, Text size to 150 % while holzWave is open and focus it again; turn animations off; use a high contrast theme. Open a pane with wide characters, emoji, combining marks, box drawing and powerline symbols. If you can, remove WebView2 first (a virtual machine) | The installer installs without an administrator prompt, holzWave starts, the settings folder is where [config.md](config.md) says and the uninstall leaves no program files. One native title bar with the system buttons and the page's bar directly under it, both drag, snap works. The chrome (tabs, bar, status line, dialogs) grows once by the OS text size and returns when it is reverted, without a restart; the terminal text does not change; reduced motion and contrast switch the same classes as on macOS. No console window flashes at start or on focus. Glyphs align to the cells; a missing glyph is a box, never a proportional face. With WebView2 absent the installer downloads it (needs the network) |  |
+| W13 | 02.2-04 | On Windows 10 22H2 and on Windows 11 24H2, where both exist: repeat W1, W2 and W3 | The three rows hold on both (the end-of-file behaviour of the console host differs between them) |  |
+| L1 | 02.2-05, 02.2-06, 02.2-07 | On a Debian family and on a Fedora family machine, in an X11 session, follow [build-linux.md](build-linux.md) from the top, run the app and go through Part 2 rows 1 to 19. Then check the shell: `$SHELL` unset in the launcher, and `"shell": "/usr/bin/fish"` if fish is installed. Look at the window frame: one native title bar (client-side under GNOME, server-side under KDE), the page's bar below it; drag by each, double-click each, maximise, restore, snap | The guide works as written; a package that is missing or a command that differs is noted. The build finishes, the window is not blank, every Part 2 row passes. The shell is `$SHELL`, else `/bin/sh`; an unusable `shell` falls back with a line in the pane. One native title bar and the page's bar directly under it, both drag, no resize-edge problem |  |
+| L2 | 02.2-03, 02.2-06 | The same in a Wayland session (GNOME, KDE; with an NVIDIA GPU if you have one). Move and resize the window, quit, relaunch | No blank or flickering window and no `Error 71` in the console; if there is one, record which of the four variables of [build-linux.md](build-linux.md) fixes it, in order. The window position is not restored under Wayland (the compositor places it; documented); the size should be |  |
+| L3 | 02.2-03, 02.2-06 | At scales 100, 150 and 200 %, and with fractional scaling; read the renderer name in the status line. Tear a pane off by dragging its header beyond the window edge on X11; on Wayland drag it out and then use the palette actions `Move pane to new window` and `Move tab to new window`. Try `GDK_BACKEND=x11` in a Wayland session | Text is sharp and nothing overlaps. The renderer (WebGL2 or Canvas 2D) is noted, and so is how fast typing and scrolling feel (WebKitGTK cannot say whether WebGL2 is on a software path). On X11 tear-off by the pointer works and the new window opens under it; on Wayland dragging out cancels without harm and the palette actions work; under XWayland the pointer numbers are usable |  |
+| L4 | 02.2-02 | Type AltGr and dead-key characters, use the compose key and an input method (ibus and fcitx5), on X11 and on Wayland. Press `Ctrl+Shift+Space`, `Ctrl+Shift+O` and `Alt+Shift+1` | Characters type exactly once; the composition and the candidate window behave as in Part 2 item 6; no chord is eaten by the desktop or the input method (assumptions A1 and A5: `Ctrl+Shift+E` is avoided because GNOME takes it) |  |
+| L5 | 02.2-09, 02.2-06 | Under GNOME turn Large Text on and off, and set a fractional text scale (`gsettings set org.gnome.desktop.interface text-scaling-factor 1.25`), with holzWave open, then focus it. Check the font fallback: a machine without `fonts-noto-color-emoji` | The chrome scales once by that factor, not twice, and returns when reverted, without a restart; the terminal text does not change. If the chrome never follows although GNOME changed, note it (the helper runs with a cleared environment; the fix is passing `HOME` and `XDG_RUNTIME_DIR`). KDE and other desktops stay at 100 % by design. Without a colour emoji font emoji may be boxes (recorded, not a defect); wide characters and box drawing stay aligned |  |
+| L6 | 02.2-06 | Run the AppImage on the build distribution and on a second distribution (after `chmod +x`) | It starts. If not, note the error: a missing FUSE 2 (`libfuse2t64`, `fuse-libs`) is the usual one and `--appimage-extract-and-run` the way around it; a failing `linuxdeploy` strip at build time is another |  |
+| L7 | 02.2-06 | Install the deb on a Debian family machine and the rpm on a Fedora family machine (`sudo apt install ./file.deb`, `sudo dnf install ./file.rpm`), launch from the menu, look at the taskbar on X11 and on Wayland, then remove the package | Dependencies resolve (WebKitGTK 4.1 and GTK 3 only), holzWave is listed under System or Terminal with its name and icon, the taskbar groups the windows under one icon, named right (if it shows two icons, `StartupWMClass` in `app/src-tauri/linux/holzwave.desktop` needs the class the window really has), the menu icon shows (the bundler wrote the HiDPI icon as `256x256@2`, which some icon themes may ignore), and the package removes cleanly |  |
+| L8 | 02.2-02 | Copy with `Ctrl+Shift+C` and `Ctrl+Insert`, paste with `Ctrl+Shift+V` and `Shift+Insert`, paste text from another app, and middle-click in a pane | As W6: every paste arrives once and plain `Ctrl+C` interrupts. Middle-click paste (the X11 primary selection) does nothing: a documented deviation |  |
+| L9 | 02.2-03 | Click a URL and a file path in the terminal with the link modifier | `xdg-open` opens the default browser; the path opens its containing folder in the file manager and the file is never run. If nothing opens, note whether a handler for `xdg-open` exists on that desktop |  |
+| L10 | 02.2-08 | Only if plan 02.2-08 ships a Flatpak: install it, run it, and in a pane look at the shell, `echo ~` and `ls`; check the menu icon | The shell is the host's shell, `~` is the host home, the host's tools are reachable, and the documented limits of `docs/flatpak.md` hold. If no Flatpak ships, the row stays empty and says so |  |
+
+## What to expect
 
 Known limits of this build, so they are not reported as defects:
 
@@ -126,4 +187,12 @@ Known limits of this build, so they are not reported as defects:
 - Hint labels cover the first 676 targets of a pane in reading order, and a number of 7 to 40 digits counts as a hash.
 - `Cmd+C` is a fixed shortcut. A chord the core refused stays in the overrides map of `settings.json` until it is reset.
 - The UI scale and the font size are user settings; the macOS web view reports no OS text-size signal (D-25).
-- Windows and Linux are not built yet (Phase 2.2); Part 2 is the list the owner runs there.
+- Windows and Linux are written and cross-checked from the Mac and have never been run on their own platform: Part 4
+  is the list the owner runs there, and Part 2 is run there too. Until then nothing about them is verified.
+- Where Windows and Linux differ from macOS on purpose, the list is in [design.md](design.md) section 7. In short: a
+  native window frame; no directory tracking in `cmd.exe`; PowerShell's integration cannot be switched off; Kitty keyboard
+  requests from a Windows program may not reach the engine; no middle-click paste on X11; no pointer tear-off and no
+  window position restore under Wayland; the OS text size is read on Windows and GNOME only; emoji need a colour emoji font
+  on Linux; the installers and packages are unsigned and the Windows installer is NSIS only; AppImage portability is what
+  the run shows; no Option-as-Alt setting off macOS; `Ctrl+V` pastes on Windows and is not rebindable.
+- The key binding overrides in `settings.json` do not travel between platforms ([config.md](config.md)).

@@ -13,7 +13,8 @@
 //!   with their exact set of parents;
 //! * the sources: no network API in first-party Rust (non-test code) or in the page;
 //! * the page policy (no remote origin in the CSP, no dev server URL, no updater) and the absence of CI (D-04);
-//! * the examples of `docs/config.md`, which are parsed by the real loaders, so the document cannot drift from the code.
+//! * the examples of `docs/config.md`, which are parsed by the real loaders, so the document cannot drift from the code;
+//! * the owner's Windows and Linux list: every row W1 to W13 and L1 to L10 is in `docs/test-plan.md` exactly once.
 //!
 //! The capability allow-list and the exact CSP are pinned by `app/src-tauri/tests/acl.rs`; this file does not repeat
 //! them, it only re-checks the properties that DESK-26 depends on.
@@ -767,4 +768,93 @@ fn config_md_names_every_setting_and_every_action() {
             }
         }
     }
+}
+
+// ---- docs/test-plan.md ------------------------------------------------------------------------------------
+
+/// The cells of a Markdown table row, split at every `|` that is not escaped as `\|`, with the outer bars dropped and
+/// each cell trimmed. `None` for a line that is not a table row.
+fn table_cells(line: &str) -> Option<Vec<String>> {
+    let line = line.trim();
+    let inner = line.strip_prefix('|')?;
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut previous = ' ';
+    for c in inner.chars() {
+        if c == '|' && previous != '\\' {
+            cells.push(cell.trim().to_owned());
+            cell.clear();
+        } else {
+            cell.push(c);
+        }
+        previous = c;
+    }
+    cells.push(cell.trim().to_owned());
+    Some(cells)
+}
+
+/// What is wrong with the rows `ids` in the document `doc`, one sentence each: a row that is missing, one that appears
+/// twice, one without its plan pointer, its instruction or its expected result. A row is a table row whose first cell
+/// is exactly the id. The Result column (the fifth cell) is never looked at: it is the owner's to fill in.
+fn test_plan_row_problems(doc: &str, ids: &[String]) -> Vec<String> {
+    let rows: Vec<Vec<String>> = doc.lines().filter_map(table_cells).collect();
+    let mut problems = Vec::new();
+    for id in ids {
+        let found: Vec<&Vec<String>> = rows.iter().filter(|cells| cells.first().is_some_and(|c| c == id)).collect();
+        match found.as_slice() {
+            [] => problems.push(format!("row {id} is missing")),
+            [row] => {
+                // Columns: #, Plan, What to do, Expected, Result.
+                if row.len() < 5 {
+                    problems.push(format!("row {id} has {} cells, the table has five columns", row.len()));
+                } else if row[1..4].iter().any(String::is_empty) {
+                    problems.push(format!("row {id} has an empty Plan, What to do or Expected cell"));
+                }
+            }
+            more => problems.push(format!("row {id} appears {} times", more.len())),
+        }
+    }
+    problems
+}
+
+fn windows_and_linux_row_ids() -> Vec<String> {
+    (1..=13).map(|n| format!("W{n}")).chain((1..=10).map(|n| format!("L{n}"))).collect()
+}
+
+#[test]
+fn test_plan_has_every_windows_and_linux_row_exactly_once() {
+    let problems = test_plan_row_problems(&read("docs/test-plan.md"), &windows_and_linux_row_ids());
+    assert!(problems.is_empty(), "docs/test-plan.md Part 4: {problems:?}");
+}
+
+#[test]
+fn the_row_check_of_the_test_plan_sees_missing_duplicate_and_empty_rows_and_ignores_the_result_column() {
+    let ids = vec!["W1".to_owned(), "W2".to_owned(), "W3".to_owned()];
+    let doc = "\
+| # | Plan | What to do | Expected | Result |
+|---|---|---|---|---|
+| W1 | 02.2-04 | run it | it runs | pass: it ran \\| twice |
+| W2 | 02.2-04 | | it ends | |
+| W2 | 02.2-04 | again | it ends | |
+| W10 | 02.2-04 | not W1 | at all | |
+";
+    let problems = test_plan_row_problems(doc, &ids);
+    assert_eq!(
+        problems,
+        [
+            "row W2 appears 2 times".to_owned(), // two rows: the empty cell of the first is not reported twice
+            "row W3 is missing".to_owned(),
+        ]
+    );
+    let empty = "| W1 | 02.2-04 | | it runs | |\n";
+    assert_eq!(
+        test_plan_row_problems(empty, &["W1".to_owned()]),
+        ["row W1 has an empty Plan, What to do or Expected cell".to_owned()]
+    );
+    let short = "| W1 | 02.2-04 | run it | it runs |\n";
+    assert_eq!(test_plan_row_problems(short, &["W1".to_owned()]), ["row W1 has 4 cells, the table has five columns".to_owned()]);
+    // A filled Result column changes nothing.
+    let done = "| W1 | 02.2-04 | run it | it runs | fail: a long line | with | bars |\n";
+    assert!(test_plan_row_problems(done, &["W1".to_owned()]).is_empty());
 }
