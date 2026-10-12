@@ -125,3 +125,64 @@ fn the_base_file_is_the_same_for_every_platform() {
     assert_eq!(conf["bundle"]["targets"], "all", "the base bundle targets");
     assert!(conf["bundle"].get("linux").is_none(), "the base file has a Linux bundle section");
 }
+
+const WINDOWS_CONF: &str = include_str!("../tauri.windows.conf.json");
+
+fn windows_conf() -> Value {
+    serde_json::from_str(WINDOWS_CONF).expect("tauri.windows.conf.json is JSON")
+}
+
+#[test]
+fn the_windows_file_builds_one_per_user_nsis_installer_and_nothing_else() {
+    // The CLI merges tauri.<platform>.conf.json over tauri.conf.json, as it does for Linux. The file holds the bundle
+    // and nothing else: the window and the app are the same on Windows as on every other platform.
+    let windows = windows_conf();
+    let keys: Vec<&String> = windows.as_object().expect("an object").keys().filter(|k| *k != "$schema").collect();
+    assert_eq!(keys, ["bundle"], "the Windows file changes only the bundle");
+    // NSIS only. No MSI: its WiX toolset is downloaded at build time and needs an optional Windows feature, and a
+    // pre-release version such as 0.0.1-alpha1 is not a valid MSI version either.
+    assert_eq!(windows["bundle"]["targets"], serde_json::json!(["nsis"]), "the Windows bundle targets");
+    // Per user: no administrator prompt, and an upgrade of an installed copy needs none (T-2.2-31). Changing this later
+    // changes where installed copies live and how they are upgraded, so it is pinned.
+    assert_eq!(windows["bundle"]["windows"]["nsis"]["installMode"], "currentUser");
+}
+
+#[test]
+fn the_windows_file_configures_no_signing_and_no_msi() {
+    // Signing is Phase 10 (T-2.2-29): an installer that is half configured for signing fails at build time on a machine
+    // without the certificate, or worse, signs with the wrong one. Every key that would start it is refused here.
+    let windows = windows_conf();
+    let section = &windows["bundle"]["windows"];
+    for key in ["certificateThumbprint", "signCommand", "timestampUrl", "tsp", "digestAlgorithm", "wix"] {
+        assert!(section.get(key).is_none(), "bundle.windows.{key} is configured: no signing and no MSI in 0.0.1");
+    }
+    // The WebView2 install mode keeps its default (the Evergreen bootstrapper is downloaded when the runtime is
+    // missing); the guide says so. A fixed or embedded runtime would be a decision with a size cost.
+    assert!(section.get("webviewInstallMode").is_none(), "the WebView2 install mode is not the default");
+    // No hook runs at install time (T-2.2-31): the same rule as the Linux packages.
+    let nsis = section["nsis"].as_object().expect("an nsis section");
+    assert_eq!(nsis.keys().collect::<Vec<_>>(), ["installMode"], "the nsis section holds the install mode only");
+    let lowered = WINDOWS_CONF.to_lowercase();
+    assert!(!lowered.contains("script") && !lowered.contains("hooks"), "an install script or hook is configured");
+}
+
+#[test]
+fn the_windows_installer_has_its_icon_and_the_base_file_lists_it() {
+    // The icon of the executable, the installer and the shortcuts comes from the base file's list.
+    let conf = conf();
+    let list = conf["bundle"]["icon"].as_array().expect("bundle.icon is a list");
+    let icons: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
+    assert!(icons.contains(&"icons/icon.ico"), "icons/icon.ico is not in the base icon list");
+    assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/icon.ico").is_file(), "icons/icon.ico does not exist");
+}
+
+#[test]
+fn the_windows_file_leaves_the_base_bundle_to_the_base_file() {
+    // This plan changes no key of tauri.conf.json: the version, the identifier (the settings directory) and the
+    // security policy are those of every platform.
+    let windows = windows_conf();
+    assert!(windows["bundle"].get("icon").is_none(), "the Windows file overrides the icon list");
+    assert!(windows.get("identifier").is_none(), "the Windows file overrides the identifier");
+    assert!(windows.get("version").is_none(), "the Windows file overrides the version");
+    assert_eq!(conf()["bundle"]["targets"], "all", "the base bundle targets");
+}
