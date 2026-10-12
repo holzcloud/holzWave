@@ -12,6 +12,7 @@ import { initKeyboard } from "./keyboard.js";
 import { initLinks } from "./links.js";
 import { initOverlay } from "./overlay.js";
 import { initPalette } from "./palette.js";
+import { initDragDrop } from "./dragdrop.js";
 import { initPointer } from "./pointer.js";
 import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
 import { initSearch } from "./search-ui.js";
@@ -25,6 +26,7 @@ async function main() {
   initOverlay(applyView);
   initKeyboard(applyView);
   initPointer(applyView);
+  initDragDrop(applyView);
   initSelection();
   await initSearch();
   await initLinks();

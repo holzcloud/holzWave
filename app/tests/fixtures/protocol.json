@@ -417,6 +417,24 @@
           "title": "Rename workspace"
         },
         {
+          "action": "pane.swap_next",
+          "chord": null,
+          "is_default": true,
+          "title": "Swap with next pane"
+        },
+        {
+          "action": "pane.move_next_tab",
+          "chord": null,
+          "is_default": true,
+          "title": "Move pane to next tab"
+        },
+        {
+          "action": "pane.move_prev_tab",
+          "chord": null,
+          "is_default": true,
+          "title": "Move pane to previous tab"
+        },
+        {
           "action": "edit.word_back",
           "chord": "Alt+Left",
           "is_default": true,
@@ -882,6 +900,24 @@
         "chord": null,
         "is_default": true,
         "title": "Rename workspace"
+      },
+      {
+        "action": "pane.swap_next",
+        "chord": null,
+        "is_default": true,
+        "title": "Swap with next pane"
+      },
+      {
+        "action": "pane.move_next_tab",
+        "chord": null,
+        "is_default": true,
+        "title": "Move pane to next tab"
+      },
+      {
+        "action": "pane.move_prev_tab",
+        "chord": null,
+        "is_default": true,
+        "title": "Move pane to previous tab"
       },
       {
         "action": "edit.word_back",

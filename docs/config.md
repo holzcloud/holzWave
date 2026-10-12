@@ -210,7 +210,8 @@ The defaults (the macOS table; Windows and Linux pick their own in Phase 2.2):
 | `font.decrease` | `Cmd+-` | `font.reset` | `Cmd+0` |
 | `settings.open` | `Cmd+,` | | |
 | `tab.rename` | none | `pane.rename` | none |
-| `workspace.rename` | none | | |
+| `workspace.rename` | none | `pane.swap_next` | none |
+| `pane.move_next_tab` | none | `pane.move_prev_tab` | none |
 
 The line-editing actions send fixed bytes to the shell's line editor (`edit.word_back` and `edit.word_forward` send
 `ESC b` and `ESC f`, `edit.line_start` and `edit.line_end` send `Ctrl+A` and `Ctrl+E`, `edit.delete_word_back` sends
@@ -234,6 +235,13 @@ The three rename actions start the in-place editor on the shown tab, the focused
 click on a tab, a pane header or a workspace chip does the same. A name is cut to 128 characters, loses control
 characters and blanks at both ends, and the empty name gives the automatic one back (`shell`, the program's title,
 `ws N`). Names of panes are kept in `layout.json` (`pane_names`); tabs and workspaces keep theirs in their own entry.
+
+A pane is dragged by its header onto another pane: on the outer quarter of a side it splits that pane there, on the
+middle the two swap places; onto a tab it moves into that tab. A tab is dragged to another place in the strip, or onto
+a workspace chip to move into that workspace. Escape, or a drop on nothing, cancels. The pane keeps its shell, its
+scrollback and its name; the core refuses a move that would pass the pane or depth limits and changes nothing. Without
+the mouse: `pane.swap_next` swaps the focused pane with the next one of the tab, `pane.move_next_tab` and
+`pane.move_prev_tab` move it into the next or previous tab (all three are unbound by default).
 
 Actions without a chord in the table (`keybindings.open`, the theme entries of the palette) are reached from the
 palette and the dialogs and can be bound by adding them to the table in a later version.

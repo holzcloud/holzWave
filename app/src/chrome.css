@@ -150,3 +150,10 @@
 .ph-sub { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--hw-ink-2); margin-left: .667rem; }
 .ph-sub:empty { display: none; }
 .ph-title { pointer-events: auto; }
+
+/* Drag and drop (DESK-20): the box shows what the dragged pane would take; nothing else of the page changes. */
+.drop-outline {
+  position: fixed; z-index: 50; box-sizing: border-box; pointer-events: none;
+  border: 2px solid var(--hw-ink); background: color-mix(in srgb, var(--hw-ink) 12%, transparent);
+}
+:root.dragging, :root.dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
