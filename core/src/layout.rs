@@ -7,6 +7,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+mod windows;
+
+pub use windows::{
+    AttachTo, MAIN_WINDOW, MAX_WINDOWS, Moved, SetClose, TornOff, WindowSet, valid_window_label,
+};
+
 pub type PaneId = u64;
 pub type SplitId = u64;
 
@@ -683,26 +689,34 @@ impl Layout {
             return self.swap_panes(pane, target);
         }
         let mut next = self.clone();
-        if !next.detach_pane(pane) {
+        if !next.detach_pane(pane) || !next.insert_pane(pane, target, edge) {
             return false;
         }
-        let Some((wi, ti)) = next.locate(target) else { return false };
+        *self = next;
+        true
+    }
+
+    /// Put `pane`, which is in no tab of this layout, on a side of `target` (never the middle) and focus it. False,
+    /// with the layout possibly changed by the unused split id only, when the target is not here or the tab is at
+    /// its pane or depth limit; callers work on a copy.
+    fn insert_pane(&mut self, pane: PaneId, target: PaneId, edge: Edge) -> bool {
+        let Some((wi, ti)) = self.locate(target) else { return false };
         let (axis, before) = match edge {
             Edge::Left => (Axis::Row, true),
             Edge::Right => (Axis::Row, false),
             Edge::Top => (Axis::Column, true),
-            _ => (Axis::Column, false),
+            Edge::Bottom => (Axis::Column, false),
+            Edge::Center => return false,
         };
-        let split_id = next.id();
-        let tab = &mut next.workspaces[wi].tabs[ti];
+        let split_id = self.id();
+        let tab = &mut self.workspaces[wi].tabs[ti];
         if tab.panes().len() >= MAX_PANES_PER_TAB || !tab.root.split_with(target, axis, split_id, pane, before) {
             return false;
         }
         if tab.root.depth() > MAX_SPLIT_DEPTH {
             return false;
         }
-        next.focus_pane(pane);
-        *self = next;
+        self.focus_pane(pane);
         true
     }
 
@@ -783,28 +797,38 @@ impl Layout {
                     tab.focus = tab.panes()[0];
                 }
             } else {
-                w.tabs.remove(ti);
-                if ti < w.active {
-                    // The shown tab moved one place to the left with its siblings: it stays the shown one.
-                    w.active -= 1;
-                } else {
-                    // The shown tab itself went (the one that followed slides into the index, or the new last
-                    // one is shown), or a tab after it went and the index is still right.
-                    w.active = w.active.min(w.tabs.len().saturating_sub(1));
-                }
-                if w.tabs.is_empty() {
-                    self.workspaces.remove(wi);
-                    if wi < self.active {
-                        // The shown workspace moved one place to the left with its siblings: it stays shown.
-                        self.active -= 1;
-                    } else {
-                        self.active = self.active.min(self.workspaces.len() - 1);
-                    }
-                }
+                self.remove_tab_at(wi, ti);
             }
             return true;
         }
         false
+    }
+
+    /// Take the tab `ti` of workspace `wi` out. A workspace that this empties disappears, and the active indexes stay
+    /// on what was shown: when something before the shown one goes the index moves with it, and when the shown one
+    /// itself goes the one that followed is shown (the new last one when it was the last). Both indexes must exist.
+    /// The layout may be left without a workspace; the caller keeps that from being visible.
+    fn remove_tab_at(&mut self, wi: usize, ti: usize) -> Tab {
+        let w = &mut self.workspaces[wi];
+        let tab = w.tabs.remove(ti);
+        if ti < w.active {
+            // The shown tab moved one place to the left with its siblings: it stays the shown one.
+            w.active -= 1;
+        } else {
+            // The shown tab itself went (the one that followed slides into the index, or the new last
+            // one is shown), or a tab after it went and the index is still right.
+            w.active = w.active.min(w.tabs.len().saturating_sub(1));
+        }
+        if w.tabs.is_empty() {
+            self.workspaces.remove(wi);
+            if wi < self.active {
+                // The shown workspace moved one place to the left with its siblings: it stays shown.
+                self.active -= 1;
+            } else {
+                self.active = self.active.min(self.workspaces.len().saturating_sub(1));
+            }
+        }
+        tab
     }
 
     /// Close a pane everywhere. Empty tabs and empty workspaces disappear; the last pane of the last
