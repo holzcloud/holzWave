@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use holzwave_core::keybindings::{Keybindings, actions};
+use holzwave_core::keybindings::{Keybindings, actions_for};
 use holzwave_core::layout::{Layout, LoadStatus};
 use holzwave_core::session::Session;
 use holzwave_core::settings::Settings;
@@ -746,15 +746,25 @@ fn config_md_names_every_setting_and_every_action() {
     for key in defaults.as_object().expect("settings are an object").keys() {
         assert!(doc.contains(&format!("`{key}`")), "docs/config.md does not document the setting {key}");
     }
-    for action in actions() {
-        // Tab and workspace selection are one row each: `tab.select_1` to `_9`.
-        let numbered = action.id.rsplit_once('_').is_some_and(|(_, n)| matches!(n, "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
-        if numbered {
-            continue;
-        }
-        assert!(doc.contains(&format!("`{}`", action.id)), "docs/config.md does not list the action {}", action.id);
-        if let Some(default) = action.default.filter(|_| !action.id.contains("select_")) {
-            assert!(doc.contains(&format!("`{default}`")), "docs/config.md does not list {default} for {}", action.id);
+    for os in ["macos", "windows", "linux"] {
+        for action in actions_for(os) {
+            // Tab and workspace selection are one row each: `tab.select_1` to `_9`.
+            let numbered =
+                action.id.rsplit_once('_').is_some_and(|(_, n)| matches!(n, "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"));
+            if numbered {
+                continue;
+            }
+            let id = format!("`{}`", action.id);
+            assert!(doc.contains(&id), "docs/config.md does not list the action {}", action.id);
+            if let Some(default) = action.default.filter(|_| !action.id.contains("select_")) {
+                // The row of the action names the default of every platform, so the two are on one line.
+                let default = format!("`{default}`");
+                assert!(
+                    doc.lines().any(|line| line.contains(&id) && line.contains(&default)),
+                    "docs/config.md does not list {default} for {} on {os}",
+                    action.id
+                );
+            }
         }
     }
 }

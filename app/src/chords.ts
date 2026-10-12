@@ -1,7 +1,9 @@
 // The static table from a canonical chord to an action id. Canonical form is the core's (core/src/keybindings.rs):
 // modifiers in the order Cmd, Ctrl, Alt, Shift, then the key, letters upper case, "+" as the separator.
-// These are the macOS defaults; a chord whose action nobody registered resolves and then does nothing.
+// `CHORDS` is the macOS table; a chord whose action nobody registered resolves and then does nothing.
 // `pane.close` is Cmd+W (D-14): the native macOS menu has no Close Window item, so the page owns the shortcut.
+// It is only the fallback until the core's rows arrive. On Windows and Linux it holds just the fixed clipboard chords
+// (see FIXED_CLIPBOARD): the Super key (`Cmd`) is the OS's there, so a Win-key chord must never run from this table.
 
 export const CHORDS: ReadonlyMap<string, string> = new Map([
   ["Cmd+D", "pane.split_right"],
@@ -46,6 +48,35 @@ export const CHORDS: ReadonlyMap<string, string> = new Map([
   ["Alt+Backspace", "edit.delete_word_back"],
   ["Cmd+Backspace", "edit.delete_to_line_start"],
 ]);
+
+// ---- the platform --------------------------------------------------------------------------------
+
+/**
+ * The fixed clipboard shortcuts of Windows and Linux: outside the core's rebindable table, like `Cmd+C` on macOS.
+ * Plain `Ctrl+C` is never a copy (it is SIGINT and always reaches the program). `Ctrl+V` pastes on Windows only: on
+ * Linux a terminal keeps it for the program (Ctrl+V is the literal-next of the shell).
+ */
+const FIXED_CLIPBOARD: ReadonlyMap<string, string> = new Map([
+  ["Ctrl+Shift+C", "edit.copy"],
+  ["Ctrl+Insert", "edit.copy"],
+  ["Ctrl+Shift+V", "edit.paste"],
+  ["Shift+Insert", "edit.paste"],
+]);
+const WINDOWS_CLIPBOARD: ReadonlyMap<string, string> = new Map([...FIXED_CLIPBOARD, ["Ctrl+V", "edit.paste"]]);
+
+/** The platform the page runs on, as `app_info` names it; empty until it is known, which reads as macOS. */
+let os = "";
+
+/** Tell this module the platform (`macos`, `windows`, anything else is Linux). An empty name means not known yet. */
+export function setOs(name: string): void {
+  os = name;
+}
+
+/** The static fallback of the platform: the whole table on macOS (and while the OS is unknown), else clipboard chords. */
+function fallback(): ReadonlyMap<string, string> {
+  if (os === "" || os === "macos") return CHORDS;
+  return os === "windows" ? WINDOWS_CLIPBOARD : FIXED_CLIPBOARD;
+}
 
 // ---- the core's resolved table --------------------------------------------------------------------
 
@@ -102,20 +133,20 @@ export function setBindingTable(rows: readonly BindingRowLike[]): BindingConflic
 
 /**
  * The action id of a canonical chord, or undefined. With the core's table set, a chord is whatever the table binds.
- * A chord of the static table whose action the core's table does not know (`edit.copy`, which is no rebindable
- * action) stays a fixed shortcut; one whose action the table knows and left unbound or moved stays unowned.
+ * A chord of the static table whose action the core's table does not know (`edit.copy` and `edit.paste`, which are no
+ * rebindable actions) stays a fixed shortcut; one whose action the table knows and left unbound or moved stays unowned.
  */
 export function actionIdFor(chord: string): string | undefined {
-  if (!table) return CHORDS.get(chord);
+  if (!table) return fallback().get(chord);
   const id = table.index.get(chord);
   if (id !== undefined) return id;
-  const fixed = CHORDS.get(chord);
+  const fixed = fallback().get(chord);
   return fixed !== undefined && !table.actions.has(fixed) ? fixed : undefined;
 }
 
 /** The chord in force for an action: the core's table when set, else the static one; undefined when unbound. */
 export function chordFor(action: string): string | undefined {
   if (table) return table.byAction.get(action);
-  for (const [chord, id] of CHORDS) if (id === action) return chord;
+  for (const [chord, id] of fallback()) if (id === action) return chord;
   return undefined;
 }

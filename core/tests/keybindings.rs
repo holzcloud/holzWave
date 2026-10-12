@@ -3,7 +3,12 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use holzwave_core::keybindings::{Chord, Keybindings, actions};
+use holzwave_core::keybindings::{ActionInfo, Chord, Keybindings, actions, actions_for};
+
+/// The three default tables, by the OS name `std::env::consts::OS` and the app's `app_info` use.
+const OSES: [&str; 3] = ["macos", "windows", "linux"];
+/// The table the macOS literals of the tests below are written against; the override policy is the same on all three.
+const MAC: &str = "macos";
 
 /// `text` parsed and printed back in canonical form.
 fn canon(text: &str) -> Result<String, String> {
@@ -68,15 +73,15 @@ fn parse_exposes_modifiers_and_key_as_fields() {
 
 // ---- the default table ----------------------------------------------------------------------------------
 
-/// The action table, after checking that it is the full set: a loop over an empty table would pass vacuously.
-fn all_actions() -> &'static [holzwave_core::keybindings::ActionInfo] {
-    assert_eq!(actions().len(), 15 + 9 + 9 + 3 + 6 + 3 + 2, "the table holds 47 actions");
-    actions()
+/// The action table of `os`, after checking that it is the full set: a loop over an empty table would pass vacuously.
+fn all_actions(os: &str) -> &'static [ActionInfo] {
+    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 3 + 6 + 3 + 2, "the {os} table holds 47 actions");
+    actions_for(os)
 }
 
-/// The default chord of `action`, from the table.
-fn default_of(action: &str) -> Option<&'static str> {
-    actions().iter().find(|a| a.id == action).and_then(|a| a.default)
+/// The default chord of `action` in the table of `os`.
+fn default_of(os: &str, action: &str) -> Option<&'static str> {
+    actions_for(os).iter().find(|a| a.id == action).and_then(|a| a.default)
 }
 
 #[test]
@@ -104,47 +109,174 @@ fn the_default_table_holds_every_action_of_the_decisions() {
     .chain((1..=9).map(|n| (format!("workspace.select_{n}"), format!("Cmd+Alt+{n}"))))
     .collect();
     for (action, chord) in &expected {
-        assert_eq!(default_of(action), Some(chord.as_str()), "default of {action}");
+        assert_eq!(default_of(MAC, action), Some(chord.as_str()), "default of {action}");
     }
 }
 
 #[test]
 fn closing_a_pane_is_cmd_w_not_cmd_shift_w() {
     // D-14: Cmd+W closes the pane and "Close Window" is gone from the menu.
-    assert_eq!(default_of("pane.close"), Some("Cmd+W"));
+    assert_eq!(default_of(MAC, "pane.close"), Some("Cmd+W"));
 }
 
 #[test]
 fn every_action_has_a_title() {
-    for a in all_actions() {
-        assert!(!a.title.trim().is_empty(), "{} has no title", a.id);
+    for os in OSES {
+        for a in all_actions(os) {
+            assert!(!a.title.trim().is_empty(), "{} has no title on {os}", a.id);
+        }
     }
 }
 
 #[test]
 fn default_chords_are_written_in_canonical_form() {
-    for a in all_actions() {
-        if let Some(d) = a.default {
-            assert_eq!(canon(d), Ok(d.to_string()), "default of {} is not canonical", a.id);
+    for os in OSES {
+        for a in all_actions(os) {
+            if let Some(d) = a.default {
+                assert_eq!(canon(d), Ok(d.to_string()), "default of {} on {os} is not canonical", a.id);
+            }
         }
     }
 }
 
 #[test]
 fn defaults_resolve_without_warnings_and_match_the_table() {
-    let (kb, warnings) = Keybindings::resolve(&BTreeMap::new());
-    assert!(warnings.is_empty(), "{warnings:?}");
-    for a in all_actions() {
-        let want = a.default.map(chord);
-        assert_eq!(kb.chord_of(a.id), want.as_ref(), "chord of {}", a.id);
+    for os in OSES {
+        let (kb, warnings) = Keybindings::resolve_for(os, &BTreeMap::new());
+        assert!(warnings.is_empty(), "{os}: {warnings:?}");
+        for a in all_actions(os) {
+            let want = a.default.map(chord);
+            assert_eq!(kb.chord_of(a.id), want.as_ref(), "chord of {} on {os}", a.id);
+        }
+        assert_eq!(Keybindings::default_for(os).table(), kb.table(), "{os}");
     }
+}
+
+#[test]
+fn the_three_tables_hold_the_same_actions_with_the_same_titles_in_the_same_order() {
+    let mac = all_actions("macos");
+    for os in ["windows", "linux"] {
+        let other = all_actions(os);
+        for (m, o) in mac.iter().zip(other) {
+            assert_eq!((m.id, m.title), (o.id, o.title), "{os}");
+        }
+    }
+}
+
+#[test]
+fn a_name_that_is_neither_macos_nor_windows_is_the_linux_table() {
+    for name in ["linux", "freebsd", "", "android", "MacOS"] {
+        assert_eq!(actions_for(name), all_actions("linux"), "{name:?}");
+    }
+}
+
+#[test]
+fn the_host_functions_use_the_table_of_the_os_the_build_runs_on() {
+    let host = std::env::consts::OS;
+    assert_eq!(actions(), all_actions(host));
+    assert_eq!(Keybindings::default().table(), Keybindings::default_for(host).table());
+    let o = overrides(&[("tab.new", "Ctrl+Alt+Shift+Y"), ("nonsense", "Ctrl+Alt+Q")]);
+    let (host_table, host_warnings) = Keybindings::resolve(&o);
+    let (named_table, named_warnings) = Keybindings::resolve_for(host, &o);
+    assert_eq!(host_table.table(), named_table.table());
+    assert_eq!(host_warnings, named_warnings);
+}
+
+#[test]
+fn the_macos_table_still_has_its_eight_unbound_actions_on_every_platform() {
+    for os in OSES {
+        for id in [
+            "tab.rename",
+            "pane.rename",
+            "workspace.rename",
+            "pane.swap_next",
+            "pane.move_next_tab",
+            "pane.move_prev_tab",
+            "pane.move_to_new_window",
+            "tab.move_to_new_window",
+        ] {
+            assert_eq!(default_of(os, id), None, "{id} on {os}");
+        }
+    }
+}
+
+#[test]
+fn windows_and_linux_use_ctrl_shift_and_the_decided_chords() {
+    let mut expected: Vec<(String, String)> = [
+        ("pane.split_right", "Ctrl+Shift+D"),
+        ("pane.split_down", "Ctrl+Shift+O"),
+        ("pane.close", "Ctrl+Shift+W"),
+        ("pane.focus_next", "Ctrl+Shift+]"),
+        ("pane.focus_prev", "Ctrl+Shift+["),
+        ("tab.new", "Ctrl+Shift+T"),
+        ("workspace.new", "Ctrl+Shift+N"),
+        ("palette.open", "Ctrl+Shift+P"),
+        ("search.open", "Ctrl+Shift+F"),
+        ("copy_mode.enter", "Ctrl+Shift+X"),
+        ("hints.open", "Ctrl+Shift+Space"),
+        ("font.increase", "Ctrl+Shift+="),
+        ("font.decrease", "Ctrl+Shift+-"),
+        ("font.reset", "Ctrl+Shift+0"),
+        ("settings.open", "Ctrl+Shift+,"),
+    ]
+    .iter()
+    .map(|(a, c)| ((*a).to_string(), (*c).to_string()))
+    .collect();
+    expected.extend((1..=9).map(|n| (format!("tab.select_{n}"), format!("Alt+Shift+{n}"))));
+    expected.extend((1..=9).map(|n| (format!("workspace.select_{n}"), format!("Ctrl+Shift+{n}"))));
+    for os in ["windows", "linux"] {
+        for (action, chord) in &expected {
+            assert_eq!(default_of(os, action), Some(chord.as_str()), "default of {action} on {os}");
+        }
+    }
+}
+
+#[test]
+fn no_windows_or_linux_default_takes_the_super_key_or_plain_typing() {
+    for os in ["windows", "linux"] {
+        for a in all_actions(os) {
+            let Some(d) = a.default else { continue };
+            let c = chord(d);
+            assert!(!c.cmd, "{d} of {} on {os} uses the Super key", a.id);
+            // A single Ctrl or Alt on a printable key belongs to the shell (Ctrl+C is SIGINT).
+            if c.modifier_count() == 1 {
+                assert!(NAVIGATION.contains(&c.key.as_str()), "{d} of {} on {os} is a plain Ctrl or Alt key", a.id);
+            }
+            // Ctrl+Alt is AltGr on Windows: a printable key with both would take typing away.
+            if os == "windows" && c.ctrl && c.alt {
+                assert!(!is_printable(&c.key), "{d} of {} would take AltGr typing on Windows", a.id);
+            }
+        }
+    }
+}
+
+/// The keys on which a single Ctrl or Alt is allowed, as in the bindability policy.
+const NAVIGATION: [&str; 8] = ["Left", "Right", "Up", "Down", "Home", "End", "Backspace", "Delete"];
+
+fn is_printable(key: &str) -> bool {
+    key.chars().count() == 1 && key != "Space"
+}
+
+#[test]
+fn the_override_policy_is_the_same_on_every_table() {
+    // The displaced default is that platform's own chord; the policy itself does not change.
+    for (os, default_chord) in [("macos", "Cmd+K"), ("windows", "Ctrl+Shift+P"), ("linux", "Ctrl+Shift+P")] {
+        let (kb, warnings) = Keybindings::resolve_for(os, &overrides(&[("tab.new", default_chord)]));
+        assert_eq!(kb.action_of(&chord(default_chord)), Some("tab.new"), "{os}");
+        assert_eq!(kb.chord_of("palette.open"), None, "{os}: the displaced default is unbound");
+        assert_eq!(warnings.len(), 1, "{os}: {warnings:?}");
+    }
+    // A macOS default is just a free chord on Windows.
+    let (kb, warnings) = Keybindings::resolve_for("windows", &overrides(&[("tab.new", "Cmd+K")]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(kb.chord_of("palette.open"), Some(&chord("Ctrl+Shift+P")));
 }
 
 // ---- one override travels from the settings map to the resolved table ---------------------------------
 
 #[test]
 fn an_override_changes_exactly_one_action_and_is_reported_as_not_default() {
-    let (kb, warnings) = Keybindings::resolve(&overrides(&[("pane.split_right", "Cmd+Shift+Enter")]));
+    let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("pane.split_right", "Cmd+Shift+Enter")]));
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(kb.chord_of("pane.split_right").map(ToString::to_string), Some("Cmd+Shift+Enter".to_string()));
 
@@ -165,26 +297,28 @@ fn an_override_changes_exactly_one_action_and_is_reported_as_not_default() {
 
 #[test]
 fn an_override_is_matched_by_chord_and_the_old_default_no_longer_is() {
-    let (kb, _) = Keybindings::resolve(&overrides(&[("pane.split_right", "Cmd+Shift+Enter")]));
+    let (kb, _) = Keybindings::resolve_for(MAC, &overrides(&[("pane.split_right", "Cmd+Shift+Enter")]));
     assert_eq!(kb.action_of(&chord("Cmd+Shift+Enter")), Some("pane.split_right"));
     assert_eq!(kb.action_of(&chord("Cmd+D")), None, "the default chord is free after the override");
 }
 
 #[test]
 fn action_of_finds_every_default_chord_and_the_ids_are_unique() {
-    let (kb, _) = Keybindings::resolve(&BTreeMap::new());
-    let mut ids = HashSet::new();
-    for a in all_actions() {
-        assert!(ids.insert(a.id), "duplicate action id {}", a.id);
-        if let Some(d) = a.default {
-            assert_eq!(kb.action_of(&chord(d)), Some(a.id), "chord {d}");
+    for os in OSES {
+        let (kb, _) = Keybindings::resolve_for(os, &BTreeMap::new());
+        let mut ids = HashSet::new();
+        for a in all_actions(os) {
+            assert!(ids.insert(a.id), "duplicate action id {} on {os}", a.id);
+            if let Some(d) = a.default {
+                assert_eq!(kb.action_of(&chord(d)), Some(a.id), "chord {d} on {os}");
+            }
         }
     }
 }
 
 #[test]
 fn an_override_spelled_loosely_is_stored_in_canonical_form() {
-    let (kb, warnings) = Keybindings::resolve(&overrides(&[("tab.new", "command+alt+t")]));
+    let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("tab.new", "command+alt+t")]));
     assert!(warnings.is_empty(), "{warnings:?}");
     let row = kb.table().into_iter().find(|r| r.action == "tab.new").expect("tab.new row");
     assert_eq!(row.chord.as_deref(), Some("Cmd+Alt+T"));
@@ -192,7 +326,7 @@ fn an_override_spelled_loosely_is_stored_in_canonical_form() {
 
 #[test]
 fn an_override_equal_to_the_default_counts_as_default() {
-    let (kb, _) = Keybindings::resolve(&overrides(&[("pane.split_right", "cmd+d")]));
+    let (kb, _) = Keybindings::resolve_for(MAC, &overrides(&[("pane.split_right", "cmd+d")]));
     let row = kb.table().into_iter().find(|r| r.action == "pane.split_right").expect("row");
     assert_eq!(row.chord.as_deref(), Some("Cmd+D"));
     assert!(row.is_default);
@@ -239,23 +373,27 @@ fn the_edit_actions_are_in_the_table_with_the_platform_standard_as_default() {
         "edit.delete_word_back",
         "edit.delete_to_line_start",
     ];
-    for id in ids {
-        assert!(actions().iter().any(|a| a.id == id), "{id} is missing from the table");
+    for os in OSES {
+        for id in ids {
+            assert!(actions_for(os).iter().any(|a| a.id == id), "{id} is missing from the {os} table");
+        }
     }
-    if cfg!(target_os = "macos") {
-        assert_eq!(default_of("edit.word_back"), Some("Alt+Left"));
-        assert_eq!(default_of("edit.word_forward"), Some("Alt+Right"));
-        assert_eq!(default_of("edit.line_start"), Some("Cmd+Left"));
-        assert_eq!(default_of("edit.line_end"), Some("Cmd+Right"));
-        assert_eq!(default_of("edit.delete_word_back"), Some("Alt+Backspace"));
-        assert_eq!(default_of("edit.delete_to_line_start"), Some("Cmd+Backspace"));
-    } else {
-        assert_eq!(default_of("edit.word_back"), Some("Ctrl+Left"));
-        assert_eq!(default_of("edit.word_forward"), Some("Ctrl+Right"));
-        assert_eq!(default_of("edit.delete_word_back"), Some("Ctrl+Backspace"));
-        // Home and End already work through the encoder.
-        assert_eq!(default_of("edit.line_start"), None);
-        assert_eq!(default_of("edit.line_end"), None);
+    assert_eq!(default_of("macos", "edit.word_back"), Some("Alt+Left"));
+    assert_eq!(default_of("macos", "edit.word_forward"), Some("Alt+Right"));
+    assert_eq!(default_of("macos", "edit.line_start"), Some("Cmd+Left"));
+    assert_eq!(default_of("macos", "edit.line_end"), Some("Cmd+Right"));
+    assert_eq!(default_of("macos", "edit.delete_word_back"), Some("Alt+Backspace"));
+    assert_eq!(default_of("macos", "edit.delete_to_line_start"), Some("Cmd+Backspace"));
+    // Linux: Ctrl moves and deletes by word; Home and End already work through the encoder.
+    assert_eq!(default_of("linux", "edit.word_back"), Some("Ctrl+Left"));
+    assert_eq!(default_of("linux", "edit.word_forward"), Some("Ctrl+Right"));
+    assert_eq!(default_of("linux", "edit.delete_word_back"), Some("Ctrl+Backspace"));
+    assert_eq!(default_of("linux", "edit.line_start"), None);
+    assert_eq!(default_of("linux", "edit.line_end"), None);
+    assert_eq!(default_of("linux", "edit.delete_to_line_start"), None);
+    // Windows: PSReadLine and cmd bind Ctrl+Arrow, Home and End themselves, so none of the six has a default.
+    for id in ids {
+        assert_eq!(default_of("windows", id), None, "{id} on Windows");
     }
 }
 
@@ -284,12 +422,14 @@ fn ctrl_or_alt_with_one_more_modifier_is_bindable_even_on_a_letter() {
 
 #[test]
 fn every_default_chord_is_unique_and_bindable_under_the_policy() {
-    let mut seen = HashSet::new();
-    for a in all_actions() {
-        let Some(d) = a.default else { continue };
-        let c = chord(d);
-        assert!(c.is_bindable(), "default {d} of {} is refused by the policy", a.id);
-        assert!(seen.insert(c), "default chord {d} is used twice");
+    for os in OSES {
+        let mut seen = HashSet::new();
+        for a in all_actions(os) {
+            let Some(d) = a.default else { continue };
+            let c = chord(d);
+            assert!(c.is_bindable(), "default {d} of {} on {os} is refused by the policy", a.id);
+            assert!(seen.insert(c), "default chord {d} is used twice on {os}");
+        }
     }
 }
 
@@ -297,17 +437,17 @@ fn every_default_chord_is_unique_and_bindable_under_the_policy() {
 
 #[test]
 fn an_unknown_action_id_is_reported_and_ignored() {
-    let (kb, warnings) = Keybindings::resolve(&overrides(&[("pane.explode", "Cmd+Alt+E")]));
+    let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("pane.explode", "Cmd+Alt+E")]));
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("pane.explode"), "{warnings:?}");
-    assert_eq!(kb.table(), Keybindings::default().table(), "the table is the default table");
+    assert_eq!(kb.table(), Keybindings::default_for(MAC).table(), "the table is the default table");
     assert_eq!(kb.action_of(&chord("Cmd+Alt+E")), None);
 }
 
 #[test]
 fn an_unparsable_chord_is_reported_and_the_default_stays() {
     for bad in ["Cmd++", "Hyper+X", "Cmd+Shift", "Cmd+Cmd+D", "Cmd+F25", "Cmd+F01", "Cmd+ab", "+"] {
-        let (kb, warnings) = Keybindings::resolve(&overrides(&[("pane.close", bad)]));
+        let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("pane.close", bad)]));
         assert_eq!(warnings.len(), 1, "{bad:?}: {warnings:?}");
         assert!(warnings[0].contains("pane.close"), "{bad:?}: {warnings:?}");
         assert_eq!(kb.chord_of("pane.close"), Some(&chord("Cmd+W")), "{bad:?}");
@@ -317,7 +457,7 @@ fn an_unparsable_chord_is_reported_and_the_default_stays() {
 
 #[test]
 fn the_empty_string_unbinds_a_known_action_without_a_warning() {
-    let (kb, warnings) = Keybindings::resolve(&overrides(&[("pane.close", "")]));
+    let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("pane.close", "")]));
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(kb.chord_of("pane.close"), None);
     assert_eq!(kb.action_of(&chord("Cmd+W")), None);
@@ -329,7 +469,7 @@ fn the_empty_string_unbinds_a_known_action_without_a_warning() {
 #[test]
 fn a_chord_that_would_steal_terminal_input_is_refused_with_a_warning() {
     for refused in ["D", "Shift+D", "Ctrl+D", "Alt+D", "Escape", "shift+enter", "F5"] {
-        let (kb, warnings) = Keybindings::resolve(&overrides(&[("tab.new", refused)]));
+        let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("tab.new", refused)]));
         assert_eq!(warnings.len(), 1, "{refused:?}: {warnings:?}");
         assert!(warnings[0].contains("tab.new"), "{refused:?}: {warnings:?}");
         assert_eq!(kb.chord_of("tab.new"), Some(&chord("Cmd+T")), "{refused:?} keeps the default");
@@ -340,7 +480,7 @@ fn a_chord_that_would_steal_terminal_input_is_refused_with_a_warning() {
 #[test]
 fn an_override_beats_a_default_and_the_displaced_action_is_unbound_with_a_warning() {
     // Cmd+K is the default of palette.open.
-    let (kb, warnings) = Keybindings::resolve(&overrides(&[("tab.new", "Cmd+K")]));
+    let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("tab.new", "Cmd+K")]));
     assert_eq!(kb.chord_of("tab.new"), Some(&chord("Cmd+K")));
     assert_eq!(kb.action_of(&chord("Cmd+K")), Some("tab.new"));
     assert_eq!(kb.chord_of("palette.open"), None, "the displaced default is unbound");
@@ -354,7 +494,7 @@ fn an_override_beats_a_default_and_the_displaced_action_is_unbound_with_a_warnin
 fn two_overrides_on_one_chord_drop_the_alphabetically_later_action() {
     // The same chord in two spellings, so the conflict is found on the canonical form.
     let (kb, warnings) =
-        Keybindings::resolve(&overrides(&[("tab.new", "cmd+alt+y"), ("pane.split_down", "Command+Alt+Y")]));
+        Keybindings::resolve_for(MAC, &overrides(&[("tab.new", "cmd+alt+y"), ("pane.split_down", "Command+Alt+Y")]));
     assert_eq!(kb.action_of(&chord("Cmd+Alt+Y")), Some("pane.split_down"), "pane.* sorts before tab.*");
     assert_eq!(kb.chord_of("tab.new"), Some(&chord("Cmd+T")), "the dropped override leaves the default");
     assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -364,7 +504,7 @@ fn two_overrides_on_one_chord_drop_the_alphabetically_later_action() {
 #[test]
 fn a_dropped_override_still_loses_its_default_to_another_override() {
     // tab.new is dropped by the conflict and falls back to Cmd+T, which workspace.new then claims.
-    let (kb, warnings) = Keybindings::resolve(&overrides(&[
+    let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[
         ("pane.split_down", "Cmd+Alt+Y"),
         ("tab.new", "Cmd+Alt+Y"),
         ("workspace.new", "Cmd+T"),
@@ -377,7 +517,7 @@ fn a_dropped_override_still_loses_its_default_to_another_override() {
 #[test]
 fn swapping_two_defaults_is_not_a_conflict() {
     let (kb, warnings) =
-        Keybindings::resolve(&overrides(&[("pane.split_right", "Cmd+Shift+D"), ("pane.split_down", "Cmd+D")]));
+        Keybindings::resolve_for(MAC, &overrides(&[("pane.split_right", "Cmd+Shift+D"), ("pane.split_down", "Cmd+D")]));
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(kb.action_of(&chord("Cmd+D")), Some("pane.split_down"));
     assert_eq!(kb.action_of(&chord("Cmd+Shift+D")), Some("pane.split_right"));
@@ -385,7 +525,7 @@ fn swapping_two_defaults_is_not_a_conflict() {
 
 #[test]
 fn every_chord_in_the_resolved_table_belongs_to_at_most_one_action() {
-    let (kb, _) = Keybindings::resolve(&overrides(&[
+    let (kb, _) = Keybindings::resolve_for(MAC, &overrides(&[
         ("tab.new", "Cmd+K"),
         ("search.open", "Cmd+K"),
         ("font.reset", "Cmd+W"),
@@ -402,7 +542,7 @@ fn every_chord_in_the_resolved_table_belongs_to_at_most_one_action() {
 
 #[test]
 fn warnings_never_carry_control_characters_from_the_file() {
-    let (_, warnings) = Keybindings::resolve(&overrides(&[
+    let (_, warnings) = Keybindings::resolve_for(MAC, &overrides(&[
         ("evil\u{1b}[2J", "Cmd+X"),
         ("tab.new", "Cmd+\u{7}\u{1b}]0;x"),
         ("pane.close", "Hyper+\n+X"),
@@ -448,7 +588,7 @@ fn the_shared_samples_survive_a_round_trip_through_the_settings_map() {
     // Each sample bound to font.reset comes back as the same string. A sample that is the default chord of another
     // action takes it away from that action, which is one warning; any other sample is silent.
     for sample in SHARED_SAMPLES {
-        let (kb, warnings) = Keybindings::resolve(&overrides(&[("font.reset", sample)]));
+        let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("font.reset", sample)]));
         assert_eq!(kb.chord_of("font.reset").map(ToString::to_string).as_deref(), Some(sample));
         let taken = actions().iter().filter(|a| a.id != "font.reset" && a.default == Some(sample)).count();
         assert_eq!(warnings.len(), taken, "{sample}: {warnings:?}");

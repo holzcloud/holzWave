@@ -4,8 +4,16 @@
 //! then the key, letters in upper case. The webview builds that string from a `KeyboardEvent`, the keybinding
 //! editor writes it to `settings.json`, and [`Chord::parse`] reads it back, so all three agree on one spelling.
 //!
-//! std only. The defaults are the macOS set; [`actions`] is the single place where another platform will pick its
-//! own table (Phase 2.2).
+//! std only. There are three default tables, chosen by an OS name (`macos`, `windows`, anything else is Linux) in
+//! [`actions_for`]; [`actions`] is the one for the OS this build runs on.
+//!
+//! macOS keeps `Cmd` for everything. Windows and Linux never use `Cmd` (the Super key: the OS claims it) and never a
+//! plain `Ctrl+letter` or `Alt+letter` (those belong to the shell: `Ctrl+C` is SIGINT, `Ctrl+D` is EOF). They use
+//! `Ctrl+Shift`, the terminal convention, with two exceptions: tab numbers are `Alt+Shift+digit` because `Ctrl+Alt`
+//! is AltGr on Windows and would take typing away on a Swiss or German layout, and nothing is on `Ctrl+Shift+E`
+//! because GNOME's input method (IBus) takes it for the emoji picker. The line-editing actions follow what each
+//! shell binds itself: Linux keeps `Ctrl+Left`, `Ctrl+Right` and `Ctrl+Backspace`; on Windows PSReadLine and cmd
+//! bind those and Home and End already, so none of the six has a default there.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -187,8 +195,8 @@ const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
     ActionInfo { id, title, default: None }
 }
 
-/// The platform-independent part of the default table. Order is the order of the editor.
-static BASE_ACTIONS: [ActionInfo; 41] = [
+/// The base part of the macOS default table. Order is the order of the editor, and the other tables keep it.
+static BASE_MACOS: [ActionInfo; 41] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -232,6 +240,51 @@ static BASE_ACTIONS: [ActionInfo; 41] = [
     unbound("tab.move_to_new_window", "Move tab to new window"),
 ];
 
+/// The base part for Windows and Linux: the same actions in the same order, on `Ctrl+Shift` (see the module docs).
+static BASE_OTHER: [ActionInfo; 41] = [
+    action("pane.split_right", "Split pane right", "Ctrl+Shift+D"),
+    action("pane.split_down", "Split pane down", "Ctrl+Shift+O"),
+    action("pane.close", "Close pane", "Ctrl+Shift+W"),
+    action("pane.focus_next", "Focus next pane", "Ctrl+Shift+]"),
+    action("pane.focus_prev", "Focus previous pane", "Ctrl+Shift+["),
+    action("tab.new", "New tab", "Ctrl+Shift+T"),
+    action("tab.select_1", "Select tab 1", "Alt+Shift+1"),
+    action("tab.select_2", "Select tab 2", "Alt+Shift+2"),
+    action("tab.select_3", "Select tab 3", "Alt+Shift+3"),
+    action("tab.select_4", "Select tab 4", "Alt+Shift+4"),
+    action("tab.select_5", "Select tab 5", "Alt+Shift+5"),
+    action("tab.select_6", "Select tab 6", "Alt+Shift+6"),
+    action("tab.select_7", "Select tab 7", "Alt+Shift+7"),
+    action("tab.select_8", "Select tab 8", "Alt+Shift+8"),
+    action("tab.select_9", "Select tab 9", "Alt+Shift+9"),
+    action("workspace.new", "New workspace", "Ctrl+Shift+N"),
+    action("workspace.select_1", "Select workspace 1", "Ctrl+Shift+1"),
+    action("workspace.select_2", "Select workspace 2", "Ctrl+Shift+2"),
+    action("workspace.select_3", "Select workspace 3", "Ctrl+Shift+3"),
+    action("workspace.select_4", "Select workspace 4", "Ctrl+Shift+4"),
+    action("workspace.select_5", "Select workspace 5", "Ctrl+Shift+5"),
+    action("workspace.select_6", "Select workspace 6", "Ctrl+Shift+6"),
+    action("workspace.select_7", "Select workspace 7", "Ctrl+Shift+7"),
+    action("workspace.select_8", "Select workspace 8", "Ctrl+Shift+8"),
+    action("workspace.select_9", "Select workspace 9", "Ctrl+Shift+9"),
+    action("palette.open", "Open command palette", "Ctrl+Shift+P"),
+    action("search.open", "Search in scrollback", "Ctrl+Shift+F"),
+    action("copy_mode.enter", "Enter copy mode", "Ctrl+Shift+X"),
+    action("hints.open", "Show hints", "Ctrl+Shift+Space"),
+    action("font.increase", "Increase font size", "Ctrl+Shift+="),
+    action("font.decrease", "Decrease font size", "Ctrl+Shift+-"),
+    action("font.reset", "Reset font size", "Ctrl+Shift+0"),
+    action("settings.open", "Open settings", "Ctrl+Shift+,"),
+    unbound("tab.rename", "Rename tab"),
+    unbound("pane.rename", "Rename pane"),
+    unbound("workspace.rename", "Rename workspace"),
+    unbound("pane.swap_next", "Swap with next pane"),
+    unbound("pane.move_next_tab", "Move pane to next tab"),
+    unbound("pane.move_prev_tab", "Move pane to previous tab"),
+    unbound("pane.move_to_new_window", "Move pane to new window"),
+    unbound("tab.move_to_new_window", "Move tab to new window"),
+];
+
 /// The line-editing actions with the macOS standard as default: Option moves and deletes by word, Cmd by line.
 static EDIT_ACTIONS_MACOS: [ActionInfo; 6] = [
     action("edit.word_back", "Move one word back", "Alt+Left"),
@@ -242,9 +295,9 @@ static EDIT_ACTIONS_MACOS: [ActionInfo; 6] = [
     action("edit.delete_to_line_start", "Delete to the start of the line", "Cmd+Backspace"),
 ];
 
-/// The line-editing actions with the Windows and Linux standard as default: Ctrl moves and deletes by word, and
-/// Home and End already reach the shell through the key encoder, so line start and end stay unbound.
-static EDIT_ACTIONS_OTHER: [ActionInfo; 6] = [
+/// The line-editing actions with the Linux standard as default: Ctrl moves and deletes by word, and Home and End
+/// already reach the shell through the key encoder, so line start and end stay unbound.
+static EDIT_ACTIONS_LINUX: [ActionInfo; 6] = [
     action("edit.word_back", "Move one word back", "Ctrl+Left"),
     action("edit.word_forward", "Move one word forward", "Ctrl+Right"),
     unbound("edit.line_start", "Move to the start of the line"),
@@ -253,15 +306,37 @@ static EDIT_ACTIONS_OTHER: [ActionInfo; 6] = [
     unbound("edit.delete_to_line_start", "Delete to the start of the line"),
 ];
 
-/// Every action of this build with its default chord. The one place that chooses the default table for the
-/// platform: the platform-independent part, then the line-editing actions with the platform's standard chords.
-/// Phase 2.2 replaces the Cmd chords of the base part for the other platforms.
-pub fn actions() -> &'static [ActionInfo] {
-    static TABLE: OnceLock<Vec<ActionInfo>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let edit: &[ActionInfo] = if cfg!(target_os = "macos") { &EDIT_ACTIONS_MACOS } else { &EDIT_ACTIONS_OTHER };
-        BASE_ACTIONS.iter().chain(edit).map(|a| ActionInfo { id: a.id, title: a.title, default: a.default }).collect()
+/// The line-editing actions on Windows: PSReadLine and cmd bind Ctrl+Arrow, Ctrl+Backspace, Home and End themselves,
+/// so an action that sends ESC b or ESC f would only get in their way. All six are unbound until the user binds them.
+static EDIT_ACTIONS_WINDOWS: [ActionInfo; 6] = [
+    unbound("edit.word_back", "Move one word back"),
+    unbound("edit.word_forward", "Move one word forward"),
+    unbound("edit.line_start", "Move to the start of the line"),
+    unbound("edit.line_end", "Move to the end of the line"),
+    unbound("edit.delete_word_back", "Delete the word before the cursor"),
+    unbound("edit.delete_to_line_start", "Delete to the start of the line"),
+];
+
+/// Every action with its default chord on the OS of that name (`macos`, `windows`; any other name is Linux, the
+/// spelling of `std::env::consts::OS` and of the app's `app_info`). The one place that chooses the default table: the
+/// base part of the platform, then its line-editing actions. Each table is built once.
+pub fn actions_for(os: &str) -> &'static [ActionInfo] {
+    static MACOS: OnceLock<Vec<ActionInfo>> = OnceLock::new();
+    static WINDOWS: OnceLock<Vec<ActionInfo>> = OnceLock::new();
+    static LINUX: OnceLock<Vec<ActionInfo>> = OnceLock::new();
+    let (cell, base, edit): (&OnceLock<Vec<ActionInfo>>, &[ActionInfo], &[ActionInfo]) = match os {
+        "macos" => (&MACOS, &BASE_MACOS, &EDIT_ACTIONS_MACOS),
+        "windows" => (&WINDOWS, &BASE_OTHER, &EDIT_ACTIONS_WINDOWS),
+        _ => (&LINUX, &BASE_OTHER, &EDIT_ACTIONS_LINUX),
+    };
+    cell.get_or_init(|| {
+        base.iter().chain(edit).map(|a| ActionInfo { id: a.id, title: a.title, default: a.default }).collect()
     })
+}
+
+/// Every action of this build with its default chord: [`actions_for`] with the OS the build runs on.
+pub fn actions() -> &'static [ActionInfo] {
+    actions_for(std::env::consts::OS)
 }
 
 /// One row of the key binding editor.
@@ -286,21 +361,31 @@ struct Entry {
 /// uses on every key press.
 #[derive(Clone, Debug)]
 pub struct Keybindings {
-    /// In the order of [`actions`].
+    /// In the order of [`actions_for`] of the table's OS.
     entries: Vec<Entry>,
     by_chord: HashMap<Chord, usize>,
 }
 
 impl Default for Keybindings {
     fn default() -> Self {
-        Keybindings::resolve(&BTreeMap::new()).0
+        Keybindings::default_for(std::env::consts::OS)
     }
 }
 
 impl Keybindings {
-    /// Apply the `overrides` of `settings.json` (action id to chord text, as `Settings::keybindings` holds them)
-    /// to the default table. Returns the table and one plain sentence per override that could not be used, which
-    /// the editor can show next to the row. Nothing here errors: a bad entry is reported and ignored.
+    /// The default table of the OS of that name, with no override.
+    pub fn default_for(os: &str) -> Keybindings {
+        Keybindings::resolve_for(os, &BTreeMap::new()).0
+    }
+
+    /// [`resolve_for`](Self::resolve_for) with the OS this build runs on.
+    pub fn resolve(overrides: &BTreeMap<String, String>) -> (Keybindings, Vec<String>) {
+        Keybindings::resolve_for(std::env::consts::OS, overrides)
+    }
+
+    /// Apply the `overrides` of `settings.json` (action id to chord text, as `Settings::keybindings` holds them) to the
+    /// default table of the OS of that name. Returns the table and one plain sentence per override that could not be
+    /// used, which the editor can show next to the row. Nothing here errors: a bad entry is reported and ignored.
     ///
     /// The policy, in order:
     ///
@@ -312,9 +397,9 @@ impl Keybindings {
     /// - an override beats a default: the action that had the chord by default is unbound, with a warning.
     ///
     /// Afterwards no chord belongs to two actions.
-    pub fn resolve(overrides: &BTreeMap<String, String>) -> (Keybindings, Vec<String>) {
+    pub fn resolve_for(os: &str, overrides: &BTreeMap<String, String>) -> (Keybindings, Vec<String>) {
         let mut warnings = Vec::new();
-        let infos = actions();
+        let infos = actions_for(os);
         let mut chords: Vec<Option<Chord>> =
             infos.iter().map(|a| a.default.and_then(|d| Chord::parse(d).ok())).collect();
         let keeps = |index: usize| match infos[index].default {
@@ -383,13 +468,13 @@ impl Keybindings {
             ));
             chords[index] = None;
         }
-        (Keybindings::from_chords(chords), warnings)
+        (Keybindings::from_chords(infos, chords), warnings)
     }
 
-    fn from_chords(chords: Vec<Option<Chord>>) -> Keybindings {
+    fn from_chords(infos: &'static [ActionInfo], chords: Vec<Option<Chord>>) -> Keybindings {
         let mut entries = Vec::with_capacity(chords.len());
         let mut by_chord = HashMap::new();
-        for (index, (info, chord)) in actions().iter().zip(chords).enumerate() {
+        for (index, (info, chord)) in infos.iter().zip(chords).enumerate() {
             let default = info.default.and_then(|d| Chord::parse(d).ok());
             if let Some(c) = &chord {
                 by_chord.insert(c.clone(), index);
@@ -409,7 +494,7 @@ impl Keybindings {
         self.by_chord.get(chord).map(|&i| self.entries[i].info.id)
     }
 
-    /// One row per action in the order of [`actions`], for the editor.
+    /// One row per action in the order of the table, for the editor.
     pub fn table(&self) -> Vec<BindingRow> {
         self.entries
             .iter()

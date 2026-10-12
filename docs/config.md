@@ -197,6 +197,12 @@ one key. The key is a single printable character (`D`, `]`, `1`, `,`) or a name:
 `Ctrl` or `Alt`. `D`, `Shift+D`, `Ctrl+D`, `Alt+D` and `Escape` are refused; `Cmd+D`, `Ctrl+Alt+D` and
 `Ctrl+Shift+PageDown` are fine.
 
+**A chord is text with a platform meaning.** `Cmd` is the Command key on macOS and the Super (Windows) key elsewhere,
+which the operating system usually keeps for itself, so no default on Windows or Linux uses it. A `settings.json`
+written on one platform therefore carries that platform's chords: a copy of `keybindings` from a Mac would bind Super
+chords on Windows. Copy the file between machines only after translating `Cmd` (settings sync in Phase 4 has to do the
+same, not copy the `keybindings` overrides across platforms as they are).
+
 **Resolution**, in this order:
 
 1. An action id the build does not know is ignored, with a warning.
@@ -205,41 +211,71 @@ one key. The key is a single printable character (`D`, `]`, `1`, `,`) or a name:
 4. Two overrides on one chord: the alphabetically earlier action id keeps it, the other keeps its default.
 5. An override beats a default: the action that had the chord by default is unbound, with a warning.
 
-Afterwards no chord belongs to two actions. `Cmd+C` (copy) is a fixed shortcut with no action in the table; another
-action can take the chord, and Reset in the editor gives it back.
+Afterwards no chord belongs to two actions.
 
-The defaults (the macOS table; Windows and Linux pick their own in Phase 2.2):
+**AltGr.** On a layout with a third level (Swiss, German and others) AltGr types `@ \ | { } [ ] ~ €`. Windows reports it
+as `Ctrl` and `Alt` held together, so while AltGr is held the page ignores both for key presses and for chords: the
+characters are typed and a chord such as `Ctrl+Alt+7` can never be recorded from AltGr+7. A real `Ctrl+Alt` press
+without AltGr is still a chord and reaches the program with both modifiers. On Windows the core backs the page up: with
+`Ctrl` and `Alt` held and a typed character that is not the US-layout character of that physical key, both modifiers are
+dropped. No Windows default uses `Ctrl+Alt` with a printable key.
 
-| Action id | Default | Action id | Default |
+**Copy and paste** are fixed shortcuts outside the table, like `Cmd+C` always was; no action can be bound to them, and
+a chord that another action takes is that action's. Plain `Ctrl+C` is never a copy on any platform: it always reaches the
+program (SIGINT).
+
+| | macOS | Windows | Linux |
 |---|---|---|---|
-| `pane.split_right` | `Cmd+D` | `workspace.new` | `Cmd+Shift+N` |
-| `pane.split_down` | `Cmd+Shift+D` | `workspace.select_1` to `_9` | `Cmd+Alt+1` to `Cmd+Alt+9` |
-| `pane.close` | `Cmd+W` | `palette.open` | `Cmd+K` |
-| `pane.focus_next` | `Cmd+]` | `search.open` | `Cmd+F` |
-| `pane.focus_prev` | `Cmd+[` | `copy_mode.enter` | `Cmd+Shift+X` |
-| `tab.new` | `Cmd+T` | `hints.open` | `Cmd+Shift+Space` |
-| `tab.select_1` to `_9` | `Cmd+1` to `Cmd+9` | `font.increase` | `Cmd+=` |
-| `font.decrease` | `Cmd+-` | `font.reset` | `Cmd+0` |
-| `settings.open` | `Cmd+,` | | |
-| `tab.rename` | none | `pane.rename` | none |
-| `workspace.rename` | none | `pane.swap_next` | none |
-| `pane.move_next_tab` | none | `pane.move_prev_tab` | none |
-| `pane.move_to_new_window` | none | `tab.move_to_new_window` | none |
+| copy the selection | `Cmd+C` | `Ctrl+Shift+C`, `Ctrl+Insert` | `Ctrl+Shift+C`, `Ctrl+Insert` |
+| paste | `Cmd+V` (Edit menu) | `Ctrl+Shift+V`, `Shift+Insert`, `Ctrl+V` | `Ctrl+Shift+V`, `Shift+Insert` |
+
+A paste chord is not swallowed by the page: the web view pastes into the terminal input, and when it does not, the page
+reads the clipboard itself once. Several lines still ask first, and a program that asked for bracketed paste gets it. In
+a text field of the page (search, a name, the palette) none of these shortcuts is the page's: copy and paste are the
+field's own.
+
+The defaults. Windows and Linux use `Ctrl+Shift` as the terminal convention that leaves plain `Ctrl+letter` to the
+shell. Tab numbers are `Alt+Shift+digit` because `Ctrl+Alt` is AltGr on Windows; nothing uses `Ctrl+Shift+E`, which
+GNOME's input method takes for emoji.
+
+| Action id | macOS | Windows | Linux |
+|---|---|---|---|
+| `pane.split_right` | `Cmd+D` | `Ctrl+Shift+D` | `Ctrl+Shift+D` |
+| `pane.split_down` | `Cmd+Shift+D` | `Ctrl+Shift+O` | `Ctrl+Shift+O` |
+| `pane.close` | `Cmd+W` | `Ctrl+Shift+W` | `Ctrl+Shift+W` |
+| `pane.focus_next` | `Cmd+]` | `Ctrl+Shift+]` | `Ctrl+Shift+]` |
+| `pane.focus_prev` | `Cmd+[` | `Ctrl+Shift+[` | `Ctrl+Shift+[` |
+| `tab.new` | `Cmd+T` | `Ctrl+Shift+T` | `Ctrl+Shift+T` |
+| `tab.select_1` to `_9` | `Cmd+1` to `Cmd+9` | `Alt+Shift+1` to `Alt+Shift+9` | `Alt+Shift+1` to `Alt+Shift+9` |
+| `workspace.new` | `Cmd+Shift+N` | `Ctrl+Shift+N` | `Ctrl+Shift+N` |
+| `workspace.select_1` to `_9` | `Cmd+Alt+1` to `Cmd+Alt+9` | `Ctrl+Shift+1` to `Ctrl+Shift+9` | `Ctrl+Shift+1` to `Ctrl+Shift+9` |
+| `palette.open` | `Cmd+K` | `Ctrl+Shift+P` | `Ctrl+Shift+P` |
+| `search.open` | `Cmd+F` | `Ctrl+Shift+F` | `Ctrl+Shift+F` |
+| `copy_mode.enter` | `Cmd+Shift+X` | `Ctrl+Shift+X` | `Ctrl+Shift+X` |
+| `hints.open` | `Cmd+Shift+Space` | `Ctrl+Shift+Space` | `Ctrl+Shift+Space` |
+| `font.increase` | `Cmd+=` | `Ctrl+Shift+=` | `Ctrl+Shift+=` |
+| `font.decrease` | `Cmd+-` | `Ctrl+Shift+-` | `Ctrl+Shift+-` |
+| `font.reset` | `Cmd+0` | `Ctrl+Shift+0` | `Ctrl+Shift+0` |
+| `settings.open` | `Cmd+,` | `Ctrl+Shift+,` | `Ctrl+Shift+,` |
+| `tab.rename`, `pane.rename`, `workspace.rename` | none | none | none |
+| `pane.swap_next`, `pane.move_next_tab`, `pane.move_prev_tab` | none | none | none |
+| `pane.move_to_new_window`, `tab.move_to_new_window` | none | none | none |
 
 The line-editing actions send fixed bytes to the shell's line editor (`edit.word_back` and `edit.word_forward` send
 `ESC b` and `ESC f`, `edit.line_start` and `edit.line_end` send `Ctrl+A` and `Ctrl+E`, `edit.delete_word_back` sends
 `ESC DEL`, `edit.delete_to_line_start` sends `Ctrl+U`). Each platform has its own standard as the default, and every
 chord can be changed or unbound like any other. They apply on the normal screen only: a program on the alternate screen
-(vim, less, htop) gets the key itself.
+(vim, less, htop) gets the key itself. Windows has no default for any of the six: PowerShell (PSReadLine) and `cmd`
+bind `Ctrl+Left`, `Ctrl+Right`, `Ctrl+Backspace`, `Home` and `End` themselves.
 
-| Action id | macOS | Windows and Linux |
-|---|---|---|
-| `edit.word_back` | `Alt+Left` | `Ctrl+Left` |
-| `edit.word_forward` | `Alt+Right` | `Ctrl+Right` |
-| `edit.line_start` | `Cmd+Left` | none: `Home` already reaches the shell |
-| `edit.line_end` | `Cmd+Right` | none: `End` already reaches the shell |
-| `edit.delete_word_back` | `Alt+Backspace` | `Ctrl+Backspace` |
-| `edit.delete_to_line_start` | `Cmd+Backspace` | none |
+| Action id | macOS | Windows | Linux |
+|---|---|---|---|
+| `edit.word_back` | `Alt+Left` | none | `Ctrl+Left` |
+| `edit.word_forward` | `Alt+Right` | none | `Ctrl+Right` |
+| `edit.line_start` | `Cmd+Left` | none | none: `Home` already reaches the shell |
+| `edit.line_end` | `Cmd+Right` | none | none: `End` already reaches the shell |
+| `edit.delete_word_back` | `Alt+Backspace` | none | `Ctrl+Backspace` |
+| `edit.delete_to_line_start` | `Cmd+Backspace` | none | none |
 
 A single `Alt` or `Ctrl` is bindable on the navigation keys (`Left`, `Right`, `Up`, `Down`, `Home`, `End`,
 `Backspace`, `Delete`) and nowhere else, so `Option+7` on a Swiss layout still types its character.
