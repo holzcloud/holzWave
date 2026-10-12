@@ -49,6 +49,7 @@
     "allow-reset-setting",
     "allow-reload-settings",
     "allow-app-info",
+    "allow-os-text-scale",
     "allow-open-url",
     "allow-reveal-path",
     "allow-mouse",

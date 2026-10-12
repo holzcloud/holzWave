@@ -17,6 +17,7 @@ export default async function ({ page, url, errors }) {
   await blinkResetCase(page, url);
   await blinkPreferenceCase(page, url);
   await blinkCursorCase(page, url);
+  await osTextCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -34,12 +35,18 @@ const PAPIER = {
   },
 };
 
-/** Open the page against the stub; `view` is what `get_settings` answers (null: the core has nothing to say). */
-async function open(page, url, view = AUBERGINE(), query = "?renderer=canvas") {
-  await page.addInitScript((v) => {
+/**
+ * Open the page against the stub; `view` is what `get_settings` answers (null: the core has nothing to say). `osText`
+ * is what `os_text_scale` answers: undefined is a stub that does not script it (the answer is null), a number is the
+ * percent. The test changes the answer later through `window.__OS_TEXT`.
+ */
+async function open(page, url, view = AUBERGINE(), query = "?renderer=canvas", osText = undefined) {
+  await page.addInitScript(([v, os]) => {
+    window.__OS_TEXT = os;
     window.__MOCK__.on("get_settings", () => structuredClone(v));
     window.__MOCK__.on("reload_settings", () => structuredClone(v));
-  }, view);
+    window.__MOCK__.on("os_text_scale", () => window.__OS_TEXT);
+  }, [view, osText]);
   await page.goto(`${url}index.html${query}`);
   await page.waitForSelector(".divider");
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
@@ -457,4 +464,25 @@ async function blinkCursorCase(page, url) {
   await page.evaluate(() => window.__MOCK__.emit("pane-exit", { pane: 1, code: 0 }));
   await waitBlink(page, { on: true, running: false });
   assert.equal(await intervals(page), base, "an exited pane leaves no timer");
+}
+
+/** The root font size the page resolved and the inline one (empty: the stylesheet's own). */
+const rootSize = (page) =>
+  page.evaluate(() => ({
+    computed: getComputedStyle(document.documentElement).fontSize,
+    inline: document.documentElement.style.fontSize,
+  }));
+
+/**
+ * The OS text size scales the chrome (DESK-24): the shell's `os_text_scale` times the user's `ui_scale` is the root
+ * font size. 150 % of the 12 px base is 18 px; a stub that does not answer is 100 % and leaves the stylesheet's size.
+ */
+async function osTextCase(page, url) {
+  await open(page, url, AUBERGINE(), "?renderer=canvas", 150);
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).fontSize === "18px");
+  assert.equal((await rootSize(page)).inline, "18px");
+  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("os_text_scale"))).length >= 1, true);
+
+  await open(page, url);
+  assert.deepEqual(await rootSize(page), { computed: "12px", inline: "" }, "no answer is the stylesheet's size");
 }

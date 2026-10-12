@@ -47,6 +47,7 @@ fn main() {
     "reset_setting",
     "reload_settings",
     "app_info",
+    "os_text_scale",
     "open_url",
     "reveal_path",
     "mouse",

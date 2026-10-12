@@ -603,6 +603,13 @@ pub fn app_info(core: State<Arc<AppCore>>) -> AppInfo {
     core.app_info()
 }
 
+/// The text size the operating system asks for, in percent (100 to 300; 100 where the platform has no such setting or
+/// it cannot be read). Async: it runs a program, for at most a moment. The page multiplies its UI scale by it.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn os_text_scale() -> u32 {
+    crate::textscale::read(std::env::consts::OS)
+}
+
 /// A pointer press, release or motion at `x`, `y` device pixels from the origin of the pane's grid; `mods` is
 /// SHIFT 1, ALT 2, CTRL 4, SUPER 8. Hot path: bounds the numbers and pushes to the pane's queue, nothing else, so
 /// it is synchronous and never waits.

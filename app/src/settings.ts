@@ -2,7 +2,7 @@
 // renderer's cursor colour, and the actions that ask the core to change something. The core owns every value
 // (D-06): the page sends `set_setting` and then shows what the core answered, never what it asked for. The pure
 // rules (colour validation, reading the view) are in settings-model.ts, which node can import.
-import { refresh as refreshPreferences, watch as watchPreferences } from "./a11y.js";
+import { effectiveUiScale, osTextScaleOf, refresh as refreshPreferences, watch as watchPreferences } from "./a11y.js";
 import { registerAction, replaceAction, unregisterAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { CURSOR_COLOR, FONT_PX, setFontPx } from "./frame.js";
@@ -68,25 +68,53 @@ export function applyTheme(view: SettingsView): void {
 /** The look the metrics were last taken for. */
 let look: Look = { fontPx: FONT_PX, uiScale: 100 };
 
+/** The text size the OS asks for, in percent (100: none). Only the root font size reads it, never the grid. */
+let osPercent = 100;
+
+/** The effective UI scale the root font size was last set for. */
+let rootScale = 100;
+
 /**
- * Follow the font size and the UI scale of the view. The UI scale is the root font size (12 px at 100 %): every
- * chrome size is in rem and the pane header is derived from it, so one change moves chrome, headers and grid
- * together. A value that is not in the core's range keeps the previous one. A change after start-up asks the scene
- * to measure again, which sends `resize` to every visible pane.
+ * Set the root font size for the user's UI scale times the OS text size (12 px at 100 %): every chrome size is in
+ * rem and the pane header is derived from it, so one change moves chrome, headers and grid together. Returns whether
+ * the root font size changed.
+ */
+function applyRootScale(): boolean {
+  const next = effectiveUiScale(look.uiScale, osPercent);
+  if (next === rootScale) return false;
+  rootScale = next;
+  const root = document.documentElement;
+  if (next === 100) root.style.removeProperty("font-size"); // the stylesheet's 12 px
+  else root.style.setProperty("font-size", `${rootFontPx(next)}px`);
+  return true;
+}
+
+/**
+ * Follow the font size and the UI scale of the view. A value that is not in the core's range keeps the previous one.
+ * A change after start-up asks the scene to measure again, which sends `resize` to every visible pane.
  */
 function applyLook(view: SettingsView): void {
   const next = lookOf(view.settings, look);
   const fontChanged = next.fontPx !== look.fontPx;
-  const scaleChanged = next.uiScale !== look.uiScale;
-  if (!fontChanged && !scaleChanged) return;
   look = next;
   if (fontChanged) setFontPx(next.fontPx);
-  if (scaleChanged) {
-    const root = document.documentElement;
-    if (next.uiScale === 100) root.style.removeProperty("font-size"); // the stylesheet's 12 px
-    else root.style.setProperty("font-size", `${rootFontPx(next.uiScale)}px`);
+  const scaleChanged = applyRootScale();
+  if ((fontChanged || scaleChanged) && live) host?.refit();
+}
+
+/**
+ * Ask the shell for the OS text size and apply it to the chrome. An answer that is not a percent in 100 to 300 is
+ * read as 100. A shell that does not answer leaves the size as it was (100 at start-up).
+ */
+async function refreshOsText(): Promise<void> {
+  let answer: unknown;
+  try {
+    answer = await call<unknown>("os_text_scale");
+  } catch {
+    return;
   }
-  if (live) host?.refit();
+  osPercent = osTextScaleOf(answer);
+  if (applyRootScale() && live) host?.refit();
 }
 
 // ---- the actions ---------------------------------------------------------------------------------
@@ -241,6 +269,7 @@ export async function initSettings(h: SettingsHost): Promise<void> {
   registerSettingsActions();
   watchPreferences(); // before the first answer: a page whose core cannot answer still follows the OS
   await listen<unknown>("settings", (raw) => void accept(raw));
+  await refreshOsText(); // before the first view: the root font size is set once, for the user's scale and the OS's
   try {
     accept(await call<unknown>("get_settings"));
   } catch {

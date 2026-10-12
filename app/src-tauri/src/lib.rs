@@ -13,6 +13,7 @@
 mod commands;
 mod menu;
 mod state;
+mod textscale;
 mod windows;
 
 use std::sync::Arc;
@@ -413,6 +414,7 @@ pub fn run() {
             commands::reset_setting,
             commands::reload_settings,
             commands::app_info,
+            commands::os_text_scale,
             commands::open_url,
             commands::reveal_path,
             commands::mouse,

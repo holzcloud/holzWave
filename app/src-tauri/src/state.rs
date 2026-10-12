@@ -1979,7 +1979,7 @@ fn open_launch(os: &str, url: &str, env: &dyn Fn(&str) -> Option<String>) -> Res
 
 /// The Windows directory: `SystemRoot` if it is a drive path, else `C:\Windows`. A relative or network value of the
 /// variable is not taken, so the launchers never leave the local drive.
-fn system_root(env: &dyn Fn(&str) -> Option<String>) -> String {
+pub(crate) fn system_root(env: &dyn Fn(&str) -> Option<String>) -> String {
     const DEFAULT: &str = r"C:\Windows";
     match env("SystemRoot") {
         Some(root) if is_drive_path(&root) => root.trim_end_matches(['\\', '/']).to_owned(),

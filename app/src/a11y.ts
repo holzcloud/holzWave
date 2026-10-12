@@ -61,6 +61,32 @@ export function effectiveEffect(setting: boolean, motionReduced: boolean): boole
   return setting && !motionReduced;
 }
 
+/** The text size the OS asks for, in percent, as the shell reads it: 100 (the default, also macOS) up to 300. */
+export const OS_TEXT_RANGE: readonly [number, number] = [100, 300];
+
+/** The range the effective UI scale is held to, in percent: the user's 75 to 200 times the OS factor, never beyond. */
+export const EFFECTIVE_SCALE_RANGE: readonly [number, number] = [75, 300];
+
+/**
+ * The OS text size the shell answered, rounded to a whole percent. An answer that is not a finite number in 100 to
+ * 300 (nothing, null, text, a value the shell should have clamped) is read as 100: no OS preference.
+ */
+export function osTextScaleOf(answer: unknown): number {
+  if (typeof answer !== "number" || !Number.isFinite(answer)) return OS_TEXT_RANGE[0];
+  const whole = Math.round(answer);
+  return whole >= OS_TEXT_RANGE[0] && whole <= OS_TEXT_RANGE[1] ? whole : OS_TEXT_RANGE[0];
+}
+
+/**
+ * The UI scale in effect, in percent: the user's `ui_scale` times the OS text size, rounded and held to 75 to 300.
+ * Only the chrome's root font size uses it; the terminal's `font_size` never sees the OS value. An OS value of 100,
+ * or one that is missing or invalid, leaves the user's value as it is.
+ */
+export function effectiveUiScale(userPercent: number, osPercent?: unknown): number {
+  const scaled = Math.round((userPercent * osTextScaleOf(osPercent)) / 100);
+  return Math.min(EFFECTIVE_SCALE_RANGE[1], Math.max(EFFECTIVE_SCALE_RANGE[0], scaled));
+}
+
 // ---- measured contrast ----------------------------------------------------------------------------
 
 /** WCAG relative luminance of 0xRRGGBB. */
