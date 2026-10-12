@@ -281,8 +281,8 @@ fn an_override_changes_exactly_one_action_and_is_reported_as_not_default() {
     assert_eq!(kb.chord_of("pane.split_right").map(ToString::to_string), Some("Cmd+Shift+Enter".to_string()));
 
     let table = kb.table();
-    assert_eq!(table.len(), actions().len(), "one row per action, in the table order");
-    for (row, info) in table.iter().zip(actions()) {
+    assert_eq!(table.len(), actions_for(MAC).len(), "one row per action, in the table order");
+    for (row, info) in table.iter().zip(actions_for(MAC)) {
         assert_eq!(row.action, info.id);
         assert_eq!(row.title, info.title);
         if row.action == "pane.split_right" {
@@ -590,7 +590,7 @@ fn the_shared_samples_survive_a_round_trip_through_the_settings_map() {
     for sample in SHARED_SAMPLES {
         let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("font.reset", sample)]));
         assert_eq!(kb.chord_of("font.reset").map(ToString::to_string).as_deref(), Some(sample));
-        let taken = actions().iter().filter(|a| a.id != "font.reset" && a.default == Some(sample)).count();
+        let taken = actions_for(MAC).iter().filter(|a| a.id != "font.reset" && a.default == Some(sample)).count();
         assert_eq!(warnings.len(), taken, "{sample}: {warnings:?}");
     }
 }
