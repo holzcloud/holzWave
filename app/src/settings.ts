@@ -196,7 +196,10 @@ export async function reload(): Promise<string | null> {
   }
 }
 
-/** Window focus reloads, at most once a second: the core compares modification times before it reads anything. */
+/**
+ * Window focus reloads and asks the OS text size again, at most once a second: the core compares modification times
+ * before it reads anything, and the OS text size is read by a helper program.
+ */
 const RELOAD_MIN_MS = 1000;
 let lastReload = Number.NEGATIVE_INFINITY;
 
@@ -205,6 +208,7 @@ function reloadOnFocus(): void {
   if (now - lastReload < RELOAD_MIN_MS) return;
   lastReload = now;
   void reload();
+  void refreshOsText(); // the OS text size may have changed while the window was away
 }
 
 /** Call `fn` after every accepted view; the returned function stops it. */

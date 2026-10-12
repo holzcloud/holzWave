@@ -485,4 +485,81 @@ async function osTextCase(page, url) {
 
   await open(page, url);
   assert.deepEqual(await rootSize(page), { computed: "12px", inline: "" }, "no answer is the stylesheet's size");
+  await osTextClampCase(page, url);
+  await osTextFocusCase(page, url);
+  await osTextFailureCase(page, url);
+}
+
+/** The cell size the page last sent to the core (a pane's start until it resized), and how many `resize` calls there were. */
+const lastCell = (page) =>
+  page.evaluate(() => {
+    const calls = window.__MOCK__.callsOf("resize");
+    const last = calls[calls.length - 1] ?? window.__MOCK__.callsOf("start_pane")[0];
+    return { count: calls.length, cell_w: last.cell_w, cell_h: last.cell_h };
+  });
+
+/** 150 % of a 200 % UI scale is held to 300 %: a 36 px root font size. */
+async function osTextClampCase(page, url) {
+  const view = AUBERGINE();
+  view.settings.ui_scale = 200;
+  await open(page, url, view, "?renderer=canvas", 150);
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).fontSize === "36px");
+  const user = AUBERGINE();
+  user.settings.ui_scale = 200;
+  await open(page, url, user, "?renderer=canvas", 225);
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).fontSize === "36px");
+  // An answer outside 100 to 300 is no preference.
+  await open(page, url, AUBERGINE(), "?renderer=canvas", 450);
+  assert.deepEqual(await rootSize(page), { computed: "12px", inline: "" });
+}
+
+/** The OS text size is asked again when the window gains focus (at most once a second): the root follows and the grid is fitted again, with the same cells. */
+async function osTextFocusCase(page, url) {
+  await open(page, url, AUBERGINE(), "?renderer=canvas", 150);
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).fontSize === "18px");
+  const focus = () => page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const asked = async () => (await callsOf(page, "os_text_scale")).length;
+  await page.waitForTimeout(1100);
+  const before = await lastCell(page);
+  const base = await asked();
+
+  // The OS setting is reverted: the next focus brings the stylesheet's size back and sends `resize` again.
+  await page.evaluate(() => (window.__OS_TEXT = 100));
+  await focus();
+  await focus();
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).fontSize === "12px");
+  await page.waitForFunction((n) => window.__MOCK__.callsOf("resize").length >= n + 2, before.count);
+  assert.equal(await asked(), base + 1, "focus events in a row ask once");
+  assert.equal((await rootSize(page)).inline, "");
+  const after = await lastCell(page);
+  assert.deepEqual([after.cell_w, after.cell_h], [before.cell_w, before.cell_h], "the OS size does not change the grid's cells");
+
+  // And back up: 200 percent on the next focus after the gate.
+  await page.waitForTimeout(1100);
+  await page.evaluate(() => (window.__OS_TEXT = 200));
+  await focus();
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).fontSize === "24px");
+  const up = await lastCell(page);
+  assert.deepEqual([up.cell_w, up.cell_h], [before.cell_w, before.cell_h]);
+
+  // A null answer is read as 100.
+  await page.waitForTimeout(1100);
+  await page.evaluate(() => (window.__OS_TEXT = null));
+  await focus();
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).fontSize === "12px");
+}
+
+/** A command that fails leaves the previous value: nothing changes and no `resize` is sent. */
+async function osTextFailureCase(page, url) {
+  await open(page, url, AUBERGINE(), "?renderer=canvas", 150);
+  await page.waitForFunction(() => getComputedStyle(document.documentElement).fontSize === "18px");
+  await page.waitForTimeout(1100);
+  const resizes = (await lastCell(page)).count;
+  const base = (await callsOf(page, "os_text_scale")).length;
+  await page.evaluate(() => window.__MOCK__.on("os_text_scale", () => Promise.reject("the helper is gone")));
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.waitForFunction((n) => window.__MOCK__.callsOf("os_text_scale").length > n, base);
+  await page.waitForTimeout(200);
+  assert.equal((await rootSize(page)).computed, "18px", "the previous size stays");
+  assert.equal((await lastCell(page)).count, resizes, "nothing was fitted again");
 }

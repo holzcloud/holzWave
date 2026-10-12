@@ -5,13 +5,53 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { contrastRatio, effectiveBlink, effectiveContrast, effectiveMotion, onAccentOf } from "../../dist/a11y.js";
+import {
+  contrastRatio, effectiveBlink, effectiveContrast, effectiveMotion, effectiveUiScale, onAccentOf, osTextScaleOf,
+} from "../../dist/a11y.js";
+import { rootFontPx } from "../../dist/settings-model.js";
 import { CHORDS, actionIdFor, bindingIndex, setBindingTable } from "../../dist/chords.js";
 import { chordsOf, primaryChord } from "../../dist/keymap.js";
 import { readSettingsView, tokenEntries } from "../../dist/settings-model.js";
 
 const fromRoot = (path) => readFileSync(fileURLToPath(new URL(`../../../${path}`, import.meta.url)), "utf8");
 const golden = JSON.parse(readFileSync(fileURLToPath(new URL("../fixtures/protocol.json", import.meta.url)), "utf8"));
+
+// ---- the UI scale and the OS text size -----------------------------------------------------------------
+
+test("effectiveUiScale: an OS size of 100 or a missing or invalid one leaves the user's scale", () => {
+  for (const user of [75, 100, 150, 200]) {
+    assert.equal(effectiveUiScale(user, 100), user);
+    assert.equal(effectiveUiScale(user), user, "no answer");
+    for (const bad of [null, undefined, Number.NaN, Number.POSITIVE_INFINITY, "150", {}, [], true, 0, -50, 99, 301, 1e9]) {
+      assert.equal(effectiveUiScale(user, bad), user, `${String(bad)} is read as 100`);
+    }
+  }
+});
+
+test("effectiveUiScale: the product is rounded and held to 75 to 300 percent", () => {
+  assert.equal(effectiveUiScale(100, 150), 150);
+  assert.equal(effectiveUiScale(110, 125), 138, "137.5 rounds up");
+  assert.equal(effectiveUiScale(133, 133), 177, "176.89 rounds to the nearest");
+  assert.equal(effectiveUiScale(150, 200), 300);
+  assert.equal(effectiveUiScale(200, 150), 300, "the product 300 is the limit itself");
+  assert.equal(effectiveUiScale(200, 225), 300, "450 is held to 300");
+  assert.equal(effectiveUiScale(200, 300), 300);
+  assert.equal(effectiveUiScale(75, 100), 75);
+  assert.equal(effectiveUiScale(60, 100), 75, "a product below 75 is held to 75");
+  assert.equal(effectiveUiScale(40, 130), 75);
+  assert.equal(rootFontPx(effectiveUiScale(200, 150)), 36, "150 % of a 200 % scale is a 36 px root font size");
+  assert.equal(rootFontPx(effectiveUiScale(100, 150)), 18);
+});
+
+test("osTextScaleOf: a whole percent in 100 to 300, anything else is 100", () => {
+  assert.equal(osTextScaleOf(100), 100);
+  assert.equal(osTextScaleOf(150), 150);
+  assert.equal(osTextScaleOf(300), 300);
+  assert.equal(osTextScaleOf(149.6), 150, "a fraction is rounded");
+  assert.equal(osTextScaleOf(99), 100);
+  assert.equal(osTextScaleOf(301), 100, "beyond what the shell may answer is no answer");
+  for (const bad of [null, undefined, Number.NaN, "150", {}]) assert.equal(osTextScaleOf(bad), 100);
+});
 
 // ---- motion --------------------------------------------------------------------------------------------
 

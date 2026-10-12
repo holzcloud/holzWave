@@ -1,10 +1,11 @@
 // Accessibility preferences (DESK-24). The core owns the values (D-06): `motion`, `contrast` and `cursor_blink` are
 // `system` or an explicit choice. This module resolves them against what the web view can report, which is the
-// three media queries `prefers-reduced-motion`, `prefers-contrast` and `forced-colors` (nothing on macOS says how
-// large the system text is, so the scalable UI font is the user's `ui_scale` and the font size actions, not an OS
-// signal). The result is two classes on the root element, `motion-reduce` and `contrast-high`, that the
-// stylesheets key on, the effective cursor blink the scene asks for, and whether the two optional grid effects of
-// DESK-28 (smooth scrolling, cursor trail) may run.
+// three media queries `prefers-reduced-motion`, `prefers-contrast` and `forced-colors`. The size of the UI text is
+// the user's `ui_scale` times the OS text size: macOS reports none (100), Windows and Linux are read by the shell
+// (`os_text_scale`, see `effectiveUiScale`); only the chrome follows, never the terminal's `font_size`. The result
+// is two classes on the root element, `motion-reduce` and `contrast-high`, that the stylesheets key on, the
+// effective cursor blink the scene asks for, and whether the two optional grid effects of DESK-28 (smooth
+// scrolling, cursor trail) may run.
 //
 // The resolution functions are pure. Nothing here touches the DOM at import, so node can import the file.
 import { state } from "./state.js";

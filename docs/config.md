@@ -60,7 +60,7 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `version` | number | `1` | `1` | the file format version; it cannot be set |
 | `theme` | string | a theme name (below); an unknown name resolves to `aubergine` | `"aubergine"` | at once, in every pane |
 | `font_size` | number | 8 to 40 | 14 | at once; the terminal font in CSS pixels |
-| `ui_scale` | number | 75 to 200 (percent) | 100 | at once; scales the chrome (tabs, status line, dialogs) |
+| `ui_scale` | number | 75 to 200 (percent) | 100 | at once; scales the chrome (tabs, status line, dialogs); on Windows and Linux the chrome also follows the OS text size on top of it (see Accessibility) |
 | `option_as_alt` | boolean | | `false` | at once, in every pane: Option sends `ESC` plus the key instead of the layout's character |
 | `cursor_blink` | string | `"system"`, `"on"`, `"off"` | `"system"` | at once |
 | `motion` | string | `"system"`, `"reduce"`, `"full"` | `"system"` | at once |
@@ -395,7 +395,7 @@ What follows the operating system, and what is yours to set (DESK-24). The rules
 | Increased contrast | `prefers-contrast: more` and `forced-colors` | `contrast`: `system`, `normal`, `high` | 2 px focus line, hairlines and dim text use the stronger tokens (`ink_3`, `ink_2`); under forced colours the chrome uses system colours |
 | Cursor blink | the reduced-motion preference; there is no OS signal of its own | `cursor_blink`: `system`, `on`, `off` | only a cursor the program asked to blink does; with `system` it stops under reduced motion |
 | Smooth scrolling and cursor trail | the reduced-motion preference; there is no OS signal of their own | `smooth_scroll`, `cursor_trail`: `false`, `true` | off by default; each is drawn only while reduced motion is not in effect, and `motion: "full"` allows them although the OS asks to reduce |
-| UI font size | **nothing**: the web view reports no OS text-size signal on macOS | `ui_scale` (75 to 200 %) and `font_size` (8 to 40) | the requirement's wording allows this; the OS-driven part comes per platform in Phase 2.2 (D-25) |
+| UI font size | Windows: the `TextScaleFactor` registry value of the Text size setting, read through `reg.exe`; Linux: the GNOME `text-scaling-factor` key, read through `gsettings`; macOS: **nothing**, it has no such signal | `ui_scale` (75 to 200 %) and `font_size` (8 to 40) | the chrome's size is `ui_scale` times the OS factor (100 to 300 %), held to 75 to 300 %; only the chrome follows, the terminal text stays at `font_size`; read at start and when the window gains focus, so a change arrives without a restart; a source that cannot be read counts as 100 % |
 
 An explicit setting beats the OS in both directions: `motion: "full"` keeps transitions although the OS asks to reduce
 them, `contrast: "normal"` ignores the OS preference, `cursor_blink: "on"` blinks under reduced motion. The OS
