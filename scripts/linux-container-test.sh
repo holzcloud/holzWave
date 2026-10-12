@@ -2,6 +2,7 @@
 # The test suite on Linux, from the Mac, in a Docker container.
 #
 #   sh scripts/linux-container-test.sh [core|app|all] [-- <arguments for the test binaries>]    (default: core)
+#   sh scripts/linux-container-test.sh image
 #
 # Modes: `core` runs `cargo test -p holzwave-core`, `app` runs `cargo test -p holzwave-app` (the app crate needs a
 # built page: `npm --prefix app run build` runs first), `all` runs the whole workspace. Everything after `--` goes to
@@ -10,7 +11,7 @@
 # The container is `ubuntu:26.04`, which is arm64 on an Apple Silicon Mac: a proxy for x86_64 (the same kernel API
 # and the same code paths, not the same CPU). The first run builds the image `holzwave-linux-test` (build tools,
 # GTK and WebKitGTK headers, rustup stable and Zig 0.16.0); remove it with `docker rmi holzwave-linux-test` to get
-# a newer Rust. Named volumes keep the cargo registry, the git checkouts and the target directory between runs, so
+# a newer Rust. `image` only makes sure the image exists and runs no test: scripts/linux-container-bundle.sh builds on it. Named volumes keep the cargo registry, the git checkouts and the target directory between runs, so
 # a second run does not start from nothing: `docker volume rm holzwave-linux-target` forgets the build cache.
 #
 # The working tree is streamed into the container with tar (without target, .git, node_modules and .planning), so
@@ -28,7 +29,7 @@ root=$(dirname "$here")
 
 mode=core
 case "${1:-}" in
-    core | app | all)
+    core | app | all | image)
         mode=$1
         shift
         ;;
@@ -37,7 +38,7 @@ case "${1:-}" in
     "") ;;
     --) shift ;;
     *)
-        echo "usage: sh scripts/linux-container-test.sh [core|app|all] [-- <arguments for the test binaries>]" >&2
+        echo "usage: sh scripts/linux-container-test.sh [core|app|all|image] [-- <arguments for the test binaries>]" >&2
         exit 2
         ;;
 esac
@@ -136,6 +137,11 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
         echo "linux-container-test: the image build failed" >&2
         exit 1
     }
+fi
+
+if [ "$mode" = image ]; then
+    echo "linux-container-test: the image $IMAGE is there"
+    exit 0
 fi
 
 case "$mode" in

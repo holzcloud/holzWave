@@ -1,0 +1,10 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "targets": ["deb", "rpm", "appimage"],
+    "linux": {
+      "deb": { "desktopTemplate": "linux/holzwave.desktop" },
+      "rpm": { "desktopTemplate": "linux/holzwave.desktop" }
+    }
+  }
+}
