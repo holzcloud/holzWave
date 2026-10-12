@@ -119,6 +119,12 @@ pub struct Settings {
     pub scrollback_lines: u32,
     /// Ask before a multi-line paste when the program did not turn on bracketed paste (D-15).
     pub confirm_multiline_paste: bool,
+    /// Ease a scrollback jump over a fraction of a second (DESK-28). Off by default, and never while motion is
+    /// reduced. Purely presentation: the core still scrolls by whole rows.
+    pub smooth_scroll: bool,
+    /// Draw a short fading trail behind a cursor that jumps (DESK-28). Off by default, and never while motion is
+    /// reduced.
+    pub cursor_trail: bool,
     /// Overrides of the default key bindings: action id to chord. Validated by the key binding resolver.
     pub keybindings: BTreeMap<String, String>,
 }
@@ -136,6 +142,8 @@ impl Default for Settings {
             contrast: Contrast::System,
             scrollback_lines: 10_000,
             confirm_multiline_paste: true,
+            smooth_scroll: false,
+            cursor_trail: false,
             keybindings: BTreeMap::new(),
         }
     }

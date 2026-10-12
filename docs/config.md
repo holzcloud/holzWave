@@ -67,10 +67,20 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `contrast` | string | `"system"`, `"normal"`, `"high"` | `"system"` | at once |
 | `scrollback_lines` | number | 100 to 100000 | 10000 | for panes started afterwards; a running pane keeps its own |
 | `confirm_multiline_paste` | boolean | | `true` | at once |
+| `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |
+| `cursor_trail` | boolean | | `false` | at once; fades a short trail behind a cursor that jumps (below) |
 | `keybindings` | object | action id to chord text, at most 512 entries, each text at most 128 bytes | `{}` | at once |
 
 `option_as_alt` is off by default so that a Swiss layout types `|`, `[` and `{` with Option (D-12).
 `confirm_multiline_paste` asks before a multi-line paste into a program that did not turn on bracketed paste (D-15).
+`smooth_scroll` and `cursor_trail` are two optional effects of the drawing only (DESK-28); both are off by default and
+both stay off while reduced motion is in effect, whether the operating system asks for it or the `motion` setting says
+`"reduce"` (see [Accessibility](#accessibility)), and the change of either applies without a restart. With
+`smooth_scroll` a jump in the scrollback (wheel, page keys, a search hit) slides in over at most 120 ms instead of
+cutting; the core still scrolls by whole rows and a frame is drawn the moment it arrives. With `cursor_trail` a cursor
+that moves by more than one cell leaves up to six fading ghost cells on the way. Neither effect runs on the alternate
+screen of a full-screen program (nothing scrolls there) or while the cursor is hidden or in the off phase of its blink,
+and nothing animates, so nothing is drawn, while the screen is idle.
 
 <!-- example: settings.json -->
 ```json
@@ -85,6 +95,8 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
   "contrast": "system",
   "scrollback_lines": 20000,
   "confirm_multiline_paste": true,
+  "smooth_scroll": false,
+  "cursor_trail": false,
   "keybindings": {
     "pane.split_right": "Cmd+Shift+R",
     "pane.close": ""
@@ -332,9 +344,10 @@ What follows the operating system, and what is yours to set (DESK-24). The rules
 
 | Preference | Follows the OS through | Setting | Notes |
 |---|---|---|---|
-| Reduced motion | the `prefers-reduced-motion` media query | `motion`: `system`, `reduce`, `full` | removes every chrome transition; the terminal grid never moves |
+| Reduced motion | the `prefers-reduced-motion` media query | `motion`: `system`, `reduce`, `full` | removes every chrome transition and switches the two grid effects below off, whatever their own settings say |
 | Increased contrast | `prefers-contrast: more` and `forced-colors` | `contrast`: `system`, `normal`, `high` | 2 px focus line, hairlines and dim text use the stronger tokens (`ink_3`, `ink_2`); under forced colours the chrome uses system colours |
 | Cursor blink | the reduced-motion preference; there is no OS signal of its own | `cursor_blink`: `system`, `on`, `off` | only a cursor the program asked to blink does; with `system` it stops under reduced motion |
+| Smooth scrolling and cursor trail | the reduced-motion preference; there is no OS signal of their own | `smooth_scroll`, `cursor_trail`: `false`, `true` | off by default; each is drawn only while reduced motion is not in effect, and `motion: "full"` allows them although the OS asks to reduce |
 | UI font size | **nothing**: the web view reports no OS text-size signal on macOS | `ui_scale` (75 to 200 %) and `font_size` (8 to 40) | the requirement's wording allows this; the OS-driven part comes per platform in Phase 2.2 (D-25) |
 
 An explicit setting beats the OS in both directions: `motion: "full"` keeps transitions although the OS asks to reduce

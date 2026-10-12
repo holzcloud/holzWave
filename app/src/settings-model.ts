@@ -33,6 +33,10 @@ export interface SettingsValues {
   contrast: "system" | "normal" | "high";
   scrollback_lines: number;
   confirm_multiline_paste: boolean;
+  /** Ease a scrollback jump (DESK-28); off while motion is reduced whatever this says. */
+  smooth_scroll: boolean;
+  /** A fading trail behind a cursor that jumps (DESK-28); off while motion is reduced whatever this says. */
+  cursor_trail: boolean;
   /** The overrides as the user typed them: action id to chord text, the empty text meaning unbound. */
   keybindings: Record<string, string>;
 }
@@ -177,6 +181,8 @@ export function readSettingsView(raw: unknown): SettingsView | null {
     !finite(s.scrollback_lines) ||
     typeof s.option_as_alt !== "boolean" ||
     typeof s.confirm_multiline_paste !== "boolean" ||
+    typeof s.smooth_scroll !== "boolean" ||
+    typeof s.cursor_trail !== "boolean" ||
     !oneOf(s.cursor_blink, ["system", "on", "off"] as const) ||
     !oneOf(s.motion, ["system", "reduce", "full"] as const) ||
     !oneOf(s.contrast, ["system", "normal", "high"] as const)
@@ -203,6 +209,8 @@ export function readSettingsView(raw: unknown): SettingsView | null {
       contrast: s.contrast,
       scrollback_lines: s.scrollback_lines,
       confirm_multiline_paste: s.confirm_multiline_paste,
+      smooth_scroll: s.smooth_scroll,
+      cursor_trail: s.cursor_trail,
       keybindings: overrides,
     },
     themes,

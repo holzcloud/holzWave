@@ -29,6 +29,8 @@ fn defaults_match_the_decisions() {
     assert_eq!(s.cursor_blink, Blink::System);
     assert_eq!(s.motion, Motion::System);
     assert_eq!(s.contrast, Contrast::System);
+    assert!(!s.smooth_scroll, "DESK-28: the effects are opt-in");
+    assert!(!s.cursor_trail, "DESK-28: the effects are opt-in");
     assert!(s.keybindings.is_empty());
 }
 
@@ -63,6 +65,8 @@ fn the_document_is_pretty_printed_with_a_trailing_newline_and_a_stable_key_order
         "\"contrast\"",
         "\"scrollback_lines\"",
         "\"confirm_multiline_paste\"",
+        "\"smooth_scroll\"",
+        "\"cursor_trail\"",
         "\"keybindings\"",
     ];
     let mut at = 0;
@@ -329,6 +333,23 @@ mod validation {
     }
 
     #[test]
+    fn a_wrong_typed_effect_costs_only_that_key_and_an_old_file_loads_unchanged() {
+        // DESK-28: a file from before the two keys existed has neither and is clean; a wrong type is one repair.
+        let (old, status) = Settings::from_json(r#"{"font_size": 15, "confirm_multiline_paste": false}"#);
+        assert_eq!(status, LoadStatus::Clean);
+        assert!(!old.smooth_scroll && !old.cursor_trail);
+        assert_eq!(old.font_size, 15);
+
+        let (s, status) = Settings::from_json(r#"{"smooth_scroll": "yes", "cursor_trail": true, "font_size": 16}"#);
+        assert!(!s.smooth_scroll, "the default for the broken key");
+        assert!(s.cursor_trail, "the other keys are kept");
+        assert_eq!(s.font_size, 16);
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("smooth_scroll"), "{notes:?}");
+    }
+
+    #[test]
     fn a_json_document_that_is_not_an_object_is_reset() {
         for text in ["[]", "null", "42", "\"theme\"", "true"] {
             let (s, status) = Settings::from_json(text);
@@ -418,11 +439,14 @@ mod validation {
         s.set_value("motion", json!("reduce")).unwrap();
         s.set_value("contrast", json!("high")).unwrap();
         s.set_value("confirm_multiline_paste", json!(false)).unwrap();
+        s.set_value("smooth_scroll", json!(true)).unwrap();
+        s.set_value("cursor_trail", json!(true)).unwrap();
         s.set_value("keybindings", json!({"pane.split_right": "Cmd+D", "pane.close": ""})).unwrap();
         assert_eq!(s.theme, "Papier");
         assert!(s.option_as_alt);
         assert_eq!((s.cursor_blink, s.motion, s.contrast), (Blink::Off, Motion::Reduce, Contrast::High));
         assert!(!s.confirm_multiline_paste);
+        assert!(s.smooth_scroll && s.cursor_trail);
         assert_eq!(s.keybindings.len(), 2);
     }
 
@@ -436,6 +460,8 @@ mod validation {
             ("font_size", json!(14.5)),
             ("font_size", json!(null)),
             ("option_as_alt", json!("yes")),
+            ("smooth_scroll", json!(1)),
+            ("cursor_trail", json!("on")),
             ("cursor_blink", json!("sometimes")),
             ("keybindings", json!({"a": 5})),
             ("keybindings", json!(["a"])),

@@ -58,6 +58,11 @@ export const SCROLLBACK_HINT =
   "Upper limit per pane, for panes opened from now on. The engine also stops at a memory limit, so a pane can keep " +
   "fewer lines than this (about 1800 at 40 columns).";
 
+/** The text of the two effect toggles: they follow reduced motion, whatever the toggles say. */
+export const EFFECTS_HINT =
+  "Optional effects of the drawing, off by default. Both stay off while reduced motion is in effect, from the system " +
+  "or from the Motion setting below.";
+
 const CURSOR_BLINK = [["system", "System"], ["on", "On"], ["off", "Off"]] as const;
 const MOTION = [["system", "System"], ["reduce", "Reduce"], ["full", "Full"]] as const;
 const CONTRAST = [["system", "System"], ["normal", "Normal"], ["high", "High"]] as const;
@@ -171,12 +176,14 @@ async function show(api: SettingsApi): Promise<void> {
     };
 
     const toggle = (
-      parent: Element, id: string, text: string, key: "option_as_alt" | "confirm_multiline_paste",
+      parent: Element, id: string, text: string,
+      key: "option_as_alt" | "confirm_multiline_paste" | "smooth_scroll" | "cursor_trail", describedBy?: string,
     ): void => {
       const row = rowOf(parent, id, text);
       const node = el("input", "", row);
       node.type = "checkbox";
       node.id = id;
+      if (describedBy) node.setAttribute("aria-describedby", describedBy);
       add({
         key,
         node,
@@ -228,6 +235,12 @@ async function show(api: SettingsApi): Promise<void> {
       id: "set-scrollback-hint", text: SCROLLBACK_HINT, data: "scrollback",
     });
     toggle(terminal, "set-confirm-paste", "Confirm multi-line paste", "confirm_multiline_paste");
+    toggle(terminal, "set-smooth-scroll", "Smooth scrolling", "smooth_scroll", "set-effects-hint");
+    toggle(terminal, "set-cursor-trail", "Cursor trail", "cursor_trail", "set-effects-hint");
+    const effects = el("p", "set-hint", terminal);
+    effects.id = "set-effects-hint";
+    effects.setAttribute("data-hint", "effects");
+    effects.textContent = EFFECTS_HINT;
 
     const access = group("Accessibility");
     choice(access, "set-motion", "Motion", "motion").setOptions(MOTION);

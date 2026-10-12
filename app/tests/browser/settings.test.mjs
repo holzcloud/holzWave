@@ -145,6 +145,9 @@ async function openCase(page, url) {
   assert.deepEqual(await options(page, "Contrast"), ["System", "Normal", "High"]);
   assert.equal(await dialog(page).locator("select").count(), 0, "no <select>: WebKit reports an inline style for it");
   assert.equal(await field(page, "Confirm multi-line paste").isChecked(), true);
+  assert.equal(await field(page, "Smooth scrolling").isChecked(), false, "DESK-28: the effects are off by default");
+  assert.equal(await field(page, "Cursor trail").isChecked(), false, "DESK-28: the effects are off by default");
+  assert.match(await dialog(page).locator("[data-hint=effects]").textContent(), /reduced motion/i);
   assert.equal(await field(page, "Scrollback lines").inputValue(), "10000");
   assert.equal(await dialog(page).getByRole("button", { name: "Reload from file" }).count(), 1);
   assert.ok((await dialog(page).locator("fieldset").count()) >= 3, "the controls are grouped in fieldsets");
@@ -218,6 +221,14 @@ async function controlsCase(page, url) {
   await settle(page);
   assert.equal((await settingCalls(page)).length, 9, "blur after Enter must not send again");
 
+  // The two effects of DESK-28 are plain toggles: one request each, and the page's state follows the core.
+  await field(page, "Smooth scrolling").check();
+  assert.deepEqual(await last(10), { key: "smooth_scroll", value: true });
+  await field(page, "Cursor trail").check();
+  assert.deepEqual(await last(11), { key: "cursor_trail", value: true });
+  assert.equal(await pageState(page, "settings.settings.smooth_scroll"), true);
+  assert.equal(await pageState(page, "settings.settings.cursor_trail"), true);
+
   // The dialog shows what the core answered.
   assert.equal(await field(page, "Font size").inputValue(), "18");
   assert.equal(await field(page, "UI scale").inputValue(), "150");
@@ -229,7 +240,7 @@ async function controlsCase(page, url) {
   // A number beyond the range is clamped by the core, and the control shows the clamped value.
   await field(page, "Font size").fill("99");
   await field(page, "Font size").press("Enter");
-  assert.deepEqual(await last(10), { key: "font_size", value: 99 });
+  assert.deepEqual(await last(12), { key: "font_size", value: 99 });
   await page.waitForFunction(() => document.getElementById("set-font-size")?.value === "40");
   assert.equal(await field(page, "Font size").inputValue(), "40", "the control shows the core's value, not the typed one");
 
@@ -237,7 +248,7 @@ async function controlsCase(page, url) {
   await field(page, "Font size").fill("");
   await field(page, "Font size").press("Enter");
   await settle(page);
-  assert.equal((await settingCalls(page)).length, 10, "an empty number field must not be sent");
+  assert.equal((await settingCalls(page)).length, 12, "an empty number field must not be sent");
   assert.equal(await field(page, "Font size").inputValue(), "40");
 }
 

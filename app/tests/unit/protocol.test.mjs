@@ -57,11 +57,13 @@ test("the settings view has exactly the documented keys at every level and the s
   assert.deepEqual(keys(view), ["keybindings", "settings", "theme", "themes", "warnings"]);
   assert.deepEqual(golden.events.settings, view, "the settings event payload is the settings view");
   assert.deepEqual(keys(view.settings), [
-    "confirm_multiline_paste", "contrast", "cursor_blink", "font_size", "keybindings", "motion", "option_as_alt",
-    "scrollback_lines", "theme", "ui_scale", "version",
+    "confirm_multiline_paste", "contrast", "cursor_blink", "cursor_trail", "font_size", "keybindings", "motion",
+    "option_as_alt", "scrollback_lines", "smooth_scroll", "theme", "ui_scale", "version",
   ]);
   assert.equal(typeof view.settings.theme, "string");
   assert.equal(typeof view.settings.option_as_alt, "boolean");
+  assert.equal(view.settings.smooth_scroll, false, "DESK-28: the effects are off by default");
+  assert.equal(view.settings.cursor_trail, false, "DESK-28: the effects are off by default");
   assert.ok(view.themes.length >= 3);
   for (const t of view.themes) {
     assert.deepEqual(keys(t), ["builtin", "kind", "name"]);

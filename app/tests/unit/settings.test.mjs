@@ -97,6 +97,8 @@ test("the golden settings view is read as it is", () => {
   assert.equal(view.settings.font_size, 14);
   assert.equal(view.settings.ui_scale, 100);
   assert.equal(view.settings.confirm_multiline_paste, true);
+  assert.equal(view.settings.smooth_scroll, false);
+  assert.equal(view.settings.cursor_trail, false);
   assert.deepEqual(view.themes.map((t) => t.name), ["aubergine", "Schiefer", "Papier"]);
   assert.deepEqual(view.themes.map((t) => t.kind), ["dark", "dark", "light"]);
   assert.equal(view.theme.name, "aubergine");
@@ -110,6 +112,9 @@ test("a view with a value of the wrong type or kind is refused as a whole", () =
     (v) => (v.settings.ui_scale = null),
     (v) => (v.settings.option_as_alt = "yes"),
     (v) => (v.settings.confirm_multiline_paste = 1),
+    (v) => (v.settings.smooth_scroll = "on"),
+    (v) => (v.settings.cursor_trail = null),
+    (v) => delete v.settings.smooth_scroll,
     (v) => (v.settings.cursor_blink = "sometimes"),
     (v) => (v.settings.motion = "fast"),
     (v) => (v.settings.contrast = 3),
