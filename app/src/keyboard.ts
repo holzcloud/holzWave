@@ -6,9 +6,9 @@
 //
 // All keys go to a hidden textarea that keeps the keyboard focus: it is what makes the system's input methods and
 // dead keys work, because composition events exist only on editable elements.
-import { registerAction, runAction } from "./actions.js";
+import { keepsDefault, registerAction, runAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
-import { actionIdFor, setBindingTable } from "./chords.js";
+import { actionIdFor, setBindingTable, setOs } from "./chords.js";
 import { gridRect } from "./geometry.js";
 import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "./keymap.js";
 import { offerKey, pushKeyHandler } from "./keystack.js";
@@ -175,10 +175,13 @@ function onKeyDown(e: KeyboardEvent): void {
     // A program on the alternate screen (vim, less, htop) reads these keys itself, and a text field of the page (the name
     // editor, the search bar) edits its own line: neither gets the shell's line-editing bytes.
     if (id !== undefined && EDIT_STEPS.has(id) && (onAlternateScreen() || inOtherField(e.target))) continue;
+    // Copy and paste in a text field of the page are the field's own, with the browser's default.
+    if (id !== undefined && CLIPBOARD_ACTIONS.has(id) && inOtherField(e.target)) continue;
     // The registry decides what a held key may repeat. A repeat it swallowed is consumed here as well, so it never
-    // reaches the encoder as terminal input.
+    // reaches the encoder as terminal input. An action that keeps its default (paste) lets the first press through
+    // to the browser; its repeats are consumed, so a held chord pastes once.
     if (id !== undefined && runAction(id, { repeat: e.repeat })) {
-      e.preventDefault();
+      if (e.repeat || !keepsDefault(id)) e.preventDefault();
       return;
     }
   }
@@ -250,12 +253,61 @@ async function pasteInto(pane: number, text: string): Promise<void> {
 function onPaste(e: ClipboardEvent): void {
   if (inOtherField(e.target)) return; // a text field of the page keeps its own paste
   e.preventDefault();
+  if (pasteTimer !== null) {
+    clearTimeout(pasteTimer); // the event is the route: the fallback must not paste as well
+    pasteTimer = null;
+  } else if (performance.now() < fallbackUntil) {
+    return; // the late event of a paste the fallback already made
+  }
   if (isConfirmingPaste()) return; // one question at a time
   const text = e.clipboardData?.getData("text/plain") ?? "";
   const pane = state.view?.focus;
   if (text === "" || pane === undefined) return;
   void pasteInto(pane, text);
 }
+
+// Windows and Linux have no native Edit menu, so a paste chord is the page's. It is not prevented: the web view then
+// fires `paste` into the terminal input and `onPaste` above takes it. If no event comes, the page reads the clipboard
+// itself. Either way the text goes through `pasteInto`, and the two routes can never both paste.
+
+/** How long a paste chord waits for the web view's own `paste` event before the page reads the clipboard. */
+const PASTE_EVENT_WAIT_MS = 100;
+
+/** How long after the fallback started a `paste` event is still the same paste and is ignored. */
+const LATE_PASTE_MS = 500;
+
+/** The timer of a paste chord that is waiting for its `paste` event; null when none is. */
+let pasteTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** A `paste` event before this time (`performance.now()`) belongs to a paste the fallback already made. */
+let fallbackUntil = Number.NEGATIVE_INFINITY;
+
+/** The paste chord ran: give the browser a moment to fire `paste`, then read the clipboard once if it did not. */
+function awaitPasteEvent(): void {
+  if (pasteTimer !== null) clearTimeout(pasteTimer);
+  pasteTimer = setTimeout(() => {
+    pasteTimer = null;
+    fallbackUntil = performance.now() + LATE_PASTE_MS;
+    void pasteFromClipboard();
+  }, PASTE_EVENT_WAIT_MS);
+}
+
+/** The clipboard text through the one paste path. Only ever called after the person's own paste chord. */
+async function pasteFromClipboard(): Promise<void> {
+  if (isConfirmingPaste()) return; // one question at a time
+  let text = "";
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    return; // no permission or no clipboard: nothing to paste
+  }
+  const pane = state.view?.focus;
+  if (text === "" || pane === undefined) return;
+  await pasteInto(pane, text);
+}
+
+/** The actions whose chord a text field of the page leaves to the field. */
+const CLIPBOARD_ACTIONS: ReadonlySet<string> = new Set(["edit.copy", "edit.paste"]);
 
 // ---- layout actions ------------------------------------------------------------------------------
 
@@ -328,10 +380,20 @@ function registerEditActions(): void {
   }
 }
 
+/**
+ * Paste on a platform without a native Edit menu. macOS pastes through its menu, so the action is not registered there
+ * (`edit.copy` is, in pointer.ts, on every platform).
+ */
+function registerPasteAction(): void {
+  registerAction({ id: "edit.paste", title: "Paste", keepDefault: true, run: awaitPasteEvent });
+}
+
 /** Register the layout actions and start listening to the keyboard and to paste. Call once at start-up. */
 export function initKeyboard(applyView: (v: View) => void): void {
+  setOs(state.os); // app_info was answered before this runs: the static chords of this platform
   registerLayoutActions(applyView);
   registerEditActions();
+  if (state.os !== "macos") registerPasteAction();
   ime = createInput();
   const box = ime;
   window.addEventListener("keydown", onKeyDown);

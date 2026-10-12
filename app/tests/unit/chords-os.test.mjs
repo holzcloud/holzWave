@@ -1,9 +1,10 @@
-// The per-OS side of chords.ts (Phase 2.2). The OS setting of chords.ts is
+// The per-OS side of chords.ts and the clipboard rules of the action registry (Phase 2.2). The OS setting of chords.ts is
 // module state and node runs every test file in a process of its own, so these cases cannot disturb the macOS
 // assertions of actions.test.mjs and a11y.test.mjs; each test sets the OS it needs.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { CHORDS, actionIdFor, chordFor, setBindingTable, setOs } from "../../dist/chords.js";
+import { isRepeatable, keepsDefault, registerAction, runAction } from "../../dist/actions.js";
 
 const CLIPBOARD = [
   ["Ctrl+Shift+C", "edit.copy"],
@@ -72,4 +73,26 @@ test("with the core's rows set the rows decide and the clipboard chords stay fix
   assert.equal(actionIdFor("Shift+Insert"), "edit.paste");
   assert.equal(actionIdFor("Ctrl+Shift+V"), "tab.new", "a chord another action took is that action's");
   setBindingTable([]);
+});
+
+// ---- the registry ---------------------------------------------------------------------------------
+
+let pasted = 0;
+
+test("the paste action keeps the browser default of its key press and no other action does", () => {
+  registerAction({ id: "edit.paste", title: "Paste", keepDefault: true, run: () => void pasted++ });
+  registerAction({ id: "edit.copy", title: "Copy", run: () => {} });
+  assert.equal(keepsDefault("edit.paste"), true);
+  assert.equal(keepsDefault("edit.copy"), false);
+  assert.equal(keepsDefault("pane.close"), false, "an unknown id keeps nothing");
+  assert.equal(runAction("edit.paste"), true);
+  assert.equal(pasted, 1);
+});
+
+test("a held copy or paste chord runs once: neither is a repeatable action", () => {
+  assert.equal(isRepeatable("edit.paste"), false);
+  assert.equal(isRepeatable("edit.copy"), false);
+  const before = pasted;
+  assert.equal(runAction("edit.paste", { repeat: true }), true, "the repeat is consumed");
+  assert.equal(pasted, before, "and does not run");
 });
