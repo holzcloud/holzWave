@@ -32,6 +32,7 @@ fn defaults_match_the_decisions() {
     assert!(!s.smooth_scroll, "DESK-28: the effects are opt-in");
     assert!(!s.cursor_trail, "DESK-28: the effects are opt-in");
     assert!(s.keybindings.is_empty());
+    assert_eq!(s.shell, "", "DESK-30: empty means the platform default");
 }
 
 // ---- the document ----------------------------------------------------------------------------------
@@ -67,6 +68,7 @@ fn the_document_is_pretty_printed_with_a_trailing_newline_and_a_stable_key_order
         "\"confirm_multiline_paste\"",
         "\"smooth_scroll\"",
         "\"cursor_trail\"",
+        "\"shell\"",
         "\"keybindings\"",
     ];
     let mut at = 0;
@@ -302,6 +304,91 @@ mod validation {
         assert!(many.keybindings.contains_key("action.0000"), "the first in key order are kept");
     }
 
+    // ---- the `shell` setting (DESK-30) ----
+
+    #[test]
+    fn shell_is_empty_by_default_and_written_as_an_empty_string() {
+        assert_eq!(Settings::default().shell, "");
+        assert!(Settings::default().to_json().contains("\"shell\": \"\""));
+    }
+
+    #[test]
+    fn a_document_without_shell_loads_clean_and_equals_the_default() {
+        let (s, status) = Settings::from_json(r#"{"font_size": 14}"#);
+        assert_eq!(status, LoadStatus::Clean);
+        assert_eq!(s, Settings::default());
+    }
+
+    #[test]
+    fn a_shell_program_loads_clean() {
+        for program in ["pwsh.exe", r"C:\Program Files\PowerShell\7\pwsh.exe", "/usr/bin/fish", "/opt/my shell/zsh"] {
+            let text = serde_json::json!({ "shell": program }).to_string();
+            let (s, status) = Settings::from_json(&text);
+            assert_eq!(status, LoadStatus::Clean, "{program}");
+            assert_eq!(s.shell, program);
+        }
+    }
+
+    #[test]
+    fn a_shell_over_4096_bytes_is_reset_with_one_note_and_costs_no_other_key() {
+        let long = "p".repeat(4097);
+        let text = serde_json::json!({ "shell": long, "font_size": 17, "theme": "Schiefer" }).to_string();
+        let (s, status) = Settings::from_json(&text);
+        assert_eq!(s.shell, "");
+        assert_eq!((s.font_size, s.theme.as_str()), (17, "Schiefer"), "the other keys keep their values");
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("shell"), "{notes:?}");
+        assert!(notes[0].len() < 300, "the note does not echo the value: {} bytes", notes[0].len());
+
+        // The bound itself is allowed.
+        let (s, status) = Settings::from_json(&serde_json::json!({ "shell": "p".repeat(4096) }).to_string());
+        assert_eq!((s.shell.len(), status), (4096, LoadStatus::Clean));
+    }
+
+    #[test]
+    fn a_shell_with_a_control_character_is_reset_with_one_note_and_costs_no_other_key() {
+        for bad in ["pw\u{0}sh", "pwsh\n", "a\u{1b}[31mb", "x\ty", "\u{7f}"] {
+            let text = serde_json::json!({ "shell": bad, "scrollback_lines": 500 }).to_string();
+            let (s, status) = Settings::from_json(&text);
+            assert_eq!(s.shell, "", "{bad:?}");
+            assert_eq!(s.scrollback_lines, 500, "{bad:?}");
+            let LoadStatus::Repaired(notes) = status else { panic!("{bad:?}: expected Repaired, got {status:?}") };
+            assert_eq!(notes.len(), 1, "{bad:?}: {notes:?}");
+        }
+    }
+
+    #[test]
+    fn a_shell_of_only_blanks_counts_as_empty() {
+        let (s, status) = Settings::from_json(r#"{"shell": "   \t "}"#);
+        assert_eq!(s.shell, "");
+        assert_eq!(status, LoadStatus::Clean, "blanks are the default, not a damage");
+    }
+
+    #[test]
+    fn a_shell_that_is_not_a_string_is_a_wrong_typed_key_that_costs_only_itself() {
+        let (s, status) = Settings::from_json(r#"{"shell": 5, "font_size": 16}"#);
+        assert_eq!(s.shell, "");
+        assert_eq!(s.font_size, 16);
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("shell"), "{notes:?}");
+    }
+
+    #[test]
+    fn set_value_bounds_the_shell_like_a_load_does() {
+        let mut s = Settings::default();
+        s.font_size = 17;
+        s.set_value("shell", json!("p".repeat(5000))).unwrap();
+        assert_eq!(s.shell, "", "too long is reset, not refused");
+        assert_eq!(s.font_size, 17);
+        s.set_value("shell", json!("a\u{0}b")).unwrap();
+        assert_eq!(s.shell, "");
+        s.set_value("shell", json!("/bin/sh")).unwrap();
+        s.set_value("shell", json!("  ")).unwrap();
+        assert_eq!(s.shell, "", "blanks put the default back");
+    }
+
     #[test]
     fn from_json_clamps_and_reports_repaired() {
         let (s, status) = Settings::from_json(r#"{"font_size": 99, "ui_scale": 10, "scrollback_lines": 1}"#);
@@ -441,12 +528,14 @@ mod validation {
         s.set_value("confirm_multiline_paste", json!(false)).unwrap();
         s.set_value("smooth_scroll", json!(true)).unwrap();
         s.set_value("cursor_trail", json!(true)).unwrap();
+        s.set_value("shell", json!(r"C:\Program Files\PowerShell\7\pwsh.exe")).unwrap();
         s.set_value("keybindings", json!({"pane.split_right": "Cmd+D", "pane.close": ""})).unwrap();
         assert_eq!(s.theme, "Papier");
         assert!(s.option_as_alt);
         assert_eq!((s.cursor_blink, s.motion, s.contrast), (Blink::Off, Motion::Reduce, Contrast::High));
         assert!(!s.confirm_multiline_paste);
         assert!(s.smooth_scroll && s.cursor_trail);
+        assert_eq!(s.shell, r"C:\Program Files\PowerShell\7\pwsh.exe");
         assert_eq!(s.keybindings.len(), 2);
     }
 
@@ -462,6 +551,9 @@ mod validation {
             ("option_as_alt", json!("yes")),
             ("smooth_scroll", json!(1)),
             ("cursor_trail", json!("on")),
+            ("shell", json!(5)),
+            ("shell", json!(["pwsh"])),
+            ("shell", json!(null)),
             ("cursor_blink", json!("sometimes")),
             ("keybindings", json!({"a": 5})),
             ("keybindings", json!(["a"])),

@@ -69,6 +69,7 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `confirm_multiline_paste` | boolean | | `true` | at once |
 | `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |
 | `cursor_trail` | boolean | | `false` | at once; fades a short trail behind a cursor that jumps (below) |
+| `shell` | string | one program: a path or a name, at most 4096 bytes, no control characters; empty means the platform default | `""` | for panes started afterwards; a running pane keeps its shell (below) |
 | `keybindings` | object | action id to chord text, at most 512 entries, each text at most 128 bytes | `{}` | at once |
 
 `option_as_alt` is off by default so that a Swiss layout types `|`, `[` and `{` with Option (D-12).
@@ -81,6 +82,19 @@ cutting; the core still scrolls by whole rows and a frame is drawn the moment it
 that moves by more than one cell leaves up to six fading ghost cells on the way. Neither effect runs on the alternate
 screen of a full-screen program (nothing scrolls there) or while the cursor is hidden or in the off phase of its blink,
 and nothing animates, so nothing is drawn, while the screen is idle.
+
+`shell` is the program a new pane starts, and only the program: one string that is never split at blanks and never run
+through another shell, so arguments cannot be given here. The arguments follow from the program's file name, without a
+`.exe` suffix and without case: `-l` (a login shell) for every shell on macOS and Linux and for `bash`, `zsh`, `fish`,
+`sh` and `nu` on Windows, none for `cmd` and for any other program, and for `pwsh` and `powershell` `-NoLogo` plus a
+prompt wrapper that reports the working directory, so that a split or a new tab opens where the pane is. `cmd.exe` has
+no such report: a split from a `cmd.exe` pane starts in your home directory. Empty means the default of the platform.
+On macOS and Linux that is `$SHELL` (when it is unset or empty, `/bin/zsh` on macOS and `/bin/sh` on Linux). On Windows
+it is, in this order, PowerShell 7 (`pwsh.exe` under `%ProgramFiles%\PowerShell\7` or in a directory of `PATH`), then
+Windows PowerShell, then `%ComSpec%`, then `cmd.exe`. Only a file that exists is taken, and only a directory that
+starts with a drive letter is searched. A program that cannot be started ends that pane at once, and with the last
+pane the app: put a working path back into `settings.json` (or delete the key) and start again. The settings dialog has
+no row for it; edit the file.
 
 <!-- example: settings.json -->
 ```json

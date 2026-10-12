@@ -63,6 +63,10 @@ pub const MAX_KEYBINDINGS: usize = 512;
 /// The longest action id or chord of a key binding override, in bytes.
 pub const MAX_KEYBINDING_TEXT: usize = 128;
 
+/// The longest `shell`, in bytes. A Windows path is at most about 32 000 characters in theory and a few hundred in
+/// practice; this is far above any real one and keeps a hostile file from filling the settings.
+pub const MAX_SHELL_BYTES: usize = 4096;
+
 /// How much of a name from outside appears in a message.
 const SHOWN: usize = 40;
 
@@ -125,6 +129,9 @@ pub struct Settings {
     /// Draw a short fading trail behind a cursor that jumps (DESK-28). Off by default, and never while motion is
     /// reduced.
     pub cursor_trail: bool,
+    /// The program a new pane starts: one string, never split and never run through another shell. Empty means the
+    /// platform default of [`crate::platform::shell_launch`]. It applies to panes started afterwards.
+    pub shell: String,
     /// Overrides of the default key bindings: action id to chord. Validated by the key binding resolver.
     pub keybindings: BTreeMap<String, String>,
 }
@@ -144,6 +151,7 @@ impl Default for Settings {
             confirm_multiline_paste: true,
             smooth_scroll: false,
             cursor_trail: false,
+            shell: String::new(),
             keybindings: BTreeMap::new(),
         }
     }
@@ -216,9 +224,9 @@ impl Settings {
 
     /// Bring every value into its range and report one note per change.
     ///
-    /// Numbers are clamped, a theme name that cannot be a theme name becomes aubergine, and the key binding table
-    /// is bounded. A well formed theme name that no theme has is kept: user themes are only known to the
-    /// [`ThemeRegistry`], and a theme file that is missing for a moment should not rewrite the choice. Use
+    /// Numbers are clamped, a theme name that cannot be a theme name becomes aubergine, `shell` is bounded, and the
+    /// key binding table is bounded. A well formed theme name that no theme has is kept: user themes are only known
+    /// to the [`ThemeRegistry`], and a theme file that is missing for a moment should not rewrite the choice. Use
     /// [`Settings::sanitise_theme`] where the registry is at hand.
     pub fn sanitise(&mut self) -> Vec<String> {
         let mut notes = Vec::new();
@@ -233,6 +241,18 @@ impl Settings {
         clamp("font_size", &mut self.font_size, FONT_SIZE, &mut notes);
         clamp("ui_scale", &mut self.ui_scale, UI_SCALE, &mut notes);
         clamp("scrollback_lines", &mut self.scrollback_lines, SCROLLBACK_LINES, &mut notes);
+
+        // Blanks are no program: they mean the default and cost no note. A value that is too long or holds a control
+        // character (NUL included) cannot be a program path a person typed; it is reset, and nothing else with it.
+        if self.shell.trim().is_empty() {
+            self.shell.clear();
+        } else if self.shell.len() > MAX_SHELL_BYTES || self.shell.chars().any(char::is_control) {
+            notes.push(format!(
+                "shell is longer than {MAX_SHELL_BYTES} bytes or holds a control character; the platform default \
+                 is used"
+            ));
+            self.shell.clear();
+        }
 
         let before = self.keybindings.len();
         self.keybindings.retain(|action, chord| {

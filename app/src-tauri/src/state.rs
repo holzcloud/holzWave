@@ -23,6 +23,7 @@ use holzwave_core::layout::{
 };
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
+use holzwave_core::platform::{Os, ShellLaunch, shell_launch};
 use holzwave_core::pty::process_cwd;
 use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
@@ -435,23 +436,41 @@ pub enum Released {
 
 /// The program a pane runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShellSpec {
-    pub program: String,
-    pub args: Vec<String>,
+pub enum ShellSpec {
+    /// The shell of the platform and the `shell` setting, asked of [`shell_launch`] each time a pane starts, so a
+    /// change of the setting reaches the panes started afterwards.
+    System,
+    /// One program with its arguments, whatever the platform and the setting say. What the tests inject.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fixed { program: String, args: Vec<String> },
 }
 
 impl ShellSpec {
     #[cfg(test)]
     pub fn new(program: impl Into<String>, args: &[&str]) -> Self {
-        Self { program: program.into(), args: args.iter().map(|a| (*a).to_owned()).collect() }
+        Self::Fixed { program: program.into(), args: args.iter().map(|a| (*a).to_owned()).collect() }
+    }
+
+    /// The program and arguments of a pane's shell. `configured` is the `shell` setting; `os`, `env` and `exists`
+    /// are the facts [`shell_launch`] decides from, passed in so that every platform is tested on any host.
+    fn launch(
+        &self,
+        configured: &str,
+        os: Os,
+        env: &dyn Fn(&str) -> Option<String>,
+        exists: &dyn Fn(&str) -> bool,
+    ) -> ShellLaunch {
+        match self {
+            Self::System => shell_launch(os, configured, env, exists),
+            Self::Fixed { program, args } => ShellLaunch { program: program.clone(), args: args.clone() },
+        }
     }
 }
 
 impl Default for ShellSpec {
-    /// The user's login shell: `$SHELL -l`, `/bin/zsh` when it is not set.
+    /// The system shell: `$SHELL -l` on macOS and Linux, PowerShell or cmd on Windows, or the `shell` setting.
     fn default() -> Self {
-        let program = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
-        Self { program, args: vec!["-l".into()] }
+        Self::System
     }
 }
 
@@ -1431,7 +1450,14 @@ impl AppCore {
     /// working directory is decided by the caller.
     fn pane_spec(&self, cols: u16, rows: u16, cell: (u32, u32)) -> PaneSpec {
         let cfg = lock(&self.config);
-        let mut spec = PaneSpec::new(self.shell.program.clone(), cols, rows).args(self.shell.args.clone());
+        // The one place that reads the process environment and the file system for the shell's sake.
+        let launch = self.shell.launch(
+            &cfg.settings.shell,
+            Os::current(),
+            &|key| std::env::var(key).ok(),
+            &|path| Path::new(path).is_file(),
+        );
+        let mut spec = PaneSpec::new(launch.program, cols, rows).args(launch.args);
         spec.cell_px = cell;
         spec.scrollback = cfg.settings.scrollback_lines as usize;
         spec.option_as_alt = cfg.settings.option_as_alt;
@@ -3560,6 +3586,126 @@ mod tests {
         assert!(!dir.0.join("settings.json.tmp").exists(), "the write went through a temporary file that is gone");
         assert_eq!(rec.settings_events(), vec![view.clone()]);
         assert_eq!(core.get_settings(), view);
+    }
+
+    // ---- the shell a pane starts (DESK-30, DESK-31) -----------------------------------------------------------------
+
+    /// An environment and a file system made of lists, so no case reads the host.
+    fn facts<'a>(
+        env: &'a [(&'a str, &'a str)],
+        files: &'a [&'a str],
+    ) -> (impl Fn(&str) -> Option<String> + 'a, impl Fn(&str) -> bool + 'a) {
+        (
+            move |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_owned()),
+            move |path: &str| files.contains(&path),
+        )
+    }
+
+    fn launch_of(
+        spec: &ShellSpec,
+        configured: &str,
+        os: Os,
+        env: &[(&str, &str)],
+        files: &[&str],
+    ) -> (String, Vec<String>) {
+        let (env, exists) = facts(env, files);
+        let launch = spec.launch(configured, os, &env, &exists);
+        (launch.program, launch.args)
+    }
+
+    #[test]
+    fn the_system_shell_is_what_the_platform_names_on_every_os() {
+        let system = ShellSpec::default();
+        let login = vec!["-l".to_owned()];
+
+        let linux = launch_of(&system, "", Os::Linux, &[("SHELL", "/usr/bin/fish")], &[]);
+        assert_eq!(linux, ("/usr/bin/fish".to_owned(), login.clone()));
+        assert_eq!(launch_of(&system, "", Os::Linux, &[], &[]), ("/bin/sh".to_owned(), login.clone()), "no $SHELL");
+        assert_eq!(launch_of(&system, "", Os::Macos, &[], &[]), ("/bin/zsh".to_owned(), login.clone()));
+        assert_eq!(launch_of(&system, "", Os::Macos, &[("SHELL", "")], &[]).0, "/bin/zsh", "an empty $SHELL is unset");
+
+        let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let env = [("ProgramFiles", r"C:\Program Files"), ("SystemRoot", r"C:\Windows")];
+        let (program, args) = launch_of(&system, "", Os::Windows, &env, &[pwsh]);
+        assert_eq!(program, pwsh, "pwsh 7 first");
+        assert_eq!(args.first().map(String::as_str), Some("-NoLogo"));
+        assert!(args.iter().any(|a| a == "-EncodedCommand"), "PowerShell gets the prompt integration: {args:?}");
+
+        let windows_powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+        let (program, args) = launch_of(&system, "", Os::Windows, &env, &[windows_powershell]);
+        assert_eq!(program, windows_powershell, "then Windows PowerShell");
+        assert!(args.iter().any(|a| a == "-EncodedCommand"), "{args:?}");
+
+        let (program, args) = launch_of(&system, "", Os::Windows, &[("ComSpec", r"C:\Windows\System32\cmd.exe")], &[]);
+        assert_eq!(program, r"C:\Windows\System32\cmd.exe", "then cmd");
+        assert!(args.is_empty(), "cmd.exe gets no arguments: {args:?}");
+    }
+
+    #[test]
+    fn the_shell_setting_replaces_the_platform_default_and_the_arguments_follow_its_name() {
+        let system = ShellSpec::default();
+        let env = [("SHELL", "/bin/zsh")];
+        let fish = launch_of(&system, "/usr/bin/fish", Os::Linux, &env, &[]);
+        assert_eq!(fish, ("/usr/bin/fish".to_owned(), vec!["-l".to_owned()]));
+        assert_eq!(launch_of(&system, "/opt/homebrew/bin/nu", Os::Macos, &env, &[]).0, "/opt/homebrew/bin/nu");
+
+        let (program, args) = launch_of(&system, r"C:\Windows\System32\cmd.exe", Os::Windows, &[], &[]);
+        assert_eq!(program, r"C:\Windows\System32\cmd.exe");
+        assert!(args.is_empty(), "{args:?}");
+        let (_, args) = launch_of(&system, r"D:\Tools\PWSH.EXE", Os::Windows, &[], &[]);
+        assert!(args.iter().any(|a| a == "-EncodedCommand"), "the stem decides, without case: {args:?}");
+        let (program, args) = launch_of(&system, r"C:\Program Files\Git\bin\bash.exe", Os::Windows, &[], &[]);
+        assert_eq!((program.as_str(), args), (r"C:\Program Files\Git\bin\bash.exe", vec!["-l".to_owned()]));
+        // One program, never split: a space or a quote stays inside the one string.
+        let (program, _) = launch_of(&system, "/bin/sh -c 'x; rm -rf ~'", Os::Linux, &env, &[]);
+        assert_eq!(program, "/bin/sh -c 'x; rm -rf ~'");
+    }
+
+    #[test]
+    fn a_fixed_shell_ignores_the_platform_and_the_setting() {
+        let fixed = ShellSpec::new("/bin/cat", &["-u"]);
+        for os in [Os::Macos, Os::Windows, Os::Linux] {
+            let launch = launch_of(&fixed, "/usr/bin/fish", os, &[("SHELL", "/bin/zsh")], &[]);
+            assert_eq!(launch, ("/bin/cat".to_owned(), vec!["-u".to_owned()]), "{os:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pane_spec_follows_the_shell_setting_for_panes_started_afterwards() {
+        let dir = Scratch::new("shell-setting");
+        let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+        dir.attach(&core);
+        let before = core.pane_spec(80, 24, (9, 18));
+        assert_eq!(before.args, ["-l"]);
+
+        core.set_setting("shell", json!("/bin/sh")).expect("a string is accepted");
+        let after = core.pane_spec(80, 24, (9, 18));
+
+        assert_eq!((after.program.as_str(), after.args.as_slice()), ("/bin/sh", ["-l".to_owned()].as_slice()));
+        assert_eq!(core.get_settings().settings.shell, "/bin/sh");
+        assert_ne!(before.program, "/bin/sh", "a spec made earlier keeps its shell");
+        core.set_setting("shell", json!("")).expect("empty is the default again");
+        assert_eq!(core.pane_spec(80, 24, (9, 18)).program, before.program);
+        assert!(core.set_setting("shell", json!(5)).is_err(), "another type is refused");
+        assert_eq!(core.get_settings().settings.shell, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_that_cannot_start_ends_the_pane_without_a_crash() {
+        // T-2.2-22: the program is never run through another shell, so a missing file is an error of the spawn.
+        let dir = Scratch::new("shell-missing");
+        let rec = Arc::new(Recorder::default());
+        let core = AppCore::new(dir.0.clone(), rec.clone(), ShellSpec::default());
+        dir.attach(&core);
+        core.set_setting("shell", json!("/nonexistent/holzwave-no-shell")).expect("accepted: it is only a string");
+        let pane = only_pane(&core);
+
+        let result = core.start_pane(pane, 80, 24, 0, 0);
+
+        assert!(result.is_err(), "{result:?}");
+        assert!(wait_until(WAIT, || rec.exit_count() == 1), "the failed start is the pane's existing end");
     }
 
     #[test]
