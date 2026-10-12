@@ -3516,6 +3516,8 @@ mod tests {
 
         let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
         let view = core.get_settings();
+        // The default of the host's table: it is Cmd+W on macOS and something else elsewhere.
+        let default_close = Keybindings::default().chord_of("pane.close").map(|chord| chord.to_string());
 
         assert_eq!(view.settings.font_size, 40, "the number is clamped");
         let said = |needle: &str| view.warnings.iter().any(|w| w.contains(needle));
@@ -3524,7 +3526,8 @@ mod tests {
         assert!(said("pane.close"), "the refused chord is named: {:?}", view.warnings);
         assert!(said("no.such.action"), "{:?}", view.warnings);
         let close = view.keybindings.iter().find(|r| r.action == "pane.close").expect("row");
-        assert_eq!(close.chord.as_deref(), Some("Cmd+W"), "the refused override leaves the default");
+        assert!(default_close.is_some());
+        assert_eq!(close.chord, default_close, "the refused override leaves the default");
     }
 
     #[test]
@@ -3679,12 +3682,13 @@ mod tests {
         let before = core.pane_spec(80, 24, (9, 18));
         assert_eq!(before.args, ["-l"]);
 
-        core.set_setting("shell", json!("/bin/sh")).expect("a string is accepted");
+        // Not /bin/sh: that is $SHELL in a Linux container, and the point is that the spec changes.
+        core.set_setting("shell", json!("/bin/cat")).expect("a string is accepted");
         let after = core.pane_spec(80, 24, (9, 18));
 
-        assert_eq!((after.program.as_str(), after.args.as_slice()), ("/bin/sh", ["-l".to_owned()].as_slice()));
-        assert_eq!(core.get_settings().settings.shell, "/bin/sh");
-        assert_ne!(before.program, "/bin/sh", "a spec made earlier keeps its shell");
+        assert_eq!((after.program.as_str(), after.args.as_slice()), ("/bin/cat", ["-l".to_owned()].as_slice()));
+        assert_eq!(core.get_settings().settings.shell, "/bin/cat");
+        assert_ne!(before.program, "/bin/cat", "a spec made earlier keeps its shell");
         core.set_setting("shell", json!("")).expect("empty is the default again");
         assert_eq!(core.pane_spec(80, 24, (9, 18)).program, before.program);
         assert!(core.set_setting("shell", json!(5)).is_err(), "another type is refused");
@@ -3773,6 +3777,12 @@ mod tests {
     #[test]
     fn keybindings_are_validated_by_the_resolver_and_the_view_reflects_the_result() {
         let (core, rec, dir) = core("/bin/cat", &[]);
+        // The default of the host's table: it is Cmd+T on macOS and something else elsewhere.
+        let default_of = |view: &SettingsView, action: &str| {
+            view.keybindings.iter().find(|r| r.action == action).and_then(|r| r.chord.clone())
+        };
+        let new_tab = default_of(&core.get_settings(), "tab.new");
+        assert!(new_tab.is_some());
 
         let view = core
             .set_setting("keybindings", json!({"pane.close": "Cmd+Shift+W", "tab.new": "x", "pane.split_right": ""}))
@@ -3781,7 +3791,7 @@ mod tests {
         let row = |action: &str| view.keybindings.iter().find(|r| r.action == action).cloned().expect("row");
         assert_eq!(row("pane.close").chord.as_deref(), Some("Cmd+Shift+W"));
         assert!(!row("pane.close").is_default);
-        assert_eq!(row("tab.new").chord.as_deref(), Some("Cmd+T"), "a plain key is refused, the default stays");
+        assert_eq!(row("tab.new").chord, new_tab, "a plain key is refused, the default stays");
         assert_eq!(row("pane.split_right").chord, None, "the empty chord unbinds");
         assert!(view.warnings.iter().any(|w| w.contains("tab.new")), "{:?}", view.warnings);
         assert_eq!(view.settings.keybindings.len(), 3, "the settings keep what the user typed");
@@ -5881,7 +5891,8 @@ mod protocol {
         let settings_view = SettingsView::new(
             &Settings::default(),
             &ThemeRegistry::builtin(),
-            &Keybindings::default(),
+            // By name, not the host's table: the golden is what the Mac produces and must read the same on every host.
+            &Keybindings::default_for("macos"),
             vec!["settings.json: font_size 9999 is outside 8..=40; 40 is used".into()],
         );
         let events = [
