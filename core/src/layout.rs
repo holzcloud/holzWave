@@ -116,6 +116,17 @@ fn retain_tracking<T>(items: Vec<T>, active: usize, mut keep: impl FnMut(&mut T)
     (out, new_active)
 }
 
+/// Where on a pane another pane was dropped: a side splits it there, the middle swaps the two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+}
+
 /// What `Layout::close_pane` did. The three cases need different reactions: an unknown id is a stale event
 /// and is ignored, the last pane ends the app, anything else changed the layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +220,34 @@ impl Node {
             Node::Pane(_) => false,
             Node::Split { a, b, .. } => {
                 a.split_pane(pane, axis, split_id, new_pane) || b.split_pane(pane, axis, split_id, new_pane)
+            }
+        }
+    }
+
+    /// Like `split_pane`, but the new pane is `moved` and sits first (`before`) or last in the split.
+    fn split_with(&mut self, target: PaneId, axis: Axis, split_id: SplitId, moved: PaneId, before: bool) -> bool {
+        match self {
+            Node::Pane(p) if *p == target => {
+                let (old, new) = (Box::new(Node::Pane(target)), Box::new(Node::Pane(moved)));
+                let (a, b) = if before { (new, old) } else { (old, new) };
+                *self = Node::Split { id: split_id, axis, ratio: 0.5, a, b };
+                true
+            }
+            Node::Pane(_) => false,
+            Node::Split { a, b, .. } => {
+                a.split_with(target, axis, split_id, moved, before) || b.split_with(target, axis, split_id, moved, before)
+            }
+        }
+    }
+
+    /// Give the leaf `from` the id `to`.
+    fn rename_leaf(&mut self, from: PaneId, to: PaneId) {
+        match self {
+            Node::Pane(p) if *p == from => *p = to,
+            Node::Pane(_) => {}
+            Node::Split { a, b, .. } => {
+                a.rename_leaf(from, to);
+                b.rename_leaf(from, to);
             }
         }
     }
@@ -627,20 +666,114 @@ impl Layout {
         true
     }
 
-    /// Close a pane everywhere. Empty tabs and empty workspaces disappear; the last pane of the last
-    /// workspace cannot be closed. An id that is in no tab is `Unknown`, which is checked first.
-    ///
-    /// What is shown stays shown: when a tab or workspace before the shown one disappears, the active index
-    /// moves with it and keeps pointing at the same one, so a shell that ends in the background changes
-    /// nothing the user looks at. Only when the shown one itself disappears is the one that followed it shown
-    /// (the new last one when it was the last).
-    pub fn close_pane(&mut self, pane: PaneId) -> CloseOutcome {
-        if !self.workspaces.iter().any(|w| w.tabs.iter().any(|t| t.root.contains(pane))) {
-            return CloseOutcome::Unknown;
+    /// Where a pane is: `(workspace index, tab index)`.
+    fn locate(&self, pane: PaneId) -> Option<(usize, usize)> {
+        self.workspaces.iter().enumerate().find_map(|(wi, w)| w.tabs.iter().position(|t| t.root.contains(pane)).map(|ti| (wi, ti)))
+    }
+
+    /// Drop `pane` on `target`: on a side of it the target is split there and the pane takes that half, on the
+    /// middle the two swap places. Works inside a tab and across tabs and workspaces; the pane keeps its id (its
+    /// shell keeps running, its name stays). The moved pane gets focus and is shown. Nothing changes, and false
+    /// comes back, for an unknown or identical id, and when the result would pass the pane or depth limits.
+    pub fn move_pane(&mut self, pane: PaneId, target: PaneId, edge: Edge) -> bool {
+        if pane == target || self.locate(pane).is_none() || self.locate(target).is_none() {
+            return false;
         }
-        if self.all_panes().len() <= 1 {
-            return CloseOutcome::LastPane;
+        if edge == Edge::Center {
+            return self.swap_panes(pane, target);
         }
+        let mut next = self.clone();
+        if !next.detach_pane(pane) {
+            return false;
+        }
+        let Some((wi, ti)) = next.locate(target) else { return false };
+        let (axis, before) = match edge {
+            Edge::Left => (Axis::Row, true),
+            Edge::Right => (Axis::Row, false),
+            Edge::Top => (Axis::Column, true),
+            _ => (Axis::Column, false),
+        };
+        let split_id = next.id();
+        let tab = &mut next.workspaces[wi].tabs[ti];
+        if tab.panes().len() >= MAX_PANES_PER_TAB || !tab.root.split_with(target, axis, split_id, pane, before) {
+            return false;
+        }
+        if tab.root.depth() > MAX_SPLIT_DEPTH {
+            return false;
+        }
+        next.focus_pane(pane);
+        *self = next;
+        true
+    }
+
+    /// Swap the places of two panes, in one tab or in two. Both keep their ids and names; each tab's focus stays
+    /// on the same place, and the pane `a` is focused and shown afterwards.
+    pub fn swap_panes(&mut self, a: PaneId, b: PaneId) -> bool {
+        if a == b || self.locate(a).is_none() || self.locate(b).is_none() {
+            return false;
+        }
+        for w in &mut self.workspaces {
+            for t in &mut w.tabs {
+                // A temporary id outside every range in use, so the two renames cannot meet in the middle.
+                t.root.rename_leaf(a, u64::MAX);
+                t.root.rename_leaf(b, a);
+                t.root.rename_leaf(u64::MAX, b);
+                if t.focus == a {
+                    t.focus = b;
+                } else if t.focus == b {
+                    t.focus = a;
+                }
+            }
+        }
+        self.focus_pane(a);
+        true
+    }
+
+    /// Move the tab at `from` to the place `to` in the shown workspace (the other tabs shift); the moved tab stays the
+    /// shown one if it was shown, and the shown tab stays shown otherwise. False when an index is out of range.
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        let w = self.workspace_mut();
+        if from >= w.tabs.len() || to >= w.tabs.len() {
+            return false;
+        }
+        if from == to {
+            return true;
+        }
+        let shown = w.tabs[w.active].id;
+        let tab = w.tabs.remove(from);
+        w.tabs.insert(to, tab);
+        w.active = w.tabs.iter().position(|t| t.id == shown).unwrap_or(0);
+        true
+    }
+
+    /// Move the tab at `tab` of the shown workspace to the end of workspace `to`, and show it there. A workspace
+    /// this empties disappears. False for an index out of range or the shown workspace itself.
+    pub fn move_tab_to_workspace(&mut self, tab: usize, to: usize) -> bool {
+        if to >= self.workspaces.len() || to == self.active || tab >= self.workspace().tabs.len() {
+            return false;
+        }
+        let target_id = self.workspaces[to].id;
+        let moved = self.workspace_mut().tabs.remove(tab);
+        let source = self.active;
+        {
+            let w = &mut self.workspaces[source];
+            w.active = w.active.min(w.tabs.len().saturating_sub(1));
+        }
+        if self.workspaces[source].tabs.is_empty() {
+            self.workspaces.remove(source);
+        }
+        let to = self.workspaces.iter().position(|w| w.id == target_id).unwrap_or(0);
+        let w = &mut self.workspaces[to];
+        w.tabs.push(moved);
+        w.active = w.tabs.len() - 1;
+        self.active = to;
+        true
+    }
+
+    /// Take `pane` out of its tab; its sibling takes its place. A tab (or workspace) that this empties disappears,
+    /// with the active indexes kept on what was shown. The pane's name is kept: the caller closes or re-inserts it.
+    /// False when no tab holds the pane.
+    fn detach_pane(&mut self, pane: PaneId) -> bool {
         for wi in 0..self.workspaces.len() {
             let w = &mut self.workspaces[wi];
             let Some(ti) = w.tabs.iter().position(|t| t.root.contains(pane)) else { continue };
@@ -669,6 +802,26 @@ impl Layout {
                     }
                 }
             }
+            return true;
+        }
+        false
+    }
+
+    /// Close a pane everywhere. Empty tabs and empty workspaces disappear; the last pane of the last
+    /// workspace cannot be closed. An id that is in no tab is `Unknown`, which is checked first.
+    ///
+    /// What is shown stays shown: when a tab or workspace before the shown one disappears, the active index
+    /// moves with it and keeps pointing at the same one, so a shell that ends in the background changes
+    /// nothing the user looks at. Only when the shown one itself disappears is the one that followed it shown
+    /// (the new last one when it was the last).
+    pub fn close_pane(&mut self, pane: PaneId) -> CloseOutcome {
+        if !self.workspaces.iter().any(|w| w.tabs.iter().any(|t| t.root.contains(pane))) {
+            return CloseOutcome::Unknown;
+        }
+        if self.all_panes().len() <= 1 {
+            return CloseOutcome::LastPane;
+        }
+        if self.detach_pane(pane) {
             self.pane_names.remove(&pane);
             return CloseOutcome::Closed;
         }
@@ -1644,5 +1797,159 @@ mod tests {
         assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
         assert_eq!(fixed.pane_name(first), Some("badname"));
         assert_eq!(fixed.pane_name(9999), None, "a name of a pane that is not there is dropped");
+    }
+
+    fn sorted(mut v: Vec<PaneId>) -> Vec<PaneId> {
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn a_pane_dropped_on_a_side_splits_the_target_there() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        let c = l.split_focused(Axis::Row).unwrap();
+        // a | (b | c): drop a on the bottom of c.
+        assert!(l.move_pane(a, c, Edge::Bottom));
+        assert_eq!(sorted(l.tab().panes()), sorted(vec![a, b, c]));
+        assert_eq!(l.tab().focus, a, "the moved pane is focused");
+        let (rects, _) = l.tab().geometry();
+        let rect = |p| rects.iter().find(|(q, _)| *q == p).map(|(_, r)| *r).unwrap();
+        assert!(rect(a).y > rect(c).y, "a sits below c");
+        assert!((rect(a).x - rect(c).x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn left_and_top_put_the_moved_pane_first() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        assert!(l.move_pane(b, a, Edge::Left));
+        assert_eq!(l.tab().panes(), vec![b, a]);
+        assert!(l.move_pane(b, a, Edge::Top));
+        let (rects, _) = l.tab().geometry();
+        let y = |p| rects.iter().find(|(q, _)| *q == p).map(|(_, r)| r.y).unwrap();
+        assert!(y(b) < y(a));
+    }
+
+    #[test]
+    fn the_middle_swaps_two_panes_and_keeps_names_and_ids() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        l.rename_pane(a, "db");
+        assert!(l.move_pane(a, b, Edge::Center));
+        assert_eq!(l.tab().panes(), vec![b, a]);
+        assert_eq!(l.pane_name(a), Some("db"));
+        assert_eq!(l.tab().focus, a);
+    }
+
+    #[test]
+    fn a_pane_moves_across_tabs_and_an_emptied_tab_goes() {
+        let (mut l, a) = Layout::new();
+        let b = l.new_tab().unwrap();
+        l.rename_pane(b, "web");
+        assert_eq!(l.workspace().tabs.len(), 2);
+        assert!(l.move_pane(b, a, Edge::Right));
+        assert_eq!(l.workspace().tabs.len(), 1, "the tab b left is empty and gone");
+        assert_eq!(l.tab().panes(), vec![a, b]);
+        assert_eq!(l.pane_name(b), Some("web"), "the name follows the pane");
+        assert_eq!(l.tab().focus, b);
+    }
+
+    #[test]
+    fn a_pane_moves_to_another_workspace_and_the_shown_one_follows_it() {
+        let (mut l, a) = Layout::new();
+        let w = l.new_workspace("work").unwrap();
+        l.select_workspace(0);
+        assert!(l.move_pane(a, w, Edge::Left));
+        assert_eq!(l.workspaces.len(), 1, "workspace 0 had only a and is gone");
+        assert_eq!(l.active, 0);
+        assert_eq!(l.tab().panes(), vec![a, w]);
+    }
+
+    #[test]
+    fn swapping_across_tabs_exchanges_the_places() {
+        let (mut l, a) = Layout::new();
+        let b = l.new_tab().unwrap();
+        assert!(l.swap_panes(a, b));
+        assert_eq!(l.workspace().tabs[0].root, Node::Pane(b));
+        assert_eq!(l.workspace().tabs[1].root, Node::Pane(a));
+        assert_eq!(l.workspace().tabs[0].focus, b);
+    }
+
+    #[test]
+    fn bad_moves_change_nothing() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        let before = l.clone();
+        assert!(!l.move_pane(a, a, Edge::Left), "onto itself");
+        assert!(!l.move_pane(a, 999, Edge::Left), "unknown target");
+        assert!(!l.move_pane(999, b, Edge::Left), "unknown pane");
+        assert!(!l.swap_panes(a, a));
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn a_move_that_passes_the_depth_limit_is_refused() {
+        let (mut l, _) = Layout::new();
+        let mut deepest = 0;
+        while let Some(p) = l.split_focused(Axis::Row) {
+            deepest = p;
+        }
+        let loose = l.new_tab().unwrap();
+        let before = l.clone();
+        assert!(!l.move_pane(loose, deepest, Edge::Right), "the target is as deep as a pane may be");
+        assert_eq!(l, before, "a refused move leaves everything as it was, the loose tab included");
+    }
+
+    #[test]
+    fn moves_never_lose_or_double_a_pane() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        let c = l.split_focused(Axis::Column).unwrap();
+        let d = l.new_tab().unwrap();
+        let all = sorted(vec![a, b, c, d]);
+        let edges = [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom, Edge::Center];
+        for (i, edge) in edges.iter().cycle().take(40).enumerate() {
+            let (from, to) = (all[i % 4], all[(i * 3 + 1) % 4]);
+            l.move_pane(from, to, *edge);
+            assert_eq!(sorted(l.all_panes()), all, "after move {i}");
+            let mut copy = l.clone();
+            assert!(copy.validate().is_empty(), "the layout stays valid after move {i}");
+        }
+    }
+
+    #[test]
+    fn a_tab_moves_within_the_workspace_and_the_shown_tab_stays_shown() {
+        let (mut l, a) = Layout::new();
+        let b = l.new_tab().unwrap();
+        let c = l.new_tab().unwrap();
+        l.select_tab(0);
+        assert!(l.move_tab(0, 2));
+        let order: Vec<_> = l.workspace().tabs.iter().map(|t| t.focus).collect();
+        assert_eq!(order, vec![b, c, a]);
+        assert_eq!(l.tab().focus, a, "the moved tab was the shown one");
+        assert!(l.move_tab(0, 1));
+        assert_eq!(l.tab().focus, a, "the shown tab stays shown when others move around it");
+        assert!(!l.move_tab(0, 9));
+    }
+
+    #[test]
+    fn a_tab_moves_to_another_workspace() {
+        let (mut l, a) = Layout::new();
+        let b = l.new_tab().unwrap();
+        let w = l.new_workspace("work").unwrap();
+        l.select_workspace(0);
+        assert!(l.move_tab_to_workspace(1, 1));
+        assert_eq!(l.workspaces[0].tabs.len(), 1);
+        assert_eq!(l.workspaces[1].tabs.len(), 2);
+        assert_eq!(l.active, 1);
+        assert_eq!(l.tab().focus, b);
+        assert_eq!(sorted(l.all_panes()), sorted(vec![a, b, w]));
+        assert!(!l.move_tab_to_workspace(0, 1), "not onto the shown workspace");
+        // The only tab of workspace 0 leaves: the workspace goes and the target keeps its identity.
+        l.select_workspace(0);
+        assert!(l.move_tab_to_workspace(0, 1));
+        assert_eq!(l.workspaces.len(), 1);
+        assert_eq!(l.workspace().tabs.len(), 3);
     }
 }
