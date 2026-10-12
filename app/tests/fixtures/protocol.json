@@ -62,6 +62,19 @@
       "y",
       "mods"
     ],
+    "move_pane": [
+      "pane",
+      "target",
+      "edge"
+    ],
+    "move_tab": [
+      "from",
+      "to"
+    ],
+    "move_tab_to_workspace": [
+      "tab",
+      "workspace"
+    ],
     "new_tab": [],
     "new_workspace": [
       "name"

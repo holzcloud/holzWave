@@ -16,7 +16,7 @@ use holzwave_core::engine::{
     SearchState, SelectOp, WheelEvent,
 };
 use holzwave_core::keybindings::Keybindings;
-use holzwave_core::layout::{Axis, CloseOutcome, Divider, Layout, LoadStatus, PaneId, Rect, SplitId};
+use holzwave_core::layout::{Axis, CloseOutcome, Divider, Edge, Layout, LoadStatus, PaneId, Rect, SplitId};
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
 use holzwave_core::pty::process_cwd;
@@ -599,6 +599,28 @@ impl AppCore {
     pub fn rename_workspace(&self, index: usize, name: &str) -> View {
         self.change(|l| {
             l.rename_workspace(index, name);
+        })
+    }
+
+    /// Drop `pane` on `target`: a side splits the target there, the middle swaps the two (DESK-20). Any id the layout
+    /// does not know, and any move over a limit, changes nothing.
+    pub fn move_pane(&self, pane: PaneId, target: PaneId, edge: Edge) -> View {
+        self.change(|l| {
+            l.move_pane(pane, target, edge);
+        })
+    }
+
+    /// Move the tab at `from` to the place `to` in the shown workspace.
+    pub fn move_tab(&self, from: usize, to: usize) -> View {
+        self.change(|l| {
+            l.move_tab(from, to);
+        })
+    }
+
+    /// Move the tab at `tab` of the shown workspace to the end of workspace `workspace`.
+    pub fn move_tab_to_workspace(&self, tab: usize, workspace: usize) -> View {
+        self.change(|l| {
+            l.move_tab_to_workspace(tab, workspace);
         })
     }
 
@@ -1700,6 +1722,37 @@ mod tests {
         assert_eq!(view.workspaces.len(), 1);
         assert_eq!(view.tabs.len(), 1);
         assert_eq!(view.tabs[0].focus, view.focus, "the tab reports its focus pane");
+    }
+
+    #[test]
+    fn a_dropped_pane_moves_in_the_view_and_keeps_its_shell_and_name() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let first = core.view().focus;
+        let second = core.split(false).focus;
+        core.rename_pane(first, "db");
+
+        let view = core.move_pane(first, second, Edge::Bottom);
+
+        let mut ids: Vec<_> = view.panes.iter().map(|(p, _)| *p).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![first, second], "no pane is lost, none is started again");
+        assert_eq!(view.focus, first);
+        assert_eq!(view.pane_names, vec![(first, "db".to_string())]);
+        assert_eq!(core.move_pane(first, 9999, Edge::Left).focus, first, "an unknown target changes nothing");
+    }
+
+    #[test]
+    fn tabs_are_reordered_and_moved_to_a_workspace_through_the_core() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        core.new_tab();
+        core.new_workspace("work");
+        core.select_workspace(0);
+
+        let view = core.move_tab(0, 1);
+        assert_eq!(view.tabs.len(), 2);
+        let view = core.move_tab_to_workspace(0, 1);
+        assert_eq!(view.workspaces.len(), 2);
+        assert_eq!(view.tabs.len(), 2, "the shown workspace is now `work` with its own tab and the moved one");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use holzwave_core::engine::{
     CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode,
     SelectOp,
 };
-use holzwave_core::layout::{PaneId, SplitId};
+use holzwave_core::layout::{Edge, PaneId, SplitId};
 use holzwave_core::pane::EditAction;
 use holzwave_core::wire::SearchMsg;
 use serde::{Deserialize, Serialize};
@@ -426,6 +426,24 @@ pub fn rename_tab(core: State<Arc<AppCore>>, index: usize, name: String) -> View
 #[tauri::command(rename_all = "snake_case")]
 pub fn rename_workspace(core: State<Arc<AppCore>>, index: usize, name: String) -> View {
     core.rename_workspace(index, &name)
+}
+
+/// Drop a pane on the side or the middle of another (DESK-20). The core checks both ids and the limits.
+#[tauri::command(rename_all = "snake_case")]
+pub fn move_pane(core: State<Arc<AppCore>>, pane: PaneId, target: PaneId, edge: Edge) -> View {
+    core.move_pane(pane, target, edge)
+}
+
+/// Move a tab to another place in the shown workspace.
+#[tauri::command(rename_all = "snake_case")]
+pub fn move_tab(core: State<Arc<AppCore>>, from: usize, to: usize) -> View {
+    core.move_tab(from, to)
+}
+
+/// Move a tab of the shown workspace into another workspace.
+#[tauri::command(rename_all = "snake_case")]
+pub fn move_tab_to_workspace(core: State<Arc<AppCore>>, tab: usize, workspace: usize) -> View {
+    core.move_tab_to_workspace(tab, workspace)
 }
 
 #[tauri::command(rename_all = "snake_case")]
