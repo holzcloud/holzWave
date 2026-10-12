@@ -11,13 +11,13 @@
 [![Renderer](https://img.shields.io/badge/renderer-WebGL2-0E7C66?style=for-the-badge)](docs/architecture.md#8-rendering-and-input)
 [![Privacy](https://img.shields.io/badge/AI-only%20with%20consent-0E7C66?style=for-the-badge)](docs/architecture.md#10-security-model)
 [![License](https://img.shields.io/github/license/holzcloud/holzWave?style=for-the-badge&color=4B5563)](LICENSE)
-[![Website](https://img.shields.io/badge/website-holzcloud.ch-8D3F63?style=for-the-badge)](https://holzcloud.ch)
+[![Website](https://img.shields.io/badge/website-holzcloud.ch%2Fholzwave-8D3F63?style=for-the-badge)](https://holzcloud.ch/holzwave)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%99%A5-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/holzcloud)
 
 **holzWave** is a terminal emulator written from scratch in Rust, for macOS, Windows, Linux, iOS and Android.<br>
 Tiled panes, tabs and workspaces, SSH that reconnects, and settings that sync through your own Nextcloud.
 
-**[🌐 holzcloud.ch](https://holzcloud.ch)**
+**[🌐 holzcloud.ch/holzwave](https://holzcloud.ch/holzwave)**
 
 [Look](#-one-look-on-every-platform) · [Status](#-what-works-today) · [Build](#-build-from-source) · [How it is built](#-how-it-is-built) · [Roadmap](#%EF%B8%8F-roadmap) · [Docs](#-documentation) · [Credits](#-credits)
 
