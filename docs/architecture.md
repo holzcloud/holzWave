@@ -310,12 +310,47 @@ set of widget kinds. There is no arbitrary script execution.
 | | macOS | Windows | Linux | iOS | Android |
 |---|---|---|---|---|---|
 | Webview | WKWebView | WebView2 | WebKitGTK | WKWebView | System WebView |
-| Local shell | ✅ | ✅ (ConPTY) | ✅ | ❌ | ✅ |
+| Local shell | ✅ | written (ConPTY), not yet run | written, not yet run | ❌ | ✅ |
 | Keychain | Keychain | Credential Manager | Secret Service | Keychain | Keystore |
 | Apple AI | ✅ 26+ | – | – | later | – |
 
 Differences are confined to the shell crate and to implementations of the traits in section 4. The layout model and
 the frame protocol are identical everywhere; mobile shows one block per screen from the same `View`.
+
+### The platform seam (Phase 2.2)
+
+Windows and Linux are written and cross-checked from a Mac; **they have not been run on their own platform**, and the
+owner's run of [test-plan.md](test-plan.md) Part 4 decides whether they work. What exists, as built:
+
+- **One `Os` value, pure functions.** `core/src/platform.rs` holds every per-OS decision of the core as a function of an
+  `Os` and injected facts (environment, an `exists` closure), so each platform's rule is tested on any host: the default
+  shell and its arguments (`shell_launch`, `resolve_shell`), the UTF-8 locale, the exit-poll interval and the rename
+  retries. `child_env_on` does the same for the child's environment.
+- **The shell.** A new pane starts the program of the `shell` setting, else the platform default (macOS and Linux:
+  `$SHELL`; Windows: PowerShell 7, Windows PowerShell, `%ComSpec%`, `cmd.exe`). A setting that cannot be started falls back
+  to the default with one visible sentence. The app crate asks per pane start (`ShellSpec` in `state.rs`).
+- **Windows panes.** `core/src/winshell.rs` holds the constant PowerShell prompt wrapper (passed as base64
+  `-EncodedCommand`) that announces the directory with OSC 7, and the reader that accepts such a report only as a drive
+  path of this machine. A pane ends when its shell does even if the console host never closes the output (`PaneSpec.exit_poll`,
+  `try_wait` polled beside the reader). Settings files replace with a bounded retry on a sharing violation
+  (`persist::retry_on_sharing_violation`). `cmd.exe` has no directory report.
+- **Keys.** `Keybindings::default_for(os)` and the chord tables of `docs/config.md` per platform; AltGr is recognised
+  by the page and backed up by the core on Windows (`KeyEvent::from_dom_on`); the clipboard chords are fixed per OS.
+- **The shell of the window.** `app/src-tauri/src/state.rs` builds the platform launchers (`open_launch`,
+  `reveal_launch`, with the Windows refusal list for UNC and device paths), the host name and home directory;
+  `windows.rs` places new windows in the pointer's unit space at any display scale and knows that under Wayland the
+  pointer and the window position are unknown; `textscale.rs` reads the OS text size (Windows `reg.exe`, GNOME
+  `gsettings`) behind the `os_text_scale` command.
+- **Packaging.** `tauri.windows.conf.json` (NSIS only, per user, unsigned), `tauri.linux.conf.json` (deb, rpm, AppImage)
+  and the desktop template `app/src-tauri/linux/holzwave.desktop`; `app/src-tauri/tests/bundle.rs` pins them. The build
+  guides are [build-windows.md](build-windows.md) and [build-linux.md](build-linux.md); the deviations from macOS are in
+  [design.md](design.md) section 7.
+- **The cross-check ladder, from the Mac.** `scripts/cross-check.sh` compiles every test target of the core for
+  `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu` and the app for Windows (GNU ABI: Zig cannot build the MSVC
+  library on a Mac, so the MSVC build exists only on a Windows host). `scripts/linux-container-test.sh` runs the core and
+  app tests in an Ubuntu container, and `scripts/linux-container-bundle.sh` builds and inspects the deb and rpm there.
+  They prove that it compiles and that the Unix half passes on Linux; they do not prove a screen, an input method, a GPU
+  or ConPTY.
 
 ## 12. Quality strategy
 
@@ -362,6 +397,9 @@ All of it runs locally; GitHub builds only on request.
   the frontend. `libghostty-rs` is pinned by git revision.
 - Version `0.0.1-alpha1`, then `0.0.1-beta1`, then `0.0.1`. Alpha and beta are GitHub prereleases.
 - Local build and signing first; one GitHub build only when asked.
+- Windows builds an unsigned per-user NSIS installer, Linux a deb, an rpm and an AppImage, each on the owner's own machine
+  ([build-windows.md](build-windows.md), [build-linux.md](build-linux.md)); Zig is exactly 0.16.0 and `scripts/env.sh` and
+  `scripts/env.ps1` find it. No guide builds on GitHub, and no tag or release is made by them.
 
 ## 14. Decisions
 

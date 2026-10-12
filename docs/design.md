@@ -83,7 +83,7 @@ default.
 
 | Component | Rule |
 |---|---|
-| Window bar | traffic lights, workspace chips, tabs, version label right-aligned in mono |
+| Window bar | traffic lights (macOS; the native title bar sits above the bar elsewhere, section 7), workspace chips, tabs, version label right-aligned in mono |
 | Workspace chip / tab | text only; selected = rose wash and rose text, with an underline for non-colour cue |
 | Pane header | state dot, title, context (path, host) in mono, right-aligned |
 | Focus | 1 px rose ring plus a header cue; only shown when more than one pane exists |
@@ -109,11 +109,15 @@ while the app runs.
 | Motion | `prefers-reduced-motion` | no chrome transitions (root class `motion-reduce`); the terminal grid never moves |
 | Contrast | `prefers-contrast: more` and `forced-colors` | hairlines use `--hw-ink-3`, dim text uses `--hw-ink-2`, the focus line is 2 px, the shown status segment gets a 2 px outline (root class `contrast-high`); under forced colours the chrome uses system colours |
 | Cursor blink | none of its own: it follows reduced motion | a cursor the program asked to blink does so with a 530 ms phase, unless the setting is `off`, or `system` with reduced motion; the phase restarts on output and on every key |
-| UI scale | **none** | the user's `ui_scale` (75 to 200 %) and the font size actions; see below |
+| UI scale | **none on macOS**; Windows: the Text size setting; Linux: GNOME's `text-scaling-factor` (read by the shell, plan 02.2-09) | the user's `ui_scale` (75 to 200 %) times the OS factor, for the chrome only, and the font size actions; see below |
 
-The web view reports no OS text-size preference on macOS, so the scalable UI font is the user's own setting rather than
-an OS signal. Windows and Linux get theirs in Phase 2.2. The requirement DESK-24 says so in its wording; nothing in
-the page pretends otherwise.
+The web view reports no OS text-size preference on macOS, so there the scalable UI font is the user's own setting
+rather than an OS signal; the requirement DESK-24 says so in its wording, and nothing in the page pretends otherwise.
+On Windows and on GNOME the shell reads the OS text size (the `TextScaleFactor` registry value through `reg.exe`, and
+`text-scaling-factor` through `gsettings`), at start and when the window gains focus, and the page multiplies the user's
+`ui_scale` by it for the chrome only (tabs, bar, status line, dialogs; 75 to 300 % in all). The terminal's own text
+stays at `font_size`. Every other desktop, and every source that cannot be read, counts as 100 %. That this really
+follows the OS on a real Windows or GNOME desktop is test-plan rows W12 and L5; nothing here claims it has been seen.
 
 **Text on the accent fill.** `--hw-rose-deep` is a fill, and the text on it is `--hw-on-accent`: white or black,
 whichever measures the higher WCAG ratio against the theme's own `rose_deep` (5.05:1 on all three built-in themes,
@@ -164,3 +168,28 @@ The five earlier mockups stay as the record of the alternatives: [Glas](design/1
 [Planke](design/2-planke.png), [Haarlinie](design/3-haarlinie.png), [Welle](design/4-welle.png),
 [Papier](design/5-papier.png). The cream *Papier* look remains a candidate for a **light theme** later, because the
 terminal palette and the tokens are shared by every chrome style.
+
+## 7. Where Windows and Linux differ from macOS (Phase 2.2)
+
+Every behaviour that differs from macOS on purpose is in this one table (ROADMAP success criterion 3). The look is the
+same on every platform except where a row says otherwise. Windows and Linux were written and cross-checked from a Mac
+and have **not** been run on their own platform: a row here says what was built, and the owner's run of
+[test-plan.md](test-plan.md) Part 4 decides whether it works.
+
+| Deviation | Reason | Changed by |
+|---|---|---|
+| **Native window frame** on Windows and Linux: the system's title bar with its buttons, and the page's bar directly below it. macOS keeps the overlay bar with the traffic lights | `titleBarStyle` and `hiddenTitle` are macOS-only options in Tauri, and a page-drawn bar needs drag, resize edges and window buttons that have a history of problems under Wayland; owner decision of 2026-10-12. Plan 02.2-06 pins it in a test | a page-drawn bar: Phase 10 |
+| **`cmd.exe` does not report its directory**, so a split, a new tab and a restored pane start in the home directory | `cmd.exe` emits no OSC 7 and its `PROMPT` cannot percent-encode a path; the engine reads only OSC 7 (plans 02.2-04, 02.2-05) | none planned; PowerShell is the default shell when present |
+| **PowerShell is wrapped by an injected prompt** (`-NoLogo -NoExit -EncodedCommand`) that announces the directory, so a split and a restore work on the default shell. There is no setting to switch it off in this phase. `$?` is not preserved for the original prompt, and the wrapper runs after the profile (assumed until W7) | the only way to get a directory out of PowerShell; a constant script, no user text in it (plan 02.2-04) | an off switch only if W7 shows a conflict with a prompt framework |
+| **Kitty keyboard flags requested by a Windows program may not reach the engine** through ConPTY | ConPTY filters sequences in its non-passthrough mode and the pinned engine has no win32-input-mode; the Kitty path stays for macOS, Linux and SSH sessions (assumption A11, plan 02.2-04) | a sideloaded ConPTY with passthrough, if the run shows it matters |
+| **No middle-click paste (X11 primary selection)** | the web view's clipboard API does not provide the primary selection | none planned |
+| **Under Wayland there is no tear-off by the pointer and no window position restore** | Wayland gives a client no global coordinates; a pane or tab dragged out of the window is expected to cancel (row L3), the palette actions `Move pane to new window` and `Move tab to new window` work, and the compositor places every window (plan 02.2-03). Under XWayland (`GDK_BACKEND=x11`) the pointer numbers are expected to be usable: a way to test, not a default | none planned |
+| **The UI text size follows the OS on Windows and GNOME only**; macOS, KDE and every other desktop use `ui_scale` alone | macOS has no such signal in its web view; the other desktops have no source this phase reads (plan 02.2-09, described above in section 5) | other desktops: not planned |
+| **Fonts**: JetBrains Mono is bundled and first everywhere, so the cell size is the same; a glyph it lacks falls back through the OS: SF Mono and Menlo, then Cascadia Mono and Consolas, then DejaVu Sans Mono and Noto Sans Mono. **Emoji need a colour emoji font on Linux** (for example `fonts-noto-color-emoji`), else they are boxes | the fallback is the OS's (DirectWrite, fontconfig); nothing is bundled for it (plan 02.2-06) | a bundled emoji font: not planned |
+| **Key tables are per platform** and keep plain `Ctrl+letter` for the shell: `Ctrl+Shift` chords, tab numbers on `Alt+Shift+digit`, no use of the Super key, no default for the six line-editing actions on Windows. `keybindings` overrides do not travel between platforms | `Ctrl+Alt` is AltGr on Windows, and the shell already binds the line-editing keys (plan 02.2-02; [config.md](config.md)) | settings sync (Phase 4) must translate them |
+| **The clipboard shortcuts are fixed**: `Ctrl+Shift+C` and `Ctrl+Insert` copy, `Ctrl+Shift+V` and `Shift+Insert` paste, and `Ctrl+V` also pastes on Windows, as in Windows Terminal, so a program that wants that key itself (vim's visual block) does not receive it. Plain `Ctrl+C` always reaches the program. None of them is rebindable in this phase | there is no native Edit menu off macOS (plan 02.2-02) | rebinding: not planned |
+| **The Option row of the settings dialog exists only on macOS**; `option_as_alt` has no meaning elsewhere. AltGr is typed as the character it makes and never as a chord | Option is a macOS key; Windows reports AltGr as `Ctrl` and `Alt` together (plan 02.2-02, plan 02.2-06) | none |
+| **Reveal opens the containing folder on Linux** (`xdg-open`), where macOS and Windows select the file; links and files go to the platform's own opener (`open`, `rundll32 url.dll,FileProtocolHandler` and `explorer /select,`, `xdg-open`). A `\\server\share`, device or quoted path is refused on Windows before any file-system call | `xdg-open` has no select; a network path would contact the host (plan 02.2-03) | none |
+| **The installers and packages are unsigned.** The Windows installer is NSIS only and per user; there is no MSI. SmartScreen warns on the first run | signing is Phase 10; WiX needs an optional Windows feature and cannot carry a pre-release version (plan 02.2-07; [build-windows.md](build-windows.md)) | signing: Phase 10 |
+| **The AppImage's portability and the Flatpak's status are what the owner's run says.** The AppImage was built in a container and never started; the Flatpak is the last plan of the phase and ships only if it builds | no Linux desktop was available (plans 02.2-06, 02.2-08; [build-linux.md](build-linux.md)) | the owner's run of rows L6 and L10 |
+| **WebKitGTK may need a graphics workaround** (a blank or flickering window, mostly on NVIDIA). holzWave sets none by default | an unconditional override disables the fast path for everybody; owner decision of 2026-10-12: none until a failure is reproduced on hardware ([build-linux.md](build-linux.md)) | a follow-up plan if row L2 finds one |

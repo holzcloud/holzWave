@@ -90,7 +90,7 @@ Deliberately **not** included: a web browser block.
 
 ## 🚀 Build from source
 
-There is no installer yet. On macOS (Apple Silicon verified):
+There is no release yet. On macOS (Apple Silicon verified):
 
 ```sh
 brew install rustup zig@0.16 node
@@ -113,7 +113,10 @@ cargo test --workspace
 cargo run --release -p holzwave-spike -- throughput 256
 ```
 
-Windows, Linux, iOS and Android are planned and not yet built.
+**Windows and Linux** are written and cross-checked from a Mac, and have **not** been run on their own platform yet:
+the build guides are [docs/build-windows.md](docs/build-windows.md) and [docs/build-linux.md](docs/build-linux.md), and the
+list the owner runs on their own machines is Part 4 of [docs/test-plan.md](docs/test-plan.md). Do not expect them to work
+until that list has passed. Installers are unsigned. iOS and Android are planned and not yet built.
 
 ## 🧱 How it is built
 
@@ -149,7 +152,7 @@ in [docs/roadmap.md](docs/roadmap.md).
 
 **Behind today**
 
-- No release, no installer, no signing. macOS from source is the only verified platform.
+- No release, no signing. macOS from source is the only verified platform; Windows and Linux are written and wait for the owner's run (an unsigned installer and packages can be built locally from the guides).
 - Tauri 3 and `libghostty-vt` are pre-release; their APIs move and the build pins exact versions.
 - The keyboard uses a small table until the engine's key encoder lands (Phase 2).
 - A single maintainer, and no CI by design: everything is built and tested locally.
@@ -167,6 +170,8 @@ in [docs/roadmap.md](docs/roadmap.md).
 |---|---|
 | [Architecture](docs/architecture.md) | Boundaries, concurrency, app protocol, security, quality budget |
 | [Design](docs/design.md) | Colour, type, components and the window direction |
+| [Build on Windows](docs/build-windows.md), [Build on Linux](docs/build-linux.md) | The owner's build guides, with what was and was not verified |
+| [Test plan](docs/test-plan.md) | How to run everything locally and the lists the owner runs on their own hardware |
 | [Roadmap](docs/roadmap.md) | Phases and what each one delivers |
 | [Sync format](docs/sync.md) | Requirements and open questions, decided before any sync code |
 

@@ -54,7 +54,14 @@ Does not exist yet:
 - **Phase 2.2:** Windows (ConPTY, WebView2, installer) and Linux (X11 and Wayland, Flatpak, AppImage, deb and rpm),
   with their own default key tables and the OS-driven UI font size (DESK-30, DESK-31). The owner runs the per-platform
   list of [test-plan.md](test-plan.md) on their own hardware (D-22). No `0.0.1-alpha1` is released before this is done
-  (D-21).
+  (D-21). **Status: written and cross-checked from the Mac, waiting for the owner's run; not verified on Windows or
+  Linux.** The Windows runtime (ConPTY shell, PowerShell directory tracking, exit poll, launchers, AltGr and the per-OS key
+  tables, the OS text size), the Linux runtime, a per-user unsigned NSIS installer configuration and the deb, rpm and
+  AppImage configuration exist; the code compiles for both platforms from the Mac, the Linux tests pass in a container and
+  a deb, an rpm and an AppImage were built there. The build guides are [build-windows.md](build-windows.md) and
+  [build-linux.md](build-linux.md), the owner's list is Part 4 of [test-plan.md](test-plan.md) (rows W1 to W13 and L1 to
+  L10, all still open), and the differences from macOS are listed once in [design.md](design.md) section 7. The Flatpak is
+  the last plan of the phase and is not built yet; DESK-30 and DESK-31 are marked done only after the owner's rows pass.
 - **Phase 8:** the Kitty graphics protocol and OSC 8 hyperlinks (links in the text are detected and clickable today).
 
 - Local shell, scrollback, copy and paste, Unicode, resize, themes.
