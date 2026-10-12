@@ -130,6 +130,29 @@ fn the_output_of_a_real_shell_becomes_a_frame_event_with_its_text() {
 }
 
 #[test]
+fn a_notice_is_the_first_output_of_the_pane_and_never_reaches_the_shell() {
+    let probe = Probe::default();
+    let notice = "holzWave: the shell setting \"/nope\" was not found; /bin/sh is used instead";
+    let spec = PaneSpec { notice: Some(format!("{notice}\x1b[2J")), ..spec_sh("printf shell-output; sleep 3") };
+    let pane = spawn(spec, &probe);
+
+    assert!(wait_until(WAIT, || probe.has_text("shell-output")), "{:?}", probe.events());
+    let rows = |needle: &str| {
+        probe
+            .frames()
+            .iter()
+            .flat_map(|f| f.changed.iter().map(|r| (f.seq, r.y, row_text(r))))
+            .filter(|(_, _, text)| text.contains(needle))
+            .collect::<Vec<_>>()
+    };
+    assert!(!rows("was not found").is_empty(), "the notice is on the screen: {:?}", probe.events());
+    // The escape sequence was made harmless: it is text, so the screen was not cleared.
+    assert!(rows("shell-output").iter().all(|(_, y, _)| *y >= 1), "the shell prints below the notice");
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
 fn a_key_becomes_echoed_output() {
     let probe = Probe::default();
     let pane = spawn(PaneSpec::new("/bin/cat", 80, 24), &probe);

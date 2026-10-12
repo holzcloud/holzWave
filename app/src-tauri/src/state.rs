@@ -23,7 +23,7 @@ use holzwave_core::layout::{
 };
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
-use holzwave_core::platform::{Os, ShellLaunch, shell_launch};
+use holzwave_core::platform::{Os, ProgramCheck, ShellLaunch, ShellResolved, resolve_shell};
 use holzwave_core::pty::process_cwd;
 use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
@@ -231,6 +231,10 @@ impl Config {
             ));
         }
         warnings.extend(self.binding_notes.iter().cloned());
+        if !self.settings.shell.is_empty() {
+            // Looked at each time the view is made: a program that appears or disappears changes the sentence.
+            warnings.extend(resolve_system_shell(&ShellSpec::System, &self.settings.shell).unusable);
+        }
         SettingsView::new(&self.settings, &self.themes, &self.keybindings, warnings)
     }
 
@@ -451,20 +455,52 @@ impl ShellSpec {
         Self::Fixed { program: program.into(), args: args.iter().map(|a| (*a).to_owned()).collect() }
     }
 
-    /// The program and arguments of a pane's shell. `configured` is the `shell` setting; `os`, `env` and `exists`
-    /// are the facts [`shell_launch`] decides from, passed in so that every platform is tested on any host.
+    /// The program and arguments of a pane's shell, and the reason when the `shell` setting could not be used and the
+    /// platform default stands in. `configured` is the `shell` setting; `os`, `env`, `exists` and `check` are the
+    /// facts [`resolve_shell`] decides from, passed in so that every platform is tested on any host.
     fn launch(
         &self,
         configured: &str,
         os: Os,
         env: &dyn Fn(&str) -> Option<String>,
         exists: &dyn Fn(&str) -> bool,
-    ) -> ShellLaunch {
+        check: &dyn Fn(&str) -> ProgramCheck,
+    ) -> ShellResolved {
         match self {
-            Self::System => shell_launch(os, configured, env, exists),
-            Self::Fixed { program, args } => ShellLaunch { program: program.clone(), args: args.clone() },
+            Self::System => resolve_shell(os, configured, env, exists, check),
+            Self::Fixed { program, args } => {
+                ShellResolved { launch: ShellLaunch { program: program.clone(), args: args.clone() }, unusable: None }
+            }
         }
     }
+}
+
+/// What the file system says about a candidate shell program.
+fn check_program_on_disk(path: &str) -> ProgramCheck {
+    let Ok(meta) = std::fs::metadata(path) else { return ProgramCheck::Missing };
+    if !meta.is_file() {
+        return ProgramCheck::NotAFile;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            return ProgramCheck::NotExecutable;
+        }
+    }
+    ProgramCheck::Usable
+}
+
+/// The shell of the platform and the `shell` setting as this machine resolves it: the one place that reads the process
+/// environment and the file system for the shell's sake.
+fn resolve_system_shell(spec: &ShellSpec, configured: &str) -> ShellResolved {
+    spec.launch(
+        configured,
+        Os::current(),
+        &|key| std::env::var(key).ok(),
+        &|path| Path::new(path).is_file(),
+        &check_program_on_disk,
+    )
 }
 
 impl Default for ShellSpec {
@@ -1450,14 +1486,10 @@ impl AppCore {
     /// working directory is decided by the caller.
     fn pane_spec(&self, cols: u16, rows: u16, cell: (u32, u32)) -> PaneSpec {
         let cfg = lock(&self.config);
-        // The one place that reads the process environment and the file system for the shell's sake.
-        let launch = self.shell.launch(
-            &cfg.settings.shell,
-            Os::current(),
-            &|key| std::env::var(key).ok(),
-            &|path| Path::new(path).is_file(),
-        );
+        // An unusable `shell` never leaves the pane without a terminal: the default starts, and the pane says so first.
+        let ShellResolved { launch, unusable } = resolve_system_shell(&self.shell, &cfg.settings.shell);
         let mut spec = PaneSpec::new(launch.program, cols, rows).args(launch.args);
+        spec.notice = unusable.map(|note| format!("holzWave: {note}"));
         spec.cell_px = cell;
         spec.scrollback = cfg.settings.scrollback_lines as usize;
         spec.option_as_alt = cfg.settings.option_as_alt;
@@ -3597,10 +3629,11 @@ mod tests {
     fn facts<'a>(
         env: &'a [(&'a str, &'a str)],
         files: &'a [&'a str],
-    ) -> (impl Fn(&str) -> Option<String> + 'a, impl Fn(&str) -> bool + 'a) {
+    ) -> (impl Fn(&str) -> Option<String> + 'a, impl Fn(&str) -> bool + 'a, impl Fn(&str) -> ProgramCheck + 'a) {
         (
             move |key: &str| env.iter().find(|(k, _)| *k == key).map(|(_, v)| (*v).to_owned()),
             move |path: &str| files.contains(&path),
+            move |path: &str| if files.contains(&path) { ProgramCheck::Usable } else { ProgramCheck::Missing },
         )
     }
 
@@ -3611,8 +3644,8 @@ mod tests {
         env: &[(&str, &str)],
         files: &[&str],
     ) -> (String, Vec<String>) {
-        let (env, exists) = facts(env, files);
-        let launch = spec.launch(configured, os, &env, &exists);
+        let (env, exists, check) = facts(env, files);
+        let launch = spec.launch(configured, os, &env, &exists, &check).launch;
         (launch.program, launch.args)
     }
 
@@ -3648,19 +3681,19 @@ mod tests {
     fn the_shell_setting_replaces_the_platform_default_and_the_arguments_follow_its_name() {
         let system = ShellSpec::default();
         let env = [("SHELL", "/bin/zsh")];
-        let fish = launch_of(&system, "/usr/bin/fish", Os::Linux, &env, &[]);
+        let fish = launch_of(&system, "/usr/bin/fish", Os::Linux, &env, &["/usr/bin/fish"]);
         assert_eq!(fish, ("/usr/bin/fish".to_owned(), vec!["-l".to_owned()]));
-        assert_eq!(launch_of(&system, "/opt/homebrew/bin/nu", Os::Macos, &env, &[]).0, "/opt/homebrew/bin/nu");
+        assert_eq!(launch_of(&system, "/opt/homebrew/bin/nu", Os::Macos, &env, &["/opt/homebrew/bin/nu"]).0, "/opt/homebrew/bin/nu");
 
-        let (program, args) = launch_of(&system, r"C:\Windows\System32\cmd.exe", Os::Windows, &[], &[]);
+        let (program, args) = launch_of(&system, r"C:\Windows\System32\cmd.exe", Os::Windows, &[], &[r"C:\Windows\System32\cmd.exe"]);
         assert_eq!(program, r"C:\Windows\System32\cmd.exe");
         assert!(args.is_empty(), "{args:?}");
-        let (_, args) = launch_of(&system, r"D:\Tools\PWSH.EXE", Os::Windows, &[], &[]);
+        let (_, args) = launch_of(&system, r"D:\Tools\PWSH.EXE", Os::Windows, &[], &[r"D:\Tools\PWSH.EXE"]);
         assert!(args.iter().any(|a| a == "-EncodedCommand"), "the stem decides, without case: {args:?}");
-        let (program, args) = launch_of(&system, r"C:\Program Files\Git\bin\bash.exe", Os::Windows, &[], &[]);
+        let (program, args) = launch_of(&system, r"C:\Program Files\Git\bin\bash.exe", Os::Windows, &[], &[r"C:\Program Files\Git\bin\bash.exe"]);
         assert_eq!((program.as_str(), args), (r"C:\Program Files\Git\bin\bash.exe", vec!["-l".to_owned()]));
         // One program, never split: a space or a quote stays inside the one string.
-        let (program, _) = launch_of(&system, "/bin/sh -c 'x; rm -rf ~'", Os::Linux, &env, &[]);
+        let (program, _) = launch_of(&system, "/bin/sh -c 'x; rm -rf ~'", Os::Linux, &env, &["/bin/sh -c 'x; rm -rf ~'"]);
         assert_eq!(program, "/bin/sh -c 'x; rm -rf ~'");
     }
 
@@ -3695,10 +3728,77 @@ mod tests {
         assert_eq!(core.get_settings().settings.shell, "");
     }
 
+    /// The notice and the warning that an unusable `shell` setting gives, as a resolution on `os` says it.
+    fn unusable_of(configured: &str, os: Os, env: &[(&str, &str)], files: &[&str]) -> Option<String> {
+        let (env, exists, check) = facts(env, files);
+        ShellSpec::default().launch(configured, os, &env, &exists, &check).unusable
+    }
+
+    #[test]
+    fn an_unusable_shell_setting_falls_back_to_the_platform_default_with_a_sentence() {
+        let system = ShellSpec::default();
+        let env = [("SHELL", "/usr/bin/fish")];
+        let login = vec!["-l".to_owned()];
+
+        // Not found: the login shell starts, and the sentence names the value and what is used instead.
+        let (program, args) = launch_of(&system, "/nonexistent/shell", Os::Linux, &env, &[]);
+        assert_eq!((program.as_str(), args), ("/usr/bin/fish", login.clone()));
+        let said = unusable_of("/nonexistent/shell", Os::Linux, &env, &[]).expect("a sentence");
+        assert!(said.contains("/nonexistent/shell") && said.contains("was not found"), "{said}");
+        assert!(said.contains("/usr/bin/fish"), "it names the shell that is used: {said}");
+        assert_eq!(launch_of(&system, "/nonexistent/shell", Os::Linux, &[], &[]).0, "/bin/sh", "no $SHELL: /bin/sh");
+        assert_eq!(launch_of(&system, "/nonexistent/shell", Os::Macos, &[], &[]).0, "/bin/zsh");
+
+        // Windows: pwsh, then Windows PowerShell, then cmd.
+        let pwsh = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        let windows_powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+        let vars = [("ProgramFiles", r"C:\Program Files"), ("SystemRoot", r"C:\Windows"), ("ComSpec", r"C:\cmd.exe")];
+        let bad = r"D:\gone\shell.exe";
+        assert_eq!(launch_of(&system, bad, Os::Windows, &vars, &[pwsh, windows_powershell]).0, pwsh);
+        assert_eq!(launch_of(&system, bad, Os::Windows, &vars, &[windows_powershell]).0, windows_powershell);
+        assert_eq!(launch_of(&system, bad, Os::Windows, &vars, &[]).0, r"C:\cmd.exe");
+        assert!(unusable_of(bad, Os::Windows, &vars, &[]).is_some());
+
+        // A usable program and the empty setting say nothing.
+        assert_eq!(unusable_of("/usr/bin/nu", Os::Linux, &env, &["/usr/bin/nu"]), None);
+        assert_eq!(unusable_of("", Os::Linux, &env, &[]), None);
+        // The value is cut and has no control character in the sentence; Fixed says nothing.
+        let long = format!("/{}", "x".repeat(200));
+        let said = unusable_of(&long, Os::Linux, &env, &[]).expect("a sentence");
+        assert!(said.len() < 200 && said.contains("..."), "{said}");
+        assert!(ShellSpec::new("/bin/cat", &[]).launch("/nonexistent", Os::Linux, &|_| None, &|_| false, &|_| ProgramCheck::Missing).unusable.is_none());
+    }
+
     #[cfg(unix)]
     #[test]
-    fn a_shell_that_cannot_start_ends_the_pane_without_a_crash() {
-        // T-2.2-22: the program is never run through another shell, so a missing file is an error of the spawn.
+    fn a_shell_that_is_a_directory_or_not_executable_is_named_so_on_disk() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Scratch::new("shell-kinds");
+        let root = dir.0.clone();
+        std::fs::create_dir_all(&root).unwrap();
+        let plain = root.join("plain");
+        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let program = root.join("program");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(check_program_on_disk(root.to_str().unwrap()), ProgramCheck::NotAFile);
+        assert_eq!(check_program_on_disk(plain.to_str().unwrap()), ProgramCheck::NotExecutable);
+        assert_eq!(check_program_on_disk(program.to_str().unwrap()), ProgramCheck::Usable);
+        assert_eq!(check_program_on_disk(root.join("nothing").to_str().unwrap()), ProgramCheck::Missing);
+        let said = |path: &std::path::Path| {
+            let (env, exists, _) = facts(&[("SHELL", "/bin/sh")], &[]);
+            ShellSpec::default().launch(path.to_str().unwrap(), Os::Linux, &env, &exists, &check_program_on_disk).unusable
+        };
+        assert!(said(&root).expect("a directory").contains("is not a file"));
+        assert!(said(&plain).expect("no x bit").contains("is not executable"));
+        assert!(said(&program).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unusable_shell_still_gives_a_working_pane_a_notice_and_a_warning() {
         let dir = Scratch::new("shell-missing");
         let rec = Arc::new(Recorder::default());
         let core = AppCore::new(dir.0.clone(), rec.clone(), ShellSpec::default());
@@ -3706,10 +3806,28 @@ mod tests {
         core.set_setting("shell", json!("/nonexistent/holzwave-no-shell")).expect("accepted: it is only a string");
         let pane = only_pane(&core);
 
-        let result = core.start_pane(pane, 80, 24, 0, 0);
+        let spec = core.pane_spec(80, 24, (9, 18));
+        assert_ne!(spec.program, "/nonexistent/holzwave-no-shell", "the default starts instead");
+        assert!(spec.notice.as_deref().is_some_and(|n| n.contains("holzwave-no-shell")), "{:?}", spec.notice);
+        let warned = core.get_settings().warnings.iter().any(|w| w.contains("holzwave-no-shell"));
+        assert!(warned, "the settings view carries the sentence: {:?}", core.get_settings().warnings);
 
-        assert!(result.is_err(), "{result:?}");
-        assert!(wait_until(WAIT, || rec.exit_count() == 1), "the failed start is the pane's existing end");
+        // The only pane of the only window: it starts, it is not removed and the app does not end.
+        core.start_pane(pane, 80, 24, 0, 0).expect("the fallback shell starts");
+        assert!(
+            wait_until(WAIT, || rec.has_text(pane, "was not found")),
+            "the pane's first output names the problem: {:?}",
+            rec.all()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(core.pid(pane).is_some(), "the pane runs");
+        assert!(rec.pane_exits().is_empty(), "no pane ended: {:?}", rec.all());
+        assert!(!rec.all().iter().any(|o| matches!(o, Out::Exit)), "the app did not end: {:?}", rec.all());
+        assert_eq!(core.view().panes.len(), 1, "the pane is still in the layout");
+
+        // A usable value or the empty one removes the sentence at once.
+        core.set_setting("shell", json!("")).expect("empty is the default");
+        assert!(!core.get_settings().warnings.iter().any(|w| w.contains("shell")));
     }
 
     #[test]

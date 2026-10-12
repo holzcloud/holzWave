@@ -69,7 +69,7 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `confirm_multiline_paste` | boolean | | `true` | at once |
 | `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |
 | `cursor_trail` | boolean | | `false` | at once; fades a short trail behind a cursor that jumps (below) |
-| `shell` | string | one program: a path or a name, at most 4096 bytes, no control characters; empty means the platform default | `""` | for panes started afterwards; a running pane keeps its shell (below) |
+| `shell` | string | one program: an absolute path or a bare name, at most 4096 bytes, no control characters; empty means the platform default; a value that cannot be started falls back to the platform default with a warning | `""` | for panes started afterwards; a running pane keeps its shell (below) |
 | `keybindings` | object | action id to chord text, at most 512 entries, each text at most 128 bytes | `{}` | at once |
 
 `option_as_alt` is off by default so that a Swiss layout types `|`, `[` and `{` with Option (D-12).
@@ -92,9 +92,17 @@ no such report: a split from a `cmd.exe` pane starts in your home directory. Emp
 On macOS and Linux that is `$SHELL` (when it is unset or empty, `/bin/zsh` on macOS and `/bin/sh` on Linux). On Windows
 it is, in this order, PowerShell 7 (`pwsh.exe` under `%ProgramFiles%\PowerShell\7` or in a directory of `PATH`), then
 Windows PowerShell, then `%ComSpec%`, then `cmd.exe`. Only a file that exists is taken, and only a directory that
-starts with a drive letter is searched. A program that cannot be started ends that pane at once, and with the last
-pane the app: put a working path back into `settings.json` (or delete the key) and start again. The settings dialog has
-no row for it; edit the file.
+starts with a drive letter is searched.
+
+A `shell` that cannot be started never leaves you without a terminal. It is used when it is an absolute path (a drive
+path on Windows) to an executable file, or a bare name that is found in an absolute directory of `PATH` (on Windows
+also in `%SystemRoot%\System32`, with `.exe` added when the name has no extension); a bare name is then started by
+its full path. Anything else is unusable: a program that is not found, a directory, a file without the permission to
+run, and a relative path such as `./sh` or `~/bin/fish` (it is never looked up, and `~` is not expanded). Then the
+platform default above starts instead, the pane's first line says so (`holzWave: the shell setting "..." was not
+found; ... is used instead`), and the settings dialog lists the same sentence among its warnings for as long as the
+value stays unusable. Nothing is rewritten in `settings.json`: put a working program there, or delete the key. The
+settings dialog has no row for it; edit the file.
 
 <!-- example: settings.json -->
 ```json

@@ -122,6 +122,9 @@ pub struct PaneSpec {
     /// does not ask: the idle pane then wakes for nothing. The default is [`platform::exit_poll`] for this OS, which
     /// is `Some` on Windows only: a pseudo console before Windows 11 24H2 never ends its output pipe.
     pub exit_poll: Option<Duration>,
+    /// One line the pane shows before the shell's own output (and so first): what the app has to tell about this
+    /// start, such as an unusable `shell` setting that was replaced. It goes to the screen only, never to the shell.
+    pub notice: Option<String>,
 }
 
 impl PaneSpec {
@@ -139,6 +142,7 @@ impl PaneSpec {
             theme: None,
             frame_interval: DEFAULT_FRAME_INTERVAL,
             exit_poll: platform::exit_poll(Os::current()),
+            notice: None,
         }
     }
 
@@ -944,6 +948,12 @@ where
     if let Some(theme) = &spec.theme {
         // A theme that cannot be applied is not a reason to have no terminal.
         let _ = engine.set_theme(theme);
+    }
+    if let Some(notice) = &spec.notice {
+        // Before the shell exists, so before anything it prints. Control characters are made harmless: the line is
+        // text, never an escape sequence.
+        let line: String = notice.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        engine.feed(format!("{line}\r\n").as_bytes());
     }
     let mut options = SpawnOptions::new(spec.program.clone(), spec.cols, spec.rows)
         .args(spec.args.iter().cloned())

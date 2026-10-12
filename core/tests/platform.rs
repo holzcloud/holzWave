@@ -7,7 +7,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use holzwave_core::platform::{Os, ShellLaunch, exit_poll, rename_retries, shell_launch, utf8_locale};
+use holzwave_core::platform::{
+    Os, ProgramCheck, ShellLaunch, exit_poll, rename_retries, resolve_shell, shell_launch, utf8_locale,
+};
 use holzwave_core::pty::SpawnOptions;
 use holzwave_core::winshell::{POWERSHELL_PROMPT_SCRIPT, encode_command, powershell_integration_args};
 
@@ -377,4 +379,110 @@ fn child_env_is_child_env_on_for_the_current_os() {
     let options = SpawnOptions::new("shell", 80, 24).env("A", "1");
     let parent = [("HOME", "/h")];
     assert_eq!(options.child_env(env(&parent)), options.child_env_on(Os::current(), env(&parent)));
+}
+
+// ---- resolve_shell: an unusable `shell` setting never leaves a pane without a shell -----------------------------------
+
+/// The checks of a fake disk: the listed paths are usable, `kinds` say what else is there, everything else is missing.
+fn disk<'a>(usable: &'a [&'a str], kinds: &'a [(&'a str, ProgramCheck)]) -> impl Fn(&str) -> ProgramCheck + 'a {
+    move |path| {
+        if usable.contains(&path) {
+            ProgramCheck::Usable
+        } else {
+            kinds.iter().find(|(p, _)| *p == path).map_or(ProgramCheck::Missing, |(_, kind)| *kind)
+        }
+    }
+}
+
+fn resolved(
+    os: Os,
+    configured: &str,
+    vars: &[(&str, &str)],
+    existing: &[&str],
+    usable: &[&str],
+    kinds: &[(&str, ProgramCheck)],
+) -> (ShellLaunch, Option<String>) {
+    let out = resolve_shell(os, configured, &env(vars), &files(existing), &disk(usable, kinds));
+    (out.launch, out.unusable)
+}
+
+#[test]
+fn a_usable_setting_is_started_as_it_is_and_an_empty_one_is_the_default() {
+    let (launch, note) = resolved(Os::Linux, "/usr/bin/fish", &[("SHELL", "/bin/bash")], &[], &["/usr/bin/fish"], &[]);
+    assert_eq!((launch, note), (expect("/usr/bin/fish", &["-l"]), None));
+    let (launch, note) = resolved(Os::Linux, "", &[("SHELL", "/bin/bash")], &[], &[], &[]);
+    assert_eq!((launch, note), (expect("/bin/bash", &["-l"]), None), "the empty setting is not checked");
+}
+
+#[test]
+fn a_missing_program_falls_back_to_the_login_shell_or_bin_sh_with_one_sentence() {
+    let (launch, note) = resolved(Os::Linux, "/opt/none/fish", &[("SHELL", "/bin/bash")], &[], &[], &[]);
+    assert_eq!(launch, expect("/bin/bash", &["-l"]));
+    let note = note.expect("a sentence");
+    assert!(note.contains("/opt/none/fish") && note.contains("was not found") && note.contains("/bin/bash"), "{note}");
+
+    assert_eq!(resolved(Os::Linux, "/opt/none/fish", &[], &[], &[], &[]).0, expect("/bin/sh", &["-l"]));
+    assert_eq!(resolved(Os::Macos, "/opt/none/fish", &[], &[], &[], &[]).0, expect("/bin/zsh", &["-l"]));
+}
+
+#[test]
+fn a_directory_and_a_file_that_cannot_run_are_named() {
+    let kinds = [("/etc", ProgramCheck::NotAFile), ("/etc/hosts", ProgramCheck::NotExecutable)];
+    let (_, dir) = resolved(Os::Linux, "/etc", &[], &[], &[], &kinds);
+    assert!(dir.expect("a sentence").contains("is not a file"));
+    let (launch, plain) = resolved(Os::Linux, "/etc/hosts", &[], &[], &[], &kinds);
+    assert!(plain.expect("a sentence").contains("is not executable"));
+    assert_eq!(launch.program, "/bin/sh");
+}
+
+#[test]
+fn on_windows_the_default_order_is_pwsh_then_windows_powershell_then_cmd() {
+    let gone = r"D:\gone\shell.exe";
+    let (launch, note) = resolved(Os::Windows, gone, WINDOWS_VARS, &[PWSH7, WINPS], &[], &[]);
+    assert_eq!(launch, powershell(PWSH7));
+    assert!(note.is_some());
+    assert_eq!(resolved(Os::Windows, gone, WINDOWS_VARS, &[WINPS], &[], &[]).0, powershell(WINPS));
+    assert_eq!(resolved(Os::Windows, gone, WINDOWS_VARS, &[], &[], &[]).0, expect(r"C:\Windows\System32\cmd.exe", &[]));
+}
+
+#[test]
+fn a_bare_name_is_looked_up_in_the_absolute_directories_of_path_and_started_by_its_full_path() {
+    let vars = [("SHELL", "/bin/bash"), ("PATH", "relative/bin:/opt/x/bin::/usr/local/bin")];
+    let (launch, note) = resolved(Os::Linux, "fish", &vars, &[], &["/usr/local/bin/fish"], &[]);
+    assert_eq!((launch, note), (expect("/usr/local/bin/fish", &["-l"]), None));
+    // A relative directory of PATH and the current directory are never searched.
+    let (launch, note) = resolved(Os::Linux, "fish", &vars, &[], &["relative/bin/fish", "fish", "/fish"], &[]);
+    assert_eq!(launch.program, "/bin/bash");
+    assert!(note.expect("a sentence").contains("was not found"));
+    // A name that is there but cannot run is named, a later usable one still wins.
+    let kinds = [("/opt/x/bin/fish", ProgramCheck::NotExecutable)];
+    assert!(resolved(Os::Linux, "fish", &vars, &[], &[], &kinds).1.expect("a sentence").contains("is not executable"));
+    assert_eq!(resolved(Os::Linux, "fish", &vars, &[], &["/usr/local/bin/fish"], &kinds).1, None);
+    // Windows: the system directory is searched too and `.exe` is tried.
+    let cmd = r"C:\Windows\System32\cmd.exe";
+    let (launch, note) = resolved(Os::Windows, "cmd", WINDOWS_VARS, &[], &[cmd], &[]);
+    assert_eq!((launch, note), (expect(cmd, &[]), None));
+}
+
+#[test]
+fn a_relative_path_is_never_looked_up() {
+    for relative in ["./sh", "../bin/sh", "bin/sh", "~/bin/sh"] {
+        let (launch, note) = resolved(Os::Linux, relative, &[("SHELL", "/bin/bash")], &[], &[relative, "/bin/sh"], &[]);
+        assert_eq!(launch.program, "/bin/bash", "{relative}");
+        assert!(note.is_some(), "{relative}");
+    }
+    let (_, note) = resolved(Os::Windows, r"tools\pwsh.exe", WINDOWS_VARS, &[], &[r"tools\pwsh.exe"], &[]);
+    assert!(note.is_some(), "a Windows path without a drive");
+    let (_, note) = resolved(Os::Windows, r"\\host\share\pwsh.exe", WINDOWS_VARS, &[], &[r"\\host\share\pwsh.exe"], &[]);
+    assert!(note.is_some(), "a network path");
+}
+
+#[test]
+fn the_sentence_cuts_a_long_value_and_never_carries_a_control_character() {
+    let long = format!("/{}", "y".repeat(300));
+    let (_, note) = resolved(Os::Linux, &long, &[], &[], &[], &[]);
+    let note = note.expect("a sentence");
+    assert!(note.len() < 200 && note.contains("..."), "{note}");
+    let (_, note) = resolved(Os::Linux, "/bin/s\x1b[31mh", &[], &[], &[], &[]);
+    assert!(!note.expect("a sentence").chars().any(char::is_control));
 }

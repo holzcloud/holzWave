@@ -93,6 +93,118 @@ pub fn shell_launch(
     ShellLaunch { program, args }
 }
 
+/// What a look at one candidate program on disk found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgramCheck {
+    /// A file a pane can start.
+    Usable,
+    /// Nothing is there.
+    Missing,
+    /// Something is there, but it is not a file (a directory).
+    NotAFile,
+    /// A file without the permission to execute it.
+    NotExecutable,
+}
+
+/// The shell a pane starts and, when the `shell` setting named one that cannot be started, why the default is used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellResolved {
+    pub launch: ShellLaunch,
+    /// One plain sentence naming the setting's value (cut at 40 characters, control characters replaced) and the
+    /// reason, and the program that is used instead. `None` when the setting is empty or usable.
+    pub unusable: Option<String>,
+}
+
+/// [`shell_launch`] for a setting that may be wrong: a `configured` program that cannot be started never leaves a
+/// pane without a shell. It falls back to the platform default (`shell_launch` with an empty setting) and says why in
+/// [`ShellResolved::unusable`].
+///
+/// `configured` is usable when it is an absolute path (a drive path on Windows) that `check` finds usable, or a bare
+/// name that `check` finds usable in an absolute directory of `PATH` (and, on Windows, in `%SystemRoot%\System32`,
+/// with `.exe` tried when the name has no extension). A relative path such as `./sh` or `~/sh` is never looked up: it
+/// would depend on a directory nobody chose. A name found on `PATH` is started by its full path.
+pub fn resolve_shell(
+    os: Os,
+    configured: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    exists: &dyn Fn(&str) -> bool,
+    check: &dyn Fn(&str) -> ProgramCheck,
+) -> ShellResolved {
+    if configured.is_empty() {
+        return ShellResolved { launch: shell_launch(os, "", env, exists), unusable: None };
+    }
+    match locate_program(os, configured, env, check) {
+        Ok(program) => ShellResolved { launch: shell_launch(os, &program, env, exists), unusable: None },
+        Err(why) => {
+            let launch = shell_launch(os, "", env, exists);
+            let shown: String =
+                configured.chars().take(40).map(|c| if c.is_control() { '?' } else { c }).collect();
+            let cut = if configured.chars().count() > 40 { "..." } else { "" };
+            let unusable = format!(
+                "the shell setting \"{shown}{cut}\" {}; {} is used instead",
+                match why {
+                    ProgramCheck::Usable | ProgramCheck::Missing => "was not found",
+                    ProgramCheck::NotAFile => "is not a file",
+                    ProgramCheck::NotExecutable => "is not executable",
+                },
+                launch.program
+            );
+            ShellResolved { launch, unusable: Some(unusable) }
+        }
+    }
+}
+
+/// The program `name` stands for, or what is wrong with it.
+fn locate_program(
+    os: Os,
+    name: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    check: &dyn Fn(&str) -> ProgramCheck,
+) -> Result<String, ProgramCheck> {
+    let windows = os == Os::Windows;
+    let absolute = |path: &str| if windows { is_drive_absolute(path) } else { path.starts_with('/') };
+    let has_separator = name.contains('/') || (windows && name.contains('\\'));
+    if has_separator {
+        // A path is checked as it is; a relative one is not looked up.
+        return if absolute(name) {
+            match check(name) {
+                ProgramCheck::Usable => Ok(name.to_string()),
+                other => Err(other),
+            }
+        } else {
+            Err(ProgramCheck::Missing)
+        };
+    }
+    // The name of a program, searched like the shell's own lookup, in absolute directories only.
+    let mut dirs: Vec<String> = Vec::new();
+    if let Some(path) = non_empty(env("PATH")) {
+        let separator = if windows { ';' } else { ':' };
+        dirs.extend(path.split(separator).map(|dir| dir.trim_matches('"').to_string()).filter(|dir| absolute(dir)));
+    }
+    if windows {
+        if let Some(root) = non_empty(env("SystemRoot")).filter(|root| is_drive_absolute(root)) {
+            dirs.push(join_windows(&root, "System32"));
+        }
+    }
+    let mut candidates = vec![name.to_string()];
+    if windows && !name.contains('.') {
+        candidates.push(format!("{name}.exe"));
+    }
+    let mut worst = ProgramCheck::Missing;
+    for dir in &dirs {
+        for candidate in &candidates {
+            let path = if windows { join_windows(dir, candidate) } else { format!("{}/{candidate}", dir.trim_end_matches('/')) };
+            match check(&path) {
+                ProgramCheck::Usable => return Ok(path),
+                ProgramCheck::Missing => {}
+                // A file that is there but cannot run is a better answer than "not found", but a later usable one wins.
+                other => worst = other,
+            }
+        }
+    }
+    Err(worst)
+}
+
 /// The Windows default, see [`shell_launch`]. `cmd.exe` is the one program that is not a path: it is resolved
 /// by the spawn itself, never relative to the current directory.
 fn windows_shell(env: &dyn Fn(&str) -> Option<String>, exists: &dyn Fn(&str) -> bool) -> String {
