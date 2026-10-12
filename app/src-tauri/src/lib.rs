@@ -6,37 +6,54 @@
 //!
 //! Webview contract: the events are `frame` (a frame message of the core), `layout` (the view), `title`
 //! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}` and `settings` (a settings view); command
-//! arguments are snake_case.
+//! arguments are snake_case. Every event but `settings` and `exit` is emitted to one window, the one that holds the
+//! pane (or whose layout changed), with `emit_str_to(label, ..)`; a page has to listen with its own label, because a
+//! listener without a target receives the events of every window.
 
 mod commands;
 mod menu;
 mod state;
+mod windows;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, WebviewWindow, Window, WindowEvent};
 
 use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
-use state::{AppCore, Out, ShellSpec, Sink};
+use state::{AppCore, Out, ShellSpec, Sink, Target};
+use windows::{Normal, WindowTracker};
 
-/// Sends the core's events to every webview. Frames are events and are measured (D-16).
+/// Sends the core's events to the webview they are for. Frames are events and are measured (D-16).
 struct TauriSink {
     app: AppHandle,
 }
 
 impl Sink for TauriSink {
-    fn send(&self, out: Out) {
+    fn send(&self, target: Target, out: Out) {
         if matches!(out, Out::Exit) {
             self.app.exit(0);
             return;
         }
         match serde_json::to_string(&out) {
             Ok(json) => {
-                if let Err(e) = self.app.emit_str(out.name(), json) {
+                let sent = match &target {
+                    Target::All => self.app.emit_str(out.name(), json),
+                    Target::Window(label) => self.app.emit_str_to(&**label, out.name(), json),
+                };
+                if let Err(e) = sent {
                     eprintln!("holzwave: cannot emit {}: {e}", out.name());
                 }
             }
             Err(e) => eprintln!("holzwave: cannot serialise {}: {e}", out.name()),
+        }
+    }
+
+    fn close_window(&self, label: &str) {
+        // `destroy`, not `close`: the window is out of the set already and must not ask again.
+        if let Some(window) = self.app.get_webview_window(label)
+            && let Err(e) = window.destroy()
+        {
+            eprintln!("holzwave: cannot close the window {label}: {e}");
         }
     }
 }
@@ -81,9 +98,6 @@ struct WindowFacts {
     fullscreen: bool,
 }
 
-/// The last position and size of the window while it was neither maximised nor full screen.
-type Normal = (i32, i32, u32, u32);
-
 /// The window state to remember for `facts`, or `None` when the window is in a state that says nothing about where
 /// it lives (minimised, full screen). A maximised window keeps the geometry it had before, so that leaving the
 /// maximised state after a restart does not give back a window as large as the screen.
@@ -101,12 +115,9 @@ fn state_to_note(facts: WindowFacts, normal: &mut Option<Normal>) -> Option<Wind
     Some(WindowState { x, y, width, height, maximized: facts.maximized })
 }
 
-/// The geometry the window had while it was normal, kept between the window events of the one window.
-static NORMAL: Mutex<Option<Normal>> = Mutex::new(None);
-
-/// Apply the saved frame to the main window: the monitors that are connected now decide whether the saved position
+/// Apply the saved frame to the window `label`: the monitors that are connected now decide whether the saved position
 /// is used (T-02-59). Failures only cost the restore, never the start.
-fn restore_window(window: &WebviewWindow, core: &AppCore) {
+fn restore_window(window: &WebviewWindow, core: &AppCore, label: &str) {
     let monitors: Vec<MonitorRect> = match window.available_monitors() {
         Ok(list) => list
             .iter()
@@ -117,7 +128,7 @@ fn restore_window(window: &WebviewWindow, core: &AppCore) {
             Vec::new()
         }
     };
-    let startup = startup_for(core.placement(&monitors));
+    let startup = startup_for(core.placement(label, &monitors));
     if let Some((width, height)) = startup.size
         && let Err(e) = window.set_size(PhysicalSize::new(width, height))
     {
@@ -135,10 +146,11 @@ fn restore_window(window: &WebviewWindow, core: &AppCore) {
     }
 }
 
-/// The main window moved or changed size: hand its frame to the core, which only touches a debounced saver, so
-/// this is cheap on the thread of the window events.
+/// A window moved or changed size: hand its frame to the core, which only touches a debounced saver, so this is
+/// cheap on the thread of the window events. The geometry it had while normal is kept per window.
 fn note_window(window: &Window) {
-    let Some(core) = window.app_handle().try_state::<Arc<AppCore>>() else {
+    let app = window.app_handle();
+    let (Some(core), Some(tracker)) = (app.try_state::<Arc<AppCore>>(), app.try_state::<Arc<WindowTracker>>()) else {
         return;
     };
     let (Ok(position), Ok(size), Ok(maximized), Ok(minimized), Ok(fullscreen)) = (
@@ -157,9 +169,12 @@ fn note_window(window: &Window) {
         minimized,
         fullscreen,
     };
-    let noted = state_to_note(facts, &mut NORMAL.lock().unwrap_or_else(PoisonError::into_inner));
+    let label = window.label();
+    let mut normal = tracker.normal(label);
+    let noted = state_to_note(facts, &mut normal);
+    tracker.set_normal(label, normal);
     if let Some(state) = noted {
-        core.note_window(state);
+        core.note_window(label, state);
     }
 }
 
@@ -179,15 +194,30 @@ pub fn run() {
             let sink = Arc::new(TauriSink { app: app.handle().clone() });
             let core = AppCore::new(dir, sink, ShellSpec::default());
             app.manage(core.clone());
+            app.manage(Arc::new(WindowTracker::default()));
             if let Some(window) = app.get_webview_window("main") {
-                restore_window(&window, &core);
+                restore_window(&window, &core, "main");
             }
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, WindowEvent::Resized(_) | WindowEvent::Moved(_)) {
-                note_window(window);
+        .on_window_event(|window, event| match event {
+            WindowEvent::Resized(_) | WindowEvent::Moved(_) => note_window(window),
+            WindowEvent::Focused(true) => {
+                if let Some(tracker) = window.app_handle().try_state::<Arc<WindowTracker>>() {
+                    tracker.focused(window.label());
+                }
             }
+            WindowEvent::Destroyed => {
+                if let Some(tracker) = window.app_handle().try_state::<Arc<WindowTracker>>() {
+                    tracker.forget(window.label());
+                }
+                // The red button of a window, or the destroy of the sink. See `AppCore::window_closed` for what
+                // closing the last window and quitting leave alone.
+                if let Some(core) = window.app_handle().try_state::<Arc<AppCore>>() {
+                    core.window_closed(window.label());
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_layout,

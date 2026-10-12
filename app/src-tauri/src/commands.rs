@@ -6,6 +6,10 @@
 //! - **snake_case argument names.** The command macro of the pinned tauri-macros turns `allow_unsafe` into
 //!   `allowUnsafe` for the page unless `rename_all = "snake_case"` says otherwise, which would make `allow_unsafe`,
 //!   `cell_w` and `cell_h` silently disappear. Every command carries the rename.
+//! - **the calling window.** A command that works on a layout takes `window: WebviewWindow`, which Tauri fills in
+//!   with the window that made the call (the page does not send it, so it is no argument of the protocol), and
+//!   answers with that window's view. A command that names a pane by id (`key`, `resize`, ...) needs no window: pane
+//!   ids are global. The label of a window is the key of its layout; an unknown one is the error `no such window`.
 //! - **no waiting on the main thread.** A command without `async` runs on the main thread (RESEARCH Pitfall 10), so
 //!   those only lock, mutate and push to a queue. A command that waits for the engine thread's answer (up to two
 //!   seconds) or for a shell to start is `async`, which runs it off the main thread.
@@ -24,7 +28,7 @@ use holzwave_core::pane::EditAction;
 use holzwave_core::wire::SearchMsg;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::State;
+use tauri::{State, WebviewWindow};
 
 use crate::state::{AppCore, AppInfo, SettingsView, View};
 
@@ -253,8 +257,8 @@ impl From<CopyState> for CopyStateMsg {
 // ---- commands --------------------------------------------------------------------------------------------------
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn get_layout(core: State<Arc<AppCore>>) -> View {
-    core.view()
+pub fn get_layout(core: State<Arc<AppCore>>, window: WebviewWindow) -> Result<View, String> {
+    core.view_in(window.label())
 }
 
 /// Start the shell of a pane if it has none yet. Waits for the actor's startup handshake.
@@ -368,87 +372,104 @@ pub fn copy_mode(core: State<Arc<AppCore>>, pane: PaneId, op: CopyOpMsg) -> Resu
 
 /// Split the focused pane; `column` stacks the panes, otherwise they sit side by side.
 #[tauri::command(rename_all = "snake_case")]
-pub fn split(core: State<Arc<AppCore>>, column: bool) -> View {
-    core.split(column)
+pub fn split(core: State<Arc<AppCore>>, window: WebviewWindow, column: bool) -> Result<View, String> {
+    core.split_in(window.label(), column)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn new_tab(core: State<Arc<AppCore>>) -> View {
-    core.new_tab()
+pub fn new_tab(core: State<Arc<AppCore>>, window: WebviewWindow) -> Result<View, String> {
+    core.new_tab_in(window.label())
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn new_workspace(core: State<Arc<AppCore>>, name: String) -> View {
-    core.new_workspace(&name)
+pub fn new_workspace(core: State<Arc<AppCore>>, window: WebviewWindow, name: String) -> Result<View, String> {
+    core.new_workspace_in(window.label(), &name)
 }
 
-/// Close a pane and kill its shell. Only closing the last pane ends the app. Async because that exit path writes
-/// the layout.
+/// Close a pane of the calling window and kill its shell. The last pane of a window closes the window, and only the
+/// last pane of the last window ends the app. Async because that exit path writes the layout.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn close_pane(core: State<Arc<AppCore>>, pane: PaneId) -> View {
-    core.close_pane(pane)
+pub fn close_pane(core: State<Arc<AppCore>>, window: WebviewWindow, pane: PaneId) -> Result<View, String> {
+    core.close_pane_in(window.label(), pane)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn focus_pane(core: State<Arc<AppCore>>, pane: PaneId) -> View {
-    core.focus_pane(pane)
+pub fn focus_pane(core: State<Arc<AppCore>>, window: WebviewWindow, pane: PaneId) -> Result<View, String> {
+    core.focus_pane_in(window.label(), pane)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn cycle_focus(core: State<Arc<AppCore>>, step: i32) -> View {
-    core.cycle_focus(step)
+pub fn cycle_focus(core: State<Arc<AppCore>>, window: WebviewWindow, step: i32) -> Result<View, String> {
+    core.cycle_focus_in(window.label(), step)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn select_tab(core: State<Arc<AppCore>>, index: usize) -> View {
-    core.select_tab(index)
+pub fn select_tab(core: State<Arc<AppCore>>, window: WebviewWindow, index: usize) -> Result<View, String> {
+    core.select_tab_in(window.label(), index)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn select_workspace(core: State<Arc<AppCore>>, index: usize) -> View {
-    core.select_workspace(index)
+pub fn select_workspace(core: State<Arc<AppCore>>, window: WebviewWindow, index: usize) -> Result<View, String> {
+    core.select_workspace_in(window.label(), index)
 }
 
 /// Move a divider. Only marks the layout dirty: a debounced saver writes it, so a drag costs one write per window.
 /// Name a pane. The empty text gives back the program title; the core cleans and cuts the text.
 #[tauri::command(rename_all = "snake_case")]
-pub fn rename_pane(core: State<Arc<AppCore>>, pane: PaneId, name: String) -> View {
-    core.rename_pane(pane, &name)
+pub fn rename_pane(core: State<Arc<AppCore>>, window: WebviewWindow, pane: PaneId, name: String) -> Result<View, String> {
+    core.rename_pane_in(window.label(), pane, &name)
 }
 
 /// Name the tab at `index` of the shown workspace. The empty text gives back `shell`.
 #[tauri::command(rename_all = "snake_case")]
-pub fn rename_tab(core: State<Arc<AppCore>>, index: usize, name: String) -> View {
-    core.rename_tab(index, &name)
+pub fn rename_tab(core: State<Arc<AppCore>>, window: WebviewWindow, index: usize, name: String) -> Result<View, String> {
+    core.rename_tab_in(window.label(), index, &name)
 }
 
 /// Name the workspace at `index`. The empty text gives back `ws N`.
 #[tauri::command(rename_all = "snake_case")]
-pub fn rename_workspace(core: State<Arc<AppCore>>, index: usize, name: String) -> View {
-    core.rename_workspace(index, &name)
+pub fn rename_workspace(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    index: usize,
+    name: String,
+) -> Result<View, String> {
+    core.rename_workspace_in(window.label(), index, &name)
 }
 
-/// Drop a pane on the side or the middle of another (DESK-20). The core checks both ids and the limits.
+/// Drop a pane on the side or the middle of another in the calling window (DESK-20). The core checks both ids and
+/// the limits.
 #[tauri::command(rename_all = "snake_case")]
-pub fn move_pane(core: State<Arc<AppCore>>, pane: PaneId, target: PaneId, edge: Edge) -> View {
-    core.move_pane(pane, target, edge)
+pub fn move_pane(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    pane: PaneId,
+    target: PaneId,
+    edge: Edge,
+) -> Result<View, String> {
+    core.move_pane_in(window.label(), pane, target, edge)
 }
 
 /// Move a tab to another place in the shown workspace.
 #[tauri::command(rename_all = "snake_case")]
-pub fn move_tab(core: State<Arc<AppCore>>, from: usize, to: usize) -> View {
-    core.move_tab(from, to)
+pub fn move_tab(core: State<Arc<AppCore>>, window: WebviewWindow, from: usize, to: usize) -> Result<View, String> {
+    core.move_tab_in(window.label(), from, to)
 }
 
 /// Move a tab of the shown workspace into another workspace.
 #[tauri::command(rename_all = "snake_case")]
-pub fn move_tab_to_workspace(core: State<Arc<AppCore>>, tab: usize, workspace: usize) -> View {
-    core.move_tab_to_workspace(tab, workspace)
+pub fn move_tab_to_workspace(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    tab: usize,
+    workspace: usize,
+) -> Result<View, String> {
+    core.move_tab_to_workspace_in(window.label(), tab, workspace)
 }
 
 #[tauri::command(rename_all = "snake_case")]
-pub fn set_ratio(core: State<Arc<AppCore>>, split: SplitId, ratio: f32) -> View {
-    core.set_ratio(split, ratio)
+pub fn set_ratio(core: State<Arc<AppCore>>, window: WebviewWindow, split: SplitId, ratio: f32) -> Result<View, String> {
+    core.set_ratio_in(window.label(), split, ratio)
 }
 
 // ---- settings, themes and key bindings ----------------------------------------------------------------------------

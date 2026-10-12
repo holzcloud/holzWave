@@ -1,8 +1,10 @@
 //! The behaviour of the app shell, without Tauri (D-19).
 //!
-//! [`AppCore`] owns the layout and the pane handles and answers every command of the webview. It knows nothing about
-//! windows: what the webview has to be told leaves through a [`Sink`] as an [`Out`], and `lib.rs` maps those to Tauri
-//! events. That is what makes the shell testable headless, with a recording sink and real shells.
+//! [`AppCore`] owns the layouts of all windows and the pane handles and answers every command of the webview. It
+//! knows windows by their label and nothing else of them: what a webview has to be told leaves through a [`Sink`] as
+//! an [`Out`] with the [`Target`] it is for, and `lib.rs` maps those to Tauri events. Opening, closing and finding
+//! windows are calls on the sink too. That is what makes the shell testable headless, with a recording sink (that
+//! can refuse to open a window) and real shells.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -16,7 +18,9 @@ use holzwave_core::engine::{
     SearchState, SelectOp, WheelEvent,
 };
 use holzwave_core::keybindings::Keybindings;
-use holzwave_core::layout::{Axis, CloseOutcome, Divider, Edge, Layout, LoadStatus, PaneId, Rect, SplitId};
+use holzwave_core::layout::{
+    AttachTo, Axis, Divider, Edge, Layout, LoadStatus, MAIN_WINDOW, PaneId, Rect, SetClose, SplitId, WindowSet,
+};
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
 use holzwave_core::pty::process_cwd;
@@ -26,6 +30,8 @@ use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeReg
 use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
+
+use crate::windows::{DropKind, Drops};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
 const MAX_LAYOUT_BYTES: u64 = 1 << 20;
@@ -288,6 +294,10 @@ pub enum Out {
     PaneExit { pane: PaneId, code: Option<u32> },
     /// The settings, the theme or the key bindings changed (a command, or a hand edit that was picked up).
     Settings(SettingsView),
+    /// A pane or a tab that was released over this window comes from another window: where in this page it goes is
+    /// for this page to say. `x` and `y` are the pointer in client coordinates (CSS pixels). The page answers with
+    /// `attach_pane` or `attach_tab`, or with nothing when the pointer is over no drop zone.
+    IncomingDrop { kind: DropKind, x: f64, y: f64 },
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -302,6 +312,7 @@ impl Out {
             Out::Cwd { .. } => "cwd",
             Out::PaneExit { .. } => "pane-exit",
             Out::Settings(_) => "settings",
+            Out::IncomingDrop { .. } => "incoming-drop",
             Out::Exit => "exit",
         }
     }
@@ -325,6 +336,13 @@ struct PaneExitPayload {
     code: Option<u32>,
 }
 
+#[derive(Serialize)]
+struct IncomingDropPayload {
+    kind: DropKind,
+    x: f64,
+    y: f64,
+}
+
 /// An event serialises as its payload alone; the name travels separately ([`Out::name`]).
 impl Serialize for Out {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -335,15 +353,36 @@ impl Serialize for Out {
             Out::Cwd { pane, cwd } => CwdPayload { pane: *pane, cwd }.serialize(serializer),
             Out::PaneExit { pane, code } => PaneExitPayload { pane: *pane, code: *code }.serialize(serializer),
             Out::Settings(view) => view.serialize(serializer),
+            Out::IncomingDrop { kind, x, y } => IncomingDropPayload { kind: *kind, x: *x, y: *y }.serialize(serializer),
             Out::Exit => serializer.serialize_unit(),
         }
     }
 }
 
-/// Where the core's events go. `send` may be called from any thread, including a pane's engine thread, and must
-/// return quickly.
+/// Which webviews an event is for. A page that receives an event that is not for it draws another window's panes, so
+/// the core names the target of every event and the sink delivers it to that window only (research section 4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Every window: the settings, the end of the app.
+    All,
+    /// The window with this label.
+    Window(Arc<str>),
+}
+
+impl Target {
+    pub fn window(label: &str) -> Target {
+        Target::Window(label.into())
+    }
+}
+
+/// Where the core's events go, and the few things the core asks of the window system. `send` may be called from any
+/// thread, including a pane's engine thread, and must return quickly. The others are never called with a lock of the
+/// core held: they can wait for the main thread, whose window events take those locks.
 pub trait Sink: Send + Sync + 'static {
-    fn send(&self, out: Out);
+    fn send(&self, target: Target, out: Out);
+
+    /// The window `label` is no longer in the set (its last pane went): destroy it. Does not ask again.
+    fn close_window(&self, label: &str);
 }
 
 /// The program a pane runs.
@@ -398,14 +437,49 @@ enum Slot {
     Running(PaneHandle),
 }
 
-/// The state of the app: the layout, the running panes, and what is needed to start a pane.
+/// Which window each pane is in, for the events that go to one window: a frame, a title, a working directory, the
+/// end of a shell. Kept apart from the layouts, with a lock of its own, so that the engine thread of a pane that
+/// makes a frame never waits for the layout lock or scans the layouts.
+#[derive(Default)]
+struct Routes {
+    /// The panes that are in a layout, with the window that has them. Rebuilt from the set under the set's lock after
+    /// every change that adds, removes or moves a pane.
+    live: HashMap<PaneId, Arc<str>>,
+    /// The panes that were closed and whose shell has not reported its end yet, with the window they were in, so that
+    /// the end of the shell is told to the window that closed the pane.
+    closing: HashMap<PaneId, Arc<str>>,
+}
+
+impl Routes {
+    fn rebuild(&mut self, set: &WindowSet) {
+        let mut live = HashMap::with_capacity(self.live.len() + 1);
+        for (label, layout) in set.windows() {
+            // One allocation per window, shared by its panes.
+            let label: Arc<str> = label.into();
+            for pane in layout.all_panes() {
+                live.insert(pane, label.clone());
+            }
+        }
+        self.live = live;
+    }
+
+    fn target_of(&self, pane: PaneId) -> Option<Target> {
+        self.live.get(&pane).map(|label| Target::Window(label.clone()))
+    }
+}
+
+/// The state of the app: the layouts of every window, the running panes, and what is needed to start a pane.
 ///
-/// Lock order: `layout` first, then `panes`; `panes` is never held while waiting for `layout`. `flush` runs the
-/// save job, which locks `layout`, so it is never called with `layout` held.
+/// Lock order: `windows` first, then `panes` or `routes`; `panes` and `routes` are never held while waiting for
+/// `windows`, and never together with each other. `flush` runs the save job, which locks `windows`, so it is never
+/// called with `windows` held. The sink is never called with `windows` held, except `send`, which only queues.
 pub struct AppCore {
     /// The app data directory: `layout.json`, `settings.json`, `session.json` and `themes/` live in it.
     dir: PathBuf,
-    layout: Arc<Mutex<Layout>>,
+    /// The layout of every window.
+    windows: Arc<Mutex<WindowSet>>,
+    /// Which window each pane is in (see [`Routes`]).
+    routes: Arc<Mutex<Routes>>,
     panes: Arc<Mutex<HashMap<PaneId, Slot>>>,
     /// The settings, themes and key bindings in force. Locked briefly and never across file IO or a wait.
     config: Mutex<Config>,
@@ -414,6 +488,11 @@ pub struct AppCore {
     settings_io: Mutex<()>,
     /// The last working directory each pane reported (its `Cwd` events).
     last_cwd: Arc<Mutex<HashMap<PaneId, String>>>,
+    /// The last title each pane reported. The core sends a title when a program changes it and never again, so a
+    /// pane that arrives in another window would show none: both this and the directory are replayed to it.
+    last_title: Mutex<HashMap<PaneId, String>>,
+    /// The drop of a pane or tab that is on its way from one window to another.
+    drops: Mutex<Drops>,
     /// The directory a pane that has not started yet is to inherit, recorded when its split or tab was made.
     starts: Mutex<HashMap<PaneId, String>>,
     /// What is restored on the next start: working directory per pane and the window geometry.
@@ -429,31 +508,32 @@ pub struct AppCore {
     /// How many times the saver job wrote the file, for tests.
     writes: Arc<AtomicUsize>,
     /// The app is ending (the last pane closed or ended, or `shutdown` ran): panes that end from now on stay in the
-    /// layout, so that what is saved is what the user had.
+    /// layout, and windows that close from now on stay in it too, so that what is saved is what the user had.
     exiting: AtomicBool,
-    /// The `rev` of the last view built. Counted under the layout lock, so the order of the revs is the order of the
-    /// states of the layout.
+    /// The `rev` of the last view built. Counted under the windows lock, so the order of the revs is the order of the
+    /// states of the layouts.
     view_rev: AtomicU64,
     me: Weak<AppCore>,
 }
 
 impl AppCore {
-    /// Load the layout from `dir/layout.json` (a fresh one-pane layout when there is none or it is unusable) and
-    /// start nothing: the webview starts each pane once it knows the pane's size.
+    /// Load the layouts from `dir/layout.json` (a fresh one-pane window `main` when there is none or it is unusable;
+    /// a layout file of before windows is one window) and start nothing: the webview starts each pane once it knows
+    /// the pane's size, and the shell opens the windows other than `main` (see [`AppCore::restored_windows`]).
     pub fn new(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec) -> Arc<AppCore> {
         let path = dir.join("layout.json");
-        let layout = Arc::new(Mutex::new(load_layout(&path)));
+        let windows = Arc::new(Mutex::new(load_layout(&path)));
         let writes = Arc::new(AtomicUsize::new(0));
 
-        let job_layout = layout.clone();
+        let job_windows = windows.clone();
         let job_writes = writes.clone();
         let saver = Debounced::new(SAVE_DELAY, move || {
-            // Serialise a copy: the layout is not locked while the file is written and synced.
-            let snapshot = lock(&job_layout).clone();
-            match serde_json::to_vec_pretty(&snapshot) {
+            // Serialise a copy: the layouts are not locked while the file is written and synced.
+            let snapshot = lock(&job_windows).clone();
+            match snapshot.to_json() {
                 Ok(json) => {
                     job_writes.fetch_add(1, Ordering::SeqCst);
-                    if let Err(e) = persist::write_atomic(&path, &json) {
+                    if let Err(e) = persist::write_atomic(&path, json.as_bytes()) {
                         eprintln!("holzwave: cannot save {}: {e}", path.display());
                     }
                 }
@@ -465,25 +545,37 @@ impl AppCore {
 
         let panes = Arc::new(Mutex::new(HashMap::new()));
         let last_cwd = Arc::new(Mutex::new(HashMap::new()));
+        let routes = {
+            let mut routes = Routes::default();
+            routes.rebuild(&lock(&windows));
+            Arc::new(Mutex::new(routes))
+        };
         let session = {
             let mut session = load_session(&dir.join(SESSION_FILE));
-            // A directory of a pane that is not in the layout is of no use and must not be written back.
-            session.sanitise(&lock(&layout).all_panes());
+            // A directory of a pane that is not in the layout is of no use and must not be written back, and neither
+            // is the frame of a window that is not in it.
+            let set = lock(&windows);
+            session.sanitise(&set.all_panes());
+            session.sanitise_windows(&set.labels());
+            drop(set);
             Arc::new(Mutex::new(session))
         };
         let session_saver = {
             let path = dir.join(SESSION_FILE);
-            let (layout, panes, session, last_cwd) = (layout.clone(), panes.clone(), session.clone(), last_cwd.clone());
-            Debounced::new(SESSION_DELAY, move || write_session(&path, &layout, &panes, &session, &last_cwd))
+            let (windows, panes, session, last_cwd) = (windows.clone(), panes.clone(), session.clone(), last_cwd.clone());
+            Debounced::new(SESSION_DELAY, move || write_session(&path, &windows, &panes, &session, &last_cwd))
         };
 
         Arc::new_cyclic(|me| AppCore {
             dir,
-            layout,
+            windows,
+            routes,
             panes,
             config,
             settings_io: Mutex::new(()),
             last_cwd,
+            last_title: Mutex::new(HashMap::new()),
+            drops: Mutex::new(Drops::default()),
             starts: Mutex::new(HashMap::new()),
             session,
             session_saver,
@@ -498,40 +590,70 @@ impl AppCore {
         })
     }
 
-    pub fn view(&self) -> View {
-        self.view_of(&lock(&self.layout))
+    /// The view of the window `label`. An unknown label is the error `no such window`.
+    pub fn view_in(&self, label: &str) -> Result<View, String> {
+        let set = lock(&self.windows);
+        self.view_in_set(&set, label)
     }
 
-    /// The view of the layout, stamped with the next `rev`. The caller holds the layout lock (it has the `&Layout`
+    /// The view of the layout, stamped with the next `rev`. The caller holds the windows lock (it has the `&Layout`
     /// from the guard), so two views are stamped in the order their states happened.
     fn view_of(&self, layout: &Layout) -> View {
         View::of(layout, self.view_rev.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
-    // ---- layout commands: lock, mutate, mark dirty, answer with the new view. No disk IO, no waiting. ------------
-
-    /// Apply a layout change, schedule a save and return the new view.
-    fn change(&self, f: impl FnOnce(&mut Layout)) -> View {
-        let view = {
-            let mut layout = lock(&self.layout);
-            f(&mut layout);
-            self.view_of(&layout)
-        };
-        self.saver.touch();
-        view
+    /// [`AppCore::view_of`] for the window `label` of a set the caller has locked.
+    fn view_in_set(&self, set: &WindowSet, label: &str) -> Result<View, String> {
+        set.layout(label).map(|layout| self.view_of(layout)).ok_or_else(no_such_window)
     }
 
-    /// Like [`AppCore::change`] for a change that makes a pane out of the focused one: the new pane is to start in
+    /// Make the table of panes and windows match `set`. Call it under the windows lock, after every change that adds,
+    /// removes or moves a pane, so that the table and the layouts are never seen apart.
+    fn sync_routes(&self, set: &WindowSet) {
+        lock(&self.routes).rebuild(set);
+    }
+
+    /// The labels of the windows the saved layout has other than `main`, in order: the shell opens them after the
+    /// start (the configuration creates `main` itself).
+    pub fn restored_windows(&self) -> Vec<String> {
+        lock(&self.windows).labels().into_iter().filter(|label| *label != MAIN_WINDOW).map(str::to_owned).collect()
+    }
+
+    /// The labels of all windows.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn window_labels(&self) -> Vec<String> {
+        lock(&self.windows).labels().into_iter().map(str::to_owned).collect()
+    }
+
+    // ---- layout commands: lock, mutate, mark dirty, answer with the new view. No disk IO, no waiting. ------------
+    //
+    // Each takes the label of the window that called, and answers with that window's view. A label that is no window
+    // is the error `no such window`; nothing else can go wrong.
+
+    /// Apply a layout change to one window, schedule a save and return the new view.
+    fn change_in(&self, label: &str, f: impl FnOnce(&mut Layout)) -> Result<View, String> {
+        let view = {
+            let mut set = lock(&self.windows);
+            set.edit(label, f).ok_or_else(no_such_window)?;
+            self.view_in_set(&set, label)?
+        };
+        self.saver.touch();
+        Ok(view)
+    }
+
+    /// Like [`AppCore::change_in`] for a change that makes a pane out of the focused one: the new pane is to start in
     /// the directory the focused pane was last known to be in, which is recorded now because the focus and the
-    /// directory may both have moved by the time the webview starts the new pane.
-    fn change_inheriting(&self, f: impl FnOnce(&mut Layout)) -> View {
+    /// directory may both have moved by the time the webview starts the new pane. `add` makes the pane in the set
+    /// (so that the pane limit counts over all windows) and answers its id, `None` at a limit.
+    fn grow_in(&self, label: &str, add: impl FnOnce(&mut WindowSet) -> Option<PaneId>) -> Result<View, String> {
         let (view, creator, created) = {
-            let mut layout = lock(&self.layout);
-            let before = layout.all_panes();
-            let creator = layout.tab().focus;
-            f(&mut layout);
-            let created = layout.all_panes().into_iter().find(|p| !before.contains(p));
-            (self.view_of(&layout), creator, created)
+            let mut set = lock(&self.windows);
+            let creator = set.layout(label).ok_or_else(no_such_window)?.tab().focus;
+            let created = add(&mut set);
+            if created.is_some() {
+                self.sync_routes(&set);
+            }
+            (self.view_in_set(&set, label)?, creator, created)
         };
         if let Some(pane) = created {
             let known = lock(&self.last_cwd).get(&creator).cloned();
@@ -541,107 +663,127 @@ impl AppCore {
             }
         }
         self.saver.touch();
-        view
+        Ok(view)
     }
 
     /// Split the focused pane; the new pane gets the focus and starts where the focused pane is. At the pane limits
     /// the view comes back unchanged.
-    pub fn split(&self, column: bool) -> View {
-        self.change_inheriting(|l| {
-            l.split_focused(if column { Axis::Column } else { Axis::Row });
-        })
+    pub fn split_in(&self, label: &str, column: bool) -> Result<View, String> {
+        let axis = if column { Axis::Column } else { Axis::Row };
+        self.grow_in(label, |set| set.split_focused(label, axis))
     }
 
     /// A new tab with one pane that starts where the focused pane is.
-    pub fn new_tab(&self) -> View {
-        self.change_inheriting(|l| {
-            l.new_tab();
-        })
+    pub fn new_tab_in(&self, label: &str) -> Result<View, String> {
+        self.grow_in(label, |set| set.new_tab(label))
     }
 
-    pub fn new_workspace(&self, name: &str) -> View {
-        self.change(|l| {
-            l.new_workspace(name);
-        })
+    pub fn new_workspace_in(&self, label: &str, name: &str) -> Result<View, String> {
+        let view = {
+            let mut set = lock(&self.windows);
+            if set.new_workspace(label, name).is_some() {
+                self.sync_routes(&set);
+            }
+            self.view_in_set(&set, label)?
+        };
+        self.saver.touch();
+        Ok(view)
     }
 
-    pub fn focus_pane(&self, pane: PaneId) -> View {
-        self.change(|l| l.focus_pane(pane))
+    pub fn focus_pane_in(&self, label: &str, pane: PaneId) -> Result<View, String> {
+        self.change_in(label, |l| l.focus_pane(pane))
     }
 
-    pub fn cycle_focus(&self, step: i32) -> View {
-        self.change(|l| l.cycle_focus(step as isize))
+    pub fn cycle_focus_in(&self, label: &str, step: i32) -> Result<View, String> {
+        self.change_in(label, |l| l.cycle_focus(step as isize))
     }
 
-    pub fn select_tab(&self, index: usize) -> View {
-        self.change(|l| l.select_tab(index))
+    pub fn select_tab_in(&self, label: &str, index: usize) -> Result<View, String> {
+        self.change_in(label, |l| l.select_tab(index))
     }
 
-    pub fn select_workspace(&self, index: usize) -> View {
-        self.change(|l| l.select_workspace(index))
+    pub fn select_workspace_in(&self, label: &str, index: usize) -> Result<View, String> {
+        self.change_in(label, |l| l.select_workspace(index))
     }
 
     /// Name the pane `pane`; the empty text gives back the program title. An unknown pane changes nothing.
-    pub fn rename_pane(&self, pane: PaneId, name: &str) -> View {
-        self.change(|l| {
+    pub fn rename_pane_in(&self, label: &str, pane: PaneId, name: &str) -> Result<View, String> {
+        self.change_in(label, |l| {
             l.rename_pane(pane, name);
         })
     }
 
     /// Name the tab at `index` of the shown workspace; the empty text gives back `shell`.
-    pub fn rename_tab(&self, index: usize, name: &str) -> View {
-        self.change(|l| {
+    pub fn rename_tab_in(&self, label: &str, index: usize, name: &str) -> Result<View, String> {
+        self.change_in(label, |l| {
             l.rename_tab(index, name);
         })
     }
 
     /// Name the workspace at `index`; the empty text gives back `ws N`.
-    pub fn rename_workspace(&self, index: usize, name: &str) -> View {
-        self.change(|l| {
+    pub fn rename_workspace_in(&self, label: &str, index: usize, name: &str) -> Result<View, String> {
+        self.change_in(label, |l| {
             l.rename_workspace(index, name);
         })
     }
 
-    /// Drop `pane` on `target`: a side splits the target there, the middle swaps the two (DESK-20). Any id the layout
-    /// does not know, and any move over a limit, changes nothing.
-    pub fn move_pane(&self, pane: PaneId, target: PaneId, edge: Edge) -> View {
-        self.change(|l| {
+    /// Drop `pane` on `target`, both in the window `label`: a side splits the target there, the middle swaps the two
+    /// (DESK-20). Any id the layout does not know, and any move over a limit, changes nothing. (A pane that comes
+    /// from another window is [`AppCore::attach_pane_in`].)
+    pub fn move_pane_in(&self, label: &str, pane: PaneId, target: PaneId, edge: Edge) -> Result<View, String> {
+        self.change_in(label, |l| {
             l.move_pane(pane, target, edge);
         })
     }
 
     /// Move the tab at `from` to the place `to` in the shown workspace.
-    pub fn move_tab(&self, from: usize, to: usize) -> View {
-        self.change(|l| {
+    pub fn move_tab_in(&self, label: &str, from: usize, to: usize) -> Result<View, String> {
+        self.change_in(label, |l| {
             l.move_tab(from, to);
         })
     }
 
     /// Move the tab at `tab` of the shown workspace to the end of workspace `workspace`.
-    pub fn move_tab_to_workspace(&self, tab: usize, workspace: usize) -> View {
-        self.change(|l| {
+    pub fn move_tab_to_workspace_in(&self, label: &str, tab: usize, workspace: usize) -> Result<View, String> {
+        self.change_in(label, |l| {
             l.move_tab_to_workspace(tab, workspace);
         })
     }
 
-    pub fn set_ratio(&self, split: SplitId, ratio: f32) -> View {
-        self.change(|l| l.set_ratio(split, ratio))
+    pub fn set_ratio_in(&self, label: &str, split: SplitId, ratio: f32) -> Result<View, String> {
+        self.change_in(label, |l| l.set_ratio(split, ratio))
     }
 
-    /// Close a pane (RESEARCH Pitfall 4). The shell is killed on its own engine thread and the app keeps running;
-    /// only closing the last pane of the layout ends it, after the layout is on disk. An id that is in no tab
-    /// changes nothing.
+    /// Close a pane of the window `label` (RESEARCH Pitfall 4). The shell is killed on its own engine thread and the
+    /// app keeps running. What else happens depends on what the pane was:
+    ///
+    /// - one of several panes of its window: the window's layout changes, and that window is told;
+    /// - the last pane of a window while there are other windows: the window closes with it (its layout and frame
+    ///   go, the sink destroys it), and the answer is the view the window had;
+    /// - the last pane of the last window: the app ends, after the layouts are on disk, and nothing changes;
+    /// - an id that is in no tab of this window (another window's pane too): nothing changes.
     ///
     /// Not waiting for anything, but the exit path writes the layout, so the command is async.
-    pub fn close_pane(&self, pane: PaneId) -> View {
-        let mut layout = lock(&self.layout);
-        match layout.close_pane(pane) {
-            CloseOutcome::Closed => {
-                let view = self.view_of(&layout);
-                // Under the layout lock, so `pane_gone` of the same pane sees either both or neither of the changes.
+    pub fn close_pane_in(&self, label: &str, pane: PaneId) -> Result<View, String> {
+        let mut set = lock(&self.windows);
+        let layout = set.layout(label).ok_or_else(no_such_window)?;
+        if set.window_of(pane) != Some(label) {
+            return self.view_in_set(&set, label);
+        }
+        // The view a window gives as its last answer when it is the pane's last and the window goes with it.
+        let before = (set.len() > 1 && layout.all_panes() == [pane]).then(|| layout.clone());
+        match set.close_pane(pane) {
+            SetClose::Closed => {
+                let view = self.view_in_set(&set, label)?;
+                // Under the windows lock, so `pane_gone` of the same pane sees either both or neither of the changes.
                 let slot = lock(&self.panes).remove(&pane);
-                drop(layout);
-                self.forget_directory(pane);
+                {
+                    let mut routes = lock(&self.routes);
+                    routes.rebuild(&set);
+                    routes.closing.insert(pane, label.into());
+                }
+                drop(set);
+                self.forget_pane(pane);
                 let never_started = slot.is_none();
                 if let Some(Slot::Running(handle)) = &slot {
                     // The actor kills and reaps the shell on its own thread (about 200 ms) and sends the PaneExit.
@@ -649,21 +791,84 @@ impl AppCore {
                 }
                 drop(slot);
                 self.saver.touch();
-                self.sink.send(Out::Layout(view.clone()));
+                self.sink.send(Target::window(label), Out::Layout(view.clone()));
                 if never_started {
                     // No shell, so no Exited event will come: the page still hears that the pane is gone.
-                    self.sink.send(Out::PaneExit { pane, code: None });
+                    lock(&self.routes).closing.remove(&pane);
+                    self.sink.send(Target::window(label), Out::PaneExit { pane, code: None });
                 }
-                view
+                Ok(view)
             }
-            CloseOutcome::LastPane => {
-                let view = self.view_of(&layout);
-                drop(layout);
+            SetClose::WindowClosed(gone) => {
+                let view = before.as_ref().map(|layout| self.view_of(layout)).ok_or_else(no_such_window)?;
+                let slot = lock(&self.panes).remove(&pane);
+                self.sync_routes(&set);
+                drop(set);
+                self.forget_pane(pane);
+                if let Some(Slot::Running(handle)) = &slot {
+                    handle.close();
+                }
+                drop(slot);
+                self.window_removed(&gone);
+                Ok(view)
+            }
+            SetClose::LastPane => {
+                let view = self.view_in_set(&set, label)?;
+                drop(set);
                 self.begin_exit();
-                view
+                Ok(view)
             }
-            CloseOutcome::Unknown => self.view_of(&layout),
+            SetClose::Unknown => self.view_in_set(&set, label),
         }
+    }
+
+    /// A window left the set (its last pane closed, or it was closed with the red button): its frame is forgotten,
+    /// the layout is saved without it and, when the core did it, the sink destroys the window. Call it with no lock
+    /// held.
+    fn window_removed(&self, label: &str) {
+        lock(&self.session).forget_window(label);
+        self.session_saver.touch();
+        self.saver.touch();
+        self.sink.close_window(label);
+    }
+
+    /// The window `label` is gone (the red button, or the destroy that `close_window` of the sink asked for): its
+    /// shells end and its layout and frame are dropped.
+    ///
+    /// Two cases change nothing. The last window: closing it ends the app, and the layout on disk stays what it was,
+    /// so that the next start has the window back. And an app that is ending already: quitting must never drop the
+    /// windows from the layout (the shells end, the windows are destroyed, none of that is the user closing them). A
+    /// window that is not in the set any more (the core removed it itself) is not asked about again.
+    pub fn window_closed(&self, label: &str) {
+        if self.exiting.load(Ordering::SeqCst) {
+            return;
+        }
+        let slots = {
+            let mut set = lock(&self.windows);
+            let Some(panes) = set.close_window(label) else {
+                return;
+            };
+            self.sync_routes(&set);
+            let mut panes_map = lock(&self.panes);
+            panes.into_iter().filter_map(|pane| panes_map.remove(&pane).map(|slot| (pane, slot))).collect::<Vec<_>>()
+        };
+        // The panes are not in any layout now; their shells end on their own threads.
+        let gone: Vec<PaneId> = {
+            let mut gone = Vec::new();
+            for (pane, slot) in slots {
+                gone.push(pane);
+                if let Slot::Running(handle) = &slot {
+                    handle.close();
+                }
+            }
+            gone
+        };
+        for pane in gone {
+            self.forget_pane(pane);
+        }
+        lock(&self.session).forget_window(label);
+        self.session_saver.touch();
+        self.saver.touch();
     }
 
     /// Write the pending layout and session now, on the calling thread. Never call it with the layout locked.
@@ -719,24 +924,52 @@ impl AppCore {
         self.session_saver.touch();
     }
 
-    /// A pane left the layout: what is remembered of its directory goes, and the session is written without it.
-    fn forget_directory(&self, pane: PaneId) {
+    /// A pane left the layout: what is remembered of its directory and title goes, and the session is written
+    /// without it.
+    fn forget_pane(&self, pane: PaneId) {
         lock(&self.last_cwd).remove(&pane);
+        lock(&self.last_title).remove(&pane);
         lock(&self.starts).remove(&pane);
         self.session_saver.touch();
     }
 
-    /// Remember the window geometry for the next start. Clamped into range by the session; only touches the
-    /// debounced saver, so it is cheap on the thread of the window events.
-    pub fn note_window(&self, window: WindowState) {
-        lock(&self.session).set_window(window);
-        self.session_saver.touch();
+    /// A pane reported a new title (from its sink, on the engine thread of the pane). Remembered for the window that
+    /// the pane arrives in later.
+    fn title_reported(&self, pane: PaneId, title: &str) {
+        if self.exiting.load(Ordering::SeqCst) || !lock(&self.panes).contains_key(&pane) {
+            return;
+        }
+        lock(&self.last_title).insert(pane, title.to_owned());
     }
 
-    /// Where and how large the window opens, given the monitors that are connected now: the saved size, and the
-    /// saved position only if enough of the window is on one of them.
-    pub fn placement(&self, monitors: &[MonitorRect]) -> Placement {
-        lock(&self.session).placement(monitors)
+    /// Tell the window `label` the last title and working directory of each of `panes`: a window that gets a pane
+    /// (a page that is new, or one that a pane moved to) has never heard them, and the program says them once.
+    fn replay(&self, label: &str, panes: &[PaneId]) {
+        for pane in panes {
+            let title = lock(&self.last_title).get(pane).cloned();
+            if let Some(title) = title {
+                self.sink.send(Target::window(label), Out::Title { pane: *pane, title });
+            }
+            let cwd = lock(&self.last_cwd).get(pane).cloned();
+            if let Some(cwd) = cwd {
+                self.sink.send(Target::window(label), Out::Cwd { pane: *pane, cwd });
+            }
+        }
+    }
+
+    /// Remember the window geometry for the next start. Clamped into range by the session; only touches the
+    /// debounced saver, so it is cheap on the thread of the window events.
+    pub fn note_window(&self, label: &str, window: WindowState) {
+        if lock(&self.session).set_window_for(label, window) {
+            self.session_saver.touch();
+        }
+    }
+
+    /// Where and how large the window `label` opens, given the monitors that are connected now: the saved size, and
+    /// the saved position only if enough of the window is on one of them. A window with no saved frame gets the
+    /// default size and the position the window system chooses.
+    pub fn placement(&self, label: &str, monitors: &[MonitorRect]) -> Placement {
+        lock(&self.session).placement_for(label, monitors)
     }
 
     // ---- links, paths, app info and the pointer ------------------------------------------------------------
@@ -846,7 +1079,7 @@ impl AppCore {
             (cfg.view(), before, cfg.look())
         };
         self.push_to_panes(&before, &after);
-        self.sink.send(Out::Settings(view.clone()));
+        self.sink.send(Target::All, Out::Settings(view.clone()));
         Ok(view)
     }
 
@@ -889,7 +1122,7 @@ impl AppCore {
             (cfg.view(), before, cfg.look())
         };
         self.push_to_panes(&before, &after);
-        self.sink.send(Out::Settings(view.clone()));
+        self.sink.send(Target::All, Out::Settings(view.clone()));
         view
     }
 
@@ -950,7 +1183,7 @@ impl AppCore {
         for handle in self.running() {
             handle.close();
         }
-        self.sink.send(Out::Exit);
+        self.sink.send(Target::All, Out::Exit);
     }
 
     /// End everything and wait, for at most three seconds: the layout is written, every shell is closed and joined.
@@ -1014,17 +1247,39 @@ impl AppCore {
 
         // The sink runs on the pane's engine thread, possibly before `spawn_ghostty` has returned (a failed start
         // reports first), so it only holds the sink and a weak reference and never waits for the handle.
+        //
+        // Frames, titles and directories go to the window that has the pane, found in the table of routes (its own
+        // lock, never the layouts). A pane that is in no window any more (closed, and its last frames still on the
+        // way) has no route and its events are dropped: there is no page left that wants them.
         let sink = self.sink.clone();
+        let routes = self.routes.clone();
         let me = self.me.clone();
         let started = PaneHandle::spawn_ghostty(pane, spec, move |event| match event {
-            PaneEvent::Frame(frame) => sink.send(Out::Frame(frame)),
-            PaneEvent::Title(title) => sink.send(Out::Title { pane, title }),
+            PaneEvent::Frame(frame) => {
+                let target = lock(&routes).target_of(pane);
+                if let Some(target) = target {
+                    sink.send(target, Out::Frame(frame));
+                }
+            }
+            PaneEvent::Title(title) => {
+                // Remembered before the webview hears of it, for the window the pane may arrive in later.
+                if let Some(core) = me.upgrade() {
+                    core.title_reported(pane, &title);
+                }
+                let target = lock(&routes).target_of(pane);
+                if let Some(target) = target {
+                    sink.send(target, Out::Title { pane, title });
+                }
+            }
             PaneEvent::Cwd(cwd) => {
                 // Recorded before the webview hears of it, so that a split made on seeing it inherits it.
                 if let Some(core) = me.upgrade() {
                     core.cwd_reported(pane, &cwd);
                 }
-                sink.send(Out::Cwd { pane, cwd });
+                let target = lock(&routes).target_of(pane);
+                if let Some(target) = target {
+                    sink.send(target, Out::Cwd { pane, cwd });
+                }
             }
             PaneEvent::Exited { code } => {
                 if let Some(core) = me.upgrade() {
@@ -1053,8 +1308,8 @@ impl AppCore {
     /// close cannot slip in between. A pane that already has a slot (running, or being started by another call) is
     /// left alone and reported as such.
     fn reserve(&self, pane: PaneId) -> Result<Reserved, String> {
-        let layout = lock(&self.layout);
-        if !layout.all_panes().contains(&pane) {
+        let set = lock(&self.windows);
+        if set.window_of(pane).is_none() {
             return Err("no such pane".into());
         }
         let mut panes = lock(&self.panes);
@@ -1108,36 +1363,59 @@ impl AppCore {
     }
 
     /// The shell of a pane ended, or never started (called from the pane's sink). Forgets the handle, takes the pane
-    /// out of the layout and tells the webview. A pane the user already closed is `Unknown` to the layout by now, so
-    /// this cannot end the app a second time (RESEARCH Pitfall 4); only the last pane of the layout ends it.
+    /// out of its window's layout and tells that window. A pane the user already closed is `Unknown` to the layouts by
+    /// now, so this cannot end the app a second time (RESEARCH Pitfall 4); only the last pane of the last window ends
+    /// it. The last pane of any other window closes that window, and nobody is left to hear the exit of that pane.
     fn pane_gone(&self, pane: PaneId, code: Option<u32>) {
-        let (slot, outcome) = {
-            let mut layout = lock(&self.layout);
+        let mut layout_event: Option<(Arc<str>, View)> = None;
+        let mut exit_to: Option<Arc<str>> = None;
+        let mut gone_window: Option<String> = None;
+        let mut last = false;
+        let slot = {
+            let mut set = lock(&self.windows);
             let slot = lock(&self.panes).remove(&pane);
-            let outcome = if self.exiting.load(Ordering::SeqCst) {
+            // The window the pane is in; a pane that is in no layout (the user closed it) leaves it in `closing`.
+            let label = lock(&self.routes).live.get(&pane).cloned();
+            let closed_in = |routes: &Mutex<Routes>| lock(routes).closing.remove(&pane);
+            if self.exiting.load(Ordering::SeqCst) {
                 // The app is ending: what the user had stays in the layout.
-                None
+                exit_to = label.or_else(|| closed_in(&self.routes));
             } else {
-                match layout.close_pane(pane) {
-                    CloseOutcome::Closed => Some((CloseOutcome::Closed, Some(self.view_of(&layout)))),
-                    other => Some((other, None)),
+                match set.close_pane(pane) {
+                    SetClose::Closed => {
+                        if let Some(label) = label {
+                            layout_event = self.view_in_set(&set, &label).ok().map(|view| (label.clone(), view));
+                            exit_to = Some(label);
+                        }
+                        self.sync_routes(&set);
+                    }
+                    SetClose::WindowClosed(gone) => {
+                        self.sync_routes(&set);
+                        gone_window = Some(gone);
+                    }
+                    SetClose::LastPane => {
+                        last = true;
+                        exit_to = label;
+                    }
+                    SetClose::Unknown => exit_to = closed_in(&self.routes),
                 }
-            };
-            (slot, outcome)
+            }
+            slot
         };
         drop(slot);
 
-        let mut last = false;
-        match outcome {
-            Some((CloseOutcome::Closed, Some(view))) => {
-                self.forget_directory(pane);
-                self.saver.touch();
-                self.sink.send(Out::Layout(view));
-            }
-            Some((CloseOutcome::LastPane, _)) => last = true,
-            _ => {}
+        if let Some((label, view)) = layout_event {
+            self.forget_pane(pane);
+            self.saver.touch();
+            self.sink.send(Target::Window(label), Out::Layout(view));
         }
-        self.sink.send(Out::PaneExit { pane, code });
+        if let Some(gone) = gone_window {
+            self.forget_pane(pane);
+            self.window_removed(&gone);
+        }
+        if let Some(label) = exit_to {
+            self.sink.send(Target::Window(label), Out::PaneExit { pane, code });
+        }
         if last {
             self.begin_exit();
         }
@@ -1251,6 +1529,11 @@ impl Drop for AppCore {
     }
 }
 
+/// The answer of a command that names a window the core has no layout for.
+fn no_such_window() -> String {
+    "no such window".to_owned()
+}
+
 /// The longest `code` or `key` string of a key event the shell passes on (T-02-50): the longest real value is a
 /// named key such as `MediaTrackPrevious`.
 const MAX_KEY_BYTES: usize = 32;
@@ -1265,16 +1548,16 @@ fn clamp_cell(px: u32) -> u32 {
     px.min(256)
 }
 
-/// Read the layout file. A file that is missing gives a fresh layout. One that is damaged or inconsistent is
+/// Read the layout file: the layouts of all windows. A file that is missing gives a fresh layout. One that is damaged or inconsistent is
 /// repaired or replaced, and its original bytes are copied to `<path>.bad` before anything can overwrite them. One
 /// that is larger than `MAX_LAYOUT_BYTES` is not read; it is moved to `<path>.bad`.
-fn load_layout(path: &Path) -> Layout {
+fn load_layout(path: &Path) -> WindowSet {
     match persist::read_limited(path, MAX_LAYOUT_BYTES) {
-        Ok(None) => Layout::new().0,
+        Ok(None) => WindowSet::new().0,
         Ok(Some(bytes)) => {
             let (layout, status) = match std::str::from_utf8(&bytes) {
-                Ok(text) => Layout::from_json(text),
-                Err(e) => (Layout::new().0, LoadStatus::Reset(format!("not UTF-8: {e}"))),
+                Ok(text) => WindowSet::from_json(text),
+                Err(e) => (WindowSet::new().0, LoadStatus::Reset(format!("not UTF-8: {e}"))),
             };
             match &status {
                 LoadStatus::Clean => {}
@@ -1295,11 +1578,11 @@ fn load_layout(path: &Path) -> Layout {
             if let Err(e) = std::fs::rename(path, &bad) {
                 eprintln!("holzwave: cannot move {} to {}: {e}", path.display(), bad.display());
             }
-            Layout::new().0
+            WindowSet::new().0
         }
         Err(e) => {
             eprintln!("holzwave: cannot read {}: {e}", path.display());
-            Layout::new().0
+            WindowSet::new().0
         }
     }
 }
@@ -1532,17 +1815,21 @@ fn load_session(path: &Path) -> Session {
     session
 }
 
-/// Write the session: the window geometry and the working directory of every pane of the layout. A pane's directory
-/// is its last `Cwd` event; a running pane that never reported is asked for it, with no lock held because that can
-/// start a process. A directory of a pane that is no longer in the layout is dropped.
+/// Write the session: the geometry of every window and the working directory of every pane of the layouts. A pane's
+/// directory is its last `Cwd` event; a running pane that never reported is asked for it, with no lock held because
+/// that can start a process. A directory of a pane that is no longer in a layout is dropped, and so is the frame of a
+/// window that is no longer in the set.
 fn write_session(
     path: &Path,
-    layout: &Mutex<Layout>,
+    windows: &Mutex<WindowSet>,
     panes: &Mutex<HashMap<PaneId, Slot>>,
     session: &Mutex<Session>,
     last_cwd: &Mutex<HashMap<PaneId, String>>,
 ) {
-    let live = lock(layout).all_panes();
+    let (live, labels) = {
+        let set = lock(windows);
+        (set.all_panes(), set.labels().into_iter().map(str::to_owned).collect::<Vec<String>>())
+    };
     let mut cwds = lock(last_cwd).clone();
     let silent: Vec<(PaneId, u32)> = {
         let panes = lock(panes);
@@ -1569,6 +1856,8 @@ fn write_session(
             }
         }
         session.sanitise(&live);
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        session.sanitise_windows(&labels);
         session.clone()
     };
     if let Err(e) = persist::write_atomic(path, snapshot.to_json().as_bytes()) {
@@ -1587,21 +1876,38 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
-    /// Collects what the core tells the webview.
+    /// Collects what the core tells the webviews, with the window each event is for, and the windows it asked the
+    /// sink to close.
     #[derive(Default)]
     struct Recorder {
-        log: Mutex<Vec<Out>>,
+        log: Mutex<Vec<(Target, Out)>>,
+        closed: Mutex<Vec<String>>,
     }
 
     impl Sink for Recorder {
-        fn send(&self, out: Out) {
-            lock(&self.log).push(out);
+        fn send(&self, target: Target, out: Out) {
+            lock(&self.log).push((target, out));
+        }
+
+        fn close_window(&self, label: &str) {
+            lock(&self.closed).push(label.to_owned());
         }
     }
 
     impl Recorder {
+        /// Every event, whoever it was for.
         fn all(&self) -> Vec<Out> {
+            lock(&self.log).iter().map(|(_, out)| out.clone()).collect()
+        }
+
+        /// Every event with its target.
+        fn sent(&self) -> Vec<(Target, Out)> {
             lock(&self.log).clone()
+        }
+
+        /// The windows the core asked to have destroyed, in order.
+        fn closed_windows(&self) -> Vec<String> {
+            lock(&self.closed).clone()
         }
 
         fn frames(&self, pane: PaneId) -> Vec<FrameMsg> {
@@ -1705,6 +2011,75 @@ mod tests {
 
     fn only_pane(core: &AppCore) -> PaneId {
         core.view().panes[0].0
+    }
+
+    /// The single window of before: the commands as they were, on the window `main`. The tests that were written for
+    /// one window keep calling these, which is what shows that one window behaves exactly as it did; what is new
+    /// about several windows is tested with the `_in` methods and labels.
+    impl AppCore {
+        fn view(&self) -> View {
+            self.view_in(MAIN_WINDOW).expect("main")
+        }
+
+        fn split(&self, column: bool) -> View {
+            self.split_in(MAIN_WINDOW, column).expect("main")
+        }
+
+        fn new_tab(&self) -> View {
+            self.new_tab_in(MAIN_WINDOW).expect("main")
+        }
+
+        fn new_workspace(&self, name: &str) -> View {
+            self.new_workspace_in(MAIN_WINDOW, name).expect("main")
+        }
+
+        fn focus_pane(&self, pane: PaneId) -> View {
+            self.focus_pane_in(MAIN_WINDOW, pane).expect("main")
+        }
+
+        fn cycle_focus(&self, step: i32) -> View {
+            self.cycle_focus_in(MAIN_WINDOW, step).expect("main")
+        }
+
+        fn select_tab(&self, index: usize) -> View {
+            self.select_tab_in(MAIN_WINDOW, index).expect("main")
+        }
+
+        fn select_workspace(&self, index: usize) -> View {
+            self.select_workspace_in(MAIN_WINDOW, index).expect("main")
+        }
+
+        fn rename_pane(&self, pane: PaneId, name: &str) -> View {
+            self.rename_pane_in(MAIN_WINDOW, pane, name).expect("main")
+        }
+
+        fn rename_tab(&self, index: usize, name: &str) -> View {
+            self.rename_tab_in(MAIN_WINDOW, index, name).expect("main")
+        }
+
+        fn rename_workspace(&self, index: usize, name: &str) -> View {
+            self.rename_workspace_in(MAIN_WINDOW, index, name).expect("main")
+        }
+
+        fn move_pane(&self, pane: PaneId, target: PaneId, edge: Edge) -> View {
+            self.move_pane_in(MAIN_WINDOW, pane, target, edge).expect("main")
+        }
+
+        fn move_tab(&self, from: usize, to: usize) -> View {
+            self.move_tab_in(MAIN_WINDOW, from, to).expect("main")
+        }
+
+        fn move_tab_to_workspace(&self, tab: usize, workspace: usize) -> View {
+            self.move_tab_to_workspace_in(MAIN_WINDOW, tab, workspace).expect("main")
+        }
+
+        fn set_ratio(&self, split: SplitId, ratio: f32) -> View {
+            self.set_ratio_in(MAIN_WINDOW, split, ratio).expect("main")
+        }
+
+        fn close_pane(&self, pane: PaneId) -> View {
+            self.close_pane_in(MAIN_WINDOW, pane).expect("main")
+        }
     }
 
     fn key(code: &str, key: &str) -> DomKey {
@@ -1952,7 +2327,7 @@ mod tests {
     }
 
     fn snapshot(core: &AppCore) -> Layout {
-        lock(&core.layout).clone()
+        lock(&core.windows).layout(MAIN_WINDOW).expect("the window main").clone()
     }
 
     fn on_disk(dir: &Scratch) -> Layout {
@@ -2127,7 +2502,7 @@ mod tests {
         let rec = rec.clone();
         PaneHandle::spawn_ghostty(pane, spec, move |event| {
             if let PaneEvent::Frame(frame) = event {
-                rec.send(Out::Frame(frame));
+                rec.send(Target::window(MAIN_WINDOW), Out::Frame(frame));
             }
         })
         .expect("the shell starts")
@@ -2515,7 +2890,7 @@ mod tests {
 
         let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
 
-        assert_eq!(lock(&core.layout).all_panes().len(), 1);
+        assert_eq!(lock(&core.windows).all_panes().len(), 1);
         assert_eq!(
             std::fs::read_to_string(dir.0.join("layout.json.bad")).unwrap(),
             "{ not json",
@@ -2533,7 +2908,7 @@ mod tests {
 
         let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
 
-        assert_eq!(*lock(&core.layout), Layout::new().0, "an oversized file is not used");
+        assert_eq!(snapshot(&core), Layout::new().0, "an oversized file is not used");
         let bad = std::fs::metadata(dir.0.join("layout.json.bad")).expect("a bad copy next to the file");
         assert_eq!(bad.len(), text.len() as u64);
     }
@@ -2547,7 +2922,8 @@ mod tests {
         let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
 
         {
-            let l = lock(&core.layout);
+            let set = lock(&core.windows);
+            let l = set.layout(MAIN_WINDOW).expect("main");
             assert_eq!(l.active, 0);
             assert_eq!(l.workspace().active, 0);
             assert_eq!(l.all_panes(), vec![3], "the repaired layout keeps the file's pane");
@@ -3093,12 +3469,12 @@ mod tests {
     fn note_window_is_saved_and_placement_drops_an_off_screen_position() {
         let (core, _rec, dir) = core("/bin/cat", &[]);
         let monitors = [MonitorRect { x: 0, y: 0, width: 1920, height: 1080 }];
-        assert_eq!(core.placement(&monitors).size, holzwave_core::session::DEFAULT_SIZE, "nothing saved yet");
+        assert_eq!(core.placement(MAIN_WINDOW, &monitors).size, holzwave_core::session::DEFAULT_SIZE, "nothing saved yet");
 
-        core.note_window(WindowState { x: 100, y: 80, width: 1200, height: 700, maximized: false });
-        let on_screen = core.placement(&monitors);
-        core.note_window(WindowState { x: 5000, y: 80, width: 1200, height: 700, maximized: true });
-        let off_screen = core.placement(&monitors);
+        core.note_window(MAIN_WINDOW, WindowState { x: 100, y: 80, width: 1200, height: 700, maximized: false });
+        let on_screen = core.placement(MAIN_WINDOW, &monitors);
+        core.note_window(MAIN_WINDOW, WindowState { x: 5000, y: 80, width: 1200, height: 700, maximized: true });
+        let off_screen = core.placement(MAIN_WINDOW, &monitors);
         core.flush();
 
         assert_eq!(on_screen.position, Some((100, 80)));
@@ -3106,7 +3482,7 @@ mod tests {
         assert_eq!(off_screen.position, None, "a position that is on no monitor is dropped");
         assert_eq!(off_screen.size, (1200, 700), "the size is still applied");
         assert!(off_screen.maximized);
-        assert_eq!(core.placement(&[]).position, None, "with no monitor known the system places the window");
+        assert_eq!(core.placement(MAIN_WINDOW, &[]).position, None, "with no monitor known the system places the window");
         assert_eq!(session_on_disk(&dir).window.map(|w| (w.x, w.width)), Some((5000, 1200)));
     }
 
@@ -3114,7 +3490,10 @@ mod tests {
     fn a_window_far_outside_the_range_is_clamped_before_it_is_stored() {
         let (core, _rec, dir) = core("/bin/cat", &[]);
 
-        core.note_window(WindowState { x: i32::MAX, y: i32::MIN, width: 7, height: u32::MAX, maximized: false });
+        core.note_window(
+            MAIN_WINDOW,
+            WindowState { x: i32::MAX, y: i32::MIN, width: 7, height: u32::MAX, maximized: false },
+        );
         core.flush();
 
         let window = session_on_disk(&dir).window.expect("stored");
@@ -3411,6 +3790,512 @@ mod tests {
         assert!(core.pid(pane).is_some(), "the pane is alive");
     }
 
+    // ---- several windows: addressing, close rules, restore (plan 02.1-04) ---------------------------------------
+    //
+    // Everything here runs without a window: the sink is the recorder, which notes the target of every event and the
+    // windows it was asked to destroy. What needs a real second window is check A12 of the owner.
+
+    impl Recorder {
+        /// The frames of `pane` with the window each went to.
+        fn frame_targets(&self, pane: PaneId) -> Vec<Target> {
+            self.sent()
+                .into_iter()
+                .filter_map(|(target, out)| match out {
+                    Out::Frame(f) if f.pane == pane => Some(target),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The targets of every event of the kind `name` (see `Out::name`) from `skip` on.
+        fn targets_of(&self, name: &str, skip: usize) -> Vec<Target> {
+            self.sent().into_iter().skip(skip).filter(|(_, out)| out.name() == name).map(|(target, _)| target).collect()
+        }
+    }
+
+    /// Give `pane` a window of its own as the core does for a tear-off, without anything that opens a window.
+    fn raw_tear_off(core: &AppCore, pane: PaneId) -> String {
+        let mut set = lock(&core.windows);
+        let torn = set.tear_off_pane(pane).expect("the pane is torn off");
+        core.sync_routes(&set);
+        torn.label
+    }
+
+    /// A core whose two panes run `script` and sit in two windows: `main` and another. `(core, rec, dir, first,
+    /// second, label)`, `first` in `main` and `second` in the window `label`.
+    fn two_windows(script: &str) -> (Arc<AppCore>, Arc<Recorder>, Scratch, PaneId, PaneId, String) {
+        let (core, rec, dir) = sh(script);
+        let first = only_pane(&core);
+        let second = core.split(false).focus;
+        let label = raw_tear_off(&core, second);
+        assert_ne!(label, MAIN_WINDOW);
+        (core, rec, dir, first, second, label)
+    }
+
+    fn view_panes(view: &View) -> Vec<PaneId> {
+        let mut panes: Vec<PaneId> = view.panes.iter().map(|(p, _)| *p).collect();
+        panes.sort_unstable();
+        panes
+    }
+
+    #[test]
+    fn a_frame_goes_to_the_window_that_has_the_pane_and_to_no_other() {
+        let (core, rec, _dir, first, second, label) = two_windows("printf hello; sleep 30");
+        core.start_pane(first, 80, 24, 0, 0).expect("first starts");
+        core.start_pane(second, 80, 24, 0, 0).expect("second starts");
+
+        assert!(wait_until(WAIT, || rec.has_text(first, "hello") && rec.has_text(second, "hello")), "no frames");
+
+        let (main_frames, other_frames) = (rec.frame_targets(first), rec.frame_targets(second));
+        assert!(!main_frames.is_empty() && !other_frames.is_empty());
+        assert!(main_frames.iter().all(|t| *t == Target::window(MAIN_WINDOW)), "{main_frames:?}");
+        assert!(other_frames.iter().all(|t| *t == Target::window(&label)), "{other_frames:?}");
+    }
+
+    #[test]
+    fn a_title_and_a_directory_go_to_the_window_that_has_the_pane_and_the_end_of_its_shell_too() {
+        let script = "printf '\\033]2;build done\\007\\033]7;file://localhost/tmp\\007'; sleep 0.3; exit 3";
+        let (core, rec, _dir, _first, second, label) = two_windows(script);
+        // A second pane keeps the window open when the shell of `second` ends.
+        core.split_in(&label, true).unwrap();
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+
+        assert!(wait_until(WAIT, || !rec.pane_exits().is_empty()), "no PaneExit: {:?}", rec.all());
+
+        let ours = Target::window(&label);
+        let events: Vec<(Target, Out)> = rec.sent().into_iter().filter(|(_, o)| !matches!(o, Out::Frame(_))).collect();
+        let title = events.iter().find(|(_, o)| matches!(o, Out::Title { .. })).expect("a title");
+        let cwd = events.iter().find(|(_, o)| matches!(o, Out::Cwd { .. })).expect("a directory");
+        let exit = events.iter().find(|(_, o)| matches!(o, Out::PaneExit { .. })).expect("an exit");
+        assert_eq!((&title.0, &cwd.0, &exit.0), (&ours, &ours, &ours));
+        assert_eq!(exit.1, Out::PaneExit { pane: second, code: Some(3) });
+    }
+
+    #[test]
+    fn the_layout_event_of_a_shell_that_ends_goes_to_its_window_only() {
+        // Window `main` has two panes, the other window one; a pane of `main` ends.
+        let (core, rec, _dir) = sh("exit 0");
+        let a = only_pane(&core);
+        let b = core.split(false).focus;
+        let c = core.split(false).focus;
+        let label = raw_tear_off(&core, c);
+
+        core.start_pane(a, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || !rec.layouts().is_empty()), "no layout event: {:?}", rec.all());
+
+        let layouts = rec.sent().into_iter().filter(|(_, o)| matches!(o, Out::Layout(_))).collect::<Vec<_>>();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].0, Target::window(MAIN_WINDOW), "not to {label}");
+        assert_eq!(rec.pane_exits(), vec![(a, Some(0))]);
+        assert_eq!(rec.targets_of("pane-exit", 0), vec![Target::window(MAIN_WINDOW)]);
+        assert_eq!(core.view().panes.iter().map(|p| p.0).collect::<Vec<_>>(), vec![b]);
+    }
+
+    #[test]
+    fn settings_and_the_end_of_the_app_go_to_every_window() {
+        let (core, rec, _dir, _first, _second, _label) = two_windows("sleep 30");
+
+        core.set_setting("font_size", json!(15)).expect("set");
+        core.begin_exit();
+
+        assert_eq!(rec.targets_of("settings", 0), vec![Target::All]);
+        assert_eq!(rec.targets_of("exit", 0), vec![Target::All]);
+    }
+
+    #[test]
+    fn a_layout_command_acts_on_the_window_that_called_and_answers_with_its_view() {
+        let (core, _rec, _dir, first, second, label) = two_windows("sleep 30");
+        let main_before = core.view_in(MAIN_WINDOW).unwrap();
+
+        let view = core.split_in(&label, true).expect("the other window exists");
+
+        assert_eq!(view.panes.len(), 2, "the other window has two panes now");
+        assert!(view_panes(&view).contains(&second) && !view_panes(&view).contains(&first));
+        let main_after = core.view_in(MAIN_WINDOW).unwrap();
+        assert_eq!(without_rev(&main_after), without_rev(&main_before), "`main` did not change");
+
+        let renamed = core.rename_tab_in(&label, 0, "logs").unwrap();
+        assert_eq!(renamed.tabs[0].title, "logs");
+        assert_eq!(core.view_in(MAIN_WINDOW).unwrap().tabs[0].title, "shell");
+    }
+
+    #[test]
+    fn a_new_pane_of_a_window_gets_a_route_to_that_window() {
+        let (core, rec, _dir, _first, _second, label) = two_windows("printf made; sleep 30");
+
+        let made = core.split_in(&label, false).unwrap().focus;
+        core.start_pane(made, 80, 24, 0, 0).expect("starts");
+
+        assert!(wait_until(WAIT, || rec.has_text(made, "made")), "no frame");
+        assert!(rec.frame_targets(made).iter().all(|t| *t == Target::window(&label)));
+    }
+
+    #[test]
+    fn a_label_that_is_no_window_is_an_error_and_changes_nothing() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let before = core.view();
+
+        for label in ["window-99", "", "main ", "MAIN", "../main"] {
+            assert_eq!(core.view_in(label), Err("no such window".to_owned()), "{label:?}");
+            assert!(core.split_in(label, false).is_err());
+            assert!(core.new_tab_in(label).is_err());
+            assert!(core.new_workspace_in(label, "x").is_err());
+            assert!(core.focus_pane_in(label, before.focus).is_err());
+            assert!(core.cycle_focus_in(label, 1).is_err());
+            assert!(core.select_tab_in(label, 0).is_err());
+            assert!(core.select_workspace_in(label, 0).is_err());
+            assert!(core.rename_pane_in(label, before.focus, "x").is_err());
+            assert!(core.rename_tab_in(label, 0, "x").is_err());
+            assert!(core.rename_workspace_in(label, 0, "x").is_err());
+            assert!(core.move_pane_in(label, before.focus, before.focus, Edge::Left).is_err());
+            assert!(core.move_tab_in(label, 0, 0).is_err());
+            assert!(core.move_tab_to_workspace_in(label, 0, 0).is_err());
+            assert!(core.set_ratio_in(label, 1, 0.5).is_err());
+            assert!(core.close_pane_in(label, before.focus).is_err());
+        }
+
+        assert_eq!(without_rev(&core.view()), without_rev(&before));
+        assert!(rec.all().is_empty(), "nothing was sent: {:?}", rec.all());
+        assert_eq!(rec.exit_count(), 0);
+    }
+
+    #[test]
+    fn a_window_cannot_close_a_pane_of_another_window() {
+        let (core, rec, _dir, first, second, label) = two_windows("sleep 30");
+
+        let answer = core.close_pane_in(MAIN_WINDOW, second).expect("main exists");
+
+        assert_eq!(view_panes(&answer), vec![first], "`main` still has its own pane");
+        assert!(core.view_in(&label).is_ok(), "the other window is untouched");
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned(), label]);
+        assert!(rec.all().is_empty() && rec.closed_windows().is_empty());
+    }
+
+    // ---- the close rules --------------------------------------------------------------------------------------
+
+    #[test]
+    fn closing_the_last_pane_of_a_window_that_is_not_the_last_closes_that_window() {
+        let (core, rec, dir, first, second, label) = two_windows(HUP_PROOF);
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || rec.has_text(first, "ready") && rec.has_text(second, "ready")), "never ready");
+        let (pid_first, pid_second) = (core.pid(first).unwrap(), core.pid(second).unwrap());
+        core.note_window(&label, WindowState { x: 40, y: 40, width: 900, height: 600, maximized: false });
+        core.flush();
+        assert!(session_on_disk(&dir).window_for(&label).is_some(), "the frame of the window was saved");
+        let sent_before = rec.sent().len();
+
+        let answer = core.close_pane_in(&label, second).expect("the window exists");
+
+        assert_eq!(answer.panes.len(), 1, "the answer is the view the window had");
+        assert_eq!(rec.closed_windows(), vec![label.clone()], "the sink was asked to destroy it");
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+        assert_eq!(rec.exit_count(), 0, "the app goes on");
+        assert!(wait_until(Duration::from_secs(3), || !process_exists(pid_second)), "its shell survived");
+        assert!(process_exists(pid_first), "the shell of the other window is untouched");
+        let told: Vec<_> = rec.sent().into_iter().skip(sent_before).filter(|(_, o)| matches!(o, Out::Layout(_))).collect();
+        assert!(told.is_empty(), "a window that is going away is not sent a layout: {told:?}");
+        core.flush();
+        assert_eq!(session_on_disk(&dir).window_for(&label), None, "its frame is forgotten");
+        assert_eq!(on_disk(&dir).all_panes(), vec![first], "and the layout on disk is the one window of before");
+    }
+
+    #[test]
+    fn closing_the_last_pane_of_the_last_window_ends_the_app() {
+        let (core, rec, dir, first, second, label) = two_windows(HUP_PROOF);
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || rec.has_text(first, "ready")), "never ready");
+        core.close_pane_in(&label, second).expect("closes the other window");
+        assert_eq!(rec.exit_count(), 0);
+
+        let view = core.close_pane_in(MAIN_WINDOW, first).expect("the last window");
+
+        assert_eq!(rec.exit_count(), 1, "the end of the app is asked for once");
+        assert_eq!(view_panes(&view), vec![first], "the last pane stays in the layout, so the next start has it");
+        assert!(rec.closed_windows() == vec![label], "the last window is not destroyed by the core: the app exits");
+        assert_eq!(on_disk(&dir).all_panes(), vec![first]);
+    }
+
+    #[test]
+    fn the_red_button_of_the_last_window_changes_nothing_on_disk() {
+        let (dir, pane) = dir_with_one_pane("red-last");
+        let (core, rec) = core_in(&dir, "/bin/cat", &[]);
+        core.split(false);
+        core.flush();
+        let bytes = std::fs::read(dir.layout_file()).unwrap();
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        let writes = core.layout_writes();
+        let sent_before = rec.sent().len();
+
+        core.window_closed(MAIN_WINDOW);
+        core.flush();
+
+        assert_eq!(std::fs::read(dir.layout_file()).unwrap(), bytes, "the layout on disk is what it was");
+        assert_eq!(core.layout_writes(), writes, "and was not even written again");
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+        assert_eq!(core.view().panes.len(), 2, "the layout in memory is intact");
+        assert!(core.pid(pane).is_some(), "its shell is not ended by this rule (the exit does that)");
+        let told: Vec<_> = rec.sent().into_iter().skip(sent_before).filter(|(_, o)| !matches!(o, Out::Frame(_))).collect();
+        assert!(told.is_empty() && rec.closed_windows().is_empty(), "{told:?}");
+    }
+
+    #[test]
+    fn the_red_button_of_another_window_ends_only_its_shells() {
+        let (core, rec, dir, first, second, label) = two_windows(HUP_PROOF);
+        let third = core.split_in(&label, true).unwrap().focus;
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        core.start_pane(third, 80, 24, 0, 0).expect("starts");
+        assert!(
+            wait_until(WAIT, || [first, second, third].iter().all(|p| rec.has_text(*p, "ready"))),
+            "never ready"
+        );
+        let pids: Vec<u32> = [first, second, third].iter().map(|p| core.pid(*p).unwrap()).collect();
+        core.note_window(&label, WindowState { x: 40, y: 40, width: 900, height: 600, maximized: false });
+        let sent_before = rec.sent().len();
+
+        core.window_closed(&label);
+
+        assert!(
+            wait_until(Duration::from_secs(3), || !process_exists(pids[1]) && !process_exists(pids[2])),
+            "the shells of the window survived"
+        );
+        assert!(process_exists(pids[0]), "the shell of the other window was not touched");
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+        assert!(rec.closed_windows().is_empty(), "the window is gone already, nobody destroys it again");
+        assert_eq!(rec.exit_count(), 0);
+        assert!(core.pid(first).is_some());
+        std::thread::sleep(Duration::from_millis(300));
+        let after: Vec<_> = rec.sent().into_iter().skip(sent_before).collect();
+        assert!(
+            after.iter().all(|(_, o)| !matches!(o, Out::Layout(_) | Out::Exit)),
+            "no layout is sent for a window that closed itself: {after:?}"
+        );
+        core.flush();
+        assert_eq!(on_disk(&dir).all_panes(), vec![first], "the layout on disk lost the window");
+        assert_eq!(session_on_disk(&dir).window_for(&label), None, "and its frame");
+        // A second report of the same window (the red button, then the destroy) changes nothing.
+        core.window_closed(&label);
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+    }
+
+    #[test]
+    fn quitting_never_drops_windows() {
+        let (core, rec, dir, first, second, label) = two_windows(HUP_PROOF);
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || rec.has_text(first, "ready") && rec.has_text(second, "ready")), "never ready");
+        core.note_window(&label, WindowState { x: 40, y: 40, width: 900, height: 600, maximized: false });
+
+        // Cmd+Q: the exit request runs `shutdown`, then every window is destroyed and reports it.
+        core.shutdown();
+        core.window_closed(&label);
+        core.window_closed(MAIN_WINDOW);
+
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned(), label.clone()], "both windows are still in the set");
+        let text = std::fs::read_to_string(dir.layout_file()).unwrap();
+        let (saved, status) = WindowSet::from_json(&text);
+        assert_eq!(status, LoadStatus::Clean);
+        assert_eq!(saved.labels(), vec![MAIN_WINDOW, label.as_str()], "and on disk");
+        assert_eq!(saved.all_panes().len(), 2);
+        assert!(session_on_disk(&dir).window_for(&label).is_some(), "with their frames");
+    }
+
+    #[test]
+    fn the_end_of_the_app_through_the_last_pane_does_not_drop_windows_either() {
+        let (core, rec, dir, first, _second, label) = two_windows("sleep 30");
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+
+        // The main window's pane is not the last pane of the last window: closing it closes `main`.
+        core.begin_exit();
+        core.window_closed(&label);
+
+        assert_eq!(rec.exit_count(), 1);
+        assert_eq!(core.window_labels().len(), 2);
+        let (saved, _) = WindowSet::from_json(&std::fs::read_to_string(dir.layout_file()).unwrap());
+        assert_eq!(saved.len(), 2);
+    }
+
+    #[test]
+    fn a_shell_that_ends_by_itself_closes_its_window_when_it_was_the_last_pane_of_it() {
+        // Every shell ends at once. The pane of the other window goes first: its window closes. Then the last pane
+        // of the last window ends: the app ends (CR-01 for each window).
+        let (core, rec, dir, first, second, label) = two_windows("exit 0");
+
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || !rec.closed_windows().is_empty()), "the window did not close: {:?}", rec.all());
+        assert_eq!(rec.closed_windows(), vec![label.clone()]);
+        assert_eq!(rec.exit_count(), 0, "one window is left");
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || rec.exit_count() > 0), "no Exit: {:?}", rec.all());
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(rec.exit_count(), 1);
+        assert_eq!(on_disk(&dir).all_panes(), vec![first], "the layout of the last pane is kept");
+        assert!(
+            rec.targets_of("pane-exit", 0).iter().all(|t| *t == Target::window(MAIN_WINDOW)),
+            "nobody is told of the exit of a pane whose window went with it"
+        );
+    }
+
+    #[test]
+    fn a_pane_closed_by_the_user_reports_its_exit_to_the_window_that_closed_it() {
+        let (core, rec, _dir, first, second, label) = two_windows(HUP_PROOF);
+        let third = core.split_in(&label, false).unwrap().focus;
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(third, 80, 24, 0, 0).expect("starts");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || rec.has_text(third, "ready")), "never ready");
+
+        core.close_pane_in(&label, third).expect("closes");
+
+        assert!(wait_until(Duration::from_secs(3), || !rec.pane_exits().is_empty()), "no exit");
+        assert_eq!(rec.targets_of("pane-exit", 0), vec![Target::window(&label)]);
+        assert_eq!(rec.targets_of("layout", 0), vec![Target::window(&label)]);
+        assert!(lock(&core.routes).closing.is_empty(), "the memory of the closing pane is gone once it was told");
+    }
+
+    // ---- title and directory replay ---------------------------------------------------------------------------
+
+    #[test]
+    fn the_last_title_and_directory_of_a_pane_are_kept_and_replayed_to_a_window() {
+        let script = "printf '\\033]2;one\\007\\033]2;two\\007\\033]7;file://localhost/tmp\\007'; sleep 30";
+        let (core, rec, _dir, first, second, label) = two_windows(script);
+        core.start_pane(first, 80, 24, 0, 0).expect("starts");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        assert!(
+            wait_until(WAIT, || rec.titles().len() >= 4 && rec.cwds(first).len() == 1 && rec.cwds(second).len() == 1),
+            "{:?}",
+            rec.all().len()
+        );
+        let mark = rec.sent().len();
+
+        core.replay(&label, &[second]);
+
+        let replayed: Vec<_> = rec.sent().into_iter().skip(mark).collect();
+        assert_eq!(
+            replayed,
+            vec![
+                (Target::window(&label), Out::Title { pane: second, title: "two".into() }),
+                (Target::window(&label), Out::Cwd { pane: second, cwd: rec.cwds(second)[0].clone() }),
+            ],
+            "the last title only, then the directory, to that window only"
+        );
+    }
+
+    #[test]
+    fn a_pane_that_never_had_a_title_replays_nothing_and_a_closed_pane_is_forgotten() {
+        let (core, rec, _dir, first, second, label) = two_windows(HUP_PROOF);
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || rec.has_text(second, "ready")), "never ready");
+        let mark = rec.sent().len();
+        core.replay(&label, &[first, second]);
+        assert_eq!(rec.sent().len(), mark, "no title and no directory known");
+
+        lock(&core.last_title).insert(second, "old".into());
+        core.close_pane_in(&label, second).ok();
+        assert!(lock(&core.last_title).get(&second).is_none(), "a closed pane leaves no title behind");
+    }
+
+    // ---- restart ----------------------------------------------------------------------------------------------
+
+    const TWO_MONITORS: [MonitorRect; 1] = [MonitorRect { x: 0, y: 0, width: 2560, height: 1440 }];
+
+    #[test]
+    fn a_restart_restores_two_windows_with_their_layouts_and_frames() {
+        let dir = Scratch::new("two-windows");
+        let (first, second, label) = {
+            let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+            let first = only_pane(&core);
+            let second = core.split(false).focus;
+            core.new_workspace("notes");
+            let label = raw_tear_off(&core, second);
+            core.split_in(&label, true).unwrap();
+            core.note_window(MAIN_WINDOW, WindowState { x: 100, y: 80, width: 1200, height: 700, maximized: false });
+            core.note_window(&label, WindowState { x: 1300, y: 90, width: 800, height: 500, maximized: true });
+            core.shutdown();
+            (first, second, label)
+        };
+
+        let (again, _rec) = core_in(&dir, "/bin/cat", &[]);
+
+        assert_eq!(again.window_labels(), vec![MAIN_WINDOW.to_owned(), label.clone()]);
+        assert_eq!(again.restored_windows(), vec![label.clone()], "`main` is made by the configuration, the rest by the shell");
+        assert!(again.view_in(&label).unwrap().panes.len() == 2);
+        {
+            let set = lock(&again.windows);
+            let main_panes = set.layout(MAIN_WINDOW).unwrap().all_panes();
+            assert!(main_panes.contains(&first) && !main_panes.contains(&second));
+            assert_eq!(set.window_of(second), Some(label.as_str()));
+        }
+        let main = again.placement(MAIN_WINDOW, &TWO_MONITORS);
+        assert_eq!((main.size, main.position, main.maximized), ((1200, 700), Some((100, 80)), false));
+        let other = again.placement(&label, &TWO_MONITORS);
+        assert_eq!((other.size, other.position, other.maximized), ((800, 500), Some((1300, 90)), true));
+    }
+
+    #[test]
+    fn the_off_screen_rule_is_applied_to_every_window_on_its_own() {
+        let dir = Scratch::new("two-windows-offscreen");
+        let label = {
+            let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+            let second = core.split(false).focus;
+            let label = raw_tear_off(&core, second);
+            core.note_window(MAIN_WINDOW, WindowState { x: 100, y: 80, width: 1200, height: 700, maximized: false });
+            // The second window sat on a monitor that is not connected now.
+            core.note_window(&label, WindowState { x: 9000, y: 90, width: 800, height: 500, maximized: false });
+            core.shutdown();
+            label
+        };
+
+        let (again, _rec) = core_in(&dir, "/bin/cat", &[]);
+
+        assert_eq!(again.placement(MAIN_WINDOW, &TWO_MONITORS).position, Some((100, 80)), "this one is on a monitor");
+        let other = again.placement(&label, &TWO_MONITORS);
+        assert_eq!(other.position, None, "this one is not, so the window system places it");
+        assert_eq!(other.size, (800, 500), "its size is kept");
+        assert_eq!(again.placement("window-777", &TWO_MONITORS).size, holzwave_core::session::DEFAULT_SIZE);
+    }
+
+    #[test]
+    fn a_version_1_layout_and_session_start_as_one_window() {
+        let dir = Scratch::new("v1-files");
+        let (mut layout, _) = Layout::new();
+        layout.split_focused(Axis::Row);
+        let bytes = serde_json::to_vec_pretty(&layout).unwrap();
+        std::fs::write(dir.layout_file(), &bytes).unwrap();
+        let session = r#"{"version":1,"window":{"x":100,"y":80,"width":1200,"height":700,"maximized":false},"cwds":{}}"#;
+        std::fs::write(dir.0.join("session.json"), session).unwrap();
+
+        let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+        assert!(core.restored_windows().is_empty(), "no window to open besides main");
+        assert_eq!(core.view().panes.len(), 2);
+        let placement = core.placement(MAIN_WINDOW, &TWO_MONITORS);
+        assert_eq!((placement.size, placement.position), ((1200, 700), Some((100, 80))));
+        core.flush();
+        assert_eq!(std::fs::read(dir.layout_file()).unwrap(), bytes, "the layout file is left as it was");
+        assert!(!dir.0.join("layout.json.bad").exists() && !dir.0.join("session.json.bad").exists());
+    }
+
+    #[test]
+    fn one_window_main_is_saved_as_the_plain_layout_and_several_as_a_version_2_document() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        core.split(false);
+        core.flush();
+        let one = std::fs::read_to_string(dir.layout_file()).unwrap();
+        assert!(Layout::from_json(&one).1 == LoadStatus::Clean && !one.contains("\"windows\""), "{one}");
+
+        let second = core.split(false).focus;
+        raw_tear_off(&core, second);
+        core.saver.touch();
+        core.flush();
+
+        let two = std::fs::read_to_string(dir.layout_file()).unwrap();
+        assert!(two.contains("\"version\": 2") && two.contains("\"windows\""), "{two}");
+    }
 }
 
 /// The protocol golden (`app/tests/fixtures/protocol.json`): what the webview depends on, generated from the real
@@ -3451,7 +4336,8 @@ mod protocol {
         name: String,
         /// The attribute carries `rename_all = "snake_case"`.
         snake_case: bool,
-        /// The argument names in order, State and AppHandle parameters left out.
+        /// The argument names in order, State, AppHandle and WebviewWindow parameters left out: Tauri fills those in,
+        /// the page never sends them.
         args: Vec<String>,
     }
 
@@ -3513,7 +4399,7 @@ mod protocol {
                 .filter_map(|a| {
                     let (arg, ty) = a.split_once(':').expect("name: Type");
                     let ty = ty.trim();
-                    if ty.starts_with("State<") || ty.contains("AppHandle") {
+                    if ty.starts_with("State<") || ty.contains("AppHandle") || ty.contains("WebviewWindow") {
                         return None;
                     }
                     Some(arg.trim().to_owned())
@@ -3769,7 +4655,7 @@ mod protocol {
     fn the_scanner_reads_generics_and_skips_state_and_handles() {
         let source = r#"
             #[tauri::command(async, rename_all = "snake_case")]
-            pub fn demo(core: State<Arc<AppCore>>, app: AppHandle, pane: PaneId, map: HashMap<String, Vec<u8>>) -> Result<(), String> {
+            pub fn demo(core: State<Arc<AppCore>>, app: AppHandle, window: WebviewWindow, pane: PaneId, map: HashMap<String, Vec<u8>>) -> Result<(), String> {
                 Ok(())
             }
             #[tauri::command]
