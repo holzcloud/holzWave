@@ -310,8 +310,12 @@ impl Pty {
     ///
     /// On Unix a child that has not exited gets SIGHUP, a short grace period and then SIGKILL (portable-pty's
     /// `Child::kill`); `close` always waits afterwards, so no zombie remains, even for a shell that ignores
-    /// SIGHUP. Windows has no signals: `Child::kill` ends the shell with `TerminateProcess`, and the programs it
-    /// started get a close event when the pseudo console is released with the master.
+    /// SIGHUP. Windows has no signals: `Child::kill` ends the shell only (`TerminateProcess`, no process tree), and
+    /// the programs it started get the console close event when the pseudo console is released with the master, not
+    /// a kill. Before Windows 11 24H2 releasing it waits for its output to be drained, which is why the pane's
+    /// reader thread keeps reading until the child is reaped. There the output pipe also does not end when the shell
+    /// exits, so a pane finds the exit with [`Pty::try_wait`] on a timer (`platform::exit_poll`) instead of from the
+    /// reader.
     ///
     /// The writer and the master are dropped only after the child is gone, in that order: the writer's `Drop`
     /// writes a newline and EOF into the PTY, which would answer a live program's prompt. A writer that was handed

@@ -200,6 +200,64 @@ fn output_written_right_before_the_shell_exits_is_in_a_frame_that_precedes_exite
     }
 }
 
+// ---- exit poll ---------------------------------------------------------------------------------------------------
+//
+// The case the poll exists for, a shell that ended while its output did not, cannot be made with a real Unix child:
+// when the shell, the controlling process of its PTY, exits, the kernel hangs the PTY up and the reader sees the end
+// whatever else holds the slave (tried on macOS with a surviving and with a `setsid` child). Those tests are unit
+// tests in `core/src/pane.rs`, with the end of the output held back. What stays here is what a real shell proves.
+
+/// The pane asks the child every 20 ms whether it has exited (the default on Unix is not to ask at all).
+fn polling(spec: PaneSpec) -> PaneSpec {
+    PaneSpec { exit_poll: Some(Duration::from_millis(20)), ..spec }
+}
+
+#[test]
+fn the_exit_poll_does_not_end_a_running_pane() {
+    let probe = Probe::default();
+    let pane = spawn(polling(PaneSpec::new("/bin/cat", 80, 24)), &probe);
+    thread::sleep(Duration::from_millis(500));
+    assert!(probe.exits().is_empty(), "a running shell was reported as exited: {:?}", probe.events());
+
+    pane.key(key("KeyX", "x")).expect("the key is accepted");
+    assert!(wait_until(WAIT, || probe.has_text("x")), "the pane stopped working: {:?}", probe.events());
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn a_shell_that_exits_with_the_poll_on_gives_one_exited_and_its_last_output_first() {
+    // The end of the output and the poll race here; whichever wins, the result is the same.
+    for round in 0..5 {
+        let probe = Probe::default();
+        let pane = spawn(polling(spec_sh("printf last-words; exit 3")), &probe);
+
+        assert!(wait_until(WAIT, || !probe.exits().is_empty()), "round {round}: no Exited: {:?}", probe.events());
+        thread::sleep(Duration::from_millis(200));
+        let events = probe.events();
+        assert_eq!(probe.exits(), vec![Some(3)], "round {round}: {events:?}");
+        let last = events.last();
+        assert!(matches!(last, Some(PaneEvent::Exited { .. })), "round {round}: Exited is not last: {events:?}");
+        assert!(probe.has_text("last-words"), "round {round}: the last output never reached a frame");
+        assert!(pane.join(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn a_closed_pane_gives_exactly_one_exited_with_or_without_the_poll() {
+    for poll in [None, Some(Duration::from_millis(20))] {
+        let probe = Probe::default();
+        let pane = spawn(PaneSpec { exit_poll: poll, ..PaneSpec::new("/bin/cat", 80, 24) }, &probe);
+        thread::sleep(Duration::from_millis(100));
+        pane.close();
+        pane.close();
+        assert!(wait_until(WAIT, || !probe.exits().is_empty()), "{poll:?}: no Exited: {:?}", probe.events());
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(probe.exits().len(), 1, "{poll:?}: {:?}", probe.events());
+        assert!(pane.join(Duration::from_secs(3)));
+    }
+}
+
 #[test]
 fn a_failing_spawn_returns_an_error_and_reports_failed_exactly_once() {
     let probe = Probe::default();

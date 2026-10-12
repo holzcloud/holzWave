@@ -12,6 +12,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::platform::{Os, rename_retries};
+
 /// `path` with `suffix` appended to its file name: `layout.json` and `.tmp` give `layout.json.tmp`.
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().map(std::ffi::OsString::from).unwrap_or_default();
@@ -31,6 +33,9 @@ pub fn bad_path(path: &Path) -> PathBuf {
 ///
 /// Missing parent directories are created. On failure nothing is left behind and the error is returned; the
 /// caller decides whether to log it, nobody may ignore it silently.
+///
+/// On Windows a rename over a file that an antivirus scanner or an indexer has open fails for a moment with a
+/// sharing violation: the rename is retried a few times for that error and no other ([`rename_retries`]).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir)?;
@@ -48,7 +53,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()
     })();
-    let result = written.and_then(|()| fs::rename(&tmp, path));
+    let result = written.and_then(|()| {
+        retry_on_sharing_violation(rename_retries(Os::current()), std::thread::sleep, || fs::rename(&tmp, path))
+    });
     match &result {
         Ok(()) => {
             // Best effort: make the rename itself durable. Not every platform can open a directory.
@@ -63,6 +70,33 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         }
     }
     result
+}
+
+/// Whether `error` is what a rename gets while another process has one of the files open: `PermissionDenied`, or
+/// on Windows the raw `ERROR_SHARING_VIOLATION` (32), whichever way std reports it.
+fn is_sharing_violation(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied || (cfg!(windows) && error.raw_os_error() == Some(32))
+}
+
+/// Run `attempt`, and run it again after a short pause (10 ms, growing by 10 ms to at most 50 ms) while it fails
+/// with a sharing violation, at most `retries` more times. Any other error, and the last sharing violation, is
+/// returned as it is. `pause` is the sleep, passed in so that the count and the pauses are tested without a file
+/// system or a clock.
+pub fn retry_on_sharing_violation<T>(
+    retries: u32,
+    mut pause: impl FnMut(Duration),
+    mut attempt: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    let mut retried = 0;
+    loop {
+        match attempt() {
+            Err(error) if retried < retries && is_sharing_violation(&error) => {
+                retried += 1;
+                pause(Duration::from_millis(u64::from(retried.min(5)) * 10));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Read a file of at most `max_bytes`.

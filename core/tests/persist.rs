@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,7 +10,7 @@ use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 use common::{scratch_dir, wait_until};
-use holzwave_core::persist::{Debounced, backup_bad, bad_path, read_limited, write_atomic};
+use holzwave_core::persist::{Debounced, backup_bad, bad_path, read_limited, retry_on_sharing_violation, write_atomic};
 
 /// Names of everything in `dir`, sorted.
 fn names(dir: &Path) -> Vec<String> {
@@ -68,6 +68,70 @@ fn write_atomic_replaces_a_stale_temporary_file() {
     assert_eq!(std::fs::read(&path).unwrap(), b"fresh");
     assert_eq!(names(&dir), vec!["layout.json"]);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+// ---- the rename retry (a sharing violation on Windows) ---------------------------------------------
+
+/// Run the helper with `failures` failing attempts first (then success) and report the result with the number of
+/// attempts made and the pauses taken between them.
+fn run_retry(retries: u32, failures: u32, kind: ErrorKind) -> (io::Result<&'static str>, u32, Vec<Duration>) {
+    let mut attempts = 0;
+    let mut pauses = Vec::new();
+    let result = retry_on_sharing_violation(
+        retries,
+        |pause| pauses.push(pause),
+        || {
+            attempts += 1;
+            if attempts <= failures { Err(io::Error::from(kind)) } else { Ok("renamed") }
+        },
+    );
+    (result, attempts, pauses)
+}
+
+#[test]
+fn a_sharing_violation_is_retried_a_bounded_number_of_times() {
+    // Two failures, then success: Ok after three attempts, with a pause before each retry.
+    let (result, attempts, pauses) = run_retry(3, 2, ErrorKind::PermissionDenied);
+    assert_eq!(result.unwrap(), "renamed");
+    assert_eq!((attempts, pauses.len()), (3, 2));
+
+    // More failures than retries: the error, after exactly retries plus one attempts.
+    let (result, attempts, pauses) = run_retry(3, 10, ErrorKind::PermissionDenied);
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    assert_eq!((attempts, pauses.len()), (4, 3));
+
+    // As many failures as retries still succeeds on the last attempt.
+    let (result, attempts, _) = run_retry(3, 3, ErrorKind::PermissionDenied);
+    assert!(result.is_ok());
+    assert_eq!(attempts, 4);
+}
+
+#[test]
+fn another_error_is_not_retried() {
+    for kind in [ErrorKind::NotFound, ErrorKind::AlreadyExists, ErrorKind::InvalidInput, ErrorKind::Other] {
+        let (result, attempts, pauses) = run_retry(3, 10, kind);
+        assert_eq!(result.unwrap_err().kind(), kind);
+        assert_eq!((attempts, pauses.len()), (1, 0), "{kind:?}");
+    }
+}
+
+#[test]
+fn zero_retries_is_one_attempt() {
+    let (result, attempts, pauses) = run_retry(0, 5, ErrorKind::PermissionDenied);
+    assert!(result.is_err());
+    assert_eq!((attempts, pauses.len()), (1, 0));
+    let (result, attempts, _) = run_retry(0, 0, ErrorKind::PermissionDenied);
+    assert!(result.is_ok());
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn the_pause_between_attempts_is_short_and_never_longer_than_50_ms() {
+    let (_, _, pauses) = run_retry(8, 100, ErrorKind::PermissionDenied);
+    assert_eq!(pauses.len(), 8);
+    for pause in &pauses {
+        assert!(*pause >= Duration::from_millis(10) && *pause <= Duration::from_millis(50), "{pause:?}");
+    }
 }
 
 // ---- read_limited ----------------------------------------------------------------------------------

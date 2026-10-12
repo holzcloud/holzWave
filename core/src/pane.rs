@@ -25,8 +25,9 @@
 //!
 //! # Ending
 //!
-//! A pane ends in one of three ways and all of them take the same path: [`PaneHandle::close`] (or the last handle
-//! being dropped), the queue reporting the end of the output (the shell exited), or a failed start. The engine thread
+//! A pane ends in one of four ways and all of them take the same path: [`PaneHandle::close`] (or the last handle
+//! being dropped), the queue reporting the end of the output (the shell exited), the exit poll finding the shell
+//! exited although the output never ended (Windows), or a failed start. The engine thread
 //! closes the queue, kills and reaps the child, emits **one** [`PaneEvent::Exited`], and only then drops the writer
 //! channel, so the PTY writer (whose `Drop` writes a newline and EOF) goes last. Nothing here can make the
 //! application exit: that decision is the shell's, made from the `Exited` event.
@@ -47,9 +48,11 @@ use crate::engine::{
     SelectOp, TerminalEngine, WheelEvent, WheelOutcome, parse_osc7,
 };
 use crate::layout::PaneId;
+use crate::platform::{self, Os};
 use crate::pty::{Pty, SpawnOptions, process_cwd};
 use crate::queue::{PaneQueue, Popped};
 use crate::wire::{FrameEncoder, FrameMsg};
+use crate::winshell::announced_path;
 use crate::{Error, Result};
 
 /// The default number of scrollback lines of a pane.
@@ -95,6 +98,10 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// The size of one read from the PTY.
 const READ_CHUNK: usize = 64 * 1024;
 
+/// How long a pane whose shell was found exited by the poll keeps feeding the output that is still on its way, so
+/// that the shell's last words are in the last frame. The output pipe has no end to wait for, so this is a bound.
+const EXIT_GRACE: Duration = Duration::from_millis(150);
+
 /// How a pane is started.
 #[derive(Clone, Debug)]
 pub struct PaneSpec {
@@ -111,6 +118,10 @@ pub struct PaneSpec {
     pub theme: Option<EngineTheme>,
     /// The least time between two frames.
     pub frame_interval: Duration,
+    /// How often the pane asks the shell whether it has exited, besides waiting for the end of its output. `None`
+    /// does not ask: the idle pane then wakes for nothing. The default is [`platform::exit_poll`] for this OS, which
+    /// is `Some` on Windows only: a pseudo console before Windows 11 24H2 never ends its output pipe.
+    pub exit_poll: Option<Duration>,
 }
 
 impl PaneSpec {
@@ -127,6 +138,7 @@ impl PaneSpec {
             option_as_alt: false,
             theme: None,
             frame_interval: DEFAULT_FRAME_INTERVAL,
+            exit_poll: platform::exit_poll(Os::current()),
         }
     }
 
@@ -249,10 +261,29 @@ impl PaneHandle {
         F: FnOnce(&PaneSpec) -> Result<E> + Send + 'static,
         S: FnMut(PaneEvent) + Send + 'static,
     {
+        Self::spawn_wrapped(pane, spec, make_engine, sink, None)
+    }
+
+    /// [`PaneHandle::spawn`] with the PTY reader passed through `wrap` first. Nothing but the tests of the exit poll
+    /// passes one: they hold the end of the output back, which is what a Windows pseudo console does after its shell
+    /// ended and what no Unix PTY can be made to do (see [`ReaderWrap`]).
+    fn spawn_wrapped<E, F, S>(
+        pane: PaneId,
+        spec: PaneSpec,
+        make_engine: F,
+        sink: S,
+        wrap: Option<ReaderWrap>,
+    ) -> Result<PaneHandle>
+    where
+        E: TerminalEngine + 'static,
+        F: FnOnce(&PaneSpec) -> Result<E> + Send + 'static,
+        S: FnMut(PaneEvent) + Send + 'static,
+    {
         let mut spec = spec;
         spec.cols = spec.cols.clamp(MIN_COLS, MAX_DIM);
         spec.rows = spec.rows.clamp(MIN_ROWS, MAX_DIM);
         spec.frame_interval = spec.frame_interval.max(Duration::from_millis(1));
+        spec.exit_poll = spec.exit_poll.map(|poll| poll.max(Duration::from_millis(1)));
         spec.cell_px = (spec.cell_px.0.min(MAX_CELL_PX), spec.cell_px.1.min(MAX_CELL_PX));
 
         let queue: Arc<PaneQueue<Control>> = Arc::new(PaneQueue::new());
@@ -260,7 +291,7 @@ impl PaneHandle {
         let engine_queue = queue.clone();
         let join = thread::Builder::new()
             .name(format!("hw-pane-{pane}-engine"))
-            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx))
+            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx, wrap))
             .map_err(Error::Io)?;
 
         match started_rx.recv_timeout(START_TIMEOUT) {
@@ -507,6 +538,12 @@ impl Writer {
     }
 }
 
+/// A function that wraps the PTY reader of a pane, see [`PaneHandle::spawn_wrapped`]. It is a seam for tests: on a Unix
+/// PTY the end of the output always comes with the exit of the shell (the kernel hangs the terminal up when its
+/// controlling process exits, whatever else holds it open), so the case the exit poll exists for cannot be made
+/// with a real child and has to be made by holding the end back.
+type ReaderWrap = Box<dyn FnOnce(Box<dyn Read + Send>) -> Box<dyn Read + Send> + Send>;
+
 /// Read the PTY into the queue until the end of the output.
 ///
 /// After the queue was closed (the pane is being closed) the thread keeps reading and throws the output away until
@@ -570,6 +607,13 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     /// The process id of the shell, for the working-directory lookup.
     pid: Option<u32>,
     cwd: CwdTracker,
+    /// The poll interval of [`PaneSpec::exit_poll`] and when the child was last asked.
+    exit_poll: Option<Duration>,
+    last_exit_check: Instant,
+    /// The OS whose path rules an announced directory follows, and the machine's own name (`COMPUTERNAME`, read
+    /// once when the pane starts; empty off Windows) that a Windows prompt names as the host of its report.
+    os: Os,
+    local_host: String,
 }
 
 impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
@@ -583,6 +627,9 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             };
             if let Some(deadline) = self.cwd.deadline() {
                 wait = wait.min(deadline.saturating_duration_since(Instant::now()));
+            }
+            if let Some(poll) = self.exit_poll {
+                wait = wait.min(poll.saturating_sub(self.last_exit_check.elapsed()));
             }
             match self.queue.pop(wait) {
                 Popped::Control(Control::Close) | Popped::Closed => return,
@@ -603,6 +650,41 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             if self.cwd.begin(Instant::now()) {
                 self.look_up_cwd();
             }
+            // Asked on the clock and not on a timeout: output that keeps arriving makes every wait end early.
+            if self.exit_poll.is_some_and(|poll| self.last_exit_check.elapsed() >= poll) {
+                self.last_exit_check = Instant::now();
+                if self.shell_exited() {
+                    self.drain_after_exit();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Whether the shell has exited. Does not block; a child that cannot be asked counts as running.
+    fn shell_exited(&mut self) -> bool {
+        self.pty.as_mut().is_some_and(|pty| matches!(pty.try_wait(), Ok(Some(_))))
+    }
+
+    /// The shell exited but the output did not end (a Windows pseudo console before 24H2): feed what is still queued
+    /// or arriving for [`EXIT_GRACE`], show the last frame, and go. The caller then ends the pane like the end of the
+    /// output does, so the reader keeps draining while the child is closed and the one `Exited` follows.
+    fn drain_after_exit(&mut self) {
+        let deadline = Instant::now() + EXIT_GRACE;
+        loop {
+            match self.queue.pop(deadline.saturating_duration_since(Instant::now())) {
+                Popped::Output(chunk) => self.feed(&chunk),
+                // Answered, so that a caller waiting for a reply does not wait out its timeout; nothing else is.
+                Popped::Control(Control::Close) | Popped::Closed => return,
+                Popped::Control(control) => self.handle(control),
+                Popped::Finished | Popped::Timeout => break,
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+        if self.dirty {
+            self.emit_frame();
         }
     }
 
@@ -790,9 +872,12 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 EngineEvent::Title(title) => (self.sink)(PaneEvent::Title(title)),
                 EngineEvent::Pwd(raw) => {
                     // A program (a shell with integration, or something on the far side of ssh) announced its
-                    // directory. Only a well-formed `file://` path counts; it is the fallback of the lookup.
-                    if let Some((_host, path)) = parse_osc7(&raw) {
-                        self.cwd.announced(path.to_string_lossy().into_owned(), Instant::now());
+                    // directory. Only a well-formed `file://` path counts, and on Windows only a drive path of this
+                    // machine ([`announced_path`]); it is the fallback of the lookup, and on Windows the only source.
+                    if let Some((host, path)) = parse_osc7(&raw) {
+                        if let Some(dir) = announced_path(self.os, &host, &path, &self.local_host) {
+                            self.cwd.announced(dir.to_string_lossy().into_owned(), Instant::now());
+                        }
                     }
                 }
             }
@@ -877,6 +962,7 @@ fn engine_main<E, F, S>(
     mut sink: S,
     queue: Arc<PaneQueue<Control>>,
     started: Sender<Result<Option<u32>>>,
+    wrap: Option<ReaderWrap>,
 ) where
     E: TerminalEngine,
     F: FnOnce(&PaneSpec) -> Result<E>,
@@ -897,6 +983,11 @@ fn engine_main<E, F, S>(
     let (Some(reader), Some(writer)) = (pty.take_reader(), pty.take_writer()) else {
         let _ = pty.close();
         return fail(&mut sink, &queue, Error::Pty("the PTY has no reader or writer".into()));
+    };
+
+    let reader = match wrap {
+        Some(wrap) => wrap(reader),
+        None => reader,
     };
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -935,6 +1026,13 @@ fn engine_main<E, F, S>(
         selecting: false,
         pid,
         cwd: CwdTracker::new(Instant::now()),
+        exit_poll: spec.exit_poll,
+        last_exit_check: Instant::now(),
+        os: Os::current(),
+        local_host: match Os::current() {
+            Os::Windows => std::env::var("COMPUTERNAME").unwrap_or_default(),
+            _ => String::new(),
+        },
     };
     let _ = started.send(Ok(pid));
     actor.run();
@@ -1162,5 +1260,210 @@ mod tests {
         tracker.output(at(base, 0));
         assert_eq!(tracker.check(at(base, 200), || None), None);
         assert_eq!(tracker.deadline(), None, "a check that ran is not due again until there is output");
+    }
+}
+
+/// The exit poll against a shell whose output does not end. The end is held back by wrapping the reader (see
+/// [`ReaderWrap`]); the shell, the PTY and the engine are real.
+#[cfg(all(test, feature = "ghostty", unix))]
+mod exit_poll_tests {
+    use super::*;
+    use crate::wire::RowMsg;
+    use std::sync::atomic::AtomicBool;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// What a Windows pseudo console does before 24H2 once its shell has ended: the reader is never given the end
+    /// of the output. After the real end it waits until `release` is set, or, in `flood` mode, keeps delivering
+    /// output without a pause, so that the pane's wait for a message never runs into a timeout.
+    struct OutlivesShell {
+        inner: Box<dyn Read + Send>,
+        release: Arc<AtomicBool>,
+        flood: bool,
+        ended: bool,
+    }
+
+    impl Read for OutlivesShell {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.ended {
+                match self.inner.read(buf) {
+                    Ok(n) if n > 0 => return Ok(n),
+                    // The real end, or the macOS EIO: swallowed.
+                    _ => self.ended = true,
+                }
+            }
+            loop {
+                if self.release.load(Ordering::Relaxed) {
+                    return Ok(0);
+                }
+                if self.flood {
+                    // No pause: the queue is never empty, so the engine thread's wait never times out.
+                    let text = b"flood\r\n".repeat(64);
+                    buf[..text.len()].copy_from_slice(&text);
+                    return Ok(text.len());
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<PaneEvent>>>);
+
+    impl Log {
+        fn sink(&self) -> impl FnMut(PaneEvent) + Send + 'static {
+            let log = self.0.clone();
+            move |event| log.lock().unwrap().push(event)
+        }
+
+        fn events(&self) -> Vec<PaneEvent> {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn exits(&self) -> Vec<Option<u32>> {
+            self.events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    PaneEvent::Exited { code } => Some(code),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn has_text(&self, needle: &str) -> bool {
+            let text = |row: &RowMsg| row.runs.iter().flat_map(|run| run.0.chars()).collect::<String>();
+            self.events().iter().any(|e| match e {
+                PaneEvent::Frame(f) => f.changed.iter().any(|row| text(row).contains(needle)),
+                _ => false,
+            })
+        }
+    }
+
+    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        condition()
+    }
+
+    /// Start `/bin/sh -c script` in a pane whose output outlives the shell until the returned flag is set.
+    fn start(script: &str, exit_poll: Option<Duration>, flood: bool) -> (PaneHandle, Log, Arc<AtomicBool>) {
+        let log = Log::default();
+        let release = Arc::new(AtomicBool::new(false));
+        let held = release.clone();
+        let mut spec = PaneSpec::new("/bin/sh", 80, 24).args(["-c", script]);
+        spec.exit_poll = exit_poll;
+        let wrap: ReaderWrap = Box::new(move |inner| {
+            Box::new(OutlivesShell { inner, release: held, flood, ended: false }) as Box<dyn Read + Send>
+        });
+        let pane = PaneHandle::spawn_wrapped(
+            1,
+            spec,
+            |spec| crate::GhosttyEngine::new(spec.cols, spec.rows, spec.scrollback),
+            log.sink(),
+            Some(wrap),
+        )
+        .expect("the pane starts");
+        (pane, log, release)
+    }
+
+    #[test]
+    fn a_pane_ends_when_its_shell_exits_although_a_child_keeps_the_pty_open() {
+        let started = Instant::now();
+        let (pane, log, release) = start("exit 3", Some(Duration::from_millis(50)), false);
+
+        assert!(wait_until(WAIT, || !log.exits().is_empty()), "the poll never ended the pane: {:?}", log.events());
+        assert!(started.elapsed() < Duration::from_secs(2), "ended after {:?}", started.elapsed());
+        assert_eq!(log.exits(), vec![Some(3)]);
+        // Nothing follows the one Exited.
+        let events = log.events();
+        assert!(matches!(events.last(), Some(PaneEvent::Exited { code: Some(3) })), "{events:?}");
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(log.events().len(), events.len(), "an event arrived after Exited");
+        assert!(pane.join(Duration::from_secs(3)));
+        release.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn without_a_poll_such_a_pane_stays_open_until_it_is_closed() {
+        // The control of the test above: the hold works, and nothing but the poll ends the pane.
+        let (pane, log, release) = start("exit 3", None, false);
+        thread::sleep(Duration::from_millis(800));
+        assert!(log.exits().is_empty(), "ended without a poll: {:?}", log.events());
+
+        pane.close();
+        assert!(wait_until(WAIT, || !log.exits().is_empty()), "close did not end it");
+        assert_eq!(log.exits(), vec![Some(3)]);
+        assert!(pane.join(Duration::from_secs(3)));
+        release.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn the_exit_poll_runs_while_output_keeps_arriving() {
+        // Every wait of the engine thread ends with output and never with a timeout: the poll must not depend on a
+        // quiet moment.
+        let started = Instant::now();
+        let (pane, log, release) = start("exit 4", Some(Duration::from_millis(50)), true);
+
+        let ended = wait_until(WAIT, || !log.exits().is_empty());
+        assert!(ended, "a flood starved the poll: {} events", log.events().len());
+        assert!(started.elapsed() < Duration::from_secs(2), "ended after {:?}", started.elapsed());
+        assert_eq!(log.exits(), vec![Some(4)]);
+        assert!(log.has_text("flood"), "the output of the flood was not fed");
+        release.store(true, Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(log.exits().len(), 1);
+        assert!(pane.join(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn output_written_right_before_the_exit_is_fed_before_a_polled_pane_ends() {
+        for round in 0..3 {
+            let (pane, log, release) = start("printf last-words; exit 2", Some(Duration::from_millis(50)), false);
+
+            assert!(wait_until(WAIT, || !log.exits().is_empty()), "round {round}: no Exited: {:?}", log.events());
+            let events = log.events();
+            let exited = events.iter().position(|e| matches!(e, PaneEvent::Exited { .. })).unwrap();
+            let framed = events.iter().position(|e| match e {
+                PaneEvent::Frame(f) => {
+                    f.changed.iter().any(|row| row.runs.iter().any(|run| run.0.contains("last-words")))
+                }
+                _ => false,
+            });
+            match framed {
+                Some(i) => assert!(i < exited, "round {round}: the frame came after Exited: {events:?}"),
+                None => panic!("round {round}: the last output never reached a frame: {events:?}"),
+            }
+            assert_eq!(log.exits(), vec![Some(2)]);
+            assert!(pane.join(Duration::from_secs(3)));
+            release.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn a_pane_the_poll_ended_gives_no_second_exited_when_it_is_closed_afterwards() {
+        let (pane, log, release) = start("exit 3", Some(Duration::from_millis(50)), false);
+        assert!(wait_until(WAIT, || !log.exits().is_empty()), "no Exited: {:?}", log.events());
+        pane.close();
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(log.exits(), vec![Some(3)]);
+        assert!(pane.join(Duration::from_secs(3)));
+        release.store(true, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_running_shell_is_not_taken_for_an_exited_one_whatever_the_poll() {
+        let (pane, log, release) = start("sleep 5", Some(Duration::from_millis(10)), false);
+        thread::sleep(Duration::from_millis(500));
+        assert!(log.exits().is_empty(), "{:?}", log.events());
+        pane.close();
+        assert!(wait_until(WAIT, || !log.exits().is_empty()));
+        assert_eq!(log.exits().len(), 1);
+        assert!(pane.join(Duration::from_secs(3)));
+        release.store(true, Ordering::Relaxed);
     }
 }
