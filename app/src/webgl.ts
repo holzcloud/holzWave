@@ -1,6 +1,6 @@
 import {
-  BOLD, CURSOR_COLOR, CursorShape, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, font, getFontPx, gridCells,
-  rowExtras, visibleCursor,
+  BOLD, CURSOR_COLOR, CursorShape, Frame, GhostCell, INVERSE, ITALIC, Metrics, PaneFx, PxRect, Renderer, UNDERLINE, font,
+  getFontPx, gridCells, rowExtras, visibleCursor,
 } from "./frame.js";
 
 // WebGL2 renderer: one instanced draw per frame. Every cell is an instance that carries its
@@ -13,6 +13,11 @@ import {
 //    into the instance array); an overflow aborts the build, resets once and builds the pane again;
 //  - a run's text has one code point per cell, the rest of a grapheme cluster comes in `Frame.extras`, so the
 //    column advance is one per code point and a cluster can never shift the cells after it.
+//
+// The effects of DESK-28 add to that and never change it: a scroll slide is one more uniform (`uOffsetY`, the grid
+// drawn lower by whole device pixels, clipped to the grid's own box), the frames under a slide are the same one-
+// instance-per-cell draw with their own offset, and the cursor's ghosts are separate one-instance draws that blend
+// over the finished grid. A draw without `PaneFx` is exactly what it was.
 
 const ATLAS = 2048;
 const WORDS = 6; // col, row (f32) and slot, fg, bg, flags (u32) per instance
@@ -35,6 +40,7 @@ layout(location = 3) in uint aBg;
 layout(location = 4) in uint aFlags;
 uniform vec2 uCell;      // cell size in device px
 uniform vec2 uViewport;  // canvas size in device px
+uniform float uOffsetY;  // the grid is drawn this many device px lower (scroll slide), 0 otherwise
 uniform vec2 uSlot;      // atlas slot size in px
 uniform float uAtlasPx;  // atlas edge in px
 uniform uint uAtlasCols;
@@ -46,7 +52,7 @@ flat out uint vFlags;
 vec3 rgb(uint c) { return vec3(float((c >> 16u) & 255u), float((c >> 8u) & 255u), float(c & 255u)) / 255.0; }
 void main() {
   vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
-  vec2 px = (aCell + corner) * uCell;
+  vec2 px = (aCell + corner) * uCell + vec2(0.0, uOffsetY);
   gl_Position = vec4(px.x / uViewport.x * 2.0 - 1.0, 1.0 - px.y / uViewport.y * 2.0, 0.0, 1.0);
   vec2 origin = vec2(float(aSlot % uAtlasCols), float(aSlot / uAtlasCols)) * uSlot;
   vUV = (origin + corner * uCell) / uAtlasPx;
@@ -61,6 +67,7 @@ precision highp float;
 uniform sampler2D uAtlas;
 uniform vec2 uCell;
 uniform vec3 uCursor;
+uniform float uAlpha;    // 1, except for a cursor ghost, which is blended
 in vec2 vUV;
 in vec3 vFg;
 in vec3 vBg;
@@ -80,7 +87,7 @@ void main() {
       || (has(${F_CUR_BOTTOM}u) && p.y > uCell.y - 1.0)
       || (has(${F_CUR_LEFT}u) && p.x < 1.0)
       || (has(${F_CUR_RIGHT}u) && p.x > uCell.x - 1.0)) c = uCursor;
-  outColor = vec4(c, 1.0);
+  outColor = vec4(c, uAlpha);
 }`;
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string) {
@@ -161,7 +168,7 @@ export class WebGLRenderer implements Renderer {
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) ?? "link");
     this.prog = prog;
-    for (const n of ["uCell", "uViewport", "uSlot", "uAtlasPx", "uAtlasCols", "uAtlas", "uCursor"]) {
+    for (const n of ["uCell", "uViewport", "uSlot", "uAtlasPx", "uAtlasCols", "uAtlas", "uCursor", "uOffsetY", "uAlpha"]) {
       this.uniforms[n] = gl.getUniformLocation(prog, n);
     }
 
@@ -313,7 +320,7 @@ export class WebGLRenderer implements Renderer {
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
-  drawPane(f: Frame, r: PxRect) {
+  drawPane(f: Frame, r: PxRect, fx?: PaneFx) {
     if (this.dead) return;
     const gl = this.gl;
     // The pane's rectangle in device pixels; the origin of a GL viewport is the bottom-left corner.
@@ -330,6 +337,28 @@ export class WebGLRenderer implements Renderer {
     // A frame whose size is not a sane grid draws as its background only (the buffers are sized from it).
     const cells = gridCells(f);
     if (cells === null) return;
+
+    // A slide moves the grid by whole device pixels, so its glyphs stay on the pixel grid. What it pushes past the
+    // grid's own box is clipped there: the strip of the pane below the last row stays the pane's background.
+    const offset = this.devicePx(fx?.offsetY);
+    const under = (fx?.under ?? []).filter((u) => u.frame.cols === f.cols && u.frame.rows === f.rows);
+    if (offset !== 0 || under.length > 0) {
+      const gh = Math.min(vh, f.rows * this.ch), gw = Math.min(vw, f.cols * this.cw);
+      gl.scissor(vx, vy + vh - gh, gw, gh);
+    }
+    for (const u of under) this.drawGrid(u.frame, cells, vw, vh, this.devicePx(u.offsetY));
+    this.drawGrid(f, cells, vw, vh, offset);
+    if (fx?.ghosts && fx.ghosts.length > 0) this.drawGhosts(fx.ghosts, f);
+  }
+
+  /** CSS pixels (or nothing) as whole device pixels; anything that is not a finite number is no offset. */
+  private devicePx(css: number | undefined): number {
+    return css !== undefined && Number.isFinite(css) ? Math.round(css * this.m.dpr) : 0;
+  }
+
+  /** Build and draw one frame's grid into the viewport that is set, `offset` device pixels lower than its place. */
+  private drawGrid(f: Frame, cells: number, vw: number, vh: number, offset: number) {
+    const gl = this.gl;
     if (cells > this.capacity) {
       this.capacity = cells;
       this.words = new ArrayBuffer(cells * WORDS * 4);
@@ -352,6 +381,8 @@ export class WebGLRenderer implements Renderer {
     gl.uniform2f(this.uniforms.uSlot!, this.cw, this.ch);
     gl.uniform1f(this.uniforms.uAtlasPx!, this.atlasPx);
     gl.uniform1ui(this.uniforms.uAtlasCols!, this.atlasCols);
+    gl.uniform1f(this.uniforms.uOffsetY!, offset);
+    gl.uniform1f(this.uniforms.uAlpha!, 1);
     gl.uniform3f(
       this.uniforms.uCursor!,
       ((this.cursorColor >> 16) & 255) / 255, ((this.cursorColor >> 8) & 255) / 255, (this.cursorColor & 255) / 255,
@@ -367,6 +398,34 @@ export class WebGLRenderer implements Renderer {
     const n = Math.min(cells, this.capacity);
     gl.bufferData(gl.ARRAY_BUFFER, this.f32.subarray(0, n * WORDS), gl.STREAM_DRAW);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+  }
+
+  /**
+   * The cursor's ghosts: one blended block per ghost, in the cursor colour, over the grid that was just drawn. Each is
+   * its own one-instance draw (at most six), with the opacity as a uniform; a ghost off the grid is skipped. The
+   * program and its uniforms are the ones `drawGrid` left, only the offset and the opacity change.
+   */
+  private drawGhosts(ghosts: readonly GhostCell[], f: Frame) {
+    const gl = this.gl;
+    gl.uniform1f(this.uniforms.uOffsetY!, 0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    for (const g of ghosts) {
+      const { x, y, alpha } = g;
+      if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= f.cols || y >= f.rows) continue;
+      if (!(alpha > 0)) continue;
+      this.f32[0] = x;
+      this.f32[1] = y;
+      this.u32[2] = 0; // the blank slot: the cell is its background colour
+      this.u32[3] = this.cursorColor;
+      this.u32[4] = this.cursorColor;
+      this.u32[5] = 0;
+      gl.uniform1f(this.uniforms.uAlpha!, Math.min(1, alpha));
+      gl.bufferData(gl.ARRAY_BUFFER, this.f32.subarray(0, WORDS), gl.STREAM_DRAW);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 1);
+    }
+    gl.disable(gl.BLEND);
+    gl.uniform1f(this.uniforms.uAlpha!, 1);
   }
 
   /**

@@ -96,13 +96,39 @@ export interface PxRect {
   h: number;
 }
 
+/** An earlier frame of a pane that is drawn under the current one, `offsetY` CSS pixels lower than its place. */
+export interface UnderFrame {
+  frame: Frame;
+  offsetY: number;
+}
+
+/** A ghost of the cursor (DESK-28): the cell and the opacity, 0 to 1, of a block in the cursor colour. */
+export interface GhostCell {
+  x: number;
+  y: number;
+  alpha: number;
+}
+
+/**
+ * What a pane draws on top of its frame while an effect runs (DESK-28). Every field is optional and none of them is
+ * ever needed for a frame to be right: without them the frame is drawn at its place.
+ */
+export interface PaneFx {
+  /** The grid is drawn this many CSS pixels lower than its place (negative: higher), clipped to the grid's own box. */
+  offsetY?: number;
+  /** Earlier frames of the same grid size, oldest first, drawn before the frame itself to fill what it leaves bare. */
+  under?: UnderFrame[];
+  /** The cursor's fading ghosts, drawn last. */
+  ghosts?: GhostCell[];
+}
+
 export interface Renderer {
   /** Called whenever the canvas or the cell metrics change. */
   configure(m: Metrics): void;
   /** Start a frame: clear the whole canvas to `bg`. */
   begin(bg: number): void;
-  /** Draw one pane's grid into `rect`; the grid starts at the rect's top-left corner. */
-  drawPane(frame: Frame, rect: PxRect): void;
+  /** Draw one pane's grid into `rect`; the grid starts at the rect's top-left corner. `fx` is the effects' share. */
+  drawPane(frame: Frame, rect: PxRect, fx?: PaneFx): void;
   /** Draw the cursor in this colour (0xRRGGBB) from the next frame on; the caller schedules that frame. */
   setCursorColor(rgb: number): void;
   /** Block until the GPU has finished, so timings are real. Only used by the benchmark. */

@@ -112,8 +112,19 @@ async function installHarness(page) {
     /** The code point of the n-th distinct test glyph (the probe's mapping). */
     const glyph = (n) => String.fromCodePoint(0x4e00 + n);
 
+    /** One pane drawn with the effects of DESK-28; `rect` defaults to the whole canvas. */
+    const drawFx = (h, frame, fx, rect = { x: 0, y: 0, w: h.m.width, h: h.m.height }) => {
+      h.r.begin(0x000000);
+      h.r.drawPane(frame, rect, fx);
+    };
+    /** A grid whose row y is one run of `colours[y]`: rows can be told apart by the colour of any pixel in them. */
+    const striped = (cols, colours) => ({
+      cols, rows: colours.length, cursor: null, focused: true, fg: WHITE, bg: 0x000000,
+      lines: colours.map((c) => [[" ".repeat(cols), cols, WHITE, c, 0]]),
+    });
+
     window.__R = {
-      make, dispose, draw, glError, pixels, at, same, pack, covered, block, cell, corner, diff, diffCols, ink, row, glyph,
+      make, dispose, draw, drawFx, striped, glError, pixels, at, same, pack, covered, block, cell, corner, diff, diffCols, ink, row, glyph,
       CELL_W, CELL_H,
     };
   });
@@ -629,4 +640,93 @@ export default async function ({ page, url }) {
   assert.ok(lost.inked > 0, "the first image has text, so the comparison means something");
   assert.equal(lost.differing, 0, "the image after the restore differs from the one before the loss");
   assert.equal(lost.err, 0, "GL error after the restore");
+
+  // ---- the effects of DESK-28: a slide, the frames under it and the cursor's ghosts ---------------------------------
+  // The slide moves the drawn rows by whole device pixels and clips them to the grid's own box; the frames under it
+  // fill what the new one leaves bare; a ghost is a blended block in the cursor colour. Both renderers, same pixels.
+  const fx = await bothRenderers(page, (kind) => {
+    const R = window.__R;
+    const W = 8, H = 16;
+    const NEW = [0x101010, 0x202020, 0x303030, 0x404040, 0x505050, 0x606060];
+    const OLD = [0x0a0000, 0x140000, 0x1e0000, 0x280000, 0x320000, 0x3c0000];
+    const out = {};
+    const sample = (h, img, x, y) => R.pack(R.at(h, img, x, y));
+    const h = R.make(kind, 10, 7); // the pane is one row taller than the 6-row grid: a strip of pane below it
+    const rect = { x: 0, y: 0, w: 10 * W, h: 7 * H };
+    const grid = R.striped(10, NEW);
+
+    // Plain: no effects, and an offset of 0, draw the same image.
+    R.drawFx(h, grid, undefined, rect);
+    const plain = R.pixels(h);
+    R.drawFx(h, grid, { offsetY: 0, under: [], ghosts: [] }, rect);
+    out.zeroOffsetDiffers = R.diff(plain, R.pixels(h));
+
+    // Two rows lower: the top two rows are the pane background, row y of the frame is at row y + 2, and what runs
+    // past the grid's box (rows 4 and 5 of the frame) is clipped, not drawn into the strip below the grid.
+    R.drawFx(h, grid, { offsetY: 2 * H }, rect);
+    let img = R.pixels(h);
+    out.err = R.glError(h);
+    out.lower = [0, 1, 2, 3, 4, 5, 6].map((cy) => sample(h, img, 4, cy * H + 3));
+    out.lowerEdge = [sample(h, img, 4, 2 * H - 1), sample(h, img, 4, 2 * H)];
+
+    // Higher by five pixels: pixel row 0 shows the frame's pixel row 5, the last five pixel rows of the box are bare.
+    R.drawFx(h, grid, { offsetY: -5 }, rect);
+    img = R.pixels(h);
+    out.higher = [sample(h, img, 4, 0), sample(h, img, 4, H - 6), sample(h, img, 4, H - 5), sample(h, img, 4, 6 * H - 6), sample(h, img, 4, 6 * H - 5)];
+    out.err2 = R.glError(h);
+
+    // A frame under it fills the two bare rows; where both cover, the new frame wins.
+    R.drawFx(h, grid, { offsetY: 2 * H, under: [{ frame: R.striped(10, OLD), offsetY: 0 }] }, rect);
+    img = R.pixels(h);
+    out.under = [0, 1, 2, 3, 4, 5, 6].map((cy) => sample(h, img, 4, cy * H + 3));
+    out.underPixels = Array.from(img);
+    out.err3 = R.glError(h);
+    // An under frame of another grid size is left out instead of drawn wrong.
+    R.drawFx(h, grid, { offsetY: 2 * H, under: [{ frame: R.striped(10, OLD.slice(0, 3)), offsetY: 0 }] }, rect);
+    out.mismatched = [0, 1, 2].map((cy) => sample(h, R.pixels(h), 4, cy * H + 3));
+
+    // A ghost: the cursor colour at half opacity over the cell's own colour; its neighbours are untouched.
+    const CUR = 0xff8fb8;
+    R.drawFx(h, grid, { ghosts: [{ x: 3, y: 2, alpha: 0.5 }, { x: 99, y: 2, alpha: 0.5 }, { x: 1, y: 1, alpha: 0 }] }, rect);
+    img = R.pixels(h);
+    out.ghost = sample(h, img, 3 * W + 4, 2 * H + 8);
+    out.ghostWant = [0, 8, 16].map((sh) => ((CUR >> (16 - sh)) & 255) * 0.5 + ((NEW[2] >> (16 - sh)) & 255) * 0.5);
+    out.ghostRgb = [(out.ghost >> 16) & 255, (out.ghost >> 8) & 255, out.ghost & 255];
+    out.ghostNeighbours = [sample(h, img, 2 * W + 4, 2 * H + 8), sample(h, img, 4 * W + 4, 2 * H + 8), sample(h, img, 3 * W + 4, 1 * H + 8)];
+    out.err4 = R.glError(h);
+
+    // The next draw is plain again: the blend and the offset left nothing behind.
+    R.drawFx(h, grid, undefined, rect);
+    out.afterwards = R.diff(plain, R.pixels(h));
+    R.dispose(h);
+    out.NEW = NEW;
+    out.OLD = OLD;
+    return out;
+  });
+  for (const kind of ["webgl", "canvas"]) {
+    const r = fx[kind];
+    const px = (n) => `#${n.toString(16)}`;
+    assert.equal(r.zeroOffsetDiffers, 0, `${kind}: an offset of 0 must draw the plain image`);
+    assert.deepEqual(
+      r.lower, [0x000000, 0x000000, r.NEW[0], r.NEW[1], r.NEW[2], r.NEW[3], 0x000000],
+      `${kind}: two rows lower: the rows ${r.lower.map(px)}`,
+    );
+    assert.deepEqual(r.lowerEdge, [0x000000, r.NEW[0]], `${kind}: the slide starts exactly at the row edge`);
+    assert.deepEqual(
+      r.higher, [r.NEW[0], r.NEW[0], r.NEW[1], r.NEW[5], 0x000000],
+      `${kind}: five pixels higher: ${r.higher.map(px)}; the bare rows at the bottom are the pane background`,
+    );
+    assert.deepEqual(
+      r.under, [r.OLD[0], r.OLD[1], r.NEW[0], r.NEW[1], r.NEW[2], r.NEW[3], 0x000000],
+      `${kind}: the frame under fills the bare rows: ${r.under.map(px)}`,
+    );
+    assert.deepEqual(r.mismatched, [0x000000, 0x000000, r.NEW[0]], `${kind}: an under frame of another size is skipped`);
+    r.ghostWant.forEach((want, i) => {
+      assert.ok(Math.abs(r.ghostRgb[i] - want) <= 2, `${kind}: ghost channel ${i} is ${r.ghostRgb[i]}, want about ${want}`);
+    });
+    assert.deepEqual(r.ghostNeighbours, [r.NEW[2], r.NEW[2], r.NEW[1]], `${kind}: a ghost colours its own cell only`);
+    assert.equal(r.afterwards, 0, `${kind}: the draw after the effects is the plain one`);
+    for (const key of ["err", "err2", "err3", "err4"]) assert.equal(r[key], 0, `${kind}: gl.getError() ${key}`);
+  }
+  assert.deepEqual(fx.webgl.underPixels, fx.canvas.underPixels, "the two renderers draw a slide with a frame under it alike");
 }

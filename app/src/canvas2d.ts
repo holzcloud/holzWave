@@ -1,6 +1,6 @@
 import {
-  BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, Metrics, PxRect, Renderer, UNDERLINE, css, font, gridCells, rowExtras,
-  visibleCursor,
+  BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, Metrics, PaneFx, PxRect, Renderer, UNDERLINE, css, font, gridCells,
+  rowExtras, visibleCursor,
 } from "./frame.js";
 
 /** The cursor bar and underline are this many device pixels thick, the hollow outline one. Same as the WebGL shader. */
@@ -55,7 +55,7 @@ export class Canvas2DRenderer implements Renderer {
     ctx.fillRect(0, 0, m.width, m.height);
   }
 
-  drawPane(f: Frame, r: PxRect) {
+  drawPane(f: Frame, r: PxRect, fx?: PaneFx) {
     const { ctx, m } = this;
     const { cellW, cellH } = m;
     ctx.save();
@@ -72,6 +72,52 @@ export class Canvas2DRenderer implements Renderer {
       ctx.restore();
       return;
     }
+
+    // A slide moves the grid by whole device pixels (the glyphs stay on the pixel grid); what it pushes past the
+    // grid's own box is clipped there. The frames under it fill the rows the frame itself leaves bare.
+    const offset = this.devicePx(fx?.offsetY);
+    const under = (fx?.under ?? []).filter((u) => u.frame.cols === f.cols && u.frame.rows === f.rows);
+    if (offset !== 0 || under.length > 0) {
+      ctx.beginPath();
+      ctx.rect(0, 0, Math.min(r.w, f.cols * cellW), Math.min(r.h, f.rows * cellH));
+      ctx.clip();
+    }
+    for (const u of under) this.paintGrid(u.frame, this.devicePx(u.offsetY));
+    if (under.length > 0) {
+      // The frame's blank cells are not painted (the pane's background was): cover what the layers drew where it is.
+      ctx.fillStyle = css(f.bg);
+      ctx.fillRect(0, offset, f.cols * cellW, f.rows * cellH);
+    }
+    this.paintGrid(f, offset);
+
+    const grid = fx?.ghosts;
+    if (grid && grid.length > 0) {
+      ctx.fillStyle = css(this.cursorColor);
+      for (const { x, y, alpha } of grid) {
+        if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= f.cols || y >= f.rows) continue;
+        if (!(alpha > 0)) continue;
+        ctx.globalAlpha = Math.min(1, alpha);
+        ctx.fillRect(x * cellW, y * cellH, cellW, cellH);
+      }
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+  }
+
+  /** CSS pixels (or nothing) as the CSS pixels of whole device pixels; anything that is not a finite number is none. */
+  private devicePx(px: number | undefined): number {
+    return px !== undefined && Number.isFinite(px) ? Math.round(px * this.m.dpr) / this.m.dpr : 0;
+  }
+
+  /**
+   * One frame's grid and cursor on the pane the context is translated to, `offset` CSS pixels lower than its place.
+   * The pane's background is already painted; the context's clip is the caller's.
+   */
+  private paintGrid(f: Frame, offset: number) {
+    const { ctx, m } = this;
+    const { cellW, cellH } = m;
+    ctx.save();
+    if (offset !== 0) ctx.translate(0, offset);
     const { cols } = f;
     const baseline = Math.round(cellH * 0.78);
     let lastFont = -1;
