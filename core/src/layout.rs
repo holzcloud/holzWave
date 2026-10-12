@@ -3,6 +3,8 @@
 //! Pure data and geometry, with no terminal and no UI in it, so it is the same on every platform and
 //! easy to test. The app persists it as JSON and asks it for rectangles in normalised 0..1 units.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub type PaneId = u64;
@@ -62,6 +64,10 @@ pub struct Layout {
     pub workspaces: Vec<Workspace>,
     pub active: usize,
     next_id: u64,
+    /// The names the user gave to panes. A pane without an entry shows its program title. Left out of the file
+    /// while empty, so a layout written before panes had names is the same file as one without names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pane_names: BTreeMap<PaneId, String>,
 }
 
 const MIN_RATIO: f32 = 0.1;
@@ -86,6 +92,11 @@ const MAX_TEXT_CHARS: usize = 128;
 /// Drop control characters (terminal escapes, newlines) and cut to `MAX_TEXT_CHARS` characters.
 fn clean_text(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).take(MAX_TEXT_CHARS).collect()
+}
+
+/// A name typed by the user: cleaned, cut, and without the blanks at both ends. Blank text is the empty name.
+fn clean_name(text: &str) -> String {
+    clean_text(text).trim().to_string()
 }
 
 /// Keep the items `keep` accepts, in order. Returns them and the new index of the item that was at `active`,
@@ -272,7 +283,7 @@ impl Tab {
 impl Layout {
     /// One workspace with one tab with one pane. Returns the layout and that pane.
     pub fn new() -> (Self, PaneId) {
-        let mut l = Layout { workspaces: Vec::new(), active: 0, next_id: 1 };
+        let mut l = Layout { workspaces: Vec::new(), active: 0, next_id: 1, pane_names: BTreeMap::new() };
         let ws = l.id();
         let tab = l.id();
         let pane = l.id();
@@ -540,6 +551,23 @@ impl Layout {
             }
         }
 
+        // Pane names: a name of a pane that is not there is dropped, the others are cleaned like every stored text.
+        let before = self.pane_names.len();
+        let mut names = std::mem::take(&mut self.pane_names);
+        names.retain(|pane, _| pane_ids.contains(pane));
+        if names.len() != before {
+            repairs.push(format!("dropped {} name(s) of panes that are not in the layout", before - names.len()));
+        }
+        for (pane, name) in &mut names {
+            let clean = clean_name(name);
+            if clean != *name {
+                repairs.push(format!("pane {pane}: name shortened or stripped of control characters"));
+                *name = clean;
+            }
+        }
+        names.retain(|_, name| !name.is_empty());
+        self.pane_names = names;
+
         // Id counter: every id in the file must be below next_id, or a new pane could repeat an old id.
         let max_id = [&workspace_ids, &tab_ids, &pane_ids, &split_ids]
             .into_iter()
@@ -555,6 +583,48 @@ impl Layout {
         }
 
         Ok(repairs)
+    }
+
+    /// The name the user gave to `pane`, if any.
+    pub fn pane_name(&self, pane: PaneId) -> Option<&str> {
+        self.pane_names.get(&pane).map(String::as_str)
+    }
+
+    /// Every pane name, by pane id.
+    pub fn pane_names(&self) -> &BTreeMap<PaneId, String> {
+        &self.pane_names
+    }
+
+    /// Name a pane. The text is cleaned like every stored text; the empty (or blank) text removes the name and the
+    /// pane shows its program title again. False for a pane that is in no tab: nothing changes.
+    pub fn rename_pane(&mut self, pane: PaneId, name: &str) -> bool {
+        if !self.workspaces.iter().any(|w| w.tabs.iter().any(|t| t.root.contains(pane))) {
+            return false;
+        }
+        let name = clean_name(name);
+        if name.is_empty() {
+            self.pane_names.remove(&pane);
+        } else {
+            self.pane_names.insert(pane, name);
+        }
+        true
+    }
+
+    /// Name the tab at `index` of the shown workspace; the empty text restores `shell`. False when there is no such tab.
+    pub fn rename_tab(&mut self, index: usize, name: &str) -> bool {
+        let name = clean_name(name);
+        let w = &mut self.workspaces[self.active];
+        let Some(tab) = w.tabs.get_mut(index) else { return false };
+        tab.title = if name.is_empty() { "shell".into() } else { name };
+        true
+    }
+
+    /// Name the workspace at `index`; the empty text restores `ws N`. False when there is no such workspace.
+    pub fn rename_workspace(&mut self, index: usize, name: &str) -> bool {
+        let name = clean_name(name);
+        let Some(w) = self.workspaces.get_mut(index) else { return false };
+        w.name = if name.is_empty() { format!("ws {}", index + 1) } else { name };
+        true
     }
 
     /// Close a pane everywhere. Empty tabs and empty workspaces disappear; the last pane of the last
@@ -599,6 +669,7 @@ impl Layout {
                     }
                 }
             }
+            self.pane_names.remove(&pane);
             return CloseOutcome::Closed;
         }
         CloseOutcome::Unknown
@@ -1054,7 +1125,7 @@ mod tests {
 
     /// Serialise a hand-built layout and load it like a file from disk.
     fn load(workspaces: Vec<Workspace>) -> (Layout, LoadStatus) {
-        let l = Layout { workspaces, active: 0, next_id: 1_000_000 };
+        let l = Layout { workspaces, active: 0, next_id: 1_000_000, pane_names: BTreeMap::new() };
         Layout::from_json(&serde_json::to_string(&l).unwrap())
     }
 
@@ -1145,7 +1216,7 @@ mod tests {
         ];
         for (given, expected) in cases {
             let tab = Tab { id: 2, title: "t".into(), root: split(given), focus: 3 };
-            let mut l = Layout { workspaces: vec![workspace(1, "a", vec![tab])], active: 0, next_id: 100 };
+            let mut l = Layout { workspaces: vec![workspace(1, "a", vec![tab])], active: 0, next_id: 100, pane_names: BTreeMap::new() };
             let repairs = l.validate();
             let Node::Split { ratio, .. } = l.tab().root else { panic!("tree changed") };
             assert_eq!(ratio, expected, "ratio {given}");
@@ -1491,5 +1562,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- names (DESK-32) -----------------------------------------------------------------------------
+
+    fn two_tab_layout() -> (Layout, PaneId, PaneId) {
+        let (mut l, first) = Layout::new();
+        let second = l.split_focused(Axis::Row).expect("split");
+        (l, first, second)
+    }
+
+    #[test]
+    fn a_name_is_cleaned_cut_and_cleared_by_the_empty_text() {
+        let (mut l, first, second) = two_tab_layout();
+        assert!(l.rename_pane(first, "api\u{1b}[31m server"));
+        assert_eq!(l.pane_name(first), Some("api[31m server"));
+        assert!(l.rename_pane(first, &"x".repeat(500)));
+        assert_eq!(l.pane_name(first).map(|n| n.chars().count()), Some(MAX_TEXT_CHARS));
+        assert!(l.rename_pane(first, ""));
+        assert_eq!(l.pane_name(first), None, "the empty text gives the automatic title back");
+        assert_eq!(l.pane_name(second), None);
+    }
+
+    #[test]
+    fn tabs_and_workspaces_are_renamed_by_index_and_the_empty_text_restores_the_default() {
+        let (mut l, _) = Layout::new();
+        l.new_tab();
+        assert!(l.rename_tab(1, "website"));
+        assert_eq!(l.workspace().tabs[1].title, "website");
+        assert!(l.rename_tab(1, "  "), "blank text counts as empty");
+        assert_eq!(l.workspace().tabs[1].title, "shell");
+        assert!(!l.rename_tab(9, "x"), "an index that is not there changes nothing");
+        assert!(l.rename_workspace(0, "holzWave"));
+        assert_eq!(l.workspaces[0].name, "holzWave");
+        assert!(l.rename_workspace(0, ""));
+        assert_eq!(l.workspaces[0].name, "ws 1");
+        assert!(!l.rename_workspace(5, "x"));
+    }
+
+    #[test]
+    fn an_unknown_pane_is_not_renamed_and_a_closed_pane_loses_its_name() {
+        let (mut l, first, second) = two_tab_layout();
+        assert!(!l.rename_pane(999, "ghost"));
+        assert!(l.rename_pane(second, "tests"));
+        assert_eq!(l.close_pane(second), CloseOutcome::Closed);
+        assert_eq!(l.pane_name(second), None);
+        assert!(l.rename_pane(first, "main"));
+        assert_eq!(l.pane_name(first), Some("main"), "closing another pane keeps a name");
+    }
+
+    #[test]
+    fn splitting_keeps_names_and_gives_the_new_pane_none() {
+        let (mut l, first, _) = two_tab_layout();
+        assert!(l.rename_pane(first, "db"));
+        let third = l.split_focused(Axis::Column).expect("split");
+        assert_eq!(l.pane_name(first), Some("db"));
+        assert_eq!(l.pane_name(third), None);
+    }
+
+    #[test]
+    fn a_layout_without_names_has_no_name_field_and_an_old_file_loads_clean() {
+        let (l, _) = Layout::new();
+        let json = serde_json::to_string(&l).expect("json");
+        assert!(!json.contains("pane_names"), "{json}");
+        let (back, status) = Layout::from_json(&json);
+        assert_eq!(status, LoadStatus::Clean);
+        assert_eq!(back, l);
+    }
+
+    #[test]
+    fn names_survive_a_round_trip_and_damaged_names_are_repaired() {
+        let (mut l, first, _) = two_tab_layout();
+        l.rename_pane(first, "docs");
+        let (back, status) = Layout::from_json(&serde_json::to_string(&l).expect("json"));
+        assert_eq!(status, LoadStatus::Clean);
+        assert_eq!(back.pane_name(first), Some("docs"));
+
+        let mut value: serde_json::Value = serde_json::to_value(&l).expect("value");
+        value["pane_names"] = serde_json::json!({ first.to_string(): "bad\u{7}name", "9999": "no such pane" });
+        let (fixed, status) = Layout::from_json(&value.to_string());
+        assert!(matches!(status, LoadStatus::Repaired(_)), "{status:?}");
+        assert_eq!(fixed.pane_name(first), Some("badname"));
+        assert_eq!(fixed.pane_name(9999), None, "a name of a pane that is not there is dropped");
     }
 }
