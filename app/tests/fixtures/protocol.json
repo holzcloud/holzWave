@@ -219,11 +219,13 @@
     "incoming-drop": [
       {
         "kind": "pane",
+        "pane": 3,
         "x": 412.5,
         "y": 96.0
       },
       {
         "kind": "tab",
+        "pane": 4,
         "x": 40.0,
         "y": 12.0
       }

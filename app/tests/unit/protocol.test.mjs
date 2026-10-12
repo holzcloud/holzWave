@@ -53,12 +53,13 @@ test("the event names and the title, cwd and pane-exit payloads are pinned", () 
 });
 
 test("the commands and events between windows are pinned (DESK-29 part 2)", () => {
-  // A release over another window reaches that window as `incoming-drop` with the pointer in its client coordinates.
+  // A release over another window reaches that window as `incoming-drop` with the pane and the pointer in its client coordinates.
   const drops = golden.events["incoming-drop"];
   assert.equal(drops.length, 2, "one sample for a pane and one for a tab");
   assert.deepEqual(drops.map((d) => d.kind), ["pane", "tab"]);
   for (const d of drops) {
-    assert.deepEqual(keys(d), ["kind", "x", "y"]);
+    assert.deepEqual(keys(d), ["kind", "pane", "x", "y"], "the pane is named: the answer has to carry it");
+    assert.equal(typeof d.pane, "number");
     assert.equal(typeof d.x, "number");
     assert.equal(typeof d.y, "number");
   }

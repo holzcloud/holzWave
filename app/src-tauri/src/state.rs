@@ -296,8 +296,9 @@ pub enum Out {
     Settings(SettingsView),
     /// A pane or a tab that was released over this window comes from another window: where in this page it goes is
     /// for this page to say. `x` and `y` are the pointer in client coordinates (CSS pixels). The page answers with
-    /// `attach_pane` or `attach_tab`, or with nothing when the pointer is over no drop zone.
-    IncomingDrop { kind: DropKind, x: f64, y: f64 },
+    /// `attach_pane` or `attach_tab`, or with nothing when the pointer is over no drop zone. `pane` is the pane that
+    /// was released (for a tab, one of its panes): the answer has to name it, and this page has never heard of it.
+    IncomingDrop { kind: DropKind, pane: PaneId, x: f64, y: f64 },
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -339,6 +340,7 @@ struct PaneExitPayload {
 #[derive(Serialize)]
 struct IncomingDropPayload {
     kind: DropKind,
+    pane: PaneId,
     x: f64,
     y: f64,
 }
@@ -353,7 +355,9 @@ impl Serialize for Out {
             Out::Cwd { pane, cwd } => CwdPayload { pane: *pane, cwd }.serialize(serializer),
             Out::PaneExit { pane, code } => PaneExitPayload { pane: *pane, code: *code }.serialize(serializer),
             Out::Settings(view) => view.serialize(serializer),
-            Out::IncomingDrop { kind, x, y } => IncomingDropPayload { kind: *kind, x: *x, y: *y }.serialize(serializer),
+            Out::IncomingDrop { kind, pane, x, y } => {
+                IncomingDropPayload { kind: *kind, pane: *pane, x: *x, y: *y }.serialize(serializer)
+            }
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -1045,7 +1049,7 @@ impl AppCore {
                     return Ok(Released::Cancelled);
                 }
                 lock(&self.drops).begin(kind, pane, label, Instant::now());
-                self.sink.send(Target::window(&to), Out::IncomingDrop { kind, x, y });
+                self.sink.send(Target::window(&to), Out::IncomingDrop { kind, pane, x, y });
                 Ok(Released::Handed { to })
             }
             CursorSpot::Nothing => {
@@ -4820,7 +4824,7 @@ mod tests {
         assert_eq!(outcome, Ok(Released::Handed { to: w.clone() }));
         assert_eq!(
             rec.sent(),
-            vec![(Target::window(&w), Out::IncomingDrop { kind: DropKind::Pane, x: 12.5, y: 30.0 })],
+            vec![(Target::window(&w), Out::IncomingDrop { kind: DropKind::Pane, pane: b, x: 12.5, y: 30.0 })],
             "only the window under the pointer is told, with the pointer in its coordinates"
         );
         assert_eq!(without_rev(&core.view()), without_rev(&before), "nothing moved before the other page answers");
@@ -5306,7 +5310,7 @@ mod protocol {
             Out::Cwd { pane: 3, cwd: "/Users/holz/Projects/holzWave".into() },
             Out::PaneExit { pane: 3, code: Some(0) },
             Out::Settings(settings_view.clone()),
-            Out::IncomingDrop { kind: DropKind::Pane, x: 412.5, y: 96.0 },
+            Out::IncomingDrop { kind: DropKind::Pane, pane: 3, x: 412.5, y: 96.0 },
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -5344,7 +5348,7 @@ mod protocol {
                 "settings": payload(5),
                 "incoming-drop": [
                     payload(6),
-                    to_value(&Out::IncomingDrop { kind: DropKind::Tab, x: 40.0, y: 12.0 }),
+                    to_value(&Out::IncomingDrop { kind: DropKind::Tab, pane: 4, x: 40.0, y: 12.0 }),
                 ],
             },
             "settings_view": to_value(&settings_view),
