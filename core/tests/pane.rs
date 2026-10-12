@@ -4,6 +4,9 @@
 //! Every wait is bounded and every pane is closed at the end of its test (and by the handle's `Drop` when an
 //! assertion fails first), so no child outlives the test binary.
 #![cfg(feature = "ghostty")]
+// These tests start `/bin/sh`, `/bin/bash` or `/bin/cat`, which a Windows host does not have. Plan 04's
+// `core/tests/conpty.rs` is their Windows counterpart.
+#![cfg(unix)]
 
 mod common;
 
@@ -777,7 +780,9 @@ fn option_as_alt_changes_how_alt_f_is_encoded_in_a_following_key() {
     // Echo off: `cat -v` shows exactly the bytes the pane sent, ESC as ^[ and bytes above 127 as M-.
     let pane = spawn(spec_sh("stty -echo; printf ready; exec cat -v"), &probe);
     assert!(wait_until(WAIT, || probe.has_text("ready")));
-    let alt_f = DomKey { code: "KeyF".into(), key: "\u{0192}".into(), mods: Mods::ALT, ..DomKey::default() };
+    // The text Option+F produces on macOS with the default layout; off macOS a real Alt+F produces plain `f`.
+    let produced = if cfg!(target_os = "macos") { "\u{0192}" } else { "f" };
+    let alt_f = DomKey { code: "KeyF".into(), key: produced.into(), mods: Mods::ALT, ..DomKey::default() };
 
     if cfg!(target_os = "macos") {
         // Option composes characters on macOS unless it is meant as Alt: the composed character is sent.

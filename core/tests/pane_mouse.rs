@@ -4,6 +4,9 @@
 //! The actor tests of plan 12 stay in `pane.rs`. Every wait is bounded and every pane is closed at the end of its
 //! test (and by the handle's `Drop` when an assertion fails first).
 #![cfg(feature = "ghostty")]
+// These tests start `/bin/sh`, `/bin/bash` or `/bin/cat`, which a Windows host does not have. Plan 04's
+// `core/tests/conpty.rs` is their Windows counterpart.
+#![cfg(unix)]
 
 mod common;
 

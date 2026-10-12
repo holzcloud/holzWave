@@ -4,6 +4,9 @@
 //! (a program must not grow memory by flooding queries); user-controlled bytes (paste) are never dropped. Every
 //! expectation was measured on the pinned libghostty revision.
 #![cfg(feature = "ghostty")]
+// These tests start `/bin/sh`, `/bin/bash` or `/bin/cat`, which a Windows host does not have. Plan 04's
+// `core/tests/conpty.rs` is their Windows counterpart.
+#![cfg(unix)]
 
 mod common;
 

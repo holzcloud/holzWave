@@ -7,6 +7,9 @@
 //! ```
 //!
 //! and quote the printed numbers in the verification notes and the spike baseline.
+// These tests start `/bin/sh`, `/bin/bash` or `/bin/cat`, which a Windows host does not have. Plan 04's
+// `core/tests/conpty.rs` is their Windows counterpart.
+#![cfg(unix)]
 #![cfg(feature = "ghostty")]
 
 mod common;

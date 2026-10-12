@@ -3,6 +3,9 @@
 //!
 //! Every test that starts a long-running child holds a `Reaper`, so a failing assertion never leaves a `sleep`
 //! behind.
+// These tests start `/bin/sh`, `/bin/bash` or `/bin/cat`, which a Windows host does not have. Plan 04's
+// `core/tests/conpty.rs` is their Windows counterpart.
+#![cfg(unix)]
 
 mod common;
 
