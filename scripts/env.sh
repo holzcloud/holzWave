@@ -8,6 +8,10 @@
 #
 # Zig must be exactly 0.16.0. The pinned Ghostty commit needs it, and Zig 0.17 breaks Ghostty's build.zig
 # (Phase 2 decision D-02 documents this blocker). Homebrew keeps 0.16 in a keg-only formula for that reason.
+# Where Zig 0.16.0 is looked for, the first one winning: $HOLZWAVE_ZIG_DIR, $HOME/.holzwave/zig-0.16.0 (where
+# scripts/env.ps1 -InstallZig puts it on Windows and where docs/build-linux.md unpacks it on Linux), then Homebrew's
+# keg. A directory that does not exist is skipped. Whatever is found, `zig version` must print exactly 0.16.0: a
+# distribution's Zig is usually the newest and is wrong for this project.
 #
 # This file is sourced into the interactive shell: it never calls `exit` and never sets `set -e`. It is plain POSIX
 # sh and also works when sourced from bash or zsh.
@@ -23,6 +27,10 @@ _hw_prepend() {
 # Order matters: the last directory prepended wins, so the rustup toolchain comes first on PATH.
 _hw_prepend "$HOME/.cargo/bin"
 _hw_prepend "/opt/homebrew/opt/zig@0.16/bin"
+_hw_prepend "$HOME/.holzwave/zig-0.16.0"
+if [ -n "${HOLZWAVE_ZIG_DIR:-}" ]; then
+    _hw_prepend "$HOLZWAVE_ZIG_DIR"
+fi
 
 # The stable toolchain directory is named stable-<host triple>. It is found by listing the directory instead of a
 # glob, so a shell that errors on an unmatched glob (zsh) behaves like one that does not.
