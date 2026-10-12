@@ -229,7 +229,9 @@ async function show(api: SettingsApi): Promise<void> {
     whole(look, "set-ui-scale", "UI scale", "ui_scale", UI_SCALE_RANGE, "%");
 
     const terminal = group("Terminal");
-    toggle(terminal, "set-option-as-alt", "Option as Alt", "option_as_alt");
+    // Only macOS has an Option key; where Alt is always Alt the row would do nothing, so it is not built. The
+    // setting stays in the file and in the core (a hand-written `true` is kept and ignored).
+    if (state.os === "macos") toggle(terminal, "set-option-as-alt", "Option as Alt", "option_as_alt");
     choice(terminal, "set-cursor-blink", "Cursor blink", "cursor_blink").setOptions(CURSOR_BLINK);
     whole(terminal, "set-scrollback", "Scrollback lines", "scrollback_lines", SCROLLBACK_RANGE, "", {
       id: "set-scrollback-hint", text: SCROLLBACK_HINT, data: "scrollback",

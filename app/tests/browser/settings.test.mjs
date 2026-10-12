@@ -10,6 +10,7 @@ import { APP_DIR, callsOf, emit } from "./lib.mjs";
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000); // a dialog that never appears fails here, not at the runner's 30 s limit
   await openCase(page, url);
+  await platformCase(page, url);
   await controlsCase(page, url);
   await errorCase(page, url);
   await keyboardCase(page, url);
@@ -78,8 +79,12 @@ function installCore([initial, papier]) {
   });
 }
 
-/** Open the page against the stub with the in-page core answering. */
-async function open(page, url, view = AUBERGINE(), query = "?renderer=canvas") {
+/**
+ * Open the page against the stub with the in-page core answering. `os` is what `app_info` names (macOS unless a case
+ * says otherwise: the Option as Alt row is the one control that depends on it).
+ */
+async function open(page, url, view = AUBERGINE(), query = "?renderer=canvas", os = "macos") {
+  await page.addInitScript((i) => window.__MOCK__.on("app_info", () => i), { version: "0.0.1-alpha1", os, hostname: "woodbox" });
   await page.addInitScript(installCore, [view, PAPIER]);
   await page.goto(`${url}index.html${query}`);
   await page.waitForSelector(".divider");
@@ -169,6 +174,36 @@ async function openCase(page, url) {
   await runAction(page, "settings.open");
   await dialog(page).waitFor();
   assert.equal(await page.getByRole("dialog").count(), 1);
+}
+
+/**
+ * `Option as Alt` means something only where there is an Option key: the row is in the dialog on macOS and not in it
+ * (not merely hidden) on Windows, Linux and when the platform is not known. The other controls keep their order and
+ * ids, and the setting itself stays in the view the core sent (a hand-written `true` on Windows is kept).
+ */
+async function platformCase(page, url) {
+  // The ids of the controls in DOM order; the radios of one choice are one control (`set-theme-0`, `-1`: `set-theme`).
+  const ids = () =>
+    page.evaluate(() => [
+      ...new Set([...document.querySelectorAll('[role="dialog"] input[id^="set-"]')].map((n) => n.id.replace(/-\d+$/, ""))),
+    ]);
+  const MAC = [
+    "set-theme", "set-font-size", "set-ui-scale", "set-option-as-alt", "set-cursor-blink", "set-scrollback",
+    "set-confirm-paste", "set-smooth-scroll", "set-cursor-trail", "set-motion", "set-contrast",
+  ];
+  const OTHER = MAC.filter((id) => id !== "set-option-as-alt");
+
+  for (const [os, expected] of [["macos", MAC], ["windows", OTHER], ["linux", OTHER], ["", OTHER]]) {
+    const view = AUBERGINE();
+    view.settings.option_as_alt = true; // a hand-written value on a platform that has no use for it
+    await open(page, url, view, "?renderer=canvas", os);
+    await page.keyboard.press("Meta+,");
+    await dialog(page).waitFor();
+    assert.deepEqual(await ids(), expected, `${JSON.stringify(os)}: the controls of the dialog, in order`);
+    assert.equal(await dialog(page).getByText("Option as Alt", { exact: true }).count(), os === "macos" ? 1 : 0, `${JSON.stringify(os)}: the row's label`);
+    assert.equal((await pageState(page, "settings.settings.option_as_alt")), true, `${JSON.stringify(os)}: the setting is kept`);
+    assert.equal((await settingCalls(page)).length, 0, `${JSON.stringify(os)}: opening the dialog changes nothing`);
+  }
 }
 
 /** Every control sends exactly one set_setting with its key and the typed value; the view answers show. */

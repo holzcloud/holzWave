@@ -42,7 +42,10 @@
 
 /* The root font size is the UI scale: 12 px at 100 %. Every chrome size is in rem, so changing it scales the
    chrome and the pane headers together. */
-html { font: 12px/1 "JetBrains Mono", ui-monospace, Menlo, monospace; }
+html {
+  font: 12px/1 "JetBrains Mono", ui-monospace, Menlo, "Cascadia Mono", Consolas, "DejaVu Sans Mono", "Noto Sans Mono",
+    monospace;
+}
 html, body { margin: 0; height: 100%; background: var(--hw-ground); overflow: hidden; color: var(--hw-ink); }
 body { font: inherit; }
 button { font: inherit; color: inherit; }
@@ -67,4 +70,6 @@ button { font: inherit; color: inherit; }
    drawn, never hit by the pointer; the page moves it to the cursor cell while a composition is active. */
 .ime { position: absolute; left: 0; top: 0; width: 1px; height: 1px; margin: 0; padding: 0; border: 0; outline: none;
        resize: none; overflow: hidden; background: transparent; color: transparent; caret-color: transparent;
-       opacity: 0; pointer-events: none; font: 14px/18px "JetBrains Mono", ui-monospace, Menlo, monospace; }
+       opacity: 0; pointer-events: none;
+       font: 14px/18px "JetBrains Mono", ui-monospace, Menlo, "Cascadia Mono", Consolas, "DejaVu Sans Mono",
+         "Noto Sans Mono", monospace; }

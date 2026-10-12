@@ -1,7 +1,14 @@
 // The terminal font: JetBrains Mono is bundled (D-17), declared in app.css, loaded before the first measurement,
 // and the cell metrics that come out of the measurement are whole device pixels (RESEARCH Pitfall 11).
 import assert from "node:assert/strict";
-import { newPage } from "./lib.mjs";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { APP_DIR, newPage } from "./lib.mjs";
+
+// The families after the bundled JetBrains Mono: macOS first (as before), then the per-platform fallbacks for the glyphs
+// the bundled face lacks, then the generic one. The order is the contract: the bundled face decides every cell.
+const FALLBACKS = ["JetBrains Mono", "SF Mono", "Menlo", "Cascadia Mono", "Consolas", "DejaVu Sans Mono", "Noto Sans Mono", "monospace"];
+const quoted = (name) => (name.includes(" ") ? `"${name}"` : name);
 
 const FILES = ["JetBrainsMono-Regular.woff2", "JetBrainsMono-Bold.woff2", "JetBrainsMono-Italic.woff2"];
 
@@ -37,6 +44,7 @@ async function metricsAt(page, url) {
 }
 
 export default async function ({ page, url }) {
+  await familyCase(page, url);
   // ---- the files are served as fonts, with their licence -----------------------------------------------------
   for (const name of FILES) {
     const res = await fetch(`${url}fonts/${name}`);
@@ -83,5 +91,39 @@ export default async function ({ page, url }) {
     assert.deepEqual(made.errors, [], "page errors or CSP violations at dpr 2");
   } finally {
     await made.page.close().catch(() => {});
+  }
+}
+
+/** The family list of the canvas font string and of the two stylesheet shorthands, and what a fallback does to a cell. */
+async function familyCase(page, url) {
+  await page.goto(`${url}index.html?renderer=canvas`);
+  await page.waitForSelector(".divider");
+  const probed = await page.evaluate(async () => {
+    const { FONT_FAMILY, font } = await import(new URL("frame.js", location.href).href);
+    await document.fonts.ready;
+    const width = (family) => {
+      const ctx = document.createElement("canvas").getContext("2d");
+      ctx.font = `14px ${family}`;
+      return ctx.measureText("M").width;
+    };
+    return {
+      family: FONT_FAMILY,
+      string: font(0, 14),
+      withFallbacks: width(FONT_FAMILY),
+      bundledOnly: width('"JetBrains Mono", monospace'),
+    };
+  });
+  assert.equal(probed.family, FALLBACKS.map(quoted).join(", "), "the canvas family list");
+  assert.equal(probed.string, `14px ${probed.family}`);
+  assert.equal(probed.withFallbacks, probed.bundledOnly, "a fallback family changes no cell metric: the bundled face decides");
+
+  // The stylesheet: the root shorthand and the IME probe line. They keep their own macOS entries (`ui-monospace` for
+  // SF Mono, which other platforms skip) and get the same fallbacks, in the same order, before `monospace`.
+  const css = readFileSync(join(APP_DIR, "src/app.css"), "utf8");
+  const shorthands = [...css.matchAll(/\bfont:\s*[\w.]+\/[\w.]+\s+([^;]+);/g)].map((m) => m[1].replace(/\s+/g, " ").trim());
+  const expected = ['"JetBrains Mono"', "ui-monospace", "Menlo", ...FALLBACKS.slice(3).map(quoted)].join(", ");
+  assert.equal(shorthands.length, 2, `the two font shorthands of app.css: ${JSON.stringify(shorthands)}`);
+  for (const list of shorthands) {
+    assert.equal(list, expected, "a font shorthand of app.css lists the fallbacks in the same order as the canvas string");
   }
 }

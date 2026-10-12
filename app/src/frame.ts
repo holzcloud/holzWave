@@ -150,7 +150,10 @@ export function setFontPx(px: number): void {
   if (Number.isFinite(px) && px > 0) fontPx = px;
 }
 
-export const FONT_FAMILY = '"JetBrains Mono", "SF Mono", Menlo, monospace';
+// The bundled JetBrains Mono comes first on every platform, so the cell metrics are the same everywhere; the rest is
+// only what a glyph it lacks falls back to: macOS, then Windows, then Linux, then the generic family.
+export const FONT_FAMILY =
+  '"JetBrains Mono", "SF Mono", Menlo, "Cascadia Mono", Consolas, "DejaVu Sans Mono", "Noto Sans Mono", monospace';
 export const font = (flags: number, px = fontPx) =>
   `${flags & ITALIC ? "italic " : ""}${flags & BOLD ? "bold " : ""}${px}px ${FONT_FAMILY}`;
 export const css = (c: number) => `#${c.toString(16).padStart(6, "0")}`;
