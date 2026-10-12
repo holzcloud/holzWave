@@ -121,7 +121,10 @@ pub fn windows_path_from_osc7(host: &str, url_path: &str, local_host: &str) -> O
     let mut segments = url_path.strip_prefix('/')?.split('/');
     let drive = segments.next()?;
     let mut letters = drive.chars();
-    let is_drive = matches!((letters.next(), letters.next(), letters.next()), (Some(l), Some(':'), None) if l.is_ascii_alphabetic());
+    let is_drive = match (letters.next(), letters.next(), letters.next()) {
+        (Some(letter), Some(':'), None) => letter.is_ascii_alphabetic(),
+        _ => false,
+    };
     if !is_drive {
         return None;
     }

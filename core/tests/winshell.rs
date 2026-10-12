@@ -239,7 +239,8 @@ fn non_ascii_names_pass() {
 fn on_unix_the_announced_path_is_returned_unchanged() {
     for os in [Os::Macos, Os::Linux] {
         for (host, path) in [("anything", "/Users/me/x"), ("", "/srv/a b"), ("h", "//double/slash"), ("h", "relative")] {
-            assert_eq!(announced_path(os, host, Path::new(path), "me-mac"), Some(PathBuf::from(path)), "{os:?} {path}");
+            let got = announced_path(os, host, Path::new(path), "me-mac");
+            assert_eq!(got, Some(PathBuf::from(path)), "{os:?} {path}");
         }
     }
 }
