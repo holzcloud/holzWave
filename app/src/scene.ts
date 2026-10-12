@@ -2,16 +2,18 @@
 // change (the bar, the pane sizes the core is told, the overlay). It owns the canvas and its resize listener.
 // The canvas element can be replaced once, while the renderer is chosen (see `initScene`), so nobody keeps a
 // reference to it from before: modules that listen on it ask `canvas()` after `initScene` has run.
-import { blinkSetting, effectiveBlink, motionReduced, onPreferenceChange } from "./a11y.js";
+import { blinkSetting, cursorTrailOn, effectiveBlink, motionReduced, onPreferenceChange, smoothScrollOn } from "./a11y.js";
 import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
 import { BOLD, ITALIC, Metrics, Renderer, font, getFontPx } from "./frame.js";
+import type { Frame, PaneFx } from "./frame.js";
 import { RateMeter, applyFrame, decorationSignature, forgetPane, toRenderFrame } from "./frames.js";
-import type { FrameMsg } from "./frames.js";
+import type { FrameMsg, PaneMirror } from "./frames.js";
 import { fitCells, gridRect, headerHeight } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
 import { renderPaneHeads } from "./panehead.js";
+import { Motion } from "./scroll.js";
 import { initSettings } from "./settings.js";
 import { forgetSelection, onSelectionSpans } from "./selection.js";
 import { state } from "./state.js";
@@ -61,6 +63,9 @@ export async function initScene(): Promise<void> {
   // The cursor phase follows the preferences, and a key press (heard before any handler) restarts it.
   onPreferenceChange(syncBlink);
   window.addEventListener("keydown", restartBlink, true);
+  // The two grid effects follow the settings and reduced motion, live.
+  onPreferenceChange(syncMotion);
+  syncMotion();
 }
 
 /**
@@ -238,8 +243,11 @@ function onFrame(msg: FrameMsg): void {
   }
   if (!mirror) return;
   if (msg.full) waiting.delete(pane);
-  const before = decorationSignature(state.frames.get(pane));
+  const previous = state.frames.get(pane);
+  const before = decorationSignature(previous);
   state.frames.set(pane, mirror);
+  // The effects only add drawing after this frame; they never hold it back (see scroll.ts).
+  motion.frame(pane, previous, mirror, msg.full === true, Array.isArray(msg.changed) && msg.changed.length > 0);
   // The cache of the selection's text follows the spans; the overlay (selection, search matches and counter, copy
   // cursor) is redrawn when what the focused pane's header says about them changes.
   onSelectionSpans(pane, mirror.selection, msg.changed);
@@ -282,6 +290,7 @@ function onPaneExit(p: { pane: number; code: number | null }): void {
   forgetPane(state, p.pane);
   forgetSelection(p.pane);
   waiting.delete(p.pane);
+  motion.forget(p.pane);
   renderLabels();
   syncBlink();
   schedule();
@@ -349,6 +358,38 @@ function restartBlink(): void {
   }
 }
 
+// ---- grid effects ---------------------------------------------------------------------------------
+
+/** Smooth scrolling and the cursor trail (DESK-28): what they hold per pane, and which of them may run. */
+const motion = new Motion();
+
+/** Take the effects the settings and the motion preference allow now; an effect that is off drops what it held. */
+function syncMotion(): void {
+  motion.setEnabled(smoothScrollOn(), cursorTrailOn());
+  schedule(); // the plain frame replaces a slide or a trail that was cut short
+}
+
+/**
+ * The effects' share of one pane's draw now, or undefined when nothing animates for it (the common case). The grid
+ * slides by rows times the cell height; the frames under it come without a cursor; the ghosts are only drawn for the
+ * cursor that is drawn, so never for the off phase of a blink or a hidden cursor.
+ */
+function paneFx(id: number, mirror: PaneMirror, focused: boolean, frame: Frame): PaneFx | undefined {
+  const mo = motion.of(id, mirror.rows);
+  if (!mo) return undefined;
+  const cellH = state.metrics.cellH;
+  const fx: PaneFx = {};
+  if (mo.rows !== 0) {
+    fx.offsetY = mo.rows * cellH;
+    fx.under = mo.under.map((u) => ({
+      frame: { ...toRenderFrame(u.mirror, false), cursor: null },
+      offsetY: u.rows * cellH,
+    }));
+  }
+  if (focused && frame.cursor && mo.ghosts.length > 0) fx.ghosts = mo.ghosts;
+  return fx;
+}
+
 // ---- drawing -------------------------------------------------------------------------------------
 
 /** Draw times since the last stats update. */
@@ -369,7 +410,7 @@ function draw(): void {
     const frame = toRenderFrame(mirror, focused);
     // The off phase of a blinking cursor: the focused pane is drawn without it.
     if (focused && blinkTimer !== null && !state.blink.on) frame.cursor = null;
-    renderer.drawPane(frame, gridRect(state.metrics, r, state.headerPx));
+    renderer.drawPane(frame, gridRect(state.metrics, r, state.headerPx), paneFx(id, mirror, focused, frame));
   }
   const now = performance.now();
   batch.push(now - t0);
@@ -382,6 +423,8 @@ function draw(): void {
     batch = [];
     renderStatus();
   }
+  // The single owner of the animation loop: another animation frame only while an effect has something left to draw.
+  if (motion.active()) schedule();
 }
 
 /** Ask for one draw on the next animation frame; any number of calls before it make one draw. */
