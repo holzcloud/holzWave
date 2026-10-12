@@ -11,6 +11,8 @@
 
 use std::time::Duration;
 
+use crate::winshell::powershell_integration_args;
+
 /// An operating system, as far as the core's behaviour differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Os {
@@ -126,7 +128,8 @@ fn windows_shell(env: &dyn Fn(&str) -> Option<String>, exists: &dyn Fn(&str) -> 
 ///
 /// Unix shells always get `-l`, so a pane is a login shell. On Windows the file stem decides, read without case
 /// and without a `.exe` suffix: both PowerShell flavours get `-NoLogo` (no banner; `-l` would be an error in
-/// Windows PowerShell), `cmd` gets none, the Unix shells that run on Windows (`bash`, `zsh`, `fish`, `sh`, `nu`)
+/// Windows PowerShell) and then the prompt wrapper that announces the directory
+/// ([`powershell_integration_args`]; this is the only place that adds it), `cmd` gets none, the Unix shells that run on Windows (`bash`, `zsh`, `fish`, `sh`, `nu`)
 /// get `-l`, and any other program gets none.
 fn shell_args(os: Os, program: &str) -> Vec<String> {
     if os != Os::Windows {
@@ -135,7 +138,11 @@ fn shell_args(os: Os, program: &str) -> Vec<String> {
     let file = program.rsplit(['\\', '/']).next().unwrap_or(program).to_ascii_lowercase();
     let stem = file.strip_suffix(".exe").unwrap_or(&file);
     match stem {
-        "pwsh" | "powershell" => vec!["-NoLogo".to_string()],
+        "pwsh" | "powershell" => {
+            let mut args = vec!["-NoLogo".to_string()];
+            args.extend(powershell_integration_args());
+            args
+        }
         "bash" | "zsh" | "fish" | "sh" | "nu" => vec!["-l".to_string()],
         _ => Vec::new(),
     }

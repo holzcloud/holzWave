@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use holzwave_core::platform::{Os, ShellLaunch, exit_poll, rename_retries, shell_launch, utf8_locale};
 use holzwave_core::pty::SpawnOptions;
+use holzwave_core::winshell::{POWERSHELL_PROMPT_SCRIPT, encode_command, powershell_integration_args};
 
 /// A fake environment: the variable named `key`, as `pairs` define it.
 fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -28,6 +29,18 @@ fn launch(os: Os, configured: &str, vars: &[(&str, &str)], existing: &[&str]) ->
 
 fn expect(program: &str, args: &[&str]) -> ShellLaunch {
     ShellLaunch { program: program.to_string(), args: args.iter().map(|a| a.to_string()).collect() }
+}
+
+/// What a PowerShell pane on Windows is started with: no banner, then the prompt wrapper that announces the
+/// directory (`-NoExit -EncodedCommand <the constant script>`). The encoding itself is proven in `winshell.rs`.
+fn powershell_args() -> Vec<String> {
+    let mut args = vec!["-NoLogo".to_string()];
+    args.extend(powershell_integration_args());
+    args
+}
+
+fn powershell(program: &str) -> ShellLaunch {
+    ShellLaunch { program: program.to_string(), args: powershell_args() }
 }
 
 const PWSH7: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
@@ -75,15 +88,15 @@ fn the_current_os_is_the_one_this_build_targets() {
 #[test]
 fn windows_default_shell_prefers_pwsh_then_windows_powershell_then_cmd() {
     // 1. pwsh 7 in its standard folder
-    assert_eq!(launch(Os::Windows, "", WINDOWS_VARS, &[PWSH7, WINPS]), expect(PWSH7, &["-NoLogo"]));
+    assert_eq!(launch(Os::Windows, "", WINDOWS_VARS, &[PWSH7, WINPS]), powershell(PWSH7));
     // 2. pwsh.exe in an absolute directory of PATH, when the standard folder has none
     let vars = [("ProgramFiles", r"C:\Program Files"), ("SystemRoot", r"C:\Windows"), ("PATH", r"C:\Tools;D:\bin")];
     assert_eq!(
         launch(Os::Windows, "", &vars, &[r"D:\bin\pwsh.exe", WINPS]),
-        expect(r"D:\bin\pwsh.exe", &["-NoLogo"])
+        powershell(r"D:\bin\pwsh.exe")
     );
     // 3. Windows PowerShell under SystemRoot
-    assert_eq!(launch(Os::Windows, "", WINDOWS_VARS, &[WINPS]), expect(WINPS, &["-NoLogo"]));
+    assert_eq!(launch(Os::Windows, "", WINDOWS_VARS, &[WINPS]), powershell(WINPS));
     // 4. %ComSpec%, without arguments
     assert_eq!(launch(Os::Windows, "", WINDOWS_VARS, &[]), expect(r"C:\Windows\System32\cmd.exe", &[]));
     // 5. nothing set: the bare cmd.exe
@@ -94,14 +107,14 @@ fn windows_default_shell_prefers_pwsh_then_windows_powershell_then_cmd() {
 fn the_standard_pwsh_folder_beats_a_pwsh_on_path() {
     let vars = [("ProgramFiles", r"C:\Program Files"), ("PATH", r"C:\Tools")];
     let launched = launch(Os::Windows, "", &vars, &[PWSH7, r"C:\Tools\pwsh.exe"]);
-    assert_eq!(launched, expect(PWSH7, &["-NoLogo"]));
+    assert_eq!(launched, powershell(PWSH7));
 }
 
 #[test]
 fn a_pwsh_on_path_beats_windows_powershell() {
     let vars = [("SystemRoot", r"C:\Windows"), ("PATH", r"C:\Tools")];
     let launched = launch(Os::Windows, "", &vars, &[r"C:\Tools\pwsh.exe", WINPS]);
-    assert_eq!(launched, expect(r"C:\Tools\pwsh.exe", &["-NoLogo"]));
+    assert_eq!(launched, powershell(r"C:\Tools\pwsh.exe"));
 }
 
 #[test]
@@ -116,7 +129,7 @@ fn a_relative_path_entry_is_never_searched() {
     let vars = [("PATH", r".;C:\Tools")];
     assert_eq!(
         launch(Os::Windows, "", &vars, &[r"C:\Tools\pwsh.exe", "pwsh.exe"]),
-        expect(r"C:\Tools\pwsh.exe", &["-NoLogo"])
+        powershell(r"C:\Tools\pwsh.exe")
     );
 }
 
@@ -140,11 +153,11 @@ fn quoted_and_slashed_path_entries_are_read_like_windows_reads_them() {
     let vars = [("PATH", r#""C:\Program Files\Tools\";D:/bin/"#)];
     assert_eq!(
         launch(Os::Windows, "", &vars, &[r"C:\Program Files\Tools\pwsh.exe"]),
-        expect(r"C:\Program Files\Tools\pwsh.exe", &["-NoLogo"])
+        powershell(r"C:\Program Files\Tools\pwsh.exe")
     );
     assert_eq!(
         launch(Os::Windows, "", &vars, &[r"D:/bin\pwsh.exe"]),
-        expect(r"D:/bin\pwsh.exe", &["-NoLogo"])
+        powershell(r"D:/bin\pwsh.exe")
     );
 }
 
@@ -196,7 +209,7 @@ fn windows_ignores_the_shell_variable() {
     // An msys or git-bash parent exports SHELL; a Windows pane still starts the Windows default.
     let mut vars = WINDOWS_VARS.to_vec();
     vars.push(("SHELL", "/usr/bin/bash"));
-    assert_eq!(launch(Os::Windows, "", &vars, &[PWSH7]), expect(PWSH7, &["-NoLogo"]));
+    assert_eq!(launch(Os::Windows, "", &vars, &[PWSH7]), powershell(PWSH7));
 }
 
 // ---- a configured shell ------------------------------------------------------------------------------
@@ -223,7 +236,7 @@ fn a_configured_shell_is_one_program_and_never_split() {
 fn shell_arguments_follow_the_file_stem() {
     let args = |program: &str| launch(Os::Windows, program, &[], &[]).args;
     for program in [r"C:\x\pwsh.exe", r"C:\x\powershell.exe", "pwsh", "powershell"] {
-        assert_eq!(args(program), ["-NoLogo"], "{program}");
+        assert_eq!(args(program), powershell_args(), "{program}");
     }
     for program in [r"C:\Windows\System32\cmd.exe", "cmd"] {
         assert!(args(program).is_empty(), "{program}");
@@ -239,13 +252,13 @@ fn shell_arguments_follow_the_file_stem() {
 #[test]
 fn the_file_stem_is_read_case_insensitively_and_without_exe() {
     let args = |program: &str| launch(Os::Windows, program, &[], &[]).args;
-    assert_eq!(args(r"C:\X\PWSH.EXE"), ["-NoLogo"]);
-    assert_eq!(args(r"C:\X\PowerShell.Exe"), ["-NoLogo"]);
-    assert_eq!(args("PwSh"), ["-NoLogo"]);
+    assert_eq!(args(r"C:\X\PWSH.EXE"), powershell_args());
+    assert_eq!(args(r"C:\X\PowerShell.Exe"), powershell_args());
+    assert_eq!(args("PwSh"), powershell_args());
     assert!(args(r"C:\X\CMD.EXE").is_empty());
     assert_eq!(args(r"C:\X\Bash.EXE"), ["-l"]);
     // Both separators end a directory name; only a trailing `.exe` is dropped.
-    assert_eq!(args("C:/X/pwsh.exe"), ["-NoLogo"]);
+    assert_eq!(args("C:/X/pwsh.exe"), powershell_args());
     assert!(args(r"C:\pwsh.exe\other").is_empty());
     assert!(args("pwsh.exe.bak").is_empty());
 }
@@ -256,6 +269,36 @@ fn unix_gives_a_configured_shell_a_login_flag_whatever_its_name() {
         for program in ["/bin/sh", "/usr/local/bin/nu", "/opt/odd/tool", "/usr/bin/pwsh"] {
             assert_eq!(launch(os, program, &[], &[]).args, ["-l"], "{os:?} {program}");
         }
+    }
+}
+
+#[test]
+fn a_powershell_pane_on_windows_starts_the_prompt_wrapper_in_one_place() {
+    // A default and a configured program alike: `-NoLogo -NoExit -EncodedCommand <base64 of the script>`.
+    let launched = launch(Os::Windows, "", WINDOWS_VARS, &[PWSH7]);
+    assert_eq!(launched.args.len(), 4);
+    assert_eq!(&launched.args[..3], ["-NoLogo", "-NoExit", "-EncodedCommand"]);
+    assert_eq!(launched.args[3], encode_command(POWERSHELL_PROMPT_SCRIPT));
+    for program in [WINPS, "pwsh", "powershell.exe", r"C:\Tools\PWSH.EXE"] {
+        assert_eq!(launch(Os::Windows, program, &[], &[]).args, launched.args, "{program}");
+    }
+}
+
+#[test]
+fn only_powershell_gets_the_prompt_wrapper() {
+    for program in [r"C:\Windows\System32\cmd.exe", "cmd", "bash", r"C:\Program Files\Gitinash.exe", "wsl.exe", "nu"] {
+        let args = launch(Os::Windows, program, &[], &[]).args;
+        assert!(!args.iter().any(|a| a == "-EncodedCommand" || a == "-NoExit"), "{program}: {args:?}");
+    }
+}
+
+#[test]
+fn no_unix_platform_gets_the_prompt_wrapper_whatever_the_program_is_called() {
+    for os in [Os::Linux, Os::Macos] {
+        for program in ["pwsh", "powershell", "/usr/bin/pwsh", "/opt/microsoft/powershell/7/pwsh", "pwsh.exe"] {
+            assert_eq!(launch(os, program, &[], &[]).args, ["-l"], "{os:?} {program}");
+        }
+        assert_eq!(launch(os, "", &[("SHELL", "/usr/bin/pwsh")], &[]).args, ["-l"], "{os:?} through $SHELL");
     }
 }
 

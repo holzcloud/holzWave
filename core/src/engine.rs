@@ -515,7 +515,7 @@ fn hex_value(b: u8) -> Option<u8> {
 }
 
 /// Decode `%XX` escapes. `None` for a truncated or non-hex escape and for bytes that are not UTF-8 afterwards.
-fn percent_decode(text: &str) -> Option<String> {
+pub(crate) fn percent_decode(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

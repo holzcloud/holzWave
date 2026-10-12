@@ -18,6 +18,7 @@
 //! - [`queue`]: the bounded per-pane queue between the PTY reader and the engine thread.
 //! - [`wire`]: the frame protocol from engine update to frame message.
 //! - [`pane`]: the pane actor with engine thread, PTY reader and writer, and frame pacing.
+//! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
 
 pub mod engine;
 mod error;
@@ -32,6 +33,7 @@ pub mod session;
 pub mod settings;
 pub mod theme;
 pub mod wire;
+pub mod winshell;
 
 #[cfg(feature = "ghostty")]
 mod ghostty;
