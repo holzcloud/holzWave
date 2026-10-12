@@ -410,6 +410,24 @@ pub fn select_workspace(core: State<Arc<AppCore>>, index: usize) -> View {
 }
 
 /// Move a divider. Only marks the layout dirty: a debounced saver writes it, so a drag costs one write per window.
+/// Name a pane. The empty text gives back the program title; the core cleans and cuts the text.
+#[tauri::command(rename_all = "snake_case")]
+pub fn rename_pane(core: State<Arc<AppCore>>, pane: PaneId, name: String) -> View {
+    core.rename_pane(pane, &name)
+}
+
+/// Name the tab at `index` of the shown workspace. The empty text gives back `shell`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn rename_tab(core: State<Arc<AppCore>>, index: usize, name: String) -> View {
+    core.rename_tab(index, &name)
+}
+
+/// Name the workspace at `index`. The empty text gives back `ws N`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn rename_workspace(core: State<Arc<AppCore>>, index: usize, name: String) -> View {
+    core.rename_workspace(index, &name)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn set_ratio(core: State<Arc<AppCore>>, split: SplitId, ratio: f32) -> View {
     core.set_ratio(split, ratio)

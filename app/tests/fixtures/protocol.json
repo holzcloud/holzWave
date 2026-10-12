@@ -75,6 +75,18 @@
       "allow_unsafe"
     ],
     "reload_settings": [],
+    "rename_pane": [
+      "pane",
+      "name"
+    ],
+    "rename_tab": [
+      "index",
+      "name"
+    ],
+    "rename_workspace": [
+      "index",
+      "name"
+    ],
     "request_full": [
       "pane"
     ],
@@ -953,6 +965,7 @@
       }
     ],
     "focus": 5,
+    "pane_names": [],
     "panes": [
       [
         3,

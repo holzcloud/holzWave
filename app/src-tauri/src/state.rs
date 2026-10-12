@@ -72,6 +72,8 @@ pub struct View {
     pub focus: PaneId,
     pub panes: Vec<(PaneId, Rect)>,
     pub dividers: Vec<Divider>,
+    /// The names the user gave to the panes of the active tab; a pane without an entry has no name.
+    pub pane_names: Vec<(PaneId, String)>,
 }
 
 impl View {
@@ -95,6 +97,10 @@ impl View {
                 .map(|(i, t)| TabView { title: t.title.clone(), active: i == active_tab, focus: t.focus })
                 .collect(),
             focus: layout.tab().focus,
+            pane_names: panes
+                .iter()
+                .filter_map(|(pane, _)| layout.pane_name(*pane).map(|name| (*pane, name.to_string())))
+                .collect(),
             panes,
             dividers,
         }
@@ -573,6 +579,27 @@ impl AppCore {
 
     pub fn select_workspace(&self, index: usize) -> View {
         self.change(|l| l.select_workspace(index))
+    }
+
+    /// Name the pane `pane`; the empty text gives back the program title. An unknown pane changes nothing.
+    pub fn rename_pane(&self, pane: PaneId, name: &str) -> View {
+        self.change(|l| {
+            l.rename_pane(pane, name);
+        })
+    }
+
+    /// Name the tab at `index` of the shown workspace; the empty text gives back `shell`.
+    pub fn rename_tab(&self, index: usize, name: &str) -> View {
+        self.change(|l| {
+            l.rename_tab(index, name);
+        })
+    }
+
+    /// Name the workspace at `index`; the empty text gives back `ws N`.
+    pub fn rename_workspace(&self, index: usize, name: &str) -> View {
+        self.change(|l| {
+            l.rename_workspace(index, name);
+        })
     }
 
     pub fn set_ratio(&self, split: SplitId, ratio: f32) -> View {
@@ -1673,6 +1700,25 @@ mod tests {
         assert_eq!(view.workspaces.len(), 1);
         assert_eq!(view.tabs.len(), 1);
         assert_eq!(view.tabs[0].focus, view.focus, "the tab reports its focus pane");
+    }
+
+    #[test]
+    fn a_rename_shows_in_the_view_is_cleaned_and_an_empty_name_restores_the_default() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let pane = core.view().focus;
+
+        let view = core.rename_pane(pane, "  api\u{7} server ");
+        assert_eq!(view.pane_names, vec![(pane, "api server".to_string())]);
+        let view = core.rename_tab(0, "website");
+        assert_eq!(view.tabs[0].title, "website");
+        let view = core.rename_workspace(0, "holzWave");
+        assert_eq!(view.workspaces[0].name, "holzWave");
+
+        let view = core.rename_pane(pane, "");
+        assert!(view.pane_names.is_empty());
+        assert_eq!(core.rename_tab(0, "").tabs[0].title, "shell");
+        assert_eq!(core.rename_workspace(0, "").workspaces[0].name, "ws 1");
+        assert_eq!(core.rename_pane(9999, "ghost").pane_names, vec![], "an unknown pane changes nothing");
     }
 
     #[test]
