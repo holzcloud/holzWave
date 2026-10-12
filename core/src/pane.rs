@@ -48,7 +48,7 @@ use crate::engine::{
     SelectOp, TerminalEngine, WheelEvent, WheelOutcome, parse_osc7,
 };
 use crate::layout::PaneId;
-use crate::platform::{self, Os};
+use crate::platform::{self, Os, ShellLaunch};
 use crate::pty::{Pty, SpawnOptions, process_cwd};
 use crate::queue::{PaneQueue, Popped};
 use crate::wire::{FrameEncoder, FrameMsg};
@@ -125,6 +125,14 @@ pub struct PaneSpec {
     /// One line the pane shows before the shell's own output (and so first): what the app has to tell about this
     /// start, such as an unusable `shell` setting that was replaced. It goes to the screen only, never to the shell.
     pub notice: Option<String>,
+    /// Start the shell on the host through `flatpak-spawn --host` ([`platform::host_command`]): the program, the
+    /// arguments and the directory of the spec are wrapped, and the child process's own working directory is not set.
+    /// `false` (the default) everywhere except inside a Flatpak.
+    pub host_spawn: bool,
+    /// Ask the operating system for the shell's working directory ([`process_cwd`]). `true` (the default) everywhere
+    /// except in host-spawn mode, where the process in the sandbox is `flatpak-spawn` and its directory means
+    /// nothing: the directory then comes from the shell's OSC 7 reports only.
+    pub cwd_lookup: bool,
 }
 
 impl PaneSpec {
@@ -143,6 +151,8 @@ impl PaneSpec {
             frame_interval: DEFAULT_FRAME_INTERVAL,
             exit_poll: platform::exit_poll(Os::current()),
             notice: None,
+            host_spawn: false,
+            cwd_lookup: true,
         }
     }
 
@@ -610,6 +620,8 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     selecting: bool,
     /// The process id of the shell, for the working-directory lookup.
     pid: Option<u32>,
+    /// [`PaneSpec::cwd_lookup`]: false reports nothing from the process, so only OSC 7 tells the directory.
+    cwd_lookup: bool,
     cwd: CwdTracker,
     /// The poll interval of [`PaneSpec::exit_poll`] and when the child was last asked.
     exit_poll: Option<Duration>,
@@ -696,7 +708,8 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// (a stale network mount), so it runs on a thread of its own and its answer comes back as
     /// [`Control::CwdFound`]: keys, resizes and frames of the pane never wait for it (WR-04).
     fn look_up_cwd(&mut self) {
-        let Some(pid) = self.pid else {
+        let Some(pid) = self.pid.filter(|_| self.cwd_lookup) else {
+            // No process to ask (or none worth asking, see `PaneSpec::cwd_lookup`): the tracker falls back to OSC 7.
             self.report_cwd(None);
             return;
         };
@@ -955,14 +968,28 @@ where
         let line: String = notice.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         engine.feed(format!("{line}\r\n").as_bytes());
     }
-    let mut options = SpawnOptions::new(spec.program.clone(), spec.cols, spec.rows)
-        .args(spec.args.iter().cloned())
-        .cell_px(spec.cell_px.0, spec.cell_px.1);
-    if let Some(dir) = &spec.cwd {
-        options = options.cwd(dir.clone());
+    let (program, args, cwd) = spawn_command(spec, &|key| std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()));
+    let mut options = SpawnOptions::new(program, spec.cols, spec.rows).args(args).cell_px(spec.cell_px.0, spec.cell_px.1);
+    if let Some(dir) = cwd {
+        options = options.cwd(dir);
     }
     let pty = Pty::spawn_with(&options)?;
     Ok((engine, pty))
+}
+
+/// The program, the arguments and the working directory the child process is started with. As the spec says them, except
+/// in host-spawn mode ([`PaneSpec::host_spawn`]): then the program is `flatpak-spawn`, the directory and the
+/// variables the child would get ([`SpawnOptions::child_env`], looked up in `env`) are arguments of it, and the process's
+/// own directory is not set. Pure apart from `env`, so the rule is unit-tested without a Flatpak.
+fn spawn_command(spec: &PaneSpec, env: &dyn Fn(&str) -> Option<String>) -> (String, Vec<String>, Option<PathBuf>) {
+    if !spec.host_spawn {
+        return (spec.program.clone(), spec.args.clone(), spec.cwd.clone());
+    }
+    let child_env = SpawnOptions::new(spec.program.clone(), spec.cols, spec.rows).child_env(env);
+    let launch = ShellLaunch { program: spec.program.clone(), args: spec.args.clone() };
+    // A directory that is not UTF-8 cannot be an argument here: the pane starts without one.
+    let wrapped = platform::host_command(&launch, spec.cwd.as_deref().and_then(|dir| dir.to_str()), &child_env);
+    (wrapped.program, wrapped.args, None)
 }
 
 fn engine_main<E, F, S>(
@@ -1035,6 +1062,7 @@ fn engine_main<E, F, S>(
         last_emit: None,
         selecting: false,
         pid,
+        cwd_lookup: spec.cwd_lookup,
         cwd: CwdTracker::new(Instant::now()),
         exit_poll: spec.exit_poll,
         last_exit_check: Instant::now(),
@@ -1149,6 +1177,65 @@ mod tests {
     use super::*;
 
     const MS: Duration = Duration::from_millis(1);
+
+    // ---- spawn_command: what the child is started with ----
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn a_spec_without_the_host_flag_is_started_as_it_says() {
+        let spec = PaneSpec::new("/bin/zsh", 80, 24).args(["-l"]).cwd("/home/a");
+        assert!(!spec.host_spawn && spec.cwd_lookup, "the defaults: nothing wrapped, the directory looked up");
+        assert_eq!(
+            spawn_command(&spec, &no_env),
+            ("/bin/zsh".to_string(), vec!["-l".to_string()], Some(PathBuf::from("/home/a")))
+        );
+    }
+
+    #[test]
+    fn a_spec_with_the_host_flag_is_wrapped_and_the_process_directory_is_not_set() {
+        let mut spec = PaneSpec::new("sh", 80, 24).args(["-c", "exec zsh"]).cwd("/home/a b");
+        spec.host_spawn = true;
+        let (program, args, cwd) = spawn_command(&spec, &no_env);
+        assert_eq!(program, "flatpak-spawn");
+        assert_eq!(cwd, None, "the directory is an argument of flatpak-spawn, not the sandbox process's");
+        let separator = args.iter().position(|a| a == "--").expect("a separator");
+        assert_eq!(&args[..3], ["--host", "--watch-bus", "--directory=/home/a b"]);
+        assert_eq!(&args[separator + 1..], ["sh", "-c", "exec zsh"]);
+        // The variables the child would get travel as options of flatpak-spawn: it does not forward its own.
+        for expected in ["--env=TERM=xterm-256color", "--env=COLORTERM=truecolor", "--env=TERM_PROGRAM=holzWave"] {
+            assert!(args[..separator].iter().any(|a| a == expected), "{expected} missing in {args:?}");
+        }
+        assert!(
+            args[..separator].iter().any(|a| a.starts_with("--env=LC_CTYPE=")) || cfg!(windows),
+            "no locale in the environment of the app: the host shell gets a UTF-8 one"
+        );
+    }
+
+    #[test]
+    fn the_host_wrapping_leaves_the_locale_alone_when_the_app_has_one() {
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        spec.host_spawn = true;
+        let env = |key: &str| (key == "LANG").then(|| "de_DE.UTF-8".to_string());
+        let (_, args, _) = spawn_command(&spec, &env);
+        assert!(!args.iter().any(|a| a.starts_with("--env=LC_CTYPE")), "{args:?}");
+    }
+
+    #[test]
+    fn a_directory_that_is_not_text_starts_the_host_pane_without_one() {
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+            let mut spec = PaneSpec::new("sh", 80, 24);
+            spec.host_spawn = true;
+            spec.cwd = Some(PathBuf::from(OsString::from_vec(vec![b'/', b't', 0xff, b'x'])));
+            let (_, args, _) = spawn_command(&spec, &no_env);
+            assert!(!args.iter().any(|a| a.starts_with("--directory=")), "{args:?}");
+        }
+    }
 
     fn at(base: Instant, ms: u64) -> Instant {
         base + MS * ms as u32

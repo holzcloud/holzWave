@@ -8,6 +8,7 @@
 //! - [`shell_launch`]: the program and arguments of a pane's shell.
 //! - [`utf8_locale`]: the `LC_CTYPE` a child gets when its parent has no locale.
 //! - [`exit_poll`] and [`rename_retries`]: the two numbers the pane actor and the atomic file writer read.
+//! - [`in_flatpak`], [`host_shell_launch`] and [`host_command`]: inside a Flatpak the shell runs on the host.
 
 use std::time::Duration;
 
@@ -258,6 +259,69 @@ fn shell_args(os: Os, program: &str) -> Vec<String> {
         "bash" | "zsh" | "fish" | "sh" | "nu" => vec!["-l".to_string()],
         _ => Vec::new(),
     }
+}
+
+/// Whether this process runs inside a Flatpak sandbox: `/.flatpak-info` exists or `FLATPAK_ID` is set and not empty.
+/// The facts are injected like everywhere in this module, so the answer is the same on every OS and a test needs no
+/// Flatpak.
+pub fn in_flatpak(env: &dyn Fn(&str) -> Option<String>, exists: &dyn Fn(&str) -> bool) -> bool {
+    non_empty(env("FLATPAK_ID")).is_some() || exists("/.flatpak-info")
+}
+
+/// The one script that finds the user's login shell on the host and starts it. It is run as `sh -c <script>` on the
+/// host, asks `getent passwd` for the shell of the user, falls back to `/bin/sh` when there is none or it cannot be
+/// run, and execs it as a login shell (`-l`, like every Unix pane). A constant: nothing is interpolated into it.
+pub const HOST_LOGIN_SHELL_SCRIPT: &str = "u=$(id -un); s=$(getent passwd \"$u\" 2>/dev/null | cut -d: -f7); \
+if [ -z \"$s\" ] || [ ! -x \"$s\" ]; then s=/bin/sh; fi; exec \"$s\" -l";
+
+/// The shell a pane starts on the host, for a Flatpak session. `configured` is the `shell` setting: when it is not
+/// empty, that program (never split, not looked up: it names a program of the host, which the sandbox cannot see) with
+/// the arguments of its file stem; otherwise `sh -c` [`HOST_LOGIN_SHELL_SCRIPT`].
+pub fn host_shell_launch(configured: &str) -> ShellLaunch {
+    if configured.is_empty() {
+        return ShellLaunch { program: "sh".to_string(), args: vec!["-c".to_string(), HOST_LOGIN_SHELL_SCRIPT.to_string()] };
+    }
+    ShellLaunch { program: configured.to_string(), args: shell_args(Os::Linux, configured) }
+}
+
+/// A shell launch as the command line that runs it on the host from inside a Flatpak:
+/// `flatpak-spawn --host --watch-bus [--directory=<cwd>] [--env=NAME=VALUE]... -- <program> <args>`.
+///
+/// The options come only from constants and from the two validated inputs, each inside ONE argument:
+///
+/// - `cwd` becomes `--directory=<cwd>`, so a directory that looks like an option, or holds spaces or an equals sign,
+///   is still the value of that one option. A directory with a control character (NUL included) is refused and the
+///   pane starts without one, as does an empty one.
+/// - each pair of `env` becomes `--env=NAME=VALUE`; a pair whose name is not `[A-Za-z_][A-Za-z0-9_]*` or whose value
+///   has a control character is dropped.
+///
+/// The program and the arguments of `launch` follow the one `--` as separate arguments, unchanged and never joined into
+/// a string, so nothing of them can become an option of `flatpak-spawn`. `--watch-bus` ends the host process when
+/// the app's bus connection closes.
+///
+/// Whether a shell started this way gets a controlling terminal (job control, `sudo`) is an assumption until row L10
+/// of `docs/test-plan.md` passes on a real Flatpak.
+pub fn host_command(launch: &ShellLaunch, cwd: Option<&str>, env: &[(String, String)]) -> ShellLaunch {
+    let mut args = vec!["--host".to_string(), "--watch-bus".to_string()];
+    if let Some(dir) = cwd.filter(|dir| !dir.is_empty() && !dir.chars().any(char::is_control)) {
+        args.push(format!("--directory={dir}"));
+    }
+    for (name, value) in env {
+        if is_env_name(name) && !value.chars().any(char::is_control) {
+            args.push(format!("--env={name}={value}"));
+        }
+    }
+    args.push("--".to_string());
+    args.push(launch.program.clone());
+    args.extend(launch.args.iter().cloned());
+    ShellLaunch { program: "flatpak-spawn".to_string(), args }
+}
+
+/// A name of an environment variable the way a shell reads it: a letter or underscore, then letters, digits, underscores.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The locale a child gets when its parent has none, as the value of `LC_CTYPE`: a Finder-launched macOS app

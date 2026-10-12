@@ -23,7 +23,9 @@ use holzwave_core::layout::{
 };
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
-use holzwave_core::platform::{Os, ProgramCheck, ShellLaunch, ShellResolved, resolve_shell};
+use holzwave_core::platform::{
+    Os, ProgramCheck, ShellLaunch, ShellResolved, host_shell_launch, in_flatpak, resolve_shell,
+};
 use holzwave_core::pty::process_cwd;
 use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
@@ -467,6 +469,11 @@ impl ShellSpec {
         check: &dyn Fn(&str) -> ProgramCheck,
     ) -> ShellResolved {
         match self {
+            // Inside a Flatpak the shell is the host's: its program is not in the sandbox, so the setting is not looked
+            // up here and nothing is wrong with a program the sandbox cannot see (`PaneSpec::host_spawn`).
+            Self::System if os == Os::Linux && in_flatpak(env, exists) => {
+                ShellResolved { launch: host_shell_launch(configured), unusable: None }
+            }
             Self::System => resolve_shell(os, configured, env, exists, check),
             Self::Fixed { program, args } => {
                 ShellResolved { launch: ShellLaunch { program: program.clone(), args: args.clone() }, unusable: None }
@@ -1485,10 +1492,37 @@ impl AppCore {
     /// How a new pane is started: the scrollback, the Option key and the theme palette come from the settings; the
     /// working directory is decided by the caller.
     fn pane_spec(&self, cols: u16, rows: u16, cell: (u32, u32)) -> PaneSpec {
+        self.pane_spec_on(
+            cols,
+            rows,
+            cell,
+            Os::current(),
+            &|key| std::env::var(key).ok(),
+            &|path| Path::new(path).is_file(),
+        )
+    }
+
+    /// [`pane_spec`](Self::pane_spec) with the facts it decides from passed in. Inside a Flatpak (Linux with
+    /// `/.flatpak-info` or `FLATPAK_ID`) the pane's shell runs on the host and its directory comes from OSC 7 only; the
+    /// two flags are set exactly then, and everywhere else the spec is what it always was.
+    fn pane_spec_on(
+        &self,
+        cols: u16,
+        rows: u16,
+        cell: (u32, u32),
+        os: Os,
+        env: &dyn Fn(&str) -> Option<String>,
+        exists: &dyn Fn(&str) -> bool,
+    ) -> PaneSpec {
         let cfg = lock(&self.config);
         // An unusable `shell` never leaves the pane without a terminal: the default starts, and the pane says so first.
-        let ShellResolved { launch, unusable } = resolve_system_shell(&self.shell, &cfg.settings.shell);
+        let ShellResolved { launch, unusable } =
+            self.shell.launch(&cfg.settings.shell, os, env, exists, &check_program_on_disk);
         let mut spec = PaneSpec::new(launch.program, cols, rows).args(launch.args);
+        if os == Os::Linux && in_flatpak(env, exists) {
+            spec.host_spawn = true;
+            spec.cwd_lookup = false;
+        }
         spec.notice = unusable.map(|note| format!("holzWave: {note}"));
         spec.cell_px = cell;
         spec.scrollback = cfg.settings.scrollback_lines as usize;
@@ -3703,6 +3737,60 @@ mod tests {
         for os in [Os::Macos, Os::Windows, Os::Linux] {
             let launch = launch_of(&fixed, "/usr/bin/fish", os, &[("SHELL", "/bin/zsh")], &[]);
             assert_eq!(launch, ("/bin/cat".to_owned(), vec!["-u".to_owned()]), "{os:?}");
+        }
+    }
+
+    #[test]
+    fn in_a_flatpak_the_system_shell_is_the_host_login_shell_and_the_setting_is_not_looked_up_in_the_sandbox() {
+        use holzwave_core::platform::HOST_LOGIN_SHELL_SCRIPT;
+        let system = ShellSpec::default();
+        let flatpak = [("FLATPAK_ID", "ch.holzcloud.holzwave"), ("SHELL", "/bin/sh")];
+        assert_eq!(
+            launch_of(&system, "", Os::Linux, &flatpak, &[]),
+            ("sh".to_owned(), vec!["-c".to_owned(), HOST_LOGIN_SHELL_SCRIPT.to_owned()]),
+            "no setting: one constant script finds the host's login shell, $SHELL of the sandbox is not asked"
+        );
+        // The setting names a program of the host: the sandbox does not have it, and that is no defect.
+        assert_eq!(launch_of(&system, "/usr/bin/fish", Os::Linux, &flatpak, &[]), ("/usr/bin/fish".to_owned(), vec!["-l".to_owned()]));
+        assert_eq!(unusable_of("/usr/bin/fish", Os::Linux, &flatpak, &[]), None);
+        // The info file alone is enough.
+        assert_eq!(launch_of(&system, "", Os::Linux, &[], &["/.flatpak-info"]).0, "sh");
+        // A fixed shell (what the tests inject) stays what it is.
+        assert_eq!(launch_of(&ShellSpec::new("/bin/cat", &[]), "", Os::Linux, &flatpak, &[]).0, "/bin/cat");
+        // No Flatpak, or another OS: nothing changes.
+        assert_eq!(launch_of(&system, "", Os::Linux, &[("SHELL", "/usr/bin/fish")], &[]).0, "/usr/bin/fish");
+        assert_eq!(launch_of(&system, "", Os::Macos, &flatpak, &[]).0, "/bin/sh", "$SHELL of the environment, as on a Mac");
+        assert_eq!(
+            unusable_of("/usr/bin/fish", Os::Linux, &[("SHELL", "/bin/sh")], &[]).is_some(),
+            true,
+            "outside a Flatpak a setting that is not there is still reported"
+        );
+    }
+
+    #[test]
+    fn the_host_spawn_and_lookup_flags_follow_the_environment() {
+        let dir = Scratch::new("flatpak-flags");
+        let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+        dir.attach(&core);
+        let spec = |os: Os, vars: &'static [(&'static str, &'static str)], files: &'static [&'static str]| {
+            let (env, exists, _) = facts(vars, files);
+            core.pane_spec_on(80, 24, (9, 18), os, &env, &exists)
+        };
+
+        let inside = spec(Os::Linux, &[("FLATPAK_ID", "ch.holzcloud.holzwave")], &[]);
+        assert!(inside.host_spawn && !inside.cwd_lookup, "a Flatpak: spawn on the host, no lookup of the process directory");
+        assert_eq!(inside.program, "sh");
+        let by_file = spec(Os::Linux, &[], &["/.flatpak-info"]);
+        assert!(by_file.host_spawn && !by_file.cwd_lookup, "the info file alone");
+
+        for (os, vars, files) in [
+            (Os::Linux, &[("SHELL", "/bin/sh")][..], &[][..]),
+            (Os::Linux, &[("FLATPAK_ID", "")][..], &[][..]),
+            (Os::Macos, &[("FLATPAK_ID", "x")][..], &["/.flatpak-info"][..]),
+            (Os::Windows, &[("FLATPAK_ID", "x")][..], &[][..]),
+        ] {
+            let spec = spec(os, vars, files);
+            assert!(!spec.host_spawn && spec.cwd_lookup, "{os:?} {vars:?}: nothing is wrapped and the directory is looked up");
         }
     }
 

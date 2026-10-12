@@ -1009,6 +1009,44 @@ fn a_pane_reports_its_starting_directory_once_its_output_goes_idle() {
 }
 
 #[test]
+fn with_the_lookup_off_the_process_is_not_asked_for_its_directory() {
+    // Host-spawn mode (a Flatpak): the process in the sandbox is not the shell, its directory means nothing. The shell
+    // here does change directory, and nothing is reported from the process.
+    let probe = Probe::default();
+    let (first, second) = (scratch_dir("pane-nolookup-a"), scratch_dir("pane-nolookup-b"));
+    let script = format!("printf a; sleep 0.5; cd '{}'; printf b; sleep 3", canonical(&second));
+    let mut spec = spec_sh(&script).cwd(&first);
+    spec.cwd_lookup = false;
+    let pane = spawn(spec, &probe);
+
+    thread::sleep(Duration::from_millis(2500));
+    assert_eq!(probe.cwds(), Vec::<String>::new(), "a lookup ran although it is off");
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+    let _ = std::fs::remove_dir_all(first);
+    let _ = std::fs::remove_dir_all(second);
+}
+
+#[test]
+fn with_the_lookup_off_the_directory_comes_from_osc_7_only() {
+    let probe = Probe::default();
+    let dir = scratch_dir("pane-nolookup-osc7");
+    let script = format!("printf '\\033]7;file://localhost{}\\007'; sleep 6", canonical(&dir));
+    let mut spec = spec_sh(&script);
+    spec.cwd_lookup = false;
+    let pane = spawn(spec, &probe);
+
+    assert!(
+        wait_until(WAIT, || probe.cwds() == vec![canonical(&dir)]),
+        "the announced directory was not reported: {:?}",
+        probe.cwds()
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_new_directory_is_reported_after_the_shell_changes_it() {
     let probe = Probe::default();
     let (first, second) = (scratch_dir("pane-cwd-a"), scratch_dir("pane-cwd-b"));

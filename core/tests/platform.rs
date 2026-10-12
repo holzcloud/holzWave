@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use holzwave_core::platform::{
-    Os, ProgramCheck, ShellLaunch, exit_poll, rename_retries, resolve_shell, shell_launch, utf8_locale,
+    HOST_LOGIN_SHELL_SCRIPT, Os, ProgramCheck, ShellLaunch, exit_poll, host_command, host_shell_launch, in_flatpak,
+    rename_retries, resolve_shell, shell_launch, utf8_locale,
 };
 use holzwave_core::pty::SpawnOptions;
 use holzwave_core::winshell::{POWERSHELL_PROMPT_SCRIPT, encode_command, powershell_integration_args};
@@ -485,4 +486,172 @@ fn the_sentence_cuts_a_long_value_and_never_carries_a_control_character() {
     assert!(note.len() < 200 && note.contains("..."), "{note}");
     let (_, note) = resolved(Os::Linux, "/bin/s\x1b[31mh", &[], &[], &[], &[]);
     assert!(!note.expect("a sentence").chars().any(char::is_control));
+}
+
+// ---- Flatpak: the shell of a pane runs on the host ----------------------------------------------------------------
+//
+// PTY semantics of `flatpak-spawn --host` (a controlling terminal, job control, `sudo`) are an assumption until row
+// L10 of docs/test-plan.md passes on a real Flatpak; what is proven here is the command line and its refusals.
+
+fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+    list.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+fn strings(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn flatpak_is_detected_by_the_info_file_or_the_id() {
+    // On every OS the facts are the same, because the function reads nothing but what it is given.
+    assert!(in_flatpak(&env(&[]), &files(&["/.flatpak-info"])), "the info file alone");
+    assert!(in_flatpak(&env(&[("FLATPAK_ID", "ch.holzcloud.holzwave")]), &files(&[])), "the id alone");
+    assert!(in_flatpak(&env(&[("FLATPAK_ID", "x")]), &files(&["/.flatpak-info"])), "both");
+    assert!(!in_flatpak(&env(&[]), &files(&[])), "neither");
+    assert!(!in_flatpak(&env(&[("FLATPAK_ID", "")]), &files(&[])), "an empty id is no id");
+    assert!(!in_flatpak(&env(&[("HOME", "/home/a")]), &files(&["/etc/os-release", "/flatpak-info", "/app"])), "look-alikes");
+}
+
+#[test]
+fn the_host_command_line_is_the_constants_the_directory_the_env_and_the_program_after_the_separator() {
+    let shell = expect("/usr/bin/fish", &["-l"]);
+    let line = host_command(&shell, Some("/home/a/src"), &pairs(&[("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]));
+    assert_eq!(
+        line,
+        expect(
+            "flatpak-spawn",
+            &[
+                "--host",
+                "--watch-bus",
+                "--directory=/home/a/src",
+                "--env=TERM=xterm-256color",
+                "--env=COLORTERM=truecolor",
+                "--",
+                "/usr/bin/fish",
+                "-l"
+            ]
+        )
+    );
+    // No directory: no --directory argument at all, and no env: none either.
+    assert_eq!(host_command(&shell, None, &[]), expect("flatpak-spawn", &["--host", "--watch-bus", "--", "/usr/bin/fish", "-l"]));
+    assert_eq!(
+        host_command(&shell, Some(""), &[]),
+        host_command(&shell, None, &[]),
+        "an empty directory is no directory"
+    );
+}
+
+#[test]
+fn a_directory_that_looks_like_an_option_stays_one_argument() {
+    let shell = expect("/bin/sh", &["-l"]);
+    for dir in ["--env=X=1", "--host", "--", "-x", "--talk-name=org.freedesktop.Flatpak", "--directory=/etc"] {
+        let line = host_command(&shell, Some(dir), &[]);
+        assert_eq!(
+            line.args,
+            strings(&["--host", "--watch-bus", &format!("--directory={dir}"), "--", "/bin/sh", "-l"]),
+            "{dir}"
+        );
+        // Exactly one argument is a directory option, and it carries the whole value.
+        assert_eq!(line.args.iter().filter(|a| a.starts_with("--directory=")).count(), 1, "{dir}");
+    }
+}
+
+#[test]
+fn a_directory_with_spaces_and_an_equals_sign_stays_one_argument() {
+    let shell = expect("/bin/sh", &["-l"]);
+    for dir in ["/home/a/my projects/a=b", "/tmp/a b/--env=X=1", "/tmp/=", "/tmp/ä ö ü=1 2", "/tmp/a;b&c|d$(x)`y`'z\""] {
+        let line = host_command(&shell, Some(dir), &[]);
+        assert_eq!(
+            line.args,
+            strings(&["--host", "--watch-bus", &format!("--directory={dir}"), "--", "/bin/sh", "-l"]),
+            "{dir}"
+        );
+    }
+}
+
+#[test]
+fn a_directory_with_a_control_character_or_nul_is_refused_and_the_pane_starts_without_one() {
+    let shell = expect("/bin/sh", &["-l"]);
+    let without = host_command(&shell, None, &[]);
+    for dir in ["/tmp/a\nb", "/tmp/a\0b", "/tmp/a\x1b[31m", "/tmp/a\rb", "\u{7f}", "/tmp/\tx", "/tmp/a\u{85}b"] {
+        assert_eq!(host_command(&shell, Some(dir), &[]), without, "{dir:?}");
+    }
+}
+
+#[test]
+fn nothing_after_the_separator_is_an_option() {
+    // Whatever the program and its arguments look like, they are after the one `--` and unchanged, and the options
+    // before it are the constants plus the validated ones.
+    let hostile = expect("--host", &["--env=A=1", "--directory=/", "--", "-l", "--talk-name=x", "--forward-fd=3"]);
+    let line = host_command(&hostile, Some("/home/a"), &pairs(&[("TERM", "xterm")]));
+    let separator = line.args.iter().position(|a| a == "--").expect("a separator");
+    assert_eq!(line.args.iter().filter(|a| *a == "--").count(), 2, "the hostile list holds a second `--` as data");
+    assert_eq!(separator, 4, "the first `--` ends the options: host, watch-bus, directory, one env");
+    assert_eq!(&line.args[..separator], strings(&["--host", "--watch-bus", "--directory=/home/a", "--env=TERM=xterm"]).as_slice());
+    let mut after = vec![hostile.program.clone()];
+    after.extend(hostile.args.clone());
+    assert_eq!(&line.args[separator + 1..], after.as_slice(), "program and arguments are passed through unchanged");
+    assert_eq!(line.program, "flatpak-spawn", "the program of the line is the constant, never the user's");
+}
+
+#[test]
+fn an_env_pair_with_a_bad_name_or_a_value_with_a_control_character_is_dropped() {
+    let shell = expect("/bin/sh", &["-l"]);
+    let line = host_command(
+        &shell,
+        None,
+        &pairs(&[
+            ("TERM", "xterm-256color"),
+            ("", "x"),
+            ("A=B", "x"),
+            ("--host", "x"),
+            ("1A", "x"),
+            ("A B", "x"),
+            ("OK_1", "a=b c"),
+            ("NL", "a\nb"),
+            ("NUL", "a\0b"),
+        ]),
+    );
+    assert_eq!(
+        line.args,
+        strings(&["--host", "--watch-bus", "--env=TERM=xterm-256color", "--env=OK_1=a=b c", "--", "/bin/sh", "-l"])
+    );
+}
+
+#[test]
+fn without_the_shell_setting_the_host_login_shell_comes_from_one_constant_script() {
+    let default = host_shell_launch("");
+    assert_eq!(default, expect("sh", &["-c", HOST_LOGIN_SHELL_SCRIPT]));
+    assert!(HOST_LOGIN_SHELL_SCRIPT.contains("getent passwd"), "the user's shell is asked of the host's passwd database");
+    assert!(HOST_LOGIN_SHELL_SCRIPT.contains("/bin/sh"), "and falls back to /bin/sh");
+    assert!(HOST_LOGIN_SHELL_SCRIPT.contains("exec \"$s\" -l"), "and is exec'd as a login shell");
+    // One constant: nothing of the user can be in it, and it is not built from parts.
+    assert!(!HOST_LOGIN_SHELL_SCRIPT.contains('{') && !HOST_LOGIN_SHELL_SCRIPT.contains("%s"), "no template slot");
+    assert!(!HOST_LOGIN_SHELL_SCRIPT.contains('\n'), "one line");
+}
+
+#[test]
+fn with_the_shell_setting_the_program_of_the_setting_is_used_with_the_arguments_of_its_stem() {
+    assert_eq!(host_shell_launch("/usr/bin/fish"), expect("/usr/bin/fish", &["-l"]));
+    assert_eq!(host_shell_launch("zsh"), expect("zsh", &["-l"]));
+    // The setting is one program, never split: spaces stay inside it.
+    assert_eq!(host_shell_launch("/opt/my shell/sh"), expect("/opt/my shell/sh", &["-l"]));
+}
+
+#[test]
+fn the_default_host_launch_wrapped_is_what_the_flatpak_runs() {
+    let line = host_command(&host_shell_launch(""), Some("/home/a"), &pairs(&[("TERM", "xterm-256color")]));
+    assert_eq!(
+        line.args,
+        strings(&[
+            "--host",
+            "--watch-bus",
+            "--directory=/home/a",
+            "--env=TERM=xterm-256color",
+            "--",
+            "sh",
+            "-c",
+            HOST_LOGIN_SHELL_SCRIPT
+        ])
+    );
 }
