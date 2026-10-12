@@ -8,8 +8,9 @@ import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
 import { BOLD, ITALIC, Metrics, Renderer, font, getFontPx } from "./frame.js";
 import type { Frame, PaneFx } from "./frame.js";
-import { RateMeter, applyFrame, decorationSignature, forgetPane, toRenderFrame } from "./frames.js";
+import { RateMeter, applyFrame, decorationSignature, forgetPane, leavePane, toRenderFrame } from "./frames.js";
 import type { FrameMsg, PaneMirror } from "./frames.js";
+import { Leaving } from "./dropzone.js";
 import { fitCells, gridRect, headerHeight } from "./geometry.js";
 import { renderOverlay } from "./overlay.js";
 import { renderPaneHeads } from "./panehead.js";
@@ -166,12 +167,40 @@ export function applyView(v: View): void {
     shownRev = v.rev;
   }
   state.view = v;
+  const shown = new Set(v.panes.map(([id]) => id));
+  for (const id of shown) state.away.delete(id); // a pane that comes back is a first appearance (syncSizes)
+  for (const id of leaving.take(shown, performance.now())) leave(id);
   renderBar(v, applyView);
   renderStatus();
   syncSizes();
   renderOverlay();
   syncBlink(); // the focus may have moved to a pane whose cursor blinks, or away from one
   schedule();
+}
+
+/** The panes this page has let go of by a gesture and that no layout has confirmed gone yet. */
+const leaving = new Leaving();
+
+/**
+ * This page lets go of these panes (released outside the window, torn off): they are forgotten when the layout that
+ * shows them gone arrives. Their ids come from the gesture, because a layout lists only the shown tab's panes.
+ */
+export function markLeaving(panes: Iterable<number>): void {
+  leaving.mark(panes, performance.now());
+}
+
+/** The gesture did not let go of these panes after all (cancelled, refused, failed). */
+export function unmarkLeaving(panes: Iterable<number>): void {
+  leaving.unmark(panes);
+}
+
+/** A pane moved to another window: nothing of it stays here, so it gets a full frame when it comes back. */
+function leave(pane: number): void {
+  if (state.exited.has(pane)) return; // it ended, it did not move: the exit already forgot it
+  leavePane(state, pane);
+  forgetSelection(pane);
+  waiting.delete(pane);
+  motion.forget(pane);
 }
 
 /**
@@ -233,7 +262,7 @@ function onFrame(msg: FrameMsg): void {
   arrivals.note(performance.now());
   if (typeof msg !== "object" || msg === null || !isPane(msg.pane)) return;
   const pane = msg.pane;
-  if (state.exited.has(pane)) return; // a late frame of a pane that is gone must not bring it back
+  if (state.exited.has(pane) || state.away.has(pane)) return; // a late frame of a pane that is gone must not bring it back
   if (!msg.full && waiting.has(pane)) return;
   const { mirror, gap } = applyFrame(state.frames.get(pane), msg);
   if (gap) {
@@ -268,7 +297,7 @@ function renderLabels(): void {
 /** A program set a pane's title. The string was sanitised by the core and is only ever rendered as text. */
 function onTitle(p: { pane: number; title: string }): void {
   if (typeof p !== "object" || p === null || !isPane(p.pane) || typeof p.title !== "string") return;
-  if (state.exited.has(p.pane)) return;
+  if (state.exited.has(p.pane) || state.away.has(p.pane)) return;
   state.titles.set(p.pane, p.title);
   renderLabels();
 }
@@ -276,7 +305,7 @@ function onTitle(p: { pane: number; title: string }): void {
 /** A pane reported its working directory (OSC 7). Same rules as the title. */
 function onCwd(p: { pane: number; cwd: string }): void {
   if (typeof p !== "object" || p === null || !isPane(p.pane) || typeof p.cwd !== "string") return;
-  if (state.exited.has(p.pane)) return;
+  if (state.exited.has(p.pane) || state.away.has(p.pane)) return;
   state.cwds.set(p.pane, p.cwd);
   renderLabels();
 }

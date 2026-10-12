@@ -56,3 +56,131 @@ export function neighbour<T>(items: readonly T[], current: T, step: 1 | -1): T |
   if (at < 0 || items.length < 2) return undefined;
   return items[(at + step + items.length) % items.length];
 }
+
+// ---- between windows (DESK-29 part 2) ---------------------------------------------------------------------------
+// A drag that ends outside the window tears a pane or a tab off, and one that ends over another window is handed to
+// that window, which works out where in it the drop lands. The maths of both sides is here, without the DOM.
+
+/** How far outside the window, in CSS pixels, a release has to be to tear off; closer than that it is a slip. */
+export const TEAR_MARGIN = 24;
+
+/**
+ * Whether a pointer released at the client point (x, y) of a window of `width` by `height` CSS pixels is outside it by
+ * at least `margin` in some direction. A release just over the edge, or in the window, is not.
+ */
+export function outsideBeyond(x: number, y: number, width: number, height: number, margin = TEAR_MARGIN): boolean {
+  if (![x, y, width, height, margin].every(Number.isFinite)) return false;
+  return Math.max(-x, x - width, -y, y - height) >= margin;
+}
+
+/** What is under the pointer in the window that receives a drop, as the page worked it out from its DOM and layout. */
+export type Under =
+  | { part: "tab"; index: number }
+  | { part: "chip"; index: number }
+  | { part: "bar" }
+  | { part: "pane"; pane: number; zone: Zone | null }
+  | { part: "none" };
+
+/** The answer to an incoming drop: the command and its arguments. */
+export type Attach =
+  | { cmd: "attach_pane"; args: { pane: number; target: number; edge: Zone } | { pane: number; workspace: number } }
+  | { cmd: "attach_tab"; args: { pane: number; workspace: number } };
+
+/**
+ * What a drop of `kind` (the pane `pane`, or the tab it is in) does where the pointer is, or null when it lands
+ * nowhere. `tabs` are the tabs of the receiving window (each with the pane that has its focus) and `workspace` its shown
+ * workspace.
+ *
+ * A pane lands on the side or the middle of a pane (splits or swaps there), on a tab (next to that tab's focus pane, as
+ * in one window), or on the free part of the bar or a workspace chip as a tab of its own. A tab lands in the workspace
+ * of the chip it is over and anywhere else in the shown one. A pane that is over no zone (outside the grid of a pane)
+ * and a pointer over nothing land nowhere.
+ */
+export function attachFor(
+  kind: "pane" | "tab",
+  pane: number,
+  under: Under,
+  tabs: readonly { focus: number }[],
+  workspace: number,
+): Attach | null {
+  switch (under.part) {
+    case "chip":
+      return kind === "pane"
+        ? { cmd: "attach_pane", args: { pane, workspace: under.index } }
+        : { cmd: "attach_tab", args: { pane, workspace: under.index } };
+    case "tab": {
+      if (kind === "tab") return { cmd: "attach_tab", args: { pane, workspace } };
+      const into = tabs[under.index];
+      return into ? { cmd: "attach_pane", args: { pane, target: into.focus, edge: "right" } } : null;
+    }
+    case "bar":
+      return kind === "pane"
+        ? { cmd: "attach_pane", args: { pane, workspace } }
+        : { cmd: "attach_tab", args: { pane, workspace } };
+    case "pane":
+      if (kind === "tab") return { cmd: "attach_tab", args: { pane, workspace } };
+      return under.zone ? { cmd: "attach_pane", args: { pane, target: under.pane, edge: under.zone } } : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The pane the shell is told about and the panes this page lets go of when `source` is released outside the window: a
+ * pane is itself; a tab is named by the pane that has its focus, and its panes are known only when it is the shown tab
+ * (the layout lists no others), so for another tab only that pane. Null for a tab that is not in the layout.
+ */
+export function leavingPanes(
+  source: { kind: "pane"; pane: number } | { kind: "tab"; index: number },
+  view: { tabs: readonly { active: boolean; focus: number }[]; panes: readonly (readonly [number, unknown])[] },
+): { kind: "pane" | "tab"; pane: number; ids: number[] } | null {
+  if (source.kind === "pane") return { kind: "pane", pane: source.pane, ids: [source.pane] };
+  const tab = view.tabs[source.index];
+  if (!tab) return null;
+  return { kind: "tab", pane: tab.focus, ids: tab.active ? view.panes.map(([id]) => id) : [tab.focus] };
+}
+
+/** How long a pane stays marked as leaving, a little longer than the shell waits for the other window's answer. */
+export const LEAVE_MS = 6000;
+
+/**
+ * The panes this page has let go of by a gesture (released outside, torn off) and whose departure it has not seen in a
+ * layout yet. The layout lists only the panes of the shown tab, so "not in the layout" cannot tell a pane that left the
+ * window from one in another tab: the page names the pane itself, when it lets go of it, and forgets it when a layout
+ * confirms it is gone. A mark that nothing confirmed (the other window never answered) lapses.
+ */
+export class Leaving {
+  private marks = new Map<number, number>();
+
+  /** The panes `ids` are being let go of at `now` (milliseconds on a clock that only goes forward). */
+  mark(ids: Iterable<number>, now: number): void {
+    for (const id of ids) this.marks.set(id, now);
+  }
+
+  /** The gesture of these panes ended without letting go (cancelled, refused or failed). */
+  unmark(ids: Iterable<number>): void {
+    for (const id of ids) this.marks.delete(id);
+  }
+
+  /**
+   * The marked panes that a layout showing `shown` does not have: they have left and are no longer marked. A marked pane
+   * that is shown stays marked until its mark lapses, because the other window may still answer; one whose mark lapsed
+   * is dropped.
+   */
+  take(shown: ReadonlySet<number>, now: number): number[] {
+    const gone: number[] = [];
+    for (const [id, at] of this.marks) {
+      if (now - at > LEAVE_MS) this.marks.delete(id);
+      else if (!shown.has(id)) {
+        this.marks.delete(id);
+        gone.push(id);
+      }
+    }
+    return gone;
+  }
+
+  /** How many panes are marked. */
+  get size(): number {
+    return this.marks.size;
+  }
+}

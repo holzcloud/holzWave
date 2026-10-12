@@ -279,6 +279,27 @@ export function forgetPane(stores: PaneStores, pane: number): void {
   stores.exited.add(pane);
 }
 
+/** The per-pane maps a pane that moved to another window leaves: `exited` loses it, `away` gains it. */
+export interface LeaveStores extends Omit<PaneStores, "exited"> {
+  exited: { delete(pane: number): boolean };
+  away: { add(pane: number): unknown };
+}
+
+/**
+ * Forget a pane that moved to another window: its mirror, size, title and cwd are deleted, it is not an exited pane
+ * (it may come back) and it is remembered as away, so that events that were already on their way to this window are
+ * dropped. Its absence of a size is what makes it a first appearance when it returns: the page then starts it (a
+ * no-op, it runs) and asks for a full frame.
+ */
+export function leavePane(stores: LeaveStores, pane: number): void {
+  stores.frames.delete(pane);
+  stores.sizes.delete(pane);
+  stores.titles.delete(pane);
+  stores.cwds.delete(pane);
+  stores.exited.delete(pane);
+  stores.away.add(pane);
+}
+
 /** Events per second over the last `windowMs`: the arrival rate of frame events, whatever gets drawn of them. */
 export class RateMeter {
   private times: number[] = [];

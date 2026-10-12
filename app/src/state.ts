@@ -17,6 +17,12 @@ export interface State {
   cwds: Map<number, string>;
   /** The panes that exited. Their mirror, size, title and cwd are gone; late events about them are dropped. */
   exited: Set<number>;
+  /**
+   * The panes that moved to another window and have not been in this window's layout since. Frames, titles and
+   * directories that were already on their way to this window for them are dropped. A pane leaves this set when a
+   * layout shows it again.
+   */
+  away: Set<number>;
   /** Cell size, device pixel ratio and canvas size in CSS pixels. */
   metrics: Metrics;
   /**
@@ -55,6 +61,7 @@ export const state: State = {
   titles: new Map(),
   cwds: new Map(),
   exited: new Set(),
+  away: new Set(),
   // Replaced by the first measurement at start-up; a unit-size cell keeps divisions finite until then.
   metrics: { cellW: 1, cellH: 1, dpr: 1, width: 0, height: 0 },
   stats: { avgMs: Number.NaN, maxMs: Number.NaN, fps: 0 },
