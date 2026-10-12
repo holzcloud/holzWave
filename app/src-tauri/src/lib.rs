@@ -25,14 +25,27 @@ use tauri::{
 use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
 use state::{AppCore, Out, ShellSpec, Sink, Target};
 use windows::{
-    CursorSpot, Frame, Normal, Place, WindowTracker, position_beside, position_under_cursor, window_under,
+    CursorSpot, Frame, Normal, Place, WindowTracker, physical_pixels, pointer_is_global, position_beside,
+    position_under_cursor, shared_divisor, units_per_point, window_under,
 };
+
+/// The platform, as `std::env::consts::OS` and the page's `os-<name>` class spell it.
+const OS: &str = std::env::consts::OS;
 
 /// Sends the core's events to the webview they are for, and does what the core asks of the window system. Frames are
 /// events and are measured (D-16).
 struct TauriSink {
     app: AppHandle,
     tracker: Arc<WindowTracker>,
+}
+
+impl TauriSink {
+    /// The units per point of the window a drag gesture started in: the one that was focused last, since a drag
+    /// focuses it.
+    fn gesture_units(&self) -> f64 {
+        let window = self.tracker.order().iter().find_map(|label| self.app.get_webview_window(label));
+        window.map_or(1.0, |window| window_units(&window))
+    }
 }
 
 impl Sink for TauriSink {
@@ -66,17 +79,24 @@ impl Sink for TauriSink {
 
     fn open_window(&self, label: &str, place: &Place) -> Result<(), String> {
         let window = build_window(&self.app, label)?;
-        // A position is in logical points: a point of the desktop, whatever the density of the monitor it is on.
+        // A position is in the shared space of `windows.rs` (points on macOS, physical pixels elsewhere), and the
+        // offsets that are given in points are scaled into it. Where the window system does not say where the
+        // pointer or a window is (Wayland) there is nothing to compute, and the window opens where it puts it.
         let at = match place {
-            Place::Cursor => pointer_in_points(&self.app).map(position_under_cursor),
-            Place::Beside(origin) => self
+            Place::Cursor => {
+                pointer_in_points(&self.app).map(|cursor| position_under_cursor(cursor, self.gesture_units()))
+            }
+            Place::Beside(origin) if pointer_known() => self
                 .app
                 .get_webview_window(origin)
-                .and_then(|origin| Some((origin.outer_position().ok()?, own_scale(&origin))))
-                .map(|(position, scale)| position_beside((f64::from(position.x) / scale, f64::from(position.y) / scale))),
+                .and_then(|origin| Some((origin.outer_position().ok()?, own_scale(&origin), window_units(&origin))))
+                .map(|(position, scale, units)| {
+                    position_beside((f64::from(position.x) / scale, f64::from(position.y) / scale), units)
+                }),
+            Place::Beside(_) => None,
         };
-        if let Some((x, y)) = at
-            && let Err(e) = window.set_position(LogicalPosition::new(x, y))
+        if let Some(at) = at
+            && let Err(e) = place_window(&window, at)
         {
             // The window opens where the window system puts it; nothing is lost.
             eprintln!("holzwave: cannot place the window {label}: {e}");
@@ -116,22 +136,52 @@ fn build_window(app: &AppHandle, label: &str) -> Result<WebviewWindow, String> {
         .map_err(|e| e.to_string())
 }
 
-/// The scale factor the pixels of a window's own coordinates are in. On macOS the position and size of a window are
-/// in the scale of the monitor it is on; elsewhere the numbers of all windows and of the pointer share one physical
-/// space (phase 2.2), so nothing is divided.
+/// What the pixels of a window's own coordinates are divided by to reach the shared space of `windows.rs`: on macOS
+/// the position and size of a window are in the scale of the monitor it is on, elsewhere the numbers of all windows
+/// and of the pointer are physical and share one space already.
 fn own_scale(window: &WebviewWindow) -> f64 {
-    if cfg!(target_os = "macos") { window.scale_factor().unwrap_or(1.0) } else { 1.0 }
+    shared_divisor(OS, window.scale_factor().unwrap_or(1.0))
 }
 
-/// The pointer in logical points. macOS reports it relative to the primary monitor and in the primary monitor's scale,
-/// whatever monitor it is over, so it is divided by that scale and not by the scale of the window under it.
+/// How many units of the shared space one point (one CSS pixel) of the window is.
+fn window_units(window: &WebviewWindow) -> f64 {
+    units_per_point(OS, window.scale_factor().unwrap_or(1.0))
+}
+
+/// Whether the window system says where the pointer and the windows are (not under Wayland, see
+/// [`pointer_is_global`]).
+fn pointer_known() -> bool {
+    pointer_is_global(OS, &|name| std::env::var(name).ok())
+}
+
+/// The pointer in the shared space of `windows.rs`, `None` when the window system does not say (Wayland) or refuses.
+/// macOS reports it relative to the primary monitor and in the primary monitor's scale, whatever monitor it is over,
+/// so it is divided by that scale (in points) and not by the scale of the window under it; elsewhere it is physical
+/// like the windows and nothing is divided.
 fn pointer_in_points(app: &AppHandle) -> Option<(f64, f64)> {
+    if !pointer_known() {
+        return None;
+    }
     let cursor = app.cursor_position().ok()?;
-    let scale = if cfg!(target_os = "macos") { app.primary_monitor().ok()??.scale_factor() } else { 1.0 };
+    let scale = if cfg!(target_os = "macos") {
+        shared_divisor(OS, app.primary_monitor().ok()??.scale_factor())
+    } else {
+        1.0
+    };
     Some((cursor.x / scale, cursor.y / scale))
 }
 
-/// The frame of a window that can be dropped on, in logical points; `None` for a window that is hidden or minimised.
+/// Move `window` to a point of the shared space: a logical position on macOS (points), physical pixels elsewhere.
+fn place_window(window: &WebviewWindow, (x, y): (f64, f64)) -> tauri::Result<()> {
+    if cfg!(target_os = "macos") {
+        window.set_position(LogicalPosition::new(x, y))
+    } else {
+        let (x, y) = physical_pixels((x, y));
+        window.set_position(PhysicalPosition::new(x, y))
+    }
+}
+
+/// The frame of a window that can be dropped on, in the shared space; `None` for a window that is hidden or minimised.
 fn frame_of(label: &str, window: &WebviewWindow) -> Option<Frame> {
     if !window.is_visible().ok()? || window.is_minimized().ok()? {
         return None;
@@ -147,6 +197,7 @@ fn frame_of(label: &str, window: &WebviewWindow) -> Option<Frame> {
         height: points(f64::from(size.height)),
         inner_x: points(f64::from(inner.x)),
         inner_y: points(f64::from(inner.y)),
+        scale: window_units(window),
     })
 }
 

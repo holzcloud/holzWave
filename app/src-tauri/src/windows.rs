@@ -2,10 +2,23 @@
 //! window: which window is under the pointer, which windows were focused last, the one drop that is on its way from
 //! one window to another, where a new window opens, and what the shell remembers of each window's geometry.
 //!
-//! Units. Everything here is in logical points (CSS pixels of a page at zoom 1 on macOS). The caller converts what
-//! the window system reports: on macOS the pointer position is relative to the primary monitor and in its scale,
-//! while the frame of a window is in the scale of the monitor the window is on, so each is divided by its own scale
-//! factor before it gets here (research section 7, "units trap").
+//! Units. There is one space for hit-testing and placing, and which it is depends on the platform (research phase
+//! 2.2, S8):
+//!
+//! - macOS: logical points. The pointer position is relative to the primary monitor and in its scale, while the
+//!   frame of a window is in the scale of the monitor the window is on, so the caller divides each by its own scale
+//!   factor before it gets here (research section 7, "units trap"). A point is a CSS pixel at zoom 1.
+//! - Windows and Linux: physical pixels. The pointer and the frames of all windows already share one desktop space,
+//!   whatever scale each monitor has, so nothing is divided and the numbers compare as they are.
+//!
+//! The page's CSS pixels come only after [`Frame::client`]: it divides the offset from the page's origin by the number
+//! of units per CSS pixel of that window ([`Frame::scale`], 1 on macOS, the window's scale factor elsewhere). At 150 %
+//! one CSS pixel is 1.5 physical ones, so a pointer 150 physical pixels right of the page origin is at x = 100. The
+//! same factor, [`units_per_point`], turns the offsets of a new window (given in points) into the space of the
+//! pointer.
+//!
+//! Under Wayland the window system tells an application neither where the pointer nor where a window is
+//! ([`pointer_is_global`]), so none of the numbers above exist there and nothing is placed or attached by position.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -41,7 +54,8 @@ pub enum CursorSpot {
     Window { label: String, x: f64, y: f64 },
     /// No other window of the app.
     Nothing,
-    /// The pointer cannot be read (the platform refused, or there is no pointer); nothing is done.
+    /// The pointer cannot be read (the platform refused, there is no pointer, or the window system does not say where
+    /// it is, as under Wayland); nothing is done.
     Unknown,
 }
 
@@ -52,19 +66,65 @@ pub const BESIDE_OFFSET: f64 = 32.0;
 /// on the title bar, near the left, as when a tab is carried.
 pub const CURSOR_GRAB: (f64, f64) = (60.0, 16.0);
 
-/// The top left corner of a window that opens under the pointer.
-pub fn position_under_cursor(cursor: (f64, f64)) -> (f64, f64) {
-    (cursor.0 - CURSOR_GRAB.0, cursor.1 - CURSOR_GRAB.1)
+/// The top left corner of a window that opens under the pointer, in the units of `cursor`. [`CURSOR_GRAB`] is in
+/// points, so it is multiplied by `units_per_point` (see [`units_per_point`]).
+pub fn position_under_cursor(cursor: (f64, f64), units_per_point: f64) -> (f64, f64) {
+    (cursor.0 - CURSOR_GRAB.0 * units_per_point, cursor.1 - CURSOR_GRAB.1 * units_per_point)
 }
 
-/// The top left corner of a window that opens beside the window at `origin`.
-pub fn position_beside(origin: (f64, f64)) -> (f64, f64) {
-    (origin.0 + BESIDE_OFFSET, origin.1 + BESIDE_OFFSET)
+/// The top left corner of a window that opens beside the window at `origin`, in the units of `origin`.
+/// [`BESIDE_OFFSET`] is in points, so it is multiplied by `units_per_point`.
+pub fn position_beside(origin: (f64, f64), units_per_point: f64) -> (f64, f64) {
+    (origin.0 + BESIDE_OFFSET * units_per_point, origin.1 + BESIDE_OFFSET * units_per_point)
+}
+
+/// A scale factor as the window system reports it, or 1 when it is not a usable number.
+fn usable(scale: f64) -> f64 {
+    if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
+}
+
+/// How many units of the shared space (see the module doc) one point, that is one CSS pixel, is on a window whose
+/// display scale is `scale`: macOS compares in points, so 1; elsewhere in physical pixels, so the scale itself.
+pub fn units_per_point(os: &str, scale: f64) -> f64 {
+    if os == "macos" { 1.0 } else { usable(scale) }
+}
+
+/// What the numbers a window reports in its own pixels are divided by to get them into the shared space: macOS
+/// reports in the scale of the monitor of the window and compares in points, so the scale; elsewhere they are
+/// physical already, so 1.
+pub fn shared_divisor(os: &str, scale: f64) -> f64 {
+    if os == "macos" { usable(scale) } else { 1.0 }
+}
+
+/// A point of the shared space as whole physical pixels, for a window that is placed in them: rounded, and held to
+/// what the window system can take.
+pub fn physical_pixels(point: (f64, f64)) -> (i32, i32) {
+    let pixel = |v: f64| {
+        if v.is_finite() { v.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32 } else { 0 }
+    };
+    (pixel(point.0), pixel(point.1))
+}
+
+/// Whether the window system says where the pointer and the windows are, in one desktop space. Always, except
+/// under Wayland, where an application has neither (tao: `cursor_position` is 0,0 and window positions have no
+/// global coordinate system), so every number would be a wrong one: a release outside a window would be taken for
+/// a drop at the corner of another. A Wayland session is `XDG_SESSION_TYPE=wayland` or a `WAYLAND_DISPLAY`; an app
+/// forced onto X11 (`GDK_BACKEND` starting with `x11`, so XWayland) sees global coordinates again.
+///
+/// `os` is as `std::env::consts::OS` spells it; `env` looks up a variable of the process.
+pub fn pointer_is_global(os: &str, env: &dyn Fn(&str) -> Option<String>) -> bool {
+    if os != "linux" {
+        return true;
+    }
+    let value = |name: &str| env(name).map(|v| v.trim().to_ascii_lowercase()).unwrap_or_default();
+    let on_x11 = value("GDK_BACKEND").split(',').next().is_some_and(|first| first.trim() == "x11");
+    let wayland = value("XDG_SESSION_TYPE") == "wayland" || !value("WAYLAND_DISPLAY").is_empty();
+    on_x11 || !wayland
 }
 
 // ---- which window is under the pointer --------------------------------------------------------------------------
 
-/// The frame of one window, in logical points.
+/// The frame of one window, in the shared space of the module doc.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
     pub label: String,
@@ -76,6 +136,8 @@ pub struct Frame {
     /// The top left corner of the page (the inner area), the origin of client coordinates.
     pub inner_x: f64,
     pub inner_y: f64,
+    /// How many units of this space one CSS pixel of the page is ([`units_per_point`]).
+    pub scale: f64,
 }
 
 impl Frame {
@@ -83,9 +145,9 @@ impl Frame {
         point.0 >= self.x && point.0 < self.x + self.width && point.1 >= self.y && point.1 < self.y + self.height
     }
 
-    /// `point` in the client coordinates of the page of this window.
+    /// `point` in the client coordinates of the page of this window, in CSS pixels.
     pub fn client(&self, point: (f64, f64)) -> (f64, f64) {
-        (point.0 - self.inner_x, point.1 - self.inner_y)
+        ((point.0 - self.inner_x) / self.scale, (point.1 - self.inner_y) / self.scale)
     }
 }
 
@@ -215,7 +277,11 @@ mod tests {
     use super::*;
 
     fn frame(label: &str, x: f64, y: f64, width: f64, height: f64) -> Frame {
-        Frame { label: label.into(), x, y, width, height, inner_x: x, inner_y: y + 28.0 }
+        Frame { label: label.into(), x, y, width, height, inner_x: x, inner_y: y + 28.0, scale: 1.0 }
+    }
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| pairs.iter().find(|(n, _)| *n == name).map(|(_, v)| (*v).to_owned())
     }
 
     fn labels(list: &[&str]) -> Vec<String> {
@@ -297,8 +363,105 @@ mod tests {
 
     #[test]
     fn a_new_window_opens_under_the_pointer_or_beside_its_source() {
-        assert_eq!(position_under_cursor((500.0, 400.0)), (440.0, 384.0));
-        assert_eq!(position_beside((100.0, 80.0)), (132.0, 112.0));
+        assert_eq!(position_under_cursor((500.0, 400.0), 1.0), (440.0, 384.0));
+        assert_eq!(position_beside((100.0, 80.0), 1.0), (132.0, 112.0));
+    }
+
+    #[test]
+    fn a_window_placed_under_the_pointer_or_beside_another_at_200_percent_moves_by_scaled_offsets() {
+        // The grab point (60, 16) and the offset (32) are points; in physical pixels at 200 % they are twice as many.
+        assert_eq!(position_under_cursor((1000.0, 800.0), 2.0), (880.0, 768.0));
+        assert_eq!(position_beside((100.0, 80.0), 2.0), (164.0, 144.0));
+        assert_eq!(position_under_cursor((1000.0, 800.0), 1.5), (910.0, 776.0), "and at 150 % one and a half times");
+    }
+
+    #[test]
+    fn the_units_of_the_shared_space_are_points_on_macos_and_physical_pixels_elsewhere() {
+        assert_eq!(units_per_point("macos", 2.0), 1.0, "a point is a point");
+        assert_eq!(units_per_point("windows", 1.5), 1.5);
+        assert_eq!(units_per_point("linux", 2.0), 2.0);
+        assert_eq!(shared_divisor("macos", 2.0), 2.0, "macOS reports in the scale of the monitor");
+        assert_eq!(shared_divisor("windows", 1.5), 1.0, "elsewhere the numbers are physical already");
+        assert_eq!(shared_divisor("linux", 2.0), 1.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(units_per_point("windows", bad), 1.0, "{bad}");
+            assert_eq!(shared_divisor("macos", bad), 1.0, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_150_percent_client_offset_is_in_css_pixels() {
+        // The page starts at physical (1500, 345) and the pointer is at (1650, 645): 150 and 300 physical pixels
+        // from the origin are 100 and 200 CSS pixels at a scale of 1.5.
+        let f = Frame { scale: 1.5, inner_x: 1500.0, inner_y: 345.0, ..frame("window-5", 1500.0, 300.0, 900.0, 600.0) };
+        assert_eq!(f.client((1650.0, 645.0)), (100.0, 200.0));
+    }
+
+    #[test]
+    fn a_client_offset_at_125_and_200_percent_is_divided_by_the_scale_of_that_window() {
+        let page = frame("w", 1000.0, 72.0, 900.0, 600.0);
+        let at = |scale: f64| Frame { scale, inner_x: 1000.0, inner_y: 100.0, ..page.clone() };
+        assert_eq!(at(1.25).client((1250.0, 350.0)), (200.0, 200.0));
+        assert_eq!(at(2.0).client((1400.0, 500.0)), (200.0, 200.0));
+        assert_eq!(at(1.0).client((1200.0, 300.0)), (200.0, 200.0), "at 100 % nothing changes");
+    }
+
+    #[test]
+    fn a_drop_on_a_window_at_another_scale_lands_where_the_pointer_is() {
+        // Two windows in one physical desktop: `left` at 100 %, `right` at 200 %. The hit test compares physical
+        // numbers; only the offset into the page is converted, and with the scale of the window that was hit.
+        let left = frame("left", 0.0, 0.0, 1920.0, 1080.0);
+        let right = Frame { scale: 2.0, inner_x: 1920.0, inner_y: 56.0, ..frame("right", 1920.0, 0.0, 2000.0, 1000.0) };
+        let frames = [left, right];
+
+        let hit = window_under((2120.0, 456.0), &frames, &[], "left").expect("the pointer is over the right window");
+        assert_eq!(hit.label, "right");
+        assert_eq!(hit.client((2120.0, 456.0)), (100.0, 200.0), "200 physical pixels right are 100 CSS pixels");
+        let back = window_under((300.0, 128.0), &frames, &[], "right").expect("and over the left one");
+        assert_eq!(back.client((300.0, 128.0)), (300.0, 100.0), "the left window is at 100 %");
+    }
+
+    #[test]
+    fn a_position_in_physical_pixels_is_rounded_and_held_to_what_the_window_system_takes() {
+        assert_eq!(physical_pixels((880.4, 767.5)), (880, 768));
+        assert_eq!(physical_pixels((-12.6, 0.0)), (-13, 0), "a monitor left of the primary has negative numbers");
+        assert_eq!(physical_pixels((f64::NAN, f64::INFINITY)), (0, 0));
+        assert_eq!(physical_pixels((1e20, -1e20)), (i32::MAX, i32::MIN));
+    }
+
+    #[test]
+    fn a_wayland_session_has_no_pointer_the_application_can_read() {
+        for session in [
+            env(&[("XDG_SESSION_TYPE", "wayland")]),
+            env(&[("XDG_SESSION_TYPE", "Wayland")]),
+            env(&[("WAYLAND_DISPLAY", "wayland-0")]),
+            env(&[("XDG_SESSION_TYPE", "x11"), ("WAYLAND_DISPLAY", "wayland-0")]),
+            env(&[("XDG_SESSION_TYPE", "wayland"), ("GDK_BACKEND", "wayland")]),
+            env(&[("WAYLAND_DISPLAY", "wayland-0"), ("GDK_BACKEND", "wayland,x11")]),
+            env(&[("WAYLAND_DISPLAY", "wayland-0"), ("GDK_BACKEND", "*")]),
+        ] {
+            assert!(!pointer_is_global("linux", &session));
+        }
+    }
+
+    #[test]
+    fn an_app_on_xwayland_or_a_plain_x11_session_has_a_global_pointer() {
+        assert!(
+            pointer_is_global("linux", &env(&[("XDG_SESSION_TYPE", "wayland"), ("GDK_BACKEND", "x11")])),
+            "GDK_BACKEND=x11 under a Wayland session is XWayland, where positions are global"
+        );
+        assert!(pointer_is_global("linux", &env(&[("WAYLAND_DISPLAY", "wayland-0"), ("GDK_BACKEND", " X11,wayland")])));
+        assert!(pointer_is_global("linux", &env(&[("XDG_SESSION_TYPE", "x11"), ("DISPLAY", ":0")])));
+        assert!(pointer_is_global("linux", &env(&[])), "a session that says nothing is not Wayland");
+        assert!(pointer_is_global("linux", &env(&[("WAYLAND_DISPLAY", "")])), "an empty display is none");
+    }
+
+    #[test]
+    fn the_pointer_is_global_on_macos_and_windows_and_on_a_platform_nobody_knows() {
+        let wayland = env(&[("XDG_SESSION_TYPE", "wayland"), ("WAYLAND_DISPLAY", "wayland-0")]);
+        assert!(pointer_is_global("macos", &wayland), "the variables mean nothing there");
+        assert!(pointer_is_global("windows", &wayland));
+        assert!(pointer_is_global("plan9", &wayland), "an unknown platform keeps the numbers it gets");
     }
 
     #[test]

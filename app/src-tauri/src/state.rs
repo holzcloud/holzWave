@@ -2168,12 +2168,33 @@ fn clean_hostname(raw: &[u8]) -> String {
     line.chars().filter(|c| !c.is_control()).take(255).collect()
 }
 
-/// The name of the machine. macOS asks `/bin/hostname` by absolute path, Linux reads `/etc/hostname`; nothing is
-/// looked up through PATH (T-02-89). Empty when it cannot be read.
+/// The name of the machine from what the platform offers, `os` as `std::env::consts::OS` spells it: Windows has
+/// `COMPUTERNAME`; Linux reads `/etc/hostname` and, when that is missing or holds no name, the kernel's
+/// `/proc/sys/kernel/hostname`. A source that cannot be read is no name. macOS has no file for it (see
+/// [`read_hostname`]), so it gives the empty string here.
+fn hostname_from(
+    os: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    read_file: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> String {
+    match os {
+        "windows" => env("COMPUTERNAME").map(|name| clean_hostname(name.as_bytes())).unwrap_or_default(),
+        "linux" => ["/etc/hostname", "/proc/sys/kernel/hostname"]
+            .iter()
+            .filter_map(|file| read_file(file))
+            .map(|bytes| clean_hostname(&bytes))
+            .find(|name| !name.is_empty())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// The name of the machine. macOS asks `/bin/hostname` by absolute path; the other platforms read what
+/// [`hostname_from`] says, and nothing is looked up through PATH (T-02-89). Empty when it cannot be read.
 fn read_hostname() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("/bin/hostname")
+    let os = std::env::consts::OS;
+    if os == "macos" {
+        return std::process::Command::new("/bin/hostname")
             .env_clear()
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -2181,20 +2202,9 @@ fn read_hostname() -> String {
             .ok()
             .filter(|output| output.status.success())
             .map(|output| clean_hostname(&output.stdout))
-            .unwrap_or_default()
+            .unwrap_or_default();
     }
-    #[cfg(target_os = "linux")]
-    {
-        persist::read_limited(Path::new("/etc/hostname"), 1024)
-            .ok()
-            .flatten()
-            .map(|bytes| clean_hostname(&bytes))
-            .unwrap_or_default()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        String::new()
-    }
+    hostname_from(os, &process_env, &|file| persist::read_limited(Path::new(file), 1024).ok().flatten())
 }
 
 /// Read the session file. There is no error case: a file that cannot be used costs the hints in it and nothing else,
@@ -4314,9 +4324,7 @@ mod tests {
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(info.os, std::env::consts::OS);
         assert!(["macos", "windows", "linux"].contains(&info.os.as_str()), "{}", info.os);
-        if cfg!(any(target_os = "macos", target_os = "linux")) {
-            assert!(!info.hostname.is_empty(), "the host name could not be read");
-        }
+        assert!(!info.hostname.is_empty(), "the host name could not be read");
         assert!(!info.hostname.chars().any(char::is_control));
         assert!(info.hostname.chars().count() <= 255);
     }
@@ -4329,6 +4337,43 @@ mod tests {
         assert_eq!(clean_hostname(&[0xff, 0xfe]), "", "not UTF-8 is no name");
         assert_eq!(clean_hostname(b""), "");
         assert_eq!(clean_hostname("a".repeat(1000).as_bytes()).chars().count(), 255);
+    }
+
+    #[test]
+    fn hostname_on_windows_is_the_computer_name_of_the_environment() {
+        let env = |name: &str| (name == "COMPUTERNAME").then(|| "HOLZ-PC\n".to_owned());
+        let no_file = |_: &str| -> Option<Vec<u8>> { panic!("Windows reads no file") };
+        assert_eq!(hostname_from("windows", &env, &no_file), "HOLZ-PC");
+        assert_eq!(hostname_from("windows", &no_env, &no_file), "", "no variable is no name");
+    }
+
+    #[test]
+    fn hostname_on_linux_reads_etc_hostname_then_the_kernel_file() {
+        let files = |present: &'static [(&'static str, &'static str)]| {
+            move |path: &str| present.iter().find(|(p, _)| *p == path).map(|(_, text)| text.as_bytes().to_vec())
+        };
+        let both = files(&[("/etc/hostname", "holz-box\n"), ("/proc/sys/kernel/hostname", "kernel-name\n")]);
+        assert_eq!(hostname_from("linux", &no_env, &both), "holz-box", "the file of the system comes first");
+
+        let kernel_only = files(&[("/proc/sys/kernel/hostname", "kernel-name\n")]);
+        assert_eq!(hostname_from("linux", &no_env, &kernel_only), "kernel-name", "a missing file falls back");
+
+        let empty_etc = files(&[("/etc/hostname", "\n  \n"), ("/proc/sys/kernel/hostname", "kernel-name\n")]);
+        assert_eq!(hostname_from("linux", &no_env, &empty_etc), "kernel-name", "an empty file falls back");
+
+        let unreadable = files(&[]);
+        assert_eq!(hostname_from("linux", &no_env, &unreadable), "", "nothing readable is no name");
+        let binary = |_: &str| Some(vec![0xff, 0xfe]);
+        assert_eq!(hostname_from("linux", &no_env, &binary), "", "text that is not UTF-8 is no name");
+    }
+
+    #[test]
+    fn hostname_of_macos_and_of_an_unknown_platform_is_not_read_from_a_file() {
+        // macOS asks `/bin/hostname`, which `read_hostname` runs; the pure part has nothing to say for it.
+        let env = |_: &str| Some("not-used".to_owned());
+        let file = |_: &str| Some(b"not-used".to_vec());
+        assert_eq!(hostname_from("macos", &env, &file), "");
+        assert_eq!(hostname_from("plan9", &env, &file), "");
     }
 
     #[test]
