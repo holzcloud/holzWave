@@ -170,7 +170,7 @@ in [docs/roadmap.md](docs/roadmap.md).
 |---|---|
 | [Architecture](docs/architecture.md) | Boundaries, concurrency, app protocol, security, quality budget |
 | [Design](docs/design.md) | Colour, type, components and the window direction |
-| [Build on Windows](docs/build-windows.md), [Build on Linux](docs/build-linux.md) | The owner's build guides, with what was and was not verified |
+| [Build on Windows](docs/build-windows.md), [Build on Linux](docs/build-linux.md), [Flatpak](docs/flatpak.md) | The owner's build guides, with what was and was not verified; the Flatpak is conditional and unverified |
 | [Test plan](docs/test-plan.md) | How to run everything locally and the lists the owner runs on their own hardware |
 | [Roadmap](docs/roadmap.md) | Phases and what each one delivers |
 | [Sync format](docs/sync.md) | Requirements and open questions, decided before any sync code |

@@ -239,8 +239,11 @@ it in row L3 (the speed, the GPU and the driver) rather than trusting the label.
 
 ## Flatpak
 
-A Flatpak is the subject of the last plan of this phase; whether one ships with 0.0.1 is decided there, and
-`docs/flatpak.md` describes it if it does. This guide builds none.
+**Status: unverified.** A Flatpak is the last and conditional part of this phase: it ships with 0.0.1 only if it builds on
+your machine and row L10 passes. `sh scripts/build-flatpak.sh` builds and installs it (it needs `flatpak`,
+`flatpak-builder`, the GNOME 51 runtime and SDK and two SDK extensions, and the network), and
+[flatpak.md](flatpak.md) says what it costs in sandboxing (the app can run commands on the host), what is known to
+differ, and what to do if it does not build. This guide's own build does not make one.
 
 ## Reporting a result
 

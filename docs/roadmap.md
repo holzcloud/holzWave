@@ -61,7 +61,9 @@ Does not exist yet:
   a deb, an rpm and an AppImage were built there. The build guides are [build-windows.md](build-windows.md) and
   [build-linux.md](build-linux.md), the owner's list is Part 4 of [test-plan.md](test-plan.md) (rows W1 to W13 and L1 to
   L10, all still open), and the differences from macOS are listed once in [design.md](design.md) section 7. The Flatpak is
-  the last plan of the phase and is not built yet; DESK-30 and DESK-31 are marked done only after the owner's rows pass.
+  the last plan of the phase and conditional: its manifest and the host-shell code path exist and are checked from the Mac
+  ([flatpak.md](flatpak.md)), but it was never built or run, and it ships only if it builds on the owner's machine and row
+  L10 passes. DESK-30 and DESK-31 are marked done only after the owner's rows pass.
 - **Phase 8:** the Kitty graphics protocol and OSC 8 hyperlinks (links in the text are detected and clickable today).
 
 - Local shell, scrollback, copy and paste, Unicode, resize, themes.
