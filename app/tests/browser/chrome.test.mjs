@@ -242,12 +242,70 @@ async function platformCase(page, url) {
   assert.doesNotMatch(await platform(), /os-macos/);
   assert.ok((await padding()) < 24, `no room for traffic lights outside macOS: ${await padding()} px`);
 
+  await open(page, url, { ...INFO, os: "windows" });
+  assert.match(await platform(), /\bos-windows\b/, "the Windows class is on the root");
+  assert.doesNotMatch(await platform(), /os-macos/);
+  assert.ok((await padding()) < 24, `no room for traffic lights outside macOS: ${await padding()} px`);
+
+  await frameCase(page, url);
+
   // The stub's own answer (null): every field is an empty string and the page still starts.
   await open(page, url, null);
   assert.doesNotMatch(await platform(), /os-macos/);
   assert.deepEqual(await texts(page, "#bar .host"), [""]);
   assert.deepEqual(await texts(page, "#status .seg.version"), [""]);
   assert.equal((await callsOf(page, "app_info")).length, 1, "app_info is asked once at boot");
+}
+
+/**
+ * Windows and Linux keep the native title bar (owner decision of 2026-10-12): it sits above the page, so the page's
+ * own bar needs no room for traffic lights and nothing else changes. Under every platform class the regions lie
+ * where they lie under macOS apart from the bar's left padding: the same heights, in the same order, no overlap, and
+ * the bar's free area still carries the drag attribute.
+ */
+async function frameCase(page, url) {
+  const layout = () =>
+    page.evaluate(() => {
+      const box = (selector) => {
+        const r = document.querySelector(selector).getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width, height: r.height };
+      };
+      const tabs = [...document.querySelectorAll("#bar .tab")].map((n) => n.getBoundingClientRect());
+      return {
+        bar: box("#bar"),
+        stage: box("#stage"),
+        status: box("#status"),
+        tabTops: tabs.map((r) => r.top),
+        tabHeights: tabs.map((r) => r.height),
+        headHeights: [...document.querySelectorAll("#overlay .panehead")].map((n) => n.getBoundingClientRect().height),
+        drag: [...document.querySelectorAll("#bar .bar-fill, #bar .bar-sep, #bar .bar-info")].map((n) =>
+          n.hasAttribute("data-tauri-drag-region"),
+        ),
+        padding: parseFloat(getComputedStyle(document.getElementById("bar")).paddingLeft),
+      };
+    });
+
+  const seen = {};
+  for (const os of ["macos", "windows", "linux", null]) {
+    await open(page, url, os === null ? { ...INFO, os: "" } : { ...INFO, os });
+    await showView(page, BAR_VIEW);
+    seen[os] = await layout();
+    const l = seen[os];
+    assert.ok(l.drag.length > 0 && l.drag.every(Boolean), `${os}: the bar's free area drags the window`);
+    assert.equal(l.bar.top, 0, `${os}: the bar is the first strip of the page, directly under the native frame`);
+    assert.equal(l.stage.top, l.bar.top + l.bar.height, `${os}: the stage starts where the bar ends`);
+    assert.equal(l.status.top, l.stage.top + l.stage.height, `${os}: the status line starts where the stage ends`);
+    assert.ok(l.headHeights.length > 0, `${os}: the pane headers are drawn`);
+  }
+  assert.equal(seen.macos.padding, 80, "macOS: the room for the traffic lights");
+  for (const os of ["windows", "linux", null]) {
+    const { padding: other, ...rest } = seen[os];
+    const { padding: mac, ...same } = seen.macos;
+    assert.equal(other, seen[null].padding, `${os}: the base padding of the bar`);
+    assert.ok(other < mac, `${os}: less room than macOS`);
+    // The bar's width is the same; its content starts further left, so only the left edges of the tabs move.
+    assert.deepEqual(rest, same, `${os}: the regions lie where they lie under macOS`);
+  }
 }
 
 async function statusCase(page, url) {

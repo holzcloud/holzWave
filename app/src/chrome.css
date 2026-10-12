@@ -20,7 +20,9 @@
   padding: 0 .667rem; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-line);
   user-select: none; -webkit-user-select: none; cursor: default;
 }
-/* The overlay title bar puts the traffic lights over the page's top left corner. */
+/* The overlay title bar exists only on macOS (`titleBarStyle` is a macOS-only option): it puts the traffic lights
+   over the page's top left corner. Windows and Linux keep the native frame by decision (Phase 2.2; a page-drawn bar
+   is Phase 10), so the page's bar sits below it and needs no room: nothing outside this rule assumes an overlay. */
 .os-macos #bar { padding-left: 80px; }
 
 .bar-group { display: flex; align-items: stretch; flex: none; min-width: 0; }
