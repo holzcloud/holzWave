@@ -70,6 +70,7 @@ function headerPaneAt(x: number, y: number): number {
 
 function sourceOf(e: PointerEvent): Source | null {
   const target = e.target instanceof Element ? e.target : null;
+  if (target?.closest(".close")) return null; // a × is a button, not a handle: a press on it drags nothing
   const tab = indexOf(target, ".tab");
   if (tab >= 0) return { kind: "tab", index: tab };
   const head = target?.closest<HTMLElement>(".panehead");
@@ -89,10 +90,11 @@ function dropAt(source: Source, x: number, y: number): Drop | null {
   const view = state.view;
   if (!view) return null;
   const under = document.elementFromPoint(x, y);
-  const tab = indexOf(under, ".tab");
-  const chip = indexOf(under, ".ws-chip");
+  // The items (a tab or chip with its ×) are the targets: a drop over the × is a drop on its tab or chip.
+  const tab = indexOf(under, ".tab-item");
+  const chip = indexOf(under, ".ws-item");
   if (tab >= 0 && under) {
-    const node = under.closest<HTMLElement>(".tab") as HTMLElement;
+    const node = under.closest<HTMLElement>(".tab-item") as HTMLElement;
     const r = node.getBoundingClientRect();
     const box = { x: r.left, y: r.top, w: r.width, h: r.height };
     if (source.kind === "tab") {
@@ -104,7 +106,7 @@ function dropAt(source: Source, x: number, y: number): Drop | null {
   }
   if (chip >= 0 && under) {
     if (source.kind !== "tab" || view.workspaces[chip]?.active) return null;
-    const r = (under.closest(".ws-chip") as HTMLElement).getBoundingClientRect();
+    const r = (under.closest(".ws-item") as HTMLElement).getBoundingClientRect();
     return {
       box: { x: r.left, y: r.top, w: r.width, h: r.height },
       send: () => call("move_tab_to_workspace", { tab: source.index, workspace: chip }),
@@ -268,9 +270,9 @@ function underAt(x: number, y: number): Under {
   const view = state.view;
   const node = document.elementFromPoint(x, y);
   if (!view || !node) return { part: "none" };
-  const tab = indexOf(node, ".tab");
+  const tab = indexOf(node, ".tab-item");
   if (tab >= 0) return { part: "tab", index: tab };
-  const chip = indexOf(node, ".ws-chip");
+  const chip = indexOf(node, ".ws-item");
   if (chip >= 0) return { part: "chip", index: chip };
   if (node.closest("#bar")) return { part: "bar" };
   const c = canvas().getBoundingClientRect();

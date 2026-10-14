@@ -1,12 +1,14 @@
 // The window bar above the stage: workspace chips, numbered tabs, and the host name and clock at the right. It is
 // drawn from `state.view` and the pane titles; the elements are keyed by position and updated in place, and every
 // name from the core is put in with `textContent`, never parsed as markup. The bar's free space drags the window.
+// Every chip and tab has a × beside it that asks before it closes (confirm.ts).
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
+import { type CloseAsk, confirmClose, paneAsk, tabAsk, workspaceAsk } from "./confirm.js";
 import { el, fitNodes, loadStyles, setAttr, setText } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { clockText, tabLabel } from "./labels.js";
-import { renamePane, setPaneRenameHandler } from "./panehead.js";
+import { paneLabel, renamePane, setPaneCloseHandler, setPaneRenameHandler } from "./panehead.js";
 import { startRename } from "./rename.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
@@ -55,8 +57,37 @@ const info = draggable(el("div", "bar-info", bar));
 const host = draggable(el("span", "label host", info));
 const clock = draggable(el("span", "label clock", info));
 
-const chips: HTMLButtonElement[] = [];
-const tabButtons: HTMLButtonElement[] = [];
+/** The items of the two groups: a chip or tab and its ×, side by side. A button must not hold another button. */
+const chipItems: HTMLElement[] = [];
+const tabItems: HTMLElement[] = [];
+
+/** The chip or tab of an item: its first child. */
+const mainOf = (item: HTMLElement | undefined): HTMLButtonElement | undefined =>
+  item?.firstElementChild as HTMLButtonElement | undefined;
+
+/**
+ * An item of the bar: `main` (the chip or tab button) and a × button after it, always visible, named `Close <kind>`.
+ * The × is not inside `main`, so a press on it is no press on the tab: it neither selects it, nor starts a drag
+ * (dragdrop.ts looks for `.tab`), nor counts as the double click that renames. `onClose` gets the item's index.
+ */
+function item(
+  cls: string,
+  kind: "workspace" | "tab",
+  main: HTMLButtonElement,
+  onClose: (index: number) => void,
+): HTMLElement {
+  const root = el("div", `bar-item ${cls}`);
+  root.append(main);
+  const close = el("button", "close", root);
+  close.type = "button";
+  close.title = `Close ${kind}`;
+  close.setAttribute("aria-label", `Close ${kind}`);
+  close.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onClose(Number(root.dataset.index));
+  });
+  return root;
+}
 
 /** Mark `node` as the shown one: a class for the style and `aria-current` for assistive technology. */
 function setActive(node: HTMLElement, active: boolean, current: string): void {
@@ -74,28 +105,44 @@ export function renderBar(view: View, apply: (v: View) => void): void {
   // New elements go before the plus button, which stays last in its group.
   fitNodes(
     workspaces,
-    chips,
+    chipItems,
     view.workspaces.length,
-    () => button("ws-chip label", (index) => call("select_workspace", { index })),
+    () => item("ws-item", "workspace", button("ws-chip label", (index) => call("select_workspace", { index })), closeWorkspaceAt),
     newWorkspace,
   );
   view.workspaces.forEach((w, i) => {
-    const chip = chips[i] as HTMLButtonElement;
+    const root = chipItems[i] as HTMLElement;
+    const chip = mainOf(root) as HTMLButtonElement;
+    setAttr(root, "data-index", String(i));
     setAttr(chip, "data-index", String(i));
     setText(chip, w.name);
     setActive(chip, w.active, "true");
+    root.classList.toggle("active", w.active);
   });
 
-  fitNodes(tabs, tabButtons, view.tabs.length, () => button("tab", (index) => call("select_tab", { index })), newTab);
+  fitNodes(
+    tabs,
+    tabItems,
+    view.tabs.length,
+    () => item("tab-item", "tab", button("tab", (index) => call("select_tab", { index })), closeTabAt),
+    newTab,
+  );
   view.tabs.forEach((t, i) => {
-    const tab = tabButtons[i] as HTMLButtonElement;
-    // A name the user gave wins; a tab still called `shell` shows the title its focus pane's program set.
-    const label = tabLabel(i, t.title !== AUTO_TAB ? t.title : state.titles.get(t.focus) || t.title);
+    const root = tabItems[i] as HTMLElement;
+    const tab = mainOf(root) as HTMLButtonElement;
+    const label = tabLabel(i, tabName(t));
+    setAttr(root, "data-index", String(i));
     setAttr(tab, "data-index", String(i));
     setText(tab, label);
     setAttr(tab, "title", label);
     setActive(tab, t.active, "page");
+    root.classList.toggle("active", t.active);
   });
+}
+
+/** The name a tab shows: one the user gave wins; a tab still called `shell` shows the title its focus pane's program set. */
+function tabName(t: View["tabs"][number]): string {
+  return t.title !== AUTO_TAB ? t.title : state.titles.get(t.focus) || t.title;
 }
 
 // ---- renaming ---------------------------------------------------------------------------------------------
@@ -103,7 +150,7 @@ export function renderBar(view: View, apply: (v: View) => void): void {
 /** Rename the tab at `index`: the editor opens over its button and the confirmed name goes to the core. */
 function renameTabAt(index: number): void {
   const t = state.view?.tabs[index];
-  const node = tabButtons[index];
+  const node = mainOf(tabItems[index]);
   if (!t || !node) return;
   startRename(node, t.title === AUTO_TAB ? "" : t.title, state.titles.get(t.focus) || AUTO_TAB, (name) =>
     send(call("rename_tab", { index, name })),
@@ -113,7 +160,7 @@ function renameTabAt(index: number): void {
 /** Rename the workspace at `index`. */
 function renameWorkspaceAt(index: number): void {
   const w = state.view?.workspaces[index];
-  const node = chips[index];
+  const node = mainOf(chipItems[index]);
   if (!w || !node) return;
   const auto = `ws ${index + 1}`;
   startRename(node, w.name === auto ? "" : w.name, auto, (name) => send(call("rename_workspace", { index, name })));
@@ -145,13 +192,86 @@ function registerRenameActions(): void {
   });
 }
 
+// ---- closing ----------------------------------------------------------------------------------------------
+
+/**
+ * Ask, then close: the × buttons always ask first. `still` says whether what was asked about is still what is there
+ * after the answer (a layout can change while the dialog is open: a shell that ends, another window), so an index
+ * never closes something else. Focus goes back to the terminal either way.
+ */
+async function closeAfterAsking(ask: CloseAsk | null, still: () => boolean, close: () => Promise<View>): Promise<void> {
+  if (!ask) return;
+  let yes = false;
+  try {
+    yes = await confirmClose(ask);
+  } finally {
+    focusInput();
+  }
+  if (yes && still()) send(close());
+}
+
+/** The × of the tab at `index` of the shown workspace. */
+function closeTabAt(index: number): void {
+  const view = state.view;
+  const t = view?.tabs[index];
+  if (!view || !t) return;
+  const same = (): boolean => {
+    const now = state.view?.tabs[index];
+    return now !== undefined && now.focus === t.focus && now.title === t.title && now.panes === t.panes;
+  };
+  void closeAfterAsking(tabAsk(view, index, tabName(t)), same, () => call("close_tab", { index }));
+}
+
+/** The × of the workspace at `index`. */
+function closeWorkspaceAt(index: number): void {
+  const view = state.view;
+  const w = view?.workspaces[index];
+  if (!view || !w) return;
+  const same = (): boolean => {
+    const now = state.view?.workspaces[index];
+    return now !== undefined && now.name === w.name && now.panes === w.panes;
+  };
+  void closeAfterAsking(workspaceAsk(view, index, w.name), same, () => call("close_workspace", { index }));
+}
+
+/** The × in the header of `pane`. */
+function closePaneAfterAsking(pane: number): void {
+  const view = state.view;
+  if (!view?.panes.some(([id]) => id === pane)) return;
+  const same = (): boolean => state.view?.panes.some(([id]) => id === pane) ?? false;
+  void closeAfterAsking(paneAsk(view, paneLabel(pane)), same, () => call("close_pane", { pane }));
+}
+
+/**
+ * Register `tab.close` and `workspace.close` (palette and key binding table, unbound by default). They close the shown
+ * tab or workspace at once: asking is for the buttons, a chord or a palette entry is deliberate, as Cmd+W is.
+ */
+function registerCloseActions(): void {
+  registerAction({
+    id: "tab.close",
+    title: "Close tab",
+    run: () => {
+      const index = state.view?.tabs.findIndex((t) => t.active) ?? -1;
+      if (index >= 0) send(call("close_tab", { index }));
+    },
+  });
+  registerAction({
+    id: "workspace.close",
+    title: "Close workspace",
+    run: () => {
+      const index = state.view?.workspaces.findIndex((w) => w.active) ?? -1;
+      if (index >= 0) send(call("close_workspace", { index }));
+    },
+  });
+}
+
 // A double click on a tab or a workspace chip renames it. The first click of the pair has already selected it.
 tabs.addEventListener("dblclick", (e) => {
-  const index = tabButtons.findIndex((b) => b === (e.target as Element).closest("button"));
+  const index = tabItems.findIndex((i) => mainOf(i) === (e.target as Element).closest("button"));
   if (index >= 0) renameTabAt(index);
 });
 workspaces.addEventListener("dblclick", (e) => {
-  const index = chips.findIndex((b) => b === (e.target as Element).closest("button"));
+  const index = chipItems.findIndex((i) => mainOf(i) === (e.target as Element).closest("button"));
   if (index >= 0) renameWorkspaceAt(index);
 });
 
@@ -205,7 +325,9 @@ async function loadInfo(): Promise<void> {
  */
 export async function initChrome(): Promise<void> {
   registerRenameActions();
+  registerCloseActions();
   setPaneRenameHandler(renamePaneTo);
+  setPaneCloseHandler(closePaneAfterAsking);
   tick();
   setInterval(tick, CLOCK_MS);
   await Promise.all([

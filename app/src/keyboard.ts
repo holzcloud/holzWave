@@ -9,6 +9,7 @@
 import { keepsDefault, registerAction, runAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { actionIdFor, setBindingTable, setOs } from "./chords.js";
+import { isConfirmingClose } from "./confirm.js";
 import { gridRect } from "./geometry.js";
 import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "./keymap.js";
 import { offerKey, pushKeyHandler } from "./keystack.js";
@@ -259,7 +260,7 @@ function onPaste(e: ClipboardEvent): void {
   } else if (performance.now() < fallbackUntil) {
     return; // the late event of a paste the fallback already made
   }
-  if (isConfirmingPaste()) return; // one question at a time
+  if (isConfirmingPaste() || isConfirmingClose()) return; // one question at a time
   const text = e.clipboardData?.getData("text/plain") ?? "";
   const pane = state.view?.focus;
   if (text === "" || pane === undefined) return;
@@ -294,7 +295,7 @@ function awaitPasteEvent(): void {
 
 /** The clipboard text through the one paste path. Only ever called after the person's own paste chord. */
 async function pasteFromClipboard(): Promise<void> {
-  if (isConfirmingPaste()) return; // one question at a time
+  if (isConfirmingPaste() || isConfirmingClose()) return; // one question at a time
   let text = "";
   try {
     text = await navigator.clipboard.readText();

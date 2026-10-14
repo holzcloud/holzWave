@@ -51,6 +51,16 @@
   text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: .417rem;
   text-decoration-color: var(--hw-rose);
 }
+/* A chip or a tab and its × are two buttons in one item (a button must not hold a button), so the wash of hover and of
+   the shown one covers both. The × is always visible, dim like the rest of the idle bar, and drawn by the stylesheet:
+   the buttons that hold names keep no stray character in their text. */
+.bar-item { display: flex; align-items: stretch; flex: none; min-width: 0; }
+.bar-item.tab-item { flex: 0 1 auto; min-width: 4.5rem; overflow: hidden; }
+#bar .bar-item:hover, #bar .bar-item.active { background: var(--hw-rose-wash); }
+#bar .bar-item > :not(.close) { padding-right: .25rem; }
+#bar button.close { min-width: 0; padding: 0 .5rem 0 .25rem; color: var(--hw-dim); }
+#bar button.close::before { content: "\00d7"; }
+#bar button.close:hover { color: var(--hw-ink); }
 /* A small diamond marks the workspace that is shown; drawn, so it is the same on every platform. */
 #bar .ws-chip.active::before {
   content: ""; display: inline-block; width: .5rem; height: .5rem; margin-right: .667rem; vertical-align: .08rem;
@@ -152,6 +162,19 @@
 .ph-sub { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--hw-ink-2); margin-left: .667rem; }
 .ph-sub:empty { display: none; }
 .ph-title { pointer-events: auto; }
+/* The × at the right end of a header: as tall as the strip and flush with its edge, so it is easy to hit. The strip
+   takes no pointer events; this button, like the title, does. */
+.ph-close {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; flex: none; align-self: stretch;
+  margin: 0 -.667rem 0 0; padding: 0 .667rem; border: 0; border-radius: 0; background: none; color: var(--hw-dim);
+  font: inherit; line-height: 1; cursor: pointer; pointer-events: auto;
+}
+.ph-close::before { content: "\00d7"; }
+.ph-close:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+.ph-close:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+:root:not(.motion-reduce) .ph-close {
+  transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1);
+}
 
 /* Drag and drop (DESK-20): the box shows what the dragged pane would take; nothing else of the page changes. */
 .drop-outline {

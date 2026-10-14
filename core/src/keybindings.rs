@@ -196,7 +196,7 @@ const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
 }
 
 /// The base part of the macOS default table. Order is the order of the editor, and the other tables keep it.
-static BASE_MACOS: [ActionInfo; 41] = [
+static BASE_MACOS: [ActionInfo; 43] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -238,10 +238,12 @@ static BASE_MACOS: [ActionInfo; 41] = [
     unbound("pane.move_prev_tab", "Move pane to previous tab"),
     unbound("pane.move_to_new_window", "Move pane to new window"),
     unbound("tab.move_to_new_window", "Move tab to new window"),
+    unbound("tab.close", "Close tab"),
+    unbound("workspace.close", "Close workspace"),
 ];
 
 /// The base part for Windows and Linux: the same actions in the same order, on `Ctrl+Shift` (see the module docs).
-static BASE_OTHER: [ActionInfo; 41] = [
+static BASE_OTHER: [ActionInfo; 43] = [
     action("pane.split_right", "Split pane right", "Ctrl+Shift+D"),
     action("pane.split_down", "Split pane down", "Ctrl+Shift+O"),
     action("pane.close", "Close pane", "Ctrl+Shift+W"),
@@ -283,6 +285,8 @@ static BASE_OTHER: [ActionInfo; 41] = [
     unbound("pane.move_prev_tab", "Move pane to previous tab"),
     unbound("pane.move_to_new_window", "Move pane to new window"),
     unbound("tab.move_to_new_window", "Move tab to new window"),
+    unbound("tab.close", "Close tab"),
+    unbound("workspace.close", "Close workspace"),
 ];
 
 /// The line-editing actions with the macOS standard as default: Option moves and deletes by word, Cmd by line.

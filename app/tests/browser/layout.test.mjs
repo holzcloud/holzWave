@@ -67,7 +67,7 @@ const canvasOrigin = (page) =>
 async function barCase(page, url) {
   await open(page, url);
   await showView(page, BAR_VIEW);
-  const labels = () => page.locator("#bar button").allTextContents();
+  const labels = () => page.locator("#bar button:not(.close)").allTextContents(); // the × buttons have no text
   assert.deepEqual(
     await labels(),
     ["alpha", "beta", "+", "1 one", "2 two", "3 three", "+"],
@@ -79,7 +79,7 @@ async function barCase(page, url) {
     "the active workspace and tab are marked",
   );
 
-  const buttons = page.locator("#bar button");
+  const buttons = page.locator("#bar button:not(.close)");
   await buttons.nth(4).click(); // tab "two"
   assert.deepEqual((await callsOf(page, "select_tab")).at(-1), { index: 1 });
   await buttons.nth(1).click(); // workspace "beta"

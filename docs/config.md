@@ -282,6 +282,7 @@ GNOME's input method takes for emoji.
 | `tab.rename`, `pane.rename`, `workspace.rename` | none | none | none |
 | `pane.swap_next`, `pane.move_next_tab`, `pane.move_prev_tab` | none | none | none |
 | `pane.move_to_new_window`, `tab.move_to_new_window` | none | none | none |
+| `tab.close`, `workspace.close` | none | none | none |
 
 The line-editing actions send fixed bytes to the shell's line editor (`edit.word_back` and `edit.word_forward` send
 `ESC b` and `ESC f`, `edit.line_start` and `edit.line_end` send `Ctrl+A` and `Ctrl+E`, `edit.delete_word_back` sends
@@ -323,6 +324,15 @@ window). A release over no drop zone changes nothing. Without the mouse: `pane.m
 pane, and `tab.move_to_new_window` the shown tab, a window beside this one (both unbound by default). The pane or tab
 keeps its shell, its scrollback and its name; a pane or tab that is alone in its window cannot be torn off, and moving
 the last pane out of a window closes that window.
+
+Every tab, workspace chip and pane header has a × at its right end, always visible, that closes it after a question: the
+name of what closes, how many shells end with it, and, when it is everything in the window, that the window closes (or
+holzWave quits, when it is the only window). Enter or `Close` confirms, Escape or `Cancel` keeps everything, and no key
+of the question reaches the terminal. Closing a tab or workspace ends the shells of all its panes and nothing else. The
+shortcuts ask nothing, because pressing one is deliberate: `pane.close` (`Cmd+W`) closes the focused pane at once, and
+`tab.close` and `workspace.close` (both unbound by default, also in the palette) close the shown tab or workspace at
+once. In every case the last pane of the last window cannot be removed: closing it ends the app and the layout on disk
+stays as it was, so the next start has it all back.
 
 Actions without a chord in the table (`keybindings.open`, the theme entries of the palette) are reached from the
 palette and the dialogs and can be bound by adding them to the table in a later version.

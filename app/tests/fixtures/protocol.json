@@ -505,6 +505,18 @@
           "title": "Move tab to new window"
         },
         {
+          "action": "tab.close",
+          "chord": null,
+          "is_default": true,
+          "title": "Close tab"
+        },
+        {
+          "action": "workspace.close",
+          "chord": null,
+          "is_default": true,
+          "title": "Close workspace"
+        },
+        {
           "action": "edit.word_back",
           "chord": "Alt+Left",
           "is_default": true,
@@ -1007,6 +1019,18 @@
         "chord": null,
         "is_default": true,
         "title": "Move tab to new window"
+      },
+      {
+        "action": "tab.close",
+        "chord": null,
+        "is_default": true,
+        "title": "Close tab"
+      },
+      {
+        "action": "workspace.close",
+        "chord": null,
+        "is_default": true,
+        "title": "Close workspace"
       },
       {
         "action": "edit.word_back",

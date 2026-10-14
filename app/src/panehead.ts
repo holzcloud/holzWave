@@ -2,7 +2,7 @@
 // did) and the context, the working directory with the home prefix as `~`, right-aligned. The focused pane's strip
 // has the 1 px rose top line, and only while more than one pane is visible. State is never colour alone: the dot
 // is filled for the focused pane, hollow for the others and hollow with a dash for a pane that exited, which also
-// says "exited" in the context slot.
+// says "exited" in the context slot. A × at the right end closes the pane after a confirmation (chrome.ts).
 //
 // The strips live in the overlay (pointer events none, so the terminal below still gets every click) and are
 // keyed by pane id like the dividers: the same element is moved on every render. Everything is `textContent`.
@@ -40,6 +40,16 @@ function create(pane: number, parent: HTMLElement): Head {
   const ctx = el("span", "ph-ctx", root);
   el("span", "", ctx);
   title.addEventListener("dblclick", () => renamePane(pane));
+  // The × is the only part of the strip, besides the title, that takes the pointer. It is a button of its own, so a
+  // press on it is neither a drag of the pane (dragdrop.ts leaves `.close` alone) nor a click on the terminal below.
+  const close = el("button", "close ph-close", root);
+  close.type = "button";
+  close.title = "Close pane";
+  close.setAttribute("aria-label", "Close pane");
+  close.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeHandler(pane);
+  });
   return { root, dot, title, sub, ctx };
 }
 
@@ -49,6 +59,14 @@ let renameHandler: (pane: number, name: string) => void = () => {};
 /** Hand over the function that sends a pane's new name to the core. */
 export function setPaneRenameHandler(handler: (pane: number, name: string) => void): void {
   renameHandler = handler;
+}
+
+/** What a × is sent to; the chrome sets it (it asks first), so this module does not import it. */
+let closeHandler: (pane: number) => void = () => {};
+
+/** Hand over the function that asks and closes a pane. */
+export function setPaneCloseHandler(handler: (pane: number) => void): void {
+  closeHandler = handler;
 }
 
 /** The name the user gave to `pane`, or the empty string. */
@@ -61,6 +79,11 @@ export function renamePane(pane: number): void {
   const head = heads.get(pane);
   if (!head) return;
   startRename(head.title, nameOf(pane), automaticTitle(pane), (name) => renameHandler(pane, name));
+}
+
+/** What the pane's header shows as its title: the name the user gave, else the program's title. */
+export function paneLabel(pane: number): string {
+  return nameOf(pane) || automaticTitle(pane);
 }
 
 /** The title a pane has without a name: what its program set, else the title of its tab. */

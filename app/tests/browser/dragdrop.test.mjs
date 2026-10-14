@@ -27,7 +27,7 @@ async function open(page, url) {
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
   await page.evaluate((v) => window.__MOCK__.setView(v), VIEW);
   await emit(page, "layout", VIEW);
-  await page.waitForSelector("#bar .tab:nth-child(3)");
+  await page.waitForSelector("#bar .tab-item:nth-child(3)");
 }
 
 /** A pane's grid area on the window: the canvas box and the unit rectangle of the pane. */
@@ -50,8 +50,8 @@ export default async function ({ page, url }) {
   const right = await paneBox(page, VIEW.panes[1][1]);
   const left = await paneBox(page, VIEW.panes[0][1]);
   const headerPoint = async (box) => {
-    // The right end of the header strip is the canvas's (the title is a node of the page): both start a drag.
-    return { x: box.x + box.w - 12, y: box.y + 8 };
+    // The right part of the header strip, left of the ×, is the canvas's (the title is a node of the page): both start a drag.
+    return { x: box.x + box.w - 60, y: box.y + 8 };
   };
 
   // A pane header dragged to the bottom edge of the other pane: one move_pane, edge bottom.
@@ -77,7 +77,7 @@ export default async function ({ page, url }) {
   await page.mouse.up();
   assert.equal(await page.locator(".drop-outline").count(), 0);
   await drag(page, await headerPoint(left), { x: left.x + 100, y: left.y + 100 });
-  await page.mouse.click(right.x + right.w - 12, right.y + 8);
+  await page.mouse.click(right.x + right.w - 60, right.y + 8);
   assert.deepEqual(await sent(page, "move_pane"), [], "Escape, a drop on itself and a click send no move");
 
   // A pane onto another tab moves into it, next to that tab's focus pane.
@@ -150,7 +150,7 @@ async function releaseOutsideCase(page, url) {
   await open(page, url);
   const width = await page.evaluate(() => window.innerWidth);
   const left = await paneBox(page, VIEW.panes[0][1]);
-  const grip = { x: left.x + left.w - 12, y: left.y + 8 };
+  const grip = { x: left.x + left.w - 60, y: left.y + 8 };
   const centre = (b) => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
 
   // Beyond the margin: the pane's id and its kind, once, and no move.
@@ -228,7 +228,7 @@ async function forgetCase(page, url) {
 
   // Release pane 2 outside the window, then the layout without it arrives: forgotten.
   const width = await page.evaluate(() => window.innerWidth);
-  await drag(page, { x: right.x + right.w - 12, y: right.y + 8 }, { x: width + 50, y: 100 });
+  await drag(page, { x: right.x + right.w - 60, y: right.y + 8 }, { x: width + 50, y: 100 });
   assert.deepEqual(await sent(page, "release_outside"), [{ pane: 2, kind: "pane" }]);
   await emit(page, "layout", viewOf([1], 4));
   // A frame that was on its way to this window when the pane left is dropped, not stored.
@@ -251,7 +251,7 @@ async function forgetCase(page, url) {
   // A cancelled release does not forget: the shell kept the pane in the window.
   await reset(page, VIEW);
   await page.evaluate(() => window.__MOCK__.on("release_outside", () => ({ outcome: "cancelled" })));
-  await drag(page, { x: right.x + right.w - 12, y: right.y + 8 }, { x: width + 50, y: 100 });
+  await drag(page, { x: right.x + right.w - 60, y: right.y + 8 }, { x: width + 50, y: 100 });
   await page.waitForFunction(() => window.__MOCK__.callsOf("release_outside").length === 1);
   await emit(page, "layout", viewOf([1], 6)); // e.g. the pane went to another tab of this window
   await emit(page, "layout", viewOf([1, 2], 7));

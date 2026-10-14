@@ -75,7 +75,7 @@ fn parse_exposes_modifiers_and_key_as_fields() {
 
 /// The action table of `os`, after checking that it is the full set: a loop over an empty table would pass vacuously.
 fn all_actions(os: &str) -> &'static [ActionInfo] {
-    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 3 + 6 + 3 + 2, "the {os} table holds 47 actions");
+    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 3 + 6 + 3 + 2 + 2, "the {os} table holds 49 actions");
     actions_for(os)
 }
 
@@ -183,7 +183,7 @@ fn the_host_functions_use_the_table_of_the_os_the_build_runs_on() {
 }
 
 #[test]
-fn the_macos_table_still_has_its_eight_unbound_actions_on_every_platform() {
+fn the_macos_table_still_has_its_ten_unbound_actions_on_every_platform() {
     for os in OSES {
         for id in [
             "tab.rename",
@@ -194,6 +194,8 @@ fn the_macos_table_still_has_its_eight_unbound_actions_on_every_platform() {
             "pane.move_prev_tab",
             "pane.move_to_new_window",
             "tab.move_to_new_window",
+            "tab.close",
+            "workspace.close",
         ] {
             assert_eq!(default_of(os, id), None, "{id} on {os}");
         }

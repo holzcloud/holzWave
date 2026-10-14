@@ -19,12 +19,12 @@
 //     reset()          clear calls and handlers and go back to the default layout (listeners are kept)
 //
 // Defaults: one workspace, one tab, panes 1 and 2 side by side and one Row divider at ratio 0.5. The layout
-// commands return the current view, `set_ratio` clamps to 0.1..0.9, `release_outside` answers `{outcome: "cancelled"}`,
+// commands (the close commands too) return the current view, `set_ratio` clamps to 0.1..0.9, `release_outside` answers `{outcome: "cancelled"}`,
 // every other command returns null. The commands between windows (`tear_off_pane`, `tear_off_tab`, `attach_pane`,
 // `attach_tab`) answer the current view like the other layout commands; `window_ready` answers null.
 (() => {
   const LAYOUT_COMMANDS = new Set([
-    "get_layout", "split", "new_tab", "new_workspace", "close_pane", "focus_pane",
+    "get_layout", "split", "new_tab", "new_workspace", "close_pane", "close_tab", "close_workspace", "focus_pane",
     "cycle_focus", "select_tab", "select_workspace", "set_ratio", "rename_pane", "rename_tab", "rename_workspace", "move_pane", "move_tab", "move_tab_to_workspace",
     "tear_off_pane", "tear_off_tab", "attach_pane", "attach_tab",
   ]);
@@ -51,11 +51,13 @@
   };
 
   const defaultView = () => ({
-    workspaces: [{ name: "main", active: true }],
-    tabs: [{ title: "shell", active: true }],
+    workspaces: [{ name: "main", active: true, panes: 2 }],
+    tabs: [{ title: "shell", active: true, focus: 2, panes: 2 }],
     focus: 2,
     panes: [[1, { x: 0, y: 0, w: ratio, h: 1 }], [2, { x: ratio, y: 0, w: 1 - ratio, h: 1 }]],
     dividers: [{ split: 10, axis: "Row", area: { x: 0, y: 0, w: 1, h: 1 }, ratio }],
+    pane_names: [],
+    windows: 1,
   });
   const view = () => structuredClone(custom ?? defaultView());
 
