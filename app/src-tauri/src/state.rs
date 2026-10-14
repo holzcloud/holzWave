@@ -19,7 +19,7 @@ use holzwave_core::engine::{
 };
 use holzwave_core::keybindings::Keybindings;
 use holzwave_core::layout::{
-    AttachTo, Axis, Divider, Edge, Layout, LoadStatus, MAIN_WINDOW, Moved, PaneId, Rect, SetClose, SplitId, WindowSet,
+    AttachTo, Axis, Divider, Edge, Layout, LoadStatus, MAIN_WINDOW, Moved, PaneId, Rect, SetClose, SetCloseGroup, SplitId, WindowSet,
 };
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
@@ -930,6 +930,87 @@ impl AppCore {
             }
             SetClose::Unknown => self.view_in_set(&set, label),
         }
+    }
+
+    /// Close every pane of the tab at `index` of the shown workspace of the window `label` (the × of a tab). The panes go
+    /// as [`AppCore::close_pane_in`] lets them go, all or nothing, and the window is told once. A tab that is all of
+    /// its window closes the window when there are other windows, and ends the app when there are none (the layout on
+    /// disk stays what it was). An index that is no tab changes nothing.
+    pub fn close_tab_in(&self, label: &str, index: usize) -> Result<View, String> {
+        self.close_group_in(label, |set| set.close_tab(label, index))
+    }
+
+    /// Like [`AppCore::close_tab_in`] for the workspace at `index` (the × of a workspace chip).
+    pub fn close_workspace_in(&self, label: &str, index: usize) -> Result<View, String> {
+        self.close_group_in(label, |set| set.close_workspace(label, index))
+    }
+
+    fn close_group_in(&self, label: &str, close: impl FnOnce(&mut WindowSet) -> SetCloseGroup) -> Result<View, String> {
+        let mut set = lock(&self.windows);
+        let layout = set.layout(label).ok_or_else(no_such_window)?;
+        // The view a window gives as its last answer when the group is all of it and the window goes with it.
+        let before = (set.len() > 1).then(|| layout.clone());
+        match close(&mut set) {
+            SetCloseGroup::Closed(panes) => {
+                let view = self.view_in_set(&set, label)?;
+                // Under the windows lock, like `close_pane_in`, so `pane_gone` sees either all or none of the changes.
+                let slots = self.take_slots(&panes);
+                {
+                    let mut routes = lock(&self.routes);
+                    routes.rebuild(&set);
+                    for pane in &panes {
+                        routes.closing.insert(*pane, label.into());
+                    }
+                }
+                drop(set);
+                let never_started = self.end_panes(slots);
+                self.saver.touch();
+                self.sink.send(Target::window(label), Out::Layout(view.clone()));
+                for pane in never_started {
+                    // No shell, so no Exited event will come: the page still hears that the pane is gone.
+                    lock(&self.routes).closing.remove(&pane);
+                    self.sink.send(Target::window(label), Out::PaneExit { pane, code: None });
+                }
+                Ok(view)
+            }
+            SetCloseGroup::WindowClosed(gone, panes) => {
+                let view = before.as_ref().map(|layout| self.view_of(layout)).ok_or_else(no_such_window)?;
+                let slots = self.take_slots(&panes);
+                self.sync_routes(&set);
+                drop(set);
+                self.end_panes(slots);
+                self.window_removed(&gone);
+                Ok(view)
+            }
+            SetCloseGroup::LastPane => {
+                let view = self.view_in_set(&set, label)?;
+                drop(set);
+                self.begin_exit();
+                Ok(view)
+            }
+            SetCloseGroup::Unknown => self.view_in_set(&set, label),
+        }
+    }
+
+    /// Take the handles of `panes` out of the table (a pane that never started has none).
+    fn take_slots(&self, panes: &[PaneId]) -> Vec<(PaneId, Option<Slot>)> {
+        let mut map = lock(&self.panes);
+        panes.iter().map(|pane| (*pane, map.remove(pane))).collect()
+    }
+
+    /// Forget the frames of panes that left the layouts and end their shells, each on its own engine thread. Call it
+    /// with no lock held. Answers the panes that had no shell yet.
+    fn end_panes(&self, slots: Vec<(PaneId, Option<Slot>)>) -> Vec<PaneId> {
+        let mut never_started = Vec::new();
+        for (pane, slot) in slots {
+            self.forget_pane(pane);
+            match &slot {
+                Some(Slot::Running(handle)) => handle.close(),
+                Some(_) => {}
+                None => never_started.push(pane),
+            }
+        }
+        never_started
     }
 
     /// A window left the set (its last pane closed, or it was closed with the red button): its frame is forgotten,
@@ -5256,6 +5337,140 @@ mod tests {
         assert_eq!(rec.targets_of("pane-exit", 0), vec![Target::window(&label)]);
         assert_eq!(rec.targets_of("layout", 0), vec![Target::window(&label)]);
         assert!(lock(&core.routes).closing.is_empty(), "the memory of the closing pane is gone once it was told");
+    }
+
+    // ---- closing a whole tab or workspace (the × buttons) -------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_tab_ends_the_shells_of_its_panes_only_and_tells_the_window_once() {
+        let (core, rec, _dir, first, second, label) = two_windows(HUP_PROOF);
+        let split = core.split(false).focus;
+        let other_tab = core.new_tab().focus;
+        for pane in [first, split, other_tab, second] {
+            core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        }
+        assert!(wait_until(WAIT, || [first, split, other_tab, second].iter().all(|p| rec.has_text(*p, "ready"))), "never ready");
+        let pids: Vec<u32> = [first, split, other_tab, second].iter().map(|p| core.pid(*p).unwrap()).collect();
+        let sent_before = rec.sent().len();
+
+        let view = core.close_tab_in(MAIN_WINDOW, 0).expect("main exists");
+
+        assert_eq!(view_panes(&view), vec![other_tab], "the shown tab stays shown");
+        assert!(wait_until(Duration::from_secs(3), || !process_exists(pids[0]) && !process_exists(pids[1])), "a shell survived");
+        assert!(process_exists(pids[2]) && process_exists(pids[3]), "the other tab and the other window are untouched");
+        assert!(wait_until(Duration::from_secs(3), || rec.pane_exits().len() == 2), "no exits: {:?}", rec.pane_exits());
+        let mut exits: Vec<PaneId> = rec.pane_exits().iter().map(|(p, _)| *p).collect();
+        exits.sort_unstable();
+        assert_eq!(exits, vec![first, split]);
+        assert_eq!(rec.targets_of("layout", sent_before), vec![Target::window(MAIN_WINDOW)], "one layout, for the window");
+        assert!(rec.targets_of("pane-exit", sent_before).iter().all(|t| *t == Target::window(MAIN_WINDOW)));
+        assert!(lock(&core.routes).closing.is_empty(), "the memory of the closing panes is gone once they were told");
+        assert!(core.view_in(&label).is_ok());
+        assert_eq!(rec.exit_count(), 0);
+        assert!(rec.closed_windows().is_empty());
+    }
+
+    #[test]
+    fn a_workspace_closes_with_every_pane_of_every_tab_and_panes_that_never_started_are_told() {
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let first = only_pane(&core);
+        let b = core.new_workspace("two").focus;
+        let c = core.split(false).focus;
+        let d = core.new_tab().focus;
+        core.select_workspace(1);
+
+        let view = core.close_workspace_in(MAIN_WINDOW, 1).expect("main exists");
+
+        assert_eq!(view_panes(&view), vec![first]);
+        assert_eq!(view.workspaces.len(), 1);
+        let mut exits: Vec<_> = rec.pane_exits();
+        exits.sort_unstable();
+        assert_eq!(exits, vec![(b, None), (c, None), (d, None)]);
+        assert_eq!(rec.layouts().len(), 1, "the window hears of it once");
+        assert!(lock(&core.routes).closing.is_empty());
+        assert_eq!(rec.exit_count(), 0);
+        assert_eq!(core.view().panes.iter().map(|p| p.0).collect::<Vec<_>>(), vec![first]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tab_that_is_all_of_a_window_closes_the_window_and_no_other() {
+        let (core, rec, _dir, first, second, label) = two_windows(HUP_PROOF);
+        let third = core.split_in(&label, true).unwrap().focus;
+        for pane in [first, second, third] {
+            core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        }
+        assert!(wait_until(WAIT, || [first, second, third].iter().all(|p| rec.has_text(*p, "ready"))), "never ready");
+        let pids: Vec<u32> = [first, second, third].iter().map(|p| core.pid(*p).unwrap()).collect();
+        let sent_before = rec.sent().len();
+
+        let view = core.close_tab_in(&label, 0).expect("the window exists");
+
+        assert_eq!(view_panes(&view).len(), 2, "the answer is the view the window had");
+        assert_eq!(rec.closed_windows(), vec![label.clone()], "the sink was asked to destroy it");
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+        assert!(wait_until(Duration::from_secs(3), || !process_exists(pids[1]) && !process_exists(pids[2])), "shells survived");
+        assert!(process_exists(pids[0]), "the shell of the other window is untouched");
+        let told: Vec<_> = rec.sent().into_iter().skip(sent_before).filter(|(_, o)| matches!(o, Out::Layout(_))).collect();
+        assert!(told.is_empty(), "a window that is going away is not sent a layout: {told:?}");
+        assert_eq!(rec.exit_count(), 0, "the app goes on");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_that_is_the_whole_layout_ends_the_app_and_changes_nothing() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        let first = only_pane(&core);
+        let second = core.split(false).focus;
+        let third = core.new_tab().focus;
+        let before = core.view();
+
+        let view = core.close_workspace_in(MAIN_WINDOW, 0).expect("main exists");
+
+        assert_eq!(rec.exit_count(), 1, "the end of the app is asked for once");
+        assert_eq!(without_rev(&view), without_rev(&before), "nothing was removed, so the next start has it all");
+        assert!(rec.layouts().is_empty() && rec.pane_exits().is_empty());
+        assert_eq!(on_disk(&dir).all_panes(), vec![first, second, third]);
+        assert!(core.close_tab_in(MAIN_WINDOW, 0).is_ok());
+    }
+
+    #[test]
+    fn a_tab_or_workspace_that_is_not_there_and_a_window_that_is_not_there_change_nothing() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        let first = only_pane(&core);
+        core.split(false);
+        let before = core.view();
+
+        for view in [
+            core.close_tab_in(MAIN_WINDOW, 1).unwrap(),
+            core.close_tab_in(MAIN_WINDOW, usize::MAX).unwrap(),
+            core.close_workspace_in(MAIN_WINDOW, 1).unwrap(),
+            core.close_workspace_in(MAIN_WINDOW, usize::MAX).unwrap(),
+        ] {
+            assert_eq!(without_rev(&view), without_rev(&before));
+        }
+        assert_eq!(core.close_tab_in("window-9", 0), Err("no such window".into()));
+        assert_eq!(core.close_workspace_in("window-9", 0), Err("no such window".into()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(rec.all().is_empty(), "{:?}", rec.all());
+        assert!(!dir.layout_file().exists(), "nothing changed, nothing is written");
+        assert_eq!(core.view().panes.len(), 2);
+        assert_eq!(core.view().panes[0].0, first);
+    }
+
+    #[test]
+    fn a_window_closes_tabs_and_workspaces_of_its_own_layout_only() {
+        let (core, rec, _dir, first, second, label) = two_windows("sleep 30");
+        core.new_tab_in(&label).unwrap();
+
+        // Index 0 of `main` is the tab of `first`, whatever the other window shows at its index 0.
+        let view = core.close_tab_in(&label, 0).expect("the other window");
+
+        assert_eq!(view_panes(&view).len(), 1, "the other window kept its second tab");
+        assert!(core.view_in(MAIN_WINDOW).unwrap().panes.iter().any(|p| p.0 == first));
+        assert!(core.view_in(&label).unwrap().panes.iter().all(|p| p.0 != second));
+        assert!(rec.targets_of("layout", 0).iter().all(|t| *t == Target::window(&label)));
     }
 
     // ---- title and directory replay ---------------------------------------------------------------------------

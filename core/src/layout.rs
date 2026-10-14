@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 mod windows;
 
 pub use windows::{
-    AttachTo, MAIN_WINDOW, MAX_WINDOWS, Moved, SetClose, TornOff, WindowSet, valid_window_label,
+    AttachTo, MAIN_WINDOW, MAX_WINDOWS, Moved, SetClose, SetCloseGroup, TornOff, WindowSet, valid_window_label,
 };
 
 pub type PaneId = u64;
@@ -142,6 +142,19 @@ pub enum CloseOutcome {
     /// The pane exists but is the only one left in the whole layout; nothing was changed.
     LastPane,
     /// No tab holds this pane id; nothing was changed.
+    Unknown,
+}
+
+/// What `Layout::close_tab` and `Layout::close_workspace` did: the same three cases as [`CloseOutcome`], with the
+/// panes that went in the first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloseGroup {
+    /// The panes were removed, in the order of the tab (or of the tabs of the workspace); the tab or workspace is
+    /// gone, and what else is left follows the rules of `close_pane`.
+    Closed(Vec<PaneId>),
+    /// The tab or workspace holds every pane of the layout, so closing it would leave nothing; nothing was changed.
+    LastPane,
+    /// There is no such tab or workspace; nothing was changed.
     Unknown,
 }
 
@@ -852,6 +865,33 @@ impl Layout {
         CloseOutcome::Unknown
     }
 
+    /// Close every pane of the tab at `index` of the shown workspace (the index `select_tab` and `rename_tab` use),
+    /// one by one through [`Layout::close_pane`], so what is shown stays shown, names go with their panes and an empty
+    /// workspace disappears. When the tab holds every pane of the layout nothing changes and the answer is
+    /// [`CloseGroup::LastPane`], like `close_pane` of the last pane (the caller ends the app).
+    pub fn close_tab(&mut self, index: usize) -> CloseGroup {
+        let Some(tab) = self.workspaces[self.active].tabs.get(index) else { return CloseGroup::Unknown };
+        let panes = tab.panes();
+        self.close_all(panes)
+    }
+
+    /// Like [`Layout::close_tab`] for the workspace at `index`: every pane of every tab of it.
+    pub fn close_workspace(&mut self, index: usize) -> CloseGroup {
+        let Some(workspace) = self.workspaces.get(index) else { return CloseGroup::Unknown };
+        let panes = workspace.tabs.iter().flat_map(Tab::panes).collect();
+        self.close_all(panes)
+    }
+
+    fn close_all(&mut self, panes: Vec<PaneId>) -> CloseGroup {
+        if panes.len() >= self.all_panes().len() {
+            return CloseGroup::LastPane;
+        }
+        for pane in &panes {
+            self.close_pane(*pane);
+        }
+        CloseGroup::Closed(panes)
+    }
+
     pub fn focus_pane(&mut self, pane: PaneId) {
         for (wi, w) in self.workspaces.iter_mut().enumerate() {
             if let Some(ti) = w.tabs.iter().position(|t| t.root.contains(pane)) {
@@ -1098,6 +1138,104 @@ mod tests {
         assert_eq!(l.close_pane(c), CloseOutcome::Closed);
         assert_eq!(l.tab().panes(), vec![a], "the shown last workspace was closed: the new last one is shown");
         assert_eq!(l.active, 0);
+    }
+
+    // ---- closing a whole tab or workspace -------------------------------------------------------------------------
+
+    #[test]
+    fn closing_a_tab_closes_all_its_panes_and_nothing_else() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        let c = l.split_focused(Axis::Column).unwrap();
+        let d = l.new_tab().unwrap();
+        l.rename_pane(b, "kept? no");
+        l.rename_pane(d, "other tab");
+        l.select_tab(0);
+
+        assert_eq!(l.close_tab(0), CloseGroup::Closed(vec![a, b, c]));
+
+        assert_eq!(l.all_panes(), vec![d]);
+        assert_eq!(l.workspace().tabs.len(), 1);
+        assert_eq!(l.pane_name(b), None, "the names go with the panes");
+        assert_eq!(l.pane_name(d), Some("other tab"));
+    }
+
+    #[test]
+    fn closing_a_tab_follows_the_rules_of_closing_a_pane_for_what_is_shown() {
+        // Before the shown tab: the shown one stays shown.
+        let (mut l, a, b, c) = tabs_with_the_middle_one_shown();
+        assert_eq!(l.close_tab(0), CloseGroup::Closed(vec![a]));
+        assert_eq!((l.tab().panes(), l.workspace().active), (vec![b], 0));
+        // The shown tab itself: the one that followed it is shown, the new last one when it was the last.
+        assert_eq!(l.close_tab(0), CloseGroup::Closed(vec![b]));
+        assert_eq!((l.tab().panes(), l.workspace().active), (vec![c], 0));
+        let (mut l, a, b, c) = tabs_with_the_middle_one_shown();
+        assert_eq!(l.close_tab(2), CloseGroup::Closed(vec![c]), "after the shown one");
+        assert_eq!((l.tab().panes(), l.workspace().active), (vec![b], 1));
+        assert_eq!(l.close_tab(1), CloseGroup::Closed(vec![b]));
+        assert_eq!((l.tab().panes(), l.workspace().active), (vec![a], 0));
+    }
+
+    #[test]
+    fn closing_a_tab_that_is_not_there_or_is_everything_changes_nothing() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        let before = l.clone();
+        assert_eq!(l.close_tab(1), CloseGroup::Unknown);
+        assert_eq!(l.close_tab(usize::MAX), CloseGroup::Unknown);
+        assert_eq!(l.close_tab(0), CloseGroup::LastPane, "every pane of the layout: the end of the app");
+        assert_eq!(l, before);
+        assert_eq!(l.all_panes(), vec![a, b]);
+    }
+
+    #[test]
+    fn closing_a_tab_in_another_workspace_than_the_shown_one_is_not_possible_by_index() {
+        // The index is the one of the shown workspace, as for select_tab and rename_tab.
+        let (mut l, a) = Layout::new();
+        let b = l.new_tab().unwrap();
+        let c = l.new_workspace("two").unwrap();
+        assert_eq!(l.close_tab(1), CloseGroup::Unknown, "the shown workspace has one tab");
+        assert_eq!(l.close_tab(0), CloseGroup::Closed(vec![c]));
+        assert_eq!((l.active, l.all_panes()), (0, vec![a, b]), "the workspace went with its only tab");
+    }
+
+    #[test]
+    fn closing_a_workspace_closes_all_panes_of_all_its_tabs() {
+        let (mut l, a) = Layout::new();
+        let b = l.new_workspace("two").unwrap();
+        let c = l.split_focused(Axis::Row).unwrap();
+        let d = l.new_tab().unwrap();
+        let e = l.new_workspace("three").unwrap();
+        l.rename_pane(c, "gone");
+        l.select_workspace(1);
+
+        assert_eq!(l.close_workspace(1), CloseGroup::Closed(vec![b, c, d]));
+
+        assert_eq!(l.all_panes(), vec![a, e]);
+        assert_eq!(l.workspaces.len(), 2);
+        assert_eq!(l.tab().panes(), vec![e], "the workspace that followed the shown one is shown");
+        assert_eq!(l.pane_name(c), None);
+    }
+
+    #[test]
+    fn closing_a_workspace_before_the_shown_one_keeps_the_shown_one_shown() {
+        let (mut l, a, b, c) = workspaces_with_the_middle_one_shown();
+        let shown = l.workspace().id;
+        assert_eq!(l.close_workspace(0), CloseGroup::Closed(vec![a]));
+        assert_eq!((l.workspace().id, l.active), (shown, 0));
+        assert_eq!(l.close_workspace(1), CloseGroup::Closed(vec![c]), "after the shown one");
+        assert_eq!((l.tab().panes(), l.active), (vec![b], 0));
+    }
+
+    #[test]
+    fn closing_a_workspace_that_is_not_there_or_is_everything_changes_nothing() {
+        let (mut l, _) = Layout::new();
+        l.split_focused(Axis::Row);
+        l.new_tab();
+        let before = l.clone();
+        assert_eq!(l.close_workspace(1), CloseGroup::Unknown);
+        assert_eq!(l.close_workspace(0), CloseGroup::LastPane);
+        assert_eq!(l, before);
     }
 
     #[test]

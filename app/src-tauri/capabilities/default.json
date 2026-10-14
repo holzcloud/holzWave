@@ -27,6 +27,8 @@
     "allow-new-tab",
     "allow-new-workspace",
     "allow-close-pane",
+    "allow-close-tab",
+    "allow-close-workspace",
     "allow-focus-pane",
     "allow-cycle-focus",
     "allow-select-tab",

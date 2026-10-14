@@ -392,6 +392,8 @@ pub fn run() {
             commands::new_tab,
             commands::new_workspace,
             commands::close_pane,
+            commands::close_tab,
+            commands::close_workspace,
             commands::focus_pane,
             commands::cycle_focus,
             commands::select_tab,

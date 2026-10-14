@@ -394,6 +394,20 @@ pub fn close_pane(core: State<Arc<AppCore>>, window: WebviewWindow, pane: PaneId
     core.close_pane_in(window.label(), pane)
 }
 
+/// Close every pane of the tab at `index` of the shown workspace of the calling window (the × of a tab) and kill their
+/// shells. A tab that is all of its window closes the window; one that is the whole layout ends the app. Async for
+/// the same reasons as `close_pane`.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn close_tab(core: State<Arc<AppCore>>, window: WebviewWindow, index: usize) -> Result<View, String> {
+    core.close_tab_in(window.label(), index)
+}
+
+/// Like `close_tab` for the workspace at `index` of the calling window (the × of a workspace chip).
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn close_workspace(core: State<Arc<AppCore>>, window: WebviewWindow, index: usize) -> Result<View, String> {
+    core.close_workspace_in(window.label(), index)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn focus_pane(core: State<Arc<AppCore>>, window: WebviewWindow, pane: PaneId) -> Result<View, String> {
     core.focus_pane_in(window.label(), pane)

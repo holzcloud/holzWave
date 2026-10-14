@@ -24,7 +24,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    Axis, CloseOutcome, Edge, ID_CEILING, Layout, LoadStatus, MAX_PANES, Node, PaneId, Tab, Workspace,
+    Axis, CloseGroup, CloseOutcome, Edge, ID_CEILING, Layout, LoadStatus, MAX_PANES, Node, PaneId, Tab, Workspace,
 };
 
 /// The label of the window the app starts with: the one of the window configuration of the shell.
@@ -83,6 +83,19 @@ pub enum SetClose {
     /// The pane is the only one of the only window; nothing changed. This is the end of the app.
     LastPane,
     /// No window holds this pane id; nothing changed (a stale event).
+    Unknown,
+}
+
+/// What [`WindowSet::close_tab`] and [`WindowSet::close_workspace`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetCloseGroup {
+    /// The panes are gone from their window, which has other panes.
+    Closed(Vec<PaneId>),
+    /// The tab or workspace held every pane of its window and the window is gone with them (there are other windows).
+    WindowClosed(String, Vec<PaneId>),
+    /// It holds every pane of the only window; nothing changed. This is the end of the app.
+    LastPane,
+    /// No such window, tab or workspace; nothing changed.
     Unknown,
 }
 
@@ -280,6 +293,34 @@ impl WindowSet {
                 SetClose::WindowClosed(label)
             }
             CloseOutcome::LastPane => SetClose::LastPane,
+        }
+    }
+
+    /// Close the tab at `index` of the shown workspace of a window, with all its panes: what [`WindowSet::close_pane`]
+    /// does for each of them, but all or nothing. A tab that holds every pane of its window closes the window, unless
+    /// it is the last window: then nothing changes and the answer is [`SetCloseGroup::LastPane`].
+    pub fn close_tab(&mut self, label: &str, index: usize) -> SetCloseGroup {
+        self.close_group(label, |layout| layout.close_tab(index))
+    }
+
+    /// Like [`WindowSet::close_tab`] for the workspace at `index` of a window.
+    pub fn close_workspace(&mut self, label: &str, index: usize) -> SetCloseGroup {
+        self.close_group(label, |layout| layout.close_workspace(index))
+    }
+
+    fn close_group(&mut self, label: &str, close: impl FnOnce(&mut Layout) -> CloseGroup) -> SetCloseGroup {
+        let Some(index) = self.position(label) else { return SetCloseGroup::Unknown };
+        let panes = self.windows[index].1.all_panes();
+        let outcome = close(&mut self.windows[index].1);
+        self.sync();
+        match outcome {
+            CloseGroup::Closed(panes) => SetCloseGroup::Closed(panes),
+            CloseGroup::Unknown => SetCloseGroup::Unknown,
+            CloseGroup::LastPane if self.windows.len() > 1 => {
+                let (label, _) = self.windows.remove(index);
+                SetCloseGroup::WindowClosed(label, panes)
+            }
+            CloseGroup::LastPane => SetCloseGroup::LastPane,
         }
     }
 
@@ -1039,6 +1080,53 @@ mod tests {
         let (mut set, ..) = two_windows();
         let before = set.clone();
         assert_eq!(set.close_pane(424_242), SetClose::Unknown);
+        assert_eq!(set, before);
+    }
+
+    #[test]
+    fn closing_a_tab_of_a_window_changes_that_window_only() {
+        let (mut set, [a, b, c, d], other) = two_windows();
+        // main: its one tab holds a, b, c; a second tab keeps the window alive.
+        let extra = set.new_tab(MAIN_WINDOW).unwrap();
+        assert_eq!(set.close_tab(MAIN_WINDOW, 0), SetCloseGroup::Closed(vec![a, b, c]));
+        ok(&set);
+        assert_eq!(set.layout(MAIN_WINDOW).unwrap().all_panes(), vec![extra]);
+        assert_eq!(set.layout(&other).unwrap().all_panes(), vec![d], "the other window is untouched");
+    }
+
+    #[test]
+    fn closing_the_only_tab_of_a_window_closes_the_window_when_there_are_others() {
+        let (mut set, [a, b, c, d], other) = two_windows();
+        assert_eq!(set.close_tab(&other, 0), SetCloseGroup::WindowClosed(other.clone(), vec![d]));
+        ok(&set);
+        assert_eq!(set.labels(), [MAIN_WINDOW]);
+        assert_eq!(sorted(set.all_panes()), sorted(vec![a, b, c]));
+        // And the main window now, with all its panes, is the end of the app.
+        let before = set.clone();
+        assert_eq!(set.close_tab(MAIN_WINDOW, 0), SetCloseGroup::LastPane);
+        assert_eq!(set, before);
+    }
+
+    #[test]
+    fn closing_a_workspace_of_a_window_closes_the_window_when_it_was_all_of_it() {
+        let (mut set, [a, b, c, d], other) = two_windows();
+        let extra = set.new_workspace(MAIN_WINDOW, "two").unwrap();
+        assert_eq!(set.close_workspace(MAIN_WINDOW, 0), SetCloseGroup::Closed(vec![a, b, c]));
+        ok(&set);
+        assert_eq!(set.layout(MAIN_WINDOW).unwrap().all_panes(), vec![extra]);
+        assert_eq!(set.close_workspace(&other, 0), SetCloseGroup::WindowClosed(other.clone(), vec![d]));
+        ok(&set);
+        assert_eq!(set.close_workspace(MAIN_WINDOW, 0), SetCloseGroup::LastPane);
+    }
+
+    #[test]
+    fn a_tab_or_workspace_that_is_not_there_closes_nothing() {
+        let (mut set, ..) = two_windows();
+        let before = set.clone();
+        assert_eq!(set.close_tab("window-4242", 0), SetCloseGroup::Unknown);
+        assert_eq!(set.close_tab(MAIN_WINDOW, 9), SetCloseGroup::Unknown);
+        assert_eq!(set.close_workspace("window-4242", 0), SetCloseGroup::Unknown);
+        assert_eq!(set.close_workspace(MAIN_WINDOW, 9), SetCloseGroup::Unknown);
         assert_eq!(set, before);
     }
 

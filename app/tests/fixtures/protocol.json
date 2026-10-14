@@ -56,6 +56,12 @@
     "close_pane": [
       "pane"
     ],
+    "close_tab": [
+      "index"
+    ],
+    "close_workspace": [
+      "index"
+    ],
     "copy_mode": [
       "pane",
       "op"

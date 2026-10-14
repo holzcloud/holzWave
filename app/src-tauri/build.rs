@@ -25,6 +25,8 @@ fn main() {
     "new_tab",
     "new_workspace",
     "close_pane",
+    "close_tab",
+    "close_workspace",
     "focus_pane",
     "cycle_focus",
     "select_tab",
