@@ -20,6 +20,20 @@ export function paneCountText(count: number): string {
   return `${n} ${n === 1 ? "pane" : "panes"}`;
 }
 
+/** How long a notice stays in the status line. */
+export const NOTICE_MS = 5000;
+
+/**
+ * What the status line says when a pane or tab was not given a window of its own: `reason` is the shell's (a tab or pane
+ * that is alone in its window, the window system's refusal); without one the shell only cancelled the gesture. Cut short
+ * and stripped of control characters, because the status line is one line.
+ */
+export function refusalText(kind: "pane" | "tab", reason?: unknown): string {
+  const what = kind === "pane" ? "Pane" : "Tab";
+  const text = typeof reason === "string" ? reason.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 80) : "";
+  return text === "" ? `${what} stays here: it cannot get a window of its own` : `${what} not moved: ${text}`;
+}
+
 /** What each platform calls a user's home directory: the part up to and including the user name. */
 const HOME: Record<string, RegExp> = {
   macos: /^\/Users\/(?!Shared(?:\/|$))[^/]+(?=\/|$)/,

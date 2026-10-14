@@ -341,9 +341,11 @@ async function statusCase(page, url) {
   const order = await page.evaluate(() =>
     [...document.querySelectorAll("#status .seg")].map((n) => [...n.classList].filter((c) => !["seg", "label", "active"].includes(c))[0]),
   );
-  // The mode segment (copy mode, plan 21) sits after the workspaces; it is empty, so not shown, outside copy mode.
-  assert.deepEqual(order, ["ws", "ws", "mode", "panes", "renderer", "encoding", "version"]);
+  // The mode segment (copy mode, plan 21) and the notice (a refused tear-off) sit after the workspaces; both are empty,
+  // so not shown, outside copy mode and when nothing was refused.
+  assert.deepEqual(order, ["ws", "ws", "mode", "notice", "panes", "renderer", "encoding", "version"]);
   assert.deepEqual(await texts(page, "#status .seg.mode"), [""], "no copy mode, no mode text");
+  assert.deepEqual(await texts(page, "#status .seg.notice"), [""], "nothing refused, no notice");
 
   // A workspace that appears and one that goes: the segments follow the view.
   const three = { ...BAR_VIEW, workspaces: [...BAR_VIEW.workspaces, { name: "gamma", active: false }] };

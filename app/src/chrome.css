@@ -81,6 +81,8 @@
 #status .seg:empty { display: none; }
 /* The shown workspace is a solid segment; bold type is its cue without colour. */
 #status .seg.ws.active { background: var(--hw-rose-deep); color: var(--hw-on-accent); font-weight: 700; }
+/* A notice: bold type is its cue, as for the mode. */
+#status .seg.notice { color: var(--hw-ink); font-weight: 700; }
 #status .seg.encoding { margin-left: auto; border-left: 1px solid var(--hw-line); }
 #status .seg:last-child { border-right: 0; }
 

@@ -1,7 +1,7 @@
 // The texts of the chrome on the compiled output in dist/: no DOM is needed to import or run them.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { clockText, paneCountText, rendererText, shortenHome, tabLabel } from "../../dist/labels.js";
+import { NOTICE_MS, clockText, paneCountText, refusalText, rendererText, shortenHome, tabLabel } from "../../dist/labels.js";
 
 test("the module imports and runs without a DOM", () => {
   assert.equal(typeof document, "undefined");
@@ -100,4 +100,14 @@ test("the renderer segment is the name alone before a draw time exists", () => {
 
 test("a draw time of zero is a measurement: a timer coarser than the draw reads 0 ms", () => {
   assert.equal(rendererText("canvas2d", 0), "canvas2d 0.00 ms");
+});
+
+test("a refused tear-off is told in one short line, with the shell's reason when there is one", () => {
+  assert.equal(refusalText("pane"), "Pane stays here: it cannot get a window of its own");
+  assert.equal(refusalText("tab"), "Tab stays here: it cannot get a window of its own");
+  assert.equal(refusalText("tab", "this cannot be a window of its own"), "Tab not moved: this cannot be a window of its own");
+  assert.equal(refusalText("pane", "  \u001b[31mcannot\nopen a window\u0007 "), "Pane not moved: [31mcannot open a window", "control characters are gone");
+  assert.equal(refusalText("pane", "x".repeat(500)).length, "Pane not moved: ".length + 80, "cut to 80 characters");
+  for (const odd of [undefined, null, 42, {}, "", "   "]) assert.match(refusalText("pane", odd), /^Pane stays here/, String(odd));
+  assert.ok(NOTICE_MS >= 2000 && NOTICE_MS <= 10000, "long enough to read, short enough to be gone");
 });

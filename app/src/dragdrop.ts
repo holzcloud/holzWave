@@ -1,6 +1,6 @@
 // Drag and drop of panes and tabs (DESK-20, DESK-29): a pane is dragged by its header onto the side of another pane
-// (splits it there) or its middle (swaps the two), or onto a tab (moves into it); a tab is dragged to another place
-// in the strip or onto a workspace chip (moves into that workspace). The page only works out where the pointer is and
+// (splits it there) or its middle (swaps the two), or onto a tab or a workspace chip (moves into it); a tab is dragged
+// to another place in the strip or onto a workspace chip (moves into that workspace). The page only works out where the pointer is and
 // sends ids to the core, which checks them and the limits; nothing here moves a pane by itself.
 //
 // Pointer events, not the HTML5 drag API (WKWebView handles that badly). A press on a header or a tab becomes a drag
@@ -27,8 +27,10 @@ import {
 } from "./dropzone.js";
 import { paneAt, paneRect } from "./geometry.js";
 import { focusInput } from "./keyboard.js";
+import { refusalText } from "./labels.js";
 import { canvas, markLeaving, unmarkLeaving } from "./scene.js";
 import { state } from "./state.js";
+import { showNotice } from "./status.js";
 import type { View } from "./types.js";
 
 type Source = { kind: "pane"; pane: number } | { kind: "tab"; index: number };
@@ -105,12 +107,13 @@ function dropAt(source: Source, x: number, y: number): Drop | null {
     return { box, send: () => call("move_pane", { pane: source.pane, target: into.focus, edge: "right" }) };
   }
   if (chip >= 0 && under) {
-    if (source.kind !== "tab" || view.workspaces[chip]?.active) return null;
+    if (view.workspaces[chip]?.active) return null;
     const r = (under.closest(".ws-item") as HTMLElement).getBoundingClientRect();
-    return {
-      box: { x: r.left, y: r.top, w: r.width, h: r.height },
-      send: () => call("move_tab_to_workspace", { tab: source.index, workspace: chip }),
-    };
+    const box = { x: r.left, y: r.top, w: r.width, h: r.height };
+    // A tab goes to the end of that workspace; a pane next to the focus pane of its shown tab.
+    return source.kind === "tab"
+      ? { box, send: () => call("move_tab_to_workspace", { tab: source.index, workspace: chip }) }
+      : { box, send: () => call("move_pane_to_workspace", { pane: source.pane, workspace: chip }) };
   }
   if (source.kind !== "pane") return null;
   const c = canvas().getBoundingClientRect();
@@ -187,6 +190,12 @@ function onUp(e: PointerEvent): void {
   if (done.active) focusInput();
 }
 
+/** The shell refused or failed to give a pane or tab a window: it stays, and the status line says so for a moment. */
+function refused(kind: "pane" | "tab", ids: number[], reason: unknown): void {
+  unmarkLeaving(ids);
+  if (!String(reason).includes("no such window")) showNotice(refusalText(kind, reason)); // that window is going itself
+}
+
 /**
  * The pointer was released well outside the window: tell the shell which pane (or which tab, by one of its panes).
  * Panes that go are marked first, so that the layout without them, which can arrive before the answer, forgets them.
@@ -199,9 +208,11 @@ function releaseOutside(source: Source): void {
   markLeaving(gone.ids);
   call<{ outcome: string }>("release_outside", { pane: gone.pane, kind: gone.kind })
     .then((r) => {
-      if (r?.outcome === "cancelled") unmarkLeaving(gone.ids);
+      if (r?.outcome !== "cancelled") return;
+      unmarkLeaving(gone.ids);
+      showNotice(refusalText(gone.kind));
     })
-    .catch(() => unmarkLeaving(gone.ids));
+    .catch((e) => refused(gone.kind, gone.ids, e));
 }
 
 function onCancel(e: PointerEvent): void {
@@ -260,7 +271,7 @@ function moveToNewWindow(kind: "pane" | "tab"): void {
   markLeaving(ids);
   call(kind === "pane" ? "tear_off_pane" : "tear_off_tab", { pane: view.focus, at_cursor: false })
     .then(applyView)
-    .catch(() => unmarkLeaving(ids)); // refused: it stays where it is
+    .catch((e) => refused(kind, ids, e)); // refused: it stays where it is
 }
 
 // ---- a drop that comes from another window -------------------------------------------------------------------

@@ -94,6 +94,24 @@ export default async function ({ page, url }) {
   assert.deepEqual(await sent(page, "move_tab_to_workspace"), [{ tab: 0, workspace: 1 }]);
   assert.deepEqual(await sent(page, "select_tab"), [], "the click that ends a drag does not select a tab");
 
+  // A pane onto a workspace chip: the core puts it next to the focus pane of that workspace's shown tab. The shown
+  // workspace's own chip is no target, and the click that ends the drag selects nothing.
+  await page.evaluate(() => window.__MOCK__.reset());
+  await page.evaluate((v) => window.__MOCK__.setView(v), VIEW);
+  const chip = centre(await page.locator("#bar .ws-chip").nth(1).boundingBox());
+  await drag(page, await headerPoint(left), chip, { release: false });
+  const over = await page.locator(".drop-outline").boundingBox();
+  const item = await page.locator("#bar .ws-item").nth(1).boundingBox();
+  assert.ok(Math.abs(over.x - item.x) < 2 && Math.abs(over.width - item.width) < 2, "the outline is the chip");
+  await page.mouse.up();
+  assert.deepEqual(await sent(page, "move_pane_to_workspace"), [{ pane: 1, workspace: 1 }]);
+  assert.deepEqual(await sent(page, "move_tab_to_workspace"), [], "a pane is not a tab");
+  assert.deepEqual(await sent(page, "select_workspace"), [], "the click that ends a drag does not select a workspace");
+  await drag(page, await headerPoint(left), centre(await page.locator("#bar .ws-chip").nth(0).boundingBox()), { release: false });
+  assert.equal(await page.locator(".drop-outline").count(), 0, "the workspace the pane is in is no target");
+  await page.mouse.up();
+  assert.equal((await sent(page, "move_pane_to_workspace")).length, 1);
+
   // None of it reaches the program.
   for (const cmd of ["key", "text", "mouse", "select", "paste"]) {
     assert.deepEqual(await sent(page, cmd), [], `${cmd} is not sent while dragging`);
@@ -103,6 +121,7 @@ export default async function ({ page, url }) {
   await paletteCase(page, url);
   await forgetCase(page, url);
   await incomingCase(page, url);
+  await noticeCase(page, url); // last: it installs a fake clock that stays on the page
 }
 
 // ---- between windows ----------------------------------------------------------------------------------------------
@@ -179,7 +198,29 @@ async function releaseOutsideCase(page, url) {
   await drag(page, grip, { x: width + 40, y: 100 });
   assert.equal((await sent(page, "release_outside")).length, 1);
   assert.deepEqual(await sent(page, "start_pane"), [], "nothing was forgotten");
+  assert.equal(await notice(page), "Pane stays here: it cannot get a window of its own", "the status line says why nothing happened");
+
+  // The same for a tab, and for a window that could not be built (the shell answers an error).
+  await reset(page, VIEW);
+  await page.evaluate(() => window.__MOCK__.on("release_outside", () => ({ outcome: "cancelled" })));
+  await drag(page, centre(await page.locator("#bar .tab").nth(1).boundingBox()), { x: width + 50, y: 200 });
+  assert.equal(await notice(page), "Tab stays here: it cannot get a window of its own");
+  await reset(page, VIEW);
+  await page.evaluate(() => window.__MOCK__.on("release_outside", () => { throw "cannot open a window: the window system refused"; }));
+  await drag(page, grip, { x: width + 40, y: 100 });
+  assert.equal(await notice(page), "Pane not moved: cannot open a window: the window system refused");
+  assert.deepEqual(await sent(page, "start_pane"), [], "nothing was forgotten");
+
+  // A window that is going itself is refused with `no such window`: nothing is left to tell.
+  await open(page, url);
+  await page.evaluate(() => window.__MOCK__.on("release_outside", () => { throw "no such window"; }));
+  await drag(page, grip, { x: width + 40, y: 100 });
+  await page.waitForFunction(() => window.__MOCK__.callsOf("release_outside").length === 1);
+  assert.equal(await notice(page), "", "no message for a window that is going");
 }
+
+/** The text of the notice segment of the status line (empty when there is none). */
+const notice = (page) => page.locator("#status .seg.notice").evaluate((n) => n.textContent);
 
 /** The palette actions give the focused pane or the shown tab a window beside this one. */
 async function paletteCase(page, url) {
@@ -203,6 +244,30 @@ async function paletteCase(page, url) {
   await run("Move pane to new window");
   assert.equal((await sent(page, "tear_off_pane")).length, 2);
   assert.ok(await page.locator(".panehead").count() >= 2, "the layout is as it was");
+  assert.equal(await notice(page), "Pane not moved: a pane that is alone in its window cannot be torn off", "and the status line says why");
+}
+
+/** The notice goes by itself, a newer one replaces it, and it is announced as a status. */
+async function noticeCase(page, url) {
+  await page.clock.install({ time: new Date(2026, 0, 5, 10, 15, 40) });
+  await open(page, url);
+  const run = async (text) => {
+    await page.keyboard.press("Meta+k");
+    await page.waitForFunction(() => document.activeElement?.classList.contains("palette-input") === true);
+    await page.keyboard.type(text);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.querySelector(".palette-backdrop")?.hidden === true);
+  };
+  await page.evaluate(() => window.__MOCK__.on("tear_off_tab", () => { throw "this cannot be a window of its own"; }));
+  assert.equal(await notice(page), "", "no notice before anything was refused");
+  await run("Move tab to new window");
+  assert.equal(await notice(page), "Tab not moved: this cannot be a window of its own");
+  assert.equal(await page.locator("#status .seg.notice").getAttribute("role"), "status");
+  await page.clock.fastForward(4000);
+  assert.match(await notice(page), /^Tab not moved/, "still there after four seconds");
+  await page.clock.fastForward(1500);
+  assert.equal(await notice(page), "", "gone by itself");
+  assert.equal(await page.locator("#status .seg.notice").isVisible(), false, "an empty segment takes no room");
 }
 
 /** A pane that leaves is forgotten and is a first appearance when it comes back; a pane in another tab is not. */

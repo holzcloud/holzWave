@@ -309,8 +309,9 @@ characters and blanks at both ends, and the empty name gives the automatic one b
 `ws N`). Names of panes are kept in `layout.json` (`pane_names`); tabs and workspaces keep theirs in their own entry.
 
 A pane is dragged by its header onto another pane: on the outer quarter of a side it splits that pane there, on the
-middle the two swap places; onto a tab it moves into that tab. A tab is dragged to another place in the strip, or onto
-a workspace chip to move into that workspace. Escape, or a drop on nothing, cancels. The pane keeps its shell, its
+middle the two swap places; onto a tab it moves into that tab; onto a workspace chip it moves into that workspace, next
+to the focus pane of that workspace's shown tab (the shown workspace's own chip is no target). A tab is dragged to
+another place in the strip, or onto a workspace chip to move into that workspace. Escape, or a drop on nothing, cancels. The pane keeps its shell, its
 scrollback and its name; the core refuses a move that would pass the pane or depth limits and changes nothing. Without
 the mouse: `pane.swap_next` swaps the focused pane with the next one of the tab, `pane.move_next_tab` and
 `pane.move_prev_tab` move it into the next or previous tab (all three are unbound by default).
@@ -323,7 +324,8 @@ that workspace; a tab goes into the workspace of the chip it is over, and into t
 window). A release over no drop zone changes nothing. Without the mouse: `pane.move_to_new_window` gives the focused
 pane, and `tab.move_to_new_window` the shown tab, a window beside this one (both unbound by default). The pane or tab
 keeps its shell, its scrollback and its name; a pane or tab that is alone in its window cannot be torn off, and moving
-the last pane out of a window closes that window.
+the last pane out of a window closes that window. A tear-off that is refused (a lone pane or tab, no window to be had)
+leaves everything where it is and says why in the status line for a few seconds.
 
 Every tab, workspace chip and pane header has a × at its right end, always visible, that closes it after a question: the
 name of what closes, how many shells end with it, and, when it is everything in the window, that the window closes (or
