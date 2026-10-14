@@ -186,3 +186,15 @@ fn the_windows_file_leaves_the_base_bundle_to_the_base_file() {
     assert!(windows.get("version").is_none(), "the Windows file overrides the version");
     assert_eq!(conf()["bundle"]["targets"], "all", "the base bundle targets");
 }
+
+#[test]
+fn a_release_build_on_windows_is_a_gui_program() {
+    // Without `windows_subsystem = "windows"` the release executable is a console program and Windows opens a console
+    // window beside the app (found on the first GNU-ABI build, 2026-10-14: PE subsystem CUI). The attribute applies to
+    // release builds only, so `cargo run` keeps its console, and the MSVC build on a Windows host needs it as much.
+    let main = include_str!("../src/main.rs");
+    assert!(
+        main.lines().any(|line| line.trim() == r#"#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]"#),
+        "src/main.rs has no windows_subsystem attribute for release builds"
+    );
+}
