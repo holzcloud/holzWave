@@ -22,13 +22,17 @@ export interface Divider {
  */
 export interface View {
   rev: number;
-  workspaces: { name: string; active: boolean }[];
-  tabs: { title: string; active: boolean; focus: number }[];
+  /** `panes`: how many panes the tabs of the workspace hold together. */
+  workspaces: { name: string; active: boolean; panes: number }[];
+  /** `panes`: how many panes the tab holds. */
+  tabs: { title: string; active: boolean; focus: number; panes: number }[];
   focus: number;
   panes: [number, UnitRect][];
   dividers: Divider[];
   /** The names the user gave to the panes of the shown tab. */
   pane_names: [number, string][];
+  /** How many windows the app had when the view was made; the close confirmation says what closing everything ends. */
+  windows: number;
 }
 
 /** A pane's size in cells. */

@@ -1168,27 +1168,33 @@
       {
         "active": true,
         "focus": 5,
+        "panes": 2,
         "title": "shell"
       },
       {
         "active": false,
         "focus": 7,
+        "panes": 1,
         "title": "shell"
       },
       {
         "active": false,
         "focus": 9,
+        "panes": 1,
         "title": "shell"
       }
     ],
+    "windows": 1,
     "workspaces": [
       {
         "active": true,
-        "name": "main"
+        "name": "main",
+        "panes": 4
       },
       {
         "active": false,
-        "name": "notes"
+        "name": "notes",
+        "panes": 1
       }
     ]
   }

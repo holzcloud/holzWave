@@ -56,6 +56,8 @@ const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
 pub struct WorkspaceView {
     pub name: String,
     pub active: bool,
+    /// How many panes the tabs of this workspace hold together (the × of a chip says what it closes).
+    pub panes: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -64,6 +66,8 @@ pub struct TabView {
     pub active: bool,
     /// The pane of this tab that has the focus.
     pub focus: PaneId,
+    /// How many panes the tab holds.
+    pub panes: usize,
 }
 
 /// The layout as the webview mirrors it: the workspaces, the tabs of the active workspace, and the panes and
@@ -83,11 +87,16 @@ pub struct View {
     pub dividers: Vec<Divider>,
     /// The names the user gave to the panes of the active tab; a pane without an entry has no name.
     pub pane_names: Vec<(PaneId, String)>,
+    /// How many windows the app had when this view was made: the confirmation of a close button says whether closing
+    /// everything in this window ends the app (the only window) or the window. Only a view of this window is sent to
+    /// it, so the number can lag behind a window that closed meanwhile; the next view corrects it.
+    pub windows: usize,
 }
 
 impl View {
-    /// The view of `layout`, stamped `rev`. Take `rev` with [`AppCore::view_of`], under the layout lock.
-    pub fn of(layout: &Layout, rev: u64) -> View {
+    /// The view of `layout`, stamped `rev`, in an app with `windows` windows. Take `rev` with [`AppCore::view_of`],
+    /// under the layout lock.
+    pub fn of(layout: &Layout, rev: u64, windows: usize) -> View {
         let (panes, dividers) = layout.tab().geometry();
         let active_tab = layout.workspace().active;
         View {
@@ -96,14 +105,23 @@ impl View {
                 .workspaces
                 .iter()
                 .enumerate()
-                .map(|(i, w)| WorkspaceView { name: w.name.clone(), active: i == layout.active })
+                .map(|(i, w)| WorkspaceView {
+                    name: w.name.clone(),
+                    active: i == layout.active,
+                    panes: w.tabs.iter().map(|t| t.panes().len()).sum(),
+                })
                 .collect(),
             tabs: layout
                 .workspace()
                 .tabs
                 .iter()
                 .enumerate()
-                .map(|(i, t)| TabView { title: t.title.clone(), active: i == active_tab, focus: t.focus })
+                .map(|(i, t)| TabView {
+                    title: t.title.clone(),
+                    active: i == active_tab,
+                    focus: t.focus,
+                    panes: t.panes().len(),
+                })
                 .collect(),
             focus: layout.tab().focus,
             pane_names: panes
@@ -112,6 +130,7 @@ impl View {
                 .collect(),
             panes,
             dividers,
+            windows,
         }
     }
 }
@@ -708,13 +727,13 @@ impl AppCore {
 
     /// The view of the layout, stamped with the next `rev`. The caller holds the windows lock (it has the `&Layout`
     /// from the guard), so two views are stamped in the order their states happened.
-    fn view_of(&self, layout: &Layout) -> View {
-        View::of(layout, self.view_rev.fetch_add(1, Ordering::SeqCst) + 1)
+    fn view_of(&self, layout: &Layout, windows: usize) -> View {
+        View::of(layout, self.view_rev.fetch_add(1, Ordering::SeqCst) + 1, windows)
     }
 
     /// [`AppCore::view_of`] for the window `label` of a set the caller has locked.
     fn view_in_set(&self, set: &WindowSet, label: &str) -> Result<View, String> {
-        set.layout(label).map(|layout| self.view_of(layout)).ok_or_else(no_such_window)
+        set.layout(label).map(|layout| self.view_of(layout, set.len())).ok_or_else(no_such_window)
     }
 
     /// Make the table of panes and windows match `set`. Call it under the windows lock, after every change that adds,
@@ -910,7 +929,7 @@ impl AppCore {
                 Ok(view)
             }
             SetClose::WindowClosed(gone) => {
-                let view = before.as_ref().map(|layout| self.view_of(layout)).ok_or_else(no_such_window)?;
+                let view = before.as_ref().map(|layout| self.view_of(layout, set.len() + 1)).ok_or_else(no_such_window)?;
                 let slot = lock(&self.panes).remove(&pane);
                 self.sync_routes(&set);
                 drop(set);
@@ -974,7 +993,7 @@ impl AppCore {
                 Ok(view)
             }
             SetCloseGroup::WindowClosed(gone, panes) => {
-                let view = before.as_ref().map(|layout| self.view_of(layout)).ok_or_else(no_such_window)?;
+                let view = before.as_ref().map(|layout| self.view_of(layout, set.len() + 1)).ok_or_else(no_such_window)?;
                 let slots = self.take_slots(&panes);
                 self.sync_routes(&set);
                 drop(set);
@@ -5341,6 +5360,26 @@ mod tests {
 
     // ---- closing a whole tab or workspace (the × buttons) -------------------------------------------------------
 
+    #[test]
+    fn a_view_counts_the_panes_of_every_tab_and_workspace_and_the_windows() {
+        let (core, _rec, _dir, _first, _second, label) = two_windows("sleep 30");
+        core.split(false);
+        core.new_tab();
+        core.new_workspace("two");
+        core.split(false);
+
+        let view = core.view();
+        assert_eq!(view.windows, 2);
+        assert_eq!(view.workspaces.iter().map(|w| w.panes).collect::<Vec<_>>(), vec![3, 2]);
+        assert_eq!(view.tabs.iter().map(|t| t.panes).collect::<Vec<_>>(), vec![2]);
+        let view = core.select_workspace(0);
+        assert_eq!(view.tabs.iter().map(|t| t.panes).collect::<Vec<_>>(), vec![2, 1]);
+        let other = core.view_in(&label).unwrap();
+        assert_eq!((other.windows, other.workspaces[0].panes, other.tabs[0].panes), (2, 1, 1));
+        core.close_tab_in(&label, 0).unwrap();
+        assert_eq!(core.view().windows, 1, "the next view knows that the other window is gone");
+    }
+
     #[cfg(unix)]
     #[test]
     fn closing_a_tab_ends_the_shells_of_its_panes_only_and_tells_the_window_once() {
@@ -6260,7 +6299,7 @@ mod protocol {
         layout.select_tab(0);
         layout.new_workspace("notes");
         layout.select_workspace(0);
-        let view = View::of(&layout, 1);
+        let view = View::of(&layout, 1, 1);
         assert_eq!(view.workspaces.len(), 2);
         assert_eq!(view.tabs.len(), 3);
         assert_eq!(view.panes.len(), 2);
