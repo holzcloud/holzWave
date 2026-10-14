@@ -4,7 +4,7 @@
 #
 #   sh scripts/release-macos.sh <version>                       build and pack only, print the cask fields
 #   sh scripts/release-macos.sh <version> --publish             also create the GitHub release
-#   sh scripts/release-macos.sh <version> --publish --tap <dir> also write the cask into a checkout of the tap
+#   sh scripts/release-macos.sh <version> --publish --casks     also write the casks into Casks/ of this repo
 #
 # <version> must equal the version in app/src-tauri/tauri.conf.json (the tag is v<version>). A version with a
 # hyphen (0.0.1-alpha1, 0.0.1-beta1) is a GitHub prerelease and goes to the preview cask `holzwave@preview`; a
@@ -22,14 +22,14 @@ cd "$here/.." || exit 2
 . "$here/env.sh"
 
 version=${1:-}
-[ -n "$version" ] || { echo "usage: sh scripts/release-macos.sh <version> [--publish] [--tap <dir>]" >&2; exit 2; }
+[ -n "$version" ] || { echo "usage: sh scripts/release-macos.sh <version> [--publish] [--casks]" >&2; exit 2; }
 shift
 publish=0
-tap=
+casks=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --publish) publish=1 ;;
-    --tap) shift; tap=${1:-}; [ -d "$tap" ] || { echo "--tap needs a directory" >&2; exit 2; } ;;
+    --casks) casks=1 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -74,7 +74,7 @@ if [ "$publish" = 1 ]; then
     echo "holzWave $version for macOS (Apple Silicon)."
     echo
     echo "- Unsigned: the app is signed ad hoc only. Install with Homebrew (the cask removes the quarantine attribute):"
-    echo "  \`brew install --cask holzcloud/tap/holzwave@preview\`"
+    echo "  \`brew tap holzcloud/holzwave https://github.com/holzcloud/holzWave, then brew install --cask holzcloud/holzwave/holzwave@preview\`"
     echo "- Or open the DMG, drag holzWave to Applications, then right-click and Open once."
     echo "- SHA-256: \`$sum\`"
     echo "- Windows and Linux are not part of this release."
@@ -84,9 +84,10 @@ if [ "$publish" = 1 ]; then
   rm -f "$notes"
 fi
 
-if [ -n "$tap" ]; then
-  write_cask() { # <token> <file>
+if [ "$casks" = 1 ]; then
+  write_cask() { # <token> <file> <conflict>
     cat > "$2" <<CASK
+# $4
 cask "$1" do
   version "$version"
   sha256 "$sum"
@@ -96,30 +97,39 @@ cask "$1" do
   desc "Terminal emulator with tiled panes, tabs and workspaces"
   homepage "https://holzcloud.ch/holzwave"
 
+  livecheck do
+    url "https://github.com/holzcloud/holzWave.git"
+    strategy :git
+    regex(/^v?(\\d+(?:\\.\\d+)+(?:-(?:alpha|beta)\\d+)?)\$/i)
+  end
+
+  conflicts_with cask: "$3"
   depends_on arch: :arm64
   depends_on macos: :ventura
 
   app "holzWave.app"
 
-  # The app is signed ad hoc only: without this Gatekeeper blocks the first start.
+  # The app is signed ad hoc only, so Gatekeeper would refuse to open it while it carries the quarantine attribute.
   postflight_steps do
-    run "/usr/bin/xattr", args: ["-cr", "{{appdir}}/holzWave.app"]
+    run "/usr/bin/xattr",
+        args:           ["-dr", "com.apple.quarantine", "{{appdir}}/holzWave.app"],
+        must_succeed:   false,
+        writable_paths: ["holzWave.app"],
+        writable_base:  :appdir
   end
+
+  uninstall quit: "ch.holzcloud.holzwave"
 
   zap trash: [
     "~/Library/Application Support/ch.holzcloud.holzwave",
     "~/Library/Caches/ch.holzcloud.holzwave",
     "~/Library/WebKit/ch.holzcloud.holzwave",
   ]
-
-  caveats <<~EOS
-    holzWave is unsigned (ad-hoc signature, no notarisation). The cask removes the quarantine attribute so that it opens.
-  EOS
 end
 CASK
   }
-  mkdir -p "$tap/Casks"
-  write_cask "holzwave@preview" "$tap/Casks/holzwave@preview.rb"
-  case "$version" in *-*) ;; *) write_cask "holzwave" "$tap/Casks/holzwave.rb" ;; esac
-  echo "cask written into $tap/Casks: commit and push the tap"
+  mkdir -p Casks
+  write_cask "holzwave@preview" "Casks/holzwave@preview.rb" "holzwave" "The preview channel: the newest alpha, beta or plain release. Written by scripts/release-macos.sh."
+  case "$version" in *-*) ;; *) write_cask "holzwave" "Casks/holzwave.rb" "holzwave@preview" "The stable channel: the newest plain release. Written by scripts/release-macos.sh." ;; esac
+  echo "casks written into Casks/: commit and push them"
 fi

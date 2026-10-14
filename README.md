@@ -22,14 +22,19 @@ Nextcloud. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 ## Install (macOS, Apple Silicon)
 
+Two Homebrew channels from the casks in this repository:
+
+- **Preview** (`holzwave@preview`): the newest alpha, beta or plain release.
+- **Stable** (`holzwave`): the newest plain release, from `0.0.1` on. There is none yet.
+
 ```sh
-brew tap holzcloud/tap
-brew install --cask holzcloud/tap/holzwave@preview   # preview channel: alpha and beta builds
-brew install --cask holzcloud/tap/holzwave           # stable channel: from 0.0.1 on, not released yet
+brew tap holzcloud/holzwave https://github.com/holzcloud/holzWave
+brew trust --cask holzcloud/holzwave/holzwave@preview
+brew install --cask holzcloud/holzwave/holzwave@preview
 ```
 
-Or take the DMG from the [releases](https://github.com/holzcloud/holzWave/releases) (right-click, Open, once). The cask
-removes the quarantine attribute so the unsigned app opens.
+`brew trust` is needed once per cask. Or take the DMG from the [releases](https://github.com/holzcloud/holzWave/releases)
+(right-click, Open, once). The cask removes the quarantine attribute so the unsigned app opens.
 
 > [!IMPORTANT]
 > holzWave is inspired by [Wave Terminal](https://github.com/wavetermdev/waveterm), whose idea of the shell as one block

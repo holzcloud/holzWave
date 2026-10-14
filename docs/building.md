@@ -27,10 +27,9 @@ Windows, Linux, iOS and Android are planned and not yet built. See [test-plan.md
 
 ## Releases
 
-Releases are built on this machine, never in CI. `sh scripts/release-macos.sh <version> --publish --tap <checkout of
-holzcloud/homebrew-tap>` builds the app, packs the DMG, creates the GitHub release (a version with a hyphen is a
-prerelease) and writes the cask (`holzwave@preview` for every release, `holzwave` for releases without a hyphen);
-commit and push the tap afterwards. `.\scripts\release-windows.ps1 -Version <version> -Upload` on Windows builds the
+Releases are built on this machine, never in CI. `sh scripts/release-macos.sh <version> --publish --casks` builds the app, packs the DMG, creates the GitHub release (a version with a hyphen is a
+prerelease) and writes the casks into `Casks/` of this repository (`holzwave@preview` for every release, `holzwave` for releases
+without a hyphen); commit and push them afterwards. The repository is its own Homebrew tap, like holzBar. `.\scripts\release-windows.ps1 -Version <version> -Upload` on Windows builds the
 NSIS installer and attaches it to the same release. Both scripts refuse a dirty tree or a `main` that differs from
 `origin/main`.
 
