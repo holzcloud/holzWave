@@ -244,24 +244,19 @@ function closePaneAfterAsking(pane: number): void {
 
 /**
  * Register `tab.close` and `workspace.close` (palette and key binding table, unbound by default). They close the shown
- * tab or workspace at once: asking is for the buttons, a chord or a palette entry is deliberate, as Cmd+W is.
+ * tab or workspace after the same question as the × buttons: they end every shell of the group, which one keystroke
+ * must not do unasked. `pane.close` (Cmd+W) closes one pane at once and asks nothing.
  */
 function registerCloseActions(): void {
   registerAction({
     id: "tab.close",
     title: "Close tab",
-    run: () => {
-      const index = state.view?.tabs.findIndex((t) => t.active) ?? -1;
-      if (index >= 0) send(call("close_tab", { index }));
-    },
+    run: () => closeTabAt(state.view?.tabs.findIndex((t) => t.active) ?? -1),
   });
   registerAction({
     id: "workspace.close",
     title: "Close workspace",
-    run: () => {
-      const index = state.view?.workspaces.findIndex((w) => w.active) ?? -1;
-      if (index >= 0) send(call("close_workspace", { index }));
-    },
+    run: () => closeWorkspaceAt(state.view?.workspaces.findIndex((w) => w.active) ?? -1),
   });
 }
 

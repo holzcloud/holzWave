@@ -333,9 +333,9 @@ Every tab, workspace chip and pane header has a × at its right end, always visi
 name of what closes, how many shells end with it, and, when it is everything in the window, that the window closes (or
 holzWave quits, when it is the only window). Enter or `Close` confirms, Escape or `Cancel` keeps everything, and no key
 of the question reaches the terminal. Closing a tab or workspace ends the shells of all its panes and nothing else. The
-shortcuts ask nothing, because pressing one is deliberate: `pane.close` (`Cmd+W`) closes the focused pane at once, and
-`tab.close` and `workspace.close` (both unbound by default, also in the palette) close the shown tab or workspace at
-once. In every case the last pane of the last window cannot be removed: closing it ends the app and the layout on disk
+actions that close a tab or a workspace ask the same question: `tab.close` and `workspace.close` (both unbound by
+default, also in the palette) close the shown tab or workspace after it, and a key bound to them asks too, because they
+end every shell of the group. Only `pane.close` (`Cmd+W`) closes at once, because it ends one shell. In every case the last pane of the last window cannot be removed: closing it ends the app and the layout on disk
 stays as it was, so the next start has it all back.
 
 Actions without a chord in the table (`keybindings.open`, the theme entries of the palette) are reached from the

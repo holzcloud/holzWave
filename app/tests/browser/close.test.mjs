@@ -1,7 +1,8 @@
 // Close buttons (phase 2.1, plan 06): every tab, workspace chip and pane header has a × that is always visible and always
 // asks first. The question is a page dialog with the name and the number of shells that end; Enter or Close sends one
 // command, Escape or Cancel sends nothing, and no key of it reaches the terminal. A press on a × is neither a drag, nor a
-// rename, nor a selection of the tab. Cmd+W and the palette actions ask nothing. The browser stub plays the core.
+// rename, nor a selection of the tab. The palette actions `Close tab` and `Close workspace` ask the same question; Cmd+W asks
+// nothing. The browser stub plays the core.
 import assert from "node:assert/strict";
 import { callsOf, emit } from "./lib.mjs";
 
@@ -386,7 +387,7 @@ async function pressCase(page, url) {
   assert.deepEqual(await callsOf(page, "close_tab"), []);
 }
 
-/** Cmd+W is as it was and asks nothing; the two new actions are in the palette and close at once, as a chord would. */
+/** Cmd+W is as it was and asks nothing; `Close tab` and `Close workspace` from the palette ask exactly like the buttons. */
 async function shortcutCase(page, url) {
   await open(page, url);
   await page.keyboard.press("Meta+w");
@@ -404,12 +405,48 @@ async function shortcutCase(page, url) {
     { title: "two", active: true, focus: 3, panes: 1 },
     { title: "three", active: false, focus: 4, panes: 1 },
   ] }));
+
+  // The tab: the same question as its × (name, shells), Escape keeps it, Enter closes exactly the shown tab.
   await run("Close tab");
-  assert.deepEqual(await callsOf(page, "close_tab"), [{ index: 1 }], "the shown tab");
-  await run("Close workspace");
-  assert.deepEqual(await callsOf(page, "close_workspace"), [{ index: 0 }], "the shown workspace");
-  assert.equal(await dialog(page).count(), 0, "a chord or a palette entry is deliberate: no question");
+  await dialog(page).waitFor();
+  assert.equal(await page.locator(".dlg-close .dlg-title").textContent(), "Close tab “two”?");
+  assert.equal(await page.locator(".dlg-close .dlg-why").textContent(), "The shell in it ends.");
+  assert.deepEqual(await callsOf(page, "close_tab"), [], "asked, not closed");
+  await page.keyboard.press("Escape");
+  assert.equal(await dialog(page).count(), 0);
+  assert.deepEqual(await callsOf(page, "close_tab"), [], "Escape keeps it");
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "ime", "the terminal has the keyboard back");
+  await run("Close tab");
+  await dialog(page).waitFor();
+  await page.keyboard.press("Enter");
+  assert.deepEqual(await callsOf(page, "close_tab"), [{ index: 1 }], "the shown tab, once");
+  assert.equal(await dialog(page).count(), 0);
   assert.equal(await page.evaluate(() => document.activeElement?.id), "ime");
+
+  // The workspace likewise, through the Close button.
+  await run("Close workspace");
+  await dialog(page).waitFor();
+  assert.equal(await page.locator(".dlg-close .dlg-title").textContent(), "Close workspace “alpha”?");
+  assert.equal(await page.locator(".dlg-close .dlg-why").textContent(), "The 4 shells in it end.");
+  assert.deepEqual(await callsOf(page, "close_workspace"), []);
+  await page.getByRole("button", { name: "Cancel" }).click();
+  assert.deepEqual(await callsOf(page, "close_workspace"), [], "Cancel keeps it");
+  await run("Close workspace");
+  await dialog(page).waitFor();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  assert.deepEqual(await callsOf(page, "close_workspace"), [{ index: 0 }], "the shown workspace, once");
+
+  // While it is open nothing reaches the terminal, and a layout that changed meanwhile closes nothing else.
+  await run("Close tab");
+  await dialog(page).waitFor();
+  await page.keyboard.type("hello");
+  await page.keyboard.press("Meta+w");
+  await show(page, viewOf({ tabs: [{ title: "two", active: true, focus: 9, panes: 1 }, { title: "three", active: false, focus: 4, panes: 1 }] }));
+  await page.keyboard.press("Enter");
+  assert.deepEqual(await callsOf(page, "close_tab"), [{ index: 1 }], "the tab that changed under the question is not closed");
+  assert.deepEqual(await callsOf(page, "close_pane"), [{ pane: 1 }], "Cmd+W went nowhere while the question was open");
+  assert.deepEqual(await callsOf(page, "key"), [], "no key reached the program");
+  assert.deepEqual(await callsOf(page, "text"), [], "no text either");
 }
 
 /** A name from the core is text in the question, never markup. */
