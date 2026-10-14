@@ -27,7 +27,8 @@
 #     the bundle type into the executable. The release executable is a GUI program (no console window).
 #
 # Inspected here, any mismatch fails the script: the executable is a 64-bit GUI PE and imports no mingw runtime DLL,
-# the installer is an NSIS installer that holds holzwave-app.exe (byte for byte the built one) and WebView2Loader.dll.
+# the installer is an NSIS installer that holds holzwave-app.exe (the built one, with the bundle type marker the
+# bundler writes) and WebView2Loader.dll (the built one).
 #
 # Needs: this Mac (Darwin), Docker running, `brew install mingw-w64`, `rustup target add x86_64-pc-windows-gnu`, npm,
 # a clean working tree, and the environment of docs/building.md (scripts/env.sh puts Rust and Zig 0.16 on the PATH).
@@ -158,12 +159,19 @@ listing=$(docker run --rm -v "$bdir":/in:ro "$IMAGE" sh -c '7z l /in/*-setup.exe
 printf '%s\n' "$listing" | grep -E '(holzwave-app|WebView2Loader)\.dll|holzwave-app\.exe|Type = |SubType'
 printf '%s\n' "$listing" | grep -q ' holzwave-app\.exe$' || fail "the installer does not hold holzwave-app.exe"
 printf '%s\n' "$listing" | grep -q ' WebView2Loader\.dll$' || fail "the installer does not hold WebView2Loader.dll"
-inner() { # <name in the installer> -> sha256 of that file inside it
-    docker run --rm -v "$bdir":/in:ro "$IMAGE" sh -c '7z e -so /in/*-setup.exe "$1" | sha256sum | cut -d" " -f1' sh "$1"
-}
-[ "$(inner holzwave-app.exe)" = "$(shasum -a 256 "$exe" | cut -d' ' -f1)" ] || fail "holzwave-app.exe in the installer is not the built one"
-[ "$(inner WebView2Loader.dll)" = "$(shasum -a 256 "$loader" | cut -d' ' -f1)" ] || fail "WebView2Loader.dll in the installer is not the built one"
-echo "installer content: holzwave-app.exe and WebView2Loader.dll are byte for byte the built files"
+# Take both files out of the installer (into a scratch directory under target/) and compare them with the built ones. The
+# bundler writes the bundle type into a copy of the executable (the 3 letters of __TAURI_BUNDLE_TYPE_VAR_UNK become NSS),
+# so the executable may differ in exactly those 3 bytes and must carry the NSS marker; the loader must be identical.
+scratch="$root/target/release-cross-inspect"
+rm -rf "$scratch"
+mkdir -p "$scratch" || exit 1
+docker run --rm -v "$bdir":/in:ro -v "$scratch":/out "$IMAGE" sh -c '7z e -bso0 -bsp0 -o/out /in/*-setup.exe holzwave-app.exe WebView2Loader.dll' ||
+    fail "7z could not take the files out of the installer"
+[ "$(cmp -l "$scratch/holzwave-app.exe" "$exe" | wc -l | tr -d ' ')" -le 3 ] || fail "holzwave-app.exe in the installer differs from the built one by more than the bundle type marker"
+grep -aq '__TAURI_BUNDLE_TYPE_VAR_NSS' "$scratch/holzwave-app.exe" || fail "holzwave-app.exe in the installer does not carry the NSS bundle type marker"
+cmp -s "$scratch/WebView2Loader.dll" "$loader" || fail "WebView2Loader.dll in the installer is not the built one"
+rm -rf "$scratch"
+echo "installer content: holzwave-app.exe (up to the bundle type marker) and WebView2Loader.dll are the built files"
 
 # ---- the artifact: one name, one checksum ------------------------------------------------------------------------
 name="holzWave_${version}_x64-setup.exe"

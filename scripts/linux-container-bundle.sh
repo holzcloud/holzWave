@@ -34,8 +34,28 @@
 # inspection failed, 2 when a tool (Docker, npm) is missing. A missing tool is a failed gate, never a skip.
 
 NODE_VERSION=26.11.0
-BASE_IMAGE=holzwave-linux-test
-IMAGE=holzwave-linux-bundle
+
+# HOLZWAVE_LINUX_ARCH=amd64 builds the packages as linux/amd64 (emulated on an Apple Silicon Mac, see
+# scripts/linux-container-test.sh): the images, the target volume and the output directory (target/linux-bundle-amd64)
+# get an -amd64 suffix. HOLZWAVE_BUNDLE_APPIMAGE=required makes a missing AppImage a failure (exit 1) instead of a
+# printed result: scripts/release-linux-container.sh sets both.
+PLATFORM=
+SUFFIX=
+case "${HOLZWAVE_LINUX_ARCH:-}" in
+    "") ;;
+    amd64)
+        PLATFORM=linux/amd64
+        SUFFIX=-amd64
+        ;;
+    *)
+        echo "bundle-check: HOLZWAVE_LINUX_ARCH must be unset or amd64" >&2
+        exit 2
+        ;;
+esac
+REQUIRE_APPIMAGE=0
+[ "${HOLZWAVE_BUNDLE_APPIMAGE:-}" = required ] && REQUIRE_APPIMAGE=1
+BASE_IMAGE=holzwave-linux-test$SUFFIX
+IMAGE=holzwave-linux-bundle$SUFFIX
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
@@ -65,7 +85,7 @@ sh "$here/linux-container-test.sh" image || {
 # SHASUMS256.txt that nodejs.org publishes for it before it is unpacked; nothing downloaded here enters the repository.
 build_image() {
     echo "+ docker build -t $IMAGE (Dockerfile from stdin)"
-    docker build -t "$IMAGE" --build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg "NODE_VERSION=$NODE_VERSION" - <<'DOCKERFILE'
+    docker build ${PLATFORM:+--platform "$PLATFORM"} -t "$IMAGE" --build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg "NODE_VERSION=$NODE_VERSION" - <<'DOCKERFILE'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 ARG NODE_VERSION
@@ -105,7 +125,7 @@ fi
 echo "+ npm --prefix app run build"
 (cd "$root" && npm --prefix app run build) || exit 1
 
-out="$root/target/linux-bundle"
+out="$root/target/linux-bundle$SUFFIX"
 rm -rf "$out"
 mkdir -p "$out" || exit 1
 
@@ -193,6 +213,9 @@ else
     reason=$(grep -iE 'error|failed' /tmp/appimage.log | head -n 1)
     echo "appimage: not built, ${reason:-$(tail -n 1 /tmp/appimage.log)}"
 fi
+if [ "${REQUIRE_APPIMAGE:-0}" = 1 ] && ! ls /out/*.AppImage >/dev/null 2>&1; then
+    fail "the AppImage was required and is missing (see above)"
+fi
 exit 0
 INNER
 )
@@ -209,14 +232,15 @@ fi
 
 echo "+ docker run $IMAGE (build and inspect)"
 COPYFILE_DISABLE=1 tar -c -C "$root" --exclude target --exclude .git --exclude node_modules --exclude .planning . |
-    docker run --rm -i \
+    docker run --rm -i ${PLATFORM:+--platform "$PLATFORM"} \
         -v holzwave-linux-cargo-registry:/root/.cargo/registry \
         -v holzwave-linux-cargo-git:/root/.cargo/git \
-        -v holzwave-linux-target:/work/target \
+        -v holzwave-linux-target$SUFFIX:/work/target \
         -v holzwave-linux-npm:/root/.npm \
         -v "$out":/out \
         ${zig_system:+-v "$zig_system":/zig-system:ro -e GHOSTTY_ZIG_SYSTEM_DIR=/zig-system} \
         -e CARGO_TERM_COLOR=never \
+        -e REQUIRE_APPIMAGE="$REQUIRE_APPIMAGE" \
         "$IMAGE" \
         sh -c 'tar -x --no-same-owner -C /work && exec sh -c "$1"' sh "$INNER"
 status=$?
@@ -225,6 +249,6 @@ if [ "$status" != 0 ]; then
     echo "bundle-check: FAILED (docker exit $status)" >&2
     exit 1
 fi
-echo "bundle-check: packages are in target/linux-bundle/"
+echo "bundle-check: packages are in target/linux-bundle$SUFFIX/"
 ls -l "$out"
 echo "bundle-check: ok"

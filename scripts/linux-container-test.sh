@@ -20,9 +20,30 @@
 # Exit status: 0 when the tests ran and passed, 1 when a test failed or no test ran, 2 when a tool is missing
 # (Docker, or npm for the app modes). A missing tool is a failed gate, never a skip.
 
-IMAGE=holzwave-linux-test
 ZIG_VERSION=0.16.0
 BASE_IMAGE=ubuntu:26.04
+
+# HOLZWAVE_LINUX_ARCH=amd64 runs everything as linux/amd64 (on an Apple Silicon Mac Docker Desktop emulates it, with
+# Rosetta when that is enabled): the image is holzwave-linux-test-amd64 and the target volume holzwave-linux-target-amd64,
+# so the two architectures never share a build cache. scripts/release-linux-container.sh sets it. Unset: the native
+# architecture, exactly as before. The amd64 image is Ubuntu 24.04, not 26.04: under Rosetta the glibc 2.43 of 26.04
+# fails to create files (GNU tar: "Cannot open: Function not implemented"), and the older glibc 2.39 lets the packages
+# run on more distributions (a package needs at least the glibc it was built with).
+PLATFORM=
+SUFFIX=
+case "${HOLZWAVE_LINUX_ARCH:-}" in
+    "") ;;
+    amd64)
+        PLATFORM=linux/amd64
+        SUFFIX=-amd64
+        BASE_IMAGE=ubuntu:24.04
+        ;;
+    *)
+        echo "linux-container-test: HOLZWAVE_LINUX_ARCH must be unset or amd64" >&2
+        exit 2
+        ;;
+esac
+IMAGE=holzwave-linux-test$SUFFIX
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
@@ -58,7 +79,7 @@ fi
 # rustup comes from its official installer over TLS 1.2 or newer. Nothing downloaded here enters the repository.
 build_image() {
     echo "+ docker build -t $IMAGE (Dockerfile from stdin)"
-    docker build -t "$IMAGE" --build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg "ZIG_VERSION=$ZIG_VERSION" - <<'DOCKERFILE'
+    docker build ${PLATFORM:+--platform "$PLATFORM"} -t "$IMAGE" --build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg "ZIG_VERSION=$ZIG_VERSION" - <<'DOCKERFILE'
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 ARG ZIG_VERSION
@@ -99,10 +120,10 @@ run_tests() {
     code=$(mktemp "${TMPDIR:-/tmp}/holzwave-linux-test-code.XXXXXX") || exit 2
     echo "+ docker run $IMAGE cargo test --locked --no-fail-fast $*"
     tree_stream | {
-        docker run --rm -i \
+        docker run --rm -i ${PLATFORM:+--platform "$PLATFORM"} \
             -v holzwave-linux-cargo-registry:/root/.cargo/registry \
             -v holzwave-linux-cargo-git:/root/.cargo/git \
-            -v holzwave-linux-target:/work/target \
+            -v holzwave-linux-target$SUFFIX:/work/target \
             -e CARGO_TERM_COLOR=never \
             "$IMAGE" \
             sh -c 'tar -x --no-same-owner -C /work && exec "$@"' sh cargo test --locked --no-fail-fast "$@"
