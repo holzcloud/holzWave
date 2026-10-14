@@ -97,14 +97,13 @@ cask "$1" do
   homepage "https://holzcloud.ch/holzwave"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "holzWave.app"
 
   # The app is signed ad hoc only: without this Gatekeeper blocks the first start.
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-cr", "#{appdir}/holzWave.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-cr", "{{appdir}}/holzWave.app"]
   end
 
   zap trash: [
