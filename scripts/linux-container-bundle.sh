@@ -112,6 +112,20 @@ RUN set -eu; \
     ln -s /opt/node/bin/npm /usr/local/bin/npm; \
     ln -s /opt/node/bin/npx /usr/local/bin/npx; \
     test "$(node --version)" = "v${NODE_VERSION}"
+# x86_64 only (where Docker Desktop emulates it with Rosetta): Rosetta cannot start the type-2 runtime of the
+# linuxdeploy AppImage output plugin that the Tauri bundler downloads ("Exec format error", a static-pie file), but it
+# runs what is inside the file. So the plugin is unpacked here once (the squashfs starts where the ELF runtime ends)
+# and INNER puts a one-line stand-in for the downloaded file in the bundler's cache. It is the same unpinned
+# "continuous" download the bundler would make.
+RUN set -eu; \
+    if [ "$(uname -m)" = x86_64 ]; then \
+        curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/plugin.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage; \
+        off=$(readelf -h /tmp/plugin.AppImage | awk '/Start of section headers/{s=$5} /Size of section headers/{z=$5} /Number of section headers/{n=$5} END{print s+z*n}'); \
+        unsquashfs -o "$off" -d /opt/linuxdeploy-plugin-appimage /tmp/plugin.AppImage >/dev/null; \
+        rm /tmp/plugin.AppImage; \
+        test "$(/opt/linuxdeploy-plugin-appimage/AppRun --plugin-api-version)" = 0; \
+    fi
 DOCKERFILE
 }
 
@@ -202,6 +216,12 @@ echo "-- rpm scripts: none"
 ls -l /out
 # ---- AppImage (a try; never a gate) ------------------------------------------------------------------------------
 echo "== AppImage (best effort, APPIMAGE_EXTRACT_AND_RUN=1)"
+if [ -x /opt/linuxdeploy-plugin-appimage/AppRun ]; then
+    # See the Dockerfile: the stand-in for the plugin AppImage that Rosetta cannot start.
+    mkdir -p /root/.cache/tauri
+    printf '#!/bin/sh\nexec /opt/linuxdeploy-plugin-appimage/AppRun "$@"\n' >/root/.cache/tauri/linuxdeploy-plugin-appimage.AppImage
+    chmod +x /root/.cache/tauri/linuxdeploy-plugin-appimage.AppImage
+fi
 if APPIMAGE_EXTRACT_AND_RUN=1 tauri --bundles appimage >/tmp/appimage.log 2>&1; then
     image=$(ls "$bundle"/appimage/*.AppImage 2>/dev/null | head -n 1)
     if [ -n "$image" ] && cp "$image" /out/; then
