@@ -7,7 +7,7 @@ tag or a release, or needs a CI file (Phase 2 D-04). The result is a per-user NS
 > [!IMPORTANT]
 > **Honest status.** This guide was written on a Mac. No Windows host was available, so no step below was run on
 > Windows. What was checked on the Mac is listed at the end ([What was and was not verified](#what-was-and-was-not-verified));
-> the rest is the owner's first run, and rows W1 to W13 of [test-plan.md](test-plan.md) (Part 4) are where a step that
+> the rest is the owner's first run, and rows W1 to W14 of [test-plan.md](test-plan.md) (Part 4) are where a step that
 > does not work as written gets noted. Where a step says "unverified", that is meant literally.
 
 ## Rules of this build
@@ -166,9 +166,54 @@ Get-FileHash -Algorithm SHA256 .\target\release\bundle\nsis\holzWave_0.0.1-alpha
 
 Publish the hash beside the file (on the release page when there is one). No release is made by this guide.
 
+## The preview installer built from a Mac (GNU ABI, not the MSVC build)
+
+For a test round before a Windows build host is set up, the owner builds a Windows installer **on the Mac**:
+
+```sh
+brew install mingw-w64                       # once: the GNU-ABI linker and resource compiler (the only system install)
+rustup target add x86_64-pc-windows-gnu      # once
+sh scripts/release-windows-cross.sh 0.0.1-alpha1     # clean tree; the version of tauri.conf.json
+```
+
+The result is `target/release-cross/holzWave_<version>_x64-setup.exe` and its `.sha256` file. The script only builds and
+inspects; it never publishes. To attach the files to the release that `scripts/release-macos.sh --publish` created:
+`gh release upload v<version> target/release-cross/holzWave_<version>_x64-setup.exe*`.
+
+> [!WARNING]
+> **What this installer is not.** It is built for the **GNU ABI** (`x86_64-pc-windows-gnu`, linked with mingw-w64), not
+> the MSVC ABI that steps 1 to 7 above build. **A GNU-ABI holzWave has never run on Windows**: the owner's W rows are its
+> first run, and a failure there may come from the ABI and not from the code. It is unsigned (SmartScreen warns, see
+> step 7) and per user. The MSVC build on a Windows host is the better build and replaces this one; use it as soon as a
+> Windows machine builds.
+
+How the script gets there, and what each step is for (measured on an Apple Silicon Mac, details in
+`.planning/phases/02.2-windows-linux/02.2-RESEARCH-10.md`):
+
+- **Rust and Zig** cross-compile for `x86_64-pc-windows-gnu`; Zig builds the terminal engine for `x86_64-windows-gnu`
+  (it cannot build for MSVC on a Mac). The GNU linker drops a weak stack-probe symbol of Zig's runtime and fails with
+  "relocation truncated to fit ... `___chkstk_ms`"; the script links this target with `-Wl,--no-gc-sections` (set only
+  for this target through `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS`), which costs a few MB of executable size.
+- **NSIS** is not installed on the Mac. The Tauri bundler needs a `makensis` on `PATH` there; the script puts a one-line
+  `makensis` in front of it that runs NSIS 3.10 in a Docker container (image `holzwave-nsis`: Ubuntu with the `nsis` and
+  `7zip` packages), with the repository and the bundler's cache mounted at the same paths. The same container reads the
+  finished installer back with 7-Zip.
+- **WebView2.** The GNU ABI loads `WebView2Loader.dll` as a DLL (the MSVC build links it in); the bundler installs it
+  beside the executable. The installer still downloads the WebView2 runtime when it is missing, as in step 6.
+- **No console window.** `app/src-tauri/src/main.rs` makes release builds a GUI program (a pinned test); the first build
+  of this plan showed that without it the executable is a console program.
+- **Windows 10 or newer.** The executable imports the Universal C Runtime (`api-ms-win-crt-*`) of the mingw-w64 build;
+  no mingw runtime DLL is needed (the script fails if one is imported).
+
+Checked on the Mac by the script (and nowhere else): the executable is a 64-bit GUI PE file that imports no mingw
+runtime DLL; the installer is an NSIS installer that holds `holzwave-app.exe` and `WebView2Loader.dll`, both read back out
+of it and compared with the built files. **Not checked:** that the installer runs, that the application starts, that
+WebView2 accepts the GNU-linked loader, that ConPTY works from this executable, SmartScreen, the uninstaller. Row W14 of
+[test-plan.md](test-plan.md) is where the owner tests this exact file, and the other rows then apply to what was installed from it.
+
 ## Reporting a result
 
-Open Part 4 of [test-plan.md](test-plan.md). For every row W1 to W13, write `pass`, or `fail` with a line of what you
+Open Part 4 of [test-plan.md](test-plan.md). For every row W1 to W14, write `pass`, or `fail` with a line of what you
 saw, in its Result column, and also note any step of **this guide** that failed with its exact message (W1 covers the
 guide from the top). Rows you could not run stay empty. A failing row becomes a gap plan; DESK-30 is marked done only when
 the rows pass.
@@ -183,8 +228,9 @@ Verified on a Mac, with a tool that exists there:
 | `scripts/env.ps1` parses with the PowerShell parser of PowerShell 7.6.6; sourced on a Mac it returns with a message and does not close the shell; it leaves no function or variable behind | run with `pwsh` |
 | The Zig install path: the published index is read (the entry of 0.16.0 for both Windows architectures), a foreign address or a malformed checksum in the index is refused, a download whose sha256 differs is deleted and nothing is unpacked, the archive's real checksum equals the index and its layout is the one the script expects, a Zig of another version is refused | run with `pwsh` on the Mac against the real ziglang.org download, and with a tampered checksum |
 | The core and the app compile for `x86_64-pc-windows-gnu`, including every test target | `sh scripts/cross-check.sh all` |
+| The preview installer: the GNU-ABI release build links, the executable is a 64-bit GUI PE file that imports no mingw runtime DLL, the NSIS installer holds the executable and `WebView2Loader.dll`, both read back out of it | `sh scripts/release-windows-cross.sh <version>` on a Mac (mingw-w64 from Homebrew, NSIS in Docker) |
 
-**Not verified, because no Windows host was available:** that `env.ps1` finds `vswhere.exe` and the C++ tools, reads
+**Not verified, because no Windows host was available:** that the preview installer runs at all (row W14); that `env.ps1` finds `vswhere.exe` and the C++ tools, reads
 `rustc -vV` and runs `zig.exe` on Windows; that Windows PowerShell 5.1 runs it (written to its limits, not tried); the
 MSVC build of the terminal engine; that the guide's commands run in this order from a clean user account; the installer,
 its name, its install folder, SmartScreen and the uninstaller; the WebView2 bootstrapper; the ConPTY tests; and every

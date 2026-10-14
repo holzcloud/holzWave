@@ -8,7 +8,7 @@ The result is a `.deb`, an `.rpm` and an AppImage; the packages are not signed (
 > **Honest status.** The Linux half of the code and the packaging were run in a Linux container on a Mac (Ubuntu 26.04,
 > arm64): the whole core test suite and the app crate's tests pass there, and a deb, an rpm and an AppImage were built
 > and the first two inspected. No Linux desktop was available, so nothing was run with a screen, a GPU, X11, Wayland, a
-> real package manager install or on x86_64. Rows L1 to L10 of [test-plan.md](test-plan.md) (Part 4) are where the owner
+> real package manager install or on x86_64. Rows L1 to L11 of [test-plan.md](test-plan.md) (Part 4) are where the owner
 > notes a package name or a command that differs on a real machine. See
 > [What was and was not verified](#what-was-and-was-not-verified).
 
@@ -21,7 +21,8 @@ The result is a `.deb`, an `.rpm` and an AppImage; the packages are not signed (
 - **Everything else is the newest version**: Rust stable (from rustup, not the distribution's older `rustc`), Node,
   npm, git, the system libraries.
 - **Build only locally**, on your own machine.
-- x86_64 for 0.0.1. The container route below is arm64 on an Apple Silicon Mac, a stand-in for structure and tests.
+- x86_64 for 0.0.1. The container route below is arm64 on an Apple Silicon Mac, a stand-in for structure and tests; the
+  preview packages of the next-but-one section are built in an emulated amd64 container.
 
 ## Packages
 
@@ -190,6 +191,47 @@ release build of the engine fetches Zig packages from the network the first time
 script's header says what to do when that host is down. Both scripts print `ok` as their last line and exit non-zero
 otherwise; a missing Docker is a failed gate, not a skip.
 
+## The preview packages built from a Mac (x86_64, emulated)
+
+Until a Linux machine builds the packages itself, the owner builds x86_64 packages **on the Mac**, in an amd64 Docker
+container:
+
+```sh
+sh scripts/release-linux-container.sh 0.0.1-alpha1     # clean tree; the version of tauri.conf.json
+```
+
+The result, in `target/release-cross/` (next to the Windows installer), is `holzWave_<version>_amd64.deb`,
+`holzWave_<version>_x86_64.rpm` and `holzWave_<version>_x86_64.AppImage`, each with a `.sha256` file. The script only
+builds and inspects; it never publishes. To attach the files to the release that `scripts/release-macos.sh --publish`
+created: `gh release upload v<version> target/release-cross/holzWave_<version>_*`.
+
+> [!WARNING]
+> **What these packages are not.** They were built in a container whose amd64 code is **emulated** on an Apple Silicon Mac
+> (Docker Desktop, Rosetta): the code is real x86_64 code, but **nothing of it has run on a Linux desktop or on x86_64
+> hardware**, and the AppImage has never been started (the container has no FUSE and no display). They are unsigned. The
+> owner's row L11 of [test-plan.md](test-plan.md) is their first run. They need **glibc 2.39 or newer** and WebKitGTK
+> 4.1 (the base image is Ubuntu 24.04): Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer and the like; an
+> older distribution cannot install them and must build from source as described above.
+
+What the script does, and why (details in `.planning/phases/02.2-windows-linux/02.2-RESEARCH-10.md`):
+
+- It runs `scripts/linux-container-bundle.sh` with `HOLZWAVE_LINUX_ARCH=amd64` and `HOLZWAVE_BUNDLE_APPIMAGE=required`,
+  which builds the images `holzwave-linux-test-amd64` and `holzwave-linux-bundle-amd64` (own volumes, own output folder
+  `target/linux-bundle-amd64/`; the arm64 ones are untouched), builds the release app, makes the three packages and
+  inspects the deb and rpm (dependencies, files, icons, desktop file, no install script).
+- **The base is Ubuntu 24.04, not 26.04.** The glibc 2.43 of Ubuntu 26.04 fails to create files under Rosetta (GNU
+  `tar`: "Cannot open: Function not implemented"), so the amd64 image cannot even unpack Zig; 24.04 works, and its older
+  glibc lets the packages run on more distributions.
+- **The AppImage tool is unpacked once.** Rosetta cannot start the downloaded AppImage output plugin of linuxdeploy
+  ("Exec format error": its type-2 runtime is a static-pie file), but it runs the plugin's contents. The image unpacks
+  the plugin (the same unpinned "continuous" download the Tauri bundler makes) and the build puts a one-line stand-in
+  for the downloaded file in the bundler's cache.
+- The script then reads each package back: the deb is `amd64`, the rpm `x86_64`, the AppImage an x86-64 ELF file whose
+  `AppRun`, program and bundled WebKitGTK are there (the AppImage is opened without being run).
+
+The first run builds the images and compiles everything in the emulated container (minutes for the images and the
+compile of the application, measured in the research document); later runs reuse the docker volumes.
+
 ## Graphics: a blank, white or flickering window
 
 holzWave shows its page through WebKitGTK. On some setups, most often NVIDIA GPUs, WebKitGTK and the graphics driver
@@ -248,7 +290,7 @@ differ, and what to do if it does not build. This guide's own build does not mak
 ## Reporting a result
 
 Part 4 of [test-plan.md](test-plan.md): write `pass`, or `fail` with a line of what you saw, in the Result column of
-each row L1 to L10, and note any step of **this guide** that failed with its exact message (L1 covers the guide from
+each row L1 to L11, and note any step of **this guide** that failed with its exact message (L1 covers the guide from
 the top). A failing row becomes a gap plan; DESK-31 is marked done only when the rows pass.
 
 ## What was and was not verified
@@ -260,13 +302,15 @@ Verified in a Linux container on a Mac (Ubuntu 26.04.1, arm64, rustc 1.99, Zig 0
 | The core tests and the app crate's tests pass on Linux | `sh scripts/linux-container-test.sh all` |
 | `scripts/env.sh` sourced by dash, bash and zsh finds `$HOME/.holzwave/zig-0.16.0` and `$HOLZWAVE_ZIG_DIR`, never exits, and leaves the macOS `PATH` exactly as it was | run in the container and on the Mac |
 | The release build, a deb, an rpm and an AppImage; the deb and rpm have the right dependencies, files, icons, categories, keywords and no install script | `sh scripts/linux-container-bundle.sh` |
+| The same for x86_64: the release build, deb, rpm and AppImage in an amd64 container (Ubuntu 24.04, emulated); each is read back as x86_64 and the AppImage is opened without being run | `sh scripts/release-linux-container.sh <version>` |
 | The Debian family package names exist on Ubuntu 26.04; the Fedora family names exist on Fedora 44 | `apt-cache policy`, `dnf repoquery` in containers |
 | The commands that unpack Zig have the shape of the container image's own (checksum from the published index, `tar --strip-components=1`) | the image build of `scripts/linux-container-test.sh` |
 | The graphics section's symptoms, variables and their order | the Tauri documentation page "Linux Graphics Issues" (<https://v2.tauri.app/develop/debug/linux-graphics/>), read on 2026-10-12 |
 
 **Not verified, because no Linux desktop was available:** every graphics statement as seen on a screen; X11 and
 Wayland runs; GNOME and KDE; the installs on a real Debian family and Fedora family machine (including whether the
-Fedora set builds holzWave); the Fedora build; x86_64; that the AppImage starts (it was built, not run: no FUSE and no
-display in the container); the build with the page built by the package's own `beforeBuildCommand` (the container used
+Fedora set builds holzWave); the Fedora build; any run on real x86_64 hardware (the preview packages are x86_64 code built
+under emulation and never run); that the AppImage starts (it was built, not run: no FUSE and no display in the
+container); the build with the page built by the package's own `beforeBuildCommand` (the container used
 the host-built page); the `NO_STRIP` and FUSE remedies; `update-desktop-database` and the `Exec=env ...` override; and
 every row of Part 4.

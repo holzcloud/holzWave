@@ -23,7 +23,7 @@ cargo test --workspace
 cargo run --release -p holzwave-spike -- throughput 256
 ```
 
-Windows, Linux, iOS and Android are planned and not yet built. See [test-plan.md](test-plan.md) for the full test setup.
+Windows and Linux builds are written and cross-checked from a Mac and have not been run on their own platform yet (see [build-windows.md](build-windows.md) and [build-linux.md](build-linux.md)); iOS and Android are planned and not yet built. See [test-plan.md](test-plan.md) for the full test setup.
 
 ## Releases
 
@@ -32,4 +32,19 @@ prerelease) and writes the casks into `Casks/` of this repository (`holzwave@pre
 without a hyphen); commit and push them afterwards. The repository is its own Homebrew tap, like holzBar. `.\scripts\release-windows.ps1 -Version <version> -Upload` on Windows builds the
 NSIS installer and attaches it to the same release. Both scripts refuse a dirty tree or a `main` that differs from
 `origin/main`.
+
+**Preview packages for Windows and Linux, built on this Mac** (owner decision of 2026-10-14; they only build and checksum,
+they never publish):
+
+```sh
+sh scripts/release-windows-cross.sh <version>      # holzWave_<version>_x64-setup.exe, GNU ABI, unsigned, per user
+sh scripts/release-linux-container.sh <version>    # holzWave_<version>_amd64.deb, _x86_64.rpm, _x86_64.AppImage, unsigned
+gh release upload v<version> target/release-cross/holzWave_<version>_*     # by hand, to the release macOS created
+```
+
+Both leave the files and their `.sha256` files in `target/release-cross/`, need a clean working tree (not necessarily
+`main`) and Docker. The Windows installer is a GNU-ABI build (`brew install mingw-w64` once), not the MSVC build of a
+Windows host, and has never run on Windows; the Linux packages come from an emulated amd64 container (Ubuntu 24.04) and
+have never run on a Linux desktop. Rows W14 and L11 of [test-plan.md](test-plan.md) are their first run; the limits are
+in [build-windows.md](build-windows.md) and [build-linux.md](build-linux.md).
 

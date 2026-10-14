@@ -14,7 +14,7 @@
 //! * the sources: no network API in first-party Rust (non-test code) or in the page;
 //! * the page policy (no remote origin in the CSP, no dev server URL, no updater) and the absence of CI (D-04);
 //! * the examples of `docs/config.md`, which are parsed by the real loaders, so the document cannot drift from the code;
-//! * the owner's Windows and Linux list: every row W1 to W13 and L1 to L10 is in `docs/test-plan.md` exactly once.
+//! * the owner's Windows and Linux list: every row W1 to W14 and L1 to L11 is in `docs/test-plan.md` exactly once.
 //!
 //! The capability allow-list and the exact CSP are pinned by `app/src-tauri/tests/acl.rs`; this file does not repeat
 //! them, it only re-checks the properties that DESK-26 depends on.
@@ -819,7 +819,7 @@ fn test_plan_row_problems(doc: &str, ids: &[String]) -> Vec<String> {
 }
 
 fn windows_and_linux_row_ids() -> Vec<String> {
-    (1..=13).map(|n| format!("W{n}")).chain((1..=10).map(|n| format!("L{n}"))).collect()
+    (1..=14).map(|n| format!("W{n}")).chain((1..=11).map(|n| format!("L{n}"))).collect()
 }
 
 #[test]

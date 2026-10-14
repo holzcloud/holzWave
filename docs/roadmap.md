@@ -59,8 +59,8 @@ Does not exist yet:
   tables, the OS text size), the Linux runtime, a per-user unsigned NSIS installer configuration and the deb, rpm and
   AppImage configuration exist; the code compiles for both platforms from the Mac, the Linux tests pass in a container and
   a deb, an rpm and an AppImage were built there. The build guides are [build-windows.md](build-windows.md) and
-  [build-linux.md](build-linux.md), the owner's list is Part 4 of [test-plan.md](test-plan.md) (rows W1 to W13 and L1 to
-  L10, all still open), and the differences from macOS are listed once in [design.md](design.md) section 7. The Flatpak is
+  [build-linux.md](build-linux.md), the owner's list is Part 4 of [test-plan.md](test-plan.md) (rows W1 to W14 and L1 to
+  L11, all still open), and the differences from macOS are listed once in [design.md](design.md) section 7. The Flatpak is
   the last plan of the phase and conditional: its manifest and the host-shell code path exist and are checked from the Mac
   ([flatpak.md](flatpak.md)), but it was never built or run, and it ships only if it builds on the owner's machine and row
   L10 passes. DESK-30 and DESK-31 are marked done only after the owner's rows pass.

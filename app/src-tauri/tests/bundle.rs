@@ -198,3 +198,92 @@ fn a_release_build_on_windows_is_a_gui_program() {
         "src/main.rs has no windows_subsystem attribute for release builds"
     );
 }
+
+// ---- the preview packages built from the Mac (plan 02.2-10) --------------------------------------------------------
+
+const WINDOWS_CROSS: &str = include_str!("../../../scripts/release-windows-cross.sh");
+const LINUX_CONTAINER: &str = include_str!("../../../scripts/release-linux-container.sh");
+const BUILD_WINDOWS_DOC: &str = include_str!("../../../docs/build-windows.md");
+const BUILD_LINUX_DOC: &str = include_str!("../../../docs/build-linux.md");
+
+/// The lines of a shell script that run something: no blank line and no comment, and the text between double quotes is cut
+/// out of each line, so a message that names a command for the reader (`need "... brew install mingw-w64"`) is not a
+/// command. What a script says it does not do must hold for these lines.
+fn commands(script: &str) -> Vec<String> {
+    script
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut out = String::new();
+            let mut quoted = false;
+            for c in l.chars() {
+                if c == '"' {
+                    quoted = !quoted;
+                } else if !quoted {
+                    out.push(c);
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+#[test]
+fn the_cross_release_scripts_only_build_and_never_publish() {
+    // The owner publishes by hand with `gh release upload` (the scripts print the command and do not run it), and nothing
+    // here installs a tool: a missing tool is exit 2 with the command that fixes it (the owner approved mingw-w64 only).
+    for (name, script) in [("release-windows-cross.sh", WINDOWS_CROSS), ("release-linux-container.sh", LINUX_CONTAINER)] {
+        for line in commands(script) {
+            // (`apt-get install` inside the Dockerfile heredoc is the image's own build and is allowed.)
+            for forbidden in ["gh release", "gh api", "git push", "git tag", "--publish", "brew install", "cargo install", "rustup target add", "sudo "] {
+                assert!(!line.contains(forbidden), "{name} runs `{forbidden}`: {line}");
+            }
+        }
+        assert!(script.contains("gh release upload"), "{name} does not tell how to attach the files");
+        assert!(script.contains(".sha256"), "{name} writes no checksum file");
+    }
+}
+
+#[test]
+fn the_cross_release_scripts_name_the_artifacts_by_one_scheme() {
+    assert!(WINDOWS_CROSS.contains(r#"name="holzWave_${version}_x64-setup.exe""#), "the Windows installer name");
+    for name in [
+        r#""holzWave_${version}_amd64.deb""#,
+        r#""holzWave_${version}_x86_64.rpm""#,
+        r#""holzWave_${version}_x86_64.AppImage""#,
+    ] {
+        assert!(LINUX_CONTAINER.contains(name), "the Linux scripts does not name {name}");
+    }
+    // One folder for all of them, the one `gh release upload` is pointed at.
+    assert!(WINDOWS_CROSS.contains("out=target/release-cross") && LINUX_CONTAINER.contains("out=target/release-cross"));
+}
+
+#[test]
+fn the_windows_cross_build_is_the_gnu_abi_and_says_so() {
+    // Honest labelling: this build is not the MSVC build and has never run on Windows. The script prints it, the build
+    // guide says it, and the target is the GNU one (the MSVC engine cannot be built from a Mac).
+    assert!(WINDOWS_CROSS.contains("TARGET=x86_64-pc-windows-gnu"), "the target is not the GNU ABI");
+    assert!(!WINDOWS_CROSS.contains("windows-msvc"), "the cross build names the MSVC target");
+    for text in ["GNU-ABI build", "not the MSVC build", "unsigned", "never run on Windows"] {
+        assert!(WINDOWS_CROSS.contains(text), "release-windows-cross.sh does not say `{text}`");
+    }
+    for text in ["GNU ABI", "never run on Windows", "unsigned", "MSVC build"] {
+        assert!(BUILD_WINDOWS_DOC.contains(text), "docs/build-windows.md does not say `{text}`");
+    }
+    // The link fix and the NSIS route the research found; losing either breaks the build or the installer.
+    let code = |needle: &str| WINDOWS_CROSS.lines().any(|l| !l.trim_start().starts_with('#') && l.contains(needle));
+    assert!(code("-Wl,--no-gc-sections"), "the link flag for ___chkstk_ms is not passed (a comment does not count)");
+    assert!(code("CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="), "the flag must apply to this target only");
+    assert!(WINDOWS_CROSS.contains("makensis") && WINDOWS_CROSS.contains("docker run"), "NSIS runs in Docker");
+}
+
+#[test]
+fn the_linux_container_build_is_amd64_and_says_what_it_is_not() {
+    assert!(LINUX_CONTAINER.contains("HOLZWAVE_LINUX_ARCH=amd64"), "the build is not the amd64 container");
+    assert!(LINUX_CONTAINER.contains("HOLZWAVE_BUNDLE_APPIMAGE=required"), "a missing AppImage must fail the release");
+    for text in ["emulated", "glibc 2.39", "unsigned", "has not been started"] {
+        assert!(LINUX_CONTAINER.contains(text), "release-linux-container.sh does not say `{text}`");
+    }
+    assert!(BUILD_LINUX_DOC.contains("glibc 2.39") && BUILD_LINUX_DOC.contains("emulated"), "docs/build-linux.md lacks the limits");
+}
