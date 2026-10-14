@@ -709,6 +709,18 @@ impl Layout {
         true
     }
 
+    /// Drop `pane` on the chip of workspace `workspace`: it goes to the right of the focus pane of that workspace's
+    /// shown tab and is focused and shown there, keeping its id, shell, name and scrollback like every move. A
+    /// workspace the pane leaves empty disappears. Nothing changes, and false comes back, for an unknown pane, an
+    /// unknown workspace, the workspace the pane is in already, and a result over the pane or depth limits of that tab.
+    pub fn move_pane_to_workspace(&mut self, pane: PaneId, workspace: usize) -> bool {
+        let Some((from, _)) = self.locate(pane) else { return false };
+        let Some(target) = self.workspaces.get(workspace).filter(|_| from != workspace) else { return false };
+        let Some(tab) = target.tabs.get(target.active) else { return false };
+        let focus = tab.focus;
+        self.move_pane(pane, focus, Edge::Right)
+    }
+
     /// Put `pane`, which is in no tab of this layout, on a side of `target` (never the middle) and focus it. False,
     /// with the layout possibly changed by the unused split id only, when the target is not here or the tab is at
     /// its pane or depth limit; callers work on a copy.
@@ -2113,5 +2125,85 @@ mod tests {
         assert!(l.move_tab_to_workspace(0, 1));
         assert_eq!(l.workspaces.len(), 1);
         assert_eq!(l.workspace().tabs.len(), 3);
+    }
+
+    #[test]
+    fn a_pane_moves_onto_a_workspace_chip_next_to_its_focus_pane() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        l.rename_pane(b, "web");
+        let w = l.new_workspace("work").unwrap();
+        let x = l.split_focused(Axis::Row).unwrap();
+        l.select_workspace(0);
+        assert!(l.move_pane_to_workspace(b, 1));
+        assert_eq!(l.active, 1, "the workspace the pane went to is shown");
+        assert_eq!(l.workspaces[0].tabs[0].panes(), vec![a]);
+        assert_eq!(l.tab().panes(), vec![w, x, b], "to the right of the focus pane x");
+        assert_eq!(l.tab().focus, b);
+        assert_eq!(l.pane_name(b), Some("web"), "the name follows the pane");
+        assert_eq!(sorted(l.all_panes()), sorted(vec![a, b, w, x]));
+    }
+
+    #[test]
+    fn the_only_pane_of_a_workspace_moves_away_and_the_workspace_goes() {
+        let (mut l, a) = Layout::new();
+        let w = l.new_workspace("work").unwrap();
+        l.select_workspace(1);
+        l.select_workspace(0);
+        assert!(l.move_pane_to_workspace(a, 1));
+        assert_eq!(l.workspaces.len(), 1);
+        assert_eq!(l.workspace().name, "work");
+        assert_eq!(l.tab().panes(), vec![w, a]);
+    }
+
+    #[test]
+    fn a_pane_goes_next_to_the_focus_pane_of_the_shown_tab_of_that_workspace() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        let w = l.new_workspace("work").unwrap();
+        let shown = l.new_tab().unwrap();
+        l.select_workspace(0);
+        assert!(l.move_pane_to_workspace(a, 1));
+        let ws = &l.workspaces[1];
+        assert_eq!(ws.tabs.len(), 2, "no new tab");
+        assert_eq!(ws.active, 1, "the tab that was shown is still the shown one");
+        assert_eq!(ws.tabs[0].panes(), vec![w], "the other tab is untouched");
+        assert_eq!(ws.tabs[1].panes(), vec![shown, a]);
+        assert_eq!(l.workspaces[0].tabs[0].panes(), vec![b]);
+    }
+
+    #[test]
+    fn a_pane_dropped_on_a_chip_with_bad_ids_changes_nothing() {
+        let (mut l, a) = Layout::new();
+        let b = l.split_focused(Axis::Row).unwrap();
+        l.new_workspace("work").unwrap();
+        l.select_workspace(0);
+        let before = l.clone();
+        assert!(!l.move_pane_to_workspace(999, 1), "unknown pane");
+        assert!(!l.move_pane_to_workspace(a, 2), "unknown workspace");
+        assert!(!l.move_pane_to_workspace(a, usize::MAX), "unknown workspace");
+        assert!(!l.move_pane_to_workspace(a, 0), "a workspace the pane is in");
+        assert!(!l.move_pane_to_workspace(b, 0), "a workspace the pane is in");
+        assert_eq!(l, before);
+    }
+
+    #[test]
+    fn a_pane_dropped_on_a_chip_is_refused_over_the_limits() {
+        // A tab at the pane limit takes no more.
+        let (mut l, _) = Layout::new();
+        fill_tab(&mut l, MAX_PANES_PER_TAB);
+        let loose = l.new_workspace("work").unwrap();
+        l.select_workspace(0);
+        let before = l.clone();
+        assert!(!l.move_pane_to_workspace(loose, 0));
+        assert_eq!(l, before, "a refused move leaves everything as it was");
+        // Depth: a pane next to the deepest focus pane would pass the depth limit.
+        let (mut l, _) = Layout::new();
+        while l.split_focused(Axis::Row).is_some() {}
+        let loose = l.new_workspace("work").unwrap();
+        l.select_workspace(0);
+        let before = l.clone();
+        assert!(!l.move_pane_to_workspace(loose, 0));
+        assert_eq!(l, before);
     }
 }

@@ -35,6 +35,7 @@ fn main() {
     "rename_tab",
     "rename_workspace",
     "move_pane",
+    "move_pane_to_workspace",
     "move_tab",
     "move_tab_to_workspace",
     "set_ratio",

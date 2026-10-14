@@ -465,6 +465,18 @@ pub fn move_pane(
     core.move_pane_in(window.label(), pane, target, edge)
 }
 
+/// Drop a pane on the chip of a workspace of the calling window: it goes next to the focus pane of that workspace's
+/// shown tab. The core checks the pane, the workspace and the limits.
+#[tauri::command(rename_all = "snake_case")]
+pub fn move_pane_to_workspace(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    pane: PaneId,
+    workspace: usize,
+) -> Result<View, String> {
+    core.move_pane_to_workspace_in(window.label(), pane, workspace)
+}
+
 /// Move a tab to another place in the shown workspace.
 #[tauri::command(rename_all = "snake_case")]
 pub fn move_tab(core: State<Arc<AppCore>>, window: WebviewWindow, from: usize, to: usize) -> Result<View, String> {

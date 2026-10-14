@@ -96,6 +96,10 @@
       "target",
       "edge"
     ],
+    "move_pane_to_workspace": [
+      "pane",
+      "workspace"
+    ],
     "move_tab": [
       "from",
       "to"

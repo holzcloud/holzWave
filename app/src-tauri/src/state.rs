@@ -865,6 +865,14 @@ impl AppCore {
         })
     }
 
+    /// Drop `pane` on the chip of workspace `workspace`: it goes next to the focus pane of that workspace's shown
+    /// tab. An unknown pane or workspace, the workspace the pane is in and a move over a limit change nothing.
+    pub fn move_pane_to_workspace_in(&self, label: &str, pane: PaneId, workspace: usize) -> Result<View, String> {
+        self.change_in(label, |l| {
+            l.move_pane_to_workspace(pane, workspace);
+        })
+    }
+
     /// Move the tab at `from` to the place `to` in the shown workspace.
     pub fn move_tab_in(&self, label: &str, from: usize, to: usize) -> Result<View, String> {
         self.change_in(label, |l| {
@@ -2711,6 +2719,10 @@ mod tests {
             self.move_pane_in(MAIN_WINDOW, pane, target, edge).expect("main")
         }
 
+        fn move_pane_to_workspace(&self, pane: PaneId, workspace: usize) -> View {
+            self.move_pane_to_workspace_in(MAIN_WINDOW, pane, workspace).expect("main")
+        }
+
         fn move_tab(&self, from: usize, to: usize) -> View {
             self.move_tab_in(MAIN_WINDOW, from, to).expect("main")
         }
@@ -2761,6 +2773,40 @@ mod tests {
         assert_eq!(view.focus, first);
         assert_eq!(view.pane_names, vec![(first, "db".to_string())]);
         assert_eq!(core.move_pane(first, 9999, Edge::Left).focus, first, "an unknown target changes nothing");
+    }
+
+    #[test]
+    fn a_pane_dropped_on_a_workspace_chip_moves_there_and_keeps_its_shell_and_name() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let first = core.view().focus;
+        let second = core.split(false).focus;
+        core.rename_pane(second, "db");
+        let made = core.new_workspace("work").focus;
+        core.select_workspace(0);
+
+        let view = core.move_pane_to_workspace(second, 1);
+
+        assert_eq!(view.workspaces.iter().position(|w| w.active), Some(1), "the workspace it went to is shown");
+        let mut ids: Vec<_> = view.panes.iter().map(|(p, _)| *p).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![second, made], "it sits next to the pane of that workspace; no pane is started again");
+        assert_eq!(view.focus, second);
+        assert_eq!(view.pane_names, vec![(second, "db".to_string())], "the name follows the pane");
+        let left_behind: Vec<_> = core.select_workspace(0).panes.iter().map(|(p, _)| *p).collect();
+        assert_eq!(left_behind, vec![first]);
+    }
+
+    #[test]
+    fn a_pane_dropped_on_a_workspace_chip_with_bad_ids_changes_nothing() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let first = core.view().focus;
+        core.new_workspace("work");
+        core.select_workspace(0);
+        let before = core.view();
+
+        for (pane, workspace) in [(9999, 1), (first, 9), (first, 0), (first, usize::MAX)] {
+            assert_eq!(without_rev(&core.move_pane_to_workspace(pane, workspace)), without_rev(&before), "{pane} {workspace}");
+        }
     }
 
     #[test]
@@ -5142,6 +5188,7 @@ mod tests {
             assert!(core.rename_tab_in(label, 0, "x").is_err());
             assert!(core.rename_workspace_in(label, 0, "x").is_err());
             assert!(core.move_pane_in(label, before.focus, before.focus, Edge::Left).is_err());
+            assert!(core.move_pane_to_workspace_in(label, before.focus, 0).is_err());
             assert!(core.move_tab_in(label, 0, 0).is_err());
             assert!(core.move_tab_to_workspace_in(label, 0, 0).is_err());
             assert!(core.set_ratio_in(label, 1, 0.5).is_err());

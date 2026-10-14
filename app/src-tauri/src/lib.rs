@@ -402,6 +402,7 @@ pub fn run() {
             commands::rename_tab,
             commands::rename_workspace,
             commands::move_pane,
+            commands::move_pane_to_workspace,
             commands::move_tab,
             commands::move_tab_to_workspace,
             commands::set_ratio,

@@ -37,6 +37,7 @@
     "allow-rename-tab",
     "allow-rename-workspace",
     "allow-move-pane",
+    "allow-move-pane-to-workspace",
     "allow-move-tab",
     "allow-move-tab-to-workspace",
     "allow-set-ratio",
