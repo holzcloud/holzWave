@@ -73,6 +73,15 @@ export function outsideBeyond(x: number, y: number, width: number, height: numbe
   return Math.max(-x, x - width, -y, y - height) >= margin;
 }
 
+/**
+ * While a drag is outside its window, the page asks the shell this often to show the drop outline in the window under the
+ * pointer (the shell reads the pointer; the page cannot say where it is). It is also the heartbeat of the outline.
+ */
+export const HOVER_POLL_MS = 60;
+
+/** An outline that was shown for another window's drag goes by itself when nothing renewed it for this long. */
+export const HOVER_TTL_MS = 1000;
+
 /** What is under the pointer in the window that receives a drop, as the page worked it out from its DOM and layout. */
 export type Under =
   | { part: "tab"; index: number }

@@ -22,6 +22,7 @@
 // commands (the close commands too) return the current view, `set_ratio` clamps to 0.1..0.9, `release_outside` answers `{outcome: "cancelled"}`,
 // every other command returns null. The commands between windows (`tear_off_pane`, `tear_off_tab`, `attach_pane`,
 // `attach_tab`) answer the current view like the other layout commands; `window_ready` answers null.
+// `drag_over` and `drag_end` (the live outline across windows) answer null; a test scripts them with `on` to play the shell.
 (() => {
   const LAYOUT_COMMANDS = new Set([
     "get_layout", "split", "new_tab", "new_workspace", "close_pane", "close_tab", "close_workspace", "focus_pane",

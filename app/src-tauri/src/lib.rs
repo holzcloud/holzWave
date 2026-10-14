@@ -409,6 +409,8 @@ pub fn run() {
             commands::tear_off_pane,
             commands::tear_off_tab,
             commands::release_outside,
+            commands::drag_over,
+            commands::drag_end,
             commands::attach_pane,
             commands::attach_tab,
             commands::window_ready,

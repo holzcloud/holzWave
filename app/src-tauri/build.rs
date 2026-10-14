@@ -42,6 +42,8 @@ fn main() {
     "tear_off_pane",
     "tear_off_tab",
     "release_outside",
+    "drag_over",
+    "drag_end",
     "attach_pane",
     "attach_tab",
     "window_ready",

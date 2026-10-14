@@ -34,7 +34,7 @@ use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use crate::windows::{CursorSpot, DropKind, Drops, Place};
+use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
 const MAX_LAYOUT_BYTES: u64 = 1 << 20;
@@ -325,6 +325,13 @@ pub enum Out {
     /// `attach_pane` or `attach_tab`, or with nothing when the pointer is over no drop zone. `pane` is the pane that
     /// was released (for a tab, one of its panes): the answer has to name it, and this page has never heard of it.
     IncomingDrop { kind: DropKind, pane: PaneId, x: f64, y: f64 },
+    /// A pane or tab that is being dragged out of another window is over this one: the page shows the outline of the
+    /// zone it would land in at the pointer (`x`, `y`, client coordinates in CSS pixels, the same as `IncomingDrop`).
+    /// Nothing moves before the release; sent again whenever the pointer moves.
+    DragHover { kind: DropKind, pane: PaneId, x: f64, y: f64 },
+    /// The drag that was over this window left it, ended (released anywhere, Escape) or lost its window: the page
+    /// takes the outline away.
+    DragEnd,
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -340,6 +347,8 @@ impl Out {
             Out::PaneExit { .. } => "pane-exit",
             Out::Settings(_) => "settings",
             Out::IncomingDrop { .. } => "incoming-drop",
+            Out::DragHover { .. } => "drag-hover",
+            Out::DragEnd => "drag-end",
             Out::Exit => "exit",
         }
     }
@@ -381,9 +390,10 @@ impl Serialize for Out {
             Out::Cwd { pane, cwd } => CwdPayload { pane: *pane, cwd }.serialize(serializer),
             Out::PaneExit { pane, code } => PaneExitPayload { pane: *pane, code: *code }.serialize(serializer),
             Out::Settings(view) => view.serialize(serializer),
-            Out::IncomingDrop { kind, pane, x, y } => {
+            Out::IncomingDrop { kind, pane, x, y } | Out::DragHover { kind, pane, x, y } => {
                 IncomingDropPayload { kind: *kind, pane: *pane, x: *x, y: *y }.serialize(serializer)
             }
+            Out::DragEnd => serializer.serialize_unit(),
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -622,6 +632,8 @@ pub struct AppCore {
     last_title: Mutex<HashMap<PaneId, String>>,
     /// The drop of a pane or tab that is on its way from one window to another.
     drops: Mutex<Drops>,
+    /// The window a drag in progress is over (its outline is shown there).
+    hovers: Mutex<Hovers>,
     /// The directory a pane that has not started yet is to inherit, recorded when its split or tab was made.
     starts: Mutex<HashMap<PaneId, String>>,
     /// What is restored on the next start: working directory per pane and the window geometry.
@@ -705,6 +717,7 @@ impl AppCore {
             last_cwd,
             last_title: Mutex::new(HashMap::new()),
             drops: Mutex::new(Drops::default()),
+            hovers: Mutex::new(Hovers::default()),
             starts: Mutex::new(HashMap::new()),
             session,
             session_saver,
@@ -1044,6 +1057,7 @@ impl AppCore {
     /// the layout is saved without it and, when the core did it, the sink destroys the window. Call it with no lock
     /// held.
     fn window_removed(&self, label: &str) {
+        self.hover_window_gone(label);
         lock(&self.session).forget_window(label);
         self.session_saver.touch();
         self.saver.touch();
@@ -1058,6 +1072,7 @@ impl AppCore {
     /// windows from the layout (the shells end, the windows are destroyed, none of that is the user closing them). A
     /// window that is not in the set any more (the core removed it itself) is not asked about again.
     pub fn window_closed(&self, label: &str) {
+        self.hover_window_gone(label);
         if self.exiting.load(Ordering::SeqCst) {
             return;
         }
@@ -1202,17 +1217,10 @@ impl AppCore {
         if self.exiting.load(Ordering::SeqCst) {
             return Err("the app is closing".into());
         }
-        {
-            let set = lock(&self.windows);
-            let layout = set.layout(label).ok_or_else(no_such_window)?;
-            let owned = match kind {
-                DropKind::Pane => set.window_of(pane) == Some(label),
-                DropKind::Tab => set.locate(pane).is_some_and(|(owner, ws, _)| owner == label && ws == layout.active),
-            };
-            if !owned {
-                return Err("no such pane".into());
-            }
-        }
+        self.owns(label, pane, kind)?;
+        // The gesture is over, wherever it ended: the window that showed its outline stops showing it, before it is
+        // asked where the pane goes.
+        self.drag_left(label);
         match self.sink.cursor_spot(label) {
             CursorSpot::Window { label: to, x, y } => {
                 if to == label || lock(&self.windows).layout(&to).is_none() {
@@ -1234,6 +1242,66 @@ impl AppCore {
                 }
             }
             CursorSpot::Unknown => Ok(Released::Cancelled),
+        }
+    }
+
+    /// `pane` (or, for a tab, the tab it is in, which has to be the shown one) is in the window `label`.
+    fn owns(&self, label: &str, pane: PaneId, kind: DropKind) -> Result<(), String> {
+        let set = lock(&self.windows);
+        let layout = set.layout(label).ok_or_else(no_such_window)?;
+        let owned = match kind {
+            DropKind::Pane => set.window_of(pane) == Some(label),
+            DropKind::Tab => set.locate(pane).is_some_and(|(owner, ws, _)| owner == label && ws == layout.active),
+        };
+        if owned { Ok(()) } else { Err("no such pane".into()) }
+    }
+
+    /// The page of `label` is dragging a pane (or a tab, named by one of its panes) and the pointer is outside the
+    /// window: the shell reads the pointer, and when it is over another window of the app that window is sent
+    /// `drag-hover` with the pointer in its client coordinates, so that it can show where the drop would land; a
+    /// window the drag was over before is sent `drag-end` when it is another one, or when the pointer is over none
+    /// now. Only ids and window-local geometry travel, and nothing moves before the release (`release_outside`).
+    /// Where the pointer cannot be read nothing is shown.
+    pub fn drag_over_in(&self, label: &str, pane: PaneId, kind: DropKind) -> Result<(), String> {
+        if self.exiting.load(Ordering::SeqCst) {
+            return Err("the app is closing".into());
+        }
+        self.owns(label, pane, kind)?;
+        match self.sink.cursor_spot(label) {
+            CursorSpot::Window { label: to, x, y } if to != label && lock(&self.windows).layout(&to).is_some() => {
+                let left = lock(&self.hovers).enter(label, &to);
+                if let Some(left) = left {
+                    self.sink.send(Target::window(&left), Out::DragEnd);
+                }
+                self.sink.send(Target::window(&to), Out::DragHover { kind, pane, x, y });
+            }
+            _ => self.drag_left(label),
+        }
+        Ok(())
+    }
+
+    /// The drag that started in the window `label` ended (released, Escape, the pointer came back, the page is
+    /// going): the window it was over is told. Nothing to tell is no error.
+    pub fn drag_end_in(&self, label: &str) -> Result<(), String> {
+        lock(&self.windows).layout(label).ok_or_else(no_such_window)?;
+        self.drag_left(label);
+        Ok(())
+    }
+
+    /// Tell the window that the drag from `from` was over that the drag left it. Call it with no lock held.
+    fn drag_left(&self, from: &str) {
+        let over = lock(&self.hovers).leave(from);
+        if let Some(over) = over {
+            self.sink.send(Target::window(&over), Out::DragEnd);
+        }
+    }
+
+    /// The window `label` is gone: a drag that started in it ends for the window it was over, a drag over it is
+    /// forgotten. Call it with no lock held.
+    fn hover_window_gone(&self, label: &str) {
+        let over = lock(&self.hovers).forget(label);
+        if let Some(over) = over {
+            self.sink.send(Target::window(&over), Out::DragEnd);
         }
     }
 
@@ -5928,6 +5996,156 @@ mod tests {
         assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a, b]);
     }
 
+    // ---- the live outline across windows ----------------------------------------------------------------------
+
+    fn hover(core: &AppCore, from: &str, pane: PaneId) {
+        core.drag_over_in(from, pane, DropKind::Pane).expect("a drag over");
+    }
+
+    fn take(rec: &Recorder) -> Vec<(Target, Out)> {
+        std::mem::take(&mut *lock(&rec.log))
+    }
+
+    #[test]
+    fn a_drag_over_another_window_shows_its_outline_there_and_moves_nothing() {
+        let (core, rec, _dir, a, b, c, w) = three_panes("sleep 30");
+        let before = core.view();
+        let before_w = core.view_in(&w).unwrap();
+        over(&rec, CursorSpot::Window { label: w.clone(), x: 12.5, y: 30.0 });
+
+        hover(&core, MAIN_WINDOW, b);
+        hover(&core, MAIN_WINDOW, b);
+
+        let hover = |x, y| (Target::window(&w), Out::DragHover { kind: DropKind::Pane, pane: b, x, y });
+        assert_eq!(
+            rec.sent(),
+            vec![hover(12.5, 30.0), hover(12.5, 30.0)],
+            "only the window under the pointer is told, with ids and the pointer in its own coordinates, every time"
+        );
+        assert_eq!(without_rev(&core.view()), without_rev(&before), "nothing moved");
+        assert_eq!(without_rev(&core.view_in(&w).unwrap()), without_rev(&before_w));
+        assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a, b]);
+        assert_eq!(panes_in(&core, &w), vec![c]);
+        assert!(lock(&core.drops).is_empty(), "no drop is in flight: only a release makes one");
+    }
+
+    #[test]
+    fn a_drag_that_moves_on_tells_the_window_it_left_and_one_that_ends_tells_the_last() {
+        let (core, rec, _dir, a, b, _c, w) = three_panes("sleep 30");
+        let w2 = raw_tear_off(&core, b);
+        take(&rec);
+        let pointer = |label: &str| over(&rec, CursorSpot::Window { label: label.to_owned(), x: 5.0, y: 6.0 });
+
+        pointer(&w);
+        core.drag_over_in(MAIN_WINDOW, a, DropKind::Pane).unwrap();
+        pointer(&w2);
+        core.drag_over_in(MAIN_WINDOW, a, DropKind::Pane).unwrap();
+        assert_eq!(
+            take(&rec),
+            vec![
+                (Target::window(&w), Out::DragHover { kind: DropKind::Pane, pane: a, x: 5.0, y: 6.0 }),
+                (Target::window(&w), Out::DragEnd),
+                (Target::window(&w2), Out::DragHover { kind: DropKind::Pane, pane: a, x: 5.0, y: 6.0 }),
+            ],
+            "the window the pointer left is told, then the one it is over"
+        );
+
+        over(&rec, CursorSpot::Nothing);
+        core.drag_over_in(MAIN_WINDOW, a, DropKind::Pane).unwrap();
+        core.drag_over_in(MAIN_WINDOW, a, DropKind::Pane).unwrap();
+        assert_eq!(take(&rec), vec![(Target::window(&w2), Out::DragEnd)], "over nothing: told once");
+
+        pointer(&w);
+        core.drag_over_in(MAIN_WINDOW, a, DropKind::Pane).unwrap();
+        take(&rec);
+        core.drag_end_in(MAIN_WINDOW).unwrap();
+        core.drag_end_in(MAIN_WINDOW).unwrap();
+        assert_eq!(take(&rec), vec![(Target::window(&w), Out::DragEnd)], "Escape or a release anywhere: told once");
+    }
+
+    #[test]
+    fn the_pointer_over_the_source_or_unknown_or_a_window_that_is_gone_shows_nothing() {
+        let (core, rec, _dir, _a, b, _c, w) = three_panes("sleep 30");
+        for spot in [
+            CursorSpot::Window { label: MAIN_WINDOW.into(), x: 1.0, y: 1.0 },
+            CursorSpot::Window { label: "window-404".into(), x: 1.0, y: 1.0 },
+            CursorSpot::Unknown,
+            CursorSpot::Nothing,
+        ] {
+            over(&rec, spot);
+            hover(&core, MAIN_WINDOW, b);
+        }
+        assert!(rec.sent().is_empty(), "{:?}", rec.sent());
+        assert!(core.view_in(&w).is_ok());
+    }
+
+    #[test]
+    fn a_release_takes_the_outline_away_before_the_window_is_asked_where_the_pane_goes() {
+        let (core, rec, _dir, _a, b, _c, w) = three_panes("sleep 30");
+        over(&rec, CursorSpot::Window { label: w.clone(), x: 12.5, y: 30.0 });
+        hover(&core, MAIN_WINDOW, b);
+        take(&rec);
+
+        assert_eq!(core.release_outside_in(MAIN_WINDOW, b, DropKind::Pane), Ok(Released::Handed { to: w.clone() }));
+
+        assert_eq!(
+            rec.sent(),
+            vec![
+                (Target::window(&w), Out::DragEnd),
+                (Target::window(&w), Out::IncomingDrop { kind: DropKind::Pane, pane: b, x: 12.5, y: 30.0 }),
+            ]
+        );
+        // A release that tears off (over nothing) ends the outline too.
+        over(&rec, CursorSpot::Window { label: w.clone(), x: 1.0, y: 1.0 });
+        let a = *panes_in(&core, MAIN_WINDOW).first().unwrap();
+        hover(&core, MAIN_WINDOW, a);
+        take(&rec);
+        over(&rec, CursorSpot::Nothing);
+        assert!(matches!(core.release_outside_in(MAIN_WINDOW, a, DropKind::Pane), Ok(Released::TornOff { .. })));
+        assert_eq!(rec.sent().first(), Some(&(Target::window(&w), Out::DragEnd)));
+    }
+
+    #[test]
+    fn a_window_that_closes_ends_the_outline_it_caused_and_one_it_showed_is_forgotten() {
+        let (core, rec, _dir, _a, b, _c, w) = three_panes("sleep 30");
+        over(&rec, CursorSpot::Window { label: w.clone(), x: 5.0, y: 6.0 });
+        hover(&core, MAIN_WINDOW, b);
+        take(&rec);
+
+        // The window the drag is over closes: nobody is left to tell, and a later end finds nothing.
+        core.window_closed(&w);
+        assert!(rec.sent().is_empty(), "{:?}", rec.sent());
+        core.drag_end_in(MAIN_WINDOW).unwrap();
+        assert!(rec.sent().is_empty());
+
+        // The window the drag started in closes (a pane that ends under the pointer, the red button): the other
+        // window is told.
+        let (core, rec, _dir, _first, second, label) = two_windows("sleep 30");
+        over(&rec, CursorSpot::Window { label: MAIN_WINDOW.into(), x: 5.0, y: 6.0 });
+        core.drag_over_in(&label, second, DropKind::Pane).unwrap();
+        take(&rec);
+        core.window_closed(&label);
+        assert_eq!(take(&rec), vec![(Target::window(MAIN_WINDOW), Out::DragEnd)]);
+    }
+
+    #[test]
+    fn a_window_can_only_show_the_outline_of_its_own_panes_and_not_while_the_app_ends() {
+        let (core, rec, _dir, _a, b, c, w) = three_panes("sleep 30");
+        over(&rec, CursorSpot::Window { label: w.clone(), x: 5.0, y: 6.0 });
+
+        assert_eq!(core.drag_over_in(MAIN_WINDOW, c, DropKind::Pane), Err("no such pane".to_owned()), "a pane of another window");
+        assert_eq!(core.drag_over_in(MAIN_WINDOW, 9999, DropKind::Pane), Err("no such pane".to_owned()));
+        assert!(rec.sent().is_empty());
+        assert_eq!(core.drag_over_in("window-404", b, DropKind::Pane), Err("no such window".to_owned()));
+        assert_eq!(core.drag_end_in("window-404"), Err("no such window".to_owned()));
+        // A tab is named by a pane of the shown tab.
+        assert!(core.drag_over_in(MAIN_WINDOW, b, DropKind::Tab).is_ok());
+        assert!(core.drag_over_in(MAIN_WINDOW, c, DropKind::Tab).is_err());
+
+        core.exiting.store(true, Ordering::SeqCst);
+        assert_eq!(core.drag_over_in(MAIN_WINDOW, b, DropKind::Pane), Err("the app is closing".to_owned()));
+    }
+
     #[test]
     fn a_release_over_the_source_window_or_a_window_that_does_not_exist_is_cancelled() {
         let (core, rec, _dir, _a, b, _c, w) = three_panes("sleep 30");
@@ -6410,6 +6628,8 @@ mod protocol {
             Out::PaneExit { pane: 3, code: Some(0) },
             Out::Settings(settings_view.clone()),
             Out::IncomingDrop { kind: DropKind::Pane, pane: 3, x: 412.5, y: 96.0 },
+            Out::DragHover { kind: DropKind::Pane, pane: 3, x: 412.5, y: 96.0 },
+            Out::DragEnd,
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -6449,6 +6669,11 @@ mod protocol {
                     payload(6),
                     to_value(&Out::IncomingDrop { kind: DropKind::Tab, pane: 4, x: 40.0, y: 12.0 }),
                 ],
+                "drag-hover": [
+                    payload(7),
+                    to_value(&Out::DragHover { kind: DropKind::Tab, pane: 4, x: 40.0, y: 12.0 }),
+                ],
+                "drag-end": payload(8),
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {

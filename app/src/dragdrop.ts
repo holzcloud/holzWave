@@ -11,6 +11,12 @@
 // (`release_outside`); the shell reads the pointer and tears the pane or tab off into a window of its own, or hands the
 // drop to the window under the pointer, which gets `incoming-drop`, works out the zone here and answers with `attach_*`.
 // The page that let a pane go forgets it when the layout without it arrives (scene.ts).
+//
+// While such a drag is outside its window, the page asks the shell every 60 ms to show the drop outline in the window
+// under the pointer (`drag_over`; the shell reads the pointer). That window gets `drag-hover` with a pane id and the
+// pointer in its own coordinates, works out the zone and shows the outline; `drag-end` (sent when the pointer leaves it,
+// on Escape, on any release, or when a window closes) takes it away, and so does a second without news. Nothing moves
+// before the release.
 import { registerAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { el } from "./dom.js";
@@ -18,6 +24,8 @@ import {
   attachFor,
   beyondSlop,
   dropZone,
+  HOVER_POLL_MS,
+  HOVER_TTL_MS,
   leavingPanes,
   neighbour,
   outlineOf,
@@ -35,10 +43,18 @@ import type { View } from "./types.js";
 
 type Source = { kind: "pane"; pane: number } | { kind: "tab"; index: number };
 
+/** A box on the window, in CSS pixels. */
+interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 /** What a drop would do, worked out on every move and sent when the pointer is released. */
 interface Drop {
-  /** The box shown, in CSS pixels of the window. */
-  box: { x: number; y: number; w: number; h: number };
+  /** The box shown. */
+  box: Box;
   send: () => Promise<View>;
 }
 
@@ -131,21 +147,62 @@ function dropAt(source: Source, x: number, y: number): Drop | null {
   };
 }
 
-function showOutline(drop: Drop | null): void {
-  if (!drop) {
+function showOutline(box: Box | null): void {
+  if (!box) {
     outline?.remove();
     outline = null;
     return;
   }
   outline ??= el("div", "drop-outline", document.body);
-  outline.style.left = `${drop.box.x}px`;
-  outline.style.top = `${drop.box.y}px`;
-  outline.style.width = `${drop.box.w}px`;
-  outline.style.height = `${drop.box.h}px`;
+  outline.style.left = `${box.x}px`;
+  outline.style.top = `${box.y}px`;
+  outline.style.width = `${box.w}px`;
+  outline.style.height = `${box.h}px`;
+}
+
+// ---- the outline in another window while the drag is outside this one -----------------------------------------------
+
+let hoverTimer: ReturnType<typeof setInterval> | undefined;
+/** A `drag_over` went out, so a `drag_end` is owed to the window it was shown in. */
+let hoverSent = false;
+let hoverPending = false;
+/** The calls about the drag, one after the other: an end never overtakes a hover, and a release comes after both. */
+let hoverChain: Promise<unknown> = Promise.resolve();
+
+function pollHover(): void {
+  const view = state.view;
+  const gone = press?.active && view ? leavingPanes(press.source, view) : null;
+  if (!gone || hoverPending) return; // a slow shell is not asked again before it answered
+  hoverSent = true;
+  hoverPending = true;
+  hoverChain = hoverChain
+    .then(() => call("drag_over", { pane: gone.pane, kind: gone.kind }))
+    .catch(() => {}) // nothing to show is not an error
+    .finally(() => {
+      hoverPending = false;
+    });
+}
+
+/** The pointer is outside the window (past the margin) or not: start or stop asking the shell to show the outline. */
+function hoverOutside(outside: boolean): void {
+  if (outside && hoverTimer === undefined) {
+    pollHover();
+    hoverTimer = setInterval(pollHover, HOVER_POLL_MS);
+  } else if (!outside) stopHover();
+}
+
+/** Stop asking; if the outline was shown anywhere, tell the shell the drag is over. */
+function stopHover(): void {
+  clearInterval(hoverTimer);
+  hoverTimer = undefined;
+  if (!hoverSent) return;
+  hoverSent = false;
+  hoverChain = hoverChain.then(() => call("drag_end")).catch(() => {});
 }
 
 function end(): void {
   showOutline(null);
+  stopHover();
   document.documentElement.classList.remove("dragging");
   window.removeEventListener("pointermove", onMove, true);
   window.removeEventListener("pointerup", onUp, true);
@@ -173,7 +230,8 @@ function onMove(e: PointerEvent): void {
   }
   e.preventDefault();
   press.drop = dropAt(press.source, e.clientX, e.clientY);
-  showOutline(press.drop);
+  showOutline(press.drop?.box ?? null);
+  hoverOutside(outsideBeyond(e.clientX, e.clientY, window.innerWidth, window.innerHeight));
 }
 
 function onUp(e: PointerEvent): void {
@@ -206,7 +264,10 @@ function releaseOutside(source: Source): void {
   const gone = view && leavingPanes(source, view);
   if (!gone) return;
   markLeaving(gone.ids);
-  call<{ outcome: string }>("release_outside", { pane: gone.pane, kind: gone.kind })
+  // After the calls of the outline (`end` queued the last one): the shell takes the outline away itself, but a late
+  // `drag_over` must not show it again.
+  hoverChain
+    .then(() => call<{ outcome: string }>("release_outside", { pane: gone.pane, kind: gone.kind }))
     .then((r) => {
       if (r?.outcome !== "cancelled") return;
       unmarkLeaving(gone.ids);
@@ -276,25 +337,65 @@ function moveToNewWindow(kind: "pane" | "tab"): void {
 
 // ---- a drop that comes from another window -------------------------------------------------------------------
 
-/** What is under the window point (x, y) of this window, for the zone of an incoming drop. */
-function underAt(x: number, y: number): Under {
+const boxOf = (node: Element): Box => {
+  const r = node.getBoundingClientRect();
+  return { x: r.left, y: r.top, w: r.width, h: r.height };
+};
+
+/**
+ * What is under the window point (x, y) of this window, for the zone of a drop that comes from another window, and the
+ * box of the thing it is over (the part of a pane a drop would take, a tab, a chip or the strip).
+ */
+function probe(x: number, y: number): { under: Under; box: Box | null } {
   const view = state.view;
   const node = document.elementFromPoint(x, y);
-  if (!view || !node) return { part: "none" };
+  if (!view || !node) return { under: { part: "none" }, box: null };
   const tab = indexOf(node, ".tab-item");
-  if (tab >= 0) return { part: "tab", index: tab };
+  if (tab >= 0) return { under: { part: "tab", index: tab }, box: boxOf(node.closest(".tab-item") as Element) };
   const chip = indexOf(node, ".ws-item");
-  if (chip >= 0) return { part: "chip", index: chip };
-  if (node.closest("#bar")) return { part: "bar" };
+  if (chip >= 0) return { under: { part: "chip", index: chip }, box: boxOf(node.closest(".ws-item") as Element) };
+  const bar = node.closest("#bar");
+  if (bar) return { under: { part: "bar" }, box: boxOf(bar) };
   const c = canvas().getBoundingClientRect();
-  if (x < c.left || x >= c.right || y < c.top || y >= c.bottom) return { part: "none" };
+  if (x < c.left || x >= c.right || y < c.top || y >= c.bottom) return { under: { part: "none" }, box: null };
   const at = paneAt(state.metrics, view, x - c.left, y - c.top);
-  if (!at) return { part: "none" };
-  return { part: "pane", pane: at[0], zone: dropZone(paneRect(state.metrics, at[1]), x - c.left, y - c.top) };
+  if (!at) return { under: { part: "none" }, box: null };
+  const rect = paneRect(state.metrics, at[1]);
+  const zone = dropZone(rect, x - c.left, y - c.top);
+  const part = zone && outlineOf(rect, zone);
+  return {
+    under: { part: "pane", pane: at[0], zone },
+    box: part && { x: c.left + part.x, y: c.top + part.y, w: part.w, h: part.h },
+  };
+}
+
+const underAt = (x: number, y: number): Under => probe(x, y).under;
+
+/** The outline for another window's drag, or none; it goes by itself when nothing renews it. */
+let hoverTtl: ReturnType<typeof setTimeout> | undefined;
+function showHover(box: Box | null): void {
+  clearTimeout(hoverTtl);
+  hoverTtl = box ? setTimeout(() => showOutline(null), HOVER_TTL_MS) : undefined;
+  showOutline(box);
+}
+
+/** `drag-hover`: a pane or tab of another window is dragged over this one: show where it would land, move nothing. */
+function onDragHover(p: { kind: string; pane: number; x: number; y: number }): void {
+  const view = state.view;
+  if (typeof p !== "object" || p === null || !view) return;
+  if (p.kind !== "pane" && p.kind !== "tab") return;
+  if (!Number.isSafeInteger(p.pane) || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+  const workspace = Math.max(0, view.workspaces.findIndex((w) => w.active));
+  const { under, box } = probe(p.x, p.y);
+  if (!attachFor(p.kind, p.pane, under, view.tabs, workspace)) return showHover(null); // over no zone: no outline
+  // A tab becomes a tab of the workspace of the chip it is over, else of the shown one: the strip is where it lands.
+  const bar = document.getElementById("bar");
+  showHover(p.kind === "tab" && under.part !== "chip" && bar ? boxOf(bar) : box);
 }
 
 /** `incoming-drop`: a pane or tab of another window was released over this one. Answer where it goes, or say nothing. */
 function onIncomingDrop(p: { kind: string; pane: number; x: number; y: number }): void {
+  showHover(null); // the drop is made: the outline of the preview has done its job
   const view = state.view;
   if (typeof p !== "object" || p === null || !view) return;
   if (p.kind !== "pane" && p.kind !== "tab") return;
@@ -313,9 +414,11 @@ function onIncomingDrop(p: { kind: string; pane: number; x: number; y: number })
     .catch(() => unmarkLeaving(swapped));
 }
 
-/** Listen for drops that come from other windows. Call once, with the other listeners, before `window_ready`. */
+/** Listen for drops and drags that come from other windows. Call once, with the other listeners, before `window_ready`. */
 export async function initDragDropEvents(): Promise<void> {
   await listen("incoming-drop", onIncomingDrop);
+  await listen("drag-hover", onDragHover);
+  await listen("drag-end", () => showHover(null));
 }
 
 /** Listen for drags and register the five actions. `apply` takes the core's answer. Call once, after `initScene`. */

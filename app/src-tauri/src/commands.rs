@@ -541,6 +541,21 @@ pub fn release_outside(
     core.release_outside_in(window.label(), pane, kind)
 }
 
+/// The calling window is dragging a pane (`kind` `pane`) or the tab of a pane (`kind` `tab`) and the pointer is
+/// outside it. The shell reads the pointer and tells the window under it to show the outline of the zone it would
+/// land in (`drag-hover`); a window the drag left is told `drag-end`. Moves nothing.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn drag_over(core: State<Arc<AppCore>>, window: WebviewWindow, pane: PaneId, kind: DropKind) -> Result<(), String> {
+    core.drag_over_in(window.label(), pane, kind)
+}
+
+/// The drag of the calling window ended (released anywhere, Escape, the pointer came back inside): the window it was
+/// over takes its outline away. Nothing to tell is no error.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn drag_end(core: State<Arc<AppCore>>, window: WebviewWindow) -> Result<(), String> {
+    core.drag_end_in(window.label())
+}
+
 /// The calling window answers an `incoming-drop` of a pane: onto the pane `target` at `edge`, or as a tab of
 /// `workspace`. Only the drop that is in flight for this pane counts. Answers the view of the calling window.
 #[tauri::command(async, rename_all = "snake_case")]

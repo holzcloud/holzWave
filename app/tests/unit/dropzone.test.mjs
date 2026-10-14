@@ -3,6 +3,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   EDGE_BAND,
+  HOVER_POLL_MS,
+  HOVER_TTL_MS,
   LEAVE_MS,
   Leaving,
   TEAR_MARGIN,
@@ -167,4 +169,10 @@ test("a pane that moved to another window loses mirror, size, title and cwd, is 
   other.frames.set(4, {});
   leavePane(other, 3);
   assert.equal(other.frames.has(4), true, "the other panes are untouched");
+});
+
+test("the live outline is renewed often enough that the other window never gives up while the drag goes on", () => {
+  assert.ok(HOVER_POLL_MS >= 30 && HOVER_POLL_MS <= 120, "fast enough to follow the pointer, slow enough for the shell");
+  assert.ok(HOVER_TTL_MS >= 4 * HOVER_POLL_MS, "a few late polls do not make the outline flicker");
+  assert.ok(HOVER_TTL_MS <= 3000, "an outline nobody renews goes soon");
 });

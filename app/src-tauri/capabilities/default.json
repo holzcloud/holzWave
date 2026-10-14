@@ -44,6 +44,8 @@
     "allow-tear-off-pane",
     "allow-tear-off-tab",
     "allow-release-outside",
+    "allow-drag-over",
+    "allow-drag-end",
     "allow-attach-pane",
     "allow-attach-tab",
     "allow-window-ready",

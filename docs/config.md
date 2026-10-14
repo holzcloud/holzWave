@@ -321,7 +321,9 @@ window of its own (the pointer decides where it opens); a release only just over
 another window of holzWave it moves into that window instead: onto the side or the middle of a pane (split or swap), onto
 a tab (next to that tab's pane), onto the free part of the tab strip (as a tab of its own), or onto a workspace chip (into
 that workspace; a tab goes into the workspace of the chip it is over, and into the shown one anywhere else in the
-window). A release over no drop zone changes nothing. Without the mouse: `pane.move_to_new_window` gives the focused
+window). While you drag outside the window the other window shows the outline of the zone the pointer is over, live
+(a tab is outlined as the tab strip, or the chip it is over); it goes when the pointer leaves that window or comes back,
+on Escape and on the release, and nothing moves before the release. A release over no drop zone changes nothing. Without the mouse: `pane.move_to_new_window` gives the focused
 pane, and `tab.move_to_new_window` the shown tab, a window beside this one (both unbound by default). The pane or tab
 keeps its shell, its scrollback and its name; a pane or tab that is alone in its window cannot be torn off, and moving
 the last pane out of a window closes that window. A tear-off that is refused (a lone pane or tab, no window to be had)

@@ -45,7 +45,7 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end"]);
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
   assert.deepEqual(keys(golden.events.cwd), ["cwd", "pane"]);
   const exits = golden.events["pane-exit"];
@@ -66,6 +66,14 @@ test("the commands and events between windows are pinned (DESK-29 part 2)", () =
     assert.equal(typeof d.x, "number");
     assert.equal(typeof d.y, "number");
   }
+  // The live outline across windows: the same payload as the drop (ids and the pointer in the window's own coordinates),
+  // and an end that carries nothing.
+  const hovers = golden.events["drag-hover"];
+  assert.deepEqual(hovers.map((d) => d.kind), ["pane", "tab"]);
+  for (const d of hovers) assert.deepEqual(keys(d), ["kind", "pane", "x", "y"]);
+  assert.equal(golden.events["drag-end"], null);
+  assert.deepEqual(golden.commands.drag_over, ["pane", "kind"], "ids and a kind: the shell reads the pointer");
+  assert.deepEqual(golden.commands.drag_end, []);
   assert.deepEqual(golden.ops.drop_kind, ["pane", "tab"]);
   // The answers of release_outside: a window of its own, handed to another window, or nothing.
   assert.deepEqual(golden.answers.release_outside.map((a) => a.outcome), ["torn_off", "handed", "cancelled"]);

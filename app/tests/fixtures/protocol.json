@@ -69,6 +69,11 @@
     "cycle_focus": [
       "step"
     ],
+    "drag_end": [],
+    "drag_over": [
+      "pane",
+      "kind"
+    ],
     "focus_pane": [
       "pane"
     ],
@@ -227,6 +232,21 @@
       "cwd": "/Users/holz/Projects/holzWave",
       "pane": 3
     },
+    "drag-end": null,
+    "drag-hover": [
+      {
+        "kind": "pane",
+        "pane": 3,
+        "x": 412.5,
+        "y": 96.0
+      },
+      {
+        "kind": "tab",
+        "pane": 4,
+        "x": 40.0,
+        "y": 12.0
+      }
+    ],
     "incoming-drop": [
       {
         "kind": "pane",
@@ -248,7 +268,9 @@
       "cwd",
       "pane-exit",
       "settings",
-      "incoming-drop"
+      "incoming-drop",
+      "drag-hover",
+      "drag-end"
     ],
     "pane-exit": [
       {

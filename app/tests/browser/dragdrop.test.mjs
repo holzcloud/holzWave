@@ -5,9 +5,10 @@
 // DESK-29 part 2 (the tear-off cases at the end): a drag released 24 px or more outside the window sends the pane's id
 // to the shell (`release_outside`), a palette action does the same without the mouse, a drop that comes from another
 // window (`incoming-drop`) is answered with the zone under the pointer, and a pane that left the window is forgotten by
-// its page and gets a full frame when it comes back.
+// its page and gets a full frame when it comes back. While a drag is outside its window the other window shows the
+// drop outline (`drag-hover`, `drag-end`); two pages stand for two windows and the test plays the shell between them.
 import assert from "node:assert/strict";
-import { callsOf, emit } from "./lib.mjs";
+import { callsOf, emit, newPage } from "./lib.mjs";
 
 const VIEW = {
   workspaces: [{ name: "alpha", active: true }, { name: "beta", active: false }],
@@ -121,6 +122,7 @@ export default async function ({ page, url }) {
   await paletteCase(page, url);
   await forgetCase(page, url);
   await incomingCase(page, url);
+  await hoverCase(page, url);
   await noticeCase(page, url); // last: it installs a fake clock that stays on the page
 }
 
@@ -245,6 +247,150 @@ async function paletteCase(page, url) {
   assert.equal((await sent(page, "tear_off_pane")).length, 2);
   assert.ok(await page.locator(".panehead").count() >= 2, "the layout is as it was");
   assert.equal(await notice(page), "Pane not moved: a pane that is alone in its window cannot be torn off", "and the status line says why");
+}
+
+/**
+ * A drag that is outside its window shows the outline of the zone in the window under the pointer, live, and takes it away
+ * on every way a drag can end. Two pages: `page` is the window the drag started in, `second` is the window under the
+ * pointer; the test plays the shell, which reads the pointer (here a point it is told) and sends `drag-hover` to the
+ * window under it and `drag-end` to the one it left.
+ */
+async function hoverCase(page, url) {
+  await open(page, url);
+  const other = await newPage(page.context().browser());
+  const b = other.page;
+  try {
+    await b.goto(`${url}index.html?renderer=canvas&window=window-2`);
+    await b.waitForSelector(".divider");
+    await b.waitForFunction(() => window.__MOCK__.callsOf("window_ready").length >= 1);
+    // The shell, between the two: `__POINT__` is the pointer in the second window's client coordinates, or null.
+    await page.exposeFunction("__toSecond__", (name, payload) =>
+      b.evaluate(([n, p]) => window.__MOCK__.emitTo("window-2", n, p), [name, payload]),
+    );
+    await page.evaluate(() => {
+      window.__POINT__ = null;
+      window.__MOCK__.on("drag_over", (a) => {
+        if (window.__POINT__) return window.__toSecond__("drag-hover", { kind: a.kind, pane: a.pane, ...window.__POINT__ });
+        return window.__toSecond__("drag-end", null);
+      });
+      window.__MOCK__.on("drag_end", () => window.__toSecond__("drag-end", null));
+    });
+    const point = (p) => page.evaluate((v) => { window.__POINT__ = v; }, p);
+    const outlines = () => b.locator(".drop-outline").count();
+    // Quicker than the second window's own timeout (1 s): it was told, it did not give up by itself.
+    const gone = () => b.waitForFunction(() => document.querySelector(".drop-outline") === null, null, { timeout: 500 });
+    const calls = () => page.evaluate(() => window.__MOCK__.calls.map(([cmd]) => cmd));
+    const polls = () => page.evaluate(() => window.__MOCK__.callsOf("drag_over").length);
+    const box = async () => b.locator(".drop-outline").boundingBox();
+    const near = (got, want, why) => {
+      for (const k of ["x", "y", "width", "height"]) assert.ok(Math.abs(got[k] - want[k]) < 2, `${why}: ${k} ${JSON.stringify(got)} against ${JSON.stringify(want)}`);
+    };
+
+    const width = await page.evaluate(() => window.innerWidth);
+    const left = await paneBox(page, VIEW.panes[0][1]);
+    const grip = { x: left.x + left.w - 60, y: left.y + 8 };
+    // The second window shows the mock's default layout: panes 1 and 2 side by side, one workspace, one tab.
+    const right2 = await paneBox(b, { x: 0.5, y: 0, w: 0.5, h: 1 });
+    const bottomOf2 = { x: right2.x + right2.w / 2, y: right2.y + right2.h - 10 };
+
+    // Inside the window nothing is asked; outside, past the margin, the second window shows the zone under the pointer.
+    await point(bottomOf2);
+    await drag(page, grip, { x: width / 2, y: 300 }, { release: false });
+    assert.equal(await polls(), 0, "inside the window the shell is not asked");
+    await page.mouse.move(width + 40, 300, { steps: 4 });
+    await b.waitForSelector(".drop-outline");
+    near(await box(), { x: right2.x, y: right2.y + right2.h / 2, width: right2.w, height: right2.h / 2 }, "the lower half of pane 2 of the other window");
+    assert.deepEqual((await callsOf(page, "drag_over"))[0], { pane: 1, kind: "pane" }, "only a pane id and its kind");
+    assert.equal(await page.locator(".drop-outline").count(), 0, "this window shows none: the pointer is not over it");
+
+    // It is live: the pointer moves, the outline follows without a new event from the page's pointer.
+    await point({ x: right2.x + right2.w - 10, y: right2.y + right2.h / 2 });
+    await b.waitForFunction(() => { const r = document.querySelector(".drop-outline")?.getBoundingClientRect(); return r && r.x > 600; });
+    near(await box(), { x: right2.x + right2.w / 2, y: right2.y, width: right2.w / 2, height: right2.h }, "the right half of pane 2");
+    const chip2 = await b.locator("#bar .ws-item").first().boundingBox();
+    await point({ x: chip2.x + chip2.width / 2, y: chip2.y + chip2.height / 2 });
+    await b.waitForFunction(() => document.querySelector(".drop-outline")?.getBoundingClientRect().height < 40);
+    near(await box(), chip2, "over a chip: the chip");
+    await point(null);
+    await gone();
+    assert.equal(await outlines(), 0, "the pointer is over no window of the app: the outline goes");
+
+    // It comes back and the pointer returns into the window past the margin of 24 px: the outline goes (end sent once).
+    await point(bottomOf2);
+    await b.waitForSelector(".drop-outline");
+    const before = (await calls()).filter((c) => c === "drag_end").length;
+    await page.mouse.move(width - 100, 300, { steps: 4 });
+    await gone();
+    assert.equal((await calls()).filter((c) => c === "drag_end").length, before + 1, "the end is sent once");
+    await page.waitForTimeout(200);
+    assert.equal(await outlines(), 0, "and nothing renews it while the pointer is inside");
+
+    // Escape outside ends it, and the release that follows does nothing.
+    await page.mouse.move(width + 60, 300, { steps: 3 });
+    await b.waitForSelector(".drop-outline");
+    await page.keyboard.press("Escape");
+    await gone();
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+    assert.equal(await outlines(), 0, "Escape: no outline, and none comes back");
+    assert.deepEqual(await sent(page, "release_outside"), [], "Escape: nothing is released");
+    assert.deepEqual(await sent(page, "move_pane"), []);
+
+    // A release outside, over the other window: the outline is gone before the window is asked where the pane goes.
+    await reset(page, VIEW);
+    await page.evaluate(() => window.__MOCK__.on("drag_over", (a) => window.__toSecond__("drag-hover", { kind: a.kind, pane: a.pane, ...window.__POINT__ })));
+    await page.evaluate(() => window.__MOCK__.on("drag_end", () => window.__toSecond__("drag-end", null)));
+    await drag(page, grip, { x: width + 60, y: 300 }, { release: false });
+    await b.waitForSelector(".drop-outline");
+    await page.mouse.up();
+    await gone();
+    await page.waitForFunction(() => window.__MOCK__.callsOf("release_outside").length === 1);
+    const order = await calls();
+    assert.ok(order.lastIndexOf("drag_over") < order.indexOf("release_outside"), `no hover after the release: ${order}`);
+    assert.ok(order.indexOf("drag_end") < order.indexOf("release_outside"), "the end comes first");
+    assert.deepEqual(await sent(page, "release_outside"), [{ pane: 1, kind: "pane" }]);
+    await page.waitForTimeout(250);
+    assert.equal(await outlines(), 0);
+
+    // A tab: named by the pane that has its focus; it lands in a strip, so the strip is outlined (a chip: the chip).
+    await reset(page, VIEW);
+    await page.evaluate(() => window.__MOCK__.on("drag_over", (a) => window.__toSecond__("drag-hover", { kind: a.kind, pane: a.pane, ...window.__POINT__ })));
+    await page.evaluate(() => window.__MOCK__.on("drag_end", () => window.__toSecond__("drag-end", null)));
+    const tab = await page.locator("#bar .tab").nth(1).boundingBox();
+    await drag(page, { x: tab.x + tab.width / 2, y: tab.y + tab.height / 2 }, { x: width + 50, y: 200 }, { release: false });
+    await b.waitForSelector(".drop-outline");
+    assert.deepEqual((await callsOf(page, "drag_over")).at(-1), { pane: 3, kind: "tab" });
+    near(await box(), await b.locator("#bar").boundingBox(), "a tab over a pane: the strip");
+    await page.keyboard.press("Escape");
+    await page.mouse.up();
+    await gone();
+
+    // The window the drag started in sends nothing the terminal could hear, and the other one moved nothing.
+    for (const cmd of ["key", "text", "mouse", "select", "paste", "move_pane", "move_tab", "attach_pane", "attach_tab"]) {
+      assert.deepEqual(await callsOf(b, cmd), [], `${cmd} was not sent by the other window`);
+    }
+
+    // A window that hears nothing more takes the outline away by itself (the other page crashed, an event was lost).
+    await emit(b, "drag-hover", { kind: "pane", pane: 1, x: bottomOf2.x, y: bottomOf2.y });
+    assert.equal(await outlines(), 1);
+    await b.waitForFunction(() => document.querySelector(".drop-outline") === null, null, { timeout: 3000 });
+
+    // Over no zone, or with a payload that is not one, there is no outline and no error; a drop answers and clears it.
+    for (const junk of [null, 7, "x", { kind: "window", pane: 1, x: 5, y: 5 }, { kind: "pane", pane: "1", x: 5, y: 5 }, { kind: "pane", pane: 1, x: Number.NaN, y: 5 }, { kind: "pane", pane: 1, x: -50, y: -50 }]) {
+      await emit(b, "drag-hover", junk);
+      assert.equal(await outlines(), 0, JSON.stringify(junk));
+    }
+    await emit(b, "drag-hover", { kind: "pane", pane: 1, x: bottomOf2.x, y: bottomOf2.y });
+    assert.equal(await outlines(), 1);
+    await emit(b, "incoming-drop", { kind: "pane", pane: 1, x: bottomOf2.x, y: bottomOf2.y });
+    assert.equal(await outlines(), 0, "the drop itself clears the preview");
+    await emit(b, "drag-hover", { kind: "pane", pane: 1, x: bottomOf2.x, y: bottomOf2.y });
+    await emit(b, "drag-end", null);
+    assert.equal(await outlines(), 0);
+    assert.deepEqual(other.errors, [], "the second window reported errors");
+  } finally {
+    await b.close().catch(() => {});
+  }
 }
 
 /** The notice goes by itself, a newer one replaces it, and it is announced as a status. */

@@ -272,6 +272,53 @@ impl Drops {
     }
 }
 
+// ---- the window a drag is over --------------------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Hover {
+    from: String,
+    over: String,
+}
+
+/// The window that a drag from another window is over right now, so that it can be told when the drag leaves it or ends.
+/// There is at most one drag at a time (one pointer), so there is at most one hover. The shell keeps nothing else of it:
+/// the outline lives in the page that is hovered.
+#[derive(Debug, Default)]
+pub struct Hovers(Option<Hover>);
+
+impl Hovers {
+    /// The drag that started in `from` is over the window `over` now. The window it was over before, when that was
+    /// another one, is returned: it has to be told the drag left.
+    pub fn enter(&mut self, from: &str, over: &str) -> Option<String> {
+        let before = self.0.replace(Hover { from: from.to_owned(), over: over.to_owned() });
+        before.map(|h| h.over).filter(|w| w != over)
+    }
+
+    /// The drag that started in `from` is over no other window, or it ended. The window it was over is returned.
+    pub fn leave(&mut self, from: &str) -> Option<String> {
+        if self.0.as_ref().is_some_and(|h| h.from == from) { self.0.take().map(|h| h.over) } else { None }
+    }
+
+    /// The window `label` is gone. A hover over it is dropped (nobody is left to tell); a hover that started in it
+    /// ends, and the window it was over is returned.
+    pub fn forget(&mut self, label: &str) -> Option<String> {
+        match self.0.as_ref() {
+            Some(h) if h.from == label => self.0.take().map(|h| h.over),
+            Some(h) if h.over == label => {
+                self.0 = None;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// The window the drag is over, for tests.
+    #[cfg(test)]
+    pub fn over(&self) -> Option<&str> {
+        self.0.as_ref().map(|h| h.over.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +344,31 @@ mod tests {
         assert_eq!(window_under((1000.0, 200.0), &frames, &[], "window-5"), None, "the source is excluded");
         assert_eq!(window_under((850.0, 200.0), &frames, &[], "main"), None, "between the windows");
         assert_eq!(window_under((100.0, 100.0), &frames, &[], "window-5").map(|f| f.label.as_str()), Some("main"));
+    }
+
+    #[test]
+    fn a_drag_is_over_one_window_and_the_one_it_left_is_named() {
+        let mut hovers = Hovers::default();
+        assert_eq!(hovers.enter("main", "window-2"), None, "nothing was hovered before");
+        assert_eq!(hovers.enter("main", "window-2"), None, "still the same window: nobody to tell");
+        assert_eq!(hovers.enter("main", "window-3").as_deref(), Some("window-2"), "moved on: the first is told");
+        assert_eq!(hovers.over(), Some("window-3"));
+        assert_eq!(hovers.leave("window-2"), None, "another window's drag does not end this one");
+        assert_eq!(hovers.leave("main").as_deref(), Some("window-3"));
+        assert_eq!(hovers.leave("main"), None, "ending twice tells nobody twice");
+        assert_eq!(hovers.over(), None);
+    }
+
+    #[test]
+    fn a_window_that_goes_ends_the_hover_it_started_and_drops_the_one_over_it() {
+        let mut hovers = Hovers::default();
+        hovers.enter("main", "window-2");
+        assert_eq!(hovers.forget("window-9"), None);
+        assert_eq!(hovers.over(), Some("window-2"));
+        assert_eq!(hovers.forget("main").as_deref(), Some("window-2"), "the source went: the other is told");
+        hovers.enter("main", "window-2");
+        assert_eq!(hovers.forget("window-2"), None, "the hovered window went: nobody to tell");
+        assert_eq!(hovers.over(), None);
     }
 
     #[test]
