@@ -16,8 +16,20 @@ look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, 
 Nextcloud. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
-> **Alpha, no release, no download.** holzWave is at `0.0.1-alpha1`. It builds and runs on macOS from source only.
-> The images below are **design mockups, not screenshots**.
+> **Alpha, macOS only.** holzWave is at `0.0.1-alpha1`: a preview build for Apple Silicon, unsigned (no Developer ID,
+> no notarisation). Windows and Linux builds are written but not yet tested on real machines. The images below are
+> **design mockups, not screenshots**.
+
+## Install (macOS, Apple Silicon)
+
+```sh
+brew tap holzcloud/tap
+brew install --cask holzcloud/tap/holzwave@preview   # preview channel: alpha and beta builds
+brew install --cask holzcloud/tap/holzwave           # stable channel: from 0.0.1 on, not released yet
+```
+
+Or take the DMG from the [releases](https://github.com/holzcloud/holzWave/releases) (right-click, Open, once). The cask
+removes the quarantine attribute so the unsigned app opens.
 
 > [!IMPORTANT]
 > holzWave is inspired by [Wave Terminal](https://github.com/wavetermdev/waveterm), whose idea of the shell as one block
