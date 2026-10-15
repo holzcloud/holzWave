@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
+use holzwave_core::blocks::{BlockKind, BlockView, Opened};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
+use holzwave_core::files::{Entry, Listing};
 use holzwave_core::engine::{
     CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode,
     SelectOp,
@@ -706,4 +708,63 @@ pub fn connect(core: State<Arc<AppCore>>, window: WebviewWindow, id: String) -> 
 #[tauri::command(rename_all = "snake_case")]
 pub fn pane_connections(core: State<Arc<AppCore>>) -> Vec<ConnView> {
     core.pane_connections()
+}
+
+// ---- files and previews -----------------------------------------------------------------------------------------
+
+/// Open a file browser or a preview: `kind` is `files` or `preview`, `source` is `local` or a connection id, `placement`
+/// is `tab`, `right` or `down`. An empty `path` is the start directory of the source (for a browser). The answer is the
+/// view with the new pane focused. Reads a directory over the network, so async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn block_open(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    kind: BlockKind,
+    source: String,
+    path: String,
+    placement: String,
+) -> Result<View, String> {
+    core.block_open_in(window.label(), &placement, kind, &source, &path)
+}
+
+/// Every pane that shows a file browser or a preview. Reads memory only.
+#[tauri::command(rename_all = "snake_case")]
+pub fn pane_blocks(core: State<Arc<AppCore>>) -> Vec<BlockView> {
+    core.blocks_list()
+}
+
+/// The pane's block now shows `path`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn block_update(core: State<Arc<AppCore>>, pane: PaneId, path: String) -> Result<(), String> {
+    core.block_update(pane, &path)
+}
+
+/// The entries of a directory, folders first. Over SFTP this waits for the network, so async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn files_list(core: State<Arc<AppCore>>, source: String, path: String) -> Result<Listing, String> {
+    core.files_list(&source, &path)
+}
+
+/// What a file is: its kind, size, and for Markdown the sanitised HTML, for small text the content.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn file_open(core: State<Arc<AppCore>>, source: String, path: String) -> Result<Opened, String> {
+    core.file_open(&source, &path)
+}
+
+/// One entry, following links.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn file_stat(core: State<Arc<AppCore>>, source: String, path: String) -> Result<Entry, String> {
+    core.file_stat(&source, &path)
+}
+
+/// The bytes of a file for an image, a video or a PDF (at most 128 MiB), as raw bytes and not as JSON numbers.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn file_read(core: State<Arc<AppCore>>, source: String, path: String) -> Result<tauri::ipc::Response, String> {
+    core.file_read(&source, &path).map(tauri::ipc::Response::new)
+}
+
+/// Save the editor's text over a file (written aside and renamed over it).
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn file_save(core: State<Arc<AppCore>>, source: String, path: String, text: String) -> Result<(), String> {
+    core.file_save(&source, &path, &text)
 }

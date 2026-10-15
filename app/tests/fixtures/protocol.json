@@ -53,6 +53,16 @@
       "pane",
       "workspace"
     ],
+    "block_open": [
+      "kind",
+      "source",
+      "path",
+      "placement"
+    ],
+    "block_update": [
+      "pane",
+      "path"
+    ],
     "close_pane": [
       "pane"
     ],
@@ -84,6 +94,27 @@
     "drag_over": [
       "pane",
       "kind"
+    ],
+    "file_open": [
+      "source",
+      "path"
+    ],
+    "file_read": [
+      "source",
+      "path"
+    ],
+    "file_save": [
+      "source",
+      "path",
+      "text"
+    ],
+    "file_stat": [
+      "source",
+      "path"
+    ],
+    "files_list": [
+      "source",
+      "path"
     ],
     "focus_pane": [
       "pane"
@@ -132,6 +163,7 @@
       "url"
     ],
     "os_text_scale": [],
+    "pane_blocks": [],
     "pane_connections": [],
     "paste": [
       "pane",

@@ -429,6 +429,14 @@ pub fn run() {
             commands::connection_delete,
             commands::connect,
             commands::pane_connections,
+            commands::block_open,
+            commands::pane_blocks,
+            commands::block_update,
+            commands::files_list,
+            commands::file_open,
+            commands::file_stat,
+            commands::file_read,
+            commands::file_save,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")

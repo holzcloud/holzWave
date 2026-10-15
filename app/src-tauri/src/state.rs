@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Opened};
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
+use holzwave_core::files::{Entry, Listing};
 use holzwave_core::engine::{
     CopyOp, CopyState, DomKey, EngineTheme, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, SearchOp,
     SearchState, SelectOp, WheelEvent,
@@ -654,6 +656,8 @@ pub struct AppCore {
     shell: ShellSpec,
     /// The saved SSH, WSL and Docker connections and the panes that run them.
     connections: Connections,
+    /// The panes that show a file browser or a preview instead of a terminal.
+    blocks: Blocks,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
     saver: Debounced,
     /// How many times the saver job wrote the file, for tests.
@@ -705,6 +709,10 @@ impl AppCore {
             }
             connections
         };
+        let blocks = {
+            let live = lock(&windows).all_panes();
+            Blocks::load(&dir, user_home(), &live)
+        };
 
         let panes = Arc::new(Mutex::new(HashMap::new()));
         let last_cwd = Arc::new(Mutex::new(HashMap::new()));
@@ -747,6 +755,7 @@ impl AppCore {
             sink,
             shell,
             connections,
+            blocks,
             saver,
             writes,
             exiting: AtomicBool::new(false),
@@ -857,6 +866,59 @@ impl AppCore {
         let view = self.new_tab_in(label)?;
         self.connections.assign(view.focus, id).map_err(|e| e.to_string())?;
         Ok(view)
+    }
+
+    // ---- files and previews ----------------------------------------------------------------------------------
+
+    /// Open a file browser or a preview in a new tab (`placement` is `tab`) or beside the focused pane (`right`, `down`).
+    /// The pane runs no process; the answer is the view with the new pane focused.
+    pub fn block_open_in(&self, label: &str, placement: &str, kind: BlockKind, source: &str, path: &str) -> Result<View, String> {
+        let path = if path.is_empty() && kind == BlockKind::Files {
+            self.blocks.start_dir(&self.connections, source).map_err(|e| e.to_string())?
+        } else {
+            path.to_owned()
+        };
+        let block = Block { kind, source: source.to_owned(), path };
+        // Checked before the pane is made, so a refused block leaves no empty pane behind.
+        self.blocks.assign(0, block.clone()).map_err(|e| e.to_string())?;
+        self.blocks.forget(0);
+        let view = match placement {
+            "right" => self.split_in(label, false)?,
+            "down" => self.split_in(label, true)?,
+            _ => self.new_tab_in(label)?,
+        };
+        self.blocks.assign(view.focus, block).map_err(|e| e.to_string())?;
+        Ok(view)
+    }
+
+    /// Every pane that shows a file browser or a preview.
+    pub fn blocks_list(&self) -> Vec<BlockView> {
+        self.blocks.views(&self.connections)
+    }
+
+    /// The pane's block went to `path` (a folder entered, another file shown); remembered for the next start.
+    pub fn block_update(&self, pane: PaneId, path: &str) -> Result<(), String> {
+        self.blocks.update(pane, path).map_err(|e| e.to_string())
+    }
+
+    pub fn files_list(&self, source: &str, path: &str) -> Result<Listing, String> {
+        self.blocks.list(&self.connections, source, path).map_err(|e| e.to_string())
+    }
+
+    pub fn file_stat(&self, source: &str, path: &str) -> Result<Entry, String> {
+        self.blocks.stat(&self.connections, source, path).map_err(|e| e.to_string())
+    }
+
+    pub fn file_open(&self, source: &str, path: &str) -> Result<Opened, String> {
+        self.blocks.open(&self.connections, source, path).map_err(|e| e.to_string())
+    }
+
+    pub fn file_read(&self, source: &str, path: &str) -> Result<Vec<u8>, String> {
+        self.blocks.read(&self.connections, source, path).map_err(|e| e.to_string())
+    }
+
+    pub fn file_save(&self, source: &str, path: &str, text: &str) -> Result<(), String> {
+        self.blocks.save_file(&self.connections, source, path, text).map_err(|e| e.to_string())
     }
 
     /// The connection state of every running pane that has a connection. The webview asks about once a second while it
@@ -1513,6 +1575,7 @@ impl AppCore {
         lock(&self.last_title).remove(&pane);
         lock(&self.starts).remove(&pane);
         self.connections.forget(pane);
+        self.blocks.forget(pane);
         self.session_saver.touch();
     }
 
@@ -1854,7 +1917,11 @@ impl AppCore {
         spec.cwd = self.start_dir(pane);
         // A pane that runs a saved connection starts that instead of a local shell. A connection that cannot be made up
         // (a missing jump host, an unreadable keychain) is said on the pane's screen, and the pane is a local shell.
-        if let Err(e) = self.connections.apply(pane, &mut spec) {
+        // A pane that shows a file browser or a preview runs no process: the page draws its content.
+        spec.blank = self.blocks.block_of(pane).is_some();
+        if spec.blank {
+            spec.notice = None;
+        } else if let Err(e) = self.connections.apply(pane, &mut spec) {
             spec.notice = Some(format!("holzWave: cannot open the connection: {e}"));
         }
         lock(&self.starts).remove(&pane);
