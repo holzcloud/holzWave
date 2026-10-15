@@ -11,6 +11,7 @@ import { initChrome } from "./chrome.js";
 import { initConnections } from "./connections.js";
 import { initSync } from "./sync.js";
 import { initHistory } from "./historyview.js";
+import { initSidebar } from "./sidebar.js";
 import { openConnections } from "./connections-ui.js";
 import { initCopyMode } from "./copymode.js";
 import { initHints } from "./hints.js";
@@ -57,6 +58,7 @@ async function main() {
   // Encrypted sync: the state on the title bar and its popover.
   await initSync(() => {});
   initHistory();
+  await initSidebar();
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);

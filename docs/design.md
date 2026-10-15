@@ -329,3 +329,20 @@ underlined**. Beside a command: its directory (home as `~`), how long ago, `×n`
 `exit n` in words when it failed. `Enter` puts the command on the prompt of the focused pane and closes; it never
 runs it. `Shift+Delete` forgets the chosen command, `Clear all` (asks with a second click) forgets everything, `Escape`
 closes. The sidebar's History section (^R) comes with the sidebar and uses the same search.
+
+### 6.11 Sidebar and widgets
+
+`Cmd+B` (`Ctrl+Shift+B`), the title bar button `▥ Sidebar` or the palette shows a column 18 rem wide (216 px at the base
+size) at the right of the stage, with a hairline on its left; the stage gets narrower and the grid is measured again. It is
+hidden at first and remembers whether it was shown. Sections, each under a `.label` and separated by hairlines:
+
+- **Hosts:** the saved connections. A state dot with a word: connected (filled), reconnecting (dotted ring, `⟳ 2/5`), failed
+  (square, `failed`), not running (empty ring, the kind). A click connects.
+- **History:** a search field and the eight best matches (the same search as 6.10). A click or `Enter` puts the command on the
+  prompt of the focused pane and never runs it; `Escape` gives the keyboard back to the terminal.
+- **Widgets:** panels from data, never code. `note` (text, saved while typing), `timer` (Pomodoro: `25:00`, a bar, the word
+  `working`, `break`, `paused` or `ready`, Start, Pause, Reset), `list` (labelled commands, which go to the prompt, and
+  links, which the system opens). Two exist from the start (Notes, Pomodoro); more are `widgets/<id>.json` files
+  ([config.md](config.md)), and a file that is not valid is left out with its reason shown in the sidebar.
+
+The **Context** section (Kubernetes, Azure, GAM) is drawn with the integrations, not before.

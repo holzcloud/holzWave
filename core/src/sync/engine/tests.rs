@@ -313,11 +313,12 @@ fn promoting_ignores_names_that_are_not_synced() {
 #[test]
 fn a_hostile_server_cannot_write_outside_the_synced_names() {
     assert!(allowed("settings.json"));
-    assert!(allowed("themes/dark-2.json"));
-    for bad in ["../x", "themes/../x.json", "themes/a.b.json", "themes/.json", "other.json", "themes/x.json/y", "/etc/passwd"] {
+    assert!(allowed("themes/dark-2.json") && allowed("widgets/deploy.json") && allowed("widget_notes.json"));
+    for bad in ["../x", "themes/../x.json", "themes/a.b.json", "themes/.json", "other.json", "themes/x.json/y", "/etc/passwd", "widgets/a.b.json", "other/a.json", "widgets/../x.json"] {
         assert!(!allowed(bad), "{bad}");
     }
     assert_eq!(logical_name("themes.dark.json.hwx").as_deref(), Some("themes/dark.json"));
+    assert_eq!(logical_name("widgets.deploy.json.hwx").as_deref(), Some("widgets/deploy.json"));
     assert_eq!(logical_name("evil.hwx"), None);
     assert_eq!(logical_name("settings.json"), None);
     // The secrets file accepts only connection accounts.

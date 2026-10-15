@@ -318,7 +318,11 @@ async function pdfCase(page, url) {
   });
   await page.waitForFunction(() => {
     const c = document.querySelector(".pdf-canvas");
-    return c && c.width > 0 && c.getContext("2d").getImageData(0, 0, c.width, c.height).data.some((v, i) => i % 4 === 0 && v < 100);
+    if (!c || c.width === 0) return false;
+    const data = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    let dark = 0;
+    for (let i = 0; i < data.length; i += 4) if (data[i] < 100 && data[i + 3] > 0) dark++;
+    return dark > 50;
   });
   assert.ok((await ink()) > 50, "the page has text on it");
   assert.match(await page.locator('.block[data-pane="2"] .bk-status').textContent(), /application\/pdf · 853 B · 1 \/ 2/);

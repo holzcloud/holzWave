@@ -1,0 +1,48 @@
+/* The sidebar (sidebar.ts, docs/design.md 6.11): 18 rem (216 px at the base size) at the right of the stage, a hairline on
+   its left, sections separated by hairlines. Flat: no shadow. The state of a host is a dot and a word. */
+#sidebar { flex: none; width: 18rem; box-sizing: border-box; overflow-y: auto; background: var(--hw-ground-2);
+           border-left: 1px solid var(--hw-line); }
+#sidebar[hidden] { display: none; }
+.sidebar-btn { margin-left: .667rem; padding: .167rem .5rem; background: none; border: 1px solid transparent; border-radius: .333rem;
+               color: var(--hw-dim); cursor: pointer; white-space: nowrap; }
+.sidebar-btn:hover { border-color: var(--hw-line); color: var(--hw-ink); }
+.sidebar-btn[aria-pressed="true"] { color: var(--hw-ink); background: var(--hw-rose-wash); border-color: var(--hw-rose); }
+.sidebar-btn:focus-visible, #sidebar button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.sb-section { padding: .667rem .833rem; border-bottom: 1px solid var(--hw-line); }
+.sb-head { display: flex; justify-content: space-between; margin-bottom: .5rem; color: var(--hw-dim); }
+.sb-hint { color: var(--hw-dim); font-size: calc(11rem / 12); }
+.sb-empty, .sb-warn { margin: 0; color: var(--hw-dim); line-height: 1.4; }
+.sb-warn { color: var(--hw-warn); margin-top: .5rem; overflow-wrap: anywhere; }
+.sb-host { display: flex; align-items: center; gap: .5rem; width: 100%; padding: .25rem .333rem; background: none; border: 0;
+           border-left: 2px solid transparent; color: var(--hw-ink); text-align: left; cursor: pointer; }
+.sb-host:hover { background: var(--hw-rose-wash); }
+.sb-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-tag { flex: none; color: var(--hw-dim); }
+.sb-dot { flex: none; width: .5rem; height: .5rem; border-radius: 50%; border: 1px solid var(--hw-dim); }
+.sb-dot[data-state="connected"] { background: var(--hw-ok); border-color: var(--hw-ok); }
+.sb-dot[data-state="wait"] { border: 1px dotted var(--hw-warn); }
+.sb-dot[data-state="failed"] { background: var(--hw-danger); border-color: var(--hw-danger); border-radius: 0; }
+.sb-input { box-sizing: border-box; width: 100%; padding: .25rem .5rem; font: inherit; color: var(--hw-ink); background: var(--hw-ground);
+            border: 1px solid var(--hw-line); border-radius: .333rem; }
+.sb-input:focus-visible, .sb-note:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
+.sb-list { list-style: none; margin: .333rem 0 0; padding: 0; }
+.sb-row { padding: .25rem .333rem; border-left: 2px solid transparent; cursor: pointer; }
+.sb-row[aria-selected="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
+.sb-row:hover { background: var(--hw-rose-wash); }
+.sb-cmd { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-item { padding: 0; }
+.sb-link { display: flex; justify-content: space-between; gap: .5rem; width: 100%; padding: .25rem .333rem; background: none; border: 0; color: var(--hw-ink); text-align: left; cursor: pointer; }
+.sb-link .sb-cmd { flex: 1; min-width: 0; }
+.sb-widget { margin-bottom: .833rem; }
+.sb-title { margin-bottom: .333rem; color: var(--hw-ink-2); }
+.sb-note { box-sizing: border-box; width: 100%; resize: vertical; padding: .333rem .5rem; font: inherit; line-height: 1.4; color: var(--hw-ink);
+           background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
+.sb-clock { font-size: 1.5rem; line-height: 1.3; font-variant-numeric: tabular-nums; }
+.sb-progress { height: .333rem; margin: .25rem 0; background: var(--hw-edge); }
+.sb-progress i { display: block; width: calc(var(--p, 0) * 100%); height: 100%; background: var(--hw-ok); }
+.sb-progress i[data-mode="break"] { background: var(--hw-info); }
+.sb-controls { display: flex; gap: .5rem; margin-top: .333rem; }
+.sb-btn { padding: .167rem .667rem; background: none; border: 1px solid var(--hw-line); border-radius: .333rem; color: var(--hw-ink); cursor: pointer; }
+.sb-btn:hover { border-color: var(--hw-rose); }
+.sb-btn[hidden] { display: none; }
+@media (max-width: 640px) { #sidebar { width: 100%; } }

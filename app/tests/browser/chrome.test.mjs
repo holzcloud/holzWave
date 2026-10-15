@@ -321,7 +321,7 @@ async function statusCase(page, url) {
   await showView(page, BAR_VIEW);
 
   const place = await page.evaluate(() => ({
-    after: document.getElementById("stage").nextElementSibling?.id,
+    after: document.getElementById("main").nextElementSibling?.id,
     parent: document.getElementById("status")?.parentElement?.id,
   }));
   assert.deepEqual(place, { after: "status", parent: "app" }, "the status line is the strip after the stage");

@@ -51,6 +51,7 @@ pub mod settings;
 pub mod ssh;
 pub mod sync;
 pub mod theme;
+pub mod widgets;
 pub mod wire;
 pub mod winshell;
 

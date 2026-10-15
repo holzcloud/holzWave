@@ -76,6 +76,14 @@ fn default_secrets() -> Arc<dyn SecretStore> {
 
 // ---- what the webview sees -------------------------------------------------------------------------------------
 
+/// What the sidebar's widgets need.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct WidgetsView {
+    pub widgets: Vec<holzwave_core::widgets::WidgetDef>,
+    pub notes: std::collections::BTreeMap<String, String>,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WorkspaceView {
     pub name: String,
@@ -927,6 +935,17 @@ impl AppCore {
     /// Forget the whole history.
     pub fn history_clear(&self) -> Result<(), String> {
         self.history.clear().map_err(|e| e.to_string())
+    }
+
+    /// The widgets of the sidebar, the saved notes and a note for each widget file that was left out. Reads small files.
+    pub fn widgets_list(&self) -> WidgetsView {
+        let (widgets, warnings) = holzwave_core::widgets::load(&self.dir);
+        WidgetsView { widgets, notes: holzwave_core::widgets::load_notes(&self.dir), warnings }
+    }
+
+    /// Save the text of a note widget.
+    pub fn widget_note_save(&self, id: &str, text: &str) -> Result<(), String> {
+        holzwave_core::widgets::save_note(&self.dir, id, text).map_err(|e| e.to_string())
     }
 
     /// What this computer is doing now, for a monitor pane. Blocks for a few milliseconds: not on the main thread.

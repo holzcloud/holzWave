@@ -476,6 +476,8 @@ pub fn run() {
             commands::history_search,
             commands::history_delete,
             commands::history_clear,
+            commands::widgets_list,
+            commands::widget_note_save,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")

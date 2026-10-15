@@ -66,6 +66,8 @@ fn main() {
     "history_search",
     "history_delete",
     "history_clear",
+    "widgets_list",
+    "widget_note_save",
     "connection_save",
     "connection_delete",
     "connect",

@@ -81,6 +81,8 @@
     "allow-monitor-sample",
     "allow-history-search",
     "allow-history-delete",
-    "allow-history-clear"
+    "allow-history-clear",
+    "allow-widgets-list",
+    "allow-widget-note-save"
   ]
 }

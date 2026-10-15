@@ -31,7 +31,9 @@ const META: &str = "meta.json";
 const MAX_FILE: u64 = 4 * 1024 * 1024;
 /// The name of the virtual file that carries the connection secrets.
 pub const SECRETS: &str = "secrets.json";
-const FIXED: [&str; 4] = ["layout.json", "settings.json", "connections.json", SECRETS];
+const FIXED: [&str; 5] = ["layout.json", "settings.json", "connections.json", "widget_notes.json", SECRETS];
+/// The folders whose `<name>.json` files are synced one by one.
+const DIRS: [&str; 2] = ["themes", "widgets"];
 const STATE: &str = "sync_state.json";
 
 fn err(m: impl Into<String>) -> Error {
@@ -66,18 +68,21 @@ fn digest(bytes: &[u8]) -> String {
 /// Whether `name` is a file the sync handles: a fixed one, or `themes/<safe>.json`.
 pub fn allowed(name: &str) -> bool {
     FIXED.contains(&name)
-        || name.strip_prefix("themes/").and_then(|t| t.strip_suffix(".json")).is_some_and(|stem| safe_segment(stem) && !stem.contains('.'))
+        || name.split_once('/').is_some_and(|(dir, file)| {
+            DIRS.contains(&dir) && file.strip_suffix(".json").is_some_and(|stem| safe_segment(stem) && !stem.contains('.'))
+        })
 }
 
-/// The server's file name for a logical name: `themes/dark.json` is `themes.dark.json.hwx`.
+/// The server's file name for a logical name: `themes/dark.json` is `themes.dark.json.hwx`, `widgets/a.json` is
+/// `widgets.a.json.hwx`.
 fn remote_file(name: &str) -> String {
     format!("{}.hwx", name.replace('/', "."))
 }
 
 fn logical_name(remote: &str) -> Option<String> {
     let stem = remote.strip_suffix(".hwx")?;
-    let name = match stem.strip_prefix("themes.") {
-        Some(rest) => format!("themes/{rest}"),
+    let name = match DIRS.iter().find_map(|d| stem.strip_prefix(*d).and_then(|r| r.strip_prefix('.')).map(|rest| format!("{d}/{rest}"))) {
+        Some(n) => n,
         None => stem.to_owned(),
     };
     allowed(&name).then_some(name)
@@ -110,8 +115,8 @@ pub fn promote_incoming(dir: &Path) -> Vec<String> {
             let file = entry.file_name().to_string_lossy().into_owned();
             let name = format!("{prefix}{file}");
             let Ok(kind) = entry.file_type() else { continue };
-            if kind.is_dir() && prefix.is_empty() && file == "themes" {
-                stack.push((entry.path(), "themes/".into()));
+            if kind.is_dir() && prefix.is_empty() && DIRS.contains(&file.as_str()) {
+                stack.push((entry.path(), format!("{file}/")));
             } else if kind.is_file() && allowed(&name) && name != SECRETS {
                 if let Some(parent) = dir.join(&name).parent() {
                     let _ = fs::create_dir_all(parent);
@@ -135,11 +140,13 @@ fn promote_names(root: &Path) -> Vec<String> {
             out.push((*fixed).to_owned());
         }
     }
-    if let Ok(read) = fs::read_dir(root.join("themes")) {
-        for entry in read.flatten() {
-            let name = format!("themes/{}", entry.file_name().to_string_lossy());
-            if allowed(&name) && entry.path().is_file() {
-                out.push(name);
+    for d in DIRS {
+        if let Ok(read) = fs::read_dir(root.join(d)) {
+            for entry in read.flatten() {
+                let name = format!("{d}/{}", entry.file_name().to_string_lossy());
+                if allowed(&name) && entry.path().is_file() {
+                    out.push(name);
+                }
             }
         }
     }
@@ -171,11 +178,13 @@ impl Source for ConfigSource {
                 out.push((*name).to_owned());
             }
         }
-        if let Ok(read) = fs::read_dir(self.dir.join("themes")) {
-            for entry in read.flatten() {
-                let name = format!("themes/{}", entry.file_name().to_string_lossy());
-                if allowed(&name) && entry.path().is_file() {
-                    out.push(name);
+        for d in DIRS {
+            if let Ok(read) = fs::read_dir(self.dir.join(d)) {
+                for entry in read.flatten() {
+                    let name = format!("{d}/{}", entry.file_name().to_string_lossy());
+                    if allowed(&name) && entry.path().is_file() {
+                        out.push(name);
+                    }
                 }
             }
         }

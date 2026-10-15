@@ -280,6 +280,7 @@ GNOME's input method takes for emoji.
 | `copy_mode.enter` | `Cmd+Shift+X` | `Ctrl+Shift+X` | `Ctrl+Shift+X` |
 | `hints.open` | `Cmd+Shift+Space` | `Ctrl+Shift+Space` | `Ctrl+Shift+Space` |
 | `history.open` | `Cmd+Shift+H` | `Ctrl+Shift+H` | `Ctrl+Shift+H` |
+| `sidebar.toggle` | `Cmd+B` | `Ctrl+Shift+B` | `Ctrl+Shift+B` |
 | `font.increase` | `Cmd+=` | `Ctrl+Shift+=` | `Ctrl+Shift+=` |
 | `font.decrease` | `Cmd+-` | `Ctrl+Shift+-` | `Ctrl+Shift+-` |
 | `font.reset` | `Cmd+0` | `Ctrl+Shift+0` | `Ctrl+Shift+0` |
@@ -509,3 +510,22 @@ convention), holds control characters or is over 4096 bytes, or contains `passwo
 guarantee: a secret typed in another form is kept, so use a leading space for such a line, and `Clear all` or
 `Shift+Delete` in the history dialog forgets. The history is not synced. At most 100,000 uses are kept; the oldest tenth
 goes when it is passed.
+
+## `widgets/*.json` and `widget_notes.json`
+
+Widgets of the sidebar. `notes` and `pomodoro` exist without a file; a file with the same id replaces them. Fields (no others
+are accepted): `version` (1), `id` (default: the file name; lowercase letters, digits, `-`, `_`, at most 32), `title`
+(1 to 40 characters), `kind`, and by kind:
+
+```json
+{ "title": "Focus", "kind": "timer", "work_min": 50, "break_min": 10 }
+{ "title": "Deploy", "kind": "list", "items": [
+  { "label": "Pods", "command": "kubectl get pods" },
+  { "label": "Docs", "url": "https://example.org/docs" } ] }
+{ "title": "Scratch", "kind": "note" }
+```
+
+An item has either a one-line `command` (put on the prompt, never run) or an `http`/`https` `url`. A list has 1 to 50 items,
+at most 24 widgets are shown, a file is at most 64 KiB. A file that is not valid is left out and the sidebar shows why.
+`widget_notes.json` holds the texts of the note widgets (at most 64 KiB each). Both are synced; a downloaded one is
+applied at the next start.

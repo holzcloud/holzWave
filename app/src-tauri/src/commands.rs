@@ -858,3 +858,15 @@ pub fn history_delete(core: State<Arc<AppCore>>, cmd: String) -> Result<usize, S
 pub fn history_clear(core: State<Arc<AppCore>>) -> Result<(), String> {
     core.history_clear()
 }
+
+/// The widgets of the sidebar, their saved notes and what was wrong with a widget file.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn widgets_list(core: State<Arc<AppCore>>) -> crate::state::WidgetsView {
+    core.widgets_list()
+}
+
+/// Save the text of a note widget (an empty text forgets it).
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn widget_note_save(core: State<Arc<AppCore>>, id: String, text: String) -> Result<(), String> {
+    core.widget_note_save(&id, &text)
+}

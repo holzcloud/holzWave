@@ -296,6 +296,11 @@
       "y",
       "mods"
     ],
+    "widget_note_save": [
+      "id",
+      "text"
+    ],
+    "widgets_list": [],
     "window_ready": []
   },
   "events": {
@@ -534,6 +539,12 @@
           "chord": "Cmd+Shift+H",
           "is_default": true,
           "title": "Search the history"
+        },
+        {
+          "action": "sidebar.toggle",
+          "chord": "Cmd+B",
+          "is_default": true,
+          "title": "Show or hide the sidebar"
         },
         {
           "action": "font.increase",
@@ -1056,6 +1067,12 @@
         "chord": "Cmd+Shift+H",
         "is_default": true,
         "title": "Search the history"
+      },
+      {
+        "action": "sidebar.toggle",
+        "chord": "Cmd+B",
+        "is_default": true,
+        "title": "Show or hide the sidebar"
       },
       {
         "action": "font.increase",
