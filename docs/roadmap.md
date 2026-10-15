@@ -82,7 +82,7 @@ hosts, WSL or Docker on a real machine, or the OS keychain on Windows and Linux 
 
 ## Phase 3b — Sync
 
-- A sync module in the core (`opendal` or `reqwest_dav`); an endpoint plus an app password.
+- ✅ Sync core: WebDAV (ureq), XChaCha20-Poly1305 + Argon2id, merge engine ([sync.md](sync.md)). App layer: open.
 - End-to-end encryption (passphrase; `age` or XChaCha20). **The format is fixed first**, because it determines the
   data format of everything else. See [sync.md](sync.md).
 - Conflicts: a version stamp per file, last writer wins, the old version is kept as a backup.

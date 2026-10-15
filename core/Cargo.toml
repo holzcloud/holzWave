@@ -15,6 +15,10 @@ keyring = ["dep:keyring"]
 
 [dependencies]
 ammonia = "4"
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+chacha20poly1305 = "0.11"
+sha2 = "0.11"
+zeroize = "1"
 getrandom = "0.4"
 infer = "0.22"
 keyring = { version = "4", optional = true }
@@ -23,10 +27,12 @@ libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036b
 portable-pty = "0.9"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 russh = { version = "0.64.1", default-features = false, features = ["flate2", "ring", "rsa"] }
+quick-xml = "0.42"
 russh-sftp = "3"
 serde = { version = "1", features = ["derive"] }
 # Layout::from_json parses and validates a user-editable file, so serde_json is a run-time dependency.
 serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 
 [dev-dependencies]
