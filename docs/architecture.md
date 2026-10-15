@@ -218,9 +218,14 @@ applied step by step by the TypeScript patcher, so both languages are proven aga
 - **No raw input.** The page sends facts (`key`, `text`, `paste`); the engine's encoder produces the bytes. A
   command that can write to any PTY is still the point of the product, so the guard is the strict CSP and never
   rendering untrusted HTML in the page (previews run in a separate, sandboxed frame or window).
-- **Strict CSP.** `default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src ipc:
-  http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'`, pinned by `acl.rs`. The page uses no
-  inline style, no native `<select>` and never `innerHTML`; text from the core goes in with `textContent`.
+- **Strict CSP.** `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' holzfile:
+  http://holzfile.localhost; media-src 'self' holzfile: http://holzfile.localhost; font-src 'self'; connect-src ipc:
+  http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'`, pinned by `acl.rs`. No `blob:`, no
+  `data:`, no inline script or style. The page uses no native `<select>` and never `innerHTML`; text from the core goes
+  in with `textContent`. A Markdown document is the one piece of HTML: the core cleans it with an allow-list sanitiser
+  (`ammonia`), and the page parses it into an inert document and copies it node by node through an allow-list of its own
+  (`safehtml.ts`), so a script, a handler, a style, an image or a `javascript:` link cannot arrive even if one of the two
+  lists had a hole.
 - `withGlobalTauri` is still on, so the commands are reachable from every script of the page. The page loads only its
   own bundle under the CSP above and the capability is scoped to the one window `main`; dropping the global is still
   the target.
@@ -292,6 +297,20 @@ on the active `Connection`, so they work on remote hosts too, and their credenti
 
 User widgets are data, not code: a JSON document validated against a schema, rendered by the webview from a fixed
 set of widget kinds. There is no arbitrary script execution.
+
+## 9a. Files and previews (Phase 4)
+
+A **block pane** is a pane that runs no process: its link is a `NullLink` and the page draws its content (a file browser
+or the preview of one file) over the empty terminal. It has a header, a place in the split tree, drag and close like any
+pane, and `pane_blocks.json` remembers what each shows. `core/src/files.rs` has one `FileSource` interface with two
+implementations: this computer, and the files of a saved SSH connection over SFTP on a connection of its own (a file read
+never waits behind a terminal's output). Reads are bounded, writes are atomic (written aside, renamed over).
+
+Images, video, audio and PDFs are **not** loaded into the page. `file_grant` makes a token (128 random bits) for one file,
+and the `holzfile` URI scheme serves exactly that file from `holzfile://localhost/<token>` (`http://holzfile.localhost/`
+on Windows and Android) with byte ranges, so a video starts and seeks at once and a large file costs no memory. There is no
+path in the URL, so the page cannot ask for a file it was not given; a grant ends when its preview goes
+(`file_revoke`), at most 256 live at once. Responses say `nosniff`, `no-store` and `Content-Security-Policy: sandbox`.
 
 ## 10. Security model
 

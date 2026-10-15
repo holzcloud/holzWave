@@ -223,6 +223,10 @@ defaults; the editor never shows another platform's keys, because custom binding
 
 ### 6.5 Previews
 
+Built: the file browser (local and SFTP), Markdown, text with line numbers, images, video and audio. Not built yet: the PDF
+pane and the editor (the picture shows them as designed). A file opens in the preview beside its browser; a second file
+reuses that preview.
+
 A preview is a pane like any other and uses the same header: image (size and weight as a chip), PDF (page and zoom),
 video (a bar with time, volume and speed), Markdown (Manrope, the one place in the chrome that uses it) and the editor
 (line numbers, a dot for unsaved changes). The file browser is a pane too: `Space` on a file opens its preview beside it,

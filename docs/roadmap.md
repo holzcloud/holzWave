@@ -90,8 +90,12 @@ hosts, WSL or Docker on a real machine, or the OS keychain on Windows and Linux 
 
 ## Phase 4 — Previews
 
-- File browser; Markdown, image, video and PDF.
-- Code editor (Monaco) with local and remote file access over SFTP.
+Status: file browser, Markdown, text, image, video and audio previews are built (local and over SFTP), covered by tests
+against an in-process SSH and SFTP server and the page stub; not yet run on real hosts (rows P1 to P5 of
+[test-plan.md](test-plan.md)).
+
+- ✅ File browser (local and SFTP), Markdown, text, image, video, audio.
+- Open: PDF (pdf.js, vendored, drawn to a canvas) and the code editor with save over SFTP.
 
 ## Phase 5 — `wsh` CLI
 

@@ -208,6 +208,19 @@ against a real host, the OS keychain or a real WSL or Docker. These rows are the
 | C6 | 03 | Windows: a WSL connection. Any OS: a Docker connection to a running container | A shell in the distribution or the container opens in a new tab. Linux and macOS have no WSL: the pane says why in its first line |  |
 | C7 | 03 | Quit and start holzWave again with a connected pane in the layout | The pane starts again on the same host (`pane_connections.json`), after the passphrase of the keychain |  |
 
+## Part 6: files and previews (Phase 4)
+
+File browsers and previews are built and tested against an in-process SFTP server and a page stub. These rows are the
+owner's run on a real machine.
+
+| # | Plan | What to do | Expected | Result |
+|---|---|---|---|---|
+| P1 | 04 | Palette, `Files: This computer`. Move with the arrow keys, Enter into a folder, Backspace out, `.` for hidden files. Enter on a Markdown file, then on a text file | A browser opens in a new tab. The highlighted row has a bar and a wash. A preview opens to the right and the second file replaces the first in it. The Markdown is set in Manrope, the text has line numbers |  |
+| P2 | 04 | Preview a PNG, a JPEG, an SVG with a script in it, an MP4 (seek in the middle of it), an MP3 | Images show; the SVG shows as a picture and runs nothing; the video starts at once and seeks without loading the whole file; audio plays. Closing the pane stops the transfer |  |
+| P3 | 04 | `Files: <host> (sftp)` for a saved connection; browse, open a Markdown file and a large video (over 1 GB) | The listing is the host's; the Markdown opens; the video plays from the start with the memory of holzWave staying flat |  |
+| P4 | 04 | A Markdown file with a script tag, an `onerror` image, a `javascript:` link and a very deep nest of lists | Nothing runs; the link has no address; the page stays responsive |  |
+| P5 | 04 | Quit and start holzWave with a browser and a preview open | The same panes show the same folder and file again |  |
+
 ## What to expect
 
 Known limits of this build, so they are not reported as defects:

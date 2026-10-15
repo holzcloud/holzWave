@@ -49,13 +49,14 @@
 ## Feature status by phase
 
 Built and tested on macOS: local shell, resize, wide Unicode; tiled panes, dividers, tabs, workspaces; scrollback,
-selection, copy, paste; saved layout; WebGL2 with Canvas 2D fallback. SSH, WSL and Docker connections with a connection manager are built (core and page; see the note above). Not built:
+selection, copy, paste; saved layout; WebGL2 with Canvas 2D fallback. SSH, WSL and Docker connections with a connection manager, and file browsers and previews (Markdown, text, images,
+video, audio; local and over SFTP) are built (core and page; see the notes above). Not built:
 
 | Phase | Planned |
 |---|---|
 | 2 | Key encoder, Kitty keyboard, engine replies, themes, dirty-row frames |
 | 4 | Encrypted sync over WebDAV/Nextcloud |
-| 5 | File browser, Markdown, images, video, PDF, code editor |
+| 5 | PDF preview, code editor |
 | 6 | `wsh` CLI |
 | 7 | Widgets, history search, system monitor, AI chat, Apple on-device AI |
 | 8 | Kubernetes, Talos, Azure CLI, GAM7 blocks |

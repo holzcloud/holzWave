@@ -8,6 +8,7 @@
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, loadStyles, setText } from "./dom.js";
+import { appendSafe } from "./safehtml.js";
 import { paneRect } from "./geometry.js";
 import { focusInput } from "./keyboard.js";
 import { pushKeyHandler } from "./keystack.js";
@@ -21,8 +22,6 @@ import type { View } from "./types.js";
 
 /** The most lines of a text file the viewer draws; the rest is said to be cut. */
 const MAX_LINES = 5000;
-/** The most bytes of a file read into the page for an image or a video (the core's limit is the same). */
-const MAX_MEDIA = 128 * 1024 * 1024;
 
 let layer: HTMLElement | null = null;
 let applyView: (v: View) => void = () => {};
@@ -84,13 +83,12 @@ export async function openBlock(
   }
 }
 
-/** The raw bytes a command answered with, as an ArrayBuffer. */
-async function bytes(source: string, path: string): Promise<ArrayBuffer> {
-  const raw = await call<unknown>("file_read", { source, path });
-  if (raw instanceof ArrayBuffer) return raw;
-  if (ArrayBuffer.isView(raw)) return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
-  if (Array.isArray(raw)) return new Uint8Array(raw as number[]).buffer; // a stub that answers with numbers
-  throw new Error("the file could not be read");
+/** What `file_grant` answers: where the file is served from, and what it is. */
+interface Granted {
+  url: string;
+  token: string;
+  mime: string;
+  size: number;
 }
 
 // ---- the file browser --------------------------------------------------------------------------------------------
@@ -292,12 +290,13 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
   const status = el("div", "bk-status", root);
   status.setAttribute("role", "status");
   let current = info;
-  let url: string | null = null;
+  /** The grant of the file shown now; the core stops serving it when it is revoked. */
+  let grant: string | null = null;
   let token = 0;
 
   const release = (): void => {
-    if (url) URL.revokeObjectURL(url);
-    url = null;
+    if (grant) void call("file_revoke", { token: grant }).catch(() => {});
+    grant = null;
   };
 
   const message = (text: string, failed = false): void => {
@@ -329,13 +328,9 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
       switch (opened.content) {
         case "markdown": {
           const doc = el("div", "md", body);
-          // The core sanitised this HTML (an allow-list: no script, handler, style, image or unsafe link).
-          doc.innerHTML = opened.html ?? "";
-          if (!opened.html) doc.textContent = opened.text ?? "";
-          for (const a of doc.querySelectorAll("a")) {
-            a.setAttribute("target", "_blank");
-            a.setAttribute("rel", "noopener noreferrer");
-          }
+          // The core cleaned this HTML; the page copies it through an allow-list of its own and never uses innerHTML.
+          if (opened.html) appendSafe(opened.html, doc);
+          else doc.textContent = opened.text ?? "";
           break;
         }
         case "text": {
@@ -359,13 +354,15 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
         case "image":
         case "video":
         case "audio": {
-          if (opened.size > MAX_MEDIA) {
-            message(`Too large to show here (${humanSize(opened.size)}).`);
-            break;
+          // The file is not loaded into the page: it is served by the core in ranges, from a URL that is good for this
+          // one file (the `holzfile` scheme), so a video starts at once and seeks, and a large file costs no memory.
+          const granted = await call<Granted>("file_grant", { source: current.source, path: current.path });
+          if (mine !== token) {
+            void call("file_revoke", { token: granted.token }).catch(() => {});
+            return;
           }
-          const data = await bytes(current.source, current.path);
-          if (mine !== token) return;
-          url = URL.createObjectURL(new Blob([data], { type: opened.mime }));
+          grant = granted.token;
+          const url = granted.url;
           if (opened.content === "image") {
             const img = el("img", "bk-image", body);
             img.alt = opened.name;
