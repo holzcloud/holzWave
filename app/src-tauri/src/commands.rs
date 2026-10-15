@@ -791,8 +791,16 @@ pub struct GrantAnswer {
     pub grant: Grant,
 }
 
-/// Save the editor's text over a file (written aside and renamed over it).
+/// Save the editor's text over a file (written aside and renamed over it). `expected_modified` is the change time the
+/// file was opened with: a file that changed meanwhile is not overwritten (`null` overwrites). The answer is the new
+/// change time.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn file_save(core: State<Arc<AppCore>>, source: String, path: String, text: String) -> Result<(), String> {
-    core.file_save(&source, &path, &text)
+pub fn file_save(
+    core: State<Arc<AppCore>>,
+    source: String,
+    path: String,
+    text: String,
+    expected_modified: Option<i64>,
+) -> Result<Option<i64>, String> {
+    core.file_save(&source, &path, &text, expected_modified)
 }

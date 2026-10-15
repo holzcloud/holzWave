@@ -934,8 +934,8 @@ impl AppCore {
         self.blocks.read_granted(&self.connections, token, offset, len).map(|r| r.map_err(|e| e.to_string()))
     }
 
-    pub fn file_save(&self, source: &str, path: &str, text: &str) -> Result<(), String> {
-        self.blocks.save_file(&self.connections, source, path, text).map_err(|e| e.to_string())
+    pub fn file_save(&self, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>, String> {
+        self.blocks.save_file(&self.connections, source, path, text, expected).map_err(|e| e.to_string())
     }
 
     /// The connection state of every running pane that has a connection. The webview asks about once a second while it

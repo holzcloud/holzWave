@@ -45,6 +45,7 @@ async function open(page, url, blocks, data = {}) {
       Object.assign(window, extra);
       window.__BLOCKS = b;
       window.__MOCK__.on("file_open", () => { if (window.__OPEN instanceof Object && window.__OPEN.__throw) throw window.__OPEN.__throw; return structuredClone(window.__OPEN ?? null); });
+      window.__MOCK__.on("file_save", () => { if (window.__SAVE_ERR) throw window.__SAVE_ERR; return 1760000099; });
       window.__MOCK__.on("file_grant", () => structuredClone(window.__GRANT ?? null));
       window.__MOCK__.setView(view);
       window.__MOCK__.on("connections_list", () => [talos]);
@@ -133,18 +134,73 @@ async function browserCase(page, url) {
   assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("files_list"))).length, before);
 }
 
+/** Typing marks the pane unsaved, the save chord writes with the time it was read, a change on disk is said once. */
+async function editorCase(page, url, opened) {
+  const file = opened({ name: "main.rs", size: 3, language: "rust", text: "abc", modified: 1760000000 });
+  await open(page, url, [PREVIEW("/home/holz/main.rs")], { __OPEN: file });
+  await page.waitForSelector(".bk-editor .cm-content");
+  const status = page.locator('.block[data-pane="2"] .bk-status');
+  // Focus goes to the editor only when the person puts it there.
+  assert.equal(await page.locator(".bk-editor").evaluate((n) => document.activeElement === n), false);
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("End");
+  await page.keyboard.type("def");
+  assert.deepEqual(await page.locator(".cm-line").evaluateAll((n) => n.map((l) => l.textContent)), ["abcdef"], "keys reach the editor, not the terminal");
+  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("key"))).length, 0);
+  assert.match(await status.textContent(), /^● unsaved/);
+  assert.equal(await status.getAttribute("data-dirty"), "true");
+
+  // Closing a pane with changes asks and says so.
+  await page.locator('.panehead[data-pane="2"] .ph-close').click();
+  assert.match(await page.locator("[role=alertdialog]").first().innerText(), /not saved/);
+  await page.keyboard.press("Escape");
+  await page.locator("[role=alertdialog]").waitFor({ state: "detached" });
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("End");
+
+  await page.keyboard.press("Control+s");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 1);
+  const sent = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[0]);
+  assert.deepEqual(sent, { source: "local", path: "/home/holz/main.rs", text: "abcdef", expected_modified: 1760000000 });
+  await page.waitForFunction(() => document.querySelector('.block[data-pane="2"] .bk-status').dataset.dirty === "false");
+  assert.match(await status.textContent(), /^saved/);
+
+  // The next save carries the time the last one returned.
+  await page.keyboard.type("!");
+  await page.keyboard.press("Control+s");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 2);
+  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_save")[1])).expected_modified, 1760000099);
+
+  // A change on disk is shown; the save after it overwrites on purpose.
+  await page.evaluate(() => { window.__SAVE_ERR = "the file changed on disk since it was opened; save again to overwrite it"; });
+  await page.keyboard.type("?");
+  await page.keyboard.press("Control+s");
+  await page.waitForFunction(() => document.querySelector('.block[data-pane="2"] .bk-status').dataset.failed === "true");
+  assert.match(await status.textContent(), /changed on disk/);
+  await page.evaluate(() => { window.__SAVE_ERR = null; });
+  await page.keyboard.press("Control+s");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 4);
+  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_save")[3])).expected_modified, null);
+
+  // Escape gives the keyboard back to the terminal.
+  await page.keyboard.press("Escape");
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "ime");
+}
+
 async function previewCase(page, url) {
   const opened = (over) => ({ name: "x", size: 10, content: "text", mime: "text/plain", language: null, html: null, text: "", ...over });
   const GRANT = { url: "holzfile://localhost/0123456789abcdef0123456789abcdef", token: "0123456789abcdef0123456789abcdef", mime: "image/png", size: 5 };
 
   // Source text has line numbers and a status line with what it is.
   await open(page, url, [PREVIEW("/home/holz/notes.md")], { __OPEN: opened({ name: "main.rs", size: 22, language: "rust", text: "fn main() {\n    run();\n}" }) });
-  await page.waitForSelector(".code-text");
-  assert.equal(await page.locator(".code-gutter").textContent(), "1\n2\n3");
-  assert.equal(await page.locator(".code-text").textContent(), "fn main() {\n    run();\n}");
+  await page.waitForSelector(".bk-editor .cm-content");
+  assert.deepEqual(await page.locator(".cm-line").evaluateAll((n) => n.map((l) => l.textContent)), ["fn main() {", "    run();", "}"]);
+  assert.equal(await page.locator(".cm-lineNumbers .cm-gutterElement").count() >= 3, true, "line numbers");
   assert.match(await page.locator('.block[data-pane="2"] .bk-status').textContent(), /text\/plain · 22 B · rust/);
   assert.equal(await page.locator('.panehead[data-pane="2"] .ph-title').textContent(), "notes.md");
   assert.equal(await page.locator('.panehead[data-pane="2"] .ph-ctx').textContent(), "This computer · preview");
+
+  await editorCase(page, url, opened);
 
   // Markdown is shown as a document (through the allow-list), not as text.
   await open(page, url, [PREVIEW("/home/holz/notes.md")], { __OPEN: opened({ name: "notes.md", content: "markdown", mime: "text/markdown", html: "<h1>Phase 2</h1><p>Key <strong>encoder</strong></p>", text: "# Phase 2" }) });
@@ -152,6 +208,19 @@ async function previewCase(page, url) {
   assert.equal(await page.locator(".md h1").textContent(), "Phase 2");
   assert.equal(await page.locator(".md strong").textContent(), "encoder");
   assert.equal(await page.locator(".md").evaluate((n) => getComputedStyle(n).fontFamily.includes("Manrope")), true, "documents are set in Manrope");
+
+  // `e` turns the page into its source in the editor; Escape without changes goes back to the page.
+  await page.evaluate(() => {
+    window.__MOCK__.setView({ ...window.__MOCK__.view(), focus: 2 });
+    window.__MOCK__.emit("layout", window.__MOCK__.view());
+  });
+  await page.waitForFunction(() => document.querySelector('.block[data-pane="2"]')?.classList.contains("focused"));
+  await page.keyboard.press("e");
+  await page.waitForSelector(".bk-editor .cm-line");
+  assert.deepEqual(await page.locator(".cm-line").evaluateAll((n) => n.map((l) => l.textContent)), ["# Phase 2"]);
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".md h1");
 
   // An image comes from the granted URL, is revoked with the pane, and the file is never read into the page.
   await open(page, url, [PREVIEW("/home/holz/a.png")], { __OPEN: opened({ name: "a.png", content: "image", mime: "image/png", size: 5, text: null }), __GRANT: GRANT });

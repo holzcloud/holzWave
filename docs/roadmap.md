@@ -95,7 +95,8 @@ against an in-process SSH and SFTP server and the page stub; not yet run on real
 [test-plan.md](test-plan.md)).
 
 - ✅ File browser (local and SFTP), Markdown, text, image, video, audio.
-- Open: PDF (pdf.js, vendored, drawn to a canvas) and the code editor with save over SFTP.
+- ✅ PDF (PDF.js, vendored, read in ranges through the core, drawn to a canvas).
+- ✅ Code editor (CodeMirror 6, vendored bundle in a shadow root): text files and Markdown source, syntax colours, Cmd/Ctrl+S saves locally and over SFTP, a change on disk is noticed, closing asks when changes are unsaved.
 
 ## Phase 5 — `wsh` CLI
 

@@ -43,6 +43,8 @@ export interface Opened {
   language: string | null;
   html: string | null;
   text: string | null;
+  /** The file's modification time (seconds), sent back with a save to notice a change on disk. */
+  modified: number | null;
 }
 
 /** The block of each pane that has one. Replaced as a whole by every answer of `pane_blocks`. */
@@ -172,3 +174,6 @@ export function blockContext(b: BlockInfo): string {
 export function visibleEntries(entries: readonly FileEntry[], showHidden: boolean): FileEntry[] {
   return showHidden ? [...entries] : entries.filter((e) => !e.hidden);
 }
+
+/** The panes whose editor holds changes that are not saved. */
+export const dirtyPanes = new Set<number>();

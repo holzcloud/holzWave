@@ -230,7 +230,7 @@ reuses that preview.
 
 A preview is a pane like any other and uses the same header: image (size and weight as a chip), PDF (page and zoom),
 video (a bar with time, volume and speed), Markdown (Manrope, the one place in the chrome that uses it) and the editor
-(line numbers, a dot for unsaved changes). The file browser is a pane too: `Space` on a file opens its preview beside it,
+(line numbers, syntax colours from the `--hw-*` tokens). Unsaved changes show as `● unsaved` in the preview's status line (amber, with the words as the second cue), and closing the pane asks first. `Cmd/Ctrl+S` saves, `Escape` gives the keyboard back to the terminal; on a Markdown page `e` opens its source. The file browser is a pane too: `Space` on a file opens its preview beside it,
 and the path chip switches between local and an SSH host.
 
 ### 6.6 Mobile

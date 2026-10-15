@@ -220,6 +220,7 @@ owner's run on a real machine.
 | P3 | 04 | `Files: <host> (sftp)` for a saved connection; browse, open a Markdown file and a large video (over 1 GB) | The listing is the host's; the Markdown opens; the video plays from the start with the memory of holzWave staying flat |  |
 | P4 | 04 | A Markdown file with a script tag, an `onerror` image, a `javascript:` link and a very deep nest of lists | Nothing runs; the link has no address; the page stays responsive |  |
 | P5 | 04 | Quit and start holzWave with a browser and a preview open | The same panes show the same folder and file again |  |
+| P6 | 04 | Open a source file and a Markdown file from a browser pane (local, then over SSH). Click into the editor, type, press `Cmd+S` / `Ctrl+S`; change the file in another program and save again; type and close the pane with ×; press `e` on the Markdown page, `Escape` | The text is coloured by language, typing never reaches the shell, `● unsaved` shows until the save, the save writes the file (SFTP too), a change made elsewhere is reported once and the next save overwrites, the close question names unsaved changes, `Escape` returns to the terminal (Markdown: to the page). Only the real window shows the feel of the editor (selection, IME, long files) |  |
 
 ## What to expect
 

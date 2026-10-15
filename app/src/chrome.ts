@@ -5,6 +5,7 @@
 // Every chip and tab has a × beside it that asks before it closes (confirm.ts).
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
+import { dirtyPanes } from "./blockstate.js";
 import { type CloseAsk, confirmClose, paneAsk, tabAsk, workspaceAsk } from "./confirm.js";
 import { el, fitNodes, loadStyles, setAttr, setText } from "./dom.js";
 import { focusInput } from "./keyboard.js";
@@ -243,7 +244,7 @@ function closePaneAfterAsking(pane: number): void {
   const view = state.view;
   if (!view?.panes.some(([id]) => id === pane)) return;
   const same = (): boolean => state.view?.panes.some(([id]) => id === pane) ?? false;
-  void closeAfterAsking(paneAsk(view, paneLabel(pane)), same, () => call("close_pane", { pane }));
+  void closeAfterAsking(paneAsk(view, paneLabel(pane), dirtyPanes.has(pane)), same, () => call("close_pane", { pane }));
 }
 
 /**

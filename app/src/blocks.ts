@@ -8,6 +8,8 @@
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, loadStyles, setText } from "./dom.js";
+import { showEditor } from "./editorview.js";
+import type { EditorHandle } from "./editorview.js";
 import { showPdf } from "./pdfview.js";
 import type { PdfView } from "./pdfview.js";
 import { appendSafe } from "./safehtml.js";
@@ -17,13 +19,10 @@ import { pushKeyHandler } from "./keystack.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
 import { state } from "./state.js";
 import {
-  entryIcon, humanSize, joinPath, paneBlocks, readBlocks, readListing, setPaneBlocks, shortDate, visibleEntries,
+  dirtyPanes, entryIcon, humanSize, joinPath, paneBlocks, readBlocks, readListing, setPaneBlocks, shortDate, visibleEntries,
 } from "./blockstate.js";
 import type { BlockInfo, FileEntry, Listing, Opened } from "./blockstate.js";
 import type { View } from "./types.js";
-
-/** The most lines of a text file the viewer draws; the rest is said to be cut. */
-const MAX_LINES = 5000;
 
 let layer: HTMLElement | null = null;
 let applyView: (v: View) => void = () => {};
@@ -297,8 +296,71 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
   let token = 0;
   /** The PDF viewer, while a PDF is shown: it takes the keys of the pane. */
   let pdf: PdfView | null = null;
+  /** The editor, while a text file (or a Markdown document being edited) is shown. */
+  let editor: EditorHandle | null = null;
+  /** The text as last read or saved, to know whether the editor holds changes. */
+  let saved = "";
+  /** The file's time as last read or saved; sent with a save so a change on disk is noticed. `null` overwrites. */
+  let expected: number | null = null;
+  let facts = "";
+
+  const setDirty = (dirty: boolean): void => {
+    if (dirty === dirtyPanes.has(info.pane)) return;
+    if (dirty) dirtyPanes.add(info.pane);
+    else dirtyPanes.delete(info.pane);
+    status.dataset.dirty = dirty ? "true" : "false";
+    setText(status, dirty ? `● unsaved · ${facts}` : facts);
+    onBlocks();
+  };
+
+  const save = async (): Promise<void> => {
+    if (!editor) return;
+    const text = editor.getText();
+    try {
+      const modified = await call<number | null>("file_save", {
+        source: current.source, path: current.path, text, expected_modified: expected,
+      });
+      saved = text;
+      expected = modified ?? null;
+      status.dataset.failed = "false";
+      setDirty(editor.getText() !== saved);
+      if (!dirtyPanes.has(info.pane)) setText(status, `saved · ${facts}`);
+    } catch (e) {
+      const why = String(e);
+      status.dataset.failed = "true";
+      setText(status, why);
+      // A change on disk is said once; the next save overwrites it on purpose.
+      if (why.includes("changed on disk")) expected = null;
+    }
+  };
+
+  const edit = async (text: string, language: string | null, markdown: boolean): Promise<void> => {
+    const mine = token;
+    const host = el("div", "bk-editor", body);
+    const made = await showEditor({
+      parent: host,
+      text,
+      language,
+      onChange: (t) => setDirty(t !== saved),
+      onSave: () => void save(),
+      onLeave: () => {
+        // A Markdown document that has no changes goes back to its page; anything else gives the keys to the terminal.
+        if (markdown && !dirtyPanes.has(info.pane)) void load();
+        else focusInput();
+      },
+    });
+    if (mine !== token) {
+      made.destroy();
+      return;
+    }
+    editor = made;
+    if (state.view?.focus === info.pane) made.focus();
+  };
 
   const release = (): void => {
+    editor?.destroy();
+    editor = null;
+    setDirty(false);
     pdf?.dispose();
     pdf = null;
     if (grant) void call("file_revoke", { token: grant }).catch(() => {});
@@ -328,13 +390,16 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
     release();
     body.replaceChildren();
     status.dataset.failed = "false";
-    const facts = `${opened.mime} · ${humanSize(opened.size)}`;
+    facts = `${opened.mime} · ${humanSize(opened.size)}`;
+    saved = opened.text ?? "";
+    expected = opened.modified ?? null;
     setText(status, facts);
     try {
       switch (opened.content) {
         case "markdown": {
           const doc = el("div", "md", body);
           // The core cleaned this HTML; the page copies it through an allow-list of its own and never uses innerHTML.
+          doc.tabIndex = 0;
           if (opened.html) appendSafe(opened.html, doc);
           else doc.textContent = opened.text ?? "";
           break;
@@ -345,16 +410,9 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
             message(`This file is larger than the editor opens (${humanSize(opened.size)}).`);
             break;
           }
-          const lines = text.split("\n");
-          const cut = lines.length > MAX_LINES;
-          const code = el("div", "code", body);
-          const gutter = el("div", "code-gutter", code);
-          const content = el("pre", "code-text", code);
-          const shownLines = cut ? lines.slice(0, MAX_LINES) : lines;
-          gutter.textContent = shownLines.map((_, i) => String(i + 1)).join("\n");
-          content.textContent = shownLines.join("\n");
-          if (opened.language) setText(status, `${facts} · ${opened.language}${cut ? " · cut after " + MAX_LINES + " lines" : ""}`);
-          else if (cut) setText(status, `${facts} · cut after ${MAX_LINES} lines`);
+          if (opened.language) facts += ` · ${opened.language}`;
+          setText(status, facts);
+          await edit(text, opened.language, false);
           break;
         }
         case "image":
@@ -422,6 +480,13 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
     },
     key(e) {
       if (pdf) return pdf.key(e);
+      if (editor) return false; // the editor takes its own keys
+      if (e.key === "e" && current.path && body.querySelector(".md")) {
+        // Markdown: from the page to its source.
+        body.replaceChildren();
+        void edit(saved, "markdown", true);
+        return true;
+      }
       const step = 48;
       switch (e.key) {
         case "ArrowDown":
@@ -482,9 +547,10 @@ function renderBlocks(): void {
       const root = el("div", "block", layer);
       root.dataset.pane = String(id);
       root.setAttribute("tabindex", "-1");
-      root.addEventListener("pointerdown", () => {
+      root.addEventListener("pointerdown", (ev) => {
         if (state.view && state.view.focus !== id) void call<View>("focus_pane", { pane: id }).then(applyView);
-        focusInput();
+        // The editor keeps the focus it is given; anything else gives it to the terminal input.
+        if (!(ev.target instanceof Element && ev.target.closest("[data-field]"))) focusInput();
       });
       inst = info.kind === "files" ? filesBlock(info, root) : previewBlock(info, root);
       instances.set(id, inst);
@@ -528,6 +594,7 @@ export async function initBlocks(container: HTMLElement, apply: (v: View) => voi
   // The navigation keys of a block pane that has the focus; a key with a modifier stays with the shortcuts.
   pushKeyHandler((e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return false;
+    if (e.target instanceof Element && e.target.closest("[data-field]")) return false;
     const focus = state.view?.focus;
     const inst = focus === undefined ? undefined : instances.get(focus);
     if (!inst) return false;

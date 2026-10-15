@@ -70,3 +70,11 @@ test("a long name is cut to 40 characters in the question", () => {
   const emoji = "\u{1F332}".repeat(41);
   assert.equal(closeWording({ kind: "tab", name: emoji, panes: 1, ends: "nothing" }).title, `Close tab “${"\u{1F332}".repeat(40)}…”?`, "cut by characters, not by UTF-16 units");
 });
+
+test("a pane with unsaved changes says so", () => {
+  const view = { workspaces: [], tabs: [], focus: 1, panes: [[1, {}], [2, {}]], dividers: [], pane_names: [], windows: 1 };
+  const ask = paneAsk(view, "main.rs", true);
+  assert.equal(ask.unsaved, true);
+  assert.match(closeWording(ask).body, /not saved/);
+  assert.equal(paneAsk(view, "main.rs").unsaved, undefined);
+});

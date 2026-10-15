@@ -75,6 +75,8 @@ pub struct Opened {
     pub html: Option<String>,
     /// For text: the content, when it is small enough for the editor ([`EDIT_LIMIT`]).
     pub text: Option<String>,
+    /// When the file was last changed (seconds since the epoch): what a save is checked against.
+    pub modified: Option<i64>,
 }
 
 /// Permission to read one file through the `holzfile` scheme, which images, video, audio and PDFs are shown from.
@@ -229,7 +231,7 @@ impl Blocks {
         let entry = src.stat(path)?;
         let head = src.read_range(path, 0, SNIFF as u64)?;
         let class = classify(&entry.name, &head);
-        let mut opened = Opened { name: entry.name.clone(), size: entry.size, class: class.clone(), html: None, text: None };
+        let mut opened = Opened { name: entry.name.clone(), size: entry.size, class: class.clone(), html: None, text: None, modified: entry.modified };
         use crate::preview::Content;
         match class.content {
             Content::Markdown if entry.size <= crate::preview::MAX_MARKDOWN as u64 => {
@@ -298,12 +300,24 @@ impl Blocks {
         Some(self.source(connections, &g.source).and_then(|s| s.read_range(&g.path, offset, len.min(PREVIEW_LIMIT))))
     }
 
-    /// Save the editor's text over the file.
-    pub fn save_file(&self, connections: &Connections, source: &str, path: &str, text: &str) -> Result<()> {
+    /// Save the editor's text over the file and answer when it was changed now. `expected` is the change time the editor
+    /// opened the file with: a file that was changed meanwhile (by another program, or on another machine) is not
+    /// overwritten and the error says so; `None` overwrites whatever is there.
+    pub fn save_file(&self, connections: &Connections, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>> {
         if text.len() as u64 > EDIT_LIMIT {
             return Err(Error::Unsupported(format!("the text is larger than {EDIT_LIMIT} bytes")));
         }
-        self.source(connections, source)?.write(path, text.as_bytes())
+        let src = self.source(connections, source)?;
+        if let Some(expected) = expected {
+            // A file that does not exist yet has nothing to conflict with.
+            if let Ok(now) = src.stat(path) {
+                if now.modified.is_some_and(|m| m != expected) {
+                    return Err(Error::Unsupported("the file changed on disk since it was opened; save again to overwrite it".into()));
+                }
+            }
+        }
+        src.write(path, text.as_bytes())?;
+        Ok(src.stat(path).ok().and_then(|e| e.modified))
     }
 
     fn save(&self) {
@@ -421,8 +435,18 @@ mod tests {
         let (d, blocks, conns) = setup("save");
         let p = d.join("f.txt");
         fs::write(&p, "old").unwrap();
-        blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "new").unwrap();
+        let opened = blocks.open(&conns, LOCAL, p.to_str().unwrap()).unwrap();
+        let saved = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "new", opened.modified).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "new");
+        assert!(saved.is_some(), "the new change time comes back");
+        // The file is changed by someone else after it was opened: the save is refused, and an overwrite is explicit.
+        fs::write(&p, "theirs").unwrap();
+        let stale = opened.modified.map(|m| m - 100);
+        let err = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", stale).unwrap_err().to_string();
+        assert!(err.contains("changed on disk"), "{err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "theirs", "nothing was overwritten");
+        blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", None).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
         let err = blocks.list(&conns, "nope", "/").unwrap_err().to_string();
         assert!(err.contains("nope"), "{err}");
         let _ = fs::remove_dir_all(&d);

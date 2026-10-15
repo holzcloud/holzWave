@@ -18,6 +18,8 @@ export interface CloseAsk {
   panes: number;
   /** What else ends: nothing, the window (there are other windows) or the app (this is the only window). */
   ends: "nothing" | "window" | "app";
+  /** An editor in it holds changes that are not saved. */
+  unsaved?: boolean;
 }
 
 /** How many panes the window holds, over every workspace. A view without the counts holds the shown panes. */
@@ -49,8 +51,10 @@ export function workspaceAsk(view: View, index: number, name: string): CloseAsk 
 }
 
 /** The ask for one pane of this window, named `name`. */
-export function paneAsk(view: View, name: string): CloseAsk {
-  return { kind: "pane", name, panes: 1, ends: endsWith(view, 1) };
+export function paneAsk(view: View, name: string, unsaved = false): CloseAsk {
+  const ask: CloseAsk = { kind: "pane", name, panes: 1, ends: endsWith(view, 1) };
+  if (unsaved) ask.unsaved = true;
+  return ask;
 }
 
 /** The longest name the title shows; the full name is no use in a question. */
@@ -71,7 +75,9 @@ export function closeWording(ask: CloseAsk): { title: string; body: string; ok: 
       : ask.ends === "window"
         ? " It is everything in this window, so the window closes."
         : "";
-  return { title: `Close ${what}?`, body: `${shells}${more}`, ok: "Close" };
+  const lost = ask.unsaved ? " Changes that are not saved are lost." : "";
+  const lead = ask.unsaved && ask.panes === 1 ? "" : `${shells}`;
+  return { title: `Close ${what}?`, body: `${lead}${lost}${more}`.trim(), ok: "Close" };
 }
 
 // ---- the overlay ---------------------------------------------------------------------------------

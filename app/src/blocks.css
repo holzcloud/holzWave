@@ -28,6 +28,7 @@
 .bk-status { flex: none; padding: .167rem .667rem; border-top: 1px solid var(--hw-line); color: var(--hw-dim);
              font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase; min-height: 1.5rem; overflow: hidden;
              text-overflow: ellipsis; white-space: nowrap; }
+.bk-status[data-dirty="true"] { color: var(--hw-warn); }
 .bk-status[data-failed="true"] { color: var(--hw-danger); text-transform: none; letter-spacing: 0; white-space: normal; }
 .bk-body { flex: 1 1 0; min-height: 0; overflow: auto; }
 .bk-message { margin: 0; padding: .833rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
@@ -50,9 +51,9 @@ audio.bk-media { margin: .833rem; width: calc(100% - 1.667rem); }
 .md th, .md td { padding: .3em .7em; border: 1px solid var(--hw-line); text-align: left; }
 .md hr { border: 0; border-top: 1px solid var(--hw-line); margin: 1.4em 0; }
 .md input[type="checkbox"] { margin-right: .4em; accent-color: var(--hw-rose); }
-.code { display: flex; min-width: min-content; padding: .5rem 0; font-size: 1rem; line-height: 1.5; }
-.code-gutter { flex: none; padding: 0 .75rem 0 .667rem; text-align: right; color: var(--hw-dim); border-right: 1px solid var(--hw-line); white-space: pre; user-select: none; }
-.code-text { margin: 0; padding: 0 .75rem; font: inherit; white-space: pre; tab-size: 4; }
+.bk-body:has(.bk-editor) { overflow: hidden; }
+.bk-editor { height: 100%; }
+.bk-editor .cm-editor { height: 100%; }
 @media (forced-colors: active) {
   :root .bk-row[aria-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
 }

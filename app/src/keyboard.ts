@@ -36,7 +36,8 @@ function inOtherField(target: EventTarget | null): boolean {
     target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||
     target instanceof HTMLSelectElement ||
-    target.isContentEditable
+    target.isContentEditable ||
+    target.dataset.field !== undefined // the code editor: its content is in a shadow root, so its host is the target
   );
 }
 
