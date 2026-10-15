@@ -35,6 +35,21 @@ rendered from `docs/design/haarlinie-voll.html`. When the page changes, render t
 buttons `#views button[data-v=…]` and the platform buttons `#os button[data-os=…]`, element `#stage` at 1120×680, device
 scale factor 2) and update the README and `docs/design.md`. `assets/brand/render-banner.cjs` renders the banner.
 
+## Engineering standard
+
+For every choice (library, algorithm, protocol, crypto, file format, API, UI technique) take the **most secure, most
+modern and best performing option available today**, and check what that is now instead of relying on habit: look at the
+current documentation and release notes, and prefer maintained, audited libraries over hand-written code for anything
+security-critical (SSH, cryptography, parsers). In practice:
+
+- Secrets only in the OS keychain, never in files, logs or `Debug` output. Validate every input at the boundary, bound
+  every size, and treat everything from the network and the page as untrusted.
+- Current algorithms and defaults (for example Ed25519 keys, modern key exchange, authenticated encryption); no legacy
+  fallback unless a documented user need asks for it, and then behind an explicit setting.
+- No blocking on the main or UI thread, no needless allocation or copying on hot paths (frames, input, output),
+  measured before and after when a change claims to be faster.
+- Pin versions, keep dependencies few, and say in the commit when a choice was made for security or speed.
+
 ## Language and text
 
 Everything in the repository is English: code, comments, docs, commit messages, UI text. The user may write German in
