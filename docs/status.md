@@ -55,7 +55,6 @@ video, audio; local and over SFTP) are built (core and page; see the notes above
 | Phase | Planned |
 |---|---|
 | 2 | Key encoder, Kitty keyboard, engine replies, themes, dirty-row frames |
-| 4 | Encrypted sync over WebDAV/Nextcloud |
 | 6 | `wsh` CLI |
 | 7 | Widgets, history search, system monitor, AI chat, Apple on-device AI |
 | 8 | Kubernetes, Talos, Azure CLI, GAM7 blocks |

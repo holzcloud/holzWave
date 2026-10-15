@@ -82,7 +82,7 @@ hosts, WSL or Docker on a real machine, or the OS keychain on Windows and Linux 
 
 ## Phase 3b — Sync
 
-- ✅ Sync core: WebDAV (ureq), XChaCha20-Poly1305 + Argon2id, merge engine ([sync.md](sync.md)). App layer: open.
+- ✅ Sync core: WebDAV (ureq), XChaCha20-Poly1305 + Argon2id, merge engine ([sync.md](sync.md)). App layer ✅: account in the keychain, scheduled runs, title bar button and popover; downloads are applied at the next start.
 - End-to-end encryption (passphrase; `age` or XChaCha20). **The format is fixed first**, because it determines the
   data format of everything else. See [sync.md](sync.md).
 - Conflicts: a version stamp per file, last writer wins, the old version is kept as a backup.

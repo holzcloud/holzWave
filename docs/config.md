@@ -489,3 +489,10 @@ That claim is a test, not a promise: `core/tests/project_policy.rs` fails when
 
 One honest exception is named in the test: the Tauri 3 alpha links `reqwest` for a dev-server proxy that a desktop
 build never starts (the app sets no `devUrl`).
+
+## `sync.json` and `sync_state.json`
+
+`sync.json` is `{"endpoint": "...", "user": "..."}`: the folder address and the account of the encrypted sync. The app
+password and the passphrase are in the keychain (`sync:password`, `sync:passphrase`), never here. `sync_state.json` is
+the device's random id and, per synced file, what the last run left behind (counter, ETag, SHA-256). `sync-incoming/`
+holds downloads until the next start, `sync-conflicts/` the local versions that lost a conflict. See [sync.md](sync.md).

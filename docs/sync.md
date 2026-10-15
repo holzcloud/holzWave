@@ -1,7 +1,7 @@
 # Sync
 
-Status: **core built** (`core/src/sync`): format, WebDAV transport, merge engine, tested against an in-memory WebDAV
-server. The app layer (settings, background run, dialog) follows.
+Status: **built** (`core/src/sync`, `app/src-tauri/src/sync.rs`, `app/src/sync.ts`): format, WebDAV transport, merge engine,
+account, scheduled runs, popover. Tested against an in-memory WebDAV server, not yet against a real Nextcloud.
 
 ## What is synced
 
@@ -34,4 +34,6 @@ state (`session.json`, `known_hosts`, `pane_*.json`) is not synced.
 ## Not yet
 
 - Deletions are not synced; a deleted file comes back on the next run.
-- A downloaded `settings.json`, `layout.json`, theme or connection list is read at the next start.
+- Downloaded files are staged in `sync-incoming/` and moved into place at the next start (the running app owns its
+  files); the popover says so. Connection secrets apply at once.
+- A run happens 10 s after the start and every five minutes, and with `Sync now`; not yet on exit.

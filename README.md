@@ -72,7 +72,8 @@ Built and tested on macOS from source:
 | WebGL2 renderer with Canvas 2D fallback | built |
 | SSH (reconnect, jump host, keychain), WSL and Docker panes, connection manager | built, tested against a test server, not yet against real hosts |
 | File browser, previews (Markdown, text, image, video, audio, PDF) and code editor, local and over SFTP | built, tested against a test server, not yet against real hosts |
-| Nextcloud/WebDAV sync, `wsh` CLI | planned |
+| Encrypted Nextcloud/WebDAV sync (XChaCha20-Poly1305, Argon2id) | built, tested against a test server, not yet against a real Nextcloud |
+| `wsh` CLI | planned |
 | iOS, Android, Windows, Linux | planned |
 
 Per-phase detail: [docs/status.md](docs/status.md).
@@ -96,7 +97,7 @@ More in [docs/building.md](docs/building.md).
 
 Phase 1 (spike) is done, phase 2 (desktop MVP) is built and waits for its manual checks, and phase 3 (SSH, WSL, Docker,
 connection manager) and phase 4 (file browser and previews) are built and tested against a test server. Encrypted
-Nextcloud sync and the `wsh` CLI
+the `wsh` CLI
 follow, then mobile. Versions go `0.0.1-alpha2`, `0.0.1-beta1`, `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
