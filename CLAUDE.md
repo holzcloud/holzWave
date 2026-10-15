@@ -65,3 +65,10 @@ chat; answer them in German, but do not put German into files.
 ## Git
 
 Work on the branch you were given, commit with a clear message, push, and do not open a pull request unless asked.
+
+## How the owner works with Claude
+
+- Do everything with **GSD** (the `/gsd-*` workflow: plan a phase, execute it, verify it). If its commands are not installed
+  in the session, say so and ask how to proceed instead of working around it silently.
+- Ask **every** question through the selection tool (options to pick from), never as free text in the answer.
+
