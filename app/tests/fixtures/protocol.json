@@ -62,6 +62,17 @@
     "close_workspace": [
       "index"
     ],
+    "connect": [
+      "id"
+    ],
+    "connection_delete": [
+      "id"
+    ],
+    "connection_save": [
+      "profile",
+      "secret"
+    ],
+    "connections_list": [],
     "copy_mode": [
       "pane",
       "op"
@@ -121,6 +132,7 @@
       "url"
     ],
     "os_text_scale": [],
+    "pane_connections": [],
     "paste": [
       "pane",
       "text",

@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
 use holzwave_core::engine::{
     CopyOp, CopyState, DomKey, EngineTheme, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, SearchOp,
     SearchState, SelectOp, WheelEvent,
@@ -23,6 +24,8 @@ use holzwave_core::layout::{
 };
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
+use holzwave_core::profiles::Profile;
+use holzwave_core::secrets::SecretStore;
 use holzwave_core::platform::{
     Os, ProgramCheck, ShellLaunch, ShellResolved, host_shell_launch, in_flatpak, resolve_shell,
 };
@@ -49,6 +52,11 @@ const SESSION_DELAY: Duration = Duration::from_secs(2);
 
 /// The most time `shutdown` spends waiting for the shells to end.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
+
+/// Where passwords and key passphrases are kept: the operating system's keychain.
+fn default_secrets() -> Arc<dyn SecretStore> {
+    Arc::new(holzwave_core::secrets::KeychainStore)
+}
 
 // ---- what the webview sees -------------------------------------------------------------------------------------
 
@@ -644,6 +652,8 @@ pub struct AppCore {
     launcher: Mutex<fn(&Launch) -> Result<(), String>>,
     sink: Arc<dyn Sink>,
     shell: ShellSpec,
+    /// The saved SSH, WSL and Docker connections and the panes that run them.
+    connections: Connections,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
     saver: Debounced,
     /// How many times the saver job wrote the file, for tests.
@@ -683,6 +693,18 @@ impl AppCore {
         });
 
         let config = Mutex::new(Config::load(&dir));
+        let connections = {
+            let live = lock(&windows).all_panes();
+            let (connections, status) = Connections::load(&dir, default_secrets(), user_home(), &live);
+            match status {
+                holzwave_core::layout::LoadStatus::Clean => {}
+                holzwave_core::layout::LoadStatus::Repaired(notes) => {
+                    eprintln!("holzwave: connections.json was repaired: {}", notes.join("; "));
+                }
+                holzwave_core::layout::LoadStatus::Reset(why) => eprintln!("holzwave: connections.json was reset: {why}"),
+            }
+            connections
+        };
 
         let panes = Arc::new(Mutex::new(HashMap::new()));
         let last_cwd = Arc::new(Mutex::new(HashMap::new()));
@@ -724,6 +746,7 @@ impl AppCore {
             launcher: Mutex::new(spawn_launch),
             sink,
             shell,
+            connections,
             saver,
             writes,
             exiting: AtomicBool::new(false),
@@ -806,6 +829,47 @@ impl AppCore {
         }
         self.saver.touch();
         Ok(view)
+    }
+
+    // ---- connections ------------------------------------------------------------------------------------------
+
+    /// The saved connections, each with whether a secret is saved for it. Asks the keychain, so not on the main thread.
+    pub fn connections_list(&self) -> Vec<ProfileView> {
+        self.connections.list()
+    }
+
+    /// Add or change a connection and its secret; the answer is the connection as saved, or why it was refused.
+    pub fn connection_save(&self, profile: Profile, secret: SecretChange) -> Result<ProfileView, String> {
+        self.connections.save(profile, secret).map_err(|e| e.to_string())
+    }
+
+    /// Remove a connection and its secret.
+    pub fn connection_delete(&self, id: &str) -> Result<(), String> {
+        self.connections.delete(id).map_err(|e| e.to_string())
+    }
+
+    /// Open connection `id` in a new tab of the window `label`: the tab is made, its pane is told what to run, and the
+    /// answer is the view with the new tab shown. The webview starts the pane when it sees the view.
+    pub fn connect_in(&self, label: &str, id: &str) -> Result<View, String> {
+        if !self.connections.contains(id) {
+            return Err(format!("no connection {id}"));
+        }
+        let view = self.new_tab_in(label)?;
+        self.connections.assign(view.focus, id).map_err(|e| e.to_string())?;
+        Ok(view)
+    }
+
+    /// The connection state of every running pane that has a connection. The webview asks about once a second while it
+    /// shows one.
+    pub fn pane_connections(&self) -> Vec<ConnView> {
+        let states: Vec<_> = lock(&self.panes)
+            .iter()
+            .filter_map(|(pane, slot)| match slot {
+                Slot::Running(handle) => Some((*pane, handle.conn_state())),
+                Slot::Starting(_) => None,
+            })
+            .collect();
+        self.connections.views(states)
     }
 
     /// Split the focused pane; the new pane gets the focus and starts where the focused pane is. At the pane limits
@@ -1448,6 +1512,7 @@ impl AppCore {
         lock(&self.last_cwd).remove(&pane);
         lock(&self.last_title).remove(&pane);
         lock(&self.starts).remove(&pane);
+        self.connections.forget(pane);
         self.session_saver.touch();
     }
 
@@ -1787,6 +1852,11 @@ impl AppCore {
         let (cols, rows) = clamp_grid(cols, rows);
         let mut spec = self.pane_spec(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h)));
         spec.cwd = self.start_dir(pane);
+        // A pane that runs a saved connection starts that instead of a local shell. A connection that cannot be made up
+        // (a missing jump host, an unreadable keychain) is said on the pane's screen, and the pane is a local shell.
+        if let Err(e) = self.connections.apply(pane, &mut spec) {
+            spec.notice = Some(format!("holzWave: cannot open the connection: {e}"));
+        }
         lock(&self.starts).remove(&pane);
         // What the shell is started with; a settings change while it starts is pushed once it runs.
         let started_with = PaneLook {

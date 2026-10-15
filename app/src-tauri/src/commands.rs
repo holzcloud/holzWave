@@ -19,12 +19,14 @@
 
 use std::sync::Arc;
 
+use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::engine::{
     CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode,
     SelectOp,
 };
 use holzwave_core::layout::{Edge, PaneId, SplitId};
 use holzwave_core::pane::EditAction;
+use holzwave_core::profiles::Profile;
 use holzwave_core::wire::SearchMsg;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -671,4 +673,37 @@ pub fn mouse(
 #[tauri::command(rename_all = "snake_case")]
 pub fn wheel(core: State<Arc<AppCore>>, pane: PaneId, rows: i32, x: f64, y: f64, mods: u32) {
     core.wheel(pane, rows, x, y, mods);
+}
+
+// ---- connections ------------------------------------------------------------------------------------------------
+
+/// The saved connections (SSH, WSL, Docker), each with whether a secret is saved for it. Asks the keychain, so async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn connections_list(core: State<Arc<AppCore>>) -> Vec<ProfileView> {
+    core.connections_list()
+}
+
+/// Add or change a connection. `secret` says what to do with its password or key passphrase: `{kind: "keep"}`,
+/// `{kind: "set", value}` or `{kind: "clear"}`. The answer is the connection as saved, or why it was refused.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn connection_save(core: State<Arc<AppCore>>, profile: Profile, secret: SecretChange) -> Result<ProfileView, String> {
+    core.connection_save(profile, secret)
+}
+
+/// Remove a connection and its secret.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn connection_delete(core: State<Arc<AppCore>>, id: String) -> Result<(), String> {
+    core.connection_delete(&id)
+}
+
+/// Open connection `id` in a new tab; the answer is the view with that tab shown.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn connect(core: State<Arc<AppCore>>, window: WebviewWindow, id: String) -> Result<View, String> {
+    core.connect_in(window.label(), &id)
+}
+
+/// The connection state of every running pane that has a connection. Reads memory only.
+#[tauri::command(rename_all = "snake_case")]
+pub fn pane_connections(core: State<Arc<AppCore>>) -> Vec<ConnView> {
+    core.pane_connections()
 }

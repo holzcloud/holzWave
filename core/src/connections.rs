@@ -122,6 +122,11 @@ impl Connections {
         ProfileView { profile: profile.clone(), has_secret }
     }
 
+    /// Whether a connection with this id exists.
+    pub fn contains(&self, id: &str) -> bool {
+        self.profiles().get(id).is_some()
+    }
+
     /// Every saved connection.
     pub fn list(&self) -> Vec<ProfileView> {
         let items = self.profiles().items.clone();
