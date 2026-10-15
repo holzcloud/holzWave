@@ -103,6 +103,11 @@
       "source",
       "path"
     ],
+    "file_range": [
+      "token",
+      "offset",
+      "len"
+    ],
     "file_revoke": [
       "token"
     ],

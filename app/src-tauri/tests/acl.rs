@@ -303,7 +303,8 @@ fn the_policy_allows_nothing_inline_nothing_dynamic_and_no_remote_origin() {
     // path, no directory. `http://holzfile.localhost` is the same scheme on Windows and Android.
     want("img-src", &["'self'", "holzfile:", "http://holzfile.localhost"]);
     want("media-src", &["'self'", "holzfile:", "http://holzfile.localhost"]);
-    want("connect-src", &["ipc:", "http://ipc.localhost"]);
+    // `'self'` is for the PDF viewer, which fetches its CMaps and standard fonts from the app's own bundle.
+    want("connect-src", &["'self'", "ipc:", "http://ipc.localhost"]);
     want("object-src", &["'none'"]);
     want("base-uri", &["'none'"]);
     want("form-action", &["'none'"]);

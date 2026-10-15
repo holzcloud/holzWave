@@ -35,6 +35,7 @@ Taken from the logo (`assets/brand/holzWave.svg`) and the shared holzcloud token
 | `--hw-rose` | `#FF8FB8` | focus, action, cursor, selection base |
 | `--hw-rose-deep` | `#C23B72` | fills and large type on light grounds |
 | `--hw-rose-wash` | `rgb(255 143 184 / .14)` | selected tab, hover |
+| `--hw-paper` | `#FFFFFF` | the page of a PDF; a document keeps its own white on every theme |
 | `--hw-cream` | `#FFE6F0` | the logo's light face; light-theme ground tint |
 | `--hw-wood` | `#C98B4F` | the plank |
 | `--hw-wood-hi` / `-lo` | `#E0A869` / `#9B6534` | plank light edge / grain |

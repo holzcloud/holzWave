@@ -8,6 +8,8 @@
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, loadStyles, setText } from "./dom.js";
+import { showPdf } from "./pdfview.js";
+import type { PdfView } from "./pdfview.js";
 import { appendSafe } from "./safehtml.js";
 import { paneRect } from "./geometry.js";
 import { focusInput } from "./keyboard.js";
@@ -293,8 +295,12 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
   /** The grant of the file shown now; the core stops serving it when it is revoked. */
   let grant: string | null = null;
   let token = 0;
+  /** The PDF viewer, while a PDF is shown: it takes the keys of the pane. */
+  let pdf: PdfView | null = null;
 
   const release = (): void => {
+    pdf?.dispose();
+    pdf = null;
     if (grant) void call("file_revoke", { token: grant }).catch(() => {});
     grant = null;
   };
@@ -377,6 +383,22 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
           }
           break;
         }
+        case "pdf": {
+          // Read in ranges through the core with a grant of its own; PDF.js is loaded only now.
+          const granted = await call<Granted>("file_grant", { source: current.source, path: current.path });
+          if (mine !== token) {
+            void call("file_revoke", { token: granted.token }).catch(() => {});
+            return;
+          }
+          grant = granted.token;
+          const view = await showPdf(body, granted.token, opened.size, (t) => setText(status, `${facts} · ${t}`));
+          if (mine !== token) {
+            view.dispose();
+            return;
+          }
+          pdf = view;
+          break;
+        }
         default:
           message(`No preview for this kind of file yet (${opened.mime}, ${humanSize(opened.size)}).`);
       }
@@ -399,6 +421,7 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
       if (changed) void load();
     },
     key(e) {
+      if (pdf) return pdf.key(e);
       const step = 48;
       switch (e.key) {
         case "ArrowDown":

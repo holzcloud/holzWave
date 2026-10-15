@@ -9,6 +9,7 @@ export default async function ({ page, url, errors }) {
   await actionsCase(page, url);
   await browserCase(page, url);
   await previewCase(page, url);
+  await pdfCase(page, url);
   await safeHtmlCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -169,10 +170,10 @@ async function previewCase(page, url) {
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_revoke").length === 1);
   assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("file_revoke")[0]), { token: GRANT.token });
 
-  // A kind that has no preview yet says so, with what it is.
-  await open(page, url, [PREVIEW("/home/holz/a.pdf")], { __OPEN: opened({ name: "a.pdf", content: "pdf", mime: "application/pdf", size: 2048, text: null }) });
+  // A kind that has no preview says so, with what it is.
+  await open(page, url, [PREVIEW("/home/holz/a.bin")], { __OPEN: opened({ name: "a.bin", content: "binary", mime: "application/octet-stream", size: 2048, text: null }) });
   await page.waitForSelector(".bk-message");
-  assert.match(await page.locator(".bk-message").textContent(), /No preview for this kind of file yet \(application\/pdf, 2 KB\)/);
+  assert.match(await page.locator(".bk-message").textContent(), /No preview for this kind of file yet \(application\/octet-stream, 2 KB\)/);
 
   // A failure is shown in words.
   await open(page, url, [PREVIEW("/home/holz/a.txt")], { __OPEN: { __throw: "sftp: the request timed out" } });
@@ -221,4 +222,68 @@ async function safeHtmlCase(page, url) {
   assert.deepEqual(result.inputs, [["checkbox", false, true, null], ["checkbox", true, true, null]], "an input is only a disabled checkbox");
   assert.deepEqual(result.hrefs, [true, true, true, false, false, false, false, false, false]);
   assert.ok(result.html.includes("bold"), "the text of an unknown element stays");
+}
+
+// A real two page PDF (hand made, 853 bytes) through the real PDF.js: read in ranges through `file_range`, drawn to a
+// canvas, paged with the buttons and the keys, and the grant ends with the pane.
+const TINY_PDF = "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUiA1IDAgUl0gL0NvdW50IDIgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNyAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA0NSA+PgpzdHJlYW0KQlQgL0YxIDI0IFRmIDcyIDcwMCBUZCAoSGVsbG8gaG9seldhdmUpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyA2IDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA3IDAgUiA+PiA+PiA+PgplbmRvYmoKNiAwIG9iago8PCAvTGVuZ3RoIDQyID4+CnN0cmVhbQpCVCAvRjEgMjQgVGYgNzIgNzAwIFRkIChTZWNvbmQgcGFnZSkgVGogRVQKZW5kc3RyZWFtCmVuZG9iago3IDAgb2JqCjw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQgL0hlbHZldGljYSA+PgplbmRvYmoKeHJlZgowIDgKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDEyMSAwMDAwMCBuIAowMDAwMDAwMjQ3IDAwMDAwIG4gCjAwMDAwMDAzNDIgMDAwMDAgbiAKMDAwMDAwMDQ2OCAwMDAwMCBuIAowMDAwMDAwNTYwIDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgOCAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKNjMwCiUlRU9GCg==";
+
+async function pdfCase(page, url) {
+  await page.addInitScript((b64) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    window.__MOCK__.on("file_range", ({ offset, len }) => bytes.slice(offset, offset + len));
+  }, TINY_PDF);
+  const GRANT = { url: "holzfile://localhost/fedcba9876543210fedcba9876543210", token: "fedcba9876543210fedcba9876543210", mime: "application/pdf", size: 853 };
+  await open(page, url, [PREVIEW("/home/holz/tiny.pdf")], {
+    __OPEN: { name: "tiny.pdf", size: 853, content: "pdf", mime: "application/pdf", language: null, html: null, text: null },
+    __GRANT: GRANT,
+  });
+  await page.waitForSelector(".pdf-canvas");
+  await page.waitForFunction(() => document.querySelector(".pdf-count")?.textContent === "1 / 2");
+  // The page was drawn: the canvas has dark ink on white, which a blank canvas does not.
+  const ink = () => page.locator(".pdf-canvas").evaluate((c) => {
+    const data = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    let dark = 0;
+    for (let i = 0; i < data.length; i += 4) if (data[i] < 100 && data[i + 3] > 0) dark++;
+    return dark;
+  });
+  await page.waitForFunction(() => {
+    const c = document.querySelector(".pdf-canvas");
+    return c && c.width > 0 && c.getContext("2d").getImageData(0, 0, c.width, c.height).data.some((v, i) => i % 4 === 0 && v < 100);
+  });
+  assert.ok((await ink()) > 50, "the page has text on it");
+  assert.match(await page.locator('.block[data-pane="2"] .bk-status').textContent(), /application\/pdf · 853 B · 1 \/ 2/);
+  assert.ok((await page.evaluate(() => window.__MOCK__.callsOf("file_range"))).length >= 1, "the document was read through the core in ranges");
+
+  // Next page by the button and by the key; the first page cannot go back.
+  assert.equal(await page.locator(".pdf-bar button", { hasText: "Prev" }).isDisabled(), true);
+  await page.locator(".pdf-bar button", { hasText: "Next" }).click();
+  await page.waitForFunction(() => document.querySelector(".pdf-count")?.textContent === "2 / 2");
+  assert.equal(await page.locator(".pdf-bar button", { hasText: "Next" }).isDisabled(), true);
+  // The keys go to the viewer while its pane has the focus.
+  await page.evaluate(() => {
+    window.__MOCK__.setView({ ...window.__MOCK__.view(), focus: 2 });
+    window.__MOCK__.emit("layout", window.__MOCK__.view());
+  });
+  await page.waitForFunction(() => document.querySelector('.block[data-pane="2"]')?.classList.contains("focused"));
+  await page.evaluate(() => document.getElementById("term").focus());
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+  await page.keyboard.press("PageUp");
+  await page.waitForFunction(() => document.querySelector(".pdf-count")?.textContent === "1 / 2");
+  // Zoom changes the drawn width; fit goes back to the width of the pane.
+  const width = () => page.locator(".pdf-canvas").evaluate((c) => c.getBoundingClientRect().width);
+  const fitted = await width();
+  await page.keyboard.press("+");
+  await page.waitForFunction((w) => document.querySelector(".pdf-canvas").getBoundingClientRect().width > w, fitted);
+  await page.keyboard.press("0");
+  await page.waitForFunction((w) => Math.abs(document.querySelector(".pdf-canvas").getBoundingClientRect().width - w) < 2, fitted);
+  assert.match(await page.locator(".pdf-zoom").textContent(), /\d+ %/);
+
+  // The pane goes away: the grant ends.
+  await page.evaluate(() => {
+    window.__BLOCKS = [];
+    window.__MOCK__.setView({ ...window.__MOCK__.view(), panes: [[1, { x: 0, y: 0, w: 1, h: 1 }]], dividers: [], focus: 1 });
+  });
+  await page.evaluate(() => window.__MOCK__.emit("layout", window.__MOCK__.view()));
+  await page.waitForFunction(() => window.__MOCK__.callsOf("file_revoke").length === 1);
 }

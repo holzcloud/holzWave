@@ -70,6 +70,7 @@ fn main() {
     "file_stat",
     "file_grant",
     "file_revoke",
+    "file_range",
     "file_save",
   ]);
   tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)).expect("tauri build failed");

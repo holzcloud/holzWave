@@ -452,6 +452,7 @@ pub fn run() {
             commands::file_stat,
             commands::file_grant,
             commands::file_revoke,
+            commands::file_range,
             commands::file_save,
         ])
         .build(tauri::generate_context!())

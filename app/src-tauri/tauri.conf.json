@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' holzfile: http://holzfile.localhost; media-src 'self' holzfile: http://holzfile.localhost; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' holzfile: http://holzfile.localhost; media-src 'self' holzfile: http://holzfile.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'"
     },
     "withGlobalTauri": true
   },

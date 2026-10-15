@@ -36,6 +36,7 @@
   --hw-on-accent: #ffffff;       /* text on a rose-deep fill: 5.05:1; a theme sets it from its own fill */
   --hw-rose-wash: rgb(255 143 184 / .14);
   --hw-selection: rgb(255 143 184 / .35);
+  --hw-paper: #ffffff;           /* the page of a PDF: a document keeps its own white on every theme */
   --hw-ok: #8cc271;
   --hw-warn: #e8c15c;
   --hw-danger: #ec8272;

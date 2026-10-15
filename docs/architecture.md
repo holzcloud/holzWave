@@ -219,8 +219,8 @@ applied step by step by the TypeScript patcher, so both languages are proven aga
   command that can write to any PTY is still the point of the product, so the guard is the strict CSP and never
   rendering untrusted HTML in the page (previews run in a separate, sandboxed frame or window).
 - **Strict CSP.** `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' holzfile:
-  http://holzfile.localhost; media-src 'self' holzfile: http://holzfile.localhost; font-src 'self'; connect-src ipc:
-  http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'`, pinned by `acl.rs`. No `blob:`, no
+  http://holzfile.localhost; media-src 'self' holzfile: http://holzfile.localhost; font-src 'self'; connect-src 'self'
+  ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'`, pinned by `acl.rs`. No `blob:`, no
   `data:`, no inline script or style. The page uses no native `<select>` and never `innerHTML`; text from the core goes
   in with `textContent`. A Markdown document is the one piece of HTML: the core cleans it with an allow-list sanitiser
   (`ammonia`), and the page parses it into an inert document and copies it node by node through an allow-list of its own

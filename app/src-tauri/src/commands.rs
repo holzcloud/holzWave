@@ -765,6 +765,18 @@ pub fn file_grant(core: State<Arc<AppCore>>, source: String, path: String) -> Re
     core.file_grant(&source, &path).map(|g| GrantAnswer { url: crate::files_protocol::url_of(&g.token), grant: g })
 }
 
+/// `len` bytes of a granted file from `offset` (at most 8 MiB), as raw bytes: what the PDF viewer reads pages with, so a
+/// large document is read in pieces and never whole. Fewer bytes come back at the end of the file.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn file_range(core: State<Arc<AppCore>>, token: String, offset: u64, len: u64) -> Result<tauri::ipc::Response, String> {
+    let len = len.min(crate::files_protocol::CHUNK);
+    match core.read_granted(&token, offset, len) {
+        Some(Ok(bytes)) => Ok(tauri::ipc::Response::new(bytes)),
+        Some(Err(why)) => Err(why),
+        None => Err("no such grant".into()),
+    }
+}
+
 /// End a grant.
 #[tauri::command(rename_all = "snake_case")]
 pub fn file_revoke(core: State<Arc<AppCore>>, token: String) {

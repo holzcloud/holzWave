@@ -56,3 +56,9 @@ audio.bk-media { margin: .833rem; width: calc(100% - 1.667rem); }
 @media (forced-colors: active) {
   :root .bk-row[aria-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
 }
+/* The PDF viewer (pdfview.ts): a toolbar and one page on a canvas. The page keeps its own white; the room around it is the pane. */
+.bk-body:has(.pdf-bar) { display: flex; flex-direction: column; overflow: hidden; }
+.pdf-bar { display: flex; align-items: center; gap: .5rem; flex: none; padding: .333rem .667rem; border-bottom: 1px solid var(--hw-line); color: var(--hw-ink-2); }
+.pdf-count, .pdf-zoom { min-width: 4.5rem; text-align: center; font-variant-numeric: tabular-nums; }
+.pdf-area { flex: 1 1 0; min-height: 0; overflow: auto; padding: .667rem; background: var(--hw-ground); text-align: center; }
+.pdf-canvas { background: var(--hw-paper); max-width: none; box-shadow: none; }
