@@ -68,6 +68,11 @@ pub trait Link: Send {
     fn state(&self) -> ConnState {
         ConnState::Local
     }
+
+    /// A handle on the state that outlives the link. `None` for a link that has no state of its own.
+    fn shared_state(&self) -> Option<SharedState> {
+        None
+    }
 }
 
 impl Link for crate::pty::Pty {

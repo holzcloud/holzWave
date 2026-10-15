@@ -264,6 +264,10 @@ impl Link for SshLink {
     fn state(&self) -> ConnState {
         self.state.get()
     }
+
+    fn shared_state(&self) -> Option<SharedState> {
+        Some(self.state.clone())
+    }
 }
 
 /// The text a pane shows for something the connection has to say: dim, on a line of its own, never an escape

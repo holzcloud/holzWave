@@ -49,7 +49,9 @@ use crate::engine::{
 };
 use crate::layout::PaneId;
 use crate::platform::{self, Os, ShellLaunch};
+use crate::conn::{ConnState, Link, SharedState};
 use crate::pty::{Pty, SpawnOptions, process_cwd};
+use crate::ssh::{SshLink, SshTarget};
 use crate::queue::{PaneQueue, Popped};
 use crate::wire::{FrameEncoder, FrameMsg};
 use crate::winshell::announced_path;
@@ -133,6 +135,9 @@ pub struct PaneSpec {
     /// except in host-spawn mode, where the process in the sandbox is `flatpak-spawn` and its directory means
     /// nothing: the directory then comes from the shell's OSC 7 reports only.
     pub cwd_lookup: bool,
+    /// Run the pane on another machine over SSH instead of a local shell. `program`, `args`, `cwd` and `host_spawn`
+    /// are then not used. The pane's own thread reconnects when the connection is lost.
+    pub ssh: Option<SshTarget>,
 }
 
 impl PaneSpec {
@@ -153,6 +158,7 @@ impl PaneSpec {
             notice: None,
             host_spawn: false,
             cwd_lookup: true,
+            ssh: None,
         }
     }
 
@@ -246,6 +252,8 @@ struct Shared {
     queue: Arc<PaneQueue<Control>>,
     pid: Option<u32>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// The state of the pane's connection; empty for a local shell.
+    conn: Arc<Mutex<Option<SharedState>>>,
 }
 
 impl Drop for Shared {
@@ -302,15 +310,17 @@ impl PaneHandle {
 
         let queue: Arc<PaneQueue<Control>> = Arc::new(PaneQueue::new());
         let (started_tx, started_rx) = mpsc::channel::<Result<Option<u32>>>();
+        let conn: Arc<Mutex<Option<SharedState>>> = Arc::new(Mutex::new(None));
+        let engine_conn = conn.clone();
         let engine_queue = queue.clone();
         let join = thread::Builder::new()
             .name(format!("hw-pane-{pane}-engine"))
-            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx, wrap))
+            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx, wrap, engine_conn))
             .map_err(Error::Io)?;
 
         match started_rx.recv_timeout(START_TIMEOUT) {
             Ok(Ok(pid)) => Ok(PaneHandle {
-                shared: Arc::new(Shared { queue, pid, thread: Mutex::new(Some(join)) }),
+                shared: Arc::new(Shared { queue, pid, thread: Mutex::new(Some(join)), conn }),
             }),
             Ok(Err(e)) => {
                 // The thread reported its failure and is on its way out.
@@ -336,6 +346,12 @@ impl PaneHandle {
             |spec| crate::GhosttyEngine::new(spec.cols, spec.rows, spec.scrollback),
             sink,
         )
+    }
+
+    /// The state of the pane's connection: [`ConnState::Local`] for a shell on this machine.
+    pub fn conn_state(&self) -> ConnState {
+        let slot = self.shared.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.as_ref().map_or(ConnState::Local, SharedState::get)
     }
 
     /// The operating system's id of the shell.
@@ -604,7 +620,7 @@ fn writer_main(mut out: Box<dyn Write + Send>, rx: Receiver<Vec<u8>>, pending: A
 struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     engine: E,
     /// `None` once the child has been closed.
-    pty: Option<Pty>,
+    pty: Option<Box<dyn Link>>,
     encoder: FrameEncoder,
     writer: Writer,
     queue: Arc<PaneQueue<Control>>,
@@ -946,7 +962,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Drop for Actor<E, S> {
 }
 
 /// Build the engine and the shell. Nothing is started when the engine cannot be built.
-fn start<E, F>(spec: &PaneSpec, make_engine: F) -> Result<(E, Pty)>
+fn start<E, F>(spec: &PaneSpec, make_engine: F) -> Result<(E, Box<dyn Link>)>
 where
     E: TerminalEngine,
     F: FnOnce(&PaneSpec) -> Result<E>,
@@ -968,13 +984,17 @@ where
         let line: String = notice.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         engine.feed(format!("{line}\r\n").as_bytes());
     }
+    if let Some(target) = &spec.ssh {
+        let link = SshLink::connect(target.clone(), spec.cols, spec.rows)?;
+        return Ok((engine, Box::new(link)));
+    }
     let (program, args, cwd) = spawn_command(spec, &|key| std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()));
     let mut options = SpawnOptions::new(program, spec.cols, spec.rows).args(args).cell_px(spec.cell_px.0, spec.cell_px.1);
     if let Some(dir) = cwd {
         options = options.cwd(dir);
     }
     let pty = Pty::spawn_with(&options)?;
-    Ok((engine, pty))
+    Ok((engine, Box::new(pty)))
 }
 
 /// The program, the arguments and the working directory the child process is started with. As the spec says them, except
@@ -1000,6 +1020,7 @@ fn engine_main<E, F, S>(
     queue: Arc<PaneQueue<Control>>,
     started: Sender<Result<Option<u32>>>,
     wrap: Option<ReaderWrap>,
+    conn: Arc<Mutex<Option<SharedState>>>,
 ) where
     E: TerminalEngine,
     F: FnOnce(&PaneSpec) -> Result<E>,
@@ -1017,6 +1038,7 @@ fn engine_main<E, F, S>(
         Err(e) => return fail(&mut sink, &queue, e),
     };
     let pid = pty.process_id();
+    *conn.lock().unwrap_or_else(PoisonError::into_inner) = pty.shared_state();
     let (Some(reader), Some(writer)) = (pty.take_reader(), pty.take_writer()) else {
         let _ = pty.close();
         return fail(&mut sink, &queue, Error::Pty("the PTY has no reader or writer".into()));

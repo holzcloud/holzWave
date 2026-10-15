@@ -11,6 +11,8 @@
 //! - [`platform`]: the per-OS decisions (default shell, locale, polling) as pure functions of an `Os`.
 //! - [`pty`]: spawning a shell on a pseudo terminal.
 //! - [`conn`]: the [`conn::Link`] trait a pane talks to, and the state of a connection.
+//! - [`profiles`]: `connections.json`, the saved SSH, WSL and Docker connections.
+//! - [`secrets`]: the [`secrets::SecretStore`] trait over the OS keychain.
 //! - [`ssh`]: a shell on another machine over SSH, with reconnect.
 //! - [`persist`]: atomic file writes, bounded reads and the debounced saver.
 //! - [`settings`]: `settings.json`, typed, versioned and validated.
@@ -30,8 +32,10 @@ pub mod layout;
 pub mod pane;
 pub mod persist;
 pub mod platform;
+pub mod profiles;
 pub mod pty;
 pub mod queue;
+pub mod secrets;
 pub mod session;
 pub mod settings;
 pub mod ssh;
