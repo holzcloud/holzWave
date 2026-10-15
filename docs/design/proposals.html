@@ -73,6 +73,25 @@ header p{margin:6px 0 0;color:var(--ink2);max-width:62ch}
 .pal .q{padding:8px 10px;border-bottom:1px solid var(--edge)}
 .pal .it{padding:4px 10px;display:flex;justify-content:space-between;color:var(--ink2)}
 .pal .it.on{background:var(--wash);box-shadow:inset 2px 0 var(--rose);color:var(--ink)}
+/* Hierarchie: Workspace > Tab > Pane */
+.ws{padding:0 10px;height:20px;display:flex;align-items:center;margin:0 3px;border-radius:999px;border:1px solid var(--edge);color:var(--ink3);font-weight:700;white-space:nowrap}
+.ws.on{background:var(--rose-deep);border-color:var(--rose-deep);color:#fff}
+.tabrow{height:26px;background:var(--pane)}
+.ws-key{padding:0 10px;color:var(--ink3);align-self:center}
+.ws-rail .ico{border-radius:8px;margin:0 4px}
+.ws,.tab,.pane{position:relative}
+.show .ws,.show .ws-rail .ico{outline:1px dashed var(--wood);outline-offset:1px}
+.show .tab{outline:1px dashed var(--info);outline-offset:-2px}
+.show .pane,.show .tb,.show .blk{outline:1px dashed var(--rose);outline-offset:-2px}
+.show .ws.on::after,.show .tab.on::after,.show .pane.f::after,.show .tb.f::after{position:absolute;font-size:8px;font-weight:700;padding:0 4px;border-radius:3px;color:#14091A;z-index:5;margin-top:-18px}
+.show .ws.on::after{content:'WORKSPACE';background:var(--wood)}
+.show .tab.on::after{content:'TAB';background:var(--info);margin-top:18px}
+.show .pane.f::after,.show .tb.f::after{content:'PANE';background:var(--rose);margin:10px 0 0 40px}
+.legend{border:1px solid var(--edge);background:var(--ground2);border-radius:10px;padding:16px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+@media(max-width:700px){.legend{grid-template-columns:minmax(0,1fr)}}
+.legend h3{font:700 12px var(--mono);letter-spacing:.1em;text-transform:uppercase;margin:0 0 4px}
+.legend p{margin:0;font-size:13px;color:var(--ink2)}
+.legend .w{color:var(--wood)}.legend .t{color:var(--info)}.legend .p{color:var(--rose)}
 /* V6 Karten */
 .cards{padding:8px;gap:8px;display:grid;grid-template-columns:1.2fr 1fr;grid-template-rows:1fr 1fr}
 .cards .pane{border:1px solid var(--edge);border-radius:14px;overflow:hidden}
@@ -127,6 +146,12 @@ header p{margin:6px 0 0;color:var(--ink2);max-width:62ch}
       <button aria-pressed="false" data-os="lin">Linux</button>
     </div>
   </header>
+  <div class="legend">
+    <div><h3 class="w">Workspace</h3><p>Ein Arbeitskontext, zum Beispiel <i>main</i> oder <i>infra</i>. Merkt sich eigene Tabs und Layout. Immer als Pille mit Raute dargestellt, ganz oben beziehungsweise in der Rail.</p></div>
+    <div><h3 class="t">Tab</h3><p>Eine Seite innerhalb eines Workspace. Eckig, mit Nummer und Unterstrich, in einer eigenen Zeile darunter.</p></div>
+    <div><h3 class="p">Pane</h3><p>Eine Kachel auf einer Tab-Seite mit Shell, SSH oder Vorschau. Hat einen Header mit Statuspunkt, Titel und Host.</p></div>
+  </div>
+  <div class="seg" role="group" aria-label="Struktur" style="align-self:flex-start"><button id="sb" aria-pressed="false">Struktur beschriften</button></div>
   <div class="grid" id="grid"></div>
 </div>
 
@@ -158,16 +183,18 @@ const pal=`<div class="pal"><div class="q"><span class="ro">❯</span> split<spa
 <div class="it"><span>Split pane down</span><span class="kbd">⇧⌘D</span></div>
 <div class="it"><span>Connect: holzkube</span><span class="kbd">ssh</span></div></div>`;
 const P=(t,c,b,f)=>`<div class="pane fill ${f?'f':''}"><div class="ph row"><i class="dot"></i><span class="lbl">${t}</span><span class="ctx">${c}</span></div><div class="term fill">${b}</div></div>`;
+const WS=(a=0)=>['◆ main','◇ infra','◇ docs'].map((t,i)=>`<div class="ws ${i==a?'on':''}">${t}</div>`).join('');
+const TB=(x='',bg='')=>`<div class="bar row" ${bg?`style="${bg}"`:''}>${wcL}${WS()}<span class="fill"></span>${x}${wcR}</div><div class="bar row tabrow">${tabs(0)}</div>`;
 const tabs=(a)=>['1 shell','2 holzkube','3 notes.md'].map((t,i)=>`<div class="tab ${i==a?'on':''}">${t}</div>`).join('')+'<div class="tab dim">+</div>';
 
 const V=[
 {n:'Haarlinie+',t:'Weiterentwicklung des Beschlossenen',d:'Das aktuelle Fenster, verfeinert: Zeilen-Tabs, Pane-Header mit Statuspunkt, tmux-Statuszeile. Geringstes Risiko.',tags:['Dichte hoch','Nativ: mittel','Bestehende Basis'],
- h:`<div class="bar row">${wcL}<div class="tab on" style="box-shadow:none;color:var(--rose)">◆ MAIN</div>${tabs(0)}<span class="fill"></span><span class="dim" style="padding-right:10px">~/holzWave · 14:32</span>${wcR}</div>
+ h:`${TB('<span class="dim" style="padding-right:10px">~/holzWave · 14:32</span>')}
  <div class="row fill">${P('Shell','pane 1 · local',sh,1)}<div class="fill" style="display:flex;flex-direction:column">${P('holzkube','ssh · talos',kube)}${P('notes.md','preview',md)}</div></div>
  <div class="status row"><span class="on">MAIN</span><span>3 panes</span><span>webgl2</span><span style="margin-left:auto">utf-8</span><span>0.0.1-alpha2</span></div>${pal}`},
 {n:'Seitenleiste',t:'Workspace-Rail links',d:'Schmale Icon-Rail für Workspaces, oben nur Tabs des aktiven Workspace. Gut für viele Workspaces.',tags:['Dichte mittel','Nativ: hoch (wie Finder/Explorer)','Viele Workspaces'],
- h:`<div class="bar row">${wcL}<span class="dim lbl" style="padding:0 10px">holzWave</span>${tabs(0)}<span class="fill"></span>${wcR}</div>
- <div class="row fill"><div class="rail"><div class="ico on">M</div><div class="ico">K</div><div class="ico">D</div><div class="ico" style="margin-top:auto">⚙</div></div>
+ h:`<div class="bar row">${wcL}<span class="fill"></span>${wcR}</div><div class="bar row tabrow"><span class="ws-key lbl">Tabs</span>${tabs(0)}</div>
+ <div class="row fill"><div class="rail ws-rail"><div class="ico on">◆</div><div class="ico">◇</div><div class="ico">◇</div><div class="ico" style="margin-top:auto">⚙</div></div>
  ${P('Shell','local',sh,1)}${P('holzkube','ssh · talos',kube)}</div>
  <div class="status row"><span class="on">MAIN</span><span>2 panes</span><span style="margin-left:auto">⌘K palette</span></div>`},
 {n:'Baumansicht',t:'Workspaces, Tabs und Panes als Baum',d:'Vertikale Übersicht wie ein Dateibaum: jede Sitzung, jeder Host, jede Pane auf einen Blick. Für Power-User mit vielen SSH-Sitzungen.',tags:['Übersicht sehr hoch','Nativ: hoch','Breiter'],
@@ -179,23 +206,23 @@ const V=[
  h:`<div class="bar row" style="height:20px;background:var(--ground);border:0">${wcL}<span class="fill"></span><span class="dim" style="padding-right:10px">main · 1/3 · <span class="kbd">⌘K</span></span>${wcR}</div>
  <div class="row fill"><div class="fill" style="display:flex;flex-direction:column">${P('Shell','local',sh,1)}</div>${P('holzkube','ssh',kube)}</div>${pal}`},
 {n:'Powerline',t:'Segmentierte Statuszeile als Hauptnavigation',d:'tmux/Powerline-Pfeilsegmente unten und oben. Sehr nerdig, jede Information ist ein Segment, jedes Segment ist klickbar.',tags:['Dichte hoch','Nativ: niedrig','Max. Nerd'],
- h:`<div class="bar row" style="background:var(--ground)">${wcL}<div class="pl"><span class="a">◆ main</span><span class="b">1 shell</span><span class="c">2 holzkube</span><span class="c">3 notes</span></div><span class="fill"></span>${wcR}</div>
+ h:`<div class="bar row" style="background:var(--ground)">${wcL}<div class="pl"><span class="a ws on">◆ main</span><span class="c ws">◇ infra</span><span class="c ws">◇ docs</span></div><span class="fill"></span>${wcR}</div><div class="bar row tabrow">${tabs(0)}</div>
  <div class="row fill">${P('Shell','local',sh,1)}<div class="fill" style="display:flex;flex-direction:column">${P('holzkube','ssh',kube)}${P('notes.md','preview',md)}</div></div>
  <div class="pl" style="height:22px;background:var(--ground2)"><span class="a">main</span><span class="b">~/holzWave</span><span class="c">3 panes</span><span class="c">webgl2</span><span class="c" style="margin-left:auto">⎇ main</span><span class="b">alpha2</span></div>`},
 {n:'Karten',t:'Schwebende Panes mit 16 px Radius',d:'Panes als Karten auf dunklem Grund, Fokus als Rose-Rahmen. Weicher und moderner, braucht etwas mehr Platz.',tags:['Dichte mittel','Nativ: mittel','Modern'],
- h:`<div class="bar row" style="background:var(--ground);border:0">${wcL}${tabs(0)}<span class="fill"></span>${wcR}</div>
+ h:`${TB('','background:var(--ground)')}
  <div class="cards fill"><div class="pane big f"><div class="ph row"><i class="dot"></i><span class="lbl">Shell</span><span class="ctx">local</span></div><div class="term fill">${sh}</div></div>
  <div class="pane"><div class="ph row"><i class="dot"></i><span class="lbl">holzkube</span><span class="ctx">ssh</span></div><div class="term fill">${kube}</div></div>
  <div class="pane"><div class="ph row"><i class="dot" style="background:var(--info)"></i><span class="lbl">notes.md</span><span class="ctx">preview</span></div><div class="term fill">${md}</div></div></div>
  <div class="status row"><span class="on">MAIN</span><span>3 panes</span></div>`},
 {n:'Activity Bar',t:'IDE-artig: Sitzungen, SSH, Dateien, Sync',d:'Icon-Leiste links schaltet ein Seitenpanel (Sitzungen, Hosts, Dateivorschau, Nextcloud-Sync). Deckt alle geplanten Funktionen ab.',tags:['Funktionsumfang max.','Nativ: hoch','Breiter'],
- h:`<div class="bar row">${wcL}${tabs(0)}<span class="fill"></span>${wcR}</div>
+ h:`${TB()}
  <div class="row fill"><div class="rail"><div class="ico on">▤</div><div class="ico">⇄</div><div class="ico">▣</div><div class="ico">☁</div></div>
  <div class="side" style="width:120px"><div class="lbl h">Hosts</div><div><span class="ok">●</span> talos-1</div><div><span class="ok">●</span> talos-2</div><div><span class="er">●</span> nas</div><div class="lbl h">Sync</div><div class="ok">✓ Nextcloud</div></div>
  ${P('Shell','local',sh,1)}</div>
  <div class="status row"><span class="on">MAIN</span><span>☁ synced</span><span style="margin-left:auto">ssh 2</span></div>`},
 {n:'Blöcke',t:'Befehle als Blöcke mit Status und Dauer',d:'Jeder Befehl ist ein Block mit Exit-Code, Dauer und Aktionen (kopieren, wiederholen). Fehler fallen sofort durch roten Rand auf.',tags:['Übersicht sehr hoch','Nativ: mittel','Wave-nah'],
- h:`<div class="bar row">${wcL}${tabs(0)}<span class="fill"></span>${wcR}</div>
+ h:`${TB()}
  <div class="fill" style="overflow:hidden"><div class="blk"><div class="h"><span class="ok">✓ 0</span><span>cargo test</span><span class="t">2.4s</span></div><div class="term" style="padding:4px 10px">test result: <span class="ok">ok</span>. 14 passed</div></div>
  <div class="blk err"><div class="h"><span class="er">✗ 1</span><span>npm run build</span><span class="t">8.1s</span></div><div class="term" style="padding:4px 10px"><span class="er">error</span> TS2322 in chrome.ts:41</div></div>
  <div class="blk"><div class="h"><span class="ok">✓ 0</span><span>git log -3</span><span class="t">0.1s</span></div><div class="term" style="padding:4px 10px"><span class="wa">e883222</span> fix(release)…</div></div>
@@ -206,7 +233,7 @@ const V=[
  <div class="tui fill"><div class="tb f big dbl" data-t="1 shell · local">${sh}</div><div class="tb" data-t="2 holzkube · ssh">${kube}</div><div class="tb" data-t="3 notes.md">${md}</div></div>
  <div class="status row"><span class="on">MAIN</span><span>⌘K</span><span style="margin-left:auto">alpha2</span></div>`},
 {n:'Planke',t:'Logo-Planke als Unterkante',d:'Wie Haarlinie+, aber die Holzplanke aus dem Logo trägt die Statuszeile und den aktiven Workspace. Der einzige Warm-Akzent, bleibt wiedererkennbar.',tags:['Dichte hoch','Nativ: mittel','Markenstark'],
- h:`<div class="bar row">${wcL}<div class="tab on" style="box-shadow:none;color:var(--rose)">◆ MAIN</div>${tabs(0)}<span class="fill"></span>${wcR}</div>
+ h:`${TB()}
  <div class="row fill">${P('Shell','local',sh,1)}<div class="fill" style="display:flex;flex-direction:column">${P('holzkube','ssh · talos',kube)}${P('notes.md','preview',md)}</div></div>
  <div class="wood"></div><div class="status row" style="background:linear-gradient(var(--ground2),var(--ground))"><span class="on" style="background:var(--wood);color:#1B0E20">MAIN</span><span>3 panes</span><span style="margin-left:auto">0.0.1-alpha2</span></div>`},
 ];
@@ -216,8 +243,9 @@ V.forEach((v,i)=>{
   g.insertAdjacentHTML('beforeend',`<section class="card"><h2><i>${String(i+1).padStart(2,'0')}</i>${v.n}</h2><p><b>${v.t}.</b> ${v.d}</p><div class="tags">${v.tags.map(t=>`<span>${t}</span>`).join('')}</div><div class="m">${v.h}</div></section>`);
 });
 g.insertAdjacentHTML('beforeend',`<section class="card" style="grid-column:1/-1"><h2><i>+</i>Mobil, gilt für alle 10</h2><p>Auf iOS und Android zeigt jede Variante eine Pane pro Bildschirm, Tabs unten und die Tastenleiste über der Systemtastatur. Tokens bleiben gleich, Mindestgröße 44 px.</p><div class="m" style="height:230px;border-color:var(--edge)"><div class="pair">${phone}${phone.replace('main · 1 shell','main · 2 kube').replace('class="on">shell','>shell').replace('<span>kube','<span class="on">kube')}<div class="fill dim" style="align-self:center;padding:0 12px">Eine Pane je Bildschirm.<br>Wischen wechselt Tabs.<br>Lange Pane-Titel kürzen sich mittig.</div></div></div></section>`);
-document.querySelectorAll('.seg button').forEach(b=>b.addEventListener('click',()=>{
+document.getElementById('sb').addEventListener('click',e=>{const on=document.getElementById('root').classList.toggle('show');e.target.setAttribute('aria-pressed',on)});
+document.querySelectorAll('.seg button[data-os]').forEach(b=>b.addEventListener('click',()=>{
   document.getElementById('root').dataset.os=b.dataset.os;
-  document.querySelectorAll('.seg button').forEach(x=>x.setAttribute('aria-pressed',x===b));
+  document.querySelectorAll('.seg button[data-os]').forEach(x=>x.setAttribute('aria-pressed',x===b));
 }));
 </script>
