@@ -6,6 +6,7 @@
 // state, geometry. This file only starts them.
 // Every window runs this same page; it listens with its own label (bridge) and says `window_ready` when it has drawn.
 import { call, listen } from "./bridge.js";
+import { initBlocks } from "./blocks.js";
 import { initChrome } from "./chrome.js";
 import { initConnections } from "./connections.js";
 import { openConnections } from "./connections-ui.js";
@@ -41,6 +42,11 @@ async function main() {
   await initLinks();
   await initHints();
   await initPalette();
+  // File browsers and previews: panes that show files instead of a terminal.
+  await initBlocks(document.getElementById("overlay") as HTMLElement, applyView, () => {
+    renderStatus();
+    renderOverlay();
+  });
   // Saved connections: a palette entry for each, the manager dialog, and the state of the panes that run one.
   await initConnections(applyView, () => {
     renderStatus();

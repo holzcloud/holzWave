@@ -58,6 +58,20 @@
     "allow-open-url",
     "allow-reveal-path",
     "allow-mouse",
-    "allow-wheel"
+    "allow-wheel",
+    "allow-connections-list",
+    "allow-connection-save",
+    "allow-connection-delete",
+    "allow-connect",
+    "allow-pane-connections",
+    "allow-block-open",
+    "allow-pane-blocks",
+    "allow-block-update",
+    "allow-files-list",
+    "allow-file-open",
+    "allow-file-stat",
+    "allow-file-grant",
+    "allow-file-revoke",
+    "allow-file-save"
   ]
 }

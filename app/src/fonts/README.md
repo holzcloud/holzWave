@@ -30,3 +30,17 @@ Fetch the newest release, unpack it into a new empty directory outside the repos
 data: nothing from it is executed), extract only the three woff2 files and `OFL.txt`, compare the zip with the
 digest GitHub publishes when there is one, and update the tag, URL and checksums above in the same commit.
 `app/tests/browser/fonts.test.mjs` checks that the files are served with a font content type and load.
+
+## Bundled font: Manrope
+
+Previews of Markdown documents use Manrope, the text face of the holzcloud family (docs/design.md section 3). Chrome and
+the terminal stay in JetBrains Mono.
+
+| | |
+|---|---|
+| Project | https://github.com/sharanda/manrope |
+| File | `Manrope-Variable-latin.woff2`, the variable font (weights 200 to 800), Latin subset |
+| Source | https://fonts.gstatic.com/s/manrope/v20/xn7gYHE41ni1AdIRggexSg.woff2 (Google Fonts, fetched 2026-10-15) |
+| SHA-256 | `a30ddcd349703aff7464c34bef3fffdff405ee50c113440d7c8693c02d210972` |
+| Licence | SIL Open Font License 1.1, see `OFL-Manrope.txt` |
+| Modification | none |

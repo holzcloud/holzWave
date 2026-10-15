@@ -1,0 +1,95 @@
+// The reading and the words of block panes and file lists (blockstate.ts): no DOM is needed.
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  baseName, blockContext, blockTitle, entryIcon, humanSize, joinPath, paneBlocks, readBlocks, readListing,
+  setPaneBlocks, shortDate, visibleEntries,
+} from "../../dist/blockstate.js";
+
+test("the list of blocks is read entry by entry and what is not well formed is dropped", () => {
+  const list = readBlocks([
+    { pane: 1, kind: "files", source: "local", path: "/home", source_label: "This computer" },
+    { pane: 2, kind: "terminal", source: "local", path: "/" },
+    { pane: "x", kind: "files", source: "local", path: "/" },
+    null,
+    { pane: 3, kind: "preview", source: "talos", path: "/a.md" },
+  ]);
+  assert.deepEqual(list.map((b) => b.pane), [1, 3]);
+  assert.equal(list[1].source_label, "talos", "a missing label is the source's id");
+});
+
+test("the same answer twice is no change", () => {
+  paneBlocks.clear();
+  const one = [{ pane: 1, kind: "files", source: "local", path: "/", source_label: "This computer" }];
+  assert.equal(setPaneBlocks(one), true);
+  assert.equal(setPaneBlocks(structuredClone(one)), false);
+  assert.equal(setPaneBlocks([]), true);
+});
+
+test("a listing is read with its entries cleaned", () => {
+  const l = readListing({
+    path: "/home/holz",
+    parent: "/home",
+    entries: [
+      { name: "docs", kind: "dir", link: false, size: 0, modified: 100, hidden: false },
+      { name: "", kind: "file" },
+      { name: "a.txt", kind: "weird", size: -5, modified: "x", hidden: true },
+    ],
+    truncated: true,
+  });
+  assert.equal(l.parent, "/home");
+  assert.equal(l.truncated, true);
+  assert.deepEqual(l.entries.map((e) => [e.name, e.kind, e.size, e.modified]), [["docs", "dir", 0, 100], ["a.txt", "other", 0, null]]);
+  assert.equal(readListing(null), null);
+  assert.equal(readListing({ path: 3 }), null);
+});
+
+test("paths are joined and cut with the separator they use", () => {
+  assert.equal(joinPath("/home/holz", "a.txt"), "/home/holz/a.txt");
+  assert.equal(joinPath("/", "etc"), "/etc");
+  assert.equal(joinPath("C:\\Users\\holz", "a.txt"), "C:\\Users\\holz\\a.txt");
+  assert.equal(baseName("/home/holz/notes.md"), "notes.md");
+  assert.equal(baseName("C:\\Users\\holz\\notes.md"), "notes.md");
+  assert.equal(baseName("/home/holz/"), "holz");
+  assert.equal(baseName("/"), "/");
+});
+
+test("an icon is a shape for the kind of file", () => {
+  assert.equal(entryIcon({ name: "src", kind: "dir" }), "▸");
+  assert.equal(entryIcon({ name: "shot.PNG", kind: "file" }), "▣");
+  assert.equal(entryIcon({ name: "demo.mp4", kind: "file" }), "▶");
+  assert.equal(entryIcon({ name: "README.md", kind: "file" }), "▤");
+  assert.equal(entryIcon({ name: "main.rs", kind: "file" }), "✎");
+  assert.equal(entryIcon({ name: "sock", kind: "other" }), "·");
+});
+
+test("sizes read like a person would say them", () => {
+  assert.equal(humanSize(0), "0 B");
+  assert.equal(humanSize(1023), "1023 B");
+  assert.equal(humanSize(1536), "1.5 KB");
+  assert.equal(humanSize(12 * 1024 * 1024), "12 MB");
+  assert.equal(humanSize(5 * 1024 ** 3), "5 GB");
+  assert.equal(humanSize(-1), "");
+});
+
+test("a date shows the time this year and the year before", () => {
+  const now = new Date(2026, 9, 15, 12, 0);
+  assert.equal(shortDate(new Date(2026, 9, 15, 14, 2).getTime() / 1000, now), "Oct 15 14:02");
+  assert.equal(shortDate(new Date(2025, 2, 3, 9, 0).getTime() / 1000, now), "Mar  3  2025");
+  assert.equal(shortDate(null, now), "");
+});
+
+test("a header says what a block shows", () => {
+  const files = { pane: 1, kind: "files", source: "local", path: "/home/holz", source_label: "This computer" };
+  const preview = { pane: 2, kind: "preview", source: "talos", path: "/srv/notes.md", source_label: "Talos" };
+  assert.equal(blockTitle(files), "files");
+  assert.equal(blockContext(files), "This computer · /home/holz");
+  assert.equal(blockTitle(preview), "notes.md");
+  assert.equal(blockContext(preview), "Talos · preview");
+});
+
+test("hidden entries are shown only when asked", () => {
+  const list = [{ name: ".git", hidden: true }, { name: "src", hidden: false }];
+  assert.deepEqual(visibleEntries(list, false).map((e) => e.name), ["src"]);
+  assert.deepEqual(visibleEntries(list, true).map((e) => e.name), [".git", "src"]);
+});

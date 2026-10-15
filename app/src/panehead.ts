@@ -8,6 +8,7 @@
 // keyed by pane id like the dividers: the same element is moved on every render. Everything is `textContent`.
 import { el, fitNodes, setAttr, setRect, setText } from "./dom.js";
 import { paneRect } from "./geometry.js";
+import { blockContext, blockTitle, paneBlocks } from "./blockstate.js";
 import { connDot, connText, paneConns } from "./connstate.js";
 import { shortenHome } from "./labels.js";
 import { startRename } from "./rename.js";
@@ -128,9 +129,17 @@ export function renderPaneHeads(): void {
       const name = nameOf(id);
       const program = titleOf(id, tabTitle);
       // A name the user gave comes first; the program's title stays visible after it, lighter.
-      setText(head.title, name === "" ? program : name);
+      // A block pane (file browser, preview) is titled by what it shows, not by a program.
+      const block = paneBlocks.get(id);
+      setText(head.title, name !== "" ? name : block ? blockTitle(block) : program);
       setText(head.sub, name !== "" && program !== name ? program : "");
-      const ctx = exited ? "exited" : conn ? connText(conn) : shortenHome(state.cwds.get(id) ?? "", state.os);
+      const ctx = exited
+        ? "exited"
+        : block
+          ? blockContext(block)
+          : conn
+            ? connText(conn)
+            : shortenHome(state.cwds.get(id) ?? "", state.os);
       setText(head.ctx.firstElementChild as HTMLElement, ctx);
       setAttr(head.ctx, "title", ctx === "" ? null : ctx);
     }

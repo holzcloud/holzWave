@@ -57,6 +57,20 @@ fn main() {
     "reveal_path",
     "mouse",
     "wheel",
+    "connections_list",
+    "connection_save",
+    "connection_delete",
+    "connect",
+    "pane_connections",
+    "block_open",
+    "pane_blocks",
+    "block_update",
+    "files_list",
+    "file_open",
+    "file_stat",
+    "file_grant",
+    "file_revoke",
+    "file_save",
   ]);
   tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)).expect("tauri build failed");
 }

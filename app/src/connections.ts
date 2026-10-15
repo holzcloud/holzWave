@@ -2,6 +2,7 @@
 // manages them, and the once-a-second look at the state of the panes that run one. The core owns everything; this
 // module asks and shows. A connection opens in a new tab, which the core makes and answers with the new view.
 import { registerAction, unregisterAction } from "./actions.js";
+import { openBlock } from "./blocks.js";
 import { call } from "./bridge.js";
 import { focusInput } from "./keyboard.js";
 import { connSummary, paneConns, readConnections, readPaneConns, setPaneConns } from "./connstate.js";
@@ -40,6 +41,12 @@ export async function refreshConnections(): Promise<readonly Connection[]> {
     if (dynamicIds.has(id)) continue; // the core's ids are unique; a repeat must not break the others
     registerAction({ id, title: connectTitle(c), run: () => void connect(c.id) });
     dynamicIds.add(id);
+    if (c.kind === "ssh") {
+      // The files of a host, over SFTP on a connection of their own.
+      const filesId = `files.${c.id}`;
+      registerAction({ id: filesId, title: `Files: ${c.name} (sftp)`, run: () => void openBlock("files", c.id, "", "tab") });
+      dynamicIds.add(filesId);
+    }
   }
   onChange();
   return saved;

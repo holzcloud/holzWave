@@ -95,13 +95,16 @@
       "pane",
       "kind"
     ],
+    "file_grant": [
+      "source",
+      "path"
+    ],
     "file_open": [
       "source",
       "path"
     ],
-    "file_read": [
-      "source",
-      "path"
+    "file_revoke": [
+      "token"
     ],
     "file_save": [
       "source",

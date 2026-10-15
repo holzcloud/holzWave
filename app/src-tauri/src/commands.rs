@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use holzwave_core::blocks::{BlockKind, BlockView, Opened};
+use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
 use holzwave_core::engine::{
@@ -757,10 +757,26 @@ pub fn file_stat(core: State<Arc<AppCore>>, source: String, path: String) -> Res
     core.file_stat(&source, &path)
 }
 
-/// The bytes of a file for an image, a video or a PDF (at most 128 MiB), as raw bytes and not as JSON numbers.
+/// Permission to show one image, video, audio or PDF: the answer has a `token`, the media type and the size, and
+/// `url` is where the `holzfile` scheme serves the file from (with byte ranges, so a video seeks and nothing is loaded
+/// whole). The grant names that one file and ends with `file_revoke`.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn file_read(core: State<Arc<AppCore>>, source: String, path: String) -> Result<tauri::ipc::Response, String> {
-    core.file_read(&source, &path).map(tauri::ipc::Response::new)
+pub fn file_grant(core: State<Arc<AppCore>>, source: String, path: String) -> Result<GrantAnswer, String> {
+    core.file_grant(&source, &path).map(|g| GrantAnswer { url: crate::files_protocol::url_of(&g.token), grant: g })
+}
+
+/// End a grant.
+#[tauri::command(rename_all = "snake_case")]
+pub fn file_revoke(core: State<Arc<AppCore>>, token: String) {
+    core.file_revoke(&token);
+}
+
+/// The answer of `file_grant`.
+#[derive(Serialize)]
+pub struct GrantAnswer {
+    pub url: String,
+    #[serde(flatten)]
+    pub grant: Grant,
 }
 
 /// Save the editor's text over a file (written aside and renamed over it).

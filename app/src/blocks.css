@@ -1,0 +1,58 @@
+/* Block panes (blocks.ts): a file browser and a preview drawn over the pane's empty terminal, below its header. Every
+   colour is a `--hw-*` token and every size is in rem, so the UI scale moves it with the rest of the chrome. Docs
+   preview text is Manrope (docs/design.md section 3); everything else, and everything a machine wrote, is mono. The kind
+   of a file is a shape before its name, and the highlighted row has a bar as well as a wash, so neither needs colour. */
+.block {
+  position: absolute; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden; pointer-events: auto;
+  background: var(--hw-pane); color: var(--hw-ink); border-top: 1px solid var(--hw-line);
+}
+.block:focus { outline: none; }
+.bk-bar { display: flex; align-items: center; gap: .667rem; flex: none; padding: .333rem .667rem;
+          border-bottom: 1px solid var(--hw-line); color: var(--hw-ink-2); }
+.bk-path { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.block button { all: unset; box-sizing: border-box; cursor: pointer; padding: .167rem .5rem; border: 1px solid var(--hw-line);
+                border-radius: .5rem; color: var(--hw-ink-2); font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase; }
+.block button:hover { color: var(--hw-ink); background: var(--hw-rose-wash); }
+.block button:disabled { opacity: .5; cursor: default; background: none; }
+.block button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.block button[aria-pressed="true"] { color: var(--hw-ink); background: var(--hw-rose-wash); }
+.bk-list { flex: 1 1 0; min-height: 0; overflow: auto; padding: .167rem 0; }
+.bk-row { display: grid; grid-template-columns: 1.25rem minmax(0, 1fr) 5rem 8rem; align-items: center; column-gap: .5rem;
+          height: 1.667rem; padding: 0 .667rem; cursor: default; white-space: nowrap; }
+.bk-row[aria-selected="true"] { background: var(--hw-rose-wash); box-shadow: inset 2px 0 var(--hw-rose); color: var(--hw-ink); }
+.bk-row:hover { background: var(--hw-rose-wash); }
+.bk-icon { color: var(--hw-dim); text-align: center; }
+.bk-row[data-kind="dir"] .bk-icon, .bk-row[data-kind="dir"] .bk-name { color: var(--hw-ink); font-weight: 700; }
+.bk-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.bk-size, .bk-date { color: var(--hw-dim); text-align: right; font-variant-numeric: tabular-nums; }
+.bk-status { flex: none; padding: .167rem .667rem; border-top: 1px solid var(--hw-line); color: var(--hw-dim);
+             font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase; min-height: 1.5rem; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
+.bk-status[data-failed="true"] { color: var(--hw-danger); text-transform: none; letter-spacing: 0; white-space: normal; }
+.bk-body { flex: 1 1 0; min-height: 0; overflow: auto; }
+.bk-message { margin: 0; padding: .833rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.bk-image { display: block; max-width: 100%; max-height: 100%; margin: 0 auto; object-fit: contain; }
+.bk-body:has(.bk-image) { display: grid; place-items: center; padding: .667rem; }
+.bk-media { display: block; width: 100%; max-height: 100%; }
+audio.bk-media { margin: .833rem; width: calc(100% - 1.667rem); }
+.md { box-sizing: border-box; max-width: 46rem; margin: 0 auto; padding: .833rem 1.25rem 1.667rem; font-family: "Manrope", system-ui, sans-serif;
+      font-size: 1.167rem; line-height: 1.6; overflow-wrap: anywhere; }
+.md h1, .md h2, .md h3, .md h4 { margin: 1.4em 0 .5em; line-height: 1.25; font-weight: 700; }
+.md h1:first-child { margin-top: 0; }
+.md h1 { font-size: 1.6em; } .md h2 { font-size: 1.3em; } .md h3 { font-size: 1.1em; }
+.md p, .md ul, .md ol, .md blockquote, .md pre, .md table { margin: 0 0 .9em; }
+.md a { color: var(--hw-rose); text-decoration: underline; }
+.md blockquote { padding-left: .9em; border-left: 2px solid var(--hw-line); color: var(--hw-ink-2); }
+.md code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .9em; padding: .05em .3em; background: var(--hw-ground-2); border-radius: .25rem; }
+.md pre { padding: .75em .9em; overflow: auto; background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
+.md pre code { padding: 0; background: none; }
+.md table { border-collapse: collapse; }
+.md th, .md td { padding: .3em .7em; border: 1px solid var(--hw-line); text-align: left; }
+.md hr { border: 0; border-top: 1px solid var(--hw-line); margin: 1.4em 0; }
+.md input[type="checkbox"] { margin-right: .4em; accent-color: var(--hw-rose); }
+.code { display: flex; min-width: min-content; padding: .5rem 0; font-size: 1rem; line-height: 1.5; }
+.code-gutter { flex: none; padding: 0 .75rem 0 .667rem; text-align: right; color: var(--hw-dim); border-right: 1px solid var(--hw-line); white-space: pre; user-select: none; }
+.code-text { margin: 0; padding: 0 .75rem; font: inherit; white-space: pre; tab-size: 4; }
+@media (forced-colors: active) {
+  :root .bk-row[aria-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+}

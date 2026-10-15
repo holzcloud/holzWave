@@ -2028,6 +2028,7 @@ name = "holzwave-core"
 version = "0.0.1-alpha2"
 dependencies = [
  "ammonia",
+ "getrandom 0.4.3",
  "infer",
  "keyring",
  "libghostty-vt",

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Opened};
+use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, Opened};
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
 use holzwave_core::files::{Entry, Listing};
 use holzwave_core::engine::{
@@ -913,8 +913,25 @@ impl AppCore {
         self.blocks.open(&self.connections, source, path).map_err(|e| e.to_string())
     }
 
-    pub fn file_read(&self, source: &str, path: &str) -> Result<Vec<u8>, String> {
-        self.blocks.read(&self.connections, source, path).map_err(|e| e.to_string())
+    /// Permission to show one image, video, audio or PDF through the `holzfile` scheme: a token that is the whole URL
+    /// path, and the file's media type and size.
+    pub fn file_grant(&self, source: &str, path: &str) -> Result<Grant, String> {
+        self.blocks.grant(&self.connections, source, path).map_err(|e| e.to_string())
+    }
+
+    /// End a grant when the preview that used it is gone.
+    pub fn file_revoke(&self, token: &str) {
+        self.blocks.revoke(token);
+    }
+
+    /// What the `holzfile` scheme needs: the media type and size of a granted file.
+    pub fn granted(&self, token: &str) -> Option<(String, u64)> {
+        self.blocks.granted(token)
+    }
+
+    /// `len` bytes of a granted file from `offset`; `None` when the token is not a grant.
+    pub fn read_granted(&self, token: &str, offset: u64, len: u64) -> Option<Result<Vec<u8>, String>> {
+        self.blocks.read_granted(&self.connections, token, offset, len).map(|r| r.map_err(|e| e.to_string()))
     }
 
     pub fn file_save(&self, source: &str, path: &str, text: &str) -> Result<(), String> {
@@ -3751,6 +3768,100 @@ mod tests {
 
         assert_eq!(core.view().panes.len(), 1);
         assert_eq!(std::fs::read_to_string(dir.0.join("layout.json.bad")).unwrap(), damaged);
+    }
+
+    #[test]
+    fn a_block_opens_in_a_new_tab_or_beside_the_focused_pane_and_is_remembered() {
+        let dir = Scratch::new("blocks");
+        let folder = dir.0.join("docs");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("a.md"), "# A").unwrap();
+        let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+        let before = core.view().panes.len();
+
+        let view = core.block_open_in("main", "tab", BlockKind::Files, "local", folder.to_str().unwrap()).unwrap();
+        assert_eq!(view.tabs.len(), 2, "a new tab");
+        let blocks = core.blocks_list();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!((blocks[0].pane, blocks[0].block.kind), (view.focus, BlockKind::Files));
+        assert_eq!(blocks[0].source_label, "This computer");
+
+        let listing = core.files_list("local", folder.to_str().unwrap()).unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        let opened = core.file_open("local", folder.join("a.md").to_str().unwrap()).unwrap();
+        assert!(opened.html.unwrap().contains("<h1>A</h1>"));
+
+        let beside = core.block_open_in("main", "right", BlockKind::Preview, "local", folder.join("a.md").to_str().unwrap()).unwrap();
+        assert_eq!(beside.panes.len(), 2, "the focused tab was split: {before} panes became {}", beside.panes.len());
+        assert_eq!(core.blocks_list().len(), 2);
+        core.block_update(beside.focus, folder.join("b.md").to_str().unwrap()).unwrap();
+        assert!(core.blocks_list().iter().any(|b| b.block.path.ends_with("b.md")));
+
+        // A block with no source is refused before any pane is made.
+        let tabs = core.view().tabs.len();
+        assert!(core.block_open_in("main", "tab", BlockKind::Preview, "", "/x").is_err());
+        assert_eq!(core.view().tabs.len(), tabs, "no empty pane is left behind");
+        assert!(core.files_list("no-such-connection", "/").is_err());
+
+        // A restart opens the same views on the same panes.
+        core.flush();
+        drop(core);
+        let again = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+        assert_eq!(again.blocks_list().len(), 2);
+    }
+
+    #[test]
+    fn a_granted_file_is_served_in_ranges_and_nothing_else_is() {
+        use crate::files_protocol::serve;
+        use tauri::http::{Method, Request, StatusCode, header};
+        let dir = Scratch::new("serve");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+        png.extend((0..100u8).collect::<Vec<_>>());
+        let file = dir.0.join("a.png");
+        std::fs::write(&file, &png).unwrap();
+        std::fs::write(dir.0.join("secret.txt"), "not shown").unwrap();
+        let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+
+        let grant = core.file_grant("local", file.to_str().unwrap()).unwrap();
+        assert_eq!((grant.mime.as_str(), grant.size), ("image/png", png.len() as u64));
+        assert!(core.file_grant("local", dir.0.join("secret.txt").to_str().unwrap()).is_err(), "text is not granted");
+        let request = |method: Method, token: &str, range: Option<&str>| {
+            let mut b = Request::builder().method(method).uri(format!("holzfile://localhost/{token}"));
+            if let Some(r) = range {
+                b = b.header(header::RANGE, r);
+            }
+            b.body(Vec::new()).unwrap()
+        };
+
+        let whole = serve(&core, &request(Method::GET, &grant.token, None));
+        assert_eq!(whole.status(), StatusCode::OK);
+        assert_eq!(whole.body(), &png);
+        assert_eq!(whole.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(whole.headers()["X-Content-Type-Options"], "nosniff");
+        assert_eq!(whole.headers()["Content-Security-Policy"], "default-src 'none'; sandbox");
+
+        let part = serve(&core, &request(Method::GET, &grant.token, Some("bytes=16-19")));
+        assert_eq!(part.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(part.body(), &png[16..20]);
+        assert_eq!(part.headers()[header::CONTENT_RANGE], format!("bytes 16-19/{}", png.len()));
+        let tail = serve(&core, &request(Method::GET, &grant.token, Some("bytes=-4")));
+        assert_eq!(tail.body(), &png[png.len() - 4..]);
+        let past = serve(&core, &request(Method::GET, &grant.token, Some("bytes=9999-")));
+        assert_eq!(past.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+        let head = serve(&core, &request(Method::HEAD, &grant.token, None));
+        assert_eq!((head.status(), head.body().len()), (StatusCode::OK, 0));
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], png.len().to_string());
+        assert_eq!(serve(&core, &request(Method::POST, &grant.token, None)).status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // A token nobody was given, and a path that is not a token, read nothing.
+        assert_eq!(serve(&core, &request(Method::GET, &"0".repeat(32), None)).status(), StatusCode::NOT_FOUND);
+        let by_path = Request::builder().uri("holzfile://localhost/secret.txt").body(Vec::new()).unwrap();
+        assert_eq!(serve(&core, &by_path).status(), StatusCode::NOT_FOUND);
+
+        // After the preview is gone the URL stops working.
+        core.file_revoke(&grant.token);
+        assert_eq!(serve(&core, &request(Method::GET, &grant.token, None)).status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

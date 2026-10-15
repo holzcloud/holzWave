@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ pub const PREVIEW_LIMIT: u64 = 128 * 1024 * 1024;
 pub const EDIT_LIMIT: u64 = 8 * 1024 * 1024;
 /// The source name of this computer.
 pub const LOCAL: &str = "local";
+/// The most grants alive at once; the oldest is dropped for a new one.
+pub const MAX_GRANTS: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,6 +77,25 @@ pub struct Opened {
     pub text: Option<String>,
 }
 
+/// Permission to read one file through the `holzfile` scheme, which images, video, audio and PDFs are shown from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Grant {
+    /// 128 random bits as hex: the whole of the URL's path. Nothing can be read without one.
+    pub token: String,
+    pub mime: String,
+    pub size: u64,
+}
+
+#[derive(Clone)]
+struct Granted {
+    source: String,
+    path: String,
+    mime: String,
+    size: u64,
+    /// Orders the grants by age.
+    seq: u64,
+}
+
 pub struct Blocks {
     dir: PathBuf,
     home: Option<PathBuf>,
@@ -81,6 +103,8 @@ pub struct Blocks {
     /// One source per connection, made on first use and made again when the connection was saved.
     sources: Mutex<HashMap<String, (u64, Arc<dyn FileSource>)>>,
     local: Arc<dyn FileSource>,
+    grants: Mutex<HashMap<String, Granted>>,
+    grant_seq: AtomicU64,
 }
 
 impl Blocks {
@@ -99,6 +123,8 @@ impl Blocks {
             home,
             panes: Mutex::new(panes),
             sources: Mutex::new(HashMap::new()),
+            grants: Mutex::new(HashMap::new()),
+            grant_seq: AtomicU64::new(0),
         }
     }
 
@@ -223,9 +249,53 @@ impl Blocks {
         Ok(opened)
     }
 
-    /// The bytes of a file for an image, a video or a PDF, at most [`PREVIEW_LIMIT`].
-    pub fn read(&self, connections: &Connections, source: &str, path: &str) -> Result<Vec<u8>> {
-        self.source(connections, source)?.read(path, PREVIEW_LIMIT)
+    /// Permission to read the file at `path` through the `holzfile` scheme, for an image, a video, audio or a PDF. The
+    /// grant names the file, not a folder; a file of any other kind is refused.
+    pub fn grant(&self, connections: &Connections, source: &str, path: &str) -> Result<Grant> {
+        use crate::preview::Content;
+        let src = self.source(connections, source)?;
+        let entry = src.stat(path)?;
+        let head = src.read_range(path, 0, SNIFF as u64)?;
+        let class = classify(&entry.name, &head);
+        if !matches!(class.content, Content::Image | Content::Video | Content::Audio | Content::Pdf) {
+            return Err(Error::Unsupported("only an image, a video, audio or a PDF is shown this way".into()));
+        }
+        let mut raw = [0u8; 16];
+        getrandom::fill(&mut raw).map_err(|e| Error::Unsupported(format!("no random numbers: {e}")))?;
+        let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        let mut grants = self.grants.lock().unwrap_or_else(PoisonError::into_inner);
+        if grants.len() >= MAX_GRANTS {
+            if let Some(oldest) = grants.iter().min_by_key(|(_, g)| g.seq).map(|(k, _)| k.clone()) {
+                grants.remove(&oldest);
+            }
+        }
+        grants.insert(
+            token.clone(),
+            Granted {
+                source: source.to_owned(),
+                path: path.to_owned(),
+                mime: class.mime.clone(),
+                size: entry.size,
+                seq: self.grant_seq.fetch_add(1, Ordering::SeqCst),
+            },
+        );
+        Ok(Grant { token, mime: class.mime, size: entry.size })
+    }
+
+    /// End a grant; the URL stops working.
+    pub fn revoke(&self, token: &str) {
+        self.grants.lock().unwrap_or_else(PoisonError::into_inner).remove(token);
+    }
+
+    /// What a token names: its media type and size, or `None` when there is no such grant.
+    pub fn granted(&self, token: &str) -> Option<(String, u64)> {
+        self.grants.lock().unwrap_or_else(PoisonError::into_inner).get(token).map(|g| (g.mime.clone(), g.size))
+    }
+
+    /// `len` bytes of a granted file from `offset`. `None` when the token is not a grant.
+    pub fn read_granted(&self, connections: &Connections, token: &str, offset: u64, len: u64) -> Option<Result<Vec<u8>>> {
+        let g = self.grants.lock().unwrap_or_else(PoisonError::into_inner).get(token).cloned()?;
+        Some(self.source(connections, &g.source).and_then(|s| s.read_range(&g.path, offset, len.min(PREVIEW_LIMIT))))
     }
 
     /// Save the editor's text over the file.
@@ -307,6 +377,42 @@ mod tests {
         let bin = blocks.open(&conns, LOCAL, d.join("c.bin").to_str().unwrap()).unwrap();
         assert_eq!((bin.class.content, bin.text), (crate::preview::Content::Binary, None));
         assert!(blocks.open(&conns, LOCAL, d.join("none").to_str().unwrap()).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_grant_names_one_file_and_ends_when_it_is_revoked() {
+        let (d, blocks, conns) = setup("grant");
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R', 1, 2, 3, 4];
+        fs::write(d.join("a.png"), png).unwrap();
+        fs::write(d.join("b.txt"), "text").unwrap();
+        let grant = blocks.grant(&conns, LOCAL, d.join("a.png").to_str().unwrap()).unwrap();
+        assert_eq!((grant.mime.as_str(), grant.size, grant.token.len()), ("image/png", 20, 32));
+        assert!(grant.token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(blocks.granted(&grant.token), Some(("image/png".into(), 20)));
+        assert_eq!(blocks.read_granted(&conns, &grant.token, 8, 4).unwrap().unwrap(), &png[8..12]);
+        assert_eq!(blocks.read_granted(&conns, &grant.token, 18, 100).unwrap().unwrap(), &png[18..], "a range stops at the end");
+        assert!(blocks.read_granted(&conns, "0123", 0, 1).is_none(), "a token that was never granted reads nothing");
+        assert!(blocks.grant(&conns, LOCAL, d.join("b.txt").to_str().unwrap()).is_err(), "text is not shown this way");
+        let other = blocks.grant(&conns, LOCAL, d.join("a.png").to_str().unwrap()).unwrap();
+        assert_ne!(other.token, grant.token, "every grant has its own token");
+        blocks.revoke(&grant.token);
+        assert!(blocks.granted(&grant.token).is_none());
+        assert!(blocks.read_granted(&conns, &grant.token, 0, 1).is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_oldest_grant_goes_when_there_are_too_many() {
+        let (d, blocks, conns) = setup("many");
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+        fs::write(d.join("a.png"), png).unwrap();
+        let p = d.join("a.png");
+        let first = blocks.grant(&conns, LOCAL, p.to_str().unwrap()).unwrap();
+        for _ in 0..MAX_GRANTS {
+            blocks.grant(&conns, LOCAL, p.to_str().unwrap()).unwrap();
+        }
+        assert!(blocks.granted(&first.token).is_none(), "the first one was dropped");
         let _ = fs::remove_dir_all(&d);
     }
 

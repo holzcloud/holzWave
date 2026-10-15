@@ -299,6 +299,10 @@ fn the_policy_allows_nothing_inline_nothing_dynamic_and_no_remote_origin() {
     want("script-src", &["'self'"]);
     want("style-src", &["'self'"]);
     want("font-src", &["'self'"]);
+    // Images, video, audio and PDFs come from the `holzfile` scheme (files_protocol.rs): one granted file per token, no
+    // path, no directory. `http://holzfile.localhost` is the same scheme on Windows and Android.
+    want("img-src", &["'self'", "holzfile:", "http://holzfile.localhost"]);
+    want("media-src", &["'self'", "holzfile:", "http://holzfile.localhost"]);
     want("connect-src", &["ipc:", "http://ipc.localhost"]);
     want("object-src", &["'none'"]);
     want("base-uri", &["'none'"]);
@@ -307,12 +311,13 @@ fn the_policy_allows_nothing_inline_nothing_dynamic_and_no_remote_origin() {
     assert!(!policy.contains("unsafe-inline"), "the policy allows inline code or style");
     assert!(!policy.contains("unsafe-eval"), "the policy allows eval");
     assert!(!policy.contains("data:") && !policy.contains("blob:"), "the policy allows data or blob sources");
-    // The only remote-looking origin is the IPC host of the Windows and Android webviews, in connect-src.
+    // The only remote-looking origins are the IPC host and the file host of the Windows and Android webviews.
     for (name, sources) in &d {
         for source in sources {
             let remote = source.starts_with("http:") || source.starts_with("https:") || source.starts_with("ws");
             let ipc = name == "connect-src" && source == "http://ipc.localhost";
-            assert!(!remote || ipc, "{name} allows the origin {source}");
+            let files = (name == "img-src" || name == "media-src") && source == "http://holzfile.localhost";
+            assert!(!remote || ipc || files, "{name} allows the origin {source}");
             assert!(source != "*", "{name} allows every origin");
         }
     }

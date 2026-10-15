@@ -12,6 +12,10 @@
   src: url("./fonts/JetBrainsMono-Bold.woff2") format("woff2");
 }
 @font-face {
+  font-family: "Manrope"; font-style: normal; font-weight: 200 800; font-display: swap;
+  src: url("./fonts/Manrope-Variable-latin.woff2") format("woff2");
+}
+@font-face {
   font-family: "JetBrains Mono"; font-style: italic; font-weight: 400; font-display: block;
   src: url("./fonts/JetBrainsMono-Italic.woff2") format("woff2");
 }

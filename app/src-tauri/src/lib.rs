@@ -11,6 +11,7 @@
 //! listener without a target receives the events of every window.
 
 mod commands;
+mod files_protocol;
 mod menu;
 mod state;
 mod textscale;
@@ -373,6 +374,20 @@ pub fn run() {
             }
             _ => {}
         })
+        // Images, video, audio and PDFs are shown from this scheme, one granted file per token (files_protocol.rs).
+        .register_asynchronous_uri_scheme_protocol(files_protocol::SCHEME, |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let response = match app.try_state::<Arc<AppCore>>() {
+                    Some(core) => files_protocol::serve(&core, &request),
+                    None => tauri::http::Response::builder()
+                        .status(tauri::http::StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Vec::new())
+                        .expect("a 503 response"),
+                };
+                responder.respond(response);
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_layout,
             commands::start_pane,
@@ -435,7 +450,8 @@ pub fn run() {
             commands::files_list,
             commands::file_open,
             commands::file_stat,
-            commands::file_read,
+            commands::file_grant,
+            commands::file_revoke,
             commands::file_save,
         ])
         .build(tauri::generate_context!())
