@@ -39,7 +39,7 @@
   "app_info": {
     "hostname": "holz-mac.local",
     "os": "macos",
-    "version": "0.0.1-alpha1"
+    "version": "0.0.1-alpha2"
   },
   "commands": {
     "app_info": [],

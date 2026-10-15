@@ -4,7 +4,7 @@
 
 <br>
 
-[![Status](https://img.shields.io/badge/status-0.0.1--alpha1%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
+[![Status](https://img.shields.io/badge/status-0.0.1--alpha2%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
 [![License](https://img.shields.io/github/license/holzcloud/holzwave?style=for-the-badge&color=4B5563)](LICENSE)
 [![Rust](https://img.shields.io/badge/core-Rust-8D3F63?style=for-the-badge&logo=rust&logoColor=white)](docs/architecture.md)
 
@@ -16,7 +16,7 @@ look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, 
 Nextcloud. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
-> **Alpha, macOS only.** holzWave is at `0.0.1-alpha1`: a preview build for Apple Silicon, unsigned (no Developer ID,
+> **Alpha, macOS only.** holzWave is at `0.0.1-alpha2`: a preview build for Apple Silicon, unsigned (no Developer ID,
 > no notarisation). Windows and Linux builds are written but not yet tested on real machines. The images below are
 > **design mockups, not screenshots**.
 
@@ -89,7 +89,7 @@ More in [docs/building.md](docs/building.md).
 ## Roadmap
 
 Phase 1 (spike) is done and phase 2 (desktop MVP: key encoder, themes, robust panes) is in progress. SSH, encrypted
-Nextcloud sync, previews and the `wsh` CLI follow, then mobile. Versions go `0.0.1-alpha1`, `0.0.1-beta1`, `0.0.1`.
+Nextcloud sync, previews and the `wsh` CLI follow, then mobile. Versions go `0.0.1-alpha2`, `0.0.1-beta1`, `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation
