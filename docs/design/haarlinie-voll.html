@@ -1,8 +1,8 @@
-<title>holzWave Haarlinie Voll</title>
+<title>holzWave Hairline Full</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;600;700&display=swap">
 <style>
-/* Layout: Seitenkopf, Ansichtswahl, ein skaliertes Fenster (1120x660), Handy-Reihe, Funktionsliste */
+/* Layout: page head, view picker, one scaled window (1120x680), phone row, feature list */
 :root{
   --ground:#14091A; --ground2:#1D0F26; --pane:#1B0E20; --edge:#3A2144;
   --ink:#F6EFE6; --ink2:rgba(246,239,230,.7); --ink3:#9C8EA0;
@@ -102,7 +102,7 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .kr{display:grid;grid-template-columns:210px 1fr 170px;gap:12px;padding:3px 8px;align-items:center}.kr.on{background:var(--wash);box-shadow:inset 2px 0 var(--rose)}.kr .kc{text-align:right}
 .drop{position:absolute;background:var(--wash);border:2px dashed var(--rose);z-index:5;display:grid;place-items:center;color:var(--rose);font-weight:700}
 /* Handys */
-.phones{display:flex;gap:16px;flex-wrap:wrap}
+.phones{display:flex;gap:16px;flex-wrap:wrap;width:fit-content;max-width:100%}
 .ph1{width:200px;height:400px;border:1px solid var(--edge);border-radius:22px;overflow:hidden;background:var(--ground);display:flex;flex-direction:column;font:400 10px/1.5 var(--mono);position:relative}
 .ph1 .t{height:30px;background:var(--ground2);border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:6px;padding:0 10px;flex:none}
 .acc{display:flex;gap:3px;padding:4px;background:var(--ground2);border-top:1px solid var(--edge);flex:none}
@@ -123,24 +123,24 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
 <div class="wrap" id="root" data-os="mac">
   <div>
     <h1>holzWave <b>/</b> Haarlinie Voll</h1>
-    <p class="lead">Variante 1 mit allen geplanten Funktionen. Oben Workspaces (runde Pillen), darunter Tabs (eckig, nummeriert), darin die Panes. Rechts die einklappbare Seitenleiste. Die Ansichten unten zeigen jede Funktion im selben Fenster.</p>
+    <p class="lead">The hairline window with every planned feature. Workspaces on top (round pills), tabs below (square, numbered), panes inside. A collapsible sidebar on the right. The views below show each feature in the same window.</p>
   </div>
   <div class="views">
-    <small>Ansicht</small>
-    <div class="seg" id="views" role="group" aria-label="Ansicht"></div>
-    <small>Plattform</small>
-    <div class="seg" id="os" role="group" aria-label="Plattform">
+    <small>View</small>
+    <div class="seg" id="views" role="group" aria-label="View"></div>
+    <small>Platform</small>
+    <div class="seg" id="os" role="group" aria-label="Platform">
       <button aria-pressed="true" data-os="mac">macOS</button><button aria-pressed="false" data-os="win">Windows</button><button aria-pressed="false" data-os="lin">Linux</button>
     </div>
     <div class="note" id="note"></div>
   </div>
   <div id="fit"><div id="stage"></div></div>
 
-  <h2>Mobil (iOS, Android)</h2>
-  <p class="lead">Eine Pane pro Bildschirm. Workspaces und Tabs wandern in ein Blatt von unten, die Tastenleiste sitzt über der Systemtastatur. Gleiche Tokens, Ziele mindestens 44 px.</p>
+  <h2>Mobile (iOS, Android)</h2>
+  <p class="lead">One pane per screen. Workspaces and tabs move into a sheet from the bottom, the key row sits above the system keyboard. Same tokens, targets at least 44 px.</p>
   <div class="phones" id="phones"></div>
 
-  <h2>Funktionen und ihr Platz im Fenster</h2>
+  <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
 </div>
 
@@ -168,33 +168,32 @@ test result: <span class="ok">ok</span>. 14 passed; 0 failed
   if(mode==='copy') t=t.replace('<span class="wa">e883222</span> fix(release): Windows cross script','<span class="sel"><span class="hint">a</span>e883222 fix(release): Windows cross script</span>').replace('<span class="wa">7af9cc8</span>','<span class="hint">s</span><span class="wa">7af9cc8</span>').replace('<span class="wa">6815139</span>','<span class="hint">d</span><span class="wa">6815139</span>').replace('<span class="ro">❯</span> <span class="cur"></span>','<span class="ro">❯</span> ');
   return `<div class="term pre">${t}</div>`;
 };
-const ssh=(rc)=>`<div class="term pre">${rc?'<span class="wa">⟳ Verbindung getrennt. Neuer Versuch 2/5 in 3 s …</span>\n<span class="dim">Eingaben werden gepuffert.</span>\n\n':''}<span class="ro">❯</span> kubectl get nodes
+const ssh=(rc)=>`<div class="term pre">${rc?'<span class="wa">⟳ Connection lost. Retrying 2/5 in 3 s …</span>\n<span class="dim">Input is buffered.</span>\n\n':''}<span class="ro">❯</span> kubectl get nodes
 NAME      STATUS      ROLES           AGE
 talos-1   <span class="ok">Ready</span>       control-plane   41d
 talos-2   <span class="ok">Ready</span>       worker          41d
 talos-3   <span class="wa">NotReady</span>    worker          2d
 <span class="ro">❯</span> <span class="cur"></span></div>`;
-const md=`<div class="md"><b># Phase 2</b><br>Key encoder, Themes, robuste Panes.<br><span class="dim">–</span> Pane schliessen beendet die Shell<br><span class="dim">–</span> Layout überlebt den Neustart<br><span class="dim">–</span> <span class="in" style="text-decoration:underline">docs/roadmap.md</span></div>`;
+const md=`<div class="md"><b># Phase 2</b><br>Key encoder, themes, robust panes.<br><span class="dim">–</span> Closing a pane ends the shell<br><span class="dim">–</span> Layout survives a restart<br><span class="dim">–</span> <span class="in" style="text-decoration:underline">docs/roadmap.md</span></div>`;
 const editor=`<div class="term pre ed"><div class="g">1\n2\n3\n4\n5\n6\n7</div><div><span class="ro">pub fn</span> <span class="in">focus_next</span>(&amp;mut self) {
     <span class="ro">let</span> n = self.panes.len();
     self.focus = (self.focus + <span class="wa">1</span>) % n;
     <span class="dim">// wraps at the last pane</span>
 }
 <span class="dim">sftp://talos-1/home/holz/layout.rs</span>
-<span class="wa">●</span> <span class="dim">ungespeichert</span></div></div>`;
+<span class="wa">●</span> <span class="dim">unsaved</span></div></div>`;
 const sysmon=`<div class="term pre">CPU  <span class="bar" style="display:inline-flex;width:140px"><i class="a"></i><i class="a"></i><i class="a"></i><i class="b"></i><i></i><i></i><i></i><i></i></span> 38%
 MEM  <span class="bar" style="display:inline-flex;width:140px"><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="b"></i><i></i><i></i></span> 6.1/16G
 NET  <span class="in">↓ 1.2 MB/s</span>  <span class="ro">↑ 84 KB/s</span>
 <span class="dim">PID    NAME            CPU</span>
-4121   holzwave        <span class="wa">12.4</span>
- 882   rust-analyzer    <span class="wa">8.1</span></div>`;
+4121   holzwave        <span class="wa">12.4</span></div>`;
 
 const tabs=(on)=>['1 shell','2 holzkube','3 notes.md','4 layout.rs','5 sysmon'].map((t,i)=>`<div class="tab ${i==on?'on':''}">${t}${i==1?' <span class="cy">⌁</span>':''}<span class="x">×</span></div>`).join('')+'<div class="tab dim" style="border:0">＋</div>';
 const side=`<div class="side">
  <div class="sec"><div class="h lbl"><span>Hosts</span><span>＋</span></div><div class="i"><span class="ok">●</span>talos-1<span class="dim" style="margin-left:auto">ssh</span></div><div class="i on"><span class="wa">⟳</span>talos-2<span style="margin-left:auto">2/5</span></div><div class="i"><span class="ok">●</span>nas<span class="dim" style="margin-left:auto">wsl</span></div><div class="i"><span class="dim">○</span>build-box<span class="dim" style="margin-left:auto">docker</span></div></div>
- <div class="sec"><div class="h lbl"><span>Kontext</span><span>⌘⇧C</span></div><div class="i"><span class="cy">⎈</span>talos-prod</div><div class="i"><span class="dim">ns</span>kube-system</div><div class="i"><span class="in">az</span>holz-prod</div><div class="i"><span class="dim">gam</span>holzcloud.ch</div></div>
- <div class="sec"><div class="h lbl"><span>Verlauf</span><span>⌃R</span></div><div class="input">kube<span class="cur"></span></div><div class="i pre">kubectl get nodes</div><div class="i pre">kubectl logs -f etcd…</div><div class="i pre dim">talosctl dashboard</div></div>
- <div class="sec" style="border:0"><div class="h lbl"><span>Widgets</span><span>＋</span></div><div class="i"><span class="ro">◧</span>Notizen</div><div class="i"><span class="ro">◧</span>Pomodoro</div></div></div>`;
+ <div class="sec"><div class="h lbl"><span>Context</span><span>⌘⇧C</span></div><div class="i"><span class="cy">⎈</span>talos-prod</div><div class="i"><span class="dim">ns</span>kube-system</div><div class="i"><span class="in">az</span>holz-prod</div><div class="i"><span class="dim">gam</span>holzcloud.ch</div></div>
+ <div class="sec"><div class="h lbl"><span>History</span><span>⌃R</span></div><div class="input">kube<span class="cur"></span></div><div class="i pre">kubectl get nodes</div><div class="i pre">kubectl logs -f etcd…</div><div class="i pre dim">talosctl dashboard</div></div>
+ <div class="sec" style="border:0"><div class="h lbl"><span>Widgets</span><span>＋</span></div><div class="i"><span class="ro">◧</span>Notes</div><div class="i"><span class="ro">◧</span>Pomodoro</div></div></div>`;
 const status=(extra='')=>`<div class="status row"><span class="on">◆ main</span><span>5 tabs · 5 panes</span><span class="cy">⎈ talos-prod/kube-system</span><span class="in">az holz-prod</span><span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-alpha2</span></div>`;
 
 
@@ -202,106 +201,106 @@ const OSK={mac:{n:'⌘',s:'⇧',a:'⌥'},win:{n:'Ctrl',s:'Shift',a:'Alt'},lin:{n
 function chord(os,c){ // c: mac string, w: win/lin string
   return c[os==='mac'?0:1]||'<span class="dim">–</span>';}
 const KEYS=[
- ['Pane',[['Pane rechts teilen','pane.split_right',['⌘D','Ctrl+Shift+D']],['Pane unten teilen','pane.split_down',['⇧⌘D','Ctrl+Shift+O']],['Pane schliessen','pane.close',['⌘W','Ctrl+Shift+W']],['Nächste Pane','pane.focus_next',['⌘]','Ctrl+Shift+]']],['Vorherige Pane','pane.focus_prev',['⌘[','Ctrl+Shift+[']],['Pane in neues Fenster','pane.move_to_new_window',['','']]]],
- ['Tab',[['Neuer Tab','tab.new',['⌘T','Ctrl+Shift+T']],['Tab 1 bis 9','tab.select_1…9',['⌘1 … ⌘9','Alt+Shift+1 … 9']],['Tab umbenennen','tab.rename',['','']]]],
- ['Workspace',[['Neuer Workspace','workspace.new',['⇧⌘N','Ctrl+Shift+N']],['Workspace 1 bis 9','workspace.select_1…9',['⌥⌘1 … 9','Ctrl+Shift+1 … 9']]]],
- ['Ansicht und Werkzeuge',[['Palette','palette.open',['⌘K','Ctrl+Shift+P']],['Suche im Scrollback','search.open',['⌘F','Ctrl+Shift+F']],['Kopiermodus','copy_mode.enter',['⇧⌘X','Ctrl+Shift+X']],['Hinweise','hints.open',['⇧⌘Space','Ctrl+Shift+Space']],['Schrift grösser','font.increase',['⌘=','Ctrl+Shift+=']],['Einstellungen','settings.open',['⌘,','Ctrl+Shift+,']]]],
- ['Zeile (nur Shell-Bildschirm)',[['Wort zurück','edit.word_back',['⌥←','']],['Zeilenanfang','edit.line_start',['⌘←','']]]]
+ ['Pane',[['Split pane right','pane.split_right',['⌘D','Ctrl+Shift+D']],['Split pane down','pane.split_down',['⇧⌘D','Ctrl+Shift+O']],['Close pane','pane.close',['⌘W','Ctrl+Shift+W']],['Next pane','pane.focus_next',['⌘]','Ctrl+Shift+]']],['Previous pane','pane.focus_prev',['⌘[','Ctrl+Shift+[']],['Move pane to new window','pane.move_to_new_window',['','']]]],
+ ['Tab',[['New tab','tab.new',['⌘T','Ctrl+Shift+T']],['Tab 1 to 9','tab.select_1…9',['⌘1 … ⌘9','Alt+Shift+1 … 9']],['Rename tab','tab.rename',['','']]]],
+ ['Workspace',[['New workspace','workspace.new',['⇧⌘N','Ctrl+Shift+N']],['Workspace 1 to 9','workspace.select_1…9',['⌥⌘1 … 9','Ctrl+Shift+1 … 9']]]],
+ ['View and tools',[['Palette','palette.open',['⌘K','Ctrl+Shift+P']],['Search scrollback','search.open',['⌘F','Ctrl+Shift+F']],['Copy mode','copy_mode.enter',['⇧⌘X','Ctrl+Shift+X']],['Hints','hints.open',['⇧⌘Space','Ctrl+Shift+Space']],['Increase font','font.increase',['⌘=','Ctrl+Shift+=']],['Settings','settings.open',['⌘,','Ctrl+Shift+,']]]],
+ ['Line editing (normal screen only)',[['Word back','edit.word_back',['⌥←','']],['Line start','edit.line_start',['⌘←','']]]]
 ];
 function keysModal(os){
   const sel='pane.split_right';
   const rows=KEYS.map(g=>`<div class="grp lbl" style="padding:10px 0 2px">${g[0]}</div>`+g[1].map(r=>{
     const on=r[1]===sel,c=chord(os,r[2]);
-    return `<div class="kr ${on?'on':''}"><span>${r[0]}</span><span class="dim pre">${r[1]}</span><span class="kc">${on?'<span class="kbd" style="border-color:var(--rose);color:var(--rose)">⏺ Taste drücken …</span>':(c.indexOf('dim')>0?c:'<span class="kbd">'+c+'</span>')}</span></div>`}).join('')).join('');
+    return `<div class="kr ${on?'on':''}"><span>${r[0]}</span><span class="dim pre">${r[1]}</span><span class="kc">${on?'<span class="kbd" style="border-color:var(--rose);color:var(--rose)">⏺ Press a key …</span>':(c.indexOf('dim')>0?c:'<span class="kbd">'+c+'</span>')}</span></div>`}).join('')).join('');
   return `<div class="scrim"></div><div class="ov float modal" style="left:120px;top:40px;width:880px;height:600px;display:flex;overflow:hidden">
-  <div style="width:190px;border-right:1px solid var(--edge);padding:16px 0"><div class="it"><span>Erscheinungsbild</span></div><div class="it"><span>Terminal</span></div><div class="it on"><span>Tastenkürzel</span></div><div class="it"><span>Barrierefreiheit</span></div><div class="it"><span>Sync</span></div><div class="it"><span>KI</span></div></div>
-  <div class="fill col" style="padding:18px 24px;overflow:hidden"><div class="row" style="gap:10px"><div class="input fill" style="margin:0">⌕ Aktion oder Taste suchen<span class="cur"></span></div><span class="btn">Alle zurücksetzen</span></div>
-   <div class="row" style="gap:8px;margin:10px 0 0" ><span class="chip">Plattform: ${os==='mac'?'macOS':os==='win'?'Windows':'Linux'}</span><span class="chip w">1 Konflikt</span><span class="dim">Eigene Belegungen reisen nicht zwischen Plattformen.</span></div>
+  <div style="width:190px;border-right:1px solid var(--edge);padding:16px 0"><div class="it"><span>Appearance</span></div><div class="it"><span>Terminal</span></div><div class="it on"><span>Shortcuts</span></div><div class="it"><span>Accessibility</span></div><div class="it"><span>Sync</span></div><div class="it"><span>AI</span></div></div>
+  <div class="fill col" style="padding:18px 24px;overflow:hidden"><div class="row" style="gap:10px"><div class="input fill" style="margin:0">⌕ Search action or key<span class="cur"></span></div><span class="btn">Reset all</span></div>
+   <div class="row" style="gap:8px;margin:10px 0 0" ><span class="chip">Platform: ${os==='mac'?'macOS':os==='win'?'Windows':'Linux'}</span><span class="chip w">1 conflict</span><span class="dim">Custom bindings do not travel between platforms.</span></div>
    <div class="fill" style="overflow:hidden">${rows}</div>
-   <div class="float" style="padding:8px 12px;border-radius:8px;border-color:var(--warn);margin-top:8px"><span class="wa">Konflikt:</span> <span class="kbd">${os==='mac'?'⇧⌘D':'Ctrl+Shift+D'}</span> belegt <b>Pane unten teilen</b>. <span class="btn p" style="margin-left:8px">Ersetzen</span> <span class="btn">Abbrechen</span></div>
-   <div class="dim" style="margin-top:6px;font-size:11px">Fest: ${os==='mac'?'⌘C und ⌘V':'Ctrl+Shift+C und Ctrl+Shift+V'} kopieren und einfügen. Einfaches Ctrl+Buchstabe gehört der Shell.</div></div></div>`;}
+   <div class="float" style="padding:8px 12px;border-radius:8px;border-color:var(--warn);margin-top:8px"><span class="wa">Conflict:</span> <span class="kbd">${os==='mac'?'⇧⌘D':'Ctrl+Shift+D'}</span> is bound to <b>Split pane down</b>. <span class="btn p" style="margin-left:8px">Replace</span> <span class="btn">Cancel</span></div>
+   <div class="dim" style="margin-top:6px;font-size:11px">Fixed: ${os==='mac'?'⌘C und ⌘V':'Ctrl+Shift+C und Ctrl+Shift+V'} copy and paste. Plain Ctrl+letter belongs to the shell.</div></div></div>`;}
 
 const img=`<div class="fill" style="background:radial-gradient(circle at 70% 30%,#FFE6F0 0 6%,transparent 7%),linear-gradient(#3A2144,#C23B72 55%,#C98B4F 56%,#9B6534);position:relative;margin:8px;border-radius:6px"><span class="kbd" style="position:absolute;right:6px;bottom:6px;background:var(--ground)">1920×1080 · 412 KB</span></div>`;
-const pdf=`<div class="fill row" style="gap:10px;padding:8px;justify-content:center;background:var(--ground)"><div style="width:150px;background:#F6EFE6;color:#14091A;padding:10px;font:9px/1.4 var(--sans);overflow:hidden"><b style="font-size:11px">Sync-Format</b><br>Jede Datei trägt einen Versionsstempel. Bei Konflikt gewinnt der letzte Schreiber, die alte Version bleibt als Backup.<div style="height:4px;background:#C23B72;margin:6px 0;width:60%"></div>Verschlüsselung: XChaCha20 mit Schlüssel aus der Passphrase.</div><div class="col dim" style="gap:3px;font-size:10px"><span class="ro">3 / 12</span><span>▲ ▼</span><span>100 %</span><span>⌕</span></div></div>`;
+const pdf=`<div class="fill row" style="gap:10px;padding:8px;justify-content:center;background:var(--ground)"><div style="width:150px;background:#F6EFE6;color:#14091A;padding:10px;font:9px/1.4 var(--sans);overflow:hidden"><b style="font-size:11px">Sync format</b><br>Every file carries a version stamp. On conflict the last writer wins and the old version is kept as a backup.<div style="height:4px;background:#C23B72;margin:6px 0;width:60%"></div>Encryption: XChaCha20 with a key from the passphrase.</div><div class="col dim" style="gap:3px;font-size:10px"><span class="ro">3 / 12</span><span>▲ ▼</span><span>100 %</span><span>⌕</span></div></div>`;
 const vid=`<div class="fill" style="background:linear-gradient(135deg,#1D0F26,#3A2144);margin:8px 8px 0;border-radius:6px;display:grid;place-items:center;color:var(--rose);font-size:26px">▶</div><div class="row" style="gap:8px;padding:6px 10px"><span class="dim">02:14</span><div class="fill" style="height:4px;background:var(--edge);border-radius:2px"><div style="width:38%;height:100%;background:var(--rose);border-radius:2px"></div></div><span class="dim">05:50</span><span class="dim">🔊 1×</span></div>`;
-const tree=`<div class="term pre"><span class="dim">sftp://talos-1</span> <span class="chip">▾ lokal</span>
+const tree=`<div class="term pre"><span class="dim">sftp://talos-1</span> <span class="chip">▾ local</span>
 <span class="ro">▾</span> docs
   <span class="in">▤</span> architecture.md
   <span class="in">▤</span> sync.pdf <span class="ro">●</span>
   <span class="in">▣</span> mockup.png
   <span class="in">▶</span> demo.mp4
 <span class="ro">▸</span> core
-<span class="dim">3 Dateien · Leertaste: Vorschau</span></div>`;
-function previewArea(){return `<div class="area">${P('','▦','dateien','sftp · talos-1',tree,{f:1})}${P('in','▣','mockup.png','bild',img)}${P('in','▤','sync.pdf','pdf · Seite 3',pdf)}${P('in','▶','demo.mp4','video',vid)}</div>`}
+<span class="dim">3 files · Space: preview</span></div>`;
+function previewArea(){return `<div class="area">${P('','▦','files','sftp · talos-1',tree,{f:1})}${P('in','▣','mockup.png','image',img)}${P('in','▤','sync.pdf','pdf · page 3',pdf)}${P('in','▶','demo.mp4','video',vid)}</div>`}
 
 function base(v){
   const searchBar=v==='search'?`<div class="ov float row" style="left:150px;top:125px;padding:4px 8px;gap:8px;border-radius:8px"><span class="ro">⌕</span><span>layout<span class="cur"></span></span><span class="dim">3/12</span><span class="kbd">Aa</span><span class="kbd">.*</span><span class="kbd">ab</span><span class="dim">▲ ▼ ✕</span></div>`:'';
-  const copyBar=v==='copy'?`<div class="ov row" style="left:0;right:0;bottom:0;height:22px;background:var(--rose-deep);color:#fff;padding:0 10px;gap:14px;font-weight:700;letter-spacing:.06em"><span>COPY MODE</span><span style="font-weight:400">v Auswahl · y kopieren · / suchen · f Hinweise · q Ende</span></div>`:'';
+  const copyBar=v==='copy'?`<div class="ov row" style="left:0;right:0;bottom:0;height:22px;background:var(--rose-deep);color:#fff;padding:0 10px;gap:14px;font-weight:700;letter-spacing:.06em"><span>COPY MODE</span><span style="font-weight:400">v select · y yank · / search · f hints · q quit</span></div>`:'';
   return `<div class="titlebar row">${wcL}
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span></div><div class="ws">◇ docs <span class="n">1</span></div><div class="ws plus">＋</div>
     <span class="fill"></span>
-    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='ki'?'on':''}">✦ KI</div><div class="tbtn on">▥ Seitenleiste</div><div class="tbtn ${v==='palette'?'on':''}">⌘K</div>${wcR}</div>
-  <div class="tabrow row">${tabs(v==='blocks'?1:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 Tab · Workspaces wechseln über die Pillen</span></div>
+    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='ki'?'on':''}">✦ AI</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'?'on':''}">⌘K</div>${wcR}</div>
+  <div class="tabrow row">${tabs(v==='blocks'?1:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
   <div class="body">${v==='preview'?previewArea():`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
     <div style="display:grid;grid-template-rows:1fr 1fr;gap:1px;background:var(--edge);min-height:0">
-      ${P('in','◧','notes.md','vorschau',md)}
-      ${P('','◔','system','lokal · 1 s',sysmon)}
+      ${P('in','◧','notes.md','preview',md)}
+      ${P('','◔','system','local · 1 s',sysmon)}
     </div>${searchBar}
   </div>`}${v==='ki'?'':side}${v==='ki'?kiPanel:''}</div>${copyBar||status()}`;
 }
-const kiPanel=`<div class="side" style="width:280px"><div class="sec"><div class="h lbl"><span>✦ KI-Chat</span><span class="chip">Apple on-device</span></div></div>
- <div class="col fill" style="padding:10px 12px;gap:8px;font-family:var(--sans);font-size:12.5px"><div class="float" style="padding:8px;border-radius:8px;border-color:var(--wash)"><span class="wa">Zustimmung nötig.</span> Terminal-Inhalt wird nur gesendet, wenn du ihn teilst.<div class="row" style="gap:6px;margin-top:6px"><span class="btn p">Pane 1 teilen</span><span class="btn">Nein</span></div></div>
- <div class="dim">Du</div><div>Warum ist talos-3 NotReady?</div><div class="ro">Assistent</div><div>Prüfe <code>talosctl health</code>. Der Knoten ist erst seit 2 Tagen im Cluster.</div></div>
- <div class="input" style="margin:8px 12px 12px">Frage stellen …<span class="cur"></span></div></div>`;
+const kiPanel=`<div class="side" style="width:280px"><div class="sec"><div class="h lbl"><span>✦ AI chat</span><span class="chip">Apple on-device</span></div></div>
+ <div class="col fill" style="padding:10px 12px;gap:8px;font-family:var(--sans);font-size:12.5px"><div class="float" style="padding:8px;border-radius:8px;border-color:var(--wash)"><span class="wa">Consent needed.</span> Terminal content is only sent when you share it.<div class="row" style="gap:6px;margin-top:6px"><span class="btn p">Share pane 1</span><span class="btn">No</span></div></div>
+ <div class="dim">You</div><div>Why is talos-3 NotReady?</div><div class="ro">Assistant</div><div>Check <code>talosctl health</code>. The node joined the cluster only 2 days ago.</div></div>
+ <div class="input" style="margin:8px 12px 12px">Ask a question …<span class="cur"></span></div></div>`;
 
 const ovl={
  palette:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:520px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">❯</span>split<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
-  <div class="grp lbl">Aktionen</div><div class="it on"><span>Split pane right</span><span class="kbd">⌘D</span></div><div class="it"><span>Split pane down</span><span class="kbd">⇧⌘D</span></div><div class="it"><span>Move pane to new window</span><span class="kbd"></span></div>
-  <div class="grp lbl">Verbinden</div><div class="it"><span>SSH: talos-1</span><span class="dim">host</span></div><div class="it"><span>K8s: exec in pod etcd-0</span><span class="dim">kubectl</span></div>
-  <div class="grp lbl">Wechseln</div><div class="it"><span>Workspace: infra</span><span class="dim">3 tabs</span></div><div class="it"><span>Theme: aubergine</span><span class="dim">Theme</span></div><div style="height:8px"></div></div>`,
- blocks:`<div class="scrim"></div><div class="ov float" style="left:60px;top:62px;width:330px"><div class="grp lbl">Neuer Block</div>
-  <div class="it on"><span>❯ Shell</span><span class="kbd">⌘T</span></div><div class="it"><span>⌁ SSH-Verbindung</span><span class="dim">Phase 3</span></div><div class="it"><span>▣ WSL / Docker</span><span class="dim">Phase 3</span></div>
-  <div class="grp lbl">Vorschau</div><div class="it"><span>◧ Markdown · Bild · Video · PDF</span><span class="dim">Phase 4</span></div><div class="it"><span>✎ Editor (Monaco, SFTP)</span><span class="dim">Phase 4</span></div>
-  <div class="grp lbl">Integrationen</div><div class="it"><span class="cy">⎈ Kubernetes · Talos</span><span class="dim">Phase 6b</span></div><div class="it"><span class="in">az Azure · GAM7</span><span class="dim">Phase 6b</span></div>
-  <div class="grp lbl">Extras</div><div class="it"><span>◔ System-Monitor</span><span class="dim">Phase 6</span></div><div class="it"><span>⌕ Verlauf</span><span class="dim">Phase 6</span></div><div style="height:6px"></div></div>`,
+  <div class="grp lbl">Actions</div><div class="it on"><span>Split pane right</span><span class="kbd">⌘D</span></div><div class="it"><span>Split pane down</span><span class="kbd">⇧⌘D</span></div><div class="it"><span>Move pane to new window</span><span class="kbd"></span></div>
+  <div class="grp lbl">Connect</div><div class="it"><span>SSH: talos-1</span><span class="dim">host</span></div><div class="it"><span>K8s: exec in pod etcd-0</span><span class="dim">kubectl</span></div>
+  <div class="grp lbl">Switch</div><div class="it"><span>Workspace: infra</span><span class="dim">3 tabs</span></div><div class="it"><span>Theme: aubergine</span><span class="dim">Theme</span></div><div style="height:8px"></div></div>`,
+ blocks:`<div class="scrim"></div><div class="ov float" style="left:60px;top:62px;width:330px"><div class="grp lbl">New block</div>
+  <div class="it on"><span>❯ Shell</span><span class="kbd">⌘T</span></div><div class="it"><span>⌁ SSH connection</span><span class="dim">Phase 3</span></div><div class="it"><span>▣ WSL / Docker</span><span class="dim">Phase 3</span></div>
+  <div class="grp lbl">Preview</div><div class="it"><span>◧ Markdown · image · video · PDF</span><span class="dim">Phase 4</span></div><div class="it"><span>✎ Editor (Monaco, SFTP)</span><span class="dim">Phase 4</span></div>
+  <div class="grp lbl">Integrations</div><div class="it"><span class="cy">⎈ Kubernetes · Talos</span><span class="dim">Phase 6b</span></div><div class="it"><span class="in">az Azure · GAM7</span><span class="dim">Phase 6b</span></div>
+  <div class="grp lbl">Extras</div><div class="it"><span>◔ System monitor</span><span class="dim">Phase 6</span></div><div class="it"><span>⌕ History</span><span class="dim">Phase 6</span></div><div style="height:6px"></div></div>`,
  conn:`<div class="scrim"></div><div class="ov float modal" style="left:170px;top:60px;width:780px;height:560px;display:flex;overflow:hidden">
-  <div style="width:240px;border-right:1px solid var(--edge);padding:16px 0"><div class="grp lbl">Verbindungen</div><div class="it"><span><span class="ok">●</span> talos-1</span><span class="dim">ssh</span></div><div class="it on"><span><span class="wa">⟳</span> talos-2</span><span class="dim">ssh</span></div><div class="it"><span><span class="ok">●</span> nas</span><span class="dim">wsl</span></div><div class="it"><span><span class="dim">○</span> build-box</span><span class="dim">docker</span></div><div class="it"><span class="dim">＋ Neue Verbindung</span></div></div>
-  <div class="fill" style="padding:20px 24px"><b style="font-size:15px">talos-2</b> <span class="chip w">Verbindung wird neu aufgebaut 2/5</span>
-   <div style="height:12px"></div><div class="field"><span class="dim">Host</span><span class="v">10.0.4.12</span></div><div class="field"><span class="dim">Benutzer</span><span class="v">holz</span></div><div class="field"><span class="dim">Schlüssel</span><span class="v"><span class="ok">🔒</span> Schlüsselbund · id_ed25519</span></div><div class="field"><span class="dim">Jump-Host</span><span class="v">bastion.holzcloud.ch</span></div><div class="field"><span class="dim">Reconnect</span><span class="v">automatisch · 5 Versuche · Eingaben puffern</span></div><div class="field"><span class="dim">Start</span><span class="v">tmux attach -t main</span></div><div class="field"><span class="dim">Sync</span><span class="v"><span class="ok">☁</span> verschlüsselt synchronisiert</span></div>
-   <div class="row" style="gap:8px;margin-top:20px"><span class="btn p">Verbinden</span><span class="btn">Testen</span><span class="btn">Als Block öffnen</span><span class="btn" style="margin-left:auto;color:var(--danger)">Löschen</span></div></div></div>`,
+  <div style="width:240px;border-right:1px solid var(--edge);padding:16px 0"><div class="grp lbl">Connections</div><div class="it"><span><span class="ok">●</span> talos-1</span><span class="dim">ssh</span></div><div class="it on"><span><span class="wa">⟳</span> talos-2</span><span class="dim">ssh</span></div><div class="it"><span><span class="ok">●</span> nas</span><span class="dim">wsl</span></div><div class="it"><span><span class="dim">○</span> build-box</span><span class="dim">docker</span></div><div class="it"><span class="dim">＋ New connection</span></div></div>
+  <div class="fill" style="padding:20px 24px"><b style="font-size:15px">talos-2</b> <span class="chip w">Reconnecting 2/5</span>
+   <div style="height:12px"></div><div class="field"><span class="dim">Host</span><span class="v">10.0.4.12</span></div><div class="field"><span class="dim">User</span><span class="v">holz</span></div><div class="field"><span class="dim">Key</span><span class="v"><span class="ok">🔒</span> Keychain · id_ed25519</span></div><div class="field"><span class="dim">Jump host</span><span class="v">bastion.holzcloud.ch</span></div><div class="field"><span class="dim">Reconnect</span><span class="v">automatic · 5 attempts · buffer input</span></div><div class="field"><span class="dim">Startup</span><span class="v">tmux attach -t main</span></div><div class="field"><span class="dim">Sync</span><span class="v"><span class="ok">☁</span> synced, encrypted</span></div>
+   <div class="row" style="gap:8px;margin-top:20px"><span class="btn p">Connect</span><span class="btn">Test</span><span class="btn">Open as block</span><span class="btn" style="margin-left:auto;color:var(--danger)">Delete</span></div></div></div>`,
  settings:`<div class="scrim"></div><div class="ov float modal" style="left:170px;top:50px;width:780px;height:580px;display:flex;overflow:hidden">
-  <div style="width:190px;border-right:1px solid var(--edge);padding:16px 0"><div class="it on"><span>Erscheinungsbild</span></div><div class="it"><span>Terminal</span></div><div class="it"><span>Tastenkürzel</span></div><div class="it"><span>Barrierefreiheit</span></div><div class="it"><span>Sync</span></div><div class="it"><span>KI</span></div><div class="it"><span>Integrationen</span></div><div class="it"><span>Datenschutz</span></div></div>
+  <div style="width:190px;border-right:1px solid var(--edge);padding:16px 0"><div class="it on"><span>Appearance</span></div><div class="it"><span>Terminal</span></div><div class="it"><span>Shortcuts</span></div><div class="it"><span>Accessibility</span></div><div class="it"><span>Sync</span></div><div class="it"><span>AI</span></div><div class="it"><span>Integrations</span></div><div class="it"><span>Privacy</span></div></div>
   <div class="fill" style="padding:20px 24px"><div class="grp lbl" style="padding:0">Theme</div>
-   <div class="row" style="gap:10px;margin:8px 0 14px"><div class="float" style="padding:8px;border-color:var(--rose);border-radius:8px"><div class="sw"><i style="background:#14091A"></i><i style="background:#FF8FB8"></i><i style="background:#8CC271"></i><i style="background:#E8C15C"></i></div><div class="lbl ro" style="margin-top:4px">aubergine ✓</div></div><div class="float" style="padding:8px;border-radius:8px"><div class="sw"><i style="background:#FFE6F0"></i><i style="background:#C23B72"></i><i style="background:#5A8F45"></i><i style="background:#A07A12"></i></div><div class="lbl dim" style="margin-top:4px">papier (hell)</div></div><div class="float" style="padding:8px;border-radius:8px"><div class="sw"><i style="background:#000"></i><i style="background:#FFF"></i><i style="background:#0F0"></i><i style="background:#FF0"></i></div><div class="lbl dim" style="margin-top:4px">hoher kontrast</div></div><div class="float" style="padding:8px;border-radius:8px;border-style:dashed"><div class="lbl dim">＋ eigenes Theme</div></div></div>
-   <div class="field"><span class="dim">Schrift</span><span class="v">JetBrains Mono · 14 px · Ligaturen aus</span></div><div class="field"><span class="dim">UI-Grösse</span><span class="v">100 % × System 125 %</span></div>
-   <div class="grp lbl" style="padding:14px 0 4px">Barrierefreiheit</div>
-   <div class="field"><span class="dim">Bewegung</span><span class="seg" style="border-radius:6px"><button aria-pressed="true">System</button><button aria-pressed="false">An</button><button aria-pressed="false">Aus</button></span></div><div class="field"><span class="dim">Kontrast</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">Hoch</button><button aria-pressed="false">Normal</button></span></div><div class="field"><span class="dim">Cursor blinkt</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">An</button><button aria-pressed="false">Aus</button></span></div>
-   <div class="field"><span class="dim">Option als Alt</span><span class="v">aus (nur macOS)</span></div></div></div>`,
- sync:`<div class="ov float" style="right:150px;top:36px;width:340px;padding:14px;border-radius:16px"><div class="row" style="gap:8px"><b>Nextcloud</b><span class="chip" style="color:var(--ok)">verbunden</span></div>
+   <div class="row" style="gap:10px;margin:8px 0 14px"><div class="float" style="padding:8px;border-color:var(--rose);border-radius:8px"><div class="sw"><i style="background:#14091A"></i><i style="background:#FF8FB8"></i><i style="background:#8CC271"></i><i style="background:#E8C15C"></i></div><div class="lbl ro" style="margin-top:4px">aubergine ✓</div></div><div class="float" style="padding:8px;border-radius:8px"><div class="sw"><i style="background:#FFE6F0"></i><i style="background:#C23B72"></i><i style="background:#5A8F45"></i><i style="background:#A07A12"></i></div><div class="lbl dim" style="margin-top:4px">paper (light)</div></div><div class="float" style="padding:8px;border-radius:8px"><div class="sw"><i style="background:#000"></i><i style="background:#FFF"></i><i style="background:#0F0"></i><i style="background:#FF0"></i></div><div class="lbl dim" style="margin-top:4px">high contrast</div></div><div class="float" style="padding:8px;border-radius:8px;border-style:dashed"><div class="lbl dim">＋ custom theme</div></div></div>
+   <div class="field"><span class="dim">Font</span><span class="v">JetBrains Mono · 14 px · ligatures off</span></div><div class="field"><span class="dim">UI scale</span><span class="v">100 % × system 125 %</span></div>
+   <div class="grp lbl" style="padding:14px 0 4px">Accessibility</div>
+   <div class="field"><span class="dim">Motion</span><span class="seg" style="border-radius:6px"><button aria-pressed="true">System</button><button aria-pressed="false">On</button><button aria-pressed="false">Off</button></span></div><div class="field"><span class="dim">Contrast</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">High</button><button aria-pressed="false">Normal</button></span></div><div class="field"><span class="dim">Cursor blink</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">On</button><button aria-pressed="false">Off</button></span></div>
+   <div class="field"><span class="dim">Option as Alt</span><span class="v">off (macOS only)</span></div></div></div>`,
+ sync:`<div class="ov float" style="right:150px;top:36px;width:340px;padding:14px;border-radius:16px"><div class="row" style="gap:8px"><b>Nextcloud</b><span class="chip" style="color:var(--ok)">connected</span></div>
   <div class="dim" style="margin:4px 0 10px">cloud.holzcloud.ch/remote.php/dav · holz</div>
-  <div class="field"><span class="dim">Letzter Sync</span><span>14:31 · 3 Dateien</span></div><div class="field"><span class="dim">Verschlüsselung</span><span class="ok">Ende-zu-Ende · Passphrase</span></div><div class="field"><span class="dim">Konflikte</span><span class="wa">1 · Backup behalten</span></div>
-  <div class="grp lbl" style="padding:8px 0 2px">Synchronisiert</div><div class="dim">Einstellungen · Themes · Hosts · Layouts · Verlauf</div><div class="dim">Geheimnisse nur verschlüsselt</div>
-  <div class="row" style="gap:8px;margin-top:12px"><span class="btn p">Jetzt abgleichen</span><span class="btn">Konflikt ansehen</span></div></div>`,
+  <div class="field"><span class="dim">Last sync</span><span>14:31 · 3 files</span></div><div class="field"><span class="dim">Encryption</span><span class="ok">end-to-end · passphrase</span></div><div class="field"><span class="dim">Conflicts</span><span class="wa">1 · backup kept</span></div>
+  <div class="grp lbl" style="padding:8px 0 2px">Synced</div><div class="dim">Settings · themes · hosts · layouts · history</div><div class="dim">Secrets only encrypted</div>
+  <div class="row" style="gap:8px;margin-top:12px"><span class="btn p">Sync now</span><span class="btn">View conflict</span></div></div>`,
  keys:'KEYS',
- drag:`<div class="drop" style="left:0;top:92px;width:520px;height:270px;opacity:.9">hier ablegen: links von shell</div><div class="drop" style="right:216px;top:60px;width:270px;height:60px;border-color:var(--wood);color:var(--wood);background:rgba(201,139,79,.14)">→ als neuer Tab</div><div class="ov float" style="left:560px;top:420px;padding:6px 14px;border-color:var(--rose);color:var(--rose);transform:rotate(-2deg);font-weight:700">⠿ notes.md</div>
-  <div class="ov float" style="left:260px;top:390px;padding:4px 10px;color:var(--ink2)">Aus dem Fenster ziehen: neues Fenster. Wayland: Palette „Move pane to new window“.</div>`
+ drag:`<div class="drop" style="left:0;top:92px;width:520px;height:270px;opacity:.9">drop here: left of shell</div><div class="drop" style="right:216px;top:60px;width:270px;height:60px;border-color:var(--wood);color:var(--wood);background:rgba(201,139,79,.14)">→ as new tab</div><div class="ov float" style="left:560px;top:420px;padding:6px 14px;border-color:var(--rose);color:var(--rose);transform:rotate(-2deg);font-weight:700">⠿ notes.md</div>
+  <div class="ov float" style="left:260px;top:390px;padding:4px 10px;color:var(--ink2)">Drag out of the window: new window. Wayland: palette “Move pane to new window”.</div>`
 };
 const views=[
- ['alltag','Alltag','Alle Ebenen auf einen Blick: Workspaces als Pillen, Tabs darunter, Panes darin. Panes: lokale Shell, SSH mit K8s-Kontext (hier gerade beim Neuverbinden), SFTP-Editor, Markdown-Vorschau, System-Monitor. Rechts Hosts, Kontext, Verlauf, Widgets.'],
- ['palette','Palette ⌘K','Jede Aktion per Name: Layout, Verbinden, Wechseln, Themes. Der Weg für alles, was keinen eigenen Knopf hat.'],
- ['blocks','Neuer Block','Das Plus oder ⌘T öffnet die Blockauswahl: Shell, SSH, WSL, Docker, Vorschau, Editor, Kubernetes, Talos, Azure, GAM7, Monitor, Verlauf. Phasen stehen dabei.'],
- ['search','Suche','Scrollback-Suche in der Pane: Treffer markiert, aktueller Treffer gelb, mit Gross/Klein, Regex, Wort.'],
- ['copy','Kopiermodus','Tastaturauswahl wie in tmux. Hinweis-Buchstaben (a, s, d) zum Greifen von Hashes, Pfaden, Links. Statuszeile zeigt die Tasten.'],
- ['conn','Verbindungen','Verbindungsmanager: SSH, WSL, Docker. Schlüssel im OS-Schlüsselbund, Jump-Host, automatischer Reconnect mit Zustand.'],
- ['settings','Einstellungen','Themes (inkl. eigene), Schrift, UI-Grösse, Barrierefreiheit (System oder explizit), Tastenkürzel-Editor, Sync, KI, Datenschutz.'],
- ['sync','Sync','Nextcloud/WebDAV, Ende-zu-Ende verschlüsselt, Konflikte mit Backup, Liste was synchronisiert wird.'],
- ['ki','KI-Chat','Ersetzt die Seitenleiste. Terminal-Inhalt nur mit ausdrücklicher Zustimmung pro Pane. Anbieter wählbar, auf dem Mac lokal.'],
- ['keys','Tastenkürzel','Der Editor aus den Einstellungen. Gruppiert nach Pane, Tab, Workspace, Werkzeuge. Zeigt immer die Tasten der laufenden Plattform (Umschalter). Aufnahme, Konflikte und feste Kürzel sind sichtbar.'],
- ['preview','Vorschau-Blöcke','Dateibrowser mit lokal und SFTP, dazu Bild, PDF und Video als eigene Panes. Markdown und Editor sind in „Alltag“. Leertaste im Browser öffnet die Vorschau als Pane daneben.'],
- ['drag','Ziehen','Panes per Drag & Drop umordnen, als Tab ablegen, in neues Fenster herausziehen. Unter Wayland über die Palette.']
+ ['alltag','Daily','Every level at a glance: workspaces as pills, tabs below, panes inside. Panes: local shell, SSH with Kubernetes context (reconnecting here), SFTP editor, Markdown preview, system monitor. Hosts, context, history and widgets on the right.'],
+ ['palette','Palette ⌘K','Every action by name: layout, connect, switch, themes. The way to reach anything without its own button.'],
+ ['blocks','New block','The plus or ⌘T opens the block picker: shell, SSH, WSL, Docker, preview, editor, Kubernetes, Talos, Azure, GAM7, monitor, history. Roadmap phases are shown.'],
+ ['search','Search','Scrollback search in the pane: hits marked, current hit in yellow, with case, regex and whole-word switches.'],
+ ['copy','Copy mode','Keyboard selection as in tmux. Hint letters (a, s, d) grab hashes, paths and links. The status line shows the keys.'],
+ ['conn','Connections','Connection manager: SSH, WSL, Docker. Keys in the OS keychain, jump host, automatic reconnect with visible state.'],
+ ['settings','Settings','Themes (including custom), font, UI scale, accessibility (system or explicit), key binding editor, sync, AI, privacy.'],
+ ['keys','Shortcuts','The key binding editor. Grouped by pane, tab, workspace and tools. Always shows the keys of the running platform (see the platform switch). Capture, conflicts and fixed shortcuts are visible.'],
+ ['preview','Previews','File browser (local and SFTP) with image, PDF and video as panes of their own. Markdown and the editor are in Daily. Space in the browser opens the preview beside it.'],
+ ['sync','Sync','Nextcloud/WebDAV, end-to-end encrypted, conflicts keep a backup, a list of what is synced.'],
+ ['ki','AI chat','Replaces the sidebar. Terminal content is sent only with explicit consent per pane. Provider is selectable, on-device on the Mac.'],
+ ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
 function render(){
@@ -324,26 +323,26 @@ test unicode ... <span class="ok">ok</span>
 test result: <span class="ok">ok</span>
 <span class="ro">❯</span> <span class="cur"></span>`,`<div class="acc"><span>esc</span><span>tab</span><span>ctrl</span><span>alt</span><span>↑</span><span>↓</span></div><div class="bn"><span class="on">shell</span><span>kube</span><span>notes</span><span>＋</span></div>`)
 +`<div><div class="ph1"><div class="t"><span class="lbl">Workspaces</span></div><div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra</div><div class="ws" style="font-size:10px">◇ docs</div></div>
- <div class="cap" style="margin-top:14px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube <span class="cy">⌁</span></span></div><div class="it"><span>3 notes.md</span></div><div class="it dim"><span>＋ Neuer Block</span></div></div><div class="bn"><span class="on">Blatt</span></div></div></div>`
-+ph('<span class="wd">◆</span> main <span class="dim">· 2 holzkube</span><span class="wa" style="margin-left:auto">⟳ 2/5</span>',`<span class="wa">⟳ neuer Versuch 2/5</span>
-<span class="dim">Eingaben gepuffert</span>
+ <div class="cap" style="margin-top:14px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube <span class="cy">⌁</span></span></div><div class="it"><span>3 notes.md</span></div><div class="it dim"><span>＋ New block</span></div></div><div class="bn"><span class="on">Sheet</span></div></div></div>`
++ph('<span class="wd">◆</span> main <span class="dim">· 2 holzkube</span><span class="wa" style="margin-left:auto">⟳ 2/5</span>',`<span class="wa">⟳ retry 2/5</span>
+<span class="dim">input buffered</span>
 <span class="ro">❯</span> kubectl get nodes
 talos-1 <span class="ok">Ready</span>
 talos-3 <span class="wa">NotReady</span>`,`<div class="acc"><span>esc</span><span>tab</span><span>ctrl</span><span>alt</span><span>↑</span><span>↓</span></div><div class="bn"><span>shell</span><span class="on">kube</span><span>notes</span><span>＋</span></div>`);
 
-/* Funktionsliste */
-const B='<span class="ph-tag built">gebaut</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
+/* Feature list */
+const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
 const rows=[
-['Workspaces, Tabs, Panes','Pillen oben, Tab-Zeile, Kacheln mit Divider',B],['Pane-Header','Statuspunkt, Typ-Symbol, Titel, Kontext, ⊞ ⤢ ✕',B],['Command-Palette','⌘K, gruppiert, mit Tastenkürzeln',B],
-['Scrollback, Auswahl, Kopieren','im Terminal, Kopiermodus',B],['Suche im Scrollback','Leiste in der Pane',B],['Links, Hinweise, Kopiermodus','Hinweis-Buchstaben, Statuszeile',B],
-['Themes, Schrift, UI-Grösse','Einstellungen › Erscheinungsbild',B],['Barrierefreiheit','Einstellungen › Barrierefreiheit',B],['Tastenkürzel-Editor','Ansicht „Tastenkürzel“: Aufnahme, Konflikte, je Plattform',B],
-['Layout speichern und wiederherstellen','automatisch, Palette',B],['Panes ziehen, Tear-off','Ziehen-Ansicht',pl('2.1')],
-['SSH mit Reconnect','Pane-Header, Seitenleiste, Verbindungen',pl(3)],['WSL, Docker','Verbindungen, Blockauswahl',pl(3)],['Schlüsselbund','Verbindungen',pl(3)],
-['Nextcloud-Sync, Ende-zu-Ende','Titelleiste ☁, Sync-Popover, Einstellungen',pl('3b')],
-['Datei-Vorschau (Markdown, Bild, Video, PDF)','Ansicht „Vorschau-Blöcke“ und Alltag',pl(4)],['Editor mit SFTP','Block „Editor“',pl(4)],
-['wsh-CLI','Blöcke aus der Shell öffnen, Titel setzen',pl(5)],['Widgets-Seitenleiste','rechts, einklappbar',pl(6)],['Verlauf mit Fuzzy-Suche','Seitenleiste, ⌃R',pl(6)],['System-Monitor','Block „system“',pl(6)],['KI-Chat','Titelleiste ✦, Seitenleiste',pl(6)],
-['Kubernetes, Talos, Azure, GAM7','Kontext in Seitenleiste und Statuszeile, Blöcke',pl('6b')],['iOS und Android','Eine Pane je Bildschirm, Blatt, Tastenleiste',pl(7)]
+['Workspaces, tabs, panes','Pills on top, tab row, tiles with dividers',B],['Pane header','State dot, type icon, title, context, ⊞ ⤢ ✕',B],['Command palette','⌘K, grouped, with shortcuts',B],
+['Scrollback, selection, copy','In the terminal, copy mode',B],['Scrollback search','Bar inside the pane',B],['Links, hints, copy mode','Hint letters, status line',B],
+['Themes, font, UI scale','Settings › Appearance',B],['Accessibility','Settings › Accessibility',B],['Key binding editor','Shortcuts view: capture, conflicts, per platform',B],
+['Save and restore layout','Automatic, palette',B],['Drag panes, tear-off','Drag view',pl('2.1')],
+['SSH with reconnect','Pane header, sidebar, connections',pl(3)],['WSL, Docker','Connections, block picker',pl(3)],['Keychain','Connections',pl(3)],
+['Nextcloud sync, end-to-end','Title bar ☁, sync popover, settings',pl('3b')],
+['File previews (Markdown, image, video, PDF)','Previews view and Daily',pl(4)],['Editor with SFTP','Editor block',pl(4)],
+['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat','Title bar ✦, sidebar',pl(6)],
+['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['iOS and Android','One pane per screen, sheet, key row',pl(7)]
 ];
-$('#cov').innerHTML='<tr><th>Funktion</th><th>Wo im Fenster</th><th>Stand</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');
+$('#cov').innerHTML='<tr><th>Feature</th><th>Where</th><th>Status</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');
 render();fit();
 </script>

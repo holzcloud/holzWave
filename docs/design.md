@@ -136,6 +136,10 @@ parts kept.
 ![Desktop](design/6-desktop.png)
 ![Phone](design/7-phone.png)
 
+The interactive source of every image in this section is [design/haarlinie-voll.html](design/haarlinie-voll.html): one
+page with a view picker (daily, palette, new block, search, copy mode, connections, settings, shortcuts, previews, sync,
+AI chat, drag) and a platform switch. The PNGs are rendered from it.
+
 **Rules**
 
 1. **One look everywhere.** The window chrome is drawn by holzWave, with no native title bar or tab control, so
@@ -162,9 +166,88 @@ parts kept.
 
 **Size tokens for touch:** minimum target 44 px on mobile and 28 px on desktop; the accessory row keys are 44 px high.
 
+### 6.1 The window: three levels
+
+holzWave has three nested levels, and each one has its own shape and place so that they cannot be confused.
+
+| Level | Shape | Place | Holds |
+|---|---|---|---|
+| **Workspace** | round pill with a diamond (`◆` active, `◇` others), tab count as a small number; the active one is a solid `--hw-rose-deep` fill with `--hw-on-accent` text | title bar, left to right | its own tabs and layout |
+| **Tab** | square, numbered (`1 shell`), underline and rose wash when shown, a close mark on hover | its own row under the title bar | one split tree of panes |
+| **Pane** | tile with a 24 px header: state dot, type icon, title, context chip, context right-aligned, `⊞ ⤢ ✕` | the area under the tab row | one block: shell, SSH, preview, editor, monitor |
+
+Anything that is not one of these three is **chrome around them**: the right title-bar group (sync, AI, sidebar, palette),
+the sidebar and the status line.
+
+![Shortcuts](design/shortcuts.png)
+
+### 6.2 Anatomy
+
+| Area | Content |
+|---|---|
+| Title bar (32 px) | window buttons (left on macOS, right on Windows and Linux), workspace pills, `＋`; right group: sync state `☁ synced`, `✦ AI`, `▥ Sidebar` toggle, `⌘K` |
+| Tab row (28 px) | numbered tabs, a `⌁` mark on tabs with a remote connection, `＋`; a hint line right-aligned |
+| Area | the split tree of the shown tab, 1 px hairlines between panes, no gaps; the focused pane has the rose line on its header |
+| Sidebar (216 px, collapsible) | **Hosts** (state dot, protocol, reconnect counter), **Context** (Kubernetes context and namespace, Azure subscription, GAM profile), **History** (fuzzy search), **Widgets** |
+| Status line (24 px) | tmux-style segments: workspace (solid), tabs and panes, Kubernetes context, Azure subscription, git branch, SSH count, sync state, renderer, encoding, version |
+
+The sidebar and the AI chat share one column: opening the chat replaces the sidebar. Every segment of the status line
+and every title-bar button opens the matching popover or dialog.
+
+### 6.3 Views
+
+Each view is a state of the same window. Overlays use the 24 px radius and the shadow; everything else stays flat.
+
+| View | Image | What it shows |
+|---|---|---|
+| Daily | ![](design/6-desktop.png) | local shell, SSH pane that is reconnecting (`⟳ 2/5`) with a Kubernetes chip, SFTP editor, Markdown preview, system monitor, sidebar |
+| Palette (`Cmd+K`) | ![](design/palette.png) | fuzzy list in groups (actions, connect, switch) with the chords on the right |
+| New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history |
+| Search | ![](design/search.png) | scrollback search bar in the pane, hits marked, the current hit solid |
+| Copy mode | ![](design/copy-mode.png) | keyboard selection, hint letters on hashes and paths, a solid status line with the keys |
+| Connections | ![](design/connections.png) | list and form: host, user, key from the OS keychain, jump host, reconnect policy, startup command |
+| Settings | ![](design/settings.png) | themes (built-in and custom), font, UI scale, accessibility as `System / On / Off` |
+| Shortcuts | ![](design/shortcuts.png) | the key binding editor, see 6.4 |
+| Previews | ![](design/previews.png) | file browser (local and SFTP) with image, PDF and video panes, see 6.5 |
+| Sync | ![](design/sync.png) | Nextcloud endpoint, last sync, end-to-end encryption, conflicts with their backup |
+| AI chat | ![](design/ai-chat.png) | replaces the sidebar; terminal content is sent only after a per-pane consent |
+| Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
+
+### 6.4 Shortcuts view
+
+The editor lists every action grouped as in the palette (pane, tab, workspace, view and tools, line editing). A row is
+the action's name, its action id in mono, and the chord of the **running platform**; a row without a chord shows `–`.
+Selecting a row starts the capture (`Press a key …`); a chord that is taken shows the conflict with the action that owns
+it and offers *Replace* or *Cancel*. The footer names the fixed shortcuts. The tables in [config.md](config.md) are the
+defaults; the editor never shows another platform's keys, because custom bindings do not travel between platforms.
+
+### 6.5 Previews
+
+A preview is a pane like any other and uses the same header: image (size and weight as a chip), PDF (page and zoom),
+video (a bar with time, volume and speed), Markdown (Manrope, the one place in the chrome that uses it) and the editor
+(line numbers, a dot for unsaved changes). The file browser is a pane too: `Space` on a file opens its preview beside it,
+and the path chip switches between local and an SSH host.
+
+### 6.6 Mobile
+
+On iOS and Android a pane fills the screen. Tabs and workspaces move into a sheet from the bottom: workspace pills on
+top, the tabs of the active workspace as a list. The key row (`esc tab ctrl alt ↑ ↓`) sits above the system keyboard and
+the bottom bar holds the tabs of the shown workspace. Tokens are the ones above; touch targets are at least 44 px.
+
+![Phone](design/7-phone.png)
+
+### 6.7 Platforms
+
+The same window is drawn everywhere; only the OS window buttons move (traffic lights on the left on macOS, flat glyphs
+on the right on Windows, round buttons on the right on GNOME). Shortcut labels follow the platform table in section 7.
+
+| macOS | Windows | Linux |
+|---|---|---|
+| ![](design/platforms/macos.png) | ![](design/platforms/windows.png) | ![](design/platforms/linux.png) |
+
 ### Candidates considered
 
-The five earlier mockups stay as the record of the alternatives: [Glas](design/1-glas.png),
+The five earlier candidates stay as the record of the alternatives: [Glas](design/1-glas.png),
 [Planke](design/2-planke.png), [Haarlinie](design/3-haarlinie.png), [Welle](design/4-welle.png),
 [Papier](design/5-papier.png). The cream *Papier* look remains a candidate for a **light theme** later, because the
 terminal palette and the tokens are shared by every chrome style.

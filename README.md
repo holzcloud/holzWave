@@ -17,8 +17,8 @@ Nextcloud. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
 > **Alpha, macOS only.** holzWave is at `0.0.1-alpha2`: a preview build for Apple Silicon, unsigned (no Developer ID,
-> no notarisation). Windows and Linux builds are written but not yet tested on real machines. The images below are
-> **design mockups, not screenshots**.
+> no notarisation). Windows and Linux builds are written but not yet tested on real machines. The window in the images below is the
+> design for the release; the table [What works today](#what-works-today) says what is built.
 
 ## Install (macOS, Apple Silicon)
 
@@ -42,18 +42,22 @@ brew install --cask holzcloud/holzwave/holzwave@preview
 > Wave's code**. It is independent and not affiliated with or endorsed by the Wave project. If you want a finished
 > terminal of that kind today, use Wave and consider [sponsoring it](https://github.com/sponsors/wavetermdev).
 
-## Design mockups
+## Design
 
-| Desktop: tiled panes, tabs, workspaces | Phone: one pane per screen |
+| Workspaces, tabs and tiled panes | Phone: one pane per screen |
 |---|---|
-| ![Desktop mockup of holzWave with tiled terminal panes](docs/design/6-desktop.png) | <img src="docs/design/7-phone.png" width="260" alt="Phone mockup of holzWave with tabs and a key accessory row"> |
+| ![holzWave window with workspaces, tabs, tiled panes and a sidebar](docs/design/6-desktop.png) | <img src="docs/design/7-phone.png" width="360" alt="holzWave on a phone: pane, workspace sheet and key row"> |
+
+| Command palette | Shortcuts | Previews |
+|---|---|---|
+| ![Command palette](docs/design/palette.png) | ![Key binding editor](docs/design/shortcuts.png) | ![File browser with image, PDF and video panes](docs/design/previews.png) |
 
 | macOS | Windows | Linux |
 |---|---|---|
-| ![holzWave mockup on macOS](docs/design/platforms/macos.png) | ![holzWave mockup on Windows](docs/design/platforms/windows.png) | ![holzWave mockup on Linux](docs/design/platforms/linux.png) |
+| ![holzWave on macOS](docs/design/platforms/macos.png) | ![holzWave on Windows](docs/design/platforms/windows.png) | ![holzWave on Linux](docs/design/platforms/linux.png) |
 
-Mockups, not screenshots. The same window is drawn on every platform; only the OS window buttons and keyboard differ.
-iOS and Android mockups and the design rules are in [docs/design.md](docs/design.md).
+The same window is drawn on every platform; only the OS window buttons and the keyboard shortcuts differ. All views and
+the design rules are in [docs/design.md](docs/design.md).
 
 ## What works today
 
