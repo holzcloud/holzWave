@@ -674,6 +674,8 @@ pub struct AppCore {
     blocks: Blocks,
     /// Where `wsh` finds the app, set once the socket listens: the folder and the secret of this run.
     ipc: Mutex<Option<(PathBuf, String)>>,
+    /// The typed commands, searchable. An empty in-memory one when the file cannot be opened.
+    history: holzwave_core::history::History,
     /// The system monitor's sampler, shared by every monitor pane.
     monitor: holzwave_core::monitor::Monitor,
     /// The encrypted sync: its account, its runs and what the page shows of them.
@@ -762,6 +764,10 @@ impl AppCore {
             Debounced::new(SESSION_DELAY, move || write_session(&path, &windows, &panes, &session, &last_cwd))
         };
 
+        let history = holzwave_core::history::History::open(&dir.join("history.db")).unwrap_or_else(|e| {
+            eprintln!("holzwave: no history file ({e}); the history is kept in memory");
+            holzwave_core::history::History::in_memory().expect("in-memory history")
+        });
         let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
         Arc::new_cyclic(|me| AppCore {
             dir,
@@ -784,6 +790,7 @@ impl AppCore {
             blocks,
             sync,
             monitor: holzwave_core::monitor::Monitor::new(),
+            history,
             ipc: Mutex::new(None),
             saver,
             writes,
@@ -883,6 +890,12 @@ impl AppCore {
         if cmd == Cmd::Ping {
             return Ok("holzWave".into());
         }
+        if let Cmd::Hist { cmd, cwd, exit } = &cmd {
+            // Not every command is kept (secrets, a leading space); that is not an error for the shell.
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            self.history.add(cmd, cwd, "local", *exit, ts).map_err(|e| e.to_string())?;
+            return Ok(String::new());
+        }
         let pane = pane.ok_or("HOLZWAVE_PANE is not set")?;
         let label = lock(&self.routes).live.get(&pane).map(|l| l.to_string()).ok_or("this pane is not open any more")?;
         let view = match cmd {
@@ -895,10 +908,25 @@ impl AppCore {
                 self.block_open_in(&label, "right", BlockKind::Preview, "local", &path)?
             }
             Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
-            Cmd::Ping => return Ok(String::new()),
+            Cmd::Ping | Cmd::Hist { .. } => return Ok(String::new()),
         };
         self.sink.send(Target::window(&label), Out::Layout(view));
         Ok(String::new())
+    }
+
+    /// Find typed commands. An empty query lists the newest.
+    pub fn history_search(&self, query: &str, limit: usize) -> Vec<holzwave_core::history::Hit> {
+        self.history.search(query, None, limit)
+    }
+
+    /// Forget one command (every use of it).
+    pub fn history_delete(&self, cmd: &str) -> Result<usize, String> {
+        self.history.delete(cmd).map_err(|e| e.to_string())
+    }
+
+    /// Forget the whole history.
+    pub fn history_clear(&self) -> Result<(), String> {
+        self.history.clear().map_err(|e| e.to_string())
     }
 
     /// What this computer is doing now, for a monitor pane. Blocks for a few milliseconds: not on the main thread.

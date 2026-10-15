@@ -473,6 +473,9 @@ pub fn run() {
             commands::sync_now,
             commands::sync_off,
             commands::monitor_sample,
+            commands::history_search,
+            commands::history_delete,
+            commands::history_clear,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")

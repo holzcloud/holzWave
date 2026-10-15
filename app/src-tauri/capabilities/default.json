@@ -78,6 +78,9 @@
     "allow-sync-save",
     "allow-sync-now",
     "allow-sync-off",
-    "allow-monitor-sample"
+    "allow-monitor-sample",
+    "allow-history-search",
+    "allow-history-delete",
+    "allow-history-clear"
   ]
 }

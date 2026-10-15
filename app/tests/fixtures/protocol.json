@@ -130,6 +130,14 @@
     ],
     "get_layout": [],
     "get_settings": [],
+    "history_clear": [],
+    "history_delete": [
+      "cmd"
+    ],
+    "history_search": [
+      "query",
+      "limit"
+    ],
     "key": [
       "pane",
       "code",

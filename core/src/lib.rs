@@ -34,6 +34,7 @@ pub mod connections;
 pub mod engine;
 mod error;
 pub mod files;
+pub mod history;
 pub mod keybindings;
 pub mod monitor;
 pub mod layout;

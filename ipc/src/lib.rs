@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_LINE: usize = 64 * 1024;
 /// The longest path in a command.
 pub const MAX_PATH: usize = 4096;
+/// The longest command of `hist`.
+pub const MAX_HIST: usize = 8192;
 /// The longest value of `setmeta`.
 pub const MAX_VALUE: usize = 200;
 /// How many requests are handled at once.
@@ -36,6 +38,8 @@ pub enum Cmd {
     Edit { path: String },
     /// Set a property of the pane. `key` is `title`.
     Setmeta { key: String, value: String },
+    /// A command the shell ran, for the history. The app decides whether it is worth keeping.
+    Hist { cmd: String, cwd: String, exit: Option<i32> },
     /// Nothing: asks whether the app answers.
     Ping,
 }
@@ -67,6 +71,12 @@ impl Cmd {
                 }
                 if value.chars().count() > MAX_VALUE || value.chars().any(char::is_control) {
                     return Err(format!("the title is longer than {MAX_VALUE} characters or has a control character"));
+                }
+                Ok(())
+            }
+            Cmd::Hist { cmd, cwd, .. } => {
+                if cmd.is_empty() || cmd.len() > MAX_HIST || cwd.len() > MAX_PATH {
+                    return Err("the command or the directory is empty or too long".into());
                 }
                 Ok(())
             }

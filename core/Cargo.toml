@@ -25,9 +25,11 @@ keyring = { version = "4", optional = true }
 # libghostty-rs master (2026-10-09), pinned; the 0.2.2 on crates.io is older and needs Zig 0.15.2.
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54", optional = true }
 portable-pty = "0.9"
+nucleo-matcher = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 russh = { version = "0.64.1", default-features = false, features = ["flate2", "ring", "rsa"] }
 quick-xml = "0.42"
+rusqlite = { version = "0.40", features = ["bundled"] }
 russh-sftp = "3"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "network"] }
 serde = { version = "1", features = ["derive"] }

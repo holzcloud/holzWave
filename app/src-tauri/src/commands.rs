@@ -840,3 +840,21 @@ pub fn sync_off(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
 pub fn monitor_sample(core: State<Arc<AppCore>>) -> holzwave_core::monitor::Snapshot {
     core.monitor_sample()
 }
+
+/// Typed commands that match `query` (fuzzy), newest and best first; an empty query lists the newest.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn history_search(core: State<Arc<AppCore>>, query: String, limit: usize) -> Vec<holzwave_core::history::Hit> {
+    core.history_search(&query, limit)
+}
+
+/// Forget every use of one command.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn history_delete(core: State<Arc<AppCore>>, cmd: String) -> Result<usize, String> {
+    core.history_delete(&cmd)
+}
+
+/// Forget the whole history.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn history_clear(core: State<Arc<AppCore>>) -> Result<(), String> {
+    core.history_clear()
+}
