@@ -9,6 +9,7 @@ import { call, listen } from "./bridge.js";
 import { initBlocks } from "./blocks.js";
 import { initChrome } from "./chrome.js";
 import { initConnections } from "./connections.js";
+import { initSync } from "./sync.js";
 import { openConnections } from "./connections-ui.js";
 import { initCopyMode } from "./copymode.js";
 import { initHints } from "./hints.js";
@@ -52,6 +53,8 @@ async function main() {
     renderStatus();
     renderOverlay();
   }, () => void openConnections());
+  // Encrypted sync: the state on the title bar and its popover.
+  await initSync(() => {});
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);
