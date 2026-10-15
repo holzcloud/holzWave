@@ -366,7 +366,7 @@ fn keep(buffered: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 /// The host key check of one connection.
-struct Client {
+pub(crate) struct Client {
     host: String,
     port: u16,
     known_hosts: Option<PathBuf>,
@@ -414,6 +414,16 @@ impl client::Handler for Client {
 /// An error that trying again cannot cure.
 fn is_fatal(error: &russh::Error) -> bool {
     matches!(error, russh::Error::UnknownKey | russh::Error::NotAuthenticated | russh::Error::KeyChanged { .. })
+}
+
+/// Open a session to `target`, going through its jump host if it has one, and log in. The reason a connection cannot be
+/// made is the text of the error. Used by [`crate::files::SftpSource`], which has its own connection.
+pub(crate) async fn open_session(target: &SshTarget) -> std::result::Result<Handle<Client>, String> {
+    match open(target).await {
+        Ok(handle) => Ok(handle),
+        Err(Outcome::Lost(why) | Outcome::Fatal(why)) => Err(why),
+        Err(Outcome::Exit(_) | Outcome::Closed) => Err("the connection ended".into()),
+    }
 }
 
 /// Open a session to `target`, going through its jump host if it has one, and log in.

@@ -14,6 +14,8 @@
 //! - [`profiles`]: `connections.json`, the saved SSH, WSL and Docker connections.
 //! - [`secrets`]: the [`secrets::SecretStore`] trait over the OS keychain.
 //! - [`connections`]: the connection manager the app shell holds: profiles, secrets, which pane runs which.
+//! - [`files`]: the file browser's source of files, local and over SFTP, with bounded reads and atomic writes.
+//! - [`preview`]: the kind of a file and Markdown as sanitised HTML.
 //! - [`ssh`]: a shell on another machine over SSH, with reconnect.
 //! - [`persist`]: atomic file writes, bounded reads and the debounced saver.
 //! - [`settings`]: `settings.json`, typed, versioned and validated.
@@ -29,11 +31,13 @@ pub mod conn;
 pub mod connections;
 pub mod engine;
 mod error;
+pub mod files;
 pub mod keybindings;
 pub mod layout;
 pub mod pane;
 pub mod persist;
 pub mod platform;
+pub mod preview;
 pub mod profiles;
 pub mod pty;
 pub mod queue;
