@@ -165,7 +165,7 @@ printf '%s\n' "$listing" | grep -q ' WebView2Loader\.dll$' || fail "the installe
 scratch="$root/target/release-cross-inspect"
 rm -rf "$scratch"
 mkdir -p "$scratch" || exit 1
-docker run --rm -v "$bdir":/in:ro -v "$scratch":/out "$IMAGE" sh -c '7z e -bso0 -bsp0 -o/out /in/*-setup.exe holzwave-app.exe WebView2Loader.dll' ||
+docker run --rm -v "$bdir":/in:ro -v "$scratch":/out "$IMAGE" sh -c '7z e -bso0 -bsp0 -o/out "/in/$1" holzwave-app.exe WebView2Loader.dll' sh "$(basename "$built")" ||
     fail "7z could not take the files out of the installer"
 [ "$(cmp -l "$scratch/holzwave-app.exe" "$exe" | wc -l | tr -d ' ')" -le 3 ] || fail "holzwave-app.exe in the installer differs from the built one by more than the bundle type marker"
 grep -aq '__TAURI_BUNDLE_TYPE_VAR_NSS' "$scratch/holzwave-app.exe" || fail "holzwave-app.exe in the installer does not carry the NSS bundle type marker"
