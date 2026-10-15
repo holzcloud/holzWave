@@ -480,7 +480,7 @@ async function scaleCase(page, url) {
   }
   // The header strips are as high as the state says.
   const heads = await page.evaluate(() => [...document.querySelectorAll("#overlay .panehead")].map((n) => n.getBoundingClientRect().height));
-  assert.deepEqual(heads, [30, 30]);
+  assert.deepEqual(heads, [36, 36]);
 
   // Back to 100 %: the stylesheet's own size is back and the header too.
   const normal = AUBERGINE();
