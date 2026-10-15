@@ -1,0 +1,365 @@
+<overview>
+TDD is about design quality, not coverage metrics. The red-green-refactor cycle forces you to think about behavior before implementation, producing cleaner interfaces and more testable code.
+
+**Principle:** If you can describe the behavior as `expect(fn(input)).toBe(output)` before writing `fn`, TDD improves the result.
+
+**Key insight:** TDD work is fundamentally heavier than standard tasks—it requires 2-3 execution cycles (RED → GREEN → REFACTOR), each with file reads, test runs, and potential debugging. TDD features get dedicated plans to ensure full context is available throughout the cycle.
+</overview>
+
+<when_to_use_tdd>
+## When TDD Improves Quality
+
+**TDD candidates (create a TDD plan):**
+- Business logic with defined inputs/outputs
+- API endpoints with request/response contracts
+- Data transformations, parsing, formatting
+- Validation rules and constraints
+- Algorithms with testable behavior
+- State machines and workflows
+- Utility functions with clear specifications
+
+**Skip TDD (use standard plan with `type="auto"` tasks):**
+- UI layout, styling, visual components
+- Configuration changes
+- Glue code connecting existing components
+- One-off scripts and migrations
+- Simple CRUD with no business logic
+- Exploratory prototyping
+
+**Heuristic:** Can you write `expect(fn(input)).toBe(output)` before writing `fn`?
+→ Yes: Create a TDD plan
+→ No: Use standard plan, add tests after if needed
+</when_to_use_tdd>
+
+<tdd_plan_structure>
+## TDD Plan Structure
+
+Each TDD plan implements **one feature** through the full RED-GREEN-REFACTOR cycle.
+
+```markdown
+---
+phase: XX-name
+plan: NN
+type: tdd
+---
+
+<objective>
+[What feature and why]
+Purpose: [Design benefit of TDD for this feature]
+Output: [Working, tested feature]
+</objective>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@relevant/source/files.ts
+</context>
+
+<feature>
+  <name>[Feature name]</name>
+  <files>[source file, test file]</files>
+  <behavior>
+    [Expected behavior in testable terms]
+    Cases: input → expected output
+  </behavior>
+  <implementation>[How to implement once tests pass]</implementation>
+</feature>
+
+<verification>
+[Test command that proves feature works]
+</verification>
+
+<success_criteria>
+- Failing test written and committed
+- Implementation passes test
+- Refactor complete (if needed)
+- All 2-3 commits present
+</success_criteria>
+
+<output>
+After completion, create SUMMARY.md with:
+- RED: What test was written, why it failed, and the semantic assessment of its RED evidence
+- GREEN: What implementation made it pass
+- REFACTOR: What cleanup was done (if any)
+- Commits: List of commits produced
+</output>
+```
+
+**One feature per TDD plan.** If features are trivial enough to batch, they're trivial enough to skip TDD—use a standard plan and add tests after.
+</tdd_plan_structure>
+
+<execution_flow>
+## Red-Green-Refactor Cycle
+
+**RED - Write failing test:**
+1. Create test file following project conventions
+2. Write test describing expected behavior (from `<behavior>` element)
+3. Run test - it MUST fail **intentionally** (#3770): the TARGET test you named must be the test that fails, on an assertion for the planned behavior. A nonzero exit alone is NOT RED — syntax errors, zero-test discovery, fixture crashes, parser errors, and unrelated assertions are INVALID_RED and must not authorize GREEN.
+4. Persist the RED evidence from the actual command: `{command, exitCode, output, targetTest, targetFile, expected, actual}`. Preserve the real exit status and unmodified report; record the planned expected result and observed actual result. Write the record inside the project directory; the classifier refuses a path outside it. It reads only these fields, so the further fields below stay in the record for review.
+   - Select evidence by **report format**, regardless of runner or package manager. The classifier has a shared TAP adapter for Node's built-in test runner and Vitest (`tap` / `tap-flat`), a JUnit XML adapter for Maven Surefire/Failsafe, a swift-testing console adapter for `swift test`, and a Python `unittest` text adapter. Other producers of these formats use the same adapters.
+   - TAP: capture the complete reporter output, including its test plan. Node summary comments are optional. The report must start with its TAP output: capture the reporter's own stdout (for npm scripts, `npm run --silent`), not package-manager banners. Use the target test's exact name; when names repeat, use its qualified name as emitted in the report (`tap-flat` emits only the full `file > suite > test` name). Suite/file summary failures are not target assertions. If the reporter is incompatible, rerun the planned target with a supported reporter through the project's test command, capture that real command and result, then submit the rerun's record to the classifier below. Preserve other console output separately rather than editing the report to make it parse.
+   - JUnit XML: capture the unchanged target report generated by the actual run. For Maven this is `target/surefire-reports/TEST-*.xml` or `target/failsafe-reports/TEST-*.xml`. Record the report path, run start, and modification time as `reportPath`, `runStartedAt`, and `reportModifiedAt`; require the report to be newer than the run start and verify the named target class or method executed in that run. Name the target as the method, the class (simple or package-qualified), or `<package.Class>#<method>`. Put one complete XML document in `output`, preserving console output alongside it. Missing, stale, or ambiguous reports require STOP and investigation.
+   - swift-testing and `unittest`: capture the complete console output without color (`NO_COLOR=1`), including the final summary. swift-testing needs one `Test` result line (passed, failed, skipped, or cancelled) for every test its `Test run with N tests` summary counts; it names a test by its quoted display name or, without one, by its function name (`addsNumbers()`), and either name identifies the target; repeated swift-testing names are ambiguous and block GREEN. `unittest` needs one `FAIL:`/`ERROR:` header for every failure or error its `FAILED (...)` line counts; repeated headers from one test's failing subTests count as one failing test, a method name that repeats across classes needs its `module.Class.method` id, and a `unittest.loader._FailedTest` entry is a load failure, never RED.
+   - Pass the unchanged record to `gsd_run check tdd-red-evidence <record.json> --raw` and require `RED_EVIDENCE_OK` before GREEN. Every `INVALID_RED` reason (`unexpected_green`, `zero_tests_discovered`, `nonzero_exit_without_test_failure`, `fixture_or_load_failure`, `no_target_test_failure`, `invalid_record`, `unreadable_record`) trips the gate. `invalid_record` includes unsupported or malformed reports; inspect `evidence.report_errors`. An unsupported format requires a supported reporter or a parser adapter before GREEN. Classifier rejection never authorizes a fallback to self-attestation.
+   - After machine validation, inspect whether the target actually executed and failed on the planned assertion for the intended reason. Zero tests, a missing, skipped, or cancelled target, setup, collection, import, syntax, or fixture faults, unrelated failures, unexpected green, and incomplete or ambiguous evidence block GREEN. Record this semantic assessment as `semanticAssessment` in the RED evidence and in the SUMMARY's RED entry; never fabricate reports, counters, or parser verdicts.
+5. If test passes: feature exists or test is wrong. Investigate.
+6. Commit: `test({phase}-{plan}): add failing test for [feature]`
+
+**GREEN - Implement to pass:**
+1. Write minimal code to make test pass
+2. No cleverness, no optimization - just make it work
+3. Run test - it MUST pass
+4. Commit: `feat({phase}-{plan}): implement [feature]`
+
+**REFACTOR (if needed):**
+1. Clean up implementation if obvious improvements exist
+2. Run tests - MUST still pass
+3. Only commit if changes made: `refactor({phase}-{plan}): clean up [feature]`
+
+**Result:** Each TDD plan produces 2-3 atomic commits.
+</execution_flow>
+
+<test_quality>
+## Good Tests vs Bad Tests
+
+**Test behavior, not implementation:**
+- Good: "returns formatted date string"
+- Bad: "calls formatDate helper with correct params"
+- Tests should survive refactors
+
+**One concept per test:**
+- Good: Separate tests for valid input, empty input, malformed input
+- Bad: Single test checking all edge cases with multiple assertions
+
+**Descriptive names:**
+- Good: "should reject empty email", "returns null for invalid ID"
+- Bad: "test1", "handles error", "works correctly"
+
+**No implementation details:**
+- Good: Test public API, observable behavior
+- Bad: Mock internals, test private methods, assert on internal state
+</test_quality>
+
+<framework_setup>
+## Test Framework Setup (If None Exists)
+
+When executing a TDD plan but no test framework is configured, set it up as part of the RED phase:
+
+**1. Detect project type:**
+```bash
+# JavaScript/TypeScript
+if [ -f package.json ]; then echo "node"; fi
+
+# Python
+if [ -f requirements.txt ] || [ -f pyproject.toml ]; then echo "python"; fi
+
+# Go
+if [ -f go.mod ]; then echo "go"; fi
+
+# Rust
+if [ -f Cargo.toml ]; then echo "rust"; fi
+```
+
+**2. Install minimal framework:**
+| Project | Framework | Install |
+|---------|-----------|---------|
+| Node.js | Jest | `npm install -D jest @types/jest ts-jest` |
+| Node.js (Vite) | Vitest | `npm install -D vitest` |
+| Python | pytest | `pip install pytest` |
+| Go | testing | Built-in |
+| Rust | cargo test | Built-in |
+
+**3. Create config if needed:**
+- Jest: `jest.config.js` with ts-jest preset
+- Vitest: `vitest.config.ts` with test globals
+- pytest: `pytest.ini` or `pyproject.toml` section
+
+**4. Verify setup:**
+```bash
+# Run empty test suite - should pass with 0 tests
+npm test  # Node
+pytest    # Python
+go test ./...  # Go
+cargo test    # Rust
+```
+
+**5. Create first test file:**
+Follow project conventions for test location. The RED-commit gate
+(`workflows/execute-phase.md`) recognises the patterns below at any depth, repo root
+included. Note the gate's pathspec is deliberately **wider than the project types the
+detection step above enumerates** — it costs nothing to recognise a convention the
+onboarding flow does not yet auto-detect, and a project using one should not have its
+RED commits go unseen:
+- `*.test.*` / `*.spec.*` next to source — JS/TS and anything sharing the convention
+- `__tests__/` directory
+- `tests/` directory at root
+- `*_test.go` — Go
+- `test_*.py` / `*_test.py` — Python (in addition to `tests/`)
+- `*_test.exs` — Elixir
+- `*_spec.rb` / `*_test.rb` — Ruby
+
+**Cost of the broad pathspec (#4379).** `*.spec.*` can match a non-test file that happens to carry
+the word — `api.spec.json`, `openapi.spec.yaml` — which lets the RED gate pass on a commit touching
+only that. This is not new: the previous `**/*.spec.*` already matched those at any nested path, so
+dropping the `**/` prefix only extends the same false-positive class to the repo root. It is
+accepted rather than narrowed, because narrowing it is a behaviour change to the
+currently-supported case and not part of making other languages visible.
+
+**Known gap — Rust (#4379).** `#[test]` conventionally lives inside the implementation file, so a
+Rust RED commit touches `src/*.rs` and no path-based gate can distinguish it from ordinary source.
+Widening the pathspec to cover it would match all source and make the gate meaningless. `cargo test`
+works; the RED-*commit* gate cannot see it, so a Rust project using `workflow.tdd_mode` should
+expect the gate to trip.
+
+Framework setup is a one-time cost included in the first TDD plan's RED phase.
+</framework_setup>
+
+<error_handling>
+## Error Handling
+
+**Test doesn't fail in RED phase:**
+- Feature may already exist - investigate
+- Test may be wrong (not testing what you think)
+- Fix before proceeding
+
+**Test doesn't pass in GREEN phase:**
+- Debug implementation
+- Don't skip to refactor
+- Keep iterating until green
+
+**Tests fail in REFACTOR phase:**
+- Undo refactor
+- Commit was premature
+- Refactor in smaller steps
+
+**Unrelated tests break:**
+- Stop and investigate
+- May indicate coupling issue
+- Fix before proceeding
+</error_handling>
+
+<commit_pattern>
+## Commit Pattern for TDD Plans
+
+TDD plans produce 2-3 atomic commits (one per phase):
+
+```
+test(08-02): add failing test for email validation
+
+- Tests valid email formats accepted
+- Tests invalid formats rejected
+- Tests empty input handling
+
+feat(08-02): implement email validation
+
+- Regex pattern matches RFC 5322
+- Returns boolean for validity
+- Handles edge cases (empty, null)
+
+refactor(08-02): extract regex to constant (optional)
+
+- Moved pattern to EMAIL_REGEX constant
+- No behavior changes
+- Tests still pass
+```
+
+**Comparison with standard plans:**
+- Standard plans: 1 commit per task, 2-4 commits per plan
+- TDD plans: 2-3 commits for single feature
+
+Both follow same format: `{type}({phase}-{plan}): {description}`
+
+**Benefits:**
+- Each commit independently revertable
+- Git bisect works at commit level
+- Clear history showing TDD discipline
+- Consistent with overall commit strategy
+</commit_pattern>
+
+<gate_enforcement>
+## Gate Enforcement Rules
+
+When `workflow.tdd_mode` is enabled in config, the RED/GREEN/REFACTOR gate sequence is enforced for all `type: tdd` plans.
+
+### Gate Definitions
+
+| Gate | Required | Commit Pattern | Validation |
+|------|----------|---------------|------------|
+| RED | Yes | `test({phase}-{plan}): ...` | Target test exists AND fails before implementation: a complete report in a supported format (RED step 4) from the current run must return `RED_EVIDENCE_OK`, followed by semantic inspection of the planned assertion (RED step 4) |
+| GREEN | Yes | `feat({phase}-{plan}): ...` | Test passes after implementation |
+| REFACTOR | No | `refactor({phase}-{plan}): ...` | Tests still pass after cleanup |
+
+### Fail-Fast Rules
+
+1. **Unexpected GREEN in RED phase:** If the test passes before any implementation code is written, STOP. The feature may already exist or the test is wrong. Investigate before proceeding.
+2. **INVALID_RED in RED phase (#3770):** A nonzero exit is not RED by itself. Follow the format-based evidence contract in RED step 4, including reporter reruns and report freshness. An `INVALID_RED` verdict or failed semantic assessment halts GREEN. Unsupported, incomplete, ambiguous, or contradictory evidence cannot authorize implementation.
+3. **Missing RED commit:** If no `test(...)` commit precedes the `feat(...)` commit, the TDD discipline was violated. Flag in SUMMARY.md.
+4. **REFACTOR breaks tests:** Undo the refactor immediately. Commit was premature — refactor in smaller steps.
+
+### Executor Gate Validation
+
+After completing a `type: tdd` plan, the executor validates the git log:
+```bash
+# The commit protocol promises no zero-padding for ${PHASE}/${PLAN} — strip both and
+# match the commit-scope position anchored (#4003). #4619: PHASE may be decimal/
+# N-segment; zero-strip only the leading integer segment, escape the rest.
+# #4748: it may also carry a letter suffix (03A), so split at the first non-digit.
+PHASE_INT=${PHASE%%[!0-9]*}; PHASE_REST=${PHASE#"$PHASE_INT"}
+PHASE_N="$((10#$PHASE_INT))${PHASE_REST//./\\.}"
+PLAN_N=$((10#${PLAN}))
+# Check for RED gate commit
+git log --oneline -E --grep="^test\((0*${PHASE_N})-(0*${PLAN_N})\):" | head -1
+# Check for GREEN gate commit  
+git log --oneline -E --grep="^feat\((0*${PHASE_N})-(0*${PLAN_N})\):" | head -1
+# Check for optional REFACTOR gate commit
+git log --oneline -E --grep="^refactor\((0*${PHASE_N})-(0*${PLAN_N})\):" | head -1
+```
+
+If RED or GREEN gate commits are missing, add a `## TDD Gate Compliance` section to SUMMARY.md with the violation details.
+</gate_enforcement>
+
+<end_of_phase_review>
+## End-of-Phase TDD Review Checkpoint
+
+When `workflow.tdd_mode` is enabled, the execute-phase orchestrator inserts a collaborative review checkpoint after all waves complete but before phase verification.
+
+### Review Checkpoint Format
+
+```
+### TDD REVIEW — Phase {X}
+
+TDD Plans: {count} | Gate violations: {count}
+
+| Plan | RED | GREEN | REFACTOR | Status |
+|------|-----|-------|----------|--------|
+| {id} |  ✓  |   ✓   |    ✓     | Pass   |
+| {id} |  ✓  |   ✗   |    —     | FAIL   |
+
+{If violations exist:}
+⚠ Gate violations are advisory — review before advancing.
+```
+
+### What the Review Checks
+
+1. **Gate sequence:** Each TDD plan has RED → GREEN commits in order
+2. **Test quality:** RED phase tests fail for the right reason (not import errors or syntax)
+3. **Minimal GREEN:** Implementation is minimal — no premature optimization in GREEN phase
+4. **Refactor discipline:** If REFACTOR commit exists, tests still pass
+
+This checkpoint is advisory — it does not block phase completion but surfaces TDD discipline issues for human review.
+</end_of_phase_review>
+
+<context_budget>
+## Context Budget
+
+TDD plans target **~40% context usage** (lower than standard plans' ~50%).
+
+Why lower:
+- RED phase: write test, run test, potentially debug why it didn't fail
+- GREEN phase: implement, run test, potentially iterate on failures
+- REFACTOR phase: modify code, run tests, verify no regressions
+
+Each phase involves reading files, running commands, analyzing output. The back-and-forth is inherently heavier than linear task execution.
+
+Single feature focus ensures full quality throughout the cycle.
+</context_budget>

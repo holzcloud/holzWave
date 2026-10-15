@@ -1,0 +1,127 @@
+Apply response_language to all user-facing prose — narration between tool calls, status updates, progress notes, and findings included; preserve code, paths, and identifiers.
+
+# Step: codebase_drift_gate
+
+Post-execution structural drift detection (#2003). Runs after the last wave
+commits, before verification. **Non-blocking by contract:** any internal
+error here MUST fall through and continue to `verify_phase_goal`. The phase
+is never failed by this gate.
+
+```bash
+_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; _gsd_id_ok() { case "$("$1" runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') return 0;; *) return 1;; esac; }; _gsd_homes() { set -- "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}" "$HOME/.gemini/antigravity-ide" "$HOME/.gemini/antigravity-cli" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}" "${CLINE_CONFIG_DIR:-$HOME/.cline}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}" "${CODEX_HOME:-$HOME/.codex}" "${COPILOT_CONFIG_DIR:-${COPILOT_HOME:-$HOME/.copilot}}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}" "${HERMES_HOME:-$HOME/.hermes}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}" "${KIMI_CONFIG_DIR:-$HOME/.config/agents}" "$HOME/.agents" "${KIMI_CODE_HOME:-$HOME/.kimi-code}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}" "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}" "${TRAE_CONFIG_DIR:-$HOME/.trae}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}" "${ZCODE_CONFIG_DIR:-$HOME/.zcode}" "${GROK_AGENTS_HOME:-$HOME/.agents}"; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif _gsd_homes; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; [ -n "$_G" ] && _gsd_id_ok "$_G"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and no identity-proving gsd_run is on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; _gsd_id_ok gsd_run && GSD_IDENTITY_STATUS=ok; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
+# Resolve gsd-tools through the runtime shim launcher, NOT the bare PATH binary. On a
+# shim-only install (gsd-tools.cjs present, `gsd-tools` not on PATH) the bare call exits
+# 127, `2>/dev/null` hides it, and this non-blocking gate would silently skip drift
+# detection forever (#619). The canonical launcher preamble is defined once here — the
+# always-run drift check, the file's first launcher block — and the conditional auto-remap
+# block below reuses the launcher function from this shared shell scope (the single-preamble
+# pattern established by discuss-phase #614, enforced by tests/runtime-launcher-parity.test.cjs).
+# Non-blocking is preserved: an internal drift-command failure still falls through to the
+# skip JSON below. Exit 69 (UNAVAILABLE, #5170) is the verb saying "could not look": its payload is
+# already on stdout and is kept as the verdict; the fallback is applied only when the verb printed
+# nothing, so the two JSON documents are never concatenated.
+DRIFT=$(gsd_run verify codebase-drift 2>/dev/null) && DRIFT_EXIT=0 || DRIFT_EXIT=$?
+if [ -z "$DRIFT" ]; then DRIFT='{"skipped":true,"reason":"sdk-failed"}'; fi
+if [ "$DRIFT_EXIT" -ne 0 ]; then echo "Warning: codebase-drift check could not look (exit ${DRIFT_EXIT})" >&2; fi
+```
+
+Parse JSON for: `skipped`, `reason`, `action_required`, `directive`,
+`spawn_mapper`, `affected_paths`, `elements`, `threshold`, `action`,
+`last_mapped_commit`, `message`.
+
+**If `skipped` is true (no STRUCTURE.md, missing git, or any internal error):**
+Log one line — `Codebase drift check skipped: {reason}` — and continue to
+`verify_phase_goal`. Do NOT prompt the user. Do NOT block.
+
+**If `action_required` is false:** Continue silently to `verify_phase_goal`.
+
+**If `action_required` is true AND `directive` is `warn`:**
+Print the `message` field verbatim. The format is:
+
+```text
+Codebase drift detected: {N} structural element(s) since last mapping.
+
+New directories:
+  - {path}
+New barrel exports:
+  - {path}
+New migrations:
+  - {path}
+New route modules:
+  - {path}
+Modified files in mapped directories:
+  - {path}
+Deleted files in mapped directories:
+  - {path}
+{N} path(s) withheld: not passed to the mapper or listed (absolute, traversal, whitespace, non-ASCII or shell-metacharacter characters)
+
+Run /gsd-map-codebase --paths {affected_paths} to refresh planning context.
+```
+
+Then continue to `verify_phase_goal`. Do NOT block. Do NOT spawn anything.
+
+**If `action_required` is true AND `directive` is `auto-remap`:**
+
+First load the mapper agent's skill bundle (the executor's `AGENT_SKILLS`
+from step `init_context` is for `gsd-executor`, not the mapper):
+
+```bash
+# gsd_run is defined by the canonical preamble in the drift-check block above and reused
+# here via the workflow's shared shell scope — defining it once keeps the file compliant
+# with the single-canonical-preamble parity invariant (#619). This block only runs on the
+# `auto-remap` directive, which is always reached after the drift check above has run.
+# #4772: this file is Read, not textually substituted - write the parent command's original argument string in place of $ARGUMENTS so --ws reaches the query.
+GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+AGENT_SKILLS_MAPPER=$(gsd_run query agent-skills gsd-codebase-mapper ${GSD_WS:+--ws=${GSD_WS##* }})
+```
+
+Then spawn `gsd-codebase-mapper` agents with the `--paths` hint (runs in a subagent — no output until it returns, ~1–5 min; expected, not a freeze):
+
+<!-- #2508 runtime-aware-dispatch -->
+
+> **Runtime-aware dispatch (#2508 Phase 4).** GSD workflows dispatch specialized subagents by role. Before dispatching on a built-in-only runtime (kimi-code — three built-ins only), resolve the role to a built-in via `gsd_run query resolve-dispatch-type --requested <role> --raw`. On named-dispatch runtimes (Claude/OpenCode/…) the role is returned unchanged; on kimi-code it maps to `coder`/`explore`/`plan` by role-suffix. The persona rides `${AGENT_SKILLS_<ROLE>}` (Phase 3) regardless. See @gsd-core/references/runtime-aware-dispatch.md.
+
+```text
+Agent(
+  subagent_type="gsd-codebase-mapper",
+  description="Incremental codebase remap (drift)",
+  prompt="Focus: arch
+Today's date: {date}
+--paths {affected_paths joined by comma}
+
+Refresh STRUCTURE.md and ARCHITECTURE.md scoped to the listed paths only.
+${AGENT_SKILLS_MAPPER}"
+)
+```
+
+> **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
+
+If the spawn fails or the agent reports an error: log `Codebase drift
+auto-remap failed: {reason}` and continue to `verify_phase_goal`. The phase
+is NOT failed by a remap failure.
+
+If the remap succeeds, stamp the new baseline into the two documents the
+mapper just refreshed:
+
+```bash
+gsd_run stamp-codebase-map --files STRUCTURE.md,ARCHITECTURE.md
+```
+
+The stamp is a shell step, not a line in the mapper's prompt. An agent that
+concludes its work is already done skips a prose instruction silently, and the
+stamp is the one marker no human reviewing the documents would notice missing
+(#3418). `--files` is scoped to what this step actually refreshed -- the other
+five documents were not remapped and must not claim currency at HEAD.
+
+Only stamp on success: stamping after a failed remap would record a baseline
+the map never reached.
+
+Then log `Codebase drift auto-remap completed for paths: {affected_paths}` and
+continue to `verify_phase_goal`.
+
+The two relevant config keys (continue on error / failure if either is invalid):
+- `workflow.drift_threshold` (integer, default 3) — minimum drift elements before action
+- `workflow.drift_action` — `warn` (default) or `auto-remap`
+
+This step is fully non-blocking — it never fails the phase, and any
+exception path returns control to `verify_phase_goal`.
