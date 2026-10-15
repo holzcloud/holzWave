@@ -141,6 +141,9 @@ pub struct PaneSpec {
     /// No process at all ([`crate::conn::NullLink`]): the page draws this pane's content itself (a file browser, a
     /// preview). The pane is otherwise a pane like any other: it has a header, can be split, moved and closed.
     pub blank: bool,
+    /// Extra environment variables of the local shell (`HOLZWAVE_IPC`, `HOLZWAVE_TOKEN`, `HOLZWAVE_PANE`: what `wsh` finds the
+    /// app by). Not used for an SSH pane: a remote host reaches the app through a tunnel, which is not built yet.
+    pub env: Vec<(String, String)>,
 }
 
 impl PaneSpec {
@@ -163,6 +166,7 @@ impl PaneSpec {
             cwd_lookup: true,
             ssh: None,
             blank: false,
+            env: Vec::new(),
         }
     }
 
@@ -999,6 +1003,9 @@ where
     let mut options = SpawnOptions::new(program, spec.cols, spec.rows).args(args).cell_px(spec.cell_px.0, spec.cell_px.1);
     if let Some(dir) = cwd {
         options = options.cwd(dir);
+    }
+    for (key, value) in &spec.env {
+        options = options.env(key, value);
     }
     let pty = Pty::spawn_with(&options)?;
     Ok((engine, Box::new(pty)))
