@@ -13,6 +13,7 @@
 //! - [`conn`]: the [`conn::Link`] trait a pane talks to, and the state of a connection.
 //! - [`profiles`]: `connections.json`, the saved SSH, WSL and Docker connections.
 //! - [`secrets`]: the [`secrets::SecretStore`] trait over the OS keychain.
+//! - [`connections`]: the connection manager the app shell holds: profiles, secrets, which pane runs which.
 //! - [`ssh`]: a shell on another machine over SSH, with reconnect.
 //! - [`persist`]: atomic file writes, bounded reads and the debounced saver.
 //! - [`settings`]: `settings.json`, typed, versioned and validated.
@@ -25,6 +26,7 @@
 //! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
 
 pub mod conn;
+pub mod connections;
 pub mod engine;
 mod error;
 pub mod keybindings;
