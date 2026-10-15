@@ -155,7 +155,7 @@ case "$itype" in
     *) fail "the installer is not an NSIS installer" ;;
 esac
 bdir=$(cd "$(dirname "$built")" && pwd)
-listing=$(docker run --rm -v "$bdir":/in:ro "$IMAGE" sh -c '7z l /in/*-setup.exe') || fail "7z could not read the installer"
+listing=$(docker run --rm -v "$bdir":/in:ro "$IMAGE" sh -c '7z l "/in/$1"' sh "$(basename "$built")") || fail "7z could not read the installer"
 printf '%s\n' "$listing" | grep -E '(holzwave-app|WebView2Loader)\.dll|holzwave-app\.exe|Type = |SubType'
 printf '%s\n' "$listing" | grep -q ' holzwave-app\.exe$' || fail "the installer does not hold holzwave-app.exe"
 printf '%s\n' "$listing" | grep -q ' WebView2Loader\.dll$' || fail "the installer does not hold WebView2Loader.dll"
