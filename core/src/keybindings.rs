@@ -196,7 +196,7 @@ const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
 }
 
 /// The base part of the macOS default table. Order is the order of the editor, and the other tables keep it.
-static BASE_MACOS: [ActionInfo; 43] = [
+static BASE_MACOS: [ActionInfo; 44] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -226,6 +226,7 @@ static BASE_MACOS: [ActionInfo; 43] = [
     action("search.open", "Search in scrollback", "Cmd+F"),
     action("copy_mode.enter", "Enter copy mode", "Cmd+Shift+X"),
     action("hints.open", "Show hints", "Cmd+Shift+Space"),
+    action("history.open", "Search the history", "Cmd+Shift+H"),
     action("font.increase", "Increase font size", "Cmd+="),
     action("font.decrease", "Decrease font size", "Cmd+-"),
     action("font.reset", "Reset font size", "Cmd+0"),
@@ -243,7 +244,7 @@ static BASE_MACOS: [ActionInfo; 43] = [
 ];
 
 /// The base part for Windows and Linux: the same actions in the same order, on `Ctrl+Shift` (see the module docs).
-static BASE_OTHER: [ActionInfo; 43] = [
+static BASE_OTHER: [ActionInfo; 44] = [
     action("pane.split_right", "Split pane right", "Ctrl+Shift+D"),
     action("pane.split_down", "Split pane down", "Ctrl+Shift+O"),
     action("pane.close", "Close pane", "Ctrl+Shift+W"),
@@ -273,6 +274,7 @@ static BASE_OTHER: [ActionInfo; 43] = [
     action("search.open", "Search in scrollback", "Ctrl+Shift+F"),
     action("copy_mode.enter", "Enter copy mode", "Ctrl+Shift+X"),
     action("hints.open", "Show hints", "Ctrl+Shift+Space"),
+    action("history.open", "Search the history", "Ctrl+Shift+H"),
     action("font.increase", "Increase font size", "Ctrl+Shift+="),
     action("font.decrease", "Decrease font size", "Ctrl+Shift+-"),
     action("font.reset", "Reset font size", "Ctrl+Shift+0"),

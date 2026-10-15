@@ -10,6 +10,7 @@ import { initBlocks } from "./blocks.js";
 import { initChrome } from "./chrome.js";
 import { initConnections } from "./connections.js";
 import { initSync } from "./sync.js";
+import { initHistory } from "./historyview.js";
 import { openConnections } from "./connections-ui.js";
 import { initCopyMode } from "./copymode.js";
 import { initHints } from "./hints.js";
@@ -55,6 +56,7 @@ async function main() {
   }, () => void openConnections());
   // Encrypted sync: the state on the title bar and its popover.
   await initSync(() => {});
+  initHistory();
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);

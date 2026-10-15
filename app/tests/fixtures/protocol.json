@@ -530,6 +530,12 @@
           "title": "Show hints"
         },
         {
+          "action": "history.open",
+          "chord": "Cmd+Shift+H",
+          "is_default": true,
+          "title": "Search the history"
+        },
+        {
           "action": "font.increase",
           "chord": "Cmd+=",
           "is_default": true,
@@ -1044,6 +1050,12 @@
         "chord": "Cmd+Shift+Space",
         "is_default": true,
         "title": "Show hints"
+      },
+      {
+        "action": "history.open",
+        "chord": "Cmd+Shift+H",
+        "is_default": true,
+        "title": "Search the history"
       },
       {
         "action": "font.increase",

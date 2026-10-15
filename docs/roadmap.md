@@ -110,7 +110,7 @@ against an in-process SSH and SFTP server and the page stub; not yet run on real
 ## Phase 6 — Extras
 
 - Widgets sidebar and custom widgets described by a JSON schema.
-- History with fuzzy search (SQLite).
+- ✅ History with fuzzy search: SQLite (`history.db`, mode 0600, `secure_delete`), fzf-style matching (`nucleo-matcher`), fed by shell hooks through `wsh` (`wsh init bash|zsh|fish`), a best-effort filter keeps secrets and leading-space commands out, a dialog with `Cmd/Ctrl+Shift+H`. Open: the sidebar section, remote hosts, optional sync.
 - ✅ System monitor block (local: CPU, memory, network, busiest processes; `sysinfo`). Other computers over SSH: open.
 - AI chat behind a provider abstraction (local and cloud). Terminal context is sent only with consent.
 - Apple AI provider: a Swift bridge as a Tauri plugin (Foundation Models, macOS 26+, Apple Silicon). Selectable only

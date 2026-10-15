@@ -204,7 +204,7 @@ const KEYS=[
  ['Pane',[['Split pane right','pane.split_right',['⌘D','Ctrl+Shift+D']],['Split pane down','pane.split_down',['⇧⌘D','Ctrl+Shift+O']],['Close pane','pane.close',['⌘W','Ctrl+Shift+W']],['Next pane','pane.focus_next',['⌘]','Ctrl+Shift+]']],['Previous pane','pane.focus_prev',['⌘[','Ctrl+Shift+[']],['Move pane to new window','pane.move_to_new_window',['','']]]],
  ['Tab',[['New tab','tab.new',['⌘T','Ctrl+Shift+T']],['Tab 1 to 9','tab.select_1…9',['⌘1 … ⌘9','Alt+Shift+1 … 9']],['Rename tab','tab.rename',['','']]]],
  ['Workspace',[['New workspace','workspace.new',['⇧⌘N','Ctrl+Shift+N']],['Workspace 1 to 9','workspace.select_1…9',['⌥⌘1 … 9','Ctrl+Shift+1 … 9']]]],
- ['View and tools',[['Palette','palette.open',['⌘K','Ctrl+Shift+P']],['Search scrollback','search.open',['⌘F','Ctrl+Shift+F']],['Copy mode','copy_mode.enter',['⇧⌘X','Ctrl+Shift+X']],['Hints','hints.open',['⇧⌘Space','Ctrl+Shift+Space']],['Increase font','font.increase',['⌘=','Ctrl+Shift+=']],['Settings','settings.open',['⌘,','Ctrl+Shift+,']]]],
+ ['View and tools',[['Palette','palette.open',['⌘K','Ctrl+Shift+P']],['Search scrollback','search.open',['⌘F','Ctrl+Shift+F']],['Copy mode','copy_mode.enter',['⇧⌘X','Ctrl+Shift+X']],['Hints','hints.open',['⇧⌘Space','Ctrl+Shift+Space']],['History','history.open',['⇧⌘H','Ctrl+Shift+H']],['Increase font','font.increase',['⌘=','Ctrl+Shift+=']],['Settings','settings.open',['⌘,','Ctrl+Shift+,']]]],
  ['Line editing (normal screen only)',[['Word back','edit.word_back',['⌥←','']],['Line start','edit.line_start',['⌘←','']]]]
 ];
 function keysModal(os){
@@ -257,6 +257,11 @@ const kiPanel=`<div class="side" style="width:280px"><div class="sec"><div class
  <div class="input" style="margin:8px 12px 12px">Ask a question …<span class="cur"></span></div></div>`;
 
 const ovl={
+ history:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:560px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">⌕</span>kgp<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
+  <div class="it on"><span><span class="ro">k</span>ubectl <span class="ro">g</span>et <span class="ro">p</span>ods -n kube-system</span><span class="dim">~/infra · 2 h ago · ×14</span></div>
+  <div class="it"><span><span class="ro">k</span>ubectl <span class="ro">g</span>et <span class="ro">p</span>ods -A</span><span class="dim">~/infra · 3 d ago · ×6</span></div>
+  <div class="it"><span><span class="ro">k</span>ubectl lo<span class="ro">g</span>s -f etcd-0 -n kube-s<span class="ro">p</span>ace</span><span class="dim">~ · 1 w ago</span></div>
+  <div class="row" style="padding:8px 14px;border-top:1px solid var(--edge);gap:12px"><span class="dim">↑↓ choose</span><span class="dim">⏎ to the prompt</span><span class="dim">⇧⌫ forget</span><span class="btn" style="margin-left:auto">Clear all</span></div></div>`,
  palette:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:520px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">❯</span>split<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
   <div class="grp lbl">Actions</div><div class="it on"><span>Split pane right</span><span class="kbd">⌘D</span></div><div class="it"><span>Split pane down</span><span class="kbd">⇧⌘D</span></div><div class="it"><span>Move pane to new window</span><span class="kbd"></span></div>
   <div class="grp lbl">Connect</div><div class="it"><span>SSH: talos-1</span><span class="dim">host</span></div><div class="it"><span>K8s: exec in pod etcd-0</span><span class="dim">kubectl</span></div>
@@ -296,6 +301,7 @@ const ovl={
 const views=[
  ['alltag','Daily','Every level at a glance: workspaces as pills, tabs below, panes inside. Panes: local shell, SSH with Kubernetes context (reconnecting here), SFTP editor, Markdown preview, system monitor. Hosts, context, history and widgets on the right.'],
  ['palette','Palette ⌘K','Every action by name: layout, connect, switch, themes. The way to reach anything without its own button.'],
+ ['history','History','Fuzzy search over every command typed in the shells (fed by wsh): matched letters in rose, directory and age beside them, Enter puts the command on the prompt without running it.'],
  ['blocks','New block','The plus or ⌘T opens the block picker: shell, SSH, WSL, Docker, preview, editor, Kubernetes, Talos, Azure, GAM7, monitor, history. Roadmap phases are shown.'],
  ['search','Search','Scrollback search in the pane: hits marked, current hit in yellow, with case, regex and whole-word switches.'],
  ['copy','Copy mode','Keyboard selection as in tmux. Hint letters (a, s, d) grab hashes, paths and links. The status line shows the keys.'],

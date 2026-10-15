@@ -55,7 +55,7 @@ video, audio; local and over SFTP) are built (core and page; see the notes above
 | Phase | Planned |
 |---|---|
 | 2 | Key encoder, Kitty keyboard, engine replies, themes, dirty-row frames |
-| 7 | Widgets, history search, AI chat, Apple on-device AI |
+| 7 | Widgets, AI chat, Apple on-device AI |
 | 8 | Kubernetes, Talos, Azure CLI, GAM7 blocks |
 | 9 | iOS (SSH) and Android (local shell and SSH) |
 | 10 | Kitty graphics, hyperlinks, signed packages |

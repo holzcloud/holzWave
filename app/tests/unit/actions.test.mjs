@@ -158,6 +158,7 @@ const EXPECTED = {
   "Cmd+F": "search.open",
   "Cmd+Shift+X": "copy_mode.enter",
   "Cmd+Shift+Space": "hints.open",
+  "Cmd+Shift+H": "history.open",
   "Cmd+=": "font.increase",
   "Cmd+-": "font.decrease",
   "Cmd+0": "font.reset",

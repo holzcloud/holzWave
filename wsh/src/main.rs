@@ -76,7 +76,7 @@ fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
         [c, key, rest @ ..] if c == "setmeta" && !rest.is_empty() => Ok(Cmd::Setmeta { key: key.clone(), value: rest.join(" ") }),
         [c] if c == "ping" => Ok(Cmd::Ping),
         [c, sub, exit, dir, cmd] if c == "hist" && sub == "add" => {
-            Ok(Cmd::Hist { cmd: cmd.clone(), cwd: dir.clone(), exit: exit.parse().ok() })
+            Ok(Cmd::Hist { line: cmd.clone(), cwd: dir.clone(), exit: exit.parse().ok() })
         }
         _ => Err(USAGE.into()),
     }
@@ -136,9 +136,9 @@ mod tests {
         let cwd = Path::new("/");
         assert_eq!(
             parse(&args(&["hist", "add", "2", "/home/holz", "ls -la | grep x"]), cwd).unwrap(),
-            Cmd::Hist { cmd: "ls -la | grep x".into(), cwd: "/home/holz".into(), exit: Some(2) }
+            Cmd::Hist { line: "ls -la | grep x".into(), cwd: "/home/holz".into(), exit: Some(2) }
         );
-        assert_eq!(parse(&args(&["hist", "add", "x", "/", "ls"]), cwd).unwrap(), Cmd::Hist { cmd: "ls".into(), cwd: "/".into(), exit: None });
+        assert_eq!(parse(&args(&["hist", "add", "x", "/", "ls"]), cwd).unwrap(), Cmd::Hist { line: "ls".into(), cwd: "/".into(), exit: None });
         assert!(parse(&args(&["hist", "add", "0", "/"]), cwd).is_err());
     }
 

@@ -890,10 +890,10 @@ impl AppCore {
         if cmd == Cmd::Ping {
             return Ok("holzWave".into());
         }
-        if let Cmd::Hist { cmd, cwd, exit } = &cmd {
+        if let Cmd::Hist { line, cwd, exit } = &cmd {
             // Not every command is kept (secrets, a leading space); that is not an error for the shell.
             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-            self.history.add(cmd, cwd, "local", *exit, ts).map_err(|e| e.to_string())?;
+            self.history.add(line, cwd, "local", *exit, ts).map_err(|e| e.to_string())?;
             return Ok(String::new());
         }
         let pane = pane.ok_or("HOLZWAVE_PANE is not set")?;
@@ -4162,6 +4162,24 @@ mod tests {
         let parts: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(parts, vec![dir.0.clone(), PathBuf::from("/usr/bin")]);
         assert!(path_with_wsh(&dir.0, Some(joined.as_os_str())).is_none(), "already there");
+    }
+
+    #[test]
+    fn the_shell_hook_fills_the_history_and_secrets_stay_out_of_it() {
+        use holzwave_ipc::Cmd;
+        let (core, _rec, _dir) = core("sh", &[]);
+        let pane = core.view().focus;
+        let hist = |line: &str| Cmd::Hist { line: line.into(), cwd: "/home/holz".into(), exit: Some(0) };
+        for line in ["kubectl get pods", "ls -la", "export TOKEN=abc", " hidden"] {
+            assert_eq!(core.ipc_command(Some(pane), hist(line)), Ok(String::new()));
+        }
+        let all: Vec<String> = core.history_search("", 10).into_iter().map(|h| h.cmd).collect();
+        assert_eq!(all.len(), 2);
+        assert_eq!(core.history_search("kgp", 10)[0].cmd, "kubectl get pods");
+        assert_eq!(core.history_delete("ls -la"), Ok(1));
+        assert_eq!(core.history_search("", 10).len(), 1);
+        assert_eq!(core.history_clear(), Ok(()));
+        assert!(core.history_search("", 10).is_empty());
     }
 
     fn core_in(dir: &Scratch, program: &str, args: &[&str]) -> (Arc<AppCore>, Arc<Recorder>) {

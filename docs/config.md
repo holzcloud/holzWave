@@ -279,6 +279,7 @@ GNOME's input method takes for emoji.
 | `search.open` | `Cmd+F` | `Ctrl+Shift+F` | `Ctrl+Shift+F` |
 | `copy_mode.enter` | `Cmd+Shift+X` | `Ctrl+Shift+X` | `Ctrl+Shift+X` |
 | `hints.open` | `Cmd+Shift+Space` | `Ctrl+Shift+Space` | `Ctrl+Shift+Space` |
+| `history.open` | `Cmd+Shift+H` | `Ctrl+Shift+H` | `Ctrl+Shift+H` |
 | `font.increase` | `Cmd+=` | `Ctrl+Shift+=` | `Ctrl+Shift+=` |
 | `font.decrease` | `Cmd+-` | `Ctrl+Shift+-` | `Ctrl+Shift+-` |
 | `font.reset` | `Cmd+0` | `Ctrl+Shift+0` | `Ctrl+Shift+0` |
@@ -496,3 +497,15 @@ build never starts (the app sets no `devUrl`).
 password and the passphrase are in the keychain (`sync:password`, `sync:passphrase`), never here. `sync_state.json` is
 the device's random id and, per synced file, what the last run left behind (counter, ETag, SHA-256). `sync-incoming/`
 holds downloads until the next start, `sync-conflicts/` the local versions that lost a conflict. See [sync.md](sync.md).
+
+## `history.db`
+
+The command history (SQLite, in the app data folder, readable by the user only, deleted rows are overwritten). Commands
+arrive from the shell through `wsh`: add `eval "$(wsh init bash)"` to `~/.bashrc`, `eval "$(wsh init zsh)"` to `~/.zshrc`
+or `wsh init fish | source` to `~/.config/fish/config.fish`. The hook does nothing outside a holzWave pane and never makes
+the prompt wait. A command is **not** written down when it starts with a space (the shells' own "do not remember"
+convention), holds control characters or is over 4096 bytes, or contains `password`, `passwd`, `secret`, `token`,
+`api_key`, `api-key`, `apikey`, `authorization`, `bearer ` or `sshpass` (in any case). That filter is best effort and no
+guarantee: a secret typed in another form is kept, so use a leading space for such a line, and `Clear all` or
+`Shift+Delete` in the history dialog forgets. The history is not synced. At most 100,000 uses are kept; the oldest tenth
+goes when it is passed.

@@ -318,3 +318,14 @@ popover under it (a floating layer, 24 rem wide), and so do the palette entries 
   `Last sync` (`14:31 · 3 files`), `Encryption` (`end-to-end · passphrase`) and `Conflicts` (`none`, or the count and that
   the other version is kept), the list of what is synced, a line when changes from another computer wait for the next
   start, and the buttons `Close`, `Turn off` (asks with a second click) and `Sync now`.
+
+### 6.10 History
+
+![](design/history.png)
+
+`Cmd+Shift+H` (`Ctrl+Shift+H`) or `Search the history` in the palette opens a floating dialog built like the palette: a
+field, the matching commands below it, a foot with the keys. Matches are fuzzy; the matched letters are rose **and
+underlined**. Beside a command: its directory (home as `~`), how long ago, `×n` when it was run more than once, and
+`exit n` in words when it failed. `Enter` puts the command on the prompt of the focused pane and closes; it never
+runs it. `Shift+Delete` forgets the chosen command, `Clear all` (asks with a second click) forgets everything, `Escape`
+closes. The sidebar's History section (^R) comes with the sidebar and uses the same search.

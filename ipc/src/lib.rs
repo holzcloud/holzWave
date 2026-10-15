@@ -39,7 +39,7 @@ pub enum Cmd {
     /// Set a property of the pane. `key` is `title`.
     Setmeta { key: String, value: String },
     /// A command the shell ran, for the history. The app decides whether it is worth keeping.
-    Hist { cmd: String, cwd: String, exit: Option<i32> },
+    Hist { line: String, cwd: String, exit: Option<i32> },
     /// Nothing: asks whether the app answers.
     Ping,
 }
@@ -74,8 +74,8 @@ impl Cmd {
                 }
                 Ok(())
             }
-            Cmd::Hist { cmd, cwd, .. } => {
-                if cmd.is_empty() || cmd.len() > MAX_HIST || cwd.len() > MAX_PATH {
+            Cmd::Hist { line, cwd, .. } => {
+                if line.is_empty() || line.len() > MAX_HIST || cwd.len() > MAX_PATH {
                     return Err("the command or the directory is empty or too long".into());
                 }
                 Ok(())

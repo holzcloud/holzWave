@@ -1,0 +1,11 @@
+/* The history search (historyview.ts) reuses the palette's box and rows (palette.css). The matched letters are rose and
+   underlined, so a match is not colour alone. */
+.history .history-row { gap: .667rem; }
+.history .history-cmd { font-variant-ligatures: none; }
+.history mark { background: none; color: var(--hw-rose); text-decoration: underline; text-underline-offset: .15em; }
+.history .history-meta { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--hw-dim); }
+.history .history-meta[data-failed="true"] { color: var(--hw-danger); }
+.history .history-foot { display: flex; align-items: center; gap: 1rem; padding: .5rem 1rem; border-top: 1px solid var(--hw-line); color: var(--hw-dim); }
+.history .history-clear { margin-left: auto; padding: .167rem .667rem; background: none; border: 1px solid var(--hw-line); border-radius: .333rem; color: var(--hw-ink); cursor: pointer; }
+.history .history-clear:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.history .history-clear[data-armed="true"] { color: var(--hw-danger); border-color: var(--hw-danger); }
