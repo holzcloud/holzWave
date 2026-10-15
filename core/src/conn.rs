@@ -22,6 +22,8 @@ pub enum ConnState {
     Connected,
     /// The connection was lost and is being made again: attempt `attempt` of `of`, the next one in `in_secs` seconds.
     Reconnecting { attempt: u32, of: u32, in_secs: u64 },
+    /// The connection could not be made and the pane waits: Enter tries again.
+    Failed,
     /// The connection ended and will not be made again.
     Closed,
 }

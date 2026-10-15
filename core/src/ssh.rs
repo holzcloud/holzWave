@@ -294,13 +294,20 @@ async fn run(
             Outcome::Exit(code) => return code,
             Outcome::Closed => return 0,
             Outcome::Fatal(why) => {
-                let _ = out.send(notice(&format!("Connection to {} failed: {why}", target.host)));
-                return 255;
+                let text = format!("Connection to {} failed: {why}.", target.host);
+                if !wait_for_enter(&text, &mut cmd, &out, &state, &mut size, &mut buffered).await {
+                    return 255;
+                }
+                attempt = 0;
             }
             Outcome::Lost(why) => {
                 if attempt >= target.reconnect.attempts {
-                    let _ = out.send(notice(&format!("Connection to {} lost: {why}. Giving up.", target.host)));
-                    return 255;
+                    let text = format!("Connection to {} lost: {why}. Giving up.", target.host);
+                    if !wait_for_enter(&text, &mut cmd, &out, &state, &mut size, &mut buffered).await {
+                        return 255;
+                    }
+                    attempt = 0;
+                    continue;
                 }
                 attempt += 1;
                 let of = target.reconnect.attempts;
@@ -323,6 +330,32 @@ async fn run(
                     }
                 }
             }
+        }
+    }
+}
+
+/// The pane stays open after a failure, so the reason can be read. It says so and waits: Enter tries again (`true`),
+/// closing the pane ends it (`false`). What else is typed is dropped.
+async fn wait_for_enter(
+    text: &str,
+    cmd: &mut tmpsc::UnboundedReceiver<Cmd>,
+    out: &mpsc::Sender<Vec<u8>>,
+    state: &SharedState,
+    size: &mut (u16, u16, u32, u32),
+    buffered: &mut Vec<u8>,
+) -> bool {
+    state.set(ConnState::Failed);
+    let _ = out.send(notice(&format!("{text} Press Enter to try again.")));
+    buffered.clear();
+    loop {
+        match cmd.recv().await {
+            None | Some(Cmd::Close) => return false,
+            Some(Cmd::Data(bytes)) if bytes.iter().any(|b| *b == b'\r' || *b == b'\n') => {
+                state.set(ConnState::Connecting);
+                return true;
+            }
+            Some(Cmd::Data(_)) => {}
+            Some(Cmd::Resize { cols, rows, px_w, px_h }) => *size = (cols, rows, px_w, px_h),
         }
     }
 }
@@ -743,21 +776,29 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_password_ends_the_pane_with_a_reason_and_no_retry() {
+    fn a_wrong_password_keeps_the_pane_open_with_the_reason_and_enter_tries_again() {
         let server = serve(false);
         let mut t = target(server.addr);
         t.auth = SshAuth::Password("wrong".into());
         let mut link = SshLink::connect(t, 80, 24).unwrap();
         let mut out = Out::new(link.take_reader().unwrap());
+        let mut writer = link.take_writer().unwrap();
         out.until("refused the login", 10);
-        let mut boxed: Box<dyn Link> = Box::new(link);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while boxed.try_wait().unwrap().is_none() {
-            assert!(Instant::now() < deadline);
+        out.until("Press Enter to try again", 10);
+        assert_eq!(link.state(), ConnState::Failed);
+        assert_eq!(link.try_wait().unwrap(), None, "the pane is not ended: the reason stays on the screen");
+        assert_eq!(server.connections.load(Ordering::SeqCst), 1, "a refused login is not tried again by itself");
+        writer.write_all(b"x").unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(server.connections.load(Ordering::SeqCst), 1, "only Enter tries again");
+        writer.write_all(b"\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while server.connections.load(Ordering::SeqCst) < 2 {
+            assert!(Instant::now() < deadline, "Enter did not try again");
             thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(boxed.try_wait().unwrap(), Some(255));
-        assert_eq!(server.connections.load(Ordering::SeqCst), 1, "a refused login is not tried again");
+        let boxed: Box<dyn Link> = Box::new(link);
+        assert_eq!(boxed.close().unwrap(), 255);
     }
 
     #[test]
@@ -778,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_gives_up_after_its_attempts() {
+    fn a_pane_gives_up_after_its_attempts_and_waits_for_enter() {
         // Nothing listens on this port: bind and drop to find a free one.
         let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
         let mut t = SshTarget::new("127.0.0.1", "holz", SshAuth::Password("pw".into()));
@@ -788,13 +829,11 @@ mod tests {
         let mut out = Out::new(link.take_reader().unwrap());
         out.until("Giving up", 15);
         assert!(out.seen.contains("Retrying 2/2"), "{:?}", out.seen);
-        let mut boxed: Box<dyn Link> = Box::new(link);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while boxed.try_wait().unwrap().is_none() {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(20));
-        }
-        assert_eq!(boxed.try_wait().unwrap(), Some(255));
+        out.until("Press Enter to try again", 5);
+        assert_eq!(link.state(), ConnState::Failed);
+        assert_eq!(link.try_wait().unwrap(), None);
+        let boxed: Box<dyn Link> = Box::new(link);
+        assert_eq!(boxed.close().unwrap(), 255);
     }
 
     #[test]
