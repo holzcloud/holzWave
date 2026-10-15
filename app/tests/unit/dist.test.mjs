@@ -1,5 +1,5 @@
 // What ships: app/dist is what Tauri's `frontendDist` serves, so it may hold only index.html, compiled modules,
-// stylesheets and fonts. These tests run after `npm run build` (see `npm test`) and look at the real output; the
+// stylesheets, fonts and the vendored libraries (scripts/copy-static.mjs: PDF.js, each with its licence). These tests run after `npm run build` (see `npm test`) and look at the real output; the
 // copy step is exercised by running the real scripts/copy-static.mjs in a scratch directory, never a mock.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -48,7 +48,7 @@ function withScratch(files, body) {
   }
 }
 
-const ALLOWED = (f) => f === "index.html" || /^[^/]+\.js$/.test(f) || /^[^/]+\.css$/.test(f) || f.startsWith("fonts/");
+const ALLOWED = (f) => f === "index.html" || /^[^/]+\.js$/.test(f) || /^[^/]+\.css$/.test(f) || f.startsWith("fonts/") || /^vendor\/[a-z0-9-]+\//.test(f);
 
 test("dist holds only index.html, js, css and fonts, and no benchmark, test or map file", () => {
   assert.ok(existsSync(DIST), "app/dist is missing: run `npm run build` first");
@@ -58,6 +58,12 @@ test("dist holds only index.html, js, css and fonts, and no benchmark, test or m
   assert.deepEqual(files.filter((f) => /(^|\/)bench/.test(f)), [], "the benchmark must not ship");
   assert.deepEqual(files.filter((f) => /\.test\.js$/.test(f)), [], "test files must not ship");
   assert.deepEqual(files.filter((f) => /\.map$/.test(f)), [], "source maps must not ship");
+});
+
+test("every vendored library ships with its licence", () => {
+  const files = listFiles(DIST).filter((f) => f.startsWith("vendor/"));
+  const libs = new Set(files.map((f) => f.split("/")[1]));
+  for (const lib of libs) assert.ok(files.includes(`vendor/${lib}/LICENSE`), `vendor/${lib} has no LICENSE`);
 });
 
 test("dist has index.html and a compiled module for every source module", () => {
