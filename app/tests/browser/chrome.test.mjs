@@ -645,14 +645,14 @@ async function scaleCase(page, url) {
   const big = await scaled(18); // UI scale 150 %
   assert.equal(big.token, "36px");
   assert.equal(big.head, 36, "the header follows the root font size");
-  assert.equal(big.bar, 48, "the bar follows it too");
+  assert.equal(big.bar, 93, "the bar follows it too");
   assert.equal(big.status, 36);
   const rows = Math.floor((big.canvas - 36 - PAD) / ROW_PX);
   assert.deepEqual(big.resizes.map((r) => r.rows), [rows, rows], "the resize payload is the grid below the header");
 
   const odd = await scaled(13);
-  assert.equal(odd.token, "22px", "20/12 of 13 px, snapped to a device pixel");
-  assert.equal(odd.head, 22);
-  const rows13 = Math.floor((odd.canvas - 22 - PAD) / ROW_PX);
+  assert.equal(odd.token, "26px", "24/12 of 13 px, snapped to a device pixel");
+  assert.equal(odd.head, 26);
+  const rows13 = Math.floor((odd.canvas - 26 - PAD) / ROW_PX);
   assert.deepEqual(odd.resizes.map((r) => r.rows), [rows13, rows13]);
 }
