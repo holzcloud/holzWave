@@ -34,6 +34,9 @@ one.
 | `themes/*.json` | one user theme per file | by you, never by the app | no |
 | `layout.json` | workspaces, tabs, panes and split ratios | 250 ms after the first change of a burst, and on quit | no |
 | `session.json` | the working directory of each pane and the window frame | 2 s after the first change of a burst, and on quit | yes |
+| `connections.json` | the saved SSH, WSL and Docker connections, without secrets | when a connection is saved or deleted | no |
+| `pane_connections.json` | which pane runs which connection | when it changes | yes |
+| `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
 | `<name>.bad` | the bytes of a file that could not be used | when such a file is loaded | |
 
 Rules that hold for every file:
@@ -340,6 +343,37 @@ stays as it was, so the next start has it all back.
 
 Actions without a chord in the table (`keybindings.open`, the theme entries of the palette) are reached from the
 palette and the dialogs and can be bound by adding them to the table in a later version.
+
+## `connections.json`
+
+The saved connections, one object per connection. **No password or passphrase is in this file**: those are in the
+operating system's keychain under the service `ch.holzcloud.holzwave` and the account `ssh:<id>`.
+
+```json
+{
+  "version": 1,
+  "items": [
+    { "id": "talos", "name": "Talos", "kind": "ssh", "host": "10.0.4.12", "port": 22, "user": "holz",
+      "auth": "key", "key_path": "~/.ssh/id_ed25519", "jump": "bastion", "startup": "tmux attach -t main",
+      "reconnect_attempts": 5, "reconnect_delay_secs": 3 }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | 1 to 64 characters of `a-z`, `0-9`, `-`, `_`; the key of the keychain entry |
+| `kind` | `ssh`, `wsl` (a distribution, Windows) or `docker` (a running container) |
+| `host` | SSH host or address; WSL distribution; Docker container. No blanks, no leading dash |
+| `auth` | `key` (file at `key_path`, `~/` is the home directory; the passphrase, if any, is in the keychain) or `password` |
+| `jump` | the `id` of another SSH connection to go through first (at most 3 deep, no loops) |
+| `startup` | a line typed into the shell once it runs |
+| `reconnect_attempts`, `reconnect_delay_secs` | how often and how fast a lost connection is made again; 0 attempts does not reconnect |
+| `shell` | Docker only: the shell to start; empty is `sh` |
+
+A connection that does not validate is dropped when the file is loaded, with a note in the log, and the original is kept
+as `connections.json.bad`. A host key that is not in `known_hosts` is learned on first use; a key that **differs** from a
+known one is always refused and the pane says so.
 
 ## `session.json`
 

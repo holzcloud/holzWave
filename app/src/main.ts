@@ -7,11 +7,13 @@
 // Every window runs this same page; it listens with its own label (bridge) and says `window_ready` when it has drawn.
 import { call, listen } from "./bridge.js";
 import { initChrome } from "./chrome.js";
+import { initConnections } from "./connections.js";
+import { openConnections } from "./connections-ui.js";
 import { initCopyMode } from "./copymode.js";
 import { initHints } from "./hints.js";
 import { initKeyboard } from "./keyboard.js";
 import { initLinks } from "./links.js";
-import { initOverlay } from "./overlay.js";
+import { initOverlay, renderOverlay } from "./overlay.js";
 import { initPalette } from "./palette.js";
 import { initDragDrop, initDragDropEvents } from "./dragdrop.js";
 import { initPointer } from "./pointer.js";
@@ -39,6 +41,11 @@ async function main() {
   await initLinks();
   await initHints();
   await initPalette();
+  // Saved connections: a palette entry for each, the manager dialog, and the state of the panes that run one.
+  await initConnections(applyView, () => {
+    renderStatus();
+    renderOverlay();
+  }, () => void openConnections());
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);

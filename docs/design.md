@@ -245,6 +245,23 @@ on the right on Windows, round buttons on the right on GNOME). Shortcut labels f
 |---|---|---|
 | ![](design/platforms/macos.png) | ![](design/platforms/windows.png) | ![](design/platforms/linux.png) |
 
+### 6.8 Connection states
+
+A pane that runs a connection (SSH, WSL, Docker) keeps the pane header of every pane and says its state in the
+context slot. The state is a shape and words, never colour alone:
+
+| State | Dot | Header context | Status line |
+|---|---|---|---|
+| connected | as any pane (filled when focused, hollow otherwise) | the connection's name | `ssh N` |
+| connecting | dotted ring | `Name · connecting` | `ssh N · M down` |
+| reconnecting | dotted ring | `Name · ⟳ 2/5 in 3 s` | `ssh N · M down` |
+| failed | hollow with a dash | `Name · failed, Enter retries` | `ssh N · M down` |
+
+While a connection is down the pane screen says why on a line of its own, in the warn colour, and what is typed is kept
+(up to 64 KiB) and sent after the connection is back. A failure that retrying cannot cure (a refused login, a changed host
+key) leaves the pane open with the reason; Enter tries again. Every connection has an entry in the palette
+(`Connect: Name (ssh)`) and in the connection manager (`Connections…`), which is the Connections view of 6.3.
+
 ### Candidates considered
 
 The five earlier candidates stay as the record of the alternatives: [Glas](design/1-glas.png),

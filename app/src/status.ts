@@ -4,6 +4,7 @@
 // a colour. A notice (a refused tear-off) takes the segment after it for a few seconds and goes by itself. It is
 // rendered from `state`; every text is put in with `textContent`.
 import { getCopyMode } from "./copymode.js";
+import { connSummary, paneConns } from "./connstate.js";
 import { el, fitNodes, setAttr, setText } from "./dom.js";
 import { NOTICE_MS, paneCountText, rendererText, tabLabel } from "./labels.js";
 import { state } from "./state.js";
@@ -17,11 +18,12 @@ const seg = (cls: string): HTMLElement => el("span", `seg label ${cls}`);
 const modeSeg = seg("mode");
 const noticeSeg = seg("notice");
 noticeSeg.setAttribute("role", "status");
+const conns = seg("conns");
 const panes = seg("panes");
 const renderer = seg("renderer");
 const encoding = seg("encoding");
 const version = seg("version");
-strip.append(modeSeg, noticeSeg, panes, renderer, encoding, version);
+strip.append(modeSeg, noticeSeg, conns, panes, renderer, encoding, version);
 
 let notice = "";
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -51,6 +53,7 @@ export function renderStatus(): void {
   const copy = getCopyMode();
   setText(modeSeg, copy === "select" ? "SELECT" : copy === "copy" ? "COPY" : "");
   setText(noticeSeg, notice);
+  setText(conns, connSummary(paneConns.values()));
   setText(panes, paneCountText(view?.panes.length ?? 0));
   setText(renderer, rendererText(state.renderer, state.stats.avgMs));
   setText(encoding, "UTF-8");

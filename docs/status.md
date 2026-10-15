@@ -10,8 +10,9 @@
   The engine parses about 290 MiB/s.
 - **Tiled blocks.** Panes, tabs and workspaces with draggable dividers and a layout that survives a restart. Previews
   and widgets come as blocks later.
-- **SSH that reconnects (planned).** One connection abstraction for the terminal and for file previews, with
-  keychain-only secrets.
+- **SSH that reconnects.** A pane can run a shell on another machine over SSH (`russh`), with a jump host, host key
+  checks, and a reconnect that keeps the pane and what you type. Secrets are in the OS keychain only. WSL and Docker
+  connections open as local panes. Tested against an in-process SSH server; not yet tried against real hosts.
 - **Your own sync (planned).** Settings, themes, profiles and layouts over WebDAV/Nextcloud, end-to-end encrypted, no
   server of ours.
 - **AI with consent (planned).** Terminal context leaves the device only when you allow that one request. Local models
@@ -48,12 +49,11 @@
 ## Feature status by phase
 
 Built and tested on macOS: local shell, resize, wide Unicode; tiled panes, dividers, tabs, workspaces; scrollback,
-selection, copy, paste; saved layout; WebGL2 with Canvas 2D fallback. Not built:
+selection, copy, paste; saved layout; WebGL2 with Canvas 2D fallback. SSH, WSL and Docker connections with a connection manager are built (core and page; see the note above). Not built:
 
 | Phase | Planned |
 |---|---|
 | 2 | Key encoder, Kitty keyboard, engine replies, themes, dirty-row frames |
-| 3 | SSH manager, keychain secrets, WSL and Docker |
 | 4 | Encrypted sync over WebDAV/Nextcloud |
 | 5 | File browser, Markdown, images, video, PDF, code editor |
 | 6 | `wsh` CLI |

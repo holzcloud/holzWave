@@ -193,6 +193,21 @@ with a preview package is reported as such, because the cause can be the ABI or 
 | L10 | 02.2-08 | Only if plan 02.2-08 ships a Flatpak: install it, run it, and in a pane look at the shell, `echo ~` and `ls`; check the menu icon | The shell is the host's shell, `~` is the host home, the host's tools are reachable, and the documented limits of `docs/flatpak.md` hold. If no Flatpak ships, the row stays empty and says so |  |
 | L11 | 02.2-10 | Take the three `holzWave_<version>_*` Linux files from the release (or `target/release-cross/`), check each SHA-256 against its `.sha256` file (`sha256sum -c`), and on a distribution with glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 or newer; `ldd --version`): install the deb (`sudo apt install ./holzWave_<version>_amd64.deb`) or the rpm (`sudo dnf install ./holzWave_<version>_x86_64.rpm`), start holzWave from the menu, open a pane, type, `exit`; then `chmod +x` the AppImage and run it. Note the distribution, its glibc and the architecture (`uname -m`) | The hashes match. The package installs and its dependencies resolve (WebKitGTK 4.1 and GTK 3 only); holzWave starts and the pane works; the AppImage starts or the error is noted (a missing FUSE 2 is the usual one, `--appimage-extract-and-run` the way around it). On a distribution with an older glibc the install or start fails with a message about `GLIBC_2.39`: that is the documented limit of the container build, not a defect. This is the first time these packages run on real x86_64 hardware; L6 and L7 are then run on these files |  |
 
+## Part 5: connections (Phase 3)
+
+SSH, WSL and Docker are built and tested against an in-process SSH server and a mock page; none of it has been run
+against a real host, the OS keychain or a real WSL or Docker. These rows are the owner's run.
+
+| # | Plan | What to do | Expected | Result |
+|---|---|---|---|---|
+| C1 | 03 | Palette, `Connections…`. New connection: your own server, user, key file (with a passphrase), Save. Then Connect | The passphrase is asked for once (it is typed into the field, saved), the connection opens in a new tab, the pane header names the connection, a prompt of the far machine appears and typing and resizing work. `connections.json` has no passphrase; the OS keychain has an entry `ssh:<id>` under `ch.holzcloud.holzwave` |  |
+| C2 | 03 | With C1 open, turn the network off for 20 s (or `sudo ifconfig` down), type `ls`, turn it on | The pane stays, its header says `⟳ n/5 in 3 s` with a dotted dot, a yellow line in the pane says the connection was lost, and after the network is back it reconnects, runs what was typed (`ls`) and the header is plain again |  |
+| C3 | 03 | Connect with a wrong password, then with a key that does not exist | The pane stays open and says why (`refused the login`, `the key ... cannot be used`) and `Press Enter to try again`. Typing other keys does nothing; Enter tries once more |  |
+| C4 | 03 | Connect to a host for the first time, then change its host key on the server and connect again | The first time the key is learned (a line in `known_hosts`). After the change the pane says `the host key ... CHANGED` and does not log in |  |
+| C5 | 03 | A connection with a jump host (`bastion`), and one with `tmux attach -t main` as startup line | Both reach their shell; the startup line ran; a broken bastion gives the same pane messages as C2 and C3 |  |
+| C6 | 03 | Windows: a WSL connection. Any OS: a Docker connection to a running container | A shell in the distribution or the container opens in a new tab. Linux and macOS have no WSL: the pane says why in its first line |  |
+| C7 | 03 | Quit and start holzWave again with a connected pane in the layout | The pane starts again on the same host (`pane_connections.json`), after the passphrase of the keychain |  |
+
 ## What to expect
 
 Known limits of this build, so they are not reported as defects:

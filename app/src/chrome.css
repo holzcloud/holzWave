@@ -131,7 +131,10 @@
   border: 1px solid var(--hw-dim);
 }
 .ph-dot[data-state="focused"] { background: var(--hw-ink); border-color: var(--hw-ink); }
-.ph-dot[data-state="exited"]::after {
+/* A pane whose connection is being made again is hollow with a dashed ring; one that failed is hollow with a dash like
+   an exited pane: the state is a shape, not a colour. */
+.ph-dot[data-state="wait"] { border-style: dotted; }
+.ph-dot[data-state="failed"]::after, .ph-dot[data-state="exited"]::after {
   content: ""; position: absolute; left: -.25rem; right: -.25rem; top: calc(50% - .5px); height: 1px;
   background: var(--hw-dim);
 }
@@ -174,7 +177,7 @@
   :root .panehead.focus-line { border-top-color: Highlight; }
   :root .ph-dot { border-color: CanvasText; }
   :root .ph-dot[data-state="focused"] { background: CanvasText; }
-  :root .ph-dot[data-state="exited"]::after { background: CanvasText; }
+  :root .ph-dot[data-state="exited"]::after, :root .ph-dot[data-state="failed"]::after { background: CanvasText; }
 }
 
 /* The name editor: a text field over the label it renames. Square, hairline, mono like the rest of the chrome. */

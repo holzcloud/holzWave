@@ -350,8 +350,9 @@ async function statusCase(page, url) {
     [...document.querySelectorAll("#status .seg")].map((n) => [...n.classList].filter((c) => !["seg", "label", "active"].includes(c))[0]),
   );
   // The mode segment (copy mode, plan 21) and the notice (a refused tear-off) sit after the workspaces; both are empty,
-  // so not shown, outside copy mode and when nothing was refused.
-  assert.deepEqual(order, ["ws", "ws", "mode", "notice", "panes", "renderer", "encoding", "version"]);
+  // so not shown, outside copy mode and when nothing was refused. The connections segment (docs/design.md section 6.3) is empty
+  // while no pane runs a connection.
+  assert.deepEqual(order, ["ws", "ws", "mode", "notice", "conns", "panes", "renderer", "encoding", "version"]);
   assert.deepEqual(await texts(page, "#status .seg.mode"), [""], "no copy mode, no mode text");
   assert.deepEqual(await texts(page, "#status .seg.notice"), [""], "nothing refused, no notice");
 

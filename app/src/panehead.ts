@@ -8,6 +8,7 @@
 // keyed by pane id like the dividers: the same element is moved on every render. Everything is `textContent`.
 import { el, fitNodes, setAttr, setRect, setText } from "./dom.js";
 import { paneRect } from "./geometry.js";
+import { connDot, connText, paneConns } from "./connstate.js";
 import { shortenHome } from "./labels.js";
 import { startRename } from "./rename.js";
 import { state } from "./state.js";
@@ -122,13 +123,14 @@ export function renderPaneHeads(): void {
       head.root.classList.toggle("focused", focused);
       head.root.classList.toggle("focus-line", focused && multiple && !exited);
       head.root.classList.toggle("exited", exited);
-      setAttr(head.dot, "data-state", exited ? "exited" : focused ? "focused" : "idle");
+      const conn = paneConns.get(id);
+      setAttr(head.dot, "data-state", exited ? "exited" : (connDot(conn) ?? (focused ? "focused" : "idle")));
       const name = nameOf(id);
       const program = titleOf(id, tabTitle);
       // A name the user gave comes first; the program's title stays visible after it, lighter.
       setText(head.title, name === "" ? program : name);
       setText(head.sub, name !== "" && program !== name ? program : "");
-      const ctx = exited ? "exited" : shortenHome(state.cwds.get(id) ?? "", state.os);
+      const ctx = exited ? "exited" : conn ? connText(conn) : shortenHome(state.cwds.get(id) ?? "", state.os);
       setText(head.ctx.firstElementChild as HTMLElement, ctx);
       setAttr(head.ctx, "title", ctx === "" ? null : ctx);
     }

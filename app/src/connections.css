@@ -1,0 +1,36 @@
+/* The connection manager (connections-ui.ts): a list of saved connections on the left, the form of the chosen one
+   on the right. Loaded after dialogs.css and settings.css, whose box and rows it reuses. Every colour is a `--hw-*`
+   token and every size is in rem. The state of a connection is words (a tag after the name), never colour alone. */
+.dlg.conns { width: min(52rem, calc(100vw - 4rem)); font-size: 1rem; line-height: 1.4; }
+.conns .set-title { margin: 0 0 .667rem; font-size: 1rem; font-weight: 700; line-height: 1.3; }
+.conns .set-status { min-height: 1.4em; margin: 0 0 .5rem; color: var(--hw-warn); overflow-wrap: anywhere; }
+.conns .cx-body { display: grid; grid-template-columns: 14rem minmax(0, 1fr); gap: .833rem; min-height: 18rem; }
+.conns .cx-list { display: flex; flex-direction: column; gap: 0; max-height: calc(100vh - 16rem); overflow: auto;
+                  border: 1px solid var(--hw-line); border-radius: .333rem; }
+.conns .cx-list button { display: flex; justify-content: space-between; gap: .5rem; width: 100%; padding: .417rem .667rem;
+                         border: 0; border-bottom: 1px solid var(--hw-line); border-radius: 0; text-align: left;
+                         font-size: 1rem; letter-spacing: 0; text-transform: none; }
+.conns .cx-list button:last-child { border-bottom: 0; }
+.conns .cx-list button[aria-current="true"] { background: var(--hw-rose-wash); color: var(--hw-ink);
+                                              box-shadow: inset 2px 0 var(--hw-rose); }
+.conns .cx-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conns .cx-tag { flex: none; color: var(--hw-dim); font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase; }
+.conns .cx-new { color: var(--hw-dim); }
+.conns .cx-empty { margin: 0; padding: .667rem; color: var(--hw-dim); }
+.conns .cx-form { min-width: 0; display: flex; flex-direction: column; gap: .167rem; }
+.conns .cx-form .set-row label { flex: 0 0 9rem; }
+.conns .cx-form input[type="text"], .conns .cx-form input[type="password"], .conns .cx-form input[type="number"] {
+  box-sizing: border-box; flex: 1 1 auto; min-width: 0; margin: 0; padding: .25rem .5rem; font: inherit;
+  color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
+.conns .cx-form input[type="number"] { flex: 0 0 6rem; }
+.conns .cx-form input:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.conns .cx-form input[type="radio"], .conns .cx-form input[type="checkbox"] { width: 1rem; height: 1rem; margin: 0;
+                                                                             accent-color: var(--hw-rose); }
+.conns .cx-row-choice { display: flex; align-items: center; gap: .667rem; min-height: 2rem; flex-wrap: wrap; }
+.conns .cx-row-choice > .cx-label { flex: 0 0 9rem; color: var(--hw-ink-2); }
+.conns .cx-option { display: flex; align-items: center; gap: .417rem; cursor: pointer; }
+.conns .cx-hint { margin: 0; color: var(--hw-dim); }
+.conns [hidden] { display: none; }
+.conns .dlg-actions button:disabled { opacity: .5; cursor: default; }
+.conns .dlg-actions .cx-danger[data-armed="true"] { color: var(--hw-danger); border-color: var(--hw-danger); }
+@media (max-width: 640px) { .conns .cx-body { grid-template-columns: minmax(0, 1fr); } }
