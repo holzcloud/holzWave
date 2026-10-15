@@ -27,7 +27,7 @@ const golden = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/protocol.js
 const AUBERGINE = () => structuredClone(golden.settings_view);
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
-const HEADER = 20; // CSS px of a pane's header strip at the base root font size of 12 px
+const HEADER = 24; // CSS px of a pane's header strip at the base root font size of 12 px
 
 /** Papier, enough of it for the dialog's theme change to have a palette to show. */
 const PAPIER = {
@@ -454,7 +454,7 @@ async function fitCase(page, url) {
   assert.equal((await callsOf(page, "resize")).length, resizes + 2, "an out-of-range size must not change the cells");
 }
 
-/** UI scale 150 % is an 18 px root font size and a 30 px header; the grid below it is fitted again. */
+/** UI scale 150 % is an 18 px root font size and a 36 px header; the grid below it is fitted again. */
 async function scaleCase(page, url) {
   await open(page, url);
   const resizes = (await callsOf(page, "resize")).length;
@@ -470,13 +470,13 @@ async function scaleCase(page, url) {
     header: document.documentElement.style.getPropertyValue("--hw-header"),
   }));
   assert.equal(css.root, "18px", "12 px base times 150 %");
-  assert.equal(css.header, "30px");
-  assert.equal(await pageState(page, "headerPx"), 30);
+  assert.equal(css.header, "36px");
+  assert.equal(await pageState(page, "headerPx"), 36);
 
   const size = await canvasSize(page);
   const calls = (await callsOf(page, "resize")).slice(resizes);
   for (const c of calls) {
-    assert.equal(c.rows, Math.floor((size.h - 30 - PAD) / 18), `pane ${c.pane}: rows below a 30 px header`);
+    assert.equal(c.rows, Math.floor((size.h - 36 - PAD) / 18), `pane ${c.pane}: rows below a 36 px header`);
   }
   // The header strips are as high as the state says.
   const heads = await page.evaluate(() => [...document.querySelectorAll("#overlay .panehead")].map((n) => n.getBoundingClientRect().height));

@@ -6,8 +6,8 @@ import type { CellSize, Divider, UnitRect, View } from "./types.js";
 /** CSS px between a pane's edge and its grid on the left, right and bottom (the header covers the top). */
 export const PAD = 6;
 
-/** The height of a pane's header strip in root font sizes: 20 px at the base size of 12 px. */
-export const HEADER_REM = 20 / 12;
+/** The height of a pane's header strip in root font sizes: 24 px at the base size of 12 px (docs/design.md section 6.1). */
+export const HEADER_REM = 24 / 12;
 
 /** The root font size at UI scale 100 %: what `headerHeight` assumes for a size that is not a size. */
 const BASE_ROOT_PX = 12;

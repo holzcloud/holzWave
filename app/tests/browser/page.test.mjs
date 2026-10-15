@@ -74,7 +74,7 @@ async function stylesheetCase(page, url) {
     };
   });
   assert.equal(computed.bodyBg, "rgb(20, 9, 26)", "the ground colour is not applied");
-  assert.equal(computed.barHeight, "32px", "the bar rules are not applied");
+  assert.equal(computed.barHeight, "62px", "the bar rules are not applied");
   assert.equal(computed.overlayPosition, "absolute");
   assert.equal(computed.overlayEvents, "none");
   assert.equal(computed.dividerPosition, "absolute");

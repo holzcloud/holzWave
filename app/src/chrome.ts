@@ -1,4 +1,5 @@
-// The window bar above the stage: workspace chips, numbered tabs, and the host name and clock at the right. It is
+// The window bar above the stage, in two rows (docs/design.md section 6.1): workspace pills and the host name and clock
+// in the title row, numbered tabs in the row below. It is
 // drawn from `state.view` and the pane titles; the elements are keyed by position and updated in place, and every
 // name from the core is put in with `textContent`, never parsed as markup. The bar's free space drags the window.
 // Every chip and tab has a × beside it that asks before it closes (confirm.ts).
@@ -52,7 +53,10 @@ newTab.type = "button";
 newTab.textContent = "+";
 newTab.title = "New tab";
 newTab.setAttribute("aria-label", "New tab");
+// The free space of the tab row drags the window too: the bar has two rows (docs/design.md section 6.1).
+draggable(el("div", "tabs-fill", tabs));
 draggable(el("div", "bar-fill", bar));
+
 const info = draggable(el("div", "bar-info", bar));
 const host = draggable(el("span", "label host", info));
 const clock = draggable(el("span", "label clock", info));

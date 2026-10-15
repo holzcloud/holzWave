@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { callsOf, emit } from "./lib.mjs";
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
-const HEADER = 20; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
+const HEADER = 24; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
 const BG = 0x14091a;
 const COLS = 20;
 const ROWS = 4;

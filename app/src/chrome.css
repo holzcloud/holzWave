@@ -14,46 +14,54 @@
 
 /* ---- window bar -------------------------------------------------------------------------------------------- */
 
+/* Two rows (docs/design.md section 6.1): the title row (32 px) holds the workspace pills, the free space that drags
+   the window, and the host and clock; the tab row (28 px and its top hairline) holds the numbered tabs. The three
+   levels keep their own shapes: a workspace is a round pill with a diamond, a tab is square, a pane is a tile. */
 #bar {
-  --bar-line: calc(31rem / 12); /* the bar's height without its hairline: one line, so text sits in the middle */
-  box-sizing: border-box; display: flex; align-items: stretch; flex: none; height: calc(32rem / 12);
+  box-sizing: border-box; display: grid; grid-template-columns: auto 1fr auto;
+  grid-template-rows: calc(32rem / 12) calc(29rem / 12); flex: none; height: calc(62rem / 12);
   padding: 0 .667rem; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-line);
   user-select: none; -webkit-user-select: none; cursor: default;
 }
 /* The overlay title bar exists only on macOS (`titleBarStyle` is a macOS-only option): it puts the traffic lights
-   over the page's top left corner. Windows and Linux keep the native frame by decision (Phase 2.2; a page-drawn bar
-   is Phase 10), so the page's bar sits below it and needs no room: nothing outside this rule assumes an overlay. */
-.os-macos #bar { padding-left: 80px; }
+   over the page's top left corner, so the pills start after them. Windows and Linux keep the native frame by decision
+   (Phase 2.2; a page-drawn bar is Phase 10), so the page's bar sits below it and needs no room. */
+.os-macos #bar .bar-workspaces { margin-left: calc(80px - .667rem); }
 
-.bar-group { display: flex; align-items: stretch; flex: none; min-width: 0; }
-.bar-tabs { flex: 0 1 auto; overflow: hidden; }
-.bar-sep { flex: none; width: 1px; margin: .5rem .667rem; background: var(--hw-line); }
-.bar-fill { flex: 1 1 0; min-width: .667rem; }
-.bar-info { display: flex; align-items: center; flex: none; color: var(--hw-dim); white-space: nowrap; }
+.bar-group { display: flex; align-items: stretch; min-width: 0; }
+.bar-workspaces { grid-row: 1; grid-column: 1; align-items: center; }
+.bar-sep { display: none; }
+.bar-fill { grid-row: 1; grid-column: 2; min-width: .667rem; }
+.bar-info { grid-row: 1; grid-column: 3; display: flex; align-items: center; color: var(--hw-dim); white-space: nowrap; }
 .bar-info .host { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; }
 .host:not(:empty) + .clock::before { content: "\00b7"; margin: 0 .5em; }
+.bar-tabs {
+  grid-row: 2; grid-column: 1 / -1; overflow: hidden; margin: 0 -.667rem; padding: 0 .667rem;
+  background: var(--hw-pane); border-top: 1px solid var(--hw-line);
+}
+.tabs-fill { flex: 1 1 0; min-width: 0; }
 
 #bar button {
   -webkit-appearance: none; appearance: none; box-sizing: border-box; display: block; flex: none;
   min-width: calc(28rem / 12); max-width: 18rem; margin: 0; padding: 0 .833rem; border: 0; border-radius: 0;
-  background: none; color: var(--hw-dim); line-height: var(--bar-line); white-space: nowrap;
+  background: none; color: var(--hw-dim); line-height: calc(28rem / 12); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; text-align: center; cursor: pointer;
 }
 #bar button.plus { padding: 0 .667rem; }
-/* Tabs give way to the host label by shortening their titles; the chips and plus buttons keep their size. */
+/* Tabs give way to the host label by shortening their titles; the pills and plus buttons keep their size. */
 #bar .tab { flex: 0 1 auto; min-width: 3rem; }
 #bar button:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
 #bar button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
-/* The active workspace chip and tab: a wash, ink text and an underline in rose. The underline is also the cue
-   that does not depend on the colour. */
+/* The shown tab: a wash, ink text and an underline in rose. The underline is also the cue that does not depend on
+   the colour. */
 #bar button.active {
   background: var(--hw-rose-wash); color: var(--hw-ink);
   text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: .417rem;
   text-decoration-color: var(--hw-rose);
 }
-/* A chip or a tab and its × are two buttons in one item (a button must not hold a button), so the wash of hover and of
-   the shown one covers both. The × is always visible, dim like the rest of the idle bar, and drawn by the stylesheet:
-   the buttons that hold names keep no stray character in their text. */
+/* A pill or a tab and its × are two buttons in one item (a button must not hold a button), so the wash of hover and
+   of the shown one covers both. The × is always visible, dim like the rest of the idle bar, and drawn by the
+   stylesheet: the buttons that hold names keep no stray character in their text. */
 .bar-item { display: flex; align-items: stretch; flex: none; min-width: 0; }
 .bar-item.tab-item { flex: 0 1 auto; min-width: 4.5rem; overflow: hidden; }
 #bar .bar-item:hover, #bar .bar-item.active { background: var(--hw-rose-wash); }
@@ -61,11 +69,23 @@
 #bar button.close { min-width: 0; padding: 0 .5rem 0 .25rem; color: var(--hw-dim); }
 #bar button.close::before { content: "\00d7"; }
 #bar button.close:hover { color: var(--hw-ink); }
-/* A small diamond marks the workspace that is shown; drawn, so it is the same on every platform. */
-#bar .ws-chip.active::before {
-  content: ""; display: inline-block; width: .5rem; height: .5rem; margin-right: .667rem; vertical-align: .08rem;
-  background: var(--hw-rose); transform: rotate(45deg);
+
+/* The workspace pill: round, hairline, 22 px high. The diamond is drawn, so it is the same on every platform: filled
+   on the shown workspace, hollow on the others. The shown pill is also a solid fill, so it reads without colour. */
+#bar .bar-item.ws-item {
+  align-self: center; height: calc(22rem / 12); margin: 0 .167rem; overflow: hidden;
+  border: 1px solid var(--hw-line); border-radius: 999px;
 }
+#bar .ws-item button { line-height: calc(20rem / 12); }
+#bar .ws-item .ws-chip { padding: 0 .25rem 0 .75rem; font-weight: 700; }
+#bar button.ws-chip.active { background: none; text-decoration: none; color: var(--hw-on-accent); }
+#bar .bar-item.ws-item.active { background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); color: var(--hw-on-accent); }
+#bar .ws-item.active button.close, #bar .ws-item.active button.close:hover { color: var(--hw-on-accent); }
+#bar .ws-chip::before {
+  content: ""; display: inline-block; box-sizing: border-box; width: .5rem; height: .5rem; margin-right: .5rem;
+  vertical-align: .08rem; border: 1px solid currentColor; transform: rotate(45deg);
+}
+#bar .ws-chip.active::before { background: currentColor; }
 
 /* ---- status line ------------------------------------------------------------------------------------------- */
 
@@ -99,7 +119,7 @@
 .panehead {
   position: absolute; box-sizing: border-box; display: flex; align-items: center; gap: .5rem;
   height: var(--hw-header); padding: 0 .667rem; overflow: hidden;
-  background: var(--hw-ground-2); border-top: 1px solid transparent; color: var(--hw-ink-2);
+  background: var(--hw-ground-2); border-top: 1px solid transparent; border-bottom: 1px solid var(--hw-line); color: var(--hw-ink-2);
   pointer-events: none; user-select: none; -webkit-user-select: none;
 }
 /* The focus line: the only rose in a header. */
@@ -116,7 +136,10 @@
   background: var(--hw-dim);
 }
 
-.ph-title { flex: 0 1 auto; min-width: 0; max-width: 70%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ph-title {
+  flex: 0 1 auto; min-width: 0; max-width: 70%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-size: calc(11rem / 12); font-weight: 500; text-transform: uppercase; letter-spacing: .1em;
+}
 .panehead.focused .ph-title { color: var(--hw-ink); }
 
 /* The context is right-aligned and cut from the left, so the end of a path stays visible. The text sits in an
@@ -146,7 +169,7 @@
   :root .divider::after { background: CanvasText; }
   :root .divider:hover::after { background: Highlight; }
   :root #bar button.active { text-decoration-color: Highlight; }
-  :root #bar .ws-chip.active::before { background: Highlight; }
+  :root #bar .ws-item.active { outline: 2px solid Highlight; outline-offset: -2px; }
   :root #status .seg.ws.active { background: Highlight; color: HighlightText; }
   :root .panehead.focus-line { border-top-color: Highlight; }
   :root .ph-dot { border-color: CanvasText; }

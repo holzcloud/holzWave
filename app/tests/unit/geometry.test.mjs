@@ -64,20 +64,20 @@ test("a header height that is not a length counts as no header", () => {
 });
 
 test("the header height follows the root font size and snaps to device pixels", () => {
-  assert.equal(HEADER_REM, 20 / 12);
-  assert.equal(headerHeight(12, 1), 20, "UI scale 100 %");
-  assert.equal(headerHeight(18, 1), 30, "UI scale 150 %");
-  assert.equal(headerHeight(24, 1), 40);
-  assert.equal(headerHeight(13, 1), 22, "21.67 px snaps to a whole device pixel");
-  assert.equal(headerHeight(13, 2), 21.5, "a half CSS pixel is a whole device pixel at 2x");
-  assert.equal(headerHeight(12, 2), 20);
+  assert.equal(HEADER_REM, 24 / 12);
+  assert.equal(headerHeight(12, 1), 24, "UI scale 100 %");
+  assert.equal(headerHeight(18, 1), 36, "UI scale 150 %");
+  assert.equal(headerHeight(24, 1), 48);
+  assert.equal(headerHeight(13.3, 1), 27, "26.6 px snaps to a whole device pixel");
+  assert.equal(headerHeight(13.25, 2), 26.5, "a half CSS pixel is a whole device pixel at 2x");
+  assert.equal(headerHeight(12, 2), 24);
 });
 
 test("the header height of a root size that is not a size is the base height", () => {
-  assert.equal(headerHeight(Number.NaN, 1), 20);
-  assert.equal(headerHeight(0, 1), 20);
-  assert.equal(headerHeight(-12, 1), 20);
-  assert.equal(headerHeight(12, 0), 20, "a device pixel ratio of 0 counts as 1");
+  assert.equal(headerHeight(Number.NaN, 1), 24);
+  assert.equal(headerHeight(0, 1), 24);
+  assert.equal(headerHeight(-12, 1), 24);
+  assert.equal(headerHeight(12, 0), 24, "a device pixel ratio of 0 counts as 1");
 });
 
 test("cellAt floors to cell indices relative to the grid below the header", () => {

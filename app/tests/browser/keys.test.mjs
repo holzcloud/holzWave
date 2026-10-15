@@ -46,7 +46,7 @@ export default async function ({ page, url }) {
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
 const ROW_PX = 18; // one cell row: ceil(14 px font * 1.25)
-const HEADER = 20; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
+const HEADER = 24; // CSS px of a pane's header strip at the base font size (state.headerPx); the grid starts below it
 
 /** One frame message for `pane` with the cursor at (x, y) in a 60 x 4 grid. */
 const frame = (pane, seq, x, y) => ({

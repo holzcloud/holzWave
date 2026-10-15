@@ -39,7 +39,7 @@ const INFO = { version: "0.0.1-alpha1", os: "linux", hostname: "woodbox" };
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
 const ROW_PX = 18; // one cell row: ceil(14 px font * 1.25)
-const HEADER = 20; // CSS px of a pane's header strip at the base font size
+const HEADER = 24; // CSS px of a pane's header strip at the base font size
 const ROSE = "rgb(255, 143, 184)";
 
 /** The canvas box in page pixels. */
@@ -107,14 +107,15 @@ async function barCase(page, url) {
     chips: [...document.querySelectorAll("#bar .ws-chip")].map((n) => n.getAttribute("aria-current")),
     // The underline is a text decoration, so the marker is there without any colour.
     deco: [...document.querySelectorAll("#bar .tab")].map((n) => getComputedStyle(n).textDecorationLine),
-    chipDeco: [...document.querySelectorAll("#bar .ws-chip")].map((n) => getComputedStyle(n).textDecorationLine),
+    // The diamond of a pill is filled on the shown workspace and hollow on the others, so the marker needs no colour.
+    chipDiamond: [...document.querySelectorAll("#bar .ws-chip")].map((n) => getComputedStyle(n, "::before").backgroundColor),
   }));
   assert.deepEqual(current.tabs, ["page", null, null], "only the active tab is aria-current page");
   assert.deepEqual(current.chips, ["true", null], "only the active workspace is aria-current");
   assert.ok(current.deco[0].includes("underline"), `the active tab has no underline: ${current.deco[0]}`);
   assert.ok(!current.deco[1].includes("underline") && !current.deco[2].includes("underline"), "an inactive tab is underlined");
-  assert.ok(current.chipDeco[0].includes("underline"), "the active workspace chip has no underline");
-  assert.ok(!current.chipDeco[1].includes("underline"), "an inactive workspace chip is underlined");
+  assert.notEqual(current.chipDiamond[0], "rgba(0, 0, 0, 0)", "the active workspace pill has no filled diamond");
+  assert.equal(current.chipDiamond[1], "rgba(0, 0, 0, 0)", "an inactive workspace pill has a filled diamond");
 
   // Buttons send the command with their own index and give the keyboard back to the terminal input.
   await page.locator("#bar .tab").nth(1).click();
@@ -231,7 +232,12 @@ async function clockCase(page, url) {
 }
 
 async function platformCase(page, url) {
-  const padding = () => page.evaluate(() => parseFloat(getComputedStyle(document.getElementById("bar")).paddingLeft));
+  const padding = () =>
+    page.evaluate(
+      () =>
+        parseFloat(getComputedStyle(document.getElementById("bar")).paddingLeft) +
+        parseFloat(getComputedStyle(document.querySelector("#bar .bar-workspaces")).marginLeft),
+    );
   const platform = () => page.evaluate(() => document.documentElement.className);
 
   await open(page, url, { ...INFO, os: "macos" });
@@ -281,7 +287,9 @@ async function frameCase(page, url) {
         drag: [...document.querySelectorAll("#bar .bar-fill, #bar .bar-sep, #bar .bar-info")].map((n) =>
           n.hasAttribute("data-tauri-drag-region"),
         ),
-        padding: parseFloat(getComputedStyle(document.getElementById("bar")).paddingLeft),
+        padding:
+          parseFloat(getComputedStyle(document.getElementById("bar")).paddingLeft) +
+          parseFloat(getComputedStyle(document.querySelector("#bar .bar-workspaces")).marginLeft),
       };
     });
 
@@ -635,11 +643,11 @@ async function scaleCase(page, url) {
   };
 
   const big = await scaled(18); // UI scale 150 %
-  assert.equal(big.token, "30px");
-  assert.equal(big.head, 30, "the header follows the root font size");
+  assert.equal(big.token, "36px");
+  assert.equal(big.head, 36, "the header follows the root font size");
   assert.equal(big.bar, 48, "the bar follows it too");
   assert.equal(big.status, 36);
-  const rows = Math.floor((big.canvas - 30 - PAD) / ROW_PX);
+  const rows = Math.floor((big.canvas - 36 - PAD) / ROW_PX);
   assert.deepEqual(big.resizes.map((r) => r.rows), [rows, rows], "the resize payload is the grid below the header");
 
   const odd = await scaled(13);
