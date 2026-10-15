@@ -1,0 +1,308 @@
+<title>holzWave Haarlinie Voll</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Manrope:wght@400;600;700&display=swap">
+<style>
+/* Layout: Seitenkopf, Ansichtswahl, ein skaliertes Fenster (1120x660), Handy-Reihe, Funktionsliste */
+:root{
+  --ground:#14091A; --ground2:#1D0F26; --pane:#1B0E20; --edge:#3A2144;
+  --ink:#F6EFE6; --ink2:rgba(246,239,230,.7); --ink3:#9C8EA0;
+  --rose:#FF8FB8; --rose-deep:#C23B72; --wash:rgba(255,143,184,.14); --sel:rgba(255,143,184,.35);
+  --wood:#C98B4F; --ok:#8CC271; --warn:#E8C15C; --danger:#EC8272; --info:#8FB8D8; --cyan:#7FD1C7;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace; --sans:'Manrope',system-ui,sans-serif;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:14px/1.5 var(--sans);padding-block:24px 56px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+h1{font:700 22px/1.2 var(--mono);margin:0;text-wrap:balance}h1 b{color:var(--rose)}
+h2{font:700 13px var(--mono);letter-spacing:.1em;text-transform:uppercase;margin:12px 0 0}
+p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
+.seg{display:flex;flex-wrap:wrap;border:1px solid var(--edge);border-radius:8px;overflow:hidden;width:fit-content;max-width:100%}
+.seg button{all:unset;cursor:pointer;padding:7px 12px;font:500 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink3);border-right:1px solid var(--edge)}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed=true]{background:var(--wash);color:var(--rose);box-shadow:inset 0 -2px var(--rose)}
+.seg button:focus-visible{outline:2px solid var(--rose);outline-offset:-2px}
+.views{display:flex;flex-direction:column;gap:8px}
+.views small{color:var(--ink3);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.note{color:var(--ink2);font-size:13px;min-height:2.6em;max-width:90ch}
+#fit{width:100%;border:1px solid var(--edge);border-radius:10px;overflow:hidden;background:var(--ground)}
+#stage{width:1120px;height:680px;transform-origin:0 0;position:relative}
+
+/* ---------- Fenster ---------- */
+.m{position:absolute;inset:0;display:flex;flex-direction:column;font:400 12px/1.55 var(--mono);color:var(--ink);background:var(--ground);overflow:hidden}
+.m *{min-width:0}
+.dim{color:var(--ink3)}.ro{color:var(--rose)}.ok{color:var(--ok)}.wa{color:var(--warn)}.er{color:var(--danger)}.in{color:var(--info)}.cy{color:var(--cyan)}.wd{color:var(--wood)}
+.lbl{font-weight:500;letter-spacing:.1em;text-transform:uppercase;font-size:10px}
+.row{display:flex;align-items:center}.col{display:flex;flex-direction:column}.fill{flex:1;min-height:0;min-width:0}
+.pre{white-space:pre;overflow:hidden}
+.cur{display:inline-block;width:.6em;height:1.1em;background:var(--rose);vertical-align:-2px}
+.kbd{border:1px solid var(--edge);border-radius:4px;padding:0 5px;color:var(--ink3);font-size:10px;white-space:nowrap}
+.wc{display:flex;align-items:center;flex:none}
+.wc.mac{gap:7px;padding:0 12px}.wc.mac i{width:11px;height:11px;border-radius:50%;display:block}
+.wc.mac i:nth-child(1){background:#EC8272}.wc.mac i:nth-child(2){background:#E8C15C}.wc.mac i:nth-child(3){background:#8CC271}
+.wc.win,.wc.lin{display:none}
+[data-os=win] .wc.mac,[data-os=lin] .wc.mac{display:none}
+[data-os=win] .wc.win{display:flex}[data-os=lin] .wc.lin{display:flex}
+.wc.win span{width:40px;text-align:center;color:var(--ink3);line-height:32px}
+.wc.lin span{width:20px;height:20px;border-radius:50%;background:var(--wash);color:var(--ink2);text-align:center;font-size:11px;line-height:20px;margin-right:6px}
+[data-os=mac] .rwc{display:none}[data-os=win] .lwc,[data-os=lin] .lwc{display:none}
+.titlebar{height:32px;background:var(--ground2);border-bottom:1px solid var(--edge);flex:none;gap:4px}
+.ws{height:22px;padding:0 11px;border-radius:999px;border:1px solid var(--edge);color:var(--ink3);font-weight:700;display:flex;align-items:center;gap:6px;white-space:nowrap}
+.ws .n{font-weight:400;font-size:10px;opacity:.8}
+.ws.on{background:var(--rose-deep);border-color:var(--rose-deep);color:#fff}
+.ws.plus{border-style:dashed}
+.tbtn{height:22px;padding:0 9px;border-radius:6px;display:flex;align-items:center;gap:6px;color:var(--ink2);white-space:nowrap}
+.tbtn:hover,.tbtn.on{background:var(--wash);color:var(--rose)}
+.tabrow{height:28px;background:var(--pane);border-bottom:1px solid var(--edge);flex:none}
+.tab{height:100%;padding:0 12px;display:flex;align-items:center;gap:7px;color:var(--ink3);border-right:1px solid var(--edge);white-space:nowrap}
+.tab.on{color:var(--ink);background:var(--wash);box-shadow:inset 0 -2px var(--rose)}
+.tab .x{opacity:.5}
+.body{display:flex;flex:1;min-height:0}
+.area{display:grid;grid-template-columns:1.25fr 1fr;grid-template-rows:1.25fr 1fr;flex:1;min-width:0;background:var(--edge);gap:1px}
+.pane{background:var(--pane);display:flex;flex-direction:column;position:relative;min-height:0}
+.ph{height:24px;padding:0 10px;gap:8px;border-bottom:1px solid var(--edge);flex:none;display:flex;align-items:center}
+.pane.f .ph{box-shadow:inset 0 1px var(--rose)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:none}
+.dot.wa{background:var(--warn)}.dot.in{background:var(--info)}.dot.er{background:var(--danger)}
+.ph .ctx{margin-left:auto;color:var(--ink3);white-space:nowrap}
+.ph .act{color:var(--ink3);letter-spacing:.2em;opacity:.7}
+.chip{border:1px solid var(--edge);border-radius:999px;padding:0 8px;font-size:10px;color:var(--ink2);white-space:nowrap}
+.chip.k{color:var(--cyan);border-color:rgba(127,209,199,.4)}.chip.w{color:var(--warn);border-color:rgba(232,193,92,.4)}
+.term{padding:8px 10px;flex:1;min-height:0}
+.side{width:216px;background:var(--ground2);border-left:1px solid var(--edge);flex:none;display:flex;flex-direction:column;overflow:hidden}
+.sec{border-bottom:1px solid var(--edge);padding:8px 0}
+.sec .h{padding:0 12px 4px;display:flex;justify-content:space-between;color:var(--ink3)}
+.sec .i{padding:2px 12px;display:flex;gap:8px;align-items:center;color:var(--ink2);white-space:nowrap}
+.sec .i.on{background:var(--wash);color:var(--rose);box-shadow:inset 2px 0 var(--rose)}
+.input{margin:4px 12px;border:1px solid var(--edge);border-radius:6px;padding:2px 8px;color:var(--ink3)}
+.status{height:24px;background:var(--ground2);border-top:1px solid var(--edge);flex:none;font-size:10px}
+.status span{padding:0 10px;height:100%;display:flex;align-items:center;gap:5px;color:var(--ink3);letter-spacing:.08em;text-transform:uppercase;border-right:1px solid var(--edge);white-space:nowrap}
+.status span.on{background:var(--rose-deep);color:#fff;border:0}
+.status span:last-child{border:0}
+.bar{display:flex;gap:2px;height:8px;margin:2px 0}
+.bar i{flex:1;background:var(--edge);border-radius:1px}.bar i.a{background:var(--ok)}.bar i.b{background:var(--warn)}
+.sel{background:var(--sel)}.hl{background:rgba(232,193,92,.3);outline:1px solid var(--warn)}.hl.cur2{background:var(--warn);color:#14091A}
+.hint{background:var(--rose);color:#14091A;font-weight:700;padding:0 3px;border-radius:2px;margin-right:2px}
+.md{font-family:var(--sans);font-size:13px;line-height:1.55;padding:8px 12px}.md b{color:var(--rose)}
+.ed{display:flex;font-size:11.5px}.ed .g{color:var(--ink3);text-align:right;padding-right:10px;border-right:1px solid var(--edge);margin-right:10px;opacity:.7;user-select:none}
+/* Überlagerungen */
+.ov{position:absolute;z-index:6}
+.scrim{position:absolute;inset:0;background:rgba(20,9,26,.55);z-index:5}
+.float{background:var(--ground2);border:1px solid var(--edge);box-shadow:0 18px 48px rgba(0,0,0,.6);border-radius:10px}
+.modal{border-radius:24px}
+.it{padding:5px 14px;display:flex;justify-content:space-between;gap:12px;color:var(--ink2);white-space:nowrap}
+.it.on{background:var(--wash);box-shadow:inset 2px 0 var(--rose);color:var(--ink)}
+.grp{padding:6px 14px 2px;color:var(--ink3)}
+.field{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:center;padding:4px 0}
+.field .v{border:1px solid var(--edge);border-radius:6px;padding:3px 9px;background:var(--pane)}
+.btn{border:1px solid var(--edge);border-radius:8px;padding:4px 12px;color:var(--ink2)}
+.btn.p{background:var(--rose-deep);border-color:var(--rose-deep);color:#fff;font-weight:700}
+.sw{display:flex;gap:3px}.sw i{width:14px;height:14px;border-radius:3px;display:block}
+.drop{position:absolute;background:var(--wash);border:2px dashed var(--rose);z-index:5;display:grid;place-items:center;color:var(--rose);font-weight:700}
+/* Handys */
+.phones{display:flex;gap:16px;flex-wrap:wrap}
+.ph1{width:200px;height:400px;border:1px solid var(--edge);border-radius:22px;overflow:hidden;background:var(--ground);display:flex;flex-direction:column;font:400 10px/1.5 var(--mono);position:relative}
+.ph1 .t{height:30px;background:var(--ground2);border-bottom:1px solid var(--edge);display:flex;align-items:center;gap:6px;padding:0 10px;flex:none}
+.acc{display:flex;gap:3px;padding:4px;background:var(--ground2);border-top:1px solid var(--edge);flex:none}
+.acc span{flex:1;text-align:center;border:1px solid var(--edge);border-radius:6px;padding:8px 0;color:var(--ink2);font-size:9px}
+.bn{display:flex;border-top:1px solid var(--edge);background:var(--ground2);flex:none}
+.bn span{flex:1;text-align:center;padding:8px 0;color:var(--ink3);font-size:9px}.bn span.on{color:var(--rose);box-shadow:inset 0 2px var(--rose)}
+.cap{color:var(--ink3);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;margin-top:6px}
+.tblwrap{overflow-x:auto;border:1px solid var(--edge);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th{font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);text-align:left;padding:8px 12px;border-bottom:1px solid var(--edge);background:var(--ground2)}
+td{padding:7px 12px;border-bottom:1px solid var(--edge);vertical-align:top;color:var(--ink2)}
+td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
+.ph-tag{font:500 10px var(--mono);border:1px solid var(--edge);border-radius:999px;padding:0 7px;white-space:nowrap;color:var(--ink3)}
+.ph-tag.built{color:var(--ok);border-color:rgba(140,194,113,.4)}
+@media (prefers-reduced-motion:no-preference){.cur{animation:b 1.06s steps(1) infinite}@keyframes b{50%{opacity:0}}}
+</style>
+
+<div class="wrap" id="root" data-os="mac">
+  <div>
+    <h1>holzWave <b>/</b> Haarlinie Voll</h1>
+    <p class="lead">Variante 1 mit allen geplanten Funktionen. Oben Workspaces (runde Pillen), darunter Tabs (eckig, nummeriert), darin die Panes. Rechts die einklappbare Seitenleiste. Die Ansichten unten zeigen jede Funktion im selben Fenster.</p>
+  </div>
+  <div class="views">
+    <small>Ansicht</small>
+    <div class="seg" id="views" role="group" aria-label="Ansicht"></div>
+    <small>Plattform</small>
+    <div class="seg" id="os" role="group" aria-label="Plattform">
+      <button aria-pressed="true" data-os="mac">macOS</button><button aria-pressed="false" data-os="win">Windows</button><button aria-pressed="false" data-os="lin">Linux</button>
+    </div>
+    <div class="note" id="note"></div>
+  </div>
+  <div id="fit"><div id="stage"></div></div>
+
+  <h2>Mobil (iOS, Android)</h2>
+  <p class="lead">Eine Pane pro Bildschirm. Workspaces und Tabs wandern in ein Blatt von unten, die Tastenleiste sitzt über der Systemtastatur. Gleiche Tokens, Ziele mindestens 44 px.</p>
+  <div class="phones" id="phones"></div>
+
+  <h2>Funktionen und ihr Platz im Fenster</h2>
+  <div class="tblwrap"><table id="cov"></table></div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const wcL='<div class="wc mac lwc"><i></i><i></i><i></i></div>';
+const wcR='<div class="wc win rwc"><span>&#8211;</span><span>&#9633;</span><span>&#10005;</span></div><div class="wc lin rwc"><span>&#8211;</span><span>&#9633;</span><span>&#10005;</span></div>';
+const P=(dot,ico,t,ctx,body,o={})=>`<div class="pane ${o.f?'f':''}" style="${o.s||''}"><div class="ph"><i class="dot ${dot}"></i><span class="dim">${ico}</span><b class="lbl">${t}</b>${o.chip||''}<span class="ctx">${ctx}</span><span class="act">⊞ ⤢ ✕</span></div>${body}</div>`;
+
+const shell=(mode)=>{
+  let t=`<span class="ro">❯</span> cargo test -p holzwave-core
+<span class="dim">   Compiling holzwave-core v0.0.1-alpha2</span>
+test layout::focus_cycles_and_wraps ... <span class="ok">ok</span>
+test layout::json_roundtrip ... <span class="ok">ok</span>
+test unicode_and_wide_characters ... <span class="ok">ok</span>
+test scrollback_can_be_scrolled ... <span class="ok">ok</span>
+test result: <span class="ok">ok</span>. 14 passed; 0 failed
+
+<span class="ro">❯</span> git log --oneline | head -3
+<span class="wa">e883222</span> fix(release): Windows cross script
+<span class="wa">7af9cc8</span> Casks: holzwave@preview 0.0.1-alpha2
+<span class="wa">6815139</span> release: version 0.0.1-alpha2
+<span class="ro">❯</span> <span class="cur"></span>`;
+  if(mode==='search') t=t.replace(/layout::focus_cycles_and_wraps/,'<span class="hl cur2">layout</span>::focus_cycles_and_wraps').replace('layout::json_roundtrip','<span class="hl">layout</span>::json_roundtrip').replace('release: version','<span class="hl">release</span>: version').replace('fix(release)','fix(<span class="hl">release</span>)');
+  if(mode==='copy') t=t.replace('<span class="wa">e883222</span> fix(release): Windows cross script','<span class="sel"><span class="hint">a</span>e883222 fix(release): Windows cross script</span>').replace('<span class="wa">7af9cc8</span>','<span class="hint">s</span><span class="wa">7af9cc8</span>').replace('<span class="wa">6815139</span>','<span class="hint">d</span><span class="wa">6815139</span>').replace('<span class="ro">❯</span> <span class="cur"></span>','<span class="ro">❯</span> ');
+  return `<div class="term pre">${t}</div>`;
+};
+const ssh=(rc)=>`<div class="term pre">${rc?'<span class="wa">⟳ Verbindung getrennt. Neuer Versuch 2/5 in 3 s …</span>\n<span class="dim">Eingaben werden gepuffert.</span>\n\n':''}<span class="ro">❯</span> kubectl get nodes
+NAME      STATUS      ROLES           AGE
+talos-1   <span class="ok">Ready</span>       control-plane   41d
+talos-2   <span class="ok">Ready</span>       worker          41d
+talos-3   <span class="wa">NotReady</span>    worker          2d
+<span class="ro">❯</span> <span class="cur"></span></div>`;
+const md=`<div class="md"><b># Phase 2</b><br>Key encoder, Themes, robuste Panes.<br><span class="dim">–</span> Pane schliessen beendet die Shell<br><span class="dim">–</span> Layout überlebt den Neustart<br><span class="dim">–</span> <span class="in" style="text-decoration:underline">docs/roadmap.md</span></div>`;
+const editor=`<div class="term pre ed"><div class="g">1\n2\n3\n4\n5\n6\n7</div><div><span class="ro">pub fn</span> <span class="in">focus_next</span>(&amp;mut self) {
+    <span class="ro">let</span> n = self.panes.len();
+    self.focus = (self.focus + <span class="wa">1</span>) % n;
+    <span class="dim">// wraps at the last pane</span>
+}
+<span class="dim">sftp://talos-1/home/holz/layout.rs</span>
+<span class="wa">●</span> <span class="dim">ungespeichert</span></div></div>`;
+const sysmon=`<div class="term pre">CPU  <span class="bar" style="display:inline-flex;width:140px"><i class="a"></i><i class="a"></i><i class="a"></i><i class="b"></i><i></i><i></i><i></i><i></i></span> 38%
+MEM  <span class="bar" style="display:inline-flex;width:140px"><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="a"></i><i class="b"></i><i></i><i></i></span> 6.1/16G
+NET  <span class="in">↓ 1.2 MB/s</span>  <span class="ro">↑ 84 KB/s</span>
+<span class="dim">PID    NAME            CPU</span>
+4121   holzwave        <span class="wa">12.4</span>
+ 882   rust-analyzer    <span class="wa">8.1</span></div>`;
+
+const tabs=(on)=>['1 shell','2 holzkube','3 notes.md','4 layout.rs','5 sysmon'].map((t,i)=>`<div class="tab ${i==on?'on':''}">${t}${i==1?' <span class="cy">⌁</span>':''}<span class="x">×</span></div>`).join('')+'<div class="tab dim" style="border:0">＋</div>';
+const side=`<div class="side">
+ <div class="sec"><div class="h lbl"><span>Hosts</span><span>＋</span></div><div class="i"><span class="ok">●</span>talos-1<span class="dim" style="margin-left:auto">ssh</span></div><div class="i on"><span class="wa">⟳</span>talos-2<span style="margin-left:auto">2/5</span></div><div class="i"><span class="ok">●</span>nas<span class="dim" style="margin-left:auto">wsl</span></div><div class="i"><span class="dim">○</span>build-box<span class="dim" style="margin-left:auto">docker</span></div></div>
+ <div class="sec"><div class="h lbl"><span>Kontext</span><span>⌘⇧C</span></div><div class="i"><span class="cy">⎈</span>talos-prod</div><div class="i"><span class="dim">ns</span>kube-system</div><div class="i"><span class="in">az</span>holz-prod</div><div class="i"><span class="dim">gam</span>holzcloud.ch</div></div>
+ <div class="sec"><div class="h lbl"><span>Verlauf</span><span>⌃R</span></div><div class="input">kube<span class="cur"></span></div><div class="i pre">kubectl get nodes</div><div class="i pre">kubectl logs -f etcd…</div><div class="i pre dim">talosctl dashboard</div></div>
+ <div class="sec" style="border:0"><div class="h lbl"><span>Widgets</span><span>＋</span></div><div class="i"><span class="ro">◧</span>Notizen</div><div class="i"><span class="ro">◧</span>Pomodoro</div></div></div>`;
+const status=(extra='')=>`<div class="status row"><span class="on">◆ main</span><span>5 tabs · 5 panes</span><span class="cy">⎈ talos-prod/kube-system</span><span class="in">az holz-prod</span><span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-alpha2</span></div>`;
+
+function base(v){
+  const searchBar=v==='search'?`<div class="ov float row" style="left:150px;top:125px;padding:4px 8px;gap:8px;border-radius:8px"><span class="ro">⌕</span><span>layout<span class="cur"></span></span><span class="dim">3/12</span><span class="kbd">Aa</span><span class="kbd">.*</span><span class="kbd">ab</span><span class="dim">▲ ▼ ✕</span></div>`:'';
+  const copyBar=v==='copy'?`<div class="ov row" style="left:0;right:0;bottom:0;height:22px;background:var(--rose-deep);color:#fff;padding:0 10px;gap:14px;font-weight:700;letter-spacing:.06em"><span>COPY MODE</span><span style="font-weight:400">v Auswahl · y kopieren · / suchen · f Hinweise · q Ende</span></div>`:'';
+  return `<div class="titlebar row">${wcL}
+    <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span></div><div class="ws">◇ docs <span class="n">1</span></div><div class="ws plus">＋</div>
+    <span class="fill"></span>
+    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='ki'?'on':''}">✦ KI</div><div class="tbtn on">▥ Seitenleiste</div><div class="tbtn ${v==='palette'?'on':''}">⌘K</div>${wcR}</div>
+  <div class="tabrow row">${tabs(v==='blocks'?1:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 Tab · Workspaces wechseln über die Pillen</span></div>
+  <div class="body"><div class="area">
+    ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
+    ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
+    ${P('in','✎','layout.rs','sftp · talos-1',editor)}
+    <div style="display:grid;grid-template-rows:1fr 1fr;gap:1px;background:var(--edge);min-height:0">
+      ${P('in','◧','notes.md','vorschau',md)}
+      ${P('','◔','system','lokal · 1 s',sysmon)}
+    </div>${searchBar}
+  </div>${v==='ki'?'':side}${v==='ki'?kiPanel:''}</div>${copyBar||status()}`;
+}
+const kiPanel=`<div class="side" style="width:280px"><div class="sec"><div class="h lbl"><span>✦ KI-Chat</span><span class="chip">Apple on-device</span></div></div>
+ <div class="col fill" style="padding:10px 12px;gap:8px;font-family:var(--sans);font-size:12.5px"><div class="float" style="padding:8px;border-radius:8px;border-color:var(--wash)"><span class="wa">Zustimmung nötig.</span> Terminal-Inhalt wird nur gesendet, wenn du ihn teilst.<div class="row" style="gap:6px;margin-top:6px"><span class="btn p">Pane 1 teilen</span><span class="btn">Nein</span></div></div>
+ <div class="dim">Du</div><div>Warum ist talos-3 NotReady?</div><div class="ro">Assistent</div><div>Prüfe <code>talosctl health</code>. Der Knoten ist erst seit 2 Tagen im Cluster.</div></div>
+ <div class="input" style="margin:8px 12px 12px">Frage stellen …<span class="cur"></span></div></div>`;
+
+const ovl={
+ palette:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:520px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">❯</span>split<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
+  <div class="grp lbl">Aktionen</div><div class="it on"><span>Split pane right</span><span class="kbd">⌘D</span></div><div class="it"><span>Split pane down</span><span class="kbd">⇧⌘D</span></div><div class="it"><span>Move pane to new window</span><span class="kbd"></span></div>
+  <div class="grp lbl">Verbinden</div><div class="it"><span>SSH: talos-1</span><span class="dim">host</span></div><div class="it"><span>K8s: exec in pod etcd-0</span><span class="dim">kubectl</span></div>
+  <div class="grp lbl">Wechseln</div><div class="it"><span>Workspace: infra</span><span class="dim">3 tabs</span></div><div class="it"><span>Theme: aubergine</span><span class="dim">Theme</span></div><div style="height:8px"></div></div>`,
+ blocks:`<div class="scrim"></div><div class="ov float" style="left:60px;top:62px;width:330px"><div class="grp lbl">Neuer Block</div>
+  <div class="it on"><span>❯ Shell</span><span class="kbd">⌘T</span></div><div class="it"><span>⌁ SSH-Verbindung</span><span class="dim">Phase 3</span></div><div class="it"><span>▣ WSL / Docker</span><span class="dim">Phase 3</span></div>
+  <div class="grp lbl">Vorschau</div><div class="it"><span>◧ Markdown · Bild · Video · PDF</span><span class="dim">Phase 4</span></div><div class="it"><span>✎ Editor (Monaco, SFTP)</span><span class="dim">Phase 4</span></div>
+  <div class="grp lbl">Integrationen</div><div class="it"><span class="cy">⎈ Kubernetes · Talos</span><span class="dim">Phase 6b</span></div><div class="it"><span class="in">az Azure · GAM7</span><span class="dim">Phase 6b</span></div>
+  <div class="grp lbl">Extras</div><div class="it"><span>◔ System-Monitor</span><span class="dim">Phase 6</span></div><div class="it"><span>⌕ Verlauf</span><span class="dim">Phase 6</span></div><div style="height:6px"></div></div>`,
+ conn:`<div class="scrim"></div><div class="ov float modal" style="left:170px;top:60px;width:780px;height:560px;display:flex;overflow:hidden">
+  <div style="width:240px;border-right:1px solid var(--edge);padding:16px 0"><div class="grp lbl">Verbindungen</div><div class="it"><span><span class="ok">●</span> talos-1</span><span class="dim">ssh</span></div><div class="it on"><span><span class="wa">⟳</span> talos-2</span><span class="dim">ssh</span></div><div class="it"><span><span class="ok">●</span> nas</span><span class="dim">wsl</span></div><div class="it"><span><span class="dim">○</span> build-box</span><span class="dim">docker</span></div><div class="it"><span class="dim">＋ Neue Verbindung</span></div></div>
+  <div class="fill" style="padding:20px 24px"><b style="font-size:15px">talos-2</b> <span class="chip w">Verbindung wird neu aufgebaut 2/5</span>
+   <div style="height:12px"></div><div class="field"><span class="dim">Host</span><span class="v">10.0.4.12</span></div><div class="field"><span class="dim">Benutzer</span><span class="v">holz</span></div><div class="field"><span class="dim">Schlüssel</span><span class="v"><span class="ok">🔒</span> Schlüsselbund · id_ed25519</span></div><div class="field"><span class="dim">Jump-Host</span><span class="v">bastion.holzcloud.ch</span></div><div class="field"><span class="dim">Reconnect</span><span class="v">automatisch · 5 Versuche · Eingaben puffern</span></div><div class="field"><span class="dim">Start</span><span class="v">tmux attach -t main</span></div><div class="field"><span class="dim">Sync</span><span class="v"><span class="ok">☁</span> verschlüsselt synchronisiert</span></div>
+   <div class="row" style="gap:8px;margin-top:20px"><span class="btn p">Verbinden</span><span class="btn">Testen</span><span class="btn">Als Block öffnen</span><span class="btn" style="margin-left:auto;color:var(--danger)">Löschen</span></div></div></div>`,
+ settings:`<div class="scrim"></div><div class="ov float modal" style="left:170px;top:50px;width:780px;height:580px;display:flex;overflow:hidden">
+  <div style="width:190px;border-right:1px solid var(--edge);padding:16px 0"><div class="it on"><span>Erscheinungsbild</span></div><div class="it"><span>Terminal</span></div><div class="it"><span>Tastenkürzel</span></div><div class="it"><span>Barrierefreiheit</span></div><div class="it"><span>Sync</span></div><div class="it"><span>KI</span></div><div class="it"><span>Integrationen</span></div><div class="it"><span>Datenschutz</span></div></div>
+  <div class="fill" style="padding:20px 24px"><div class="grp lbl" style="padding:0">Theme</div>
+   <div class="row" style="gap:10px;margin:8px 0 14px"><div class="float" style="padding:8px;border-color:var(--rose);border-radius:8px"><div class="sw"><i style="background:#14091A"></i><i style="background:#FF8FB8"></i><i style="background:#8CC271"></i><i style="background:#E8C15C"></i></div><div class="lbl ro" style="margin-top:4px">aubergine ✓</div></div><div class="float" style="padding:8px;border-radius:8px"><div class="sw"><i style="background:#FFE6F0"></i><i style="background:#C23B72"></i><i style="background:#5A8F45"></i><i style="background:#A07A12"></i></div><div class="lbl dim" style="margin-top:4px">papier (hell)</div></div><div class="float" style="padding:8px;border-radius:8px"><div class="sw"><i style="background:#000"></i><i style="background:#FFF"></i><i style="background:#0F0"></i><i style="background:#FF0"></i></div><div class="lbl dim" style="margin-top:4px">hoher kontrast</div></div><div class="float" style="padding:8px;border-radius:8px;border-style:dashed"><div class="lbl dim">＋ eigenes Theme</div></div></div>
+   <div class="field"><span class="dim">Schrift</span><span class="v">JetBrains Mono · 14 px · Ligaturen aus</span></div><div class="field"><span class="dim">UI-Grösse</span><span class="v">100 % × System 125 %</span></div>
+   <div class="grp lbl" style="padding:14px 0 4px">Barrierefreiheit</div>
+   <div class="field"><span class="dim">Bewegung</span><span class="seg" style="border-radius:6px"><button aria-pressed="true">System</button><button aria-pressed="false">An</button><button aria-pressed="false">Aus</button></span></div><div class="field"><span class="dim">Kontrast</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">Hoch</button><button aria-pressed="false">Normal</button></span></div><div class="field"><span class="dim">Cursor blinkt</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">An</button><button aria-pressed="false">Aus</button></span></div>
+   <div class="field"><span class="dim">Option als Alt</span><span class="v">aus (nur macOS)</span></div></div></div>`,
+ sync:`<div class="ov float" style="right:150px;top:36px;width:340px;padding:14px;border-radius:16px"><div class="row" style="gap:8px"><b>Nextcloud</b><span class="chip" style="color:var(--ok)">verbunden</span></div>
+  <div class="dim" style="margin:4px 0 10px">cloud.holzcloud.ch/remote.php/dav · holz</div>
+  <div class="field"><span class="dim">Letzter Sync</span><span>14:31 · 3 Dateien</span></div><div class="field"><span class="dim">Verschlüsselung</span><span class="ok">Ende-zu-Ende · Passphrase</span></div><div class="field"><span class="dim">Konflikte</span><span class="wa">1 · Backup behalten</span></div>
+  <div class="grp lbl" style="padding:8px 0 2px">Synchronisiert</div><div class="dim">Einstellungen · Themes · Hosts · Layouts · Verlauf</div><div class="dim">Geheimnisse nur verschlüsselt</div>
+  <div class="row" style="gap:8px;margin-top:12px"><span class="btn p">Jetzt abgleichen</span><span class="btn">Konflikt ansehen</span></div></div>`,
+ drag:`<div class="drop" style="left:0;top:92px;width:520px;height:270px;opacity:.9">hier ablegen: links von shell</div><div class="drop" style="right:216px;top:60px;width:270px;height:60px;border-color:var(--wood);color:var(--wood);background:rgba(201,139,79,.14)">→ als neuer Tab</div><div class="ov float" style="left:560px;top:420px;padding:6px 14px;border-color:var(--rose);color:var(--rose);transform:rotate(-2deg);font-weight:700">⠿ notes.md</div>
+  <div class="ov float" style="left:260px;top:390px;padding:4px 10px;color:var(--ink2)">Aus dem Fenster ziehen: neues Fenster. Wayland: Palette „Move pane to new window“.</div>`
+};
+const views=[
+ ['alltag','Alltag','Alle Ebenen auf einen Blick: Workspaces als Pillen, Tabs darunter, Panes darin. Panes: lokale Shell, SSH mit K8s-Kontext (hier gerade beim Neuverbinden), SFTP-Editor, Markdown-Vorschau, System-Monitor. Rechts Hosts, Kontext, Verlauf, Widgets.'],
+ ['palette','Palette ⌘K','Jede Aktion per Name: Layout, Verbinden, Wechseln, Themes. Der Weg für alles, was keinen eigenen Knopf hat.'],
+ ['blocks','Neuer Block','Das Plus oder ⌘T öffnet die Blockauswahl: Shell, SSH, WSL, Docker, Vorschau, Editor, Kubernetes, Talos, Azure, GAM7, Monitor, Verlauf. Phasen stehen dabei.'],
+ ['search','Suche','Scrollback-Suche in der Pane: Treffer markiert, aktueller Treffer gelb, mit Gross/Klein, Regex, Wort.'],
+ ['copy','Kopiermodus','Tastaturauswahl wie in tmux. Hinweis-Buchstaben (a, s, d) zum Greifen von Hashes, Pfaden, Links. Statuszeile zeigt die Tasten.'],
+ ['conn','Verbindungen','Verbindungsmanager: SSH, WSL, Docker. Schlüssel im OS-Schlüsselbund, Jump-Host, automatischer Reconnect mit Zustand.'],
+ ['settings','Einstellungen','Themes (inkl. eigene), Schrift, UI-Grösse, Barrierefreiheit (System oder explizit), Tastenkürzel-Editor, Sync, KI, Datenschutz.'],
+ ['sync','Sync','Nextcloud/WebDAV, Ende-zu-Ende verschlüsselt, Konflikte mit Backup, Liste was synchronisiert wird.'],
+ ['ki','KI-Chat','Ersetzt die Seitenleiste. Terminal-Inhalt nur mit ausdrücklicher Zustimmung pro Pane. Anbieter wählbar, auf dem Mac lokal.'],
+ ['drag','Ziehen','Panes per Drag & Drop umordnen, als Tab ablegen, in neues Fenster herausziehen. Unter Wayland über die Palette.']
+];
+const vb=$('#views');let cur='alltag';
+function render(){
+  const st=$('#stage');
+  st.innerHTML=`<div class="m">${base(cur)}${ovl[cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'?'':cur]||''}</div>`;
+  $('#note').textContent=views.find(v=>v[0]===cur)[2];
+  vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
+}
+views.forEach(v=>{const b=document.createElement('button');b.textContent=v[1];b.dataset.v=v[0];b.onclick=()=>{cur=v[0];render()};vb.append(b)});
+document.querySelectorAll('#os button').forEach(b=>b.onclick=()=>{$('#root').dataset.os=b.dataset.os;document.querySelectorAll('#os button').forEach(x=>x.setAttribute('aria-pressed',x===b))});
+function fit(){const f=$('#fit'),s=Math.min(1,f.clientWidth/1120);$('#stage').style.transform=`scale(${s})`;f.style.height=(680*s)+'px'}
+addEventListener('resize',fit);
+
+/* Handys */
+const ph=(top,body,bot)=>`<div><div class="ph1"><div class="t">${top}</div><div class="fill pre" style="padding:8px 10px;overflow:hidden">${body}</div>${bot}</div></div>`;
+$('#phones').innerHTML=
+ ph('<span class="wd">◆</span> main <span class="dim">· 1 shell</span><span class="ro" style="margin-left:auto">✦ ⌘</span>',`<span class="ro">❯</span> cargo test
+test layout ... <span class="ok">ok</span>
+test unicode ... <span class="ok">ok</span>
+test result: <span class="ok">ok</span>
+<span class="ro">❯</span> <span class="cur"></span>`,`<div class="acc"><span>esc</span><span>tab</span><span>ctrl</span><span>alt</span><span>↑</span><span>↓</span></div><div class="bn"><span class="on">shell</span><span>kube</span><span>notes</span><span>＋</span></div>`)
++`<div><div class="ph1"><div class="t"><span class="lbl">Workspaces</span></div><div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra</div><div class="ws" style="font-size:10px">◇ docs</div></div>
+ <div class="cap" style="margin-top:14px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube <span class="cy">⌁</span></span></div><div class="it"><span>3 notes.md</span></div><div class="it dim"><span>＋ Neuer Block</span></div></div><div class="bn"><span class="on">Blatt</span></div></div></div>`
++ph('<span class="wd">◆</span> main <span class="dim">· 2 holzkube</span><span class="wa" style="margin-left:auto">⟳ 2/5</span>',`<span class="wa">⟳ neuer Versuch 2/5</span>
+<span class="dim">Eingaben gepuffert</span>
+<span class="ro">❯</span> kubectl get nodes
+talos-1 <span class="ok">Ready</span>
+talos-3 <span class="wa">NotReady</span>`,`<div class="acc"><span>esc</span><span>tab</span><span>ctrl</span><span>alt</span><span>↑</span><span>↓</span></div><div class="bn"><span>shell</span><span class="on">kube</span><span>notes</span><span>＋</span></div>`);
+
+/* Funktionsliste */
+const B='<span class="ph-tag built">gebaut</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
+const rows=[
+['Workspaces, Tabs, Panes','Pillen oben, Tab-Zeile, Kacheln mit Divider',B],['Pane-Header','Statuspunkt, Typ-Symbol, Titel, Kontext, ⊞ ⤢ ✕',B],['Command-Palette','⌘K, gruppiert, mit Tastenkürzeln',B],
+['Scrollback, Auswahl, Kopieren','im Terminal, Kopiermodus',B],['Suche im Scrollback','Leiste in der Pane',B],['Links, Hinweise, Kopiermodus','Hinweis-Buchstaben, Statuszeile',B],
+['Themes, Schrift, UI-Grösse','Einstellungen › Erscheinungsbild',B],['Barrierefreiheit','Einstellungen › Barrierefreiheit',B],['Tastenkürzel-Editor','Einstellungen › Tastenkürzel',B],
+['Layout speichern und wiederherstellen','automatisch, Palette',B],['Panes ziehen, Tear-off','Ziehen-Ansicht',pl('2.1')],
+['SSH mit Reconnect','Pane-Header, Seitenleiste, Verbindungen',pl(3)],['WSL, Docker','Verbindungen, Blockauswahl',pl(3)],['Schlüsselbund','Verbindungen',pl(3)],
+['Nextcloud-Sync, Ende-zu-Ende','Titelleiste ☁, Sync-Popover, Einstellungen',pl('3b')],
+['Datei-Vorschau (Markdown, Bild, Video, PDF)','Block „Vorschau“',pl(4)],['Editor mit SFTP','Block „Editor“',pl(4)],
+['wsh-CLI','Blöcke aus der Shell öffnen, Titel setzen',pl(5)],['Widgets-Seitenleiste','rechts, einklappbar',pl(6)],['Verlauf mit Fuzzy-Suche','Seitenleiste, ⌃R',pl(6)],['System-Monitor','Block „system“',pl(6)],['KI-Chat','Titelleiste ✦, Seitenleiste',pl(6)],
+['Kubernetes, Talos, Azure, GAM7','Kontext in Seitenleiste und Statuszeile, Blöcke',pl('6b')],['iOS und Android','Eine Pane je Bildschirm, Blatt, Tastenleiste',pl(7)]
+];
+$('#cov').innerHTML='<tr><th>Funktion</th><th>Wo im Fenster</th><th>Stand</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');
+render();fit();
+</script>
