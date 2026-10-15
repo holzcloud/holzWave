@@ -16,6 +16,11 @@ ghostty = ["dep:libghostty-vt"]
 # libghostty-rs master (2026-10-09), pinned; the 0.2.2 on crates.io is older and needs Zig 0.15.2.
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54", optional = true }
 portable-pty = "0.9"
+russh = { version = "0.64.1", default-features = false, features = ["flate2", "ring", "rsa"] }
 serde = { version = "1", features = ["derive"] }
 # Layout::from_json parses and validates a user-editable file, so serde_json is a run-time dependency.
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+
+[dev-dependencies]
+rand = { version = "0.10", features = ["thread_rng"] }
