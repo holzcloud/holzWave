@@ -73,7 +73,7 @@ Built and tested on macOS from source:
 | SSH (reconnect, jump host, keychain), WSL and Docker panes, connection manager | built, tested against a test server, not yet against real hosts |
 | File browser, previews (Markdown, text, image, video, audio, PDF) and code editor, local and over SFTP | built, tested against a test server, not yet against real hosts |
 | Encrypted Nextcloud/WebDAV sync (XChaCha20-Poly1305, Argon2id) | built, tested against a test server, not yet against a real Nextcloud |
-| `wsh` CLI | planned |
+| `wsh` CLI (`view`, `edit`, `setmeta title`) over a private local socket | built, not yet packaged with the installers |
 | iOS, Android, Windows, Linux | planned |
 
 Per-phase detail: [docs/status.md](docs/status.md).
@@ -96,9 +96,9 @@ More in [docs/building.md](docs/building.md).
 ## Roadmap
 
 Phase 1 (spike) is done, phase 2 (desktop MVP) is built and waits for its manual checks, and phase 3 (SSH, WSL, Docker,
-connection manager) and phase 4 (file browser and previews) are built and tested against a test server. Encrypted
-the `wsh` CLI
-follow, then mobile. Versions go `0.0.1-alpha2`, `0.0.1-beta1`, `0.0.1`.
+connection manager), phase 4 (file browser, previews, editor), the encrypted sync and the `wsh` CLI are built and
+tested against test servers. The widgets, history, monitor and AI chat follow, then the native integrations and mobile.
+Versions go `0.0.1-alpha2`, `0.0.1-beta1`, `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation

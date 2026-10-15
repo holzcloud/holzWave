@@ -354,6 +354,9 @@ pub fn run() {
                     Err(e) => eprintln!("holzwave: cannot restore the window {label}: {e}"),
                 }
             }
+            // `wsh` finds the app through a socket in a folder only this user can enter; every pane started from now on
+            // gets its address and this run's secret. Without a socket the app works the same, `wsh` just has nothing to talk to.
+            start_ipc(app.handle(), &core);
             // The scheduled sync: a first run shortly after the start, then every five minutes. It does nothing while sync
             // is off, and a failure is only the state the page shows.
             let background = core.clone();
@@ -483,6 +486,30 @@ pub fn run() {
                 core.shutdown();
             }
         });
+}
+
+/// The app's side of `wsh`.
+struct IpcHandler(std::sync::Arc<AppCore>);
+
+impl holzwave_ipc::Handler for IpcHandler {
+    fn handle(&self, pane: Option<u64>, cmd: holzwave_ipc::Cmd) -> Result<String, String> {
+        self.0.ipc_command(pane, cmd)
+    }
+}
+
+fn start_ipc(app: &tauri::AppHandle, core: &std::sync::Arc<AppCore>) {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|d| std::path::PathBuf::from(d).join("holzwave"))
+        .or_else(|| app.path().app_data_dir().ok().map(|d| d.join("ipc")));
+    let (Some(dir), Ok(token)) = (dir, holzwave_ipc::new_token()) else { return };
+    match holzwave_ipc::serve(&dir, token.clone(), std::sync::Arc::new(IpcHandler(core.clone()))) {
+        Ok(server) => {
+            core.set_ipc(dir, token);
+            // Lives as long as the app.
+            std::mem::forget(server);
+        }
+        Err(e) => eprintln!("holzwave: wsh cannot connect to this app: {e}"),
+    }
 }
 
 #[cfg(test)]

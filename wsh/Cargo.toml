@@ -1,0 +1,10 @@
+[package]
+name = "wsh"
+description = "wsh: control a running holzWave from its terminals (view, edit, setmeta)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+holzwave-ipc = { path = "../ipc" }

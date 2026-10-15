@@ -61,7 +61,7 @@ authoritative layout, session or setting, and can be reloaded at any time.
 | `app/src-tauri/` | `holzwave-app` | Tauri command layer, window, plugins | ✅ |
 | `app/src/` | TypeScript | chrome, renderers, input | ✅ |
 | `spike/` | `holzwave-spike` | measurement tool, not shipped | ✅ |
-| `wsh/` | `holzwave-wsh` | CLI, depends on a small `holzwave-control` client crate | phase 6 |
+| `wsh/` | `wsh` | CLI; depends on the small `holzwave-ipc` crate (`ipc/`: protocol, socket server and client) | ✅ |
 | `plugins/apple-ai/` | Swift package | Foundation Models bridge | phase 7 |
 | `docs/` | | roadmap, architecture, design, sync, config, test plan | ✅ |
 

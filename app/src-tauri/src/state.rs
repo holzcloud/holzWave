@@ -55,6 +55,20 @@ const SESSION_DELAY: Duration = Duration::from_secs(2);
 /// The most time `shutdown` spends waiting for the shells to end.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
 
+/// `path` with `bin` in front, when `wsh` is in `bin` and `bin` is not on `path` yet; otherwise `None`.
+fn path_with_wsh(bin: &Path, path: Option<&std::ffi::OsStr>) -> Option<std::ffi::OsString> {
+    let name = if cfg!(windows) { "wsh.exe" } else { "wsh" };
+    if !bin.join(name).is_file() {
+        return None;
+    }
+    let mut dirs: Vec<PathBuf> = path.map(|p| std::env::split_paths(p).collect()).unwrap_or_default();
+    if dirs.iter().any(|d| d == bin) {
+        return None;
+    }
+    dirs.insert(0, bin.to_path_buf());
+    std::env::join_paths(dirs).ok()
+}
+
 /// Where passwords and key passphrases are kept: the operating system's keychain.
 fn default_secrets() -> Arc<dyn SecretStore> {
     Arc::new(holzwave_core::secrets::KeychainStore)
@@ -658,6 +672,8 @@ pub struct AppCore {
     connections: Connections,
     /// The panes that show a file browser or a preview instead of a terminal.
     blocks: Blocks,
+    /// Where `wsh` finds the app, set once the socket listens: the folder and the secret of this run.
+    ipc: Mutex<Option<(PathBuf, String)>>,
     /// The encrypted sync: its account, its runs and what the page shows of them.
     sync: crate::sync::SyncRuntime,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
@@ -765,6 +781,7 @@ impl AppCore {
             connections,
             blocks,
             sync,
+            ipc: Mutex::new(None),
             saver,
             writes,
             exiting: AtomicBool::new(false),
@@ -850,6 +867,36 @@ impl AppCore {
     }
 
     // ---- connections ------------------------------------------------------------------------------------------
+
+    /// Tell new panes where `wsh` finds the app.
+    pub fn set_ipc(&self, dir: PathBuf, token: String) {
+        *lock(&self.ipc) = Some((dir, token));
+    }
+
+    /// A command from `wsh`, typed in `pane`: open a file beside it, or name it. The window that has the pane is told
+    /// the new layout; the answer is the text `wsh` prints.
+    pub fn ipc_command(&self, pane: Option<u64>, cmd: holzwave_ipc::Cmd) -> Result<String, String> {
+        use holzwave_ipc::Cmd;
+        if cmd == Cmd::Ping {
+            return Ok("holzWave".into());
+        }
+        let pane = pane.ok_or("HOLZWAVE_PANE is not set")?;
+        let label = lock(&self.routes).live.get(&pane).map(|l| l.to_string()).ok_or("this pane is not open any more")?;
+        let view = match cmd {
+            Cmd::View { path } | Cmd::Edit { path } => {
+                let p = std::path::Path::new(&path);
+                if !p.is_absolute() || !p.is_file() {
+                    return Err(format!("{path}: no such file"));
+                }
+                self.focus_pane_in(&label, pane)?;
+                self.block_open_in(&label, "right", BlockKind::Preview, "local", &path)?
+            }
+            Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
+            Cmd::Ping => return Ok(String::new()),
+        };
+        self.sink.send(Target::window(&label), Out::Layout(view));
+        Ok(String::new())
+    }
 
     /// The state of the sync, for the page.
     pub fn sync_status(&self) -> crate::sync::SyncView {
@@ -1965,6 +2012,19 @@ impl AppCore {
         let (cols, rows) = clamp_grid(cols, rows);
         let mut spec = self.pane_spec(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h)));
         spec.cwd = self.start_dir(pane);
+        if let Some((dir, token)) = lock(&self.ipc).clone() {
+            spec.env = vec![
+                ("HOLZWAVE_IPC".into(), dir.to_string_lossy().into_owned()),
+                ("HOLZWAVE_TOKEN".into(), token),
+                ("HOLZWAVE_PANE".into(), pane.to_string()),
+            ];
+            // `wsh` is installed beside the app; the panes find it by name.
+            if let Some(path) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent).and_then(|bin| {
+                path_with_wsh(bin, std::env::var_os("PATH").as_deref())
+            }) {
+                spec.env.push(("PATH".into(), path.to_string_lossy().into_owned()));
+            }
+        }
         // A pane that runs a saved connection starts that instead of a local shell. A connection that cannot be made up
         // (a missing jump host, an unreadable keychain) is said on the pane's screen, and the pane is a local shell.
         // A pane that shows a file browser or a preview runs no process: the page draws its content.
@@ -4033,6 +4093,41 @@ mod tests {
     }
 
     /// A core over an existing scratch directory, so that a test can put files there first.
+    #[test]
+    fn wsh_names_a_pane_opens_a_file_beside_it_and_refuses_what_is_not_a_pane_or_a_file() {
+        use holzwave_ipc::Cmd;
+        let (core, rec, dir) = core("sh", &[]);
+        let pane = core.view().focus;
+        assert_eq!(core.ipc_command(None, Cmd::Ping).as_deref(), Ok("holzWave"));
+        assert!(core.ipc_command(None, Cmd::Setmeta { key: "title".into(), value: "x".into() }).is_err(), "no pane named");
+        assert!(core.ipc_command(Some(9999), Cmd::Setmeta { key: "title".into(), value: "x".into() }).unwrap_err().contains("not open"));
+
+        assert_eq!(core.ipc_command(Some(pane), Cmd::Setmeta { key: "title".into(), value: "build".into() }), Ok(String::new()));
+        assert!(core.view().pane_names.iter().any(|(id, name)| *id == pane && name == "build"));
+        assert!(rec.log.lock().unwrap().iter().any(|(_, o)| matches!(o, Out::Layout(_))), "the window is told");
+
+        let before = core.view().panes.len();
+        assert!(core.ipc_command(Some(pane), Cmd::View { path: "relative.md".into() }).unwrap_err().contains("no such file"));
+        assert!(core.ipc_command(Some(pane), Cmd::View { path: dir.0.join("missing.md").to_string_lossy().into_owned() }).is_err());
+        assert_eq!(core.view().panes.len(), before, "a refused file makes no pane");
+        let file = dir.0.join("notes.md");
+        std::fs::write(&file, "# hi").unwrap();
+        assert_eq!(core.ipc_command(Some(pane), Cmd::Edit { path: file.to_string_lossy().into_owned() }), Ok(String::new()));
+        assert_eq!(core.view().panes.len(), before + 1, "the file opens beside the pane");
+    }
+
+    #[test]
+    fn the_folder_of_wsh_goes_in_front_of_the_path_once() {
+        let dir = Scratch::new("wshpath");
+        let name = if cfg!(windows) { "wsh.exe" } else { "wsh" };
+        assert!(path_with_wsh(&dir.0, Some(std::ffi::OsStr::new("/usr/bin"))).is_none(), "no wsh beside the app");
+        std::fs::write(dir.0.join(name), "").unwrap();
+        let joined = path_with_wsh(&dir.0, Some(std::env::join_paths([Path::new("/usr/bin")]).unwrap().as_os_str())).unwrap();
+        let parts: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(parts, vec![dir.0.clone(), PathBuf::from("/usr/bin")]);
+        assert!(path_with_wsh(&dir.0, Some(joined.as_os_str())).is_none(), "already there");
+    }
+
     fn core_in(dir: &Scratch, program: &str, args: &[&str]) -> (Arc<AppCore>, Arc<Recorder>) {
         let rec = Arc::new(Recorder::default());
         let core = AppCore::new(dir.0.clone(), rec.clone(), ShellSpec::new(program, args));

@@ -100,9 +100,12 @@ against an in-process SSH and SFTP server and the page stub; not yet run on real
 
 ## Phase 5 — `wsh` CLI
 
-- A small Rust binary that controls the core over a Unix socket or a named pipe.
-- Commands: `view`, `edit`, `setmeta`, `ai`.
-- On remote hosts through an SSH tunnel.
+- ✅ A small Rust binary (`wsh/`) that controls the app over a Unix socket or a named pipe (`ipc/`). The socket is in a
+  folder only the user can enter, and every request carries a secret that only the panes of this run of the app know
+  (`HOLZWAVE_IPC`, `HOLZWAVE_TOKEN`, `HOLZWAVE_PANE`, set for local panes; `wsh` beside the app is put on their `PATH`).
+- ✅ Commands: `view <file>` and `edit <file>` (a preview beside the pane; Markdown opens as a page, `e` edits it),
+  `setmeta title <text>`, `ping`. `ai` comes with the AI chat.
+- Open: remote hosts through an SSH tunnel (the remote pane has no variables yet); packaging `wsh` with the installers.
 
 ## Phase 6 — Extras
 

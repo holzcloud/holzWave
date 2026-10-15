@@ -1176,6 +1176,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "dom_query"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2028,6 +2034,7 @@ name = "holzwave-app"
 version = "0.0.1-alpha2"
 dependencies = [
  "holzwave-core",
+ "holzwave-ipc",
  "serde",
  "serde_json",
  "tauri",
@@ -2058,6 +2065,16 @@ dependencies = [
  "tokio",
  "ureq",
  "zeroize",
+]
+
+[[package]]
+name = "holzwave-ipc"
+version = "0.0.1-alpha2"
+dependencies = [
+ "getrandom 0.4.3",
+ "interprocess",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2378,6 +2395,19 @@ dependencies = [
  "proc-macro2-diagnostics",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe388dd743f24e2e350318bd4bc67b2ab99599c2c63076cd9397293206779186"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3867,6 +3897,12 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+
+[[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
 name = "redox_syscall"
@@ -6030,6 +6066,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6459,6 +6501,13 @@ dependencies = [
  "windows-core",
  "windows-version",
  "x11-dl",
+]
+
+[[package]]
+name = "wsh"
+version = "0.0.1-alpha2"
+dependencies = [
+ "holzwave-ipc",
 ]
 
 [[package]]
