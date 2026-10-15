@@ -42,6 +42,8 @@ pub enum BlockKind {
     Files,
     /// The preview of one file.
     Preview,
+    /// The system monitor of this computer. It has no path.
+    Monitor,
 }
 
 /// What a block pane shows.
@@ -330,6 +332,10 @@ impl Blocks {
 }
 
 fn valid(block: &Block) -> bool {
+    // The monitor looks at this computer and has no path.
+    if block.kind == BlockKind::Monitor {
+        return block.source == LOCAL && block.path.is_empty();
+    }
     !block.source.is_empty()
         && block.source.len() <= 64
         && !block.path.is_empty()
@@ -371,6 +377,17 @@ mod tests {
         assert!(Blocks::load(&d, None, &[2]).block_of(1).is_none(), "a pane that left the layout is dropped");
         blocks.forget(1);
         assert!(blocks.block_of(1).is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_monitor_block_is_local_and_has_no_path() {
+        let (d, blocks, _) = setup("monitor");
+        let monitor = |source: &str, path: &str| Block { kind: BlockKind::Monitor, source: source.into(), path: path.into() };
+        blocks.assign(1, monitor(LOCAL, "")).unwrap();
+        assert!(blocks.assign(2, monitor("talos", "")).is_err(), "no monitor of another computer yet");
+        assert!(blocks.assign(3, monitor(LOCAL, "/x")).is_err());
+        assert_eq!(Blocks::load(&d, None, &[1]).block_of(1).unwrap().kind, BlockKind::Monitor, "it survives a restart");
         let _ = fs::remove_dir_all(&d);
     }
 

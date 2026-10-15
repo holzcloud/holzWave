@@ -35,6 +35,7 @@ pub mod engine;
 mod error;
 pub mod files;
 pub mod keybindings;
+pub mod monitor;
 pub mod layout;
 pub mod pane;
 pub mod persist;

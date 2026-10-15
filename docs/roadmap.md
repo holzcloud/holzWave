@@ -111,7 +111,7 @@ against an in-process SSH and SFTP server and the page stub; not yet run on real
 
 - Widgets sidebar and custom widgets described by a JSON schema.
 - History with fuzzy search (SQLite).
-- System monitor block.
+- ✅ System monitor block (local: CPU, memory, network, busiest processes; `sysinfo`). Other computers over SSH: open.
 - AI chat behind a provider abstraction (local and cloud). Terminal context is sent only with consent.
 - Apple AI provider: a Swift bridge as a Tauri plugin (Foundation Models, macOS 26+, Apple Silicon). Selectable only
   on supported Macs, with a fallback otherwise.

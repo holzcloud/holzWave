@@ -63,3 +63,24 @@ audio.bk-media { margin: .833rem; width: calc(100% - 1.667rem); }
 .pdf-count, .pdf-zoom { min-width: 4.5rem; text-align: center; font-variant-numeric: tabular-nums; }
 .pdf-area { flex: 1 1 0; min-height: 0; overflow: auto; padding: .667rem; background: var(--hw-ground); text-align: center; }
 .pdf-canvas { background: var(--hw-paper); max-width: none; box-shadow: none; }
+
+/* The system monitor (docs/design.md 6.5): bars with their numbers, the rates, the busiest processes. A bar is segments;
+   the number beside it is the second cue, so a level is never colour alone. */
+.mon { padding: .667rem .833rem; font-size: 1rem; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.mon-row { display: flex; align-items: center; gap: .667rem; white-space: nowrap; }
+.mon-label { flex: 0 0 3rem; color: var(--hw-dim); }
+.mon-bar { display: inline-flex; gap: 2px; width: 10rem; height: .667rem; }
+.mon-bar i { flex: 1; background: var(--hw-edge); border-radius: 1px; }
+.mon-bar i[data-on="ok"] { background: var(--hw-ok); }
+.mon-bar i[data-on="warn"] { background: var(--hw-warn); }
+.mon-bar i[data-on="danger"] { background: var(--hw-danger); }
+.mon-value[data-level="warn"] { color: var(--hw-warn); }
+.mon-value[data-level="danger"] { color: var(--hw-danger); text-decoration: underline; }
+.mon-down { color: var(--hw-info); }
+.mon-up { color: var(--hw-rose); }
+.mon-dim { color: var(--hw-dim); }
+.mon-proc { display: grid; grid-template-columns: 5rem minmax(0, 1fr) 4rem 4rem; gap: .667rem; white-space: nowrap; }
+.mon-proc > span:nth-child(n+3) { text-align: right; }
+.mon-name { overflow: hidden; text-overflow: ellipsis; }
+.mon > .mon-proc.mon-dim { margin-top: .667rem; }
+.mon > .mon-row.mon-dim { margin-top: .167rem; }

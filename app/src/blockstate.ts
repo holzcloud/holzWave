@@ -2,7 +2,7 @@
 // icons of a file list. Pure: no DOM, so node can test it. Every name comes from the core or from a remote machine and
 // is put on the screen with `textContent` only.
 
-export type BlockKind = "files" | "preview";
+export type BlockKind = "files" | "preview" | "monitor";
 
 /** What a block pane shows, as the core lists it. */
 export interface BlockInfo {
@@ -50,7 +50,7 @@ export interface Opened {
 /** The block of each pane that has one. Replaced as a whole by every answer of `pane_blocks`. */
 export const paneBlocks = new Map<number, BlockInfo>();
 
-const KINDS: ReadonlySet<string> = new Set(["files", "preview"]);
+const KINDS: ReadonlySet<string> = new Set(["files", "preview", "monitor"]);
 
 /** Read the answer of `pane_blocks`; an entry that is not well formed is dropped. */
 export function readBlocks(raw: unknown): BlockInfo[] {
@@ -162,11 +162,12 @@ export function shortDate(secs: number | null, now: Date = new Date()): string {
 
 /** The title of a block pane's header. */
 export function blockTitle(b: BlockInfo): string {
-  return b.kind === "files" ? "files" : baseName(b.path);
+  return b.kind === "files" ? "files" : b.kind === "monitor" ? "system" : baseName(b.path);
 }
 
 /** The context of a block pane's header: where it reads from, and for a browser the folder. */
 export function blockContext(b: BlockInfo): string {
+  if (b.kind === "monitor") return "local · 1 s";
   return b.kind === "files" ? `${b.source_label} · ${b.path}` : `${b.source_label} · preview`;
 }
 

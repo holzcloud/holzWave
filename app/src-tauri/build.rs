@@ -62,6 +62,7 @@ fn main() {
     "sync_save",
     "sync_now",
     "sync_off",
+    "monitor_sample",
     "connection_save",
     "connection_delete",
     "connect",

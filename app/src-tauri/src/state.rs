@@ -674,6 +674,8 @@ pub struct AppCore {
     blocks: Blocks,
     /// Where `wsh` finds the app, set once the socket listens: the folder and the secret of this run.
     ipc: Mutex<Option<(PathBuf, String)>>,
+    /// The system monitor's sampler, shared by every monitor pane.
+    monitor: holzwave_core::monitor::Monitor,
     /// The encrypted sync: its account, its runs and what the page shows of them.
     sync: crate::sync::SyncRuntime,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
@@ -781,6 +783,7 @@ impl AppCore {
             connections,
             blocks,
             sync,
+            monitor: holzwave_core::monitor::Monitor::new(),
             ipc: Mutex::new(None),
             saver,
             writes,
@@ -896,6 +899,11 @@ impl AppCore {
         };
         self.sink.send(Target::window(&label), Out::Layout(view));
         Ok(String::new())
+    }
+
+    /// What this computer is doing now, for a monitor pane. Blocks for a few milliseconds: not on the main thread.
+    pub fn monitor_sample(&self) -> holzwave_core::monitor::Snapshot {
+        self.monitor.sample()
     }
 
     /// The state of the sync, for the page.

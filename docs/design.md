@@ -228,6 +228,11 @@ Built: the file browser (local and SFTP), Markdown, text with line numbers, imag
 pane and the editor (the picture shows them as designed). A file opens in the preview beside its browser; a second file
 reuses that preview.
 
+The system monitor is a pane too (`System monitor` in the palette; header `system`, context `local · 1 s`): CPU and memory as
+eight-segment bars with their numbers beside them (the level is also said by the number turning amber, or red and
+underlined, above 70 and 90 percent), the network rates, the uptime and the eight busiest processes (PID, name, CPU,
+memory), one sample a second, paused while the window is hidden.
+
 A preview is a pane like any other and uses the same header: image (size and weight as a chip), PDF (page and zoom),
 video (a bar with time, volume and speed), Markdown (Manrope, the one place in the chrome that uses it) and the editor
 (line numbers, syntax colours from the `--hw-*` tokens). Unsaved changes show as `● unsaved` in the preview's status line (amber, with the words as the second cue), and closing the pane asks first. `Cmd/Ctrl+S` saves, `Escape` gives the keyboard back to the terminal; on a Markdown page `e` opens its source. The file browser is a pane too: `Space` on a file opens its preview beside it,

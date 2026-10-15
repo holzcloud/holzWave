@@ -834,3 +834,9 @@ pub fn sync_now(core: State<Arc<AppCore>>) -> Result<crate::sync::SyncView, Stri
 pub fn sync_off(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
     core.sync_off()
 }
+
+/// What this computer is doing: CPU, memory, network and the busiest processes.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn monitor_sample(core: State<Arc<AppCore>>) -> holzwave_core::monitor::Snapshot {
+    core.monitor_sample()
+}

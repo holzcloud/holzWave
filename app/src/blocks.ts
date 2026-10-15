@@ -8,6 +8,8 @@
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, loadStyles, setText } from "./dom.js";
+import { bar, bytes, memory, rate, readSample, uptime } from "./monitorstate.js";
+import type { MonSample } from "./monitorstate.js";
 import { showEditor } from "./editorview.js";
 import type { EditorHandle } from "./editorview.js";
 import { showPdf } from "./pdfview.js";
@@ -69,7 +71,7 @@ export async function refreshBlocks(): Promise<void> {
 
 /** Open a file browser (`files`) or a preview (`preview`) in a new tab or beside the focused pane. */
 export async function openBlock(
-  kind: "files" | "preview",
+  kind: "files" | "preview" | "monitor",
   source: string,
   path: string,
   placement: "tab" | "right" | "down",
@@ -520,6 +522,98 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
   };
 }
 
+// ---- the system monitor ------------------------------------------------------------------------------------------
+
+/** How many processes the monitor lists. */
+const MON_ROWS = 8;
+const MON_SEGMENTS = 8;
+
+/** CPU and memory as bars with their numbers, the network rates, and the busiest processes; sampled every second. */
+function monitorBlock(info: BlockInfo, root: HTMLElement): Instance {
+  root.classList.add("block-monitor");
+  const body = el("div", "mon bk-body", root);
+  body.setAttribute("role", "group");
+  body.setAttribute("aria-label", "System monitor");
+  const meter = (label: string) => {
+    const row = el("div", "mon-row", body);
+    el("span", "mon-label", row).textContent = label;
+    const b = el("span", "mon-bar", row);
+    b.setAttribute("role", "img");
+    const cells = Array.from({ length: MON_SEGMENTS }, () => el("i", "", b));
+    const value = el("span", "mon-value", row);
+    return { b, cells, value };
+  };
+  const cpu = meter("CPU");
+  const mem = meter("MEM");
+  const netRow = el("div", "mon-row", body);
+  el("span", "mon-label", netRow).textContent = "NET";
+  const down = el("span", "mon-down", netRow);
+  const up = el("span", "mon-up", netRow);
+  const upRow = el("div", "mon-row mon-dim", body);
+  el("span", "mon-label", upRow).textContent = "UP";
+  const upValue = el("span", "", upRow);
+  const head = el("div", "mon-proc mon-dim", body);
+  for (const t of ["PID", "NAME", "CPU", "MEM"]) el("span", "", head).textContent = t;
+  const procs = Array.from({ length: MON_ROWS }, () => {
+    const row = el("div", "mon-proc", body);
+    return [el("span", "", row), el("span", "mon-name", row), el("span", "", row), el("span", "", row)];
+  });
+  const fill = (m: { b: HTMLElement; cells: HTMLElement[]; value: HTMLElement }, percent: number, text: string): void => {
+    const { on, level } = bar(percent, MON_SEGMENTS);
+    m.cells.forEach((c, i) => {
+      c.dataset.on = i < on ? level : "";
+    });
+    m.b.setAttribute("aria-label", `${Math.round(percent)} percent`);
+    m.value.dataset.level = level;
+    setText(m.value, text);
+  };
+  const draw = (s: MonSample): void => {
+    fill(cpu, s.cpu, `${Math.round(s.cpu)}%`);
+    const memPercent = s.mem_total === 0 ? 0 : (s.mem_used / s.mem_total) * 100;
+    fill(mem, memPercent, memory(s.mem_used, s.mem_total));
+    setText(down, `↓ ${rate(s.net_rx)}`);
+    setText(up, `↑ ${rate(s.net_tx)}`);
+    setText(upValue, `${uptime(s.uptime)} · ${s.cores} cores`);
+    procs.forEach((cells, i) => {
+      const p = s.procs[i];
+      setText(cells[0]!, p ? String(p.pid) : "");
+      setText(cells[1]!, p ? p.name : "");
+      setText(cells[2]!, p ? p.cpu.toFixed(1) : "");
+      setText(cells[3]!, p ? bytes(p.mem) : "");
+    });
+  };
+  let alive = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tick = async (): Promise<void> => {
+    if (!alive) return;
+    // A hidden window (or a tab that is not shown) costs nothing: the sample waits.
+    if (!document.hidden && root.offsetParent !== null) {
+      try {
+        const s = readSample(await call<unknown>("monitor_sample"));
+        if (s && alive) draw(s);
+      } catch {
+        // the next second asks again
+      }
+    }
+    if (alive) timer = setTimeout(() => void tick(), 1000);
+  };
+  void tick();
+  return {
+    pane: info.pane,
+    root,
+    info,
+    update() {},
+    key() {
+      return false;
+    },
+    dispose() {
+      alive = false;
+      clearTimeout(timer);
+      root.replaceChildren();
+    },
+  };
+}
+
 // ---- placing the blocks ------------------------------------------------------------------------------------------
 
 /** Bring the drawn blocks in line with the view: one per visible block pane, over the pane below its header. */
@@ -552,7 +646,7 @@ function renderBlocks(): void {
         // The editor keeps the focus it is given; anything else gives it to the terminal input.
         if (!(ev.target instanceof Element && ev.target.closest("[data-field]"))) focusInput();
       });
-      inst = info.kind === "files" ? filesBlock(info, root) : previewBlock(info, root);
+      inst = info.kind === "files" ? filesBlock(info, root) : info.kind === "monitor" ? monitorBlock(info, root) : previewBlock(info, root);
       instances.set(id, inst);
     } else {
       inst.update(info);
@@ -590,6 +684,11 @@ export async function initBlocks(container: HTMLElement, apply: (v: View) => voi
     id: "files.open",
     title: "Files: This computer",
     run: () => void openBlock("files", "local", "", "tab"),
+  });
+  registerAction({
+    id: "monitor.open",
+    title: "System monitor",
+    run: () => void openBlock("monitor", "local", "", "tab"),
   });
   // The navigation keys of a block pane that has the focus; a key with a modifier stays with the shortcuts.
   pushKeyHandler((e) => {
