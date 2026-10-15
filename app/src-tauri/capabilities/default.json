@@ -73,6 +73,10 @@
     "allow-file-grant",
     "allow-file-revoke",
     "allow-file-range",
-    "allow-file-save"
+    "allow-file-save",
+    "allow-sync-status",
+    "allow-sync-save",
+    "allow-sync-now",
+    "allow-sync-off"
   ]
 }

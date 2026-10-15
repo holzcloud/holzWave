@@ -14,6 +14,7 @@ mod commands;
 mod files_protocol;
 mod menu;
 mod state;
+mod sync;
 mod textscale;
 mod windows;
 
@@ -353,6 +354,16 @@ pub fn run() {
                     Err(e) => eprintln!("holzwave: cannot restore the window {label}: {e}"),
                 }
             }
+            // The scheduled sync: a first run shortly after the start, then every five minutes. It does nothing while sync
+            // is off, and a failure is only the state the page shows.
+            let background = core.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                loop {
+                    background.sync_background();
+                    std::thread::sleep(std::time::Duration::from_secs(300));
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -454,6 +465,10 @@ pub fn run() {
             commands::file_revoke,
             commands::file_range,
             commands::file_save,
+            commands::sync_status,
+            commands::sync_save,
+            commands::sync_now,
+            commands::sync_off,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")

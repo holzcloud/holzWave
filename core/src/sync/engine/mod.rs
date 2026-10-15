@@ -93,7 +93,61 @@ pub trait Source: Send {
     fn write(&self, name: &str, bytes: &[u8]) -> Result<()>;
 }
 
-/// The configuration folder, plus the connection secrets as the virtual file [`SECRETS`].
+/// Where downloaded files wait until the next start. The running app owns its files (it rewrites the layout, the settings
+/// and the connection list from memory), so a download must not land in them: [`promote_incoming`] moves it into place
+/// before anything is read.
+const INCOMING: &str = "sync-incoming";
+
+/// Move what the sync downloaded into place. Called once at start, before the configuration is read. Returns the names
+/// that were applied. A file that is not a synced name is removed, not applied.
+pub fn promote_incoming(dir: &Path) -> Vec<String> {
+    let root = dir.join(INCOMING);
+    let mut names = Vec::new();
+    let mut stack = vec![(root.clone(), String::new())];
+    while let Some((path, prefix)) = stack.pop() {
+        let Ok(read) = fs::read_dir(&path) else { continue };
+        for entry in read.flatten() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let name = format!("{prefix}{file}");
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() && prefix.is_empty() && file == "themes" {
+                stack.push((entry.path(), "themes/".into()));
+            } else if kind.is_file() && allowed(&name) && name != SECRETS {
+                if let Some(parent) = dir.join(&name).parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if fs::rename(entry.path(), dir.join(&name)).is_ok() {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&root);
+    names.sort();
+    names
+}
+
+/// The synced names that are staged in `root`.
+fn promote_names(root: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for fixed in FIXED.iter().filter(|n| **n != SECRETS) {
+        if root.join(fixed).is_file() {
+            out.push((*fixed).to_owned());
+        }
+    }
+    if let Ok(read) = fs::read_dir(root.join("themes")) {
+        for entry in read.flatten() {
+            let name = format!("themes/{}", entry.file_name().to_string_lossy());
+            if allowed(&name) && entry.path().is_file() {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// The configuration folder, plus the connection secrets as the virtual file [`SECRETS`]. Downloads are staged, see
+/// [`promote_incoming`]; what is staged counts as the local version.
 pub struct ConfigSource {
     dir: PathBuf,
     secrets: Arc<dyn SecretStore>,
@@ -125,6 +179,11 @@ impl Source for ConfigSource {
                 }
             }
         }
+        for staged in promote_names(&self.dir.join(INCOMING)) {
+            if !out.contains(&staged) {
+                out.push(staged);
+            }
+        }
         if !self.accounts().is_empty() {
             out.push(SECRETS.to_owned());
         }
@@ -144,6 +203,9 @@ impl Source for ConfigSource {
                 }
             }
             return Ok((!map.is_empty()).then(|| serde_json::to_vec(&map).unwrap_or_default()));
+        }
+        if let Some(staged) = read_limited(&self.dir.join(INCOMING).join(name), MAX_FILE)? {
+            return Ok(Some(staged));
         }
         Ok(read_limited(&self.dir.join(name), MAX_FILE)?)
     }
@@ -165,7 +227,7 @@ impl Source for ConfigSource {
             }
             return Ok(());
         }
-        Ok(write_atomic(&self.dir.join(name), bytes)?)
+        Ok(write_atomic(&self.dir.join(INCOMING).join(name), bytes)?)
     }
 }
 

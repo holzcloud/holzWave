@@ -259,6 +259,15 @@
       "cell_w",
       "cell_h"
     ],
+    "sync_now": [],
+    "sync_off": [],
+    "sync_save": [
+      "endpoint",
+      "user",
+      "password",
+      "passphrase"
+    ],
+    "sync_status": [],
     "tear_off_pane": [
       "pane",
       "at_cursor"

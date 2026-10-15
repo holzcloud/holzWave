@@ -658,6 +658,8 @@ pub struct AppCore {
     connections: Connections,
     /// The panes that show a file browser or a preview instead of a terminal.
     blocks: Blocks,
+    /// The encrypted sync: its account, its runs and what the page shows of them.
+    sync: crate::sync::SyncRuntime,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
     saver: Debounced,
     /// How many times the saver job wrote the file, for tests.
@@ -676,6 +678,11 @@ impl AppCore {
     /// a layout file of before windows is one window) and start nothing: the webview starts each pane once it knows
     /// the pane's size, and the shell opens the windows other than `main` (see [`AppCore::restored_windows`]).
     pub fn new(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec) -> Arc<AppCore> {
+        // What the sync downloaded last time is put in place before anything is read.
+        let applied = holzwave_core::sync::engine::promote_incoming(&dir);
+        if !applied.is_empty() {
+            eprintln!("holzwave: applied from sync: {}", applied.join(", "));
+        }
         let path = dir.join("layout.json");
         let windows = Arc::new(Mutex::new(load_layout(&path)));
         let writes = Arc::new(AtomicUsize::new(0));
@@ -737,6 +744,7 @@ impl AppCore {
             Debounced::new(SESSION_DELAY, move || write_session(&path, &windows, &panes, &session, &last_cwd))
         };
 
+        let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
         Arc::new_cyclic(|me| AppCore {
             dir,
             windows,
@@ -756,6 +764,7 @@ impl AppCore {
             shell,
             connections,
             blocks,
+            sync,
             saver,
             writes,
             exiting: AtomicBool::new(false),
@@ -841,6 +850,30 @@ impl AppCore {
     }
 
     // ---- connections ------------------------------------------------------------------------------------------
+
+    /// The state of the sync, for the page.
+    pub fn sync_status(&self) -> crate::sync::SyncView {
+        self.sync.view()
+    }
+
+    /// Set up the sync for an account and run it once. Blocks on the network: not on the main thread.
+    pub fn sync_save(&self, endpoint: &str, user: &str, password: &str, passphrase: &str) -> Result<crate::sync::SyncView, String> {
+        self.sync.save(endpoint, user, password, passphrase)
+    }
+
+    /// Run the sync now. Blocks on the network.
+    pub fn sync_now(&self) -> Result<crate::sync::SyncView, String> {
+        self.sync.run()
+    }
+
+    pub fn sync_off(&self) -> crate::sync::SyncView {
+        self.sync.off()
+    }
+
+    /// The scheduled run.
+    pub fn sync_background(&self) {
+        self.sync.background();
+    }
 
     /// The saved connections, each with whether a secret is saved for it. Asks the keychain, so not on the main thread.
     pub fn connections_list(&self) -> Vec<ProfileView> {

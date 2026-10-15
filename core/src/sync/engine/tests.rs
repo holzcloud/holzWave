@@ -137,11 +137,15 @@ fn connect(server: &Server, d: &Device, pass: &str) -> Result<Syncer<WebDav, Con
     Syncer::connect_with(backend, ConfigSource::new(&d.dir, d.secrets.clone()), &d.dir, pass, Kdf { m_kib: 8 * 1024, t: 1, p: 1 })
 }
 
+/// What the device has after its next start: staged downloads are moved into place first.
 fn text(d: &Device, name: &str) -> Option<String> {
+    promote_incoming(&d.dir);
     fs::read_to_string(d.dir.join(name)).ok()
 }
 
+/// An edit by the user, after the device started again (staged downloads applied).
 fn put(d: &Device, name: &str, text: &str) {
+    promote_incoming(&d.dir);
     write_atomic(&d.dir.join(name), text.as_bytes()).unwrap();
 }
 
@@ -268,9 +272,42 @@ fn themes_sync_and_secrets_travel_only_inside_the_encrypted_payload() {
     }
     let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
     assert!(report.downloaded.contains(&"themes/dark.json".to_owned()));
+    assert!(!b.dir.join("themes").exists(), "a download is staged, the running app's files are not touched");
+    assert_eq!(text(&b, "themes/dark.json").as_deref(), Some("{\"name\":\"dark\"}"));
     assert_eq!(b.secrets.get("ssh:web").unwrap().as_deref(), Some("hunter2hunter2"));
     assert!(!b.dir.join("secrets.json").exists(), "the secrets never become a file");
     assert!(fs::read_dir(&b.dir).unwrap().flatten().all(|e| !fs::read(e.path()).map_or(false, |c| c.windows(8).any(|w| w == b"hunter2h"))));
+}
+
+#[test]
+fn a_staged_download_counts_as_the_local_version_and_is_not_sent_back() {
+    let srv = server();
+    let (a, b) = (device("a10"), device("b10"));
+    put(&a, "settings.json", "from a");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    write_atomic(&b.dir.join("settings.json"), b"local edit made before the download was applied").unwrap();
+    let puts = srv.store.lock().unwrap().puts;
+    // The next run sees B's staged version as local; it does not upload the stale file.
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.uploaded.is_empty(), "{report:?}");
+    assert_eq!(srv.store.lock().unwrap().puts, puts);
+    // Applying replaces the file.
+    assert_eq!(promote_incoming(&b.dir), vec!["settings.json"]);
+    assert_eq!(text(&b, "settings.json").as_deref(), Some("from a"));
+}
+
+#[test]
+fn promoting_ignores_names_that_are_not_synced() {
+    let d = device("a11");
+    let incoming = d.dir.join("sync-incoming");
+    fs::create_dir_all(incoming.join("themes")).unwrap();
+    fs::write(incoming.join("evil.sh"), "x").unwrap();
+    fs::write(incoming.join("secrets.json"), "{}").unwrap();
+    fs::write(incoming.join("themes").join("a.b.json"), "x").unwrap();
+    fs::write(incoming.join("layout.json"), "{}").unwrap();
+    assert_eq!(promote_incoming(&d.dir), vec!["layout.json"]);
+    assert!(!d.dir.join("evil.sh").exists() && !d.dir.join("secrets.json").exists() && !incoming.exists());
 }
 
 #[test]

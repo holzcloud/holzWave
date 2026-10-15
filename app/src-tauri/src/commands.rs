@@ -804,3 +804,33 @@ pub fn file_save(
 ) -> Result<Option<i64>, String> {
     core.file_save(&source, &path, &text, expected_modified)
 }
+
+/// The state of the sync.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn sync_status(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
+    core.sync_status()
+}
+
+/// Set up the sync for an account (the first run makes the folder on a new server) or why it was refused.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn sync_save(
+    core: State<Arc<AppCore>>,
+    endpoint: String,
+    user: String,
+    password: String,
+    passphrase: String,
+) -> Result<crate::sync::SyncView, String> {
+    core.sync_save(&endpoint, &user, &password, &passphrase)
+}
+
+/// Run the sync now.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn sync_now(core: State<Arc<AppCore>>) -> Result<crate::sync::SyncView, String> {
+    core.sync_now()
+}
+
+/// Turn the sync off and forget the account.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn sync_off(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
+    core.sync_off()
+}
