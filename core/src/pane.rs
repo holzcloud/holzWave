@@ -138,6 +138,9 @@ pub struct PaneSpec {
     /// Run the pane on another machine over SSH instead of a local shell. `program`, `args`, `cwd` and `host_spawn`
     /// are then not used. The pane's own thread reconnects when the connection is lost.
     pub ssh: Option<SshTarget>,
+    /// No process at all ([`crate::conn::NullLink`]): the page draws this pane's content itself (a file browser, a
+    /// preview). The pane is otherwise a pane like any other: it has a header, can be split, moved and closed.
+    pub blank: bool,
 }
 
 impl PaneSpec {
@@ -159,6 +162,7 @@ impl PaneSpec {
             host_spawn: false,
             cwd_lookup: true,
             ssh: None,
+            blank: false,
         }
     }
 
@@ -983,6 +987,9 @@ where
         // text, never an escape sequence.
         let line: String = notice.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         engine.feed(format!("{line}\r\n").as_bytes());
+    }
+    if spec.blank {
+        return Ok((engine, Box::new(crate::conn::NullLink::new())));
     }
     if let Some(target) = &spec.ssh {
         let link = SshLink::connect(target.clone(), spec.cols, spec.rows)?;

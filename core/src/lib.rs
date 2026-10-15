@@ -10,6 +10,7 @@
 //! - [`layout`]: the pure tab and pane layout model.
 //! - [`platform`]: the per-OS decisions (default shell, locale, polling) as pure functions of an `Os`.
 //! - [`pty`]: spawning a shell on a pseudo terminal.
+//! - [`blocks`]: panes that show a file browser or a preview instead of a terminal.
 //! - [`conn`]: the [`conn::Link`] trait a pane talks to, and the state of a connection.
 //! - [`profiles`]: `connections.json`, the saved SSH, WSL and Docker connections.
 //! - [`secrets`]: the [`secrets::SecretStore`] trait over the OS keychain.
@@ -27,6 +28,7 @@
 //! - [`pane`]: the pane actor with engine thread, PTY reader and writer, and frame pacing.
 //! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
 
+pub mod blocks;
 pub mod conn;
 pub mod connections;
 pub mod engine;

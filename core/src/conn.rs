@@ -103,9 +103,96 @@ impl Link for crate::pty::Pty {
     }
 }
 
+/// A link with nothing behind it: a pane whose content the page draws itself (a file browser, a preview). Its output
+/// never has a byte and ends only when the pane is closed; what is written to it is dropped.
+pub struct NullLink {
+    /// Held so the reader blocks; dropping it (on close) ends the reader.
+    end: Option<std::sync::mpsc::Sender<()>>,
+    reader: Option<Box<dyn Read + Send>>,
+}
+
+struct Silence(std::sync::mpsc::Receiver<()>);
+
+impl Read for Silence {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        // Blocks until the sender is dropped, which is the end of the output.
+        let _ = self.0.recv();
+        Ok(0)
+    }
+}
+
+struct Void;
+
+impl Write for Void {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl NullLink {
+    pub fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self { end: Some(tx), reader: Some(Box::new(Silence(rx))) }
+    }
+}
+
+impl Default for NullLink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Link for NullLink {
+    fn take_reader(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.reader.take()
+    }
+
+    fn take_writer(&mut self) -> Option<Box<dyn Write + Send>> {
+        Some(Box::new(Void))
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        None
+    }
+
+    fn resize_px(&self, _cols: u16, _rows: u16, _px_w: u32, _px_h: u32) -> Result<()> {
+        Ok(())
+    }
+
+    fn try_wait(&mut self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
+    fn close(mut self: Box<Self>) -> Result<u32> {
+        self.end.take();
+        Ok(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_null_link_is_silent_until_it_is_closed_and_then_its_output_ends() {
+        let mut link = Box::new(NullLink::new());
+        let mut reader = link.take_reader().unwrap();
+        let mut writer = link.take_writer().unwrap();
+        assert_eq!(writer.write(b"dropped").unwrap(), 7);
+        assert_eq!(link.try_wait().unwrap(), None);
+        let handle = std::thread::spawn(move || {
+            let mut buf = [0u8; 8];
+            reader.read(&mut buf).unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!handle.is_finished(), "the reader waits while the link is open");
+        assert_eq!(link.close().unwrap(), 0);
+        assert_eq!(handle.join().unwrap(), 0, "closing ends the output");
+    }
 
     #[test]
     fn the_shared_state_is_seen_by_every_clone() {

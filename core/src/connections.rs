@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -90,6 +91,8 @@ pub struct Connections {
     profiles: Mutex<Profiles>,
     secrets: Arc<dyn SecretStore>,
     panes: Mutex<HashMap<PaneId, String>>,
+    /// Counts the saves and deletes, so what was made from a connection (a file source) knows when it is out of date.
+    generation: AtomicU64,
 }
 
 impl Connections {
@@ -104,7 +107,7 @@ impl Connections {
             _ => HashMap::new(),
         };
         panes.retain(|pane, id| live_panes.contains(pane) && profiles.get(id).is_some());
-        let me = Self { dir: dir.to_path_buf(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes) };
+        let me = Self { dir: dir.to_path_buf(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0) };
         (me, status)
     }
 
@@ -125,6 +128,22 @@ impl Connections {
     /// Whether a connection with this id exists.
     pub fn contains(&self, id: &str) -> bool {
         self.profiles().get(id).is_some()
+    }
+
+    /// Changes whenever a connection is saved or deleted.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// The name of connection `id`.
+    pub fn label_of(&self, id: &str) -> Option<String> {
+        self.profiles().get(id).map(|p| p.name.clone())
+    }
+
+    /// The SSH target of connection `id`, with its login from the keychain and its jump hosts. For the file sources.
+    pub fn ssh_target(&self, id: &str) -> Result<crate::ssh::SshTarget> {
+        let profiles = self.profiles().clone();
+        profiles.ssh_target(id, self.secrets.as_ref(), self.home.as_deref(), &self.dir.join(KNOWN_HOSTS_FILE))
     }
 
     /// Every saved connection.
@@ -160,6 +179,7 @@ impl Connections {
         }
         *profiles = next;
         drop(profiles);
+        self.generation.fetch_add(1, Ordering::SeqCst);
         Ok(self.view(&profile))
     }
 
@@ -176,6 +196,7 @@ impl Connections {
         let _ = self.secrets.delete(&account);
         *profiles = next;
         drop(profiles);
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.panes().retain(|_, v| v != id);
         self.save_panes();
         Ok(())
