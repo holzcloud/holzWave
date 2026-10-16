@@ -79,9 +79,19 @@ type Exception = (&'static str, &'static [&'static str], &'static str);
 /// `protocol/tauri.rs`, the proxy to a dev server URL, which `manager/webview.rs` switches on with
 /// `PROXY_DEV_SERVER = cfg!(all(dev, mobile))`: a desktop build never creates the client, and `tauri.conf.json`
 /// sets no `devUrl` (checked by `page_policy_has_no_remote_origin`). `hyper-util` is below `reqwest` only.
-const EXCEPTIONS: [Exception; 2] = [
+///
+/// `ureq` is the WebDAV client of the sync and has exactly one parent, `holzwave-core`. A slice, so that a later plan
+/// appends one entry without editing a length; every entry needs a reason and a crate that is still in the closure.
+const EXCEPTIONS: &[Exception] = &[
     ("reqwest", &["tauri"], "tauri's dev-server proxy; not instantiated on desktop and devUrl is unset"),
     ("hyper-util", &["reqwest"], "the HTTP client of reqwest, reachable only through it"),
+    (
+        "ureq",
+        &["holzwave-core"],
+        "WebDAV and Nextcloud transport of the sync (core/src/sync/webdav.rs): it connects only to the endpoint the user \
+         saved and only once sync is set up (SyncRuntime::background does nothing while sync is off); https is required \
+         except for a loopback address, redirects are not followed and every answer is bounded",
+    ),
 ];
 
 /// Hits of the network scan that are named and explained. The platform opener starts `open`, `xdg-open` or `explorer`
@@ -431,17 +441,17 @@ fn the_lock_file_fetches_from_crates_io_and_one_pinned_engine_repository_only() 
     }
 }
 
-#[test]
-fn app_closure_contains_no_telemetry_or_network_client_crates() {
-    let graph = lock_graph();
-    let closure = closure(&graph, "holzwave-app");
-    assert!(closure.contains("tauri") && closure.contains("holzwave-core"), "the walk did not reach the dependencies");
+/// What is wrong with the denied crates in the closure of `start`, one sentence each: a denied crate with no exception,
+/// one whose parents differ from the set its exception names, an exception without a reason, and an exception for a
+/// crate that is not in the closure any more.
+fn closure_problems(graph: &Graph, start: &str, exceptions: &[Exception]) -> Vec<String> {
+    let reached = closure(graph, start);
     let mut problems = Vec::new();
-    for name in closure.iter().filter(|name| is_denied(name)) {
-        let parents = parents_of(&graph, name);
-        match EXCEPTIONS.iter().find(|(exception, _, _)| exception == name) {
+    for name in reached.iter().filter(|name| is_denied(name)) {
+        let parents = parents_of(graph, name);
+        match exceptions.iter().find(|(exception, _, _)| exception == name) {
             None => problems.push(format!(
-                "{name} is in the dependency closure of holzwave-app and denied (parents: {parents:?}): DESK-26 says \
+                "{name} is in the dependency closure of {start} and denied (parents: {parents:?}): DESK-26 says \
                  nothing phones home; remove it, or record a commented exception in EXCEPTIONS with its exact parents"
             )),
             Some((_, allowed, reason)) if parents != set(allowed) => problems.push(format!(
@@ -450,6 +460,26 @@ fn app_closure_contains_no_telemetry_or_network_client_crates() {
             Some(_) => {}
         }
     }
+    for (name, _, reason) in exceptions {
+        if reason.trim().is_empty() {
+            problems.push(format!("the exception for {name} has no reason: say why the crate is allowed"));
+        }
+        if !reached.contains(*name) {
+            problems.push(format!(
+                "the exception for {name} matches nothing: it is not in the dependency closure of {start} any more, \
+                 remove the exception from EXCEPTIONS"
+            ));
+        }
+    }
+    problems
+}
+
+#[test]
+fn app_closure_contains_no_telemetry_or_network_client_crates() {
+    let graph = lock_graph();
+    let closure = closure(&graph, "holzwave-app");
+    assert!(closure.contains("tauri") && closure.contains("holzwave-core"), "the walk did not reach the dependencies");
+    let problems = closure_problems(&graph, "holzwave-app", EXCEPTIONS);
     assert!(problems.is_empty(), "the telemetry and network guard failed:\n  {}", problems.join("\n  "));
 }
 
@@ -686,6 +716,82 @@ fn the_denylist_matches_names_and_prefixes() {
     for name in ["tauri", "tauri-runtime-wry", "serde", "hyperlink", "portable-pty", "holzwave-core"] {
         assert!(!is_denied(name), "{name} should be allowed");
     }
+}
+
+/// A toy lock file: each package with the names it depends on.
+fn toy_lock(packages: &[(&str, &[&str])]) -> String {
+    let mut lock = String::from("version = 4\n");
+    for (name, dependencies) in packages {
+        lock.push_str(&format!("\n[[package]]\nname = \"{name}\"\nversion = \"1.0.0\"\n"));
+        if !dependencies.is_empty() {
+            lock.push_str("dependencies = [\n");
+            for dependency in *dependencies {
+                lock.push_str(&format!(" \"{dependency}\",\n"));
+            }
+            lock.push_str("]\n");
+        }
+    }
+    lock
+}
+
+/// The shape of the real `ureq` exception (one named parent), with the parent `core` of the toy locks.
+const TOY_UREQ: &[Exception] = &[("ureq", &["core"], "the sync transport")];
+
+#[test]
+fn closure_guard_accepts_an_exception_with_exactly_its_parents() {
+    let graph = parse_lock(&toy_lock(&[("app", &["core"]), ("core", &["ureq"]), ("ureq", &[])]));
+
+    assert_eq!(closure_problems(&graph, "app", TOY_UREQ), Vec::<String>::new());
+}
+
+#[test]
+fn closure_guard_reports_a_second_parent() {
+    // `other` is in the closure and also lists ureq: the exception names `core` alone.
+    let graph = parse_lock(&toy_lock(&[
+        ("app", &["core", "other"]),
+        ("core", &["ureq"]),
+        ("other", &["ureq"]),
+        ("ureq", &[]),
+    ]));
+
+    let problems = closure_problems(&graph, "app", TOY_UREQ);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains(r#"{"core", "other"}"#), "the parents found are not named: {problems:?}");
+    assert!(problems[0].contains(r#"["core"]"#), "the parents allowed are not named: {problems:?}");
+}
+
+#[test]
+fn closure_guard_reports_a_denied_crate_without_an_exception() {
+    let graph = parse_lock(&toy_lock(&[("app", &["core"]), ("core", &["reqwest"]), ("reqwest", &[])]));
+
+    let problems = closure_problems(&graph, "app", &[]);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].starts_with("reqwest is in the dependency closure of app and denied"), "{problems:?}");
+}
+
+#[test]
+fn closure_guard_reports_an_exception_without_a_reason() {
+    let graph = parse_lock(&toy_lock(&[("app", &["core"]), ("core", &["ureq"]), ("ureq", &[])]));
+
+    for reason in ["", "   \t"] {
+        let exceptions: &[Exception] = &[("ureq", &["core"], reason)];
+        let problems = closure_problems(&graph, "app", exceptions);
+        assert_eq!(problems.len(), 1, "reason {reason:?}: {problems:?}");
+        assert!(problems[0].contains("the exception for ureq has no reason"), "{problems:?}");
+    }
+}
+
+#[test]
+fn closure_guard_reports_a_stale_exception() {
+    // ureq is no longer reachable from app: the exception outlived its cause.
+    let graph = parse_lock(&toy_lock(&[("app", &["core"]), ("core", &[]), ("ureq", &[])]));
+
+    let problems = closure_problems(&graph, "app", TOY_UREQ);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("ureq") && problems[0].contains("remove the exception"), "{problems:?}");
 }
 
 // ---- docs/config.md ---------------------------------------------------------------------------------------
