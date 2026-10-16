@@ -7,10 +7,10 @@
 
 use std::collections::HashSet;
 
-use super::TRIMMED_RESULT;
+use super::{INTERRUPTED_RESULT, TRIMMED_RESULT};
 use crate::ai::gate::ApprovedContext;
 use crate::ai::store::NOT_STORED;
-use crate::ai::types::{Message, Part, Role, ToolSpec, json_size};
+use crate::ai::types::{Message, MessageStatus, Part, Role, ToolResult, ToolSpec, json_size};
 
 /// What counts for a context note without an approved context in the request: the marker line an adapter renders.
 const NOTE_BYTES: usize = 128;
@@ -134,4 +134,107 @@ fn blocks(messages: &[Message]) -> Vec<(usize, usize)> {
 
 fn names_pinned(message: &Message, pinned: &HashSet<String>) -> bool {
     message.parts.iter().any(|part| matches!(part, Part::Context(note) if pinned.contains(&note.hash)))
+}
+
+/// What [`repair_dangling`] changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Repair {
+    /// Calls without a result that got the interrupted result.
+    pub results_added: usize,
+    /// Results without a call, and repeated results, that were removed.
+    pub orphans_removed: usize,
+    /// Assistant messages that were marked interrupted.
+    pub marked: usize,
+}
+
+impl Repair {
+    /// Whether the transcript was changed at all.
+    pub fn changed(&self) -> bool {
+        self.results_added > 0 || self.orphans_removed > 0 || self.marked > 0
+    }
+}
+
+/// Brings a stored transcript into the shape every provider accepts: each tool call has exactly one result, in the tool
+/// message that directly follows its assistant message, and no result stands without its call.
+///
+/// A chat that was interrupted (the application closed while a call was open) holds calls without results; a provider
+/// refuses every later message of such a chat. Each missing result becomes an error result with [`INTERRUPTED_RESULT`]
+/// (a fixed text, never output), appended to the tool message that follows or, when there is none, in a new tool
+/// message with the id `<assistant id>-repair` and status `Interrupted`. An assistant message that was `Complete`
+/// becomes `Interrupted`. A result whose call the assistant message before it did not ask for is removed, and so is a
+/// second result for one call (the first stays). A transcript that needs none of this is not touched, and a second call
+/// changes nothing.
+pub fn repair_dangling(messages: &mut Vec<Message>) -> Repair {
+    let mut report = Repair::default();
+    let mut rest = std::mem::take(messages).into_iter().peekable();
+    let mut repaired: Vec<Message> = Vec::new();
+    while let Some(mut message) = rest.next() {
+        match message.role {
+            Role::Tool => {
+                // No assistant message with calls introduced this tool message, so its results answer nothing.
+                let before = message.parts.len();
+                message.parts.retain(|part| !matches!(part, Part::ToolResult(_)));
+                report.orphans_removed += before - message.parts.len();
+                if !message.parts.is_empty() {
+                    repaired.push(message);
+                }
+            }
+            Role::Assistant if message.parts.iter().any(|part| matches!(part, Part::ToolCall(_))) => {
+                let asked: Vec<String> = message
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        Part::ToolCall(call) => Some(call.id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let mut answers: Vec<Message> = Vec::new();
+                while let Some(next) = rest.next_if(|next| next.role == Role::Tool) {
+                    answers.push(next);
+                }
+                let mut answered: HashSet<String> = HashSet::new();
+                for answer in &mut answers {
+                    answer.parts.retain(|part| {
+                        let Part::ToolResult(result) = part else { return true };
+                        let keep = asked.contains(&result.call_id) && answered.insert(result.call_id.clone());
+                        if !keep {
+                            report.orphans_removed += 1;
+                        }
+                        keep
+                    });
+                }
+                answers.retain(|answer| !answer.parts.is_empty());
+
+                let mut missing: Vec<Part> = Vec::new();
+                for id in &asked {
+                    if answered.insert(id.clone()) {
+                        let content = INTERRUPTED_RESULT.to_owned();
+                        let result = ToolResult { call_id: id.clone(), content, is_error: true };
+                        missing.push(Part::ToolResult(result));
+                    }
+                }
+                if !missing.is_empty() {
+                    report.results_added += missing.len();
+                    match answers.first_mut() {
+                        Some(first) => first.parts.extend(missing),
+                        None => {
+                            let id = format!("{}-repair", message.id);
+                            let mut added = Message::new(id, Role::Tool, missing, message.ts);
+                            added.status = MessageStatus::Interrupted;
+                            answers.push(added);
+                        }
+                    }
+                    if message.status == MessageStatus::Complete {
+                        message.status = MessageStatus::Interrupted;
+                        report.marked += 1;
+                    }
+                }
+                repaired.push(message);
+                repaired.extend(answers);
+            }
+            Role::User | Role::Assistant => repaired.push(message),
+        }
+    }
+    *messages = repaired;
+    report
 }

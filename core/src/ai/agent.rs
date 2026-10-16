@@ -25,11 +25,34 @@
 //!   limit in [`Limits`] that ends the turn with a stable [`Limit`] name.
 //! - **The loop blocks.** [`Agent::run_turn`] belongs on a turn thread, never on a thread that serves page commands.
 //!   The only thread the loop starts is the short-lived one that denies an unanswered card.
+//! - **Stopping works in every state.** A turn ends within a quarter of a second of the stop, and the approval table
+//!   holds nothing of it afterwards (no open call, no taint ledger), also when the sink panics.
+//!
+//! # Stopping a turn
+//!
+//! The user's stop sets the [`CancelToken`]. A pane that closes or a conversation that is deleted calls
+//! [`ApprovalTable::cancel_pane`] or [`ApprovalTable::cancel_conversation`], which reaches a waiting turn the same way.
+//! In every row the calls that did not run are answered with [`STOPPED_RESULT`] through the cleaning door, every card
+//! gets its `ToolResult` event so the page can close it, and the tool message of the step is saved with status
+//! `Cancelled`.
+//!
+//! | State | Mechanism | Result |
+//! | --- | --- | --- |
+//! | before the first round, at every round start | the token is read | no request; the turn ends `Cancelled` |
+//! | while the provider streams | the provider returns `Cancelled` | text kept as `Cancelled`; calls dropped |
+//! | while a card waits | `wait` returns `Cancelled` (token, closed pane, deleted chat) | stopped text; `Cancelled` |
+//! | while a tool runs | the table's `run` returns `Cancelled` | stopped text; the turn ends `Cancelled` |
+//! | between two calls of a step | the token is read before each call | the rest gets the stopped text, no card |
+//! | after the last result | the next round start reads the token | the turn ends `Cancelled` |
+//! | nobody answers a card | denied after [`Limits::approval_timeout`] | [`TIMED_OUT_RESULT`]; the turn goes on |
 
 mod history;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -39,8 +62,10 @@ use super::gate::ApprovedContext;
 use super::provider::{AiError, CancelToken, ChatRequest, Collector, Completion, Detail, Flow, Provider, StreamEvent};
 use super::redact::{self, Keep};
 use super::tools::{
-    ApprovalTable, Decision, MAX_RESULT_BYTES, Pending, Scope, ToolError, ToolHost, ToolName, denied_result, specs,
+    ApprovalTable, Decision, MAX_RESULT_BYTES, Pending, Scope, TaintSource, ToolError, ToolHost, ToolName,
+    denied_result, specs,
 };
+pub use history::{Repair, repair_dangling};
 use history::{fit, fixed_bytes, message_bytes, strip_stored};
 
 use super::types::{Capabilities, Message, MessageStatus, Part, Role, Size, StopReason, ToolCall, ToolResult, Usage};
@@ -381,6 +406,10 @@ impl<'a> Agent<'a> {
         }
         // Dropped when this function ends, however it ends: the table keeps nothing of this turn.
         let _guard = TurnGuard { table: self.table, scope: turn.scope.clone() };
+        // A stored transcript with unanswered calls would make every provider refuse the request. The repair is a no-op
+        // after the service's own call, and what it adds is not a message of this turn.
+        let mut messages = turn.messages;
+        repair_dangling(&mut messages);
         let mut run = Run {
             provider: self.provider,
             host: self.host,
@@ -390,7 +419,7 @@ impl<'a> Agent<'a> {
             scope: turn.scope,
             model: turn.model,
             system: turn.system,
-            messages: turn.messages,
+            messages,
             context: turn.context,
             id_prefix: turn.id_prefix,
             sink,
@@ -407,6 +436,7 @@ impl<'a> Agent<'a> {
             spent: 0,
             request_size: 0,
             announced: (0, 0),
+            taint_recorded: false,
         };
         run.turn_start = run.messages.len() - 1;
         let end = run.drive();
@@ -503,6 +533,10 @@ impl Answer {
         Self { content: error.to_string(), is_error: true, class: Class::Failed, stopped: false }
     }
 
+    fn timed_out() -> Self {
+        Self { content: TIMED_OUT_RESULT.to_owned(), is_error: true, class: Class::Neutral, stopped: false }
+    }
+
     fn denied(call_id: &str) -> Self {
         Self { content: denied_result(call_id).content, is_error: true, class: Class::Neutral, stopped: false }
     }
@@ -547,6 +581,8 @@ struct Run<'r> {
     request_size: usize,
     /// The counts of the last `Trimmed` event, so an event is sent only when they change.
     announced: (u32, u32),
+    /// Whether what the turn already holds (context, earlier tool output) has been told to the approval table.
+    taint_recorded: bool,
 }
 
 impl Run<'_> {
@@ -597,6 +633,37 @@ impl Run<'_> {
         })
     }
 
+    /// Tells the approval table about the untrusted content the turn holds before its first card: approved context, a
+    /// context note in the history, and the output of every tool the history shows a result of.
+    fn record_taint(&self) -> Result<(), ToolError> {
+        let mut sources: Vec<TaintSource> = Vec::new();
+        let mut add = |source: TaintSource| {
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+        };
+        if self.context.iter().any(ApprovedContext::is_untrusted) {
+            add(TaintSource::Context);
+        }
+        let mut asked: HashMap<&str, &str> = HashMap::new();
+        for part in self.messages.iter().flat_map(|message| message.parts.iter()) {
+            match part {
+                Part::Context(_) => add(TaintSource::Context),
+                Part::ToolCall(call) => {
+                    asked.insert(call.id.as_str(), call.name.as_str());
+                }
+                Part::ToolResult(result) => {
+                    let tool = asked.get(result.call_id.as_str()).and_then(|name| ToolName::from_name(name));
+                    if let Some(tool) = tool {
+                        add(TaintSource::ToolOutput(tool));
+                    }
+                }
+                Part::Text { .. } => {}
+            }
+        }
+        sources.into_iter().try_for_each(|source| self.table.taint(&self.scope, source))
+    }
+
     fn drive(&mut self) -> TurnEnd {
         loop {
             match self.round() {
@@ -621,6 +688,16 @@ impl Run<'_> {
         let capabilities = provider.capabilities(&self.model);
         let tools = if capabilities.tools { specs(self.host, self.scope.pane) } else { Vec::new() };
         let declared: HashSet<String> = tools.iter().map(|tool| tool.name.clone()).collect();
+
+        // What the model already read steers what it asks for next, so the cards of this turn must show it. A turn that
+        // declares no tools has no cards.
+        if !declared.is_empty() && !self.taint_recorded {
+            if self.record_taint().is_err() {
+                let why = "the turn could not record what it has read, so it was not started";
+                return Next::End(TurnEnd::Failed(AiError::Policy(Detail::new(why))));
+            }
+            self.taint_recorded = true;
+        }
 
         let output_limit = self.output_limit(&capabilities);
         let mut request = ChatRequest::new(self.model.clone());
@@ -817,15 +894,45 @@ impl Run<'_> {
             Ok(pending) => pending,
             Err(error) => return Answer::refused(&error),
         };
+        let hash = pending.hash.clone();
         self.emit(AgentEvent::ToolProposed(pending));
-        match self.table.wait(&self.scope.conversation, &call.id, self.cancel) {
+        let (decision, timed_out) = self.wait_for_decision(&call.id, &hash);
+        match decision {
             Err(error) => Answer::refused(&error),
+            Ok(Decision::Deny) if timed_out => Answer::timed_out(),
             Ok(Decision::Deny) => Answer::denied(&call.id),
             Ok(_) => match self.table.run(self.host, &self.scope, &call.id, self.cancel) {
                 Ok(output) => Answer::success(output.into_text()),
                 Err(error) => Answer::refused(&error),
             },
         }
+    }
+
+    /// Waits for the user's decision on a card. A short-lived thread denies the card when nobody answered within the
+    /// approval timeout, so a forgotten card cannot park the turn thread for good. It is the only decision the loop
+    /// makes: it can deny, and it has no way to approve. The thread ends when the wait does, and the scope joins it
+    /// before this function returns; it needs no lock, no sleep and no polling.
+    fn wait_for_decision(&self, call_id: &str, hash: &str) -> (Result<Decision, ToolError>, bool) {
+        let table = self.table;
+        let conversation = self.scope.conversation.as_str();
+        let timeout = self.limits.approval_timeout;
+        let timed_out = AtomicBool::new(false);
+        let flag = &timed_out;
+        let decision = thread::scope(|scope| {
+            let (done, deadline) = mpsc::channel::<()>();
+            // Without the thread (the system refused to start one) the wait still ends with the user or the token.
+            let deadline_thread = thread::Builder::new().name("agent-approval-deadline".to_owned());
+            let _deadline = deadline_thread.spawn_scoped(scope, move || {
+                let lapsed = matches!(deadline.recv_timeout(timeout), Err(RecvTimeoutError::Timeout));
+                if lapsed && table.decide(conversation, call_id, Decision::Deny, hash).is_ok() {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            });
+            let decision = table.wait(conversation, call_id, self.cancel);
+            drop(done);
+            decision
+        });
+        (decision, timed_out.load(Ordering::SeqCst))
     }
 
     /// Passes the answer through the cleaning door, counts it, and tells the sink.
