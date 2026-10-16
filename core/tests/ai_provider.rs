@@ -624,3 +624,69 @@ fn an_ai_error_converts_into_the_crate_error() {
     assert!(matches!(error, holzwave_core::Error::Unsupported(_)), "{error:?}");
     assert!(error.to_string().starts_with("unsupported: ai: "), "{error}");
 }
+
+// ---- the module map ---------------------------------------------------------------------------------------------
+
+#[test]
+fn the_module_map_is_declared_and_the_main_types_are_reexported() {
+    // Every module of the AI core resolves.
+    #[allow(unused_imports)]
+    use holzwave_core::ai::{agent, gate, http, profiles, provider, redact, scripted, service, sse, store, tools, types, wire};
+    // The principal types resolve at the top of the module.
+    use holzwave_core::ai::{
+        AiError as ReAiError, ApiKey as ReApiKey, ApprovedContext, Capabilities, CancelToken as ReCancelToken, ChatRequest as ReChatRequest,
+        Collector as ReCollector, Completion as ReCompletion, ContextKind as ReContextKind, ContextOffer, ErrorClass as ReErrorClass,
+        Flow as ReFlow, Locality as ReLocality, Message as ReMessage, Opaque as ReOpaque, Part as RePart, Provider as ReProvider,
+        Role as ReRole, Script as ReScript, ScriptedProvider as ReScriptedProvider, Step, StopReason as ReStopReason,
+        StreamEvent as ReStreamEvent, ToolCall as ReToolCall, ToolResult as ReToolResult, ToolSpec as ReToolSpec, Usage as ReUsage,
+    };
+    use std::any::type_name;
+
+    let names = [
+        type_name::<ApprovedContext>(),
+        type_name::<ContextOffer>(),
+        type_name::<dyn ReProvider>(),
+        type_name::<Capabilities>(),
+        type_name::<Step>(),
+        type_name::<ReApiKey>(),
+        type_name::<ReAiError>(),
+        type_name::<ReCancelToken>(),
+        type_name::<ReChatRequest>(),
+        type_name::<ReCollector>(),
+        type_name::<ReCompletion>(),
+        type_name::<ReContextKind>(),
+        type_name::<ReErrorClass>(),
+        type_name::<ReFlow>(),
+        type_name::<ReLocality>(),
+        type_name::<ReMessage>(),
+        type_name::<ReOpaque>(),
+        type_name::<RePart>(),
+        type_name::<ReRole>(),
+        type_name::<ReScript>(),
+        type_name::<ReScriptedProvider>(),
+        type_name::<ReStopReason>(),
+        type_name::<ReStreamEvent>(),
+        type_name::<ReToolCall>(),
+        type_name::<ReToolResult>(),
+        type_name::<ReToolSpec>(),
+        type_name::<ReUsage>(),
+    ];
+    assert!(names.iter().all(|name| name.trim_start_matches("dyn ").starts_with("holzwave_core::ai::")), "{names:?}");
+
+    // A value built through the short paths drives a turn through the re-exported trait.
+    let provider: Arc<dyn ReProvider> = Arc::new(ReScriptedProvider::new("map").with_turn(ReScript::reply("ok")));
+    let mut text = String::new();
+    let result = provider.stream(
+        &ReChatRequest::new("m"),
+        &mut |event| {
+            if let ReStreamEvent::TextDelta(delta) = event {
+                text.push_str(&delta);
+            }
+            ReFlow::Continue
+        },
+        &ReCancelToken::new(),
+    );
+    assert!(result.is_ok());
+    assert_eq!(text, "ok");
+    assert!(ReLocality::Cloud.leaves_device() && ReLocality::Loopback.is_local());
+}

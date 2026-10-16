@@ -13,6 +13,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use super::gate::ApprovedContext;
 use super::types::{
     Capabilities, Message, MessageStatus, Opaque, Part, Role, Size, StopReason, ToolCall, ToolSpec, Usage, json_size,
 };
@@ -75,6 +76,9 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     /// The tools the model may call.
     pub tools: Vec<ToolSpec>,
+    /// Terminal context the user approved for the provider this request goes to. It is the only way private text
+    /// enters a request, and every item is named by exactly one [`Part::Context`] note in `messages`.
+    pub context: Vec<ApprovedContext>,
     /// The longest answer to ask for, in tokens.
     pub max_output_tokens: Option<u32>,
 }
@@ -87,8 +91,42 @@ impl ChatRequest {
             system: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            context: Vec::new(),
             max_output_tokens: None,
         }
+    }
+
+    /// The approved context whose hash (lower-case hex) is `hash`.
+    pub fn approved_for(&self, hash: &str) -> Option<&ApprovedContext> {
+        self.context.iter().find(|context| context.hash_hex() == hash)
+    }
+
+    /// Checks the consent a request carries against the provider it is about to go to.
+    ///
+    /// Every approved context must be bound to `provider_id`, must be unique, and must be named by exactly one
+    /// [`Part::Context`] note across the messages. A note with no approved context in this request is history from an
+    /// earlier turn and is fine: its text is not sent again. Anything else is [`AiError::Policy`].
+    pub fn check_consent(&self, provider_id: &str) -> Result<(), AiError> {
+        let refuse = |why: &str| Err(AiError::Policy(Detail::new(why)));
+        for (index, context) in self.context.iter().enumerate() {
+            if context.provider() != provider_id {
+                return refuse("an approved context belongs to another provider");
+            }
+            if self.context[..index].iter().any(|earlier| earlier.hash() == context.hash()) {
+                return refuse("the same context is approved twice");
+            }
+            let hash = context.hash_hex();
+            let named = self
+                .messages
+                .iter()
+                .flat_map(|message| message.parts.iter())
+                .filter(|part| matches!(part, Part::Context(note) if note.hash == hash))
+                .count();
+            if named != 1 {
+                return refuse("an approved context is not named by exactly one message");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -100,6 +138,7 @@ impl fmt::Debug for ChatRequest {
             .field("system", &Size(self.system.len()))
             .field("messages", &self.messages)
             .field("tools", &tools)
+            .field("context", &self.context)
             .field("max_output_tokens", &self.max_output_tokens)
             .finish()
     }
@@ -116,6 +155,13 @@ impl fmt::Debug for ChatRequest {
 /// - A stream that ends uncleanly is an error, never `Ok`.
 /// - `Completion::native` is the assistant turn verbatim.
 /// - The request is never logged or formatted.
+/// - The first statement is `req.check_consent(self.id())?`, so a context approved for another provider never reaches
+///   the network.
+///
+/// How an adapter renders a [`Part::Context`]: from the [`ApprovedContext`] that [`ChatRequest::approved_for`] returns
+/// for the note's hash, using its `envelope()`, which is the exact payload the user saw. When the request has none (the
+/// note is history), it renders one marker line built from the note's labels and byte counts, and never the note's
+/// `stored` text.
 pub trait Provider: Send + Sync {
     /// A stable id for the provider, the one a context is approved for.
     fn id(&self) -> &str;

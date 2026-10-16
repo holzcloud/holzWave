@@ -219,6 +219,7 @@ impl Provider for ScriptedProvider {
         if cancel.is_cancelled() {
             return Err(AiError::Cancelled);
         }
+        req.check_consent(&self.id)?;
         lock(&self.requests).push(req.clone());
         let script = lock(&self.turns)
             .pop_front()
