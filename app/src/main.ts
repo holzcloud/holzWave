@@ -6,7 +6,8 @@
 // state, geometry. This file only starts them.
 // Every window runs this same page; it listens with its own label (bridge) and says `window_ready` when it has drawn.
 import { call, listen } from "./bridge.js";
-import { initBlocks } from "./blocks.js";
+import { initBlocks, openBlock } from "./blocks.js";
+import { initChat } from "./chat.js";
 import { initChrome } from "./chrome.js";
 import { initConnections } from "./connections.js";
 import { initSync } from "./sync.js";
@@ -57,6 +58,8 @@ async function main() {
   }, () => void openConnections());
   // Encrypted sync: the state on the title bar and its popover.
   await initSync(() => {});
+  // The AI chat: its title-bar button lands between the sync button and the sidebar button.
+  await initChat(openBlock);
   initHistory();
   await initSidebar();
   initCopyMode(renderStatus);

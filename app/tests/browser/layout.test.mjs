@@ -67,7 +67,7 @@ const canvasOrigin = (page) =>
 async function barCase(page, url) {
   await open(page, url);
   await showView(page, BAR_VIEW);
-  const labels = () => page.locator("#bar button:not(.close):not(.sync-btn):not(.sidebar-btn)").allTextContents(); // the × buttons have no text
+  const labels = () => page.locator("#bar button:not(.close):not(.sync-btn):not(.ai-btn):not(.sidebar-btn)").allTextContents(); // the × buttons have no text
   assert.deepEqual(
     await labels(),
     ["alpha", "beta", "+", "1 one", "2 two", "3 three", "+"],

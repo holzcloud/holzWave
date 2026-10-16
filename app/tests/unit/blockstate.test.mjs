@@ -2,8 +2,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  baseName, blockContext, blockTitle, entryIcon, humanSize, joinPath, paneBlocks, readBlocks, readListing,
-  setPaneBlocks, shortDate, visibleEntries,
+  baseName, blockContext, blockTitle, chatTitles, entryIcon, humanSize, joinPath, paneBlocks, readBlocks, readListing,
+  setChatTitle, setPaneBlocks, shortDate, visibleEntries,
 } from "../../dist/blockstate.js";
 
 test("the list of blocks is read entry by entry and what is not well formed is dropped", () => {
@@ -38,11 +38,35 @@ test("a chat block is read with its conversation id and a bad id drops only that
 });
 
 test("a chat block has the words of a chat", () => {
+  chatTitles.clear();
   assert.equal(blockTitle(CHAT), "chat");
-  assert.equal(blockContext(CHAT), "This computer");
+  assert.equal(blockContext(CHAT), "new chat", "a chat with no title yet says so");
   const monitor = { pane: 2, kind: "monitor", source: "local", path: "", source_label: "This computer" };
   assert.equal(blockTitle(monitor), "system");
   assert.equal(blockContext(monitor), "local \u00b7 1 s");
+});
+
+test("a chat block shows the title of its chat", () => {
+  chatTitles.clear();
+  assert.equal(blockContext(CHAT), "new chat");
+  assert.equal(setChatTitle("chat-golden", "Why is talos-3 NotReady?"), true, "a new title is a change");
+  assert.equal(blockContext(CHAT), "Why is talos-3 NotReady?");
+  assert.equal(setChatTitle("chat-golden", "Why is talos-3 NotReady?"), false, "the same title is no change");
+  assert.equal(blockTitle(CHAT), "chat", "the title word of the header stays");
+  // A title is cut at 120 characters and loses control characters.
+  setChatTitle("chat-golden", `a\u0000b${"x".repeat(200)}`);
+  const cut = blockContext(CHAT);
+  assert.equal(Array.from(cut).length, 120);
+  assert.ok(cut.startsWith("ab"), "the control character is gone");
+  // An empty title puts `new chat` back and the entry is removed.
+  assert.equal(setChatTitle("chat-golden", ""), true);
+  assert.equal(blockContext(CHAT), "new chat");
+  assert.equal(chatTitles.has("chat-golden"), false);
+  // The other kinds keep their words.
+  const monitor = { pane: 2, kind: "monitor", source: "local", path: "", source_label: "This computer" };
+  const files = { pane: 3, kind: "files", source: "local", path: "/home", source_label: "This computer" };
+  assert.equal(blockContext(monitor), "local \u00b7 1 s");
+  assert.equal(blockContext(files), "This computer \u00b7 /home");
 });
 
 test("the same answer twice is no change", () => {

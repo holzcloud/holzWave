@@ -69,6 +69,7 @@ colour meets 4.5:1 on the background except black, which exists for use as a *ba
 | Labels (status bar, section tags) | JetBrains Mono, uppercase, tracked `.1em` | 11 px | 500 |
 | Terminal | JetBrains Mono | 14 px (user setting) | 400 / 700 |
 | Preview body | Manrope | 14 to 15 px, line height 1.6 | 400 |
+| Chat text | Manrope | 13 px, line height 1.55 (code and fenced blocks stay mono) | 400 |
 
 Fonts are bundled with the app, never fetched at runtime. The terminal font is a setting; ligatures are off by
 default.
@@ -94,6 +95,7 @@ default.
 | Status bar | mono labels, uppercase: version, renderer, pane count, workspace |
 | Overlays | command palette, theme picker, connection manager: 24 px radius, the only elements with a shadow |
 | Empty state | the logo's plank with one line of text; no illustrations |
+| Chat pane | a pane of its own kind (6.12): header `chat`, a bar with the provider chip, a transcript, a status line and a composer; flat and hairline, the only shadow is the provider sheet on a phone |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
 No motion in the terminal grid itself. `prefers-reduced-motion` removes all transitions.
@@ -192,8 +194,9 @@ the sidebar and the status line.
 | Sidebar (216 px, collapsible) | **Hosts** (state dot, protocol, reconnect counter), **Context** (Kubernetes context and namespace, Azure subscription, GAM profile), **History** (fuzzy search), **Widgets** |
 | Status line (24 px) | tmux-style segments: workspace (solid), tabs and panes, Kubernetes context, Azure subscription, git branch, SSH count, sync state, renderer, encoding, version |
 
-The sidebar and the AI chat share one column: opening the chat replaces the sidebar. Every segment of the status line
-and every title-bar button opens the matching popover or dialog.
+The AI chat is a pane (6.12). Its second form, in the sidebar's column, replaces the sidebar when it is opened and comes
+with the sidebar section of the chat. Every segment of the status line and every title-bar button opens the matching
+popover or dialog.
 
 ### 6.3 Views
 
@@ -346,3 +349,77 @@ hidden at first and remembers whether it was shown. Sections, each under a `.lab
   ([config.md](config.md)), and a file that is not valid is left out with its reason shown in the sidebar.
 
 The **Context** section (Kubernetes, Azure, GAM) is drawn with the integrations, not before.
+
+### 6.12 AI chat
+
+The chat is a pane of its own kind, like the file browser and the monitor: it fills a tile below a pane header, it is
+opened next to the focused pane, and it is closed like any pane. Nothing in the chat is a floating layer except the
+provider sheet on a narrow screen.
+
+**Opening.** The title-bar button `✦ AI`, the palette entries `AI chat` and `New AI chat`, and the chord of `ai.open`
+(`Cmd+Shift+A` on macOS, `Ctrl+Shift+A` on Windows and Linux) open a chat as a pane. `ai.open` focuses the chat pane of
+the shown tab when there is one and otherwise splits the focused pane to the right with a new chat; `ai.new_chat` (no
+default chord) always starts a new conversation in a new pane. The button is pressed (rose wash and rose border, as
+`▥ Sidebar`, with `aria-pressed`) while the shown tab has a chat pane. The sidebar form of the chat, which replaces the
+sidebar when it is opened, comes with the sidebar section of the chat.
+
+**Header.** Type icon `✦`, title `chat`, and right-aligned in mono the chat's title (the first line of the first message,
+at most 60 characters) or `new chat` before there is one.
+
+**Parts.** Top to bottom, separated by hairlines: the bar, the provider picker (only while open), the transcript, the
+status line and the composer.
+
+- **Bar.** On the left the provider chip in mono, the profile name and the model (`Local · llama3.2`), then `→` and the
+  host the request goes to. After it the place word as a small chip: `on device`, `this computer`, `local network` or
+  `cloud`; `local network` and `cloud` are in the warn colour, and the word is the cue. The place word is shown only once
+  a turn has told it, from the core's route, and is never guessed from a name, a preset or an address. At the right end
+  the tokens of the last turn (`in 1.2k · out 340`). With one saved profile the chip is plain text; with two or more it
+  is a button (`aria-haspopup`, `aria-expanded`); with none it reads `no provider set up` and is not a button.
+- **Picker.** A radio group under the bar, flat and hairline (a bottom sheet at 640 px and narrower). One row per
+  profile: `●` or `○`, the name, the model and the host. The chosen row has the rose wash and a 2 px rose bar on its left
+  and `aria-checked`. The arrows move and choose; `Enter`, `Space` and `Escape` close it. With two or more profiles and
+  no pin or choice nothing is sent: the first send opens the picker and says `Choose a provider first.`
+- **Transcript.** `role="log"`, not live, focusable, and a text field of the page (it keeps its own keys). Each message
+  has a label row (`YOU`, `ASSISTANT`, in the `.label` style) and its text in Manrope 13 px, line height 1.55. A user
+  message has a 2 px hairline bar on its left. The assistant text is Markdown once the message is finished and plain
+  text while it streams. A message that did not complete says `stopped`, `failed` or `interrupted` after the role (warn
+  colour, underlined). While a reply streams the label says `ASSISTANT · thinking` (only reasoning so far) or
+  `ASSISTANT · writing`. Reasoning text is not shown. Tool, context and approval parts draw nothing.
+- **End row.** A turn that failed or was cut by a limit has one row with the mark `!`, the class in words and the core's
+  one-line text (`! FAILED · overload  The provider is overloaded.`); a limit reads `! STOPPED · step limit`. The danger
+  colour and the words are two cues.
+- **Status line.** One line, `role="status"`: `working`, `thinking`, `writing`, `stopping`, a refused send in the core's
+  words, and after a turn `reply finished`, `reply stopped` or `reply failed`. It clears when the user types.
+- **Composer.** A multi-line field (1 to 8 rows) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
+  that becomes `Stop` (hairline) while a turn runs. Below the field, left: `≈ 12 tokens` (UTF-8 bytes divided by 3,
+  rounded up, the rule of the core) and the keys `⏎ send · ⇧⏎ new line · Esc stop`; right: the button. Over 131072 bytes
+  the count reads `too long · 131074 of 131072 bytes` (warn, underlined) and `Send` is disabled.
+
+**States and their second cue.**
+
+| State | Colour | Second cue |
+|---|---|---|
+| streaming reply | none | label `ASSISTANT · writing`, status `writing`, button `Stop` |
+| stopped reply | warn | label word `stopped` (underlined), status `reply stopped` |
+| failed turn | danger | end row with `!` and `FAILED · class`, status `reply failed` |
+| cut by a limit | danger | end row with `!` and `STOPPED · step limit` |
+| request leaves the computer | warn | the place word `local network` or `cloud` |
+| draft too long | warn | `too long · N of 131072 bytes` underlined, `Send` disabled |
+| chosen provider | rose wash | `●` instead of `○`, 2 px bar, `aria-checked` |
+
+**Markdown.** The preview's allow-list. `code` and fenced blocks are mono. No image is ever loaded or shown. A link opens
+in the system browser by a click only and shows its address as its tooltip. A link whose address carries a query string or
+a user name is not a link: it is text followed by the address in brackets.
+
+**Keys and focus.** Opening a chat focuses the composer, and so does the pane gaining the focus. `Enter` sends (not while
+an input method composes), `Shift+Enter` makes a new line, and `Escape` stops a running reply and otherwise gives the
+keyboard back to the terminal. The transcript can be focused; the arrows scroll it and `Cmd+C` copies the selected text.
+Closing the pane stops a running reply.
+
+**Narrow screens (640 px and narrower).** The pane is the screen. `Send`, the chip, the picker rows and the composer are at
+least 44 px high, and the composer text is at least 16 px. The picker is a sheet from the bottom edge (24 px radius on
+top, a hairline) and carries the only shadow of the chat.
+
+**Accessibility.** The chip's `aria-label` says where the request goes. The picker is a `radiogroup`. Nothing moves, so
+`motion-reduce` has nothing to remove. Every hairline is `--hw-line`, so `contrast-high` holds. Under forced colours the
+chosen row and the chip get a system-colour outline.

@@ -7,6 +7,7 @@
 // modifier stays with the shortcuts.
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
+import { mountChat } from "./chat.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { bar, bytes, memory, rate, readSample, uptime } from "./monitorstate.js";
 import type { MonSample } from "./monitorstate.js";
@@ -69,9 +70,9 @@ export async function refreshBlocks(): Promise<void> {
   }
 }
 
-/** Open a file browser (`files`) or a preview (`preview`) in a new tab or beside the focused pane. */
+/** Open a file browser (`files`), a preview (`preview`), the monitor or a chat in a new tab or beside the focused pane. */
 export async function openBlock(
-  kind: "files" | "preview" | "monitor",
+  kind: "files" | "preview" | "monitor" | "chat",
   source: string,
   path: string,
   placement: "tab" | "right" | "down",
@@ -614,6 +615,39 @@ function monitorBlock(info: BlockInfo, root: HTMLElement): Instance {
   };
 }
 
+// ---- the AI chat -------------------------------------------------------------------------------------------------
+
+/** A chat in a pane: the chat module draws it into the block's root and acts for this pane. */
+function chatBlock(info: BlockInfo, root: HTMLElement): Instance {
+  root.classList.add("block-chat");
+  let current = info;
+  // The pane that has the focus when the chat is drawn is not "gaining" it: a mount never takes the keyboard by itself.
+  let focused = state.view?.focus === info.pane;
+  const view = mountChat(root, info.path, { pane: () => current.pane });
+  return {
+    pane: info.pane,
+    root,
+    get info() {
+      return current;
+    },
+    update(next) {
+      const moved = next.path !== current.path;
+      current = next;
+      if (moved) view.show(next.path);
+      const now = state.view?.focus === next.pane;
+      if (now && !focused) view.focus();
+      focused = now;
+    },
+    key() {
+      return false;
+    },
+    dispose() {
+      view.dispose();
+      root.replaceChildren();
+    },
+  };
+}
+
 // ---- placing the blocks ------------------------------------------------------------------------------------------
 
 /** Bring the drawn blocks in line with the view: one per visible block pane, over the pane below its header. */
@@ -646,7 +680,14 @@ function renderBlocks(): void {
         // The editor keeps the focus it is given; anything else gives it to the terminal input.
         if (!(ev.target instanceof Element && ev.target.closest("[data-field]"))) focusInput();
       });
-      inst = info.kind === "files" ? filesBlock(info, root) : info.kind === "monitor" ? monitorBlock(info, root) : previewBlock(info, root);
+      inst =
+        info.kind === "files"
+          ? filesBlock(info, root)
+          : info.kind === "monitor"
+            ? monitorBlock(info, root)
+            : info.kind === "chat"
+              ? chatBlock(info, root)
+              : previewBlock(info, root);
       instances.set(id, inst);
     } else {
       inst.update(info);

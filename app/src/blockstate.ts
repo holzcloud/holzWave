@@ -165,18 +165,37 @@ export function shortDate(secs: number | null, now: Date = new Date()): string {
 }
 
 /**
- * The title of a block pane's header. The words of a chat block (`chat` here, its source label in `blockContext`) are
- * the ones its header shows until the chat view draws it; the core refuses more ids than `readBlocks` does.
+ * The title of a block pane's header. A chat block's title is `chat`; its context is the chat's own title (`blockContext`).
  */
 export function blockTitle(b: BlockInfo): string {
   if (b.kind === "chat") return "chat";
   return b.kind === "files" ? "files" : b.kind === "monitor" ? "system" : baseName(b.path);
 }
 
+/** The most characters of a chat's title the header keeps. */
+const CHAT_TITLE_MAX = 120;
+
+/** The title of each chat that has one, by conversation id; the chat view fills it and the pane header reads it. */
+export const chatTitles = new Map<string, string>();
+
+/**
+ * Remember the title of a chat for its pane header: control characters are removed and the text is cut at 120
+ * characters; an empty title puts the words `new chat` back. True when the stored title changed.
+ */
+export function setChatTitle(conversation: string, title: string): boolean {
+  const clean = Array.from(title.replace(/[\p{Cc}\u{202A}-\u{202E}\u{2066}-\u{2069}]/gu, ""))
+    .slice(0, CHAT_TITLE_MAX)
+    .join("");
+  const before = chatTitles.get(conversation) ?? "";
+  if (clean === "") chatTitles.delete(conversation);
+  else chatTitles.set(conversation, clean);
+  return clean !== before;
+}
+
 /** The context of a block pane's header: where it reads from, and for a browser the folder. */
 export function blockContext(b: BlockInfo): string {
   if (b.kind === "monitor") return "local · 1 s";
-  if (b.kind === "chat") return b.source_label;
+  if (b.kind === "chat") return chatTitles.get(b.path) ?? "new chat";
   return b.kind === "files" ? `${b.source_label} · ${b.path}` : `${b.source_label} · preview`;
 }
 
