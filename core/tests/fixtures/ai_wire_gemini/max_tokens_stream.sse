@@ -1,0 +1,2 @@
+data: {"candidates":[{"finishReason":"MAX_TOKENS","index":0}],"usageMetadata":{"promptTokenCount":30,"thoughtsTokenCount":8190,"totalTokenCount":8220}}
+

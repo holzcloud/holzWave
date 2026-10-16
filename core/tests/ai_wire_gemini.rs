@@ -12,13 +12,14 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::fake_http::{FakeHttp, Reply};
+use common::fake_http::{Ending, FakeHttp, Reply};
 use holzwave_core::ai::gate::{ApprovedContext, Destination, Gate, OfferRequest, RequestItem};
-use holzwave_core::ai::http::{Http, HttpConfig, NetworkPolicy, RetryPolicy, SecretHeader, Target};
+use holzwave_core::ai::http::{Frame, Http, HttpConfig, NetworkPolicy, Rejection, RetryPolicy, SecretHeader, Target};
 use holzwave_core::ai::provider::{
-    AiError, CancelToken, ChatRequest, Collector, Completion, ErrorClass, Provider, StreamEvent,
+    AiError, CancelToken, ChatRequest, Collector, Completion, ErrorClass, Flow, Provider, StreamEvent,
 };
 use holzwave_core::ai::redact::SourceText;
+use holzwave_core::ai::sse::{Limits, SseDecoder};
 use holzwave_core::ai::types::{
     ApiKey, Consent, ContextKind, ContextNote, Locality, Message, MessageStatus, NoteItem, Opaque, Part, Role,
     StopReason, ToolCall, ToolResult, ToolSpec, Usage,
@@ -57,6 +58,13 @@ fn fixture(name: &str) -> Vec<u8> {
     let bytes: &[u8] = match name {
         "text_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/text_stream.sse"),
         "tool_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/tool_stream.sse"),
+        "parallel_tools_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/parallel_tools_stream.sse"),
+        "thinking_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/thinking_stream.sse"),
+        "max_tokens_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/max_tokens_stream.sse"),
+        "blocked_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/blocked_stream.sse"),
+        "error_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/error_stream.sse"),
+        "unknown_fields_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/unknown_fields_stream.sse"),
+        "safety_stream.sse" => include_bytes!("fixtures/ai_wire_gemini/safety_stream.sse"),
         other => panic!("no fixture called {other}"),
     };
     lf(bytes)
@@ -1281,4 +1289,915 @@ fn the_request_is_a_pure_function_of_its_inputs() {
     assert_eq!(first.path, other.path);
     assert_eq!(first.body, other.body, "a second adapter gives the same bytes");
     assert_eq!(fake.accepted(), 0, "building a request opens no connection");
+}
+
+// ---- the stream: a driver without a socket ----------------------------------------------------------------
+
+/// What one stream delivered when it was driven without a socket.
+struct Driven {
+    log: Vec<String>,
+    calls: Vec<ToolCall>,
+    result: Result<Completion, AiError>,
+}
+
+impl Driven {
+    fn completion(&self) -> &Completion {
+        self.result.as_ref().unwrap_or_else(|error| panic!("the stream failed: {error:?} after {:?}", self.log))
+    }
+
+    fn error(&self) -> &AiError {
+        self.result.as_ref().expect_err("the stream should have failed")
+    }
+
+    fn text(&self) -> String {
+        self.log.iter().filter_map(|entry| entry.strip_prefix("text:")).collect()
+    }
+
+    fn native_parts(&self) -> Value {
+        self.completion().native.as_ref().expect("a native turn").json["parts"].clone()
+    }
+}
+
+/// Does what the chokepoint's pump does, without a socket: a fresh turn, a decoder, every chunk pushed, each decoded
+/// event handed to the turn, the first error remembered and answered with a stop, then the verdicts of both.
+fn drive_with(chunks: &[Vec<u8>], limits: Limits) -> Driven {
+    let mut turn = GeminiAdapter::new().turn();
+    let mut decoder = SseDecoder::with_limits(limits);
+    let mut log = Vec::new();
+    let mut calls = Vec::new();
+    let mut out = |event: StreamEvent| {
+        log.push(log_entry(&event));
+        if let StreamEvent::ToolCall(call) = event {
+            calls.push(call);
+        }
+        Flow::Continue
+    };
+    let mut failure: Option<AiError> = None;
+    for chunk in chunks {
+        let pushed = decoder.push(chunk, &mut |event| match turn.frame(Frame::Event(event), &mut out) {
+            Ok(flow) => flow,
+            Err(error) => {
+                failure.get_or_insert(error);
+                Flow::Stop
+            }
+        });
+        match pushed {
+            Ok(Flow::Continue) => {}
+            Ok(Flow::Stop) => break,
+            Err(error) => {
+                failure.get_or_insert(AiError::from(error));
+                break;
+            }
+        }
+    }
+    let end = decoder.finish();
+    let result = match failure {
+        Some(error) => Err(error),
+        None => turn.finish(end, &mut out),
+    };
+    Driven { log, calls, result }
+}
+
+fn drive(chunks: &[Vec<u8>]) -> Driven {
+    drive_with(chunks, Limits::DEFAULT)
+}
+
+fn drive_whole(bytes: &[u8]) -> Driven {
+    drive(&[bytes.to_vec()])
+}
+
+/// The outcome of a driven stream as one string, so a comparison failure prints both sides.
+fn summary(driven: &Driven) -> String {
+    let calls: Vec<String> = driven
+        .calls
+        .iter()
+        .map(|call| {
+            format!("{}:{}:{}", if call.id.starts_with("call_") { "<minted>" } else { &call.id }, call.name, call.args)
+        })
+        .collect();
+    let outcome = match &driven.result {
+        Ok(completion) => format!(
+            "ok {:?} usage {}/{} native {}",
+            completion.stop_reason,
+            completion.usage.input_tokens,
+            completion.usage.output_tokens,
+            completion.native.as_ref().map_or_else(|| "none".to_owned(), |native| native.json.to_string())
+        ),
+        Err(error) => format!("err {} | {error}", error.class().as_str()),
+    };
+    format!("{:?} calls {calls:?} => {outcome}", driven.log)
+}
+
+/// `bytes` with every line feed turned into a carriage return and a line feed.
+fn crlf(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + bytes.len() / 8);
+    for &byte in bytes {
+        if byte == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(byte);
+    }
+    out
+}
+
+/// One event whose data is `json`.
+fn event_of(json: &str) -> Vec<u8> {
+    format!("data: {json}\n\n").into_bytes()
+}
+
+/// One candidate with the given parts and finish reason, as an event.
+fn parts_event(parts: &str, finish: Option<&str>) -> Vec<u8> {
+    let finish = finish.map_or_else(String::new, |reason| format!(r#","finishReason":"{reason}""#));
+    event_of(&format!(r#"{{"candidates":[{{"content":{{"parts":{parts},"role":"model"}}{finish},"index":0}}]}}"#))
+}
+
+/// Several events as one stream.
+fn stream_of(events: &[Vec<u8>]) -> Vec<u8> {
+    events.concat()
+}
+
+const GOLDEN: [&str; 9] = [
+    "text_stream.sse",
+    "tool_stream.sse",
+    "parallel_tools_stream.sse",
+    "thinking_stream.sse",
+    "max_tokens_stream.sse",
+    "blocked_stream.sse",
+    "error_stream.sse",
+    "unknown_fields_stream.sse",
+    "safety_stream.sse",
+];
+
+const THINKING_SIGNATURE: &str = "dHJhaWxpbmctZml4dHVyZS1zaWduYXR1cmUtMDAwMy1ub3QtYS1jcmVkZW50aWFs";
+
+// ---- the stream: goldens and splits -----------------------------------------------------------------------
+
+#[test]
+fn every_golden_stream_decodes_the_same_at_every_split_point() {
+    let mut split_points = 0;
+    let mut runs = 0;
+    for name in GOLDEN {
+        let written = fixture(name);
+        let expected = summary(&drive_whole(&written));
+        for (form, bytes) in [("as written", written.clone()), ("with CRLF", crlf(&written))] {
+            assert_eq!(summary(&drive_whole(&bytes)), expected, "{name} {form}, unsplit");
+            for offset in 1..bytes.len() {
+                let got = summary(&drive(&[bytes[..offset].to_vec(), bytes[offset..].to_vec()]));
+                assert_eq!(got, expected, "{name} {form}, split at offset {offset}");
+                split_points += 1;
+            }
+            for size in [1, 2, 3, 7, 64] {
+                let chunks: Vec<Vec<u8>> = bytes.chunks(size).map(<[u8]>::to_vec).collect();
+                assert_eq!(summary(&drive(&chunks)), expected, "{name} {form}, chunks of {size} bytes");
+                runs += 1;
+            }
+        }
+    }
+    println!(
+        "split property: {} fixtures, 2 forms (LF, CRLF), {split_points} single-offset splits, {runs} chunked runs of 1, 2, 3, 7 and 64 bytes",
+        GOLDEN.len()
+    );
+}
+
+#[test]
+fn golden_streams_decode_to_the_expected_events_usage_and_native_turn() {
+    let unicode = "lo \u{e9} \u{65e5}\u{672c} \u{1f600}";
+
+    let text = drive_whole(&fixture("text_stream.sse"));
+    assert_eq!(text.log, vec!["text:Hel", "usage:9/0", &format!("text:{unicode}"), "usage:9/4", "text:!", "usage:9/5"]);
+    assert_eq!(text.completion().stop_reason, StopReason::EndTurn);
+    assert_eq!(text.native_parts(), json!([{ "text": format!("Hel{unicode}!") }]));
+
+    let tool = drive_whole(&fixture("tool_stream.sse"));
+    assert_eq!(tool.log, vec!["text:I will read the file.", "usage:42/0", "usage:42/68", "call:read_file"]);
+    assert_eq!(tool.completion().stop_reason, StopReason::ToolUse);
+    assert_eq!(tool.calls.len(), 1);
+    assert!(tool.calls[0].id.starts_with("call_"), "the server sent no id");
+    assert_eq!(
+        tool.native_parts(),
+        json!([
+            { "text": "I will read the file." },
+            { "functionCall": { "name": "read_file", "args": { "path": "notes/a b.txt" } }, "thoughtSignature": TOOL_SIGNATURE },
+        ])
+    );
+
+    let parallel = drive_whole(&fixture("parallel_tools_stream.sse"));
+    assert_eq!(parallel.log, vec!["usage:50/20", "usage:50/50", "call:read_file", "call:list_dir"]);
+    assert_eq!(parallel.completion().stop_reason, StopReason::ToolUse);
+    assert_eq!(parallel.calls[0].args, json!({ "path": "a.txt" }));
+    assert_eq!(parallel.calls[1].args, json!({ "path": "." }));
+    assert_ne!(parallel.calls[0].id, parallel.calls[1].id, "each call has its own id");
+    assert_eq!(
+        parallel.native_parts(),
+        json!([
+            { "functionCall": { "name": "read_file", "args": { "path": "a.txt" } }, "thoughtSignature": TOOL_SIGNATURE },
+            { "functionCall": { "name": "list_dir", "args": { "path": "." } } },
+        ]),
+        "the two call parts in order, only the first with a signature"
+    );
+
+    let thinking = drive_whole(&fixture("thinking_stream.sse"));
+    assert_eq!(
+        thinking.log,
+        vec!["reasoning:Weighing the options.", "usage:12/0", "text:The answer ", "text:is four.", "usage:12/46"]
+    );
+    assert_eq!(thinking.text(), "The answer is four.");
+    assert_eq!(thinking.completion().stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        thinking.native_parts(),
+        json!([
+            { "text": "Weighing the options.", "thought": true },
+            { "text": "The answer is four." },
+            { "text": "", "thoughtSignature": THINKING_SIGNATURE },
+        ]),
+        "the plain parts are joined, the part with a signature never is"
+    );
+
+    let max_tokens = drive_whole(&fixture("max_tokens_stream.sse"));
+    assert_eq!(max_tokens.log, vec!["usage:30/8190"]);
+    assert_eq!(max_tokens.completion().stop_reason, StopReason::MaxTokens);
+    assert!(max_tokens.completion().native.is_none(), "no parts, no native turn");
+
+    let blocked = drive_whole(&fixture("blocked_stream.sse"));
+    assert!(matches!(blocked.error(), AiError::ContentFilter), "{:?}", blocked.error());
+    assert_eq!(blocked.error().class(), ErrorClass::ContentFilter);
+
+    let failed = drive_whole(&fixture("error_stream.sse"));
+    assert_eq!(failed.log, vec!["text:Partial "]);
+    assert!(matches!(failed.error(), AiError::Overloaded), "{:?}", failed.error());
+    let shown = format!("{} {:?}", failed.error(), failed.error());
+    assert!(!shown.contains("FIXTURE-SERVER-TEXT"), "the server's text reached the error: {shown}");
+
+    let unknown = drive_whole(&fixture("unknown_fields_stream.sse"));
+    assert_eq!(unknown.log, vec!["text:Hi", "usage:5/0", "text: there", "usage:5/3"]);
+    assert_eq!(unknown.text(), "Hi there");
+    assert_eq!(unknown.completion().stop_reason, StopReason::EndTurn);
+    assert_eq!(unknown.completion().usage, Usage { input_tokens: 5, output_tokens: 3 });
+    assert_eq!(unknown.native_parts(), json!([{ "text": "Hi there" }]), "unknown keys are not stored");
+
+    let safety = drive_whole(&fixture("safety_stream.sse"));
+    assert_eq!(safety.log, vec!["text:I can start, but", "usage:9/5"]);
+    assert_eq!(safety.completion().stop_reason, StopReason::Refusal);
+    assert_eq!(safety.native_parts(), json!([{ "text": "I can start, but" }]));
+}
+
+// ---- the stream: finish reasons and calls -----------------------------------------------------------------
+
+/// How a finished turn is expected to look: a stop reason, or an error class.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Want {
+    Stop(StopReason),
+    Fail(ErrorClass),
+}
+
+fn outcome(driven: &Driven) -> Want {
+    match &driven.result {
+        Ok(completion) => Want::Stop(completion.stop_reason),
+        Err(error) => Want::Fail(error.class()),
+    }
+}
+
+#[test]
+fn finish_reasons_map_to_stable_stop_reasons_and_errors() {
+    use ErrorClass::{InvalidRequest, Protocol};
+    use StopReason::{EndTurn, MaxTokens, Other, Refusal, ToolUse};
+    let mut rows: Vec<(Option<&str>, Want, Want)> = vec![
+        (Some("STOP"), Want::Stop(EndTurn), Want::Stop(ToolUse)),
+        (Some("MAX_TOKENS"), Want::Stop(MaxTokens), Want::Fail(Protocol)),
+        (Some("CONTINUATION"), Want::Stop(MaxTokens), Want::Fail(Protocol)),
+        (Some("OTHER"), Want::Stop(Other), Want::Fail(Protocol)),
+        (Some("A_REASON_FROM_THE_FUTURE"), Want::Stop(Other), Want::Fail(Protocol)),
+        (Some("MALFORMED_FUNCTION_CALL"), Want::Fail(Protocol), Want::Fail(Protocol)),
+        (Some("UNEXPECTED_TOOL_CALL"), Want::Fail(Protocol), Want::Fail(Protocol)),
+        (Some("TOO_MANY_TOOL_CALLS"), Want::Fail(Protocol), Want::Fail(Protocol)),
+        (Some("MALFORMED_RESPONSE"), Want::Fail(Protocol), Want::Fail(Protocol)),
+        (Some("MISSING_THOUGHT_SIGNATURE"), Want::Fail(InvalidRequest), Want::Fail(InvalidRequest)),
+        (Some("FINISH_REASON_UNSPECIFIED"), Want::Fail(Protocol), Want::Fail(Protocol)),
+        (Some(""), Want::Fail(Protocol), Want::Fail(Protocol)),
+        (None, Want::Fail(Protocol), Want::Fail(Protocol)),
+    ];
+    for reason in
+        ["SAFETY", "RECITATION", "LANGUAGE", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "ESCALATION"]
+    {
+        rows.push((Some(reason), Want::Stop(Refusal), Want::Fail(Protocol)));
+    }
+    for (reason, plain, with_call) in rows {
+        let text = drive_whole(&parts_event(r#"[{"text":"hi"}]"#, reason));
+        assert_eq!(outcome(&text), plain, "reason {reason:?} without a call: {}", summary(&text));
+        let call = drive_whole(&parts_event(r#"[{"functionCall":{"name":"read_file","args":{"path":"a"}}}]"#, reason));
+        assert_eq!(outcome(&call), with_call, "reason {reason:?} with a call: {}", summary(&call));
+        if matches!(with_call, Want::Fail(_)) {
+            assert!(
+                call.calls.is_empty() && !call.log.iter().any(|entry| entry.starts_with("call:")),
+                "{reason:?}: a call ran"
+            );
+        } else {
+            assert_eq!(call.calls.len(), 1, "{reason:?}: the call is released once");
+        }
+    }
+    // The errors name no server text and are stable.
+    let missing = drive_whole(&parts_event(r#"[{"text":"hi"}]"#, Some("MISSING_THOUGHT_SIGNATURE")));
+    assert!(matches!(missing.error(), AiError::InvalidRequest(_)));
+}
+
+#[test]
+fn tool_calls_are_released_only_after_a_clean_stop() {
+    for (name, expected_calls) in [("tool_stream.sse", 1), ("parallel_tools_stream.sse", 2)] {
+        let bytes = fixture(name);
+        for cut in 0..bytes.len() {
+            let driven = drive_whole(&bytes[..cut]);
+            assert!(driven.calls.is_empty(), "{name} cut at byte {cut}: a call was released");
+            assert!(
+                !driven.log.iter().any(|entry| entry.starts_with("call:")),
+                "{name} cut at byte {cut}: a call event"
+            );
+            assert!(driven.result.is_err(), "{name} cut at byte {cut}: a cut stream ended well");
+        }
+        let whole = drive_whole(&bytes);
+        assert_eq!(whole.calls.len(), expected_calls, "{name}: the whole stream releases its calls once");
+        assert_eq!(
+            whole.log.iter().filter(|entry| entry.starts_with("call:")).count(),
+            expected_calls,
+            "{name}: each call is delivered once"
+        );
+        let tail = &whole.log[whole.log.len() - expected_calls..];
+        assert!(tail.iter().all(|entry| entry.starts_with("call:")), "{name}: the calls come last: {:?}", whole.log);
+    }
+
+    // A call event followed by a clean end and no finish reason releases nothing.
+    let no_finish = drive_whole(&parts_event(r#"[{"functionCall":{"name":"read_file","args":{}}}]"#, None));
+    assert!(no_finish.calls.is_empty());
+    assert!(matches!(no_finish.error(), AiError::Protocol(_)), "{:?}", no_finish.error());
+}
+
+#[test]
+fn a_blocked_prompt_is_a_content_filter_error() {
+    let blocked = drive_whole(&fixture("blocked_stream.sse"));
+    assert!(matches!(blocked.error(), AiError::ContentFilter));
+
+    // The unspecified value and an empty one are not a block.
+    for reason in ["BLOCK_REASON_UNSPECIFIED", ""] {
+        let feedback = event_of(&format!(
+            r#"{{"promptFeedback":{{"blockReason":"{reason}"}},"usageMetadata":{{"promptTokenCount":3}}}}"#
+        ));
+        let stream = stream_of(&[feedback, parts_event(r#"[{"text":"fine"}]"#, Some("STOP"))]);
+        let driven = drive_whole(&stream);
+        assert_eq!(driven.completion().stop_reason, StopReason::EndTurn, "block reason {reason:?}");
+        assert_eq!(driven.text(), "fine");
+    }
+
+    // The same member next to a candidate with content is ignored.
+    let next_to = event_of(
+        r#"{"promptFeedback":{"blockReason":"OTHER"},"candidates":[{"content":{"parts":[{"text":"fine"}],"role":"model"},"finishReason":"STOP","index":0}]}"#,
+    );
+    let driven = drive_whole(&next_to);
+    assert_eq!(driven.completion().stop_reason, StopReason::EndTurn);
+    assert_eq!(driven.text(), "fine");
+
+    // Next to a candidate without content it blocks.
+    let empty =
+        event_of(r#"{"promptFeedback":{"blockReason":"OTHER"},"candidates":[{"content":{"parts":[]},"index":0}]}"#);
+    assert!(matches!(drive_whole(&empty).error(), AiError::ContentFilter));
+}
+
+#[test]
+fn a_mid_stream_error_object_maps_to_a_fixed_phrase_error_without_server_text() {
+    let server_text = "SERVER-TEXT-7f3a";
+    let event = |status: Option<&str>, code: Option<u64>| {
+        let status = status.map_or_else(String::new, |name| format!(r#","status":"{name}""#));
+        let code = code.map_or_else(String::new, |code| format!(r#""code":{code},"#));
+        event_of(&format!(r#"{{"error":{{{code}"message":"{server_text}"{status}}}}}"#))
+    };
+    let mut rows: Vec<(&str, Option<u64>, ErrorClass)> = vec![
+        ("UNAUTHENTICATED", Some(401), ErrorClass::Auth),
+        ("PERMISSION_DENIED", Some(403), ErrorClass::Auth),
+        ("RESOURCE_EXHAUSTED", Some(429), ErrorClass::RateLimit),
+        ("UNAVAILABLE", Some(503), ErrorClass::Overload),
+        ("DEADLINE_EXCEEDED", Some(504), ErrorClass::Timeout),
+        ("WEIRD_NAME", Some(500), ErrorClass::Protocol),
+    ];
+    for name in ["INTERNAL", "UNKNOWN", "ABORTED", "DATA_LOSS", "CANCELLED"] {
+        rows.push((name, Some(500), ErrorClass::Server));
+    }
+    for name in
+        ["INVALID_ARGUMENT", "NOT_FOUND", "FAILED_PRECONDITION", "OUT_OF_RANGE", "ALREADY_EXISTS", "UNIMPLEMENTED"]
+    {
+        rows.push((name, Some(400), ErrorClass::InvalidRequest));
+    }
+    for (name, code, class) in rows {
+        let driven = drive_whole(&event(Some(name), code));
+        assert_eq!(driven.error().class(), class, "status {name}: {:?}", driven.error());
+        let shown = format!("{} | {:?}", driven.error(), driven.error());
+        assert!(!shown.contains(server_text), "status {name}: the server's text reached the error: {shown}");
+    }
+    let missing = drive_whole(&event(None, Some(500)));
+    assert_eq!(missing.error().class(), ErrorClass::Protocol, "a missing status name");
+    assert!(!format!("{:?}", missing.error()).contains(server_text));
+    assert!(matches!(
+        drive_whole(&event(Some("RESOURCE_EXHAUSTED"), Some(429))).error(),
+        AiError::RateLimited { retry_after: None }
+    ));
+
+    // The numeric code of a server error is kept when it is a status code, else 500.
+    for (code, status) in
+        [(Some(503), 503), (Some(100), 100), (Some(599), 599), (Some(99), 500), (Some(600), 500), (None, 500)]
+    {
+        let driven = drive_whole(&event(Some("INTERNAL"), code));
+        match driven.error() {
+            AiError::Server { status: got, .. } => assert_eq!(*got, status, "code {code:?}"),
+            other => panic!("code {code:?}: {other:?}"),
+        }
+    }
+
+    // A text event first keeps its text; the error still ends the turn.
+    let stream = stream_of(&[parts_event(r#"[{"text":"Partial"}]"#, None), event(Some("UNAVAILABLE"), Some(503))]);
+    let driven = drive_whole(&stream);
+    assert_eq!(driven.log, vec!["text:Partial"]);
+    assert!(matches!(driven.error(), AiError::Overloaded));
+}
+
+// ---- the stream: strictness and bounds --------------------------------------------------------------------
+
+#[test]
+fn unrequested_part_kinds_and_malformed_events_are_protocol_errors() {
+    let with_stop = |parts: &str| parts_event(parts, Some("STOP"));
+    let mut rows: Vec<(String, Vec<u8>)> = vec![
+        ("data that is not JSON".to_owned(), event_of("this is not json")),
+        ("data that is a JSON array".to_owned(), event_of("[1, 2]")),
+        ("data that is a JSON string".to_owned(), event_of("\"text\"")),
+        ("candidates that is not an array".to_owned(), event_of(r#"{"candidates":"x"}"#)),
+        ("a candidate that is not an object".to_owned(), event_of(r#"{"candidates":[5]}"#)),
+        ("content that is not an object".to_owned(), event_of(r#"{"candidates":[{"content":5}]}"#)),
+        ("parts that is not an array".to_owned(), event_of(r#"{"candidates":[{"content":{"parts":{}}}]}"#)),
+        ("a part that is not an object".to_owned(), with_stop("[5]")),
+        ("a text that is not a string".to_owned(), with_stop(r#"[{"text":5}]"#)),
+        ("a call without a name".to_owned(), with_stop(r#"[{"functionCall":{"args":{}}}]"#)),
+        ("a call whose name is not a string".to_owned(), with_stop(r#"[{"functionCall":{"name":3,"args":{}}}]"#)),
+        ("a call that is not an object".to_owned(), with_stop(r#"[{"functionCall":"x"}]"#)),
+        ("a signature that is not a string".to_owned(), with_stop(r#"[{"text":"a","thoughtSignature":5}]"#)),
+        (
+            "text and a call in one part".to_owned(),
+            with_stop(r#"[{"text":"a","functionCall":{"name":"a","args":{}}}]"#),
+        ),
+        ("call arguments that are an array".to_owned(), with_stop(r#"[{"functionCall":{"name":"a","args":[1]}}]"#)),
+        ("call arguments that are a string".to_owned(), with_stop(r#"[{"functionCall":{"name":"a","args":"x"}}]"#)),
+        ("a call name with a line feed".to_owned(), with_stop(r#"[{"functionCall":{"name":"a\nb","args":{}}}]"#)),
+        ("an error that is not an object".to_owned(), event_of(r#"{"error":"x"}"#)),
+    ];
+    for kind in [
+        "inlineData",
+        "fileData",
+        "functionResponse",
+        "executableCode",
+        "codeExecutionResult",
+        "toolCall",
+        "toolResponse",
+    ] {
+        rows.push((
+            format!("a part holding {kind}"),
+            with_stop(&format!(r#"[{{"{kind}":{{"data":"LEAK-CANARY"}}}}]"#)),
+        ));
+        rows.push((format!("a part with text and {kind}"), with_stop(&format!(r#"[{{"text":"a","{kind}":{{}}}}]"#))));
+    }
+    for (row, stream) in &rows {
+        let driven = drive_whole(stream);
+        assert_eq!(driven.error().class(), ErrorClass::Protocol, "{row}: {}", summary(&driven));
+        assert!(driven.calls.is_empty(), "{row}: a call ran");
+        let shown = format!("{} {:?}", driven.error(), driven.error());
+        assert!(!shown.contains("LEAK-CANARY"), "{row}: the error echoes the stream: {shown}");
+    }
+
+    // A line frame is not an event.
+    let mut turn = GeminiAdapter::new().turn();
+    let error = turn.frame(Frame::Line(b"{}"), &mut |_| Flow::Continue).expect_err("a line frame");
+    assert_eq!(error.class(), ErrorClass::Protocol);
+
+    // These are not errors.
+    let skipped = drive_whole(&with_stop(r#"[{"futureField":1}]"#));
+    assert_eq!(skipped.completion().stop_reason, StopReason::EndTurn, "a part with only unknown keys is skipped");
+    assert!(skipped.completion().native.is_none());
+    let done =
+        stream_of(&[parts_event(r#"[{"text":"a"}]"#, None), event_of("[DONE]"), parts_event("[]", Some("STOP"))]);
+    assert_eq!(drive_whole(&done).text(), "a", "a done marker is ignored");
+    let empty_data = stream_of(&[b"data:\n\n".to_vec(), parts_event(r#"[{"text":"a"}]"#, Some("STOP"))]);
+    assert_eq!(
+        drive_whole(&empty_data).completion().stop_reason,
+        StopReason::EndTurn,
+        "an empty data field is ignored"
+    );
+    let null_args = drive_whole(&with_stop(r#"[{"functionCall":{"name":"a","args":null}}]"#));
+    assert_eq!(null_args.calls[0].args, json!({}), "absent or null arguments are an empty object");
+    assert_eq!(null_args.completion().stop_reason, StopReason::ToolUse);
+}
+
+#[test]
+fn signatures_text_runs_and_sizes_are_enforced_in_the_native_turn() {
+    let leak = "BAD-SIGNATURE-TEXT";
+    let signed = |count: usize| -> String {
+        (0..count).map(|_| r#"{"text":"t","thoughtSignature":"AAAA"}"#).collect::<Vec<_>>().join(",")
+    };
+
+    // Parts per event.
+    let plain = |count: usize| -> String { (0..count).map(|_| r#"{"text":"a"}"#).collect::<Vec<_>>().join(",") };
+    let at_limit = drive_whole(&parts_event(&format!("[{}]", plain(256)), Some("STOP")));
+    assert_eq!(at_limit.text().len(), 256, "256 parts in one event pass");
+    let over = drive_whole(&parts_event(&format!("[{}]", plain(257)), Some("STOP")));
+    assert_eq!(over.error().class(), ErrorClass::Protocol, "257 parts in one event");
+
+    // Parts that cannot be joined, over several events.
+    let in_events = |total: usize| -> Vec<u8> {
+        let mut events = Vec::new();
+        let mut left = total;
+        while left > 0 {
+            let now = left.min(100);
+            events.push(parts_event(&format!("[{}]", signed(now)), None));
+            left -= now;
+        }
+        events.push(parts_event("[]", Some("STOP")));
+        stream_of(&events)
+    };
+    let ok = drive_whole(&in_events(1024));
+    assert_eq!(ok.native_parts().as_array().map(Vec::len), Some(1024), "1024 parts pass");
+    let too_many = drive_whole(&in_events(1025));
+    assert_eq!(too_many.error().class(), ErrorClass::Protocol, "1025 parts that cannot be joined");
+
+    // Signatures.
+    let signature_stream =
+        |signature: &str| parts_event(&format!(r#"[{{"text":"a","thoughtSignature":"{signature}"}}]"#), Some("STOP"));
+    let big = drive_whole(&signature_stream(&"A".repeat(262_144)));
+    assert_eq!(
+        big.native_parts()[0]["thoughtSignature"].as_str().map(str::len),
+        Some(262_144),
+        "262144 characters pass"
+    );
+    let too_big = drive_whole(&signature_stream(&"A".repeat(262_145)));
+    assert_eq!(too_big.error().class(), ErrorClass::Protocol, "262145 characters");
+    let bad_char = drive_whole(&signature_stream(&format!("{leak}!")));
+    assert_eq!(bad_char.error().class(), ErrorClass::Protocol, "a character outside the base64 set");
+    assert!(!format!("{} {:?}", bad_char.error(), bad_char.error()).contains(leak), "the signature is not echoed");
+    let alphabets = drive_whole(&signature_stream("Ab09+/=_-"));
+    assert_eq!(alphabets.native_parts()[0]["thoughtSignature"], "Ab09+/=_-", "both base64 alphabets pass");
+    let empty = drive_whole(&signature_stream(""));
+    assert_eq!(empty.native_parts(), json!([{ "text": "a" }]), "an empty signature is no signature");
+
+    // A signature-only part is kept, and a plain part after a signed one is not joined to it.
+    let kept = drive_whole(&stream_of(&[parts_event(
+        r#"[{"thoughtSignature":"AAAA"},{"text":"x"},{"text":"y","thoughtSignature":"BBBB"},{"text":"z"},{"text":"w"}]"#,
+        Some("STOP"),
+    )]));
+    assert_eq!(
+        kept.native_parts(),
+        json!([
+            { "thoughtSignature": "AAAA" },
+            { "text": "x" },
+            { "text": "y", "thoughtSignature": "BBBB" },
+            { "text": "zw" },
+        ])
+    );
+    // Thought parts and plain parts are not joined to each other.
+    let mixed = drive_whole(&parts_event(
+        r#"[{"text":"a","thought":true},{"text":"b","thought":true},{"text":"c"}]"#,
+        Some("STOP"),
+    ));
+    assert_eq!(mixed.native_parts(), json!([{ "text": "ab", "thought": true }, { "text": "c" }]));
+
+    // The stored turn: 5 MiB of plain text in events of 1 MiB passes 4 MiB and is refused; 4 MiB passes.
+    let limits = Limits { line: 8 * 1024 * 1024, event: 8 * 1024 * 1024 };
+    let megabyte = "x".repeat(1024 * 1024);
+    let chunk = |last: bool| parts_event(&format!(r#"[{{"text":"{megabyte}"}}]"#), last.then_some("STOP"));
+    let four = drive_with(&[stream_of(&[chunk(false), chunk(false), chunk(false), chunk(true)])], limits);
+    assert_eq!(four.completion().stop_reason, StopReason::EndTurn, "4 MiB of text is within the bound");
+    let five = drive_with(&[stream_of(&[chunk(false), chunk(false), chunk(false), chunk(false), chunk(true)])], limits);
+    assert_eq!(five.error().class(), ErrorClass::Protocol, "5 MiB of text is over the bound");
+    assert!(!format!("{} {:?}", five.error(), five.error()).contains("xxxx"), "the text is not echoed");
+}
+
+// ---- the rejection ----------------------------------------------------------------------------------------
+
+/// An endpoint that holds the canary key, for the tests that read error bodies.
+fn key_endpoint() -> Endpoint {
+    let target = Target::parse("http://127.0.0.1:9/v1beta", false).expect("a loopback address");
+    let secret = SecretHeader::new(API_KEY_HEADER, "", ApiKey::new(CANARY_KEY.to_owned()), target.origin().clone())
+        .expect("a key header");
+    Endpoint::new(Wire::Gemini, target, NetworkPolicy::new(false, false)).with_secret(secret)
+}
+
+fn error_body(code: u16, status: &str, message: &str, details: Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "error": { "code": code, "message": message, "status": status, "details": details } }))
+        .expect("JSON")
+}
+
+fn reject(status: u16, body: Vec<u8>, retry_after: Option<Duration>) -> Option<AiError> {
+    GeminiAdapter::new().rejection(&Rejection { status, retry_after, body }, &key_endpoint())
+}
+
+fn key_info(reason: &str) -> Value {
+    json!([{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason, "domain": "googleapis.com", "metadata": { "x": "DETAIL-CANARY" } }])
+}
+
+fn retry_info(delay: &str) -> Value {
+    json!([{ "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": delay }])
+}
+
+#[test]
+fn error_bodies_map_to_stable_classes_and_never_carry_the_key() {
+    let no_details = json!([]);
+    let invalid_key =
+        reject(400, error_body(400, "INVALID_ARGUMENT", "API key not valid.", key_info("API_KEY_INVALID")), None);
+    assert_eq!(invalid_key.expect("an error").class(), ErrorClass::Auth, "a key reason on a 400");
+    let credentials =
+        reject(400, error_body(400, "FAILED_PRECONDITION", "No credentials.", key_info("CREDENTIALS_MISSING")), None);
+    assert_eq!(credentials.expect("an error").class(), ErrorClass::Auth, "a credentials reason");
+    for (status, name) in [(401, "UNAUTHENTICATED"), (403, "PERMISSION_DENIED")] {
+        let error = reject(status, error_body(status, name, "denied", no_details.clone()), None).expect("an error");
+        assert_eq!(error.class(), ErrorClass::Auth, "{name}");
+    }
+    let not_found =
+        reject(404, error_body(404, "NOT_FOUND", "models/x is not found for this version", no_details.clone()), None)
+            .expect("an error");
+    match &not_found {
+        AiError::InvalidRequest(detail) => assert_eq!(detail.as_str(), "models/x is not found for this version"),
+        other => panic!("{other:?}"),
+    }
+
+    // The wait of a rate limit.
+    for (delay, want) in [
+        ("34s", Some(34)),
+        ("0.5s", Some(1)),
+        ("7200000s", Some(86_400)),
+        ("1.5s", Some(2)),
+        ("soon", None),
+        ("34", None),
+    ] {
+        let error = reject(
+            429,
+            error_body(429, "RESOURCE_EXHAUSTED", "slow down", retry_info(delay)),
+            Some(Duration::from_secs(7)),
+        )
+        .expect("an error");
+        let want = want.map_or(Some(Duration::from_secs(7)), |secs| Some(Duration::from_secs(secs)));
+        assert_eq!(error, AiError::RateLimited { retry_after: want }, "retry delay {delay:?}");
+    }
+    let own = reject(
+        429,
+        error_body(429, "RESOURCE_EXHAUSTED", "slow down", no_details.clone()),
+        Some(Duration::from_secs(9)),
+    );
+    assert_eq!(
+        own,
+        Some(AiError::RateLimited { retry_after: Some(Duration::from_secs(9)) }),
+        "the rejection's own wait"
+    );
+    let none = reject(429, error_body(429, "RESOURCE_EXHAUSTED", "slow down", no_details.clone()), None);
+    assert_eq!(none, Some(AiError::RateLimited { retry_after: None }));
+
+    assert_eq!(reject(503, error_body(503, "UNAVAILABLE", "m", no_details.clone()), None), Some(AiError::Overloaded));
+    assert_eq!(
+        reject(504, error_body(504, "DEADLINE_EXCEEDED", "m", no_details.clone()), None),
+        Some(AiError::Timeout)
+    );
+    match reject(500, error_body(500, "INTERNAL", "m", no_details.clone()), None).expect("an error") {
+        AiError::Server { status, .. } => assert_eq!(status, 500),
+        other => panic!("{other:?}"),
+    }
+    let long_input = "The input token count (5000000) exceeds the maximum number of tokens allowed (1048576).";
+    assert_eq!(
+        reject(400, error_body(400, "INVALID_ARGUMENT", long_input, no_details.clone()), None),
+        Some(AiError::ContextLength)
+    );
+    let other_invalid =
+        reject(400, error_body(400, "INVALID_ARGUMENT", "unknown field", no_details.clone()), None).expect("an error");
+    assert_eq!(other_invalid.class(), ErrorClass::InvalidRequest, "an argument error that is not about length");
+    assert_eq!(
+        reject(400, error_body(400, "FAILED_PRECONDITION", "billing", no_details.clone()), None)
+            .expect("an error")
+            .class(),
+        ErrorClass::InvalidRequest
+    );
+
+    // A body of any other shape falls through to the chokepoint's table.
+    let others: Vec<(&str, Vec<u8>)> = vec![
+        ("an empty body", Vec::new()),
+        ("a body that is not JSON", b"not json".to_vec()),
+        ("an HTML body", b"<html><body>Bad gateway</body></html>".to_vec()),
+        ("JSON without an error object", br#"{"foo":1}"#.to_vec()),
+        ("an error that is a string", br#"{"error":"x"}"#.to_vec()),
+        ("an unknown status name", error_body(400, "SOMETHING_NEW", "m", no_details.clone())),
+        ("a missing status name", br#"{"error":{"code":400,"message":"m"}}"#.to_vec()),
+        ("an empty array", b"[]".to_vec()),
+    ];
+    for (row, body) in others {
+        assert_eq!(reject(400, body, None), None, "{row}");
+    }
+    let wrapped = {
+        let inner = error_body(401, "UNAUTHENTICATED", "denied", no_details.clone());
+        let mut body = b"[".to_vec();
+        body.extend_from_slice(&inner);
+        body.push(b']');
+        body
+    };
+    assert_eq!(
+        reject(401, wrapped, None).expect("an error").class(),
+        ErrorClass::Auth,
+        "an error in a one-element array"
+    );
+
+    // The key is masked, the text is bounded, and the details are never copied.
+    let echo = format!("bad key {CANARY_KEY} in the request");
+    for (status, name, details) in [
+        (400, "INVALID_ARGUMENT", no_details.clone()),
+        (401, "UNAUTHENTICATED", key_info("ACCESS_TOKEN_EXPIRED")),
+        (400, "INVALID_ARGUMENT", key_info("API_KEY_INVALID")),
+    ] {
+        let error = reject(status, error_body(status, name, &echo, details), None).expect("an error");
+        let shown = format!("{error} | {error:?} | {error:#?}");
+        assert!(!shown.contains(CANARY_KEY), "{name}: the key is in the error: {shown}");
+        assert!(shown.contains("<redacted>"), "{name}: the key is masked: {shown}");
+        assert!(!shown.contains("DETAIL-CANARY"), "{name}: the details are copied: {shown}");
+    }
+    let huge = "m".repeat(8 * 1024);
+    match reject(400, error_body(400, "NOT_FOUND", &huge, no_details), None).expect("an error") {
+        AiError::InvalidRequest(detail) => {
+            assert!(detail.as_str().chars().count() <= 241, "{} characters", detail.as_str().chars().count())
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---- the stream over the wire -----------------------------------------------------------------------------
+
+#[test]
+fn an_unfinished_stream_over_the_wire_is_an_error_and_delivers_no_call() {
+    let tool_events = events_of(&fixture("tool_stream.sse"));
+    let request = || {
+        let mut req = request("gemini-test", vec![Message::user_text("u1", "read it", 1)]);
+        req.tools.push(read_file_spec());
+        req
+    };
+
+    // The first event only, ended properly: no finish reason.
+    let fake = FakeHttp::start(vec![Reply::sse_bytes(vec![tool_events[0].clone()])]);
+    let (service, _http) = provider(&fake);
+    let driven = run(service.as_ref(), &request());
+    assert_eq!(driven.log, vec!["text:I will read the file.", "usage:42/0"]);
+    assert!(matches!(driven.result, Err(AiError::Protocol(_))), "{:?}", driven.result);
+
+    // A call event with no finish reason releases nothing.
+    let call_only = parts_event(r#"[{"functionCall":{"name":"read_file","args":{"path":"a"}}}]"#, None);
+    let fake = FakeHttp::start(vec![Reply::sse_bytes(vec![call_only])]);
+    let (service, _http) = provider(&fake);
+    let driven = run(service.as_ref(), &request());
+    assert!(!driven.log.iter().any(|entry| entry.starts_with("call:")), "{:?}", driven.log);
+    assert!(matches!(driven.result, Err(AiError::Protocol(_))), "{:?}", driven.result);
+
+    // Cut in the middle of the second event but ended with a proper terminating chunk.
+    let cut = tool_events[1].len() / 2;
+    let fake = FakeHttp::start(vec![Reply::sse_bytes(vec![tool_events[0].clone(), tool_events[1][..cut].to_vec()])]);
+    let (service, _http) = provider(&fake);
+    let driven = run(service.as_ref(), &request());
+    assert!(!driven.log.iter().any(|entry| entry.starts_with("call:")), "{:?}", driven.log);
+    assert!(matches!(driven.result, Err(AiError::Network(_))), "{:?}", driven.result);
+
+    // The connection dropped in the middle of the body.
+    let text = events_of(&fixture("text_stream.sse"));
+    let fake = FakeHttp::start(vec![Reply::sse_bytes(vec![text[0].clone()]).ending(Ending::Drop)]);
+    let (service, _http) = provider(&fake);
+    let driven = run(service.as_ref(), &request());
+    assert_eq!(driven.log, vec!["text:Hel", "usage:9/0"]);
+    let error = driven.result.as_ref().expect_err("a dropped connection is never a success");
+    assert!(matches!(error.class(), ErrorClass::Network | ErrorClass::Timeout), "{error:?}");
+
+    // A 401 with the body of an invalid key is an authentication error after exactly one connection.
+    let body = error_body(
+        400,
+        "INVALID_ARGUMENT",
+        "API key not valid. Please pass a valid API key.",
+        key_info("API_KEY_INVALID"),
+    );
+    let fake = FakeHttp::start(vec![Reply::status(401).body(body)]);
+    let (service, _http) = provider(&fake);
+    let driven = run(service.as_ref(), &request());
+    assert!(matches!(driven.result, Err(AiError::Auth(_))), "{:?}", driven.result);
+    assert_eq!(fake.accepted(), 1, "an authentication error is not retried");
+
+    // A 400 whose message repeats the key is an error without the key.
+    let body = error_body(400, "INVALID_ARGUMENT", &format!("the key {CANARY_KEY} is not accepted"), json!([]));
+    let fake = FakeHttp::start(vec![Reply::status(400).body(body)]);
+    let (service, _http) = provider(&fake);
+    let driven = run(service.as_ref(), &request());
+    let error = driven.result.expect_err("a bad request");
+    assert_eq!(error.class(), ErrorClass::InvalidRequest);
+    assert!(!format!("{error} {error:?}").contains(CANARY_KEY), "the key is in the error");
+}
+
+#[test]
+fn a_rejected_request_over_the_wire_carries_the_scrubbed_message_only() {
+    let request = || request("gemini-test", vec![Message::user_text("u1", "hello", 1)]);
+
+    // A message with a control sequence and the key: both are gone.
+    let message = format!("models/x is not found \u{1b}[31m{CANARY_KEY}\u{1b}[0m \u{202e}reversed");
+    let fake = FakeHttp::start(vec![Reply::status(404).body(error_body(404, "NOT_FOUND", &message, json!([])))]);
+    let (service, _http) = provider(&fake);
+    let error = run(service.as_ref(), &request()).result.expect_err("a rejection");
+    assert_eq!(error.class(), ErrorClass::InvalidRequest);
+    let shown = error.to_string();
+    assert!(shown.contains("models/x is not found"), "{shown}");
+    assert!(!shown.contains(CANARY_KEY) && !shown.contains('\u{1b}') && !shown.contains('\u{202e}'), "{shown:?}");
+    assert_eq!(fake.accepted(), 1);
+
+    // A rate limit carries the server's retry delay after the chokepoint's retries.
+    let fake = FakeHttp::start(vec![Reply::status(429).body(error_body(
+        429,
+        "RESOURCE_EXHAUSTED",
+        "slow down",
+        retry_info("2s"),
+    ))]);
+    let (service, _http) = provider(&fake);
+    let error = run(service.as_ref(), &request()).result.expect_err("a rate limit");
+    assert_eq!(error, AiError::RateLimited { retry_after: Some(Duration::from_secs(2)) });
+    assert_eq!(fake.accepted(), 3, "the request and two retries");
+
+    // An overload and a body of another shape.
+    let fake = FakeHttp::start(vec![Reply::status(503).body(error_body(503, "UNAVAILABLE", "busy", json!([])))]);
+    let (service, _http) = provider(&fake);
+    assert_eq!(run(service.as_ref(), &request()).result.expect_err("an overload"), AiError::Overloaded);
+    let fake = FakeHttp::start(vec![Reply::status(404).body(b"<html>not found</html>".to_vec())]);
+    let (service, _http) = provider(&fake);
+    let error = run(service.as_ref(), &request()).result.expect_err("a rejection");
+    assert_eq!(error.class(), ErrorClass::InvalidRequest, "the chokepoint's table answers");
+    assert!(!error.to_string().contains("html"), "the body is not echoed: {error}");
+}
+
+// ---- the real service -------------------------------------------------------------------------------------
+
+#[test]
+#[ignore = "needs a real key in HOLZWAVE_TEST_GEMINI_KEY and network access"]
+fn live_text_and_tool_turn_against_the_real_service() {
+    let key = std::env::var("HOLZWAVE_TEST_GEMINI_KEY")
+        .unwrap_or_else(|_| panic!("set HOLZWAVE_TEST_GEMINI_KEY to a Gemini API key to run this test"));
+    let model = std::env::var("HOLZWAVE_TEST_GEMINI_MODEL").unwrap_or_else(|_| "gemini-3.8-flash".to_owned());
+    let target = Target::parse("https://generativelanguage.googleapis.com/v1beta", false).expect("the service address");
+    let secret =
+        SecretHeader::new(API_KEY_HEADER, "", ApiKey::new(key), target.origin().clone()).expect("a key header");
+    let endpoint = Endpoint::new(Wire::Gemini, target, NetworkPolicy::new(false, false)).with_secret(secret);
+    let http = Arc::new(Http::new(HttpConfig::standard()));
+    let provider = HttpProvider::new("gemini-live", endpoint, Box::new(GeminiAdapter::new()), http);
+
+    // A text turn.
+    let mut text_request = request(&model, vec![Message::user_text("u1", "Reply with the single word: ready", 1)]);
+    text_request.max_output_tokens = Some(2048);
+    let text_turn = run(&provider, &text_request);
+    let completion = text_turn.completion().clone();
+    assert!(
+        !text_turn.collector.text().is_empty() || completion.stop_reason == StopReason::MaxTokens,
+        "the text turn returned no text and did not stop at the limit: {:?}",
+        text_turn.log
+    );
+    println!(
+        "live text: model {model}, {} characters, stop {:?}",
+        text_turn.collector.text().chars().count(),
+        completion.stop_reason
+    );
+
+    // A tool turn, then the echo of the model's own content.
+    let mut tool_request =
+        request(&model, vec![Message::user_text("u2", "Use the read_file tool to read notes.txt.", 1)]);
+    tool_request.tools.push(read_file_spec());
+    tool_request.max_output_tokens = Some(2048);
+    let tool_turn = run(&provider, &tool_request);
+    let completion = tool_turn.completion().clone();
+    let calls = tool_turn.collector.tool_calls().to_vec();
+    assert_eq!(
+        calls.first().map(|call| call.name.as_str()),
+        Some("read_file"),
+        "the declared call: {:?}",
+        tool_turn.log
+    );
+    let signature_parts = completion
+        .native
+        .as_ref()
+        .and_then(|native| native.json["parts"].as_array())
+        .map_or(0, |parts| parts.iter().filter(|part| part.get("thoughtSignature").is_some()).count());
+    println!("live tool: model {model}, call {}, stop {:?}", calls[0].name, completion.stop_reason);
+    println!("live signature parts: {signature_parts}");
+    println!("live usage: {}/{}", completion.usage.input_tokens, completion.usage.output_tokens);
+    let call_id = calls[0].id.clone();
+    let assistant = tool_turn.collector.into_message("m2", 2, &model, MessageStatus::Complete, Some(completion));
+    let mut echo = request(
+        &model,
+        vec![
+            Message::user_text("u2", "Use the read_file tool to read notes.txt.", 1),
+            assistant,
+            tool_message("m3", &call_id, "notes: all good"),
+        ],
+    );
+    echo.tools.push(read_file_spec());
+    echo.max_output_tokens = Some(2048);
+    let echoed = run(&provider, &echo);
+    assert!(
+        !matches!(echoed.result, Err(AiError::InvalidRequest(_))),
+        "the echo request was refused: {:?}",
+        echoed.result
+    );
+    println!("live echo: accepted, log {:?}", echoed.log);
 }

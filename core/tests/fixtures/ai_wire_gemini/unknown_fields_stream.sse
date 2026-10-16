@@ -1,0 +1,6 @@
+data: {"candidates":[{"content":{"parts":[{"text":"Hi","partMetadata":{"a":1},"futureField":true}],"role":"model","extra":[1,2]},"index":0,"safetyRatings":[{"category":"HARM_CATEGORY_HARASSMENT","probability":"NEGLIGIBLE"}],"citationMetadata":{"citationSources":[]},"groundingMetadata":{}}],"usageMetadata":{"promptTokenCount":5,"promptTokensDetails":[{"modality":"TEXT","tokenCount":5}],"totalTokenCount":5},"modelVersion":"gemini-test","responseId":"r9","newTopLevel":{"x":1},"modelStatus":"stable"}
+
+data: {"candidates":[{"content":{"parts":[{"futureField":1},{"text":" there","partMetadata":{}}],"role":"model"},"index":0,"finishMessage":"","safetyRatings":[]}],"modelVersion":"gemini-test","newTopLevel":[1]}
+
+data: {"candidates":[{"content":{"role":"model","extra":{}},"finishReason":"STOP","finishMessage":"done","index":0,"groundingMetadata":{"webSearchQueries":[]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8,"promptTokensDetails":[]},"modelVersion":"gemini-test","responseId":"r9"}
+

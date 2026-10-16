@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"a.txt"}},"thoughtSignature":"c2lnbmF0dXJlLWZpeHR1cmUtMDAwMS1ub3QtYS1jcmVkZW50aWFs"},{"functionCall":{"name":"list_dir","args":{"path":"."}}}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":20,"totalTokenCount":70},"modelVersion":"gemini-test"}
+
+data: {"candidates":[{"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":20,"thoughtsTokenCount":30,"totalTokenCount":100},"modelVersion":"gemini-test"}
+

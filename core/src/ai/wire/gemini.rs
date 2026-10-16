@@ -26,11 +26,12 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use super::{Wire, WireAdapter, WireRequest, WireTurn};
-use crate::ai::http::Frame;
+use super::{Endpoint, Wire, WireAdapter, WireRequest, WireTurn};
+use crate::ai::http::{Frame, Rejection};
 use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, StreamEvent};
 use crate::ai::sse::{SseEvent, StreamEnd, ToolAssembler};
 use crate::ai::types::{
@@ -112,9 +113,20 @@ const PHRASE_UNANSWERED: &str = "a tool call has no result in the message after 
 const PHRASE_FRAME: &str = "the response is not an event stream";
 const PHRASE_UNREADABLE: &str = "the response holds an event that cannot be read";
 const PHRASE_PART: &str = "the response holds a part that cannot be read";
+const PHRASE_UNREQUESTED: &str = "the server sent a part kind that was not requested";
+const PHRASE_SIGNATURE: &str = "the response holds a thought signature that is not valid";
+const PHRASE_TOO_MANY_PARTS: &str = "the response holds more parts than one reply allows";
+const PHRASE_TOO_LARGE: &str = "the response is larger than one reply allows";
 const PHRASE_ERROR_EVENT: &str = "the service reported an error while streaming";
 const PHRASE_NO_FINISH: &str = "the response ended without a finish reason";
-const PHRASE_TRUNCATED: &str = "the response ended before it was complete";
+const PHRASE_TRUNCATED: &str = "the stream ended before the reply was complete";
+const PHRASE_MALFORMED_CALL: &str = "the model made a function call that the service could not read";
+const PHRASE_UNEXPECTED_CALL: &str = "the model made a tool call that was not offered";
+const PHRASE_TOO_MANY_CALLS: &str = "the model made more tool calls than the service allows";
+const PHRASE_MALFORMED_RESPONSE: &str = "the service could not form a valid response";
+const PHRASE_MISSING_SIGNATURE: &str =
+    "the service needs the thought signatures of the earlier reply; start a new chat or use another model";
+const PHRASE_NO_MESSAGE: &str = "the service refused the request";
 const PHRASE_FAILED_EARLIER: &str = "the response was refused earlier";
 
 // ---- the address ------------------------------------------------------------------------------------------
@@ -193,6 +205,83 @@ impl WireAdapter for GeminiAdapter {
     fn turn(&self) -> Box<dyn WireTurn> {
         Box::new(GeminiTurn::new())
     }
+
+    fn rejection(&self, rejection: &Rejection, endpoint: &Endpoint) -> Option<AiError> {
+        rejected(rejection, endpoint)
+    }
+}
+
+// ---- the rejection ----------------------------------------------------------------------------------------
+
+/// The most details of an error body that are looked at.
+const MAX_DETAILS: usize = 16;
+
+/// The longest wait a server may ask for in an error detail: one day, in seconds.
+const MAX_RETRY_SECONDS: f64 = 86_400.0;
+
+/// The error of an answer that was not a success, read from the error body `{ "error": { code, message, status,
+/// details } }`. A body of any other shape gives `None`, and the chokepoint's table of statuses answers.
+///
+/// The status name decides the class; a detail whose `reason` starts with `API_KEY` or `CREDENTIALS` makes it an
+/// authentication error whatever the status says. The message of `Auth` and `InvalidRequest` is shown, but only
+/// through [`Endpoint::scrub`], which masks every key of the endpoint; every other class has a fixed phrase. The
+/// `details` array is read by field name only and never copied.
+fn rejected(rejection: &Rejection, endpoint: &Endpoint) -> Option<AiError> {
+    let body: Value = serde_json::from_slice(&rejection.body).ok()?;
+    // A gateway may wrap the error object in a one-element array.
+    let body = match body {
+        Value::Array(items) => items.into_iter().next()?,
+        other => other,
+    };
+    let error = body.get("error")?.as_object()?;
+    let name = error.get("status").and_then(Value::as_str).unwrap_or("");
+    let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+    let mut reason = None;
+    let mut delay = None;
+    for detail in error.get("details").and_then(Value::as_array).into_iter().flatten().take(MAX_DETAILS) {
+        if reason.is_none() {
+            reason = detail.get("reason").and_then(Value::as_str);
+        }
+        if delay.is_none() {
+            delay = detail.get("retryDelay").and_then(Value::as_str).and_then(retry_delay);
+        }
+    }
+    let shown = |fallback: &str| {
+        if message.trim().is_empty() { Detail::new(fallback) } else { endpoint.scrub(message) }
+    };
+    let key_problem = reason.is_some_and(|reason| reason.starts_with("API_KEY") || reason.starts_with("CREDENTIALS"));
+    let kind = StatusKind::of(name);
+    if key_problem || kind == StatusKind::Auth {
+        return Some(AiError::Auth(shown("the service refused the credentials")));
+    }
+    match kind {
+        StatusKind::RateLimit => Some(AiError::RateLimited { retry_after: delay.or(rejection.retry_after) }),
+        StatusKind::Overloaded => Some(AiError::Overloaded),
+        StatusKind::Deadline => Some(AiError::Timeout),
+        StatusKind::Server => Some(AiError::Server {
+            status: server_status(Some(u64::from(rejection.status))),
+            detail: Detail::new(&format!("the service reported {name}")),
+        }),
+        StatusKind::Invalid if name == "INVALID_ARGUMENT" && exceeds_context(message) => Some(AiError::ContextLength),
+        StatusKind::Invalid => Some(AiError::InvalidRequest(shown(PHRASE_NO_MESSAGE))),
+        StatusKind::Auth | StatusKind::Unknown => None,
+    }
+}
+
+/// Whether an `INVALID_ARGUMENT` message says that the input is longer than the model accepts.
+fn exceeds_context(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("token count") && lower.contains("maximum number of tokens")
+}
+
+/// The wait of a `retryDelay` such as `34s` or `0.5s`: seconds, rounded up, cut to one day. Anything else is `None`.
+fn retry_delay(text: &str) -> Option<Duration> {
+    let seconds = text.strip_suffix('s')?;
+    if seconds.is_empty() || !seconds.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return None;
+    }
+    let value: f64 = seconds.parse().ok()?;
+    Some(Duration::from_secs(value.ceil().min(MAX_RETRY_SECONDS) as u64))
 }
 
 // ---- the request ------------------------------------------------------------------------------------------
@@ -594,11 +683,100 @@ fn kind_word(kind: ContextKind) -> &'static str {
 enum Finish {
     /// `STOP`: the model finished.
     Stop,
-    /// `MAX_TOKENS`: the output limit was reached.
+    /// `MAX_TOKENS` or `CONTINUATION`: the reply stopped at a token limit. A continuation is never taken up.
     MaxTokens,
-    /// Any other reason.
+    /// A safety, recitation, language, blocklist, prohibited-content, personal-data, image or escalation stop.
+    Refusal,
+    /// `OTHER` and every name this version does not know.
     Other,
 }
+
+/// What a finish reason means: a way the reply ended, or an error.
+enum Mapped {
+    Reason(Finish),
+    Fail(AiError),
+}
+
+/// The table of finish reasons. The error kinds end the turn at once with a fixed phrase; the rest decide the stop
+/// reason of a completed turn, and only `STOP` lets a tool call out.
+fn map_finish(name: &str) -> Mapped {
+    match name {
+        "STOP" => Mapped::Reason(Finish::Stop),
+        "MAX_TOKENS" | "CONTINUATION" => Mapped::Reason(Finish::MaxTokens),
+        "SAFETY" | "RECITATION" | "LANGUAGE" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "IMAGE_SAFETY"
+        | "ESCALATION" => Mapped::Reason(Finish::Refusal),
+        "MALFORMED_FUNCTION_CALL" => Mapped::Fail(protocol(PHRASE_MALFORMED_CALL)),
+        "UNEXPECTED_TOOL_CALL" => Mapped::Fail(protocol(PHRASE_UNEXPECTED_CALL)),
+        "TOO_MANY_TOOL_CALLS" => Mapped::Fail(protocol(PHRASE_TOO_MANY_CALLS)),
+        "MALFORMED_RESPONSE" => Mapped::Fail(protocol(PHRASE_MALFORMED_RESPONSE)),
+        "MISSING_THOUGHT_SIGNATURE" => Mapped::Fail(invalid(PHRASE_MISSING_SIGNATURE)),
+        _ => Mapped::Reason(Finish::Other),
+    }
+}
+
+/// How the service names the kind of an error, for an error object inside a stream and for an HTTP error body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusKind {
+    Auth,
+    RateLimit,
+    Overloaded,
+    Deadline,
+    Server,
+    Invalid,
+    Unknown,
+}
+
+impl StatusKind {
+    fn of(name: &str) -> StatusKind {
+        match name {
+            "UNAUTHENTICATED" | "PERMISSION_DENIED" => StatusKind::Auth,
+            "RESOURCE_EXHAUSTED" => StatusKind::RateLimit,
+            "UNAVAILABLE" => StatusKind::Overloaded,
+            "DEADLINE_EXCEEDED" => StatusKind::Deadline,
+            "INTERNAL" | "UNKNOWN" | "ABORTED" | "DATA_LOSS" | "CANCELLED" => StatusKind::Server,
+            "INVALID_ARGUMENT"
+            | "NOT_FOUND"
+            | "FAILED_PRECONDITION"
+            | "OUT_OF_RANGE"
+            | "ALREADY_EXISTS"
+            | "UNIMPLEMENTED" => StatusKind::Invalid,
+            _ => StatusKind::Unknown,
+        }
+    }
+}
+
+/// The status code a server error carries: the number the service gave when it is a status code, else 500.
+fn server_status(code: Option<u64>) -> u16 {
+    code.filter(|code| (100..=599).contains(code)).and_then(|code| u16::try_from(code).ok()).unwrap_or(500)
+}
+
+/// The error for an error object inside a stream, by its status name. Every phrase names only the matched status
+/// word: the message of the service is never read, because a stream event has no endpoint to mask a key with.
+fn error_from_status(name: &str, code: Option<u64>) -> AiError {
+    let phrase = format!("the service reported {name} while streaming");
+    match StatusKind::of(name) {
+        StatusKind::Auth => AiError::Auth(Detail::new(&phrase)),
+        StatusKind::RateLimit => AiError::RateLimited { retry_after: None },
+        StatusKind::Overloaded => AiError::Overloaded,
+        StatusKind::Deadline => AiError::Timeout,
+        StatusKind::Server => AiError::Server { status: server_status(code), detail: Detail::new(&phrase) },
+        StatusKind::Invalid => AiError::InvalidRequest(Detail::new(&phrase)),
+        StatusKind::Unknown => protocol(PHRASE_ERROR_EVENT),
+    }
+}
+
+/// The part keys that a request never asked for: media, server-side code and tool parts. A part that holds one is
+/// refused, so nothing moves through a path the consent preview does not show.
+#[rustfmt::skip]
+const UNREQUESTED: [&str; 7] = [
+    "inlineData",
+    "fileData",
+    "functionResponse",
+    "executableCode",
+    "codeExecutionResult",
+    "toolCall",
+    "toolResponse",
+];
 
 /// One part of the model's reply, as it is stored.
 enum NativePart {
@@ -708,7 +886,7 @@ impl WireTurn for GeminiTurn {
         let GeminiTurn { parts, tools, usage, finish, halted, .. } = *self;
         match end {
             StreamEnd::Stopped => return Err(AiError::Cancelled),
-            StreamEnd::Truncated { .. } => return Err(protocol(PHRASE_TRUNCATED)),
+            StreamEnd::Truncated { .. } => return Err(AiError::Network(Detail::new(PHRASE_TRUNCATED))),
             StreamEnd::Clean => {}
         }
         if halted {
@@ -733,6 +911,7 @@ impl WireTurn for GeminiTurn {
             match finish {
                 Finish::Stop => StopReason::EndTurn,
                 Finish::MaxTokens => StopReason::MaxTokens,
+                Finish::Refusal => StopReason::Refusal,
                 Finish::Other => StopReason::Other,
             }
         };
@@ -758,8 +937,8 @@ impl GeminiTurn {
         else {
             return Err(protocol(PHRASE_UNREADABLE));
         };
-        if body.get("error").is_some_and(|error| !error.is_null()) {
-            return Err(protocol(PHRASE_ERROR_EVENT));
+        if let Some(error) = body.get("error").filter(|error| !error.is_null()) {
+            return Err(stream_error(error));
         }
         let candidate = match body.get("candidates") {
             None | Some(Value::Null) => None,
@@ -770,6 +949,14 @@ impl GeminiTurn {
             },
             Some(_) => return Err(protocol(PHRASE_UNREADABLE)),
         };
+        let has_content = candidate
+            .and_then(|candidate| candidate.get("content"))
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+            .is_some_and(|parts| !parts.is_empty());
+        if !has_content && prompt_is_blocked(&body) {
+            return Err(AiError::ContentFilter);
+        }
         if let Some(candidate) = candidate {
             let parts = match candidate.get("content") {
                 None | Some(Value::Null) => None,
@@ -800,25 +987,31 @@ impl GeminiTurn {
             && !reason.is_empty()
             && reason != "FINISH_REASON_UNSPECIFIED"
         {
-            self.finish = Some(match reason {
-                "STOP" => Finish::Stop,
-                "MAX_TOKENS" => Finish::MaxTokens,
-                _ => Finish::Other,
-            });
+            match map_finish(reason) {
+                Mapped::Reason(finish) => self.finish = Some(finish),
+                Mapped::Fail(error) => return Err(error),
+            }
         }
         Ok(Flow::Continue)
     }
 
     /// The parts of one event, in order. A text part is delivered at once; a call goes to the assembler.
     fn absorb(&mut self, parts: &[Value], out: &mut dyn FnMut(StreamEvent) -> Flow) -> Result<Flow, AiError> {
+        if parts.len() > MAX_PARTS_PER_EVENT {
+            return Err(protocol(PHRASE_TOO_MANY_PARTS));
+        }
         for part in parts {
             let Value::Object(part) = part else {
                 return Err(protocol(PHRASE_PART));
             };
+            if UNREQUESTED.iter().any(|key| part.contains_key(*key)) {
+                return Err(protocol(PHRASE_UNREQUESTED));
+            }
             let signature = match part.get("thoughtSignature") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(signature)) if signature.is_empty() => None,
                 Some(Value::String(signature)) if signature_is_valid(signature) => Some(signature.clone()),
+                Some(Value::String(_)) => return Err(protocol(PHRASE_SIGNATURE)),
                 Some(_) => return Err(protocol(PHRASE_PART)),
             };
             let text = match part.get("text") {
@@ -894,7 +1087,7 @@ impl GeminiTurn {
     fn account(&mut self, bytes: usize) -> Result<(), AiError> {
         self.native_bytes = self.native_bytes.saturating_add(bytes);
         if self.native_bytes > MAX_NATIVE_BYTES {
-            return Err(protocol(PHRASE_PART));
+            return Err(protocol(PHRASE_TOO_LARGE));
         }
         Ok(())
     }
@@ -902,11 +1095,29 @@ impl GeminiTurn {
     /// Appends a part, within the bound on parts.
     fn push(&mut self, part: NativePart) -> Result<(), AiError> {
         if self.parts.len() >= MAX_PARTS {
-            return Err(protocol(PHRASE_PART));
+            return Err(protocol(PHRASE_TOO_MANY_PARTS));
         }
         self.parts.push(part);
         Ok(())
     }
+}
+
+/// The error of an `error` object inside a stream: by its status name, never by its message.
+fn stream_error(error: &Value) -> AiError {
+    let code = error.get("code").and_then(Value::as_u64);
+    match error.get("status").and_then(Value::as_str) {
+        Some(name) => error_from_status(name, code),
+        None => protocol(PHRASE_ERROR_EVENT),
+    }
+}
+
+/// Whether the service blocked the prompt: a `promptFeedback.blockReason` that is not empty and not the unspecified
+/// value.
+fn prompt_is_blocked(body: &Map<String, Value>) -> bool {
+    body.get("promptFeedback")
+        .and_then(|feedback| feedback.get("blockReason"))
+        .and_then(Value::as_str)
+        .is_some_and(|reason| !reason.is_empty() && reason != "BLOCK_REASON_UNSPECIFIED")
 }
 
 /// The token totals of an event: the prompt and tool-use prompt tokens in, the candidate and thought tokens out, each
@@ -919,4 +1130,39 @@ fn totals(body: &Map<String, Value>) -> Option<(u32, u32)> {
         clamp(count("promptTokenCount").saturating_add(count("toolUsePromptTokenCount"))),
         clamp(count("candidatesTokenCount").saturating_add(count("thoughtsTokenCount"))),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::sse::SseDecoder;
+
+    #[test]
+    fn turn_debug_shows_counts_and_never_text() {
+        let canary = "UNIT-CANARY-5d1e";
+        let event = format!(
+            "data: {{\"candidates\":[{{\"content\":{{\"parts\":[{{\"text\":\"{canary}\"}},\
+             {{\"functionCall\":{{\"name\":\"{canary}\",\"args\":{{\"k\":\"{canary}\"}}}},\
+             \"thoughtSignature\":\"{canary}\"}}]}}}}],\
+             \"usageMetadata\":{{\"promptTokenCount\":7,\"candidatesTokenCount\":3}}}}\n\n"
+        );
+        let mut turn = GeminiTurn::new();
+        let mut decoder = SseDecoder::new();
+        let mut delivered = 0;
+        let mut out = |_: StreamEvent| {
+            delivered += 1;
+            Flow::Continue
+        };
+        let pushed = decoder
+            .push(event.as_bytes(), &mut |event| turn.frame(Frame::Event(event), &mut out).expect("a good event"));
+        assert_eq!(pushed, Ok(Flow::Continue));
+        assert_eq!(delivered, 2, "the text and the usage were delivered");
+
+        for shown in [format!("{turn:?}"), format!("{turn:#?}")] {
+            assert!(!shown.contains(canary), "the turn shows text: {shown}");
+            assert!(shown.contains("parts: 2"), "the part count is shown: {shown}");
+            assert!(shown.contains("calls: 1"), "the number of calls is shown: {shown}");
+            assert!(shown.contains("bytes"), "the stored size is shown: {shown}");
+        }
+    }
 }

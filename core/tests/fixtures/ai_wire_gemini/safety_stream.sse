@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"I can start, but"}],"role":"model"},"index":0}]}
+
+data: {"candidates":[{"finishReason":"SAFETY","index":0}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":5,"totalTokenCount":14}}
+
