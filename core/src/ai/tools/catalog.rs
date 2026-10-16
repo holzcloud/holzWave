@@ -6,15 +6,18 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::layout::PaneId;
 
 use super::super::provider::Detail;
-use super::super::types::Size;
-use super::deny::Access;
-use super::{MAX_PATH_BYTES, MAX_RESULT_BYTES, Resolved, ToolError};
+use super::super::types::{Size, ToolSpec};
+use super::deny::{Access, FsKind};
+use super::{
+    DEFAULT_COMMAND_SECS, MAX_COMMAND_BYTES, MAX_COMMAND_SECS, MAX_EDIT_BYTES, MAX_PATH_BYTES, MAX_PATTERN_BYTES,
+    MAX_RESULT_BYTES, MAX_WRITE_BYTES, Resolved, ToolError,
+};
 
 /// The tools, by the name a model calls them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -79,6 +82,70 @@ impl ToolName {
     pub fn taints_turn(self) -> bool {
         !matches!(self, Self::WriteFile | Self::EditFile)
     }
+}
+
+const APPROVAL_SENTENCE: &str = "The user approves each call before it runs.";
+
+impl ToolName {
+    /// The tool as it is declared to a model: its name, what it does, and the JSON schema of its arguments, which is
+    /// generated from the table that bounds them.
+    pub fn spec(self) -> ToolSpec {
+        let description = match self {
+            Self::ReadFile => "Reads a slice of a text file. The result is cut when it is long.",
+            Self::ListDir => "Lists the entries of a directory.",
+            Self::Grep => "Searches files for a literal text and returns the matching lines. The text is not a pattern.",
+            Self::ReadPane => "Reads the text shown in a terminal pane, counted from the bottom.",
+            Self::WriteFile => "Writes a whole file and replaces it when it exists.",
+            Self::EditFile => "Replaces text inside a file.",
+            Self::RunCommand => {
+                "Runs a command in a separate process, with its own working directory and time limit. It is not typed into the pane."
+            }
+        };
+        ToolSpec {
+            name: self.as_str().to_owned(),
+            description: format!("{description} {APPROVAL_SENTENCE}"),
+            input_schema: schema(fields_of(self)),
+        }
+    }
+}
+
+/// The JSON schema of an argument table. The schema and `check_fields` read the same rows, so they cannot disagree.
+fn schema(fields: &[Field]) -> Value {
+    let mut properties = Map::new();
+    let mut required = Vec::new();
+    for field in fields {
+        let mut property = Map::new();
+        match field.kind {
+            FieldKind::Text { min_bytes, max_bytes, .. } => {
+                property.insert("type".to_owned(), json!("string"));
+                property.insert("minLength".to_owned(), json!(min_bytes));
+                property.insert("maxLength".to_owned(), json!(max_bytes));
+            }
+            FieldKind::Int { min, max, default } => {
+                property.insert("type".to_owned(), json!("integer"));
+                property.insert("minimum".to_owned(), json!(min));
+                property.insert("maximum".to_owned(), json!(max));
+                if let Some(default) = default {
+                    property.insert("default".to_owned(), json!(default));
+                }
+            }
+            FieldKind::Flag { default } => {
+                property.insert("type".to_owned(), json!("boolean"));
+                property.insert("default".to_owned(), json!(default));
+            }
+        }
+        property.insert("description".to_owned(), json!(field.doc));
+        properties.insert(field.name.to_owned(), Value::Object(property));
+        if field.required {
+            required.push(field.name);
+        }
+    }
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": properties,
+        "required": required,
+    })
 }
 
 /// What a tool does to the world.
@@ -156,6 +223,12 @@ const MAX_PANE: u64 = u32::MAX as u64;
 const MAX_OFFSET: u64 = 1 << 50;
 const DEFAULT_OFFSET: u64 = 0;
 const DEFAULT_LIMIT: u64 = MAX_RESULT_BYTES as u64;
+const MAX_LIST_ENTRIES: u64 = 1000;
+const DEFAULT_LIST_ENTRIES: u64 = 200;
+const MAX_MATCHES: u64 = 200;
+const DEFAULT_MATCHES: u64 = 50;
+const MAX_ROWS: u64 = 1000;
+const DEFAULT_ROWS: u64 = 100;
 
 const PANE: Field = Field {
     name: "pane",
@@ -164,13 +237,15 @@ const PANE: Field = Field {
     doc: "The pane to act for. Leave it out to use the pane of this conversation.",
 };
 
+const PATH: Field = Field {
+    name: "path",
+    kind: FieldKind::Text { min_bytes: 1, max_bytes: MAX_PATH_BYTES, newlines: Newlines::Reject },
+    required: true,
+    doc: "The absolute path.",
+};
+
 const READ_FILE_FIELDS: &[Field] = &[
-    Field {
-        name: "path",
-        kind: FieldKind::Text { min_bytes: 1, max_bytes: MAX_PATH_BYTES, newlines: Newlines::Reject },
-        required: true,
-        doc: "The absolute path of the file to read.",
-    },
+    Field { doc: "The absolute path of the file to read.", ..PATH },
     Field {
         name: "offset",
         kind: FieldKind::Int { min: 0, max: MAX_OFFSET, default: Some(DEFAULT_OFFSET) },
@@ -185,6 +260,124 @@ const READ_FILE_FIELDS: &[Field] = &[
     },
     PANE,
 ];
+
+const LIST_DIR_FIELDS: &[Field] = &[
+    Field { doc: "The absolute path of the directory to list.", ..PATH },
+    Field {
+        name: "max_entries",
+        kind: FieldKind::Int { min: 1, max: MAX_LIST_ENTRIES, default: Some(DEFAULT_LIST_ENTRIES) },
+        required: false,
+        doc: "The most entries to return.",
+    },
+    PANE,
+];
+
+const GREP_FIELDS: &[Field] = &[
+    Field {
+        name: "pattern",
+        kind: FieldKind::Text { min_bytes: 1, max_bytes: MAX_PATTERN_BYTES, newlines: Newlines::Reject },
+        required: true,
+        doc: "The literal text to search for. It is not a pattern: no character in it has a special meaning.",
+    },
+    Field { doc: "The absolute path of the file or directory to search.", ..PATH },
+    Field {
+        name: "ignore_case",
+        kind: FieldKind::Flag { default: false },
+        required: false,
+        doc: "Whether upper and lower case letters match each other.",
+    },
+    Field {
+        name: "max_matches",
+        kind: FieldKind::Int { min: 1, max: MAX_MATCHES, default: Some(DEFAULT_MATCHES) },
+        required: false,
+        doc: "The most matching lines to return.",
+    },
+    PANE,
+];
+
+const READ_PANE_FIELDS: &[Field] = &[
+    Field {
+        name: "pane",
+        kind: FieldKind::Int { min: 0, max: MAX_PANE, default: None },
+        required: true,
+        doc: "The pane to read.",
+    },
+    Field {
+        name: "rows",
+        kind: FieldKind::Int { min: 1, max: MAX_ROWS, default: Some(DEFAULT_ROWS) },
+        required: false,
+        doc: "The number of rows to return, counted from the bottom of the pane.",
+    },
+];
+
+const WRITE_FILE_FIELDS: &[Field] = &[
+    Field { doc: "The absolute path of the file to write. An existing file is replaced.", ..PATH },
+    Field {
+        name: "content",
+        kind: FieldKind::Text { min_bytes: 0, max_bytes: MAX_WRITE_BYTES, newlines: Newlines::Keep },
+        required: true,
+        doc: "The whole new content of the file.",
+    },
+    PANE,
+];
+
+const EDIT_FILE_FIELDS: &[Field] = &[
+    Field { doc: "The absolute path of the file to change.", ..PATH },
+    Field {
+        name: "old_text",
+        kind: FieldKind::Text { min_bytes: 1, max_bytes: MAX_EDIT_BYTES, newlines: Newlines::Keep },
+        required: true,
+        doc: "The text to replace, exactly as it is in the file.",
+    },
+    Field {
+        name: "new_text",
+        kind: FieldKind::Text { min_bytes: 0, max_bytes: MAX_EDIT_BYTES, newlines: Newlines::Keep },
+        required: true,
+        doc: "The text to put in its place.",
+    },
+    Field {
+        name: "replace_all",
+        kind: FieldKind::Flag { default: false },
+        required: false,
+        doc: "Whether to replace every occurrence instead of one.",
+    },
+    PANE,
+];
+
+const RUN_COMMAND_FIELDS: &[Field] = &[
+    Field {
+        name: "command",
+        kind: FieldKind::Text { min_bytes: 1, max_bytes: MAX_COMMAND_BYTES, newlines: Newlines::Escape },
+        required: true,
+        doc: "The command line to run.",
+    },
+    Field {
+        name: "cwd",
+        kind: FieldKind::Text { min_bytes: 1, max_bytes: MAX_PATH_BYTES, newlines: Newlines::Reject },
+        required: false,
+        doc: "The absolute path of the working directory.",
+    },
+    Field {
+        name: "timeout_secs",
+        kind: FieldKind::Int { min: 1, max: MAX_COMMAND_SECS, default: Some(DEFAULT_COMMAND_SECS) },
+        required: false,
+        doc: "How many seconds the command may run before it is stopped.",
+    },
+    PANE,
+];
+
+/// The argument table of `tool`: what is checked, and what the model is told.
+pub fn fields_of(tool: ToolName) -> &'static [Field] {
+    match tool {
+        ToolName::ReadFile => READ_FILE_FIELDS,
+        ToolName::ListDir => LIST_DIR_FIELDS,
+        ToolName::Grep => GREP_FIELDS,
+        ToolName::ReadPane => READ_PANE_FIELDS,
+        ToolName::WriteFile => WRITE_FILE_FIELDS,
+        ToolName::EditFile => EDIT_FILE_FIELDS,
+        ToolName::RunCommand => RUN_COMMAND_FIELDS,
+    }
+}
 
 /// Checks `args` against `fields`: the arguments are an object, every key is a field, every required field is there,
 /// and every value has the right type, size and shape.
@@ -338,20 +531,185 @@ impl ReadFile {
     }
 }
 
+/// The arguments of `list_dir`.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListDir {
+    /// The absolute path of the directory.
+    pub path: String,
+    /// The most entries to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_entries: Option<u64>,
+    /// The pane to act for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<PaneId>,
+}
+
+sized_debug!(ListDir: path, max_entries, pane);
+
+impl ListDir {
+    /// The most entries to return, with the default applied.
+    pub fn max_entries(&self) -> u64 {
+        self.max_entries.unwrap_or(DEFAULT_LIST_ENTRIES)
+    }
+}
+
+/// The arguments of `grep`: a search for a literal text, not a pattern.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Grep {
+    /// The text to search for.
+    pub pattern: String,
+    /// The absolute path of the file or directory.
+    pub path: String,
+    /// Whether upper and lower case letters match each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignore_case: Option<bool>,
+    /// The most matching lines to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_matches: Option<u64>,
+    /// The pane to act for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<PaneId>,
+}
+
+sized_debug!(Grep: pattern, path, ignore_case, max_matches, pane);
+
+impl Grep {
+    /// Whether case is ignored, with the default applied.
+    pub fn ignore_case(&self) -> bool {
+        self.ignore_case.unwrap_or(false)
+    }
+
+    /// The most matching lines to return, with the default applied.
+    pub fn max_matches(&self) -> u64 {
+        self.max_matches.unwrap_or(DEFAULT_MATCHES)
+    }
+}
+
+/// The arguments of `read_pane`.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadPane {
+    /// The pane to read.
+    pub pane: PaneId,
+    /// The number of rows to return, counted from the bottom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u64>,
+}
+
+sized_debug!(ReadPane: pane, rows);
+
+impl ReadPane {
+    /// The number of rows, with the default applied.
+    pub fn rows(&self) -> u64 {
+        self.rows.unwrap_or(DEFAULT_ROWS)
+    }
+}
+
+/// The arguments of `write_file`.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteFile {
+    /// The absolute path of the file.
+    pub path: String,
+    /// The whole new content.
+    pub content: String,
+    /// The pane to act for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<PaneId>,
+}
+
+sized_debug!(WriteFile: path, content, pane);
+
+/// The arguments of `edit_file`.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EditFile {
+    /// The absolute path of the file.
+    pub path: String,
+    /// The text to replace.
+    pub old_text: String,
+    /// The text to put in its place.
+    pub new_text: String,
+    /// Whether to replace every occurrence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_all: Option<bool>,
+    /// The pane to act for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<PaneId>,
+}
+
+sized_debug!(EditFile: path, old_text, new_text, replace_all, pane);
+
+impl EditFile {
+    /// Whether every occurrence is replaced, with the default applied.
+    pub fn replace_all(&self) -> bool {
+        self.replace_all.unwrap_or(false)
+    }
+}
+
+/// The arguments of `run_command`.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunCommand {
+    /// The command line.
+    pub command: String,
+    /// The absolute path of the working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// How many seconds the command may run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// The pane to act for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<PaneId>,
+}
+
+sized_debug!(RunCommand: command, cwd, timeout_secs, pane);
+
+impl RunCommand {
+    /// How many seconds the command may run, with the default applied.
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or(DEFAULT_COMMAND_SECS)
+    }
+}
+
 /// A call whose arguments passed the tables.
 #[derive(Clone)]
 pub enum Tool {
     /// `read_file`.
     ReadFile(ReadFile),
+    /// `list_dir`.
+    ListDir(ListDir),
+    /// `grep`.
+    Grep(Grep),
+    /// `read_pane`.
+    ReadPane(ReadPane),
+    /// `write_file`.
+    WriteFile(WriteFile),
+    /// `edit_file`.
+    EditFile(EditFile),
+    /// `run_command`.
+    RunCommand(RunCommand),
 }
 
 impl Tool {
     /// Decodes the call `name` with `args`. Unknown names, unknown arguments and every value outside its bounds are
     /// refused.
     pub fn parse(name: &str, args: &Value) -> Result<Tool, ToolError> {
-        match ToolName::from_name(name) {
-            Some(ToolName::ReadFile) => decode(READ_FILE_FIELDS, args).map(Tool::ReadFile),
-            _ => Err(ToolError::UnknownTool(Detail::new(name))),
+        let Some(tool) = ToolName::from_name(name) else {
+            return Err(ToolError::UnknownTool(Detail::new(name)));
+        };
+        let fields = fields_of(tool);
+        match tool {
+            ToolName::ReadFile => decode(fields, args).map(Tool::ReadFile),
+            ToolName::ListDir => decode(fields, args).map(Tool::ListDir),
+            ToolName::Grep => decode(fields, args).map(Tool::Grep),
+            ToolName::ReadPane => decode(fields, args).map(Tool::ReadPane),
+            ToolName::WriteFile => decode(fields, args).map(Tool::WriteFile),
+            ToolName::EditFile => decode(fields, args).map(Tool::EditFile),
+            ToolName::RunCommand => decode(fields, args).map(Tool::RunCommand),
         }
     }
 
@@ -359,6 +717,12 @@ impl Tool {
     pub fn name(&self) -> ToolName {
         match self {
             Self::ReadFile(_) => ToolName::ReadFile,
+            Self::ListDir(_) => ToolName::ListDir,
+            Self::Grep(_) => ToolName::Grep,
+            Self::ReadPane(_) => ToolName::ReadPane,
+            Self::WriteFile(_) => ToolName::WriteFile,
+            Self::EditFile(_) => ToolName::EditFile,
+            Self::RunCommand(_) => ToolName::RunCommand,
         }
     }
 
@@ -367,10 +731,13 @@ impl Tool {
         self.name().effect()
     }
 
-    /// How the tool uses its path: `None` for a tool without one.
+    /// How the tool uses its path: `Read` for the file tools that read, `Write` for the ones that change a file, and
+    /// `None` for a tool without a path.
     pub fn access(&self) -> Option<Access> {
         match self {
-            Self::ReadFile(_) => Some(Access::Read),
+            Self::ReadFile(_) | Self::ListDir(_) | Self::Grep(_) => Some(Access::Read),
+            Self::WriteFile(_) | Self::EditFile(_) => Some(Access::Write),
+            Self::ReadPane(_) | Self::RunCommand(_) => None,
         }
     }
 
@@ -378,6 +745,12 @@ impl Tool {
     pub fn pane(&self) -> Option<PaneId> {
         match self {
             Self::ReadFile(a) => a.pane,
+            Self::ListDir(a) => a.pane,
+            Self::Grep(a) => a.pane,
+            Self::ReadPane(a) => Some(a.pane),
+            Self::WriteFile(a) => a.pane,
+            Self::EditFile(a) => a.pane,
+            Self::RunCommand(a) => a.pane,
         }
     }
 
@@ -385,13 +758,19 @@ impl Tool {
     pub fn path(&self) -> Option<&str> {
         match self {
             Self::ReadFile(a) => Some(&a.path),
+            Self::ListDir(a) => Some(&a.path),
+            Self::Grep(a) => Some(&a.path),
+            Self::WriteFile(a) => Some(&a.path),
+            Self::EditFile(a) => Some(&a.path),
+            Self::ReadPane(_) | Self::RunCommand(_) => None,
         }
     }
 
     /// The working directory the call names, as the model wrote it.
     pub fn cwd(&self) -> Option<&str> {
         match self {
-            Self::ReadFile(_) => None,
+            Self::RunCommand(a) => a.cwd.as_deref(),
+            _ => None,
         }
     }
 
@@ -404,6 +783,33 @@ impl Tool {
                 Item::line("offset", a.offset().to_string()),
                 Item::line("limit", a.limit().to_string()),
             ],
+            Self::ListDir(a) => {
+                vec![Item::line("path", a.path.clone()), Item::line("max_entries", a.max_entries().to_string())]
+            }
+            Self::Grep(a) => vec![
+                Item::line("pattern", a.pattern.clone()),
+                Item::line("path", a.path.clone()),
+                Item::line("ignore_case", a.ignore_case().to_string()),
+                Item::line("max_matches", a.max_matches().to_string()),
+            ],
+            Self::ReadPane(a) => vec![Item::line("rows", a.rows().to_string())],
+            Self::WriteFile(a) => {
+                vec![Item::line("path", a.path.clone()), Item::text("content", a.content.clone(), Newlines::Keep)]
+            }
+            Self::EditFile(a) => vec![
+                Item::line("path", a.path.clone()),
+                Item::text("old_text", a.old_text.clone(), Newlines::Keep),
+                Item::text("new_text", a.new_text.clone(), Newlines::Keep),
+                Item::line("replace_all", a.replace_all().to_string()),
+            ],
+            Self::RunCommand(a) => {
+                let mut items = vec![Item::text("command", a.command.clone(), Newlines::Escape)];
+                if let Some(cwd) = &a.cwd {
+                    items.push(Item::line("cwd", cwd.clone()));
+                }
+                items.push(Item::line("timeout_secs", a.timeout_secs().to_string()));
+                items
+            }
         }
     }
 }
@@ -412,6 +818,12 @@ impl fmt::Debug for Tool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ReadFile(a) => f.debug_tuple("ReadFile").field(a).finish(),
+            Self::ListDir(a) => f.debug_tuple("ListDir").field(a).finish(),
+            Self::Grep(a) => f.debug_tuple("Grep").field(a).finish(),
+            Self::ReadPane(a) => f.debug_tuple("ReadPane").field(a).finish(),
+            Self::WriteFile(a) => f.debug_tuple("WriteFile").field(a).finish(),
+            Self::EditFile(a) => f.debug_tuple("EditFile").field(a).finish(),
+            Self::RunCommand(a) => f.debug_tuple("RunCommand").field(a).finish(),
         }
     }
 }
@@ -427,7 +839,11 @@ pub(crate) struct Item {
 
 impl Item {
     fn line(name: &'static str, value: String) -> Self {
-        Self { name, value, newlines: Newlines::Reject }
+        Self::text(name, value, Newlines::Reject)
+    }
+
+    fn text(name: &'static str, value: String, newlines: Newlines) -> Self {
+        Self { name, value, newlines }
     }
 }
 
@@ -439,7 +855,7 @@ pub(crate) fn payload(tool: &Tool, resolved: &Resolved) -> Vec<Item> {
         Item::line("tool", tool.name().as_str().to_owned()),
         Item::line("pane", resolved.pane().to_string()),
         Item::line("target", resolved.target().to_owned()),
-        Item::line("remote", (resolved.fs() == super::deny::FsKind::Remote).to_string()),
+        Item::line("remote", (resolved.fs() == FsKind::Remote).to_string()),
     ];
     items.extend(tool.arguments());
     if let Some(path) = resolved.path() {

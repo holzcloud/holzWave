@@ -23,11 +23,12 @@ use std::fmt;
 use crate::layout::PaneId;
 
 use super::provider::{CancelToken, Detail};
-use super::types::{Size, ToolResult};
+use super::types::{Size, ToolResult, ToolSpec};
 
 pub use approval::{ApprovalTable, Decision, PayloadField, Pending, Ticket, denied_result};
 pub use catalog::{
-    Effect, Field, FieldKind, HASH_PREFIX, Newlines, ReadFile, Tool, ToolName, payload_hash, visible, visible_multiline,
+    EditFile, Effect, Field, FieldKind, Grep, HASH_PREFIX, ListDir, Newlines, ReadFile, ReadPane, RunCommand, Tool,
+    ToolName, WriteFile, fields_of, payload_hash, visible, visible_multiline,
 };
 pub use deny::{Access, Denied, DenyPolicy, FsKind, Style, canonical_local};
 
@@ -357,4 +358,11 @@ pub trait ToolHost: Send + Sync {
 
     /// Does what the user approved.
     fn run(&self, ticket: &Ticket, cancel: &CancelToken) -> Result<ToolOutput, ToolError>;
+}
+
+/// The tools the host offers for `pane`, as they are declared to a model, in the order of [`ToolName::ALL`].
+///
+/// A tool the host does not report as available is not declared, so the model cannot ask for it.
+pub fn specs(host: &dyn ToolHost, pane: PaneId) -> Vec<ToolSpec> {
+    ToolName::ALL.into_iter().filter(|tool| host.available(*tool, pane)).map(ToolName::spec).collect()
 }

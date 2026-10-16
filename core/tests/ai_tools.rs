@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use holzwave_core::ai::provider::{CancelToken, Detail};
 use holzwave_core::ai::tools::{
-    ApprovalTable, Decision, DenyPolicy, FsKind, Resolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName,
-    ToolOutput, denied_result,
+    ApprovalTable, Decision, DenyPolicy, FsKind, HASH_PREFIX, MAX_RESULT_BYTES, Resolved, Scope, Ticket, Tool, ToolError,
+    ToolHost, ToolName, ToolOutput, denied_result, fields_of, payload_hash, specs, visible, visible_multiline,
 };
 use holzwave_core::ai::types::ToolCall;
 use holzwave_core::layout::PaneId;
@@ -42,6 +42,7 @@ struct HostState {
     unavailable: BTreeSet<ToolName>,
     resolve_count: usize,
     ran: Vec<Ran>,
+    ticket_debug: Vec<String>,
     hook: Option<Hook>,
     run_delay: Duration,
 }
@@ -63,6 +64,7 @@ impl FakeHost {
                 unavailable: BTreeSet::new(),
                 resolve_count: 0,
                 ran: Vec::new(),
+                ticket_debug: Vec::new(),
                 hook: None,
                 run_delay: Duration::ZERO,
             })),
@@ -90,6 +92,12 @@ impl FakeHost {
 
     fn without(self, tool: ToolName) -> Self {
         self.state().unavailable.insert(tool);
+        self
+    }
+
+    /// Gives the file `path` the stamp `stamp`, as the host would after reading its modification time.
+    fn with_stamp(self, path: &str, stamp: i64) -> Self {
+        self.state().stamps.insert(path.to_owned(), stamp);
         self
     }
 
@@ -123,6 +131,11 @@ impl FakeHost {
 
     fn ran(&self) -> Vec<Ran> {
         self.state().ran.clone()
+    }
+
+    /// The `Debug` text of every ticket the host received, plain and pretty.
+    fn ticket_debug(&self) -> Vec<String> {
+        self.state().ticket_debug.clone()
     }
 
     fn resolve_count(&self) -> usize {
@@ -179,6 +192,8 @@ impl ToolHost for FakeHost {
         let mut state = self.state();
         let path = ticket.resolved().path().map(str::to_owned);
         state.ran.push(Ran { call_id: ticket.call_id().to_owned(), tool: ticket.tool().name(), path: path.clone() });
+        state.ticket_debug.push(format!("{ticket:?}"));
+        state.ticket_debug.push(format!("{ticket:#?}"));
         match ticket.tool() {
             Tool::ReadFile(args) => {
                 let Some(text) = path.as_ref().and_then(|p| state.files.get(p)) else {
@@ -189,6 +204,14 @@ impl ToolHost for FakeHost {
                 let end = start.saturating_add(usize::try_from(args.limit()).unwrap_or(usize::MAX)).min(bytes.len());
                 Ok(ToolOutput::new(String::from_utf8_lossy(&bytes[start..end]).into_owned()))
             }
+            Tool::WriteFile(args) => {
+                let Some(path) = path else {
+                    return Err(ToolError::Host(Detail::new("no path")));
+                };
+                state.files.insert(path, args.content.clone());
+                Ok(ToolOutput::new(format!("wrote {} bytes", args.content.len())))
+            }
+            _ => Ok(ToolOutput::new("ok".to_owned())),
         }
     }
 }
@@ -524,4 +547,678 @@ fn tool_errors_have_stable_codes_and_texts_without_arguments() {
         assert!(detail.as_str().chars().count() <= 241);
         assert!(content.ends_with(detail.as_str()), "{content:?}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The catalog: bounds, schemas, the card and the hash.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// How a text field treats line breaks, as the tests state it (written out here, not read from the production table).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lines {
+    Reject,
+    Escape,
+    Keep,
+}
+
+/// The bounds of one argument, as the tests state them.
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    Text { min: usize, max: usize, lines: Lines },
+    Int { min: u64, max: u64, default: Option<u64> },
+    Flag { default: bool },
+}
+
+const MAX_PANE: u64 = u32::MAX as u64;
+
+/// The arguments of a tool in table order: name, bounds, and whether the call has to give it.
+fn bounds(tool: ToolName) -> Vec<(&'static str, Kind, bool)> {
+    let path = ("path", Kind::Text { min: 1, max: 4096, lines: Lines::Reject }, true);
+    let pane = ("pane", Kind::Int { min: 0, max: MAX_PANE, default: None }, false);
+    match tool {
+        ToolName::ReadFile => vec![
+            path,
+            ("offset", Kind::Int { min: 0, max: 1 << 50, default: Some(0) }, false),
+            ("limit", Kind::Int { min: 1, max: 16384, default: Some(16384) }, false),
+            pane,
+        ],
+        ToolName::ListDir => {
+            vec![path, ("max_entries", Kind::Int { min: 1, max: 1000, default: Some(200) }, false), pane]
+        }
+        ToolName::Grep => vec![
+            ("pattern", Kind::Text { min: 1, max: 512, lines: Lines::Reject }, true),
+            path,
+            ("ignore_case", Kind::Flag { default: false }, false),
+            ("max_matches", Kind::Int { min: 1, max: 200, default: Some(50) }, false),
+            pane,
+        ],
+        ToolName::ReadPane => vec![
+            ("pane", Kind::Int { min: 0, max: MAX_PANE, default: None }, true),
+            ("rows", Kind::Int { min: 1, max: 1000, default: Some(100) }, false),
+        ],
+        ToolName::WriteFile => {
+            vec![path, ("content", Kind::Text { min: 0, max: 131_072, lines: Lines::Keep }, true), pane]
+        }
+        ToolName::EditFile => vec![
+            path,
+            ("old_text", Kind::Text { min: 1, max: 32_768, lines: Lines::Keep }, true),
+            ("new_text", Kind::Text { min: 0, max: 32_768, lines: Lines::Keep }, true),
+            ("replace_all", Kind::Flag { default: false }, false),
+            pane,
+        ],
+        ToolName::RunCommand => vec![
+            ("command", Kind::Text { min: 1, max: 8192, lines: Lines::Escape }, true),
+            ("cwd", Kind::Text { min: 1, max: 4096, lines: Lines::Reject }, false),
+            ("timeout_secs", Kind::Int { min: 1, max: 600, default: Some(60) }, false),
+            pane,
+        ],
+    }
+}
+
+/// A full, valid set of arguments for each tool.
+fn sample(tool: ToolName) -> Value {
+    match tool {
+        ToolName::ReadFile => json!({ "path": NOTES, "offset": 4, "limit": 100, "pane": 3 }),
+        ToolName::ListDir => json!({ "path": "/srv/app", "max_entries": 10, "pane": 3 }),
+        ToolName::Grep => {
+            json!({ "pattern": "needle", "path": "/srv/app", "ignore_case": true, "max_matches": 5, "pane": 3 })
+        }
+        ToolName::ReadPane => json!({ "pane": 3, "rows": 20 }),
+        ToolName::WriteFile => json!({ "path": "/srv/app/out.txt", "content": "hello\nworld", "pane": 3 }),
+        ToolName::EditFile => json!({
+            "path": "/srv/app/out.txt", "old_text": "hello", "new_text": "howdy", "replace_all": true, "pane": 3
+        }),
+        ToolName::RunCommand => json!({ "command": "ls -l", "cwd": "/srv/app", "timeout_secs": 30, "pane": 3 }),
+    }
+}
+
+/// `args` with `field` set to `value`.
+fn with(mut args: Value, field: &str, value: Value) -> Value {
+    args[field] = value;
+    args
+}
+
+/// `args` without `field`.
+fn without_field(mut args: Value, field: &str) -> Value {
+    args.as_object_mut().expect("arguments are an object").remove(field);
+    args
+}
+
+/// The arguments of a parsed tool, serialised back.
+fn args_of(tool: &Tool) -> Value {
+    match tool {
+        Tool::ReadFile(a) => serde_json::to_value(a),
+        Tool::ListDir(a) => serde_json::to_value(a),
+        Tool::Grep(a) => serde_json::to_value(a),
+        Tool::ReadPane(a) => serde_json::to_value(a),
+        Tool::WriteFile(a) => serde_json::to_value(a),
+        Tool::EditFile(a) => serde_json::to_value(a),
+        Tool::RunCommand(a) => serde_json::to_value(a),
+    }
+    .expect("arguments serialise")
+}
+
+fn parse(tool: ToolName, args: &Value) -> Result<Tool, ToolError> {
+    Tool::parse(tool.as_str(), args)
+}
+
+fn invalid(result: &Result<Tool, ToolError>) -> bool {
+    matches!(result, Err(ToolError::InvalidArguments(_)))
+}
+
+/// The schema of `read_file` with the descriptions removed, written out in full: it is what models are taught.
+fn pinned_read_file_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "offset": { "type": "integer", "minimum": 0, "maximum": 1_125_899_906_842_624u64, "default": 0 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 16384, "default": 16384 },
+            "pane": { "type": "integer", "minimum": 0, "maximum": 4_294_967_295u64 }
+        },
+        "required": ["path"]
+    })
+}
+
+#[test]
+fn every_tool_declares_a_schema_that_matches_its_argument_struct() {
+    let required_by_tool: [(ToolName, &[&str]); 7] = [
+        (ToolName::ReadFile, &["path"]),
+        (ToolName::ListDir, &["path"]),
+        (ToolName::Grep, &["pattern", "path"]),
+        (ToolName::ReadPane, &["pane"]),
+        (ToolName::WriteFile, &["path", "content"]),
+        (ToolName::EditFile, &["path", "old_text", "new_text"]),
+        (ToolName::RunCommand, &["command"]),
+    ];
+    assert_eq!(ToolName::ALL.len(), 7);
+    for (tool, required_names) in required_by_tool {
+        let table = bounds(tool);
+        let names: Vec<&str> = table.iter().map(|(name, ..)| *name).collect();
+
+        // The table of the code names the same fields in the same order.
+        let code_names: Vec<&str> = fields_of(tool).iter().map(|field| field.name).collect();
+        assert_eq!(code_names, names, "{tool:?}");
+
+        // A full sample decodes, and the struct serialises back to exactly the fields of the table.
+        let parsed = parse(tool, &sample(tool)).unwrap_or_else(|e| panic!("{tool:?}: {e}"));
+        assert_eq!(parsed.name(), tool);
+        let back: BTreeSet<String> = args_of(&parsed).as_object().unwrap().keys().cloned().collect();
+        let expected: BTreeSet<String> = names.iter().map(|n| (*n).to_owned()).collect();
+        assert_eq!(back, expected, "{tool:?}: the struct and the table name the same fields");
+
+        // Removing a field fails exactly for the required ones.
+        for (name, _, required) in &table {
+            let result = parse(tool, &without_field(sample(tool), name));
+            assert_eq!(result.is_err(), *required, "{tool:?}.{name}");
+            if *required {
+                assert!(invalid(&result), "{tool:?}.{name}: {result:?}");
+            }
+        }
+
+        // The schema is generated from the table.
+        let spec = tool.spec();
+        assert_eq!(spec.name, tool.as_str());
+        let schema = &spec.input_schema;
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"], false);
+        let properties = schema["properties"].as_object().expect("properties");
+        let declared: BTreeSet<&str> = properties.keys().map(String::as_str).collect();
+        assert_eq!(declared, names.iter().copied().collect::<BTreeSet<_>>(), "{tool:?}");
+        let required: Vec<&str> = schema["required"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(required, required_names, "{tool:?}: required fields in table order");
+        for (name, kind, _) in &table {
+            let property = &properties[*name];
+            assert!(!property["description"].as_str().unwrap_or_default().is_empty(), "{tool:?}.{name} has no description");
+            match *kind {
+                Kind::Text { min, max, .. } => {
+                    assert_eq!(property["type"], "string");
+                    assert_eq!((property["minLength"].as_u64(), property["maxLength"].as_u64()), (Some(min as u64), Some(max as u64)));
+                    assert!(property.get("default").is_none());
+                }
+                Kind::Int { min, max, default } => {
+                    assert_eq!(property["type"], "integer");
+                    assert_eq!((property["minimum"].as_u64(), property["maximum"].as_u64()), (Some(min), Some(max)));
+                    assert_eq!(property.get("default").and_then(Value::as_u64), default, "{tool:?}.{name}");
+                }
+                Kind::Flag { default } => {
+                    assert_eq!(property["type"], "boolean");
+                    assert_eq!(property["default"], default);
+                }
+            }
+        }
+
+        // The description tells the model that the user decides.
+        assert!(!spec.description.is_empty() && spec.description.chars().count() <= 400, "{tool:?}");
+        assert!(spec.description.contains("The user approves each call"), "{tool:?}: {}", spec.description);
+    }
+
+    // The schema of `read_file` is pinned.
+    let mut schema = ToolName::ReadFile.spec().input_schema;
+    for property in schema["properties"].as_object_mut().unwrap().values_mut() {
+        property.as_object_mut().unwrap().remove("description");
+    }
+    assert_eq!(schema, pinned_read_file_schema());
+
+    // `run_command` says what it is not.
+    let command = ToolName::RunCommand.spec().description;
+    assert!(command.contains("separate process") && command.contains("not typed into the pane"), "{command}");
+
+    // The defaults of the schema are the values the card shows for a call that leaves the field out.
+    let host = FakeHost::remote();
+    let table = table_with(&[]);
+    let scope = scope("c1", 1, 3);
+    for tool in ToolName::ALL {
+        let mut minimal = sample(tool);
+        for (name, _, required) in bounds(tool) {
+            if !required {
+                minimal = without_field(minimal, name);
+            }
+        }
+        let pending = table.propose(&host, &scope, &call(tool.as_str(), tool.as_str(), minimal)).unwrap();
+        let schema = tool.spec().input_schema;
+        for (name, property) in schema["properties"].as_object().unwrap() {
+            let Some(default) = property.get("default") else { continue };
+            let shown = pending
+                .payload
+                .iter()
+                .find(|field| field.name == name.as_str())
+                .unwrap_or_else(|| panic!("{tool:?}: the card shows no {name}"));
+            assert_eq!(shown.value, default.to_string(), "{tool:?}.{name}");
+        }
+    }
+}
+
+#[test]
+fn an_unknown_argument_is_refused_for_every_tool() {
+    let canary = "CANARY-9c41";
+    for tool in ToolName::ALL {
+        // Every text of the sample carries the canary, so a refusal that quotes a value shows it.
+        let mut args = sample(tool);
+        for value in args.as_object_mut().unwrap().values_mut() {
+            if let Some(text) = value.as_str() {
+                *value = json!(format!("{canary} {text}"));
+            }
+        }
+        assert!(parse(tool, &args).is_ok(), "{tool:?}");
+        let result = parse(tool, &with(args.clone(), "bogus", json!(canary)));
+        assert!(invalid(&result), "{tool:?}: {result:?}");
+        let text = result.unwrap_err().to_result("c").content;
+        assert!(text.contains("bogus") && !text.contains(canary), "{tool:?}: {text}");
+
+        // A hostile key is scrubbed and bounded.
+        let hostile = format!("\u{1b}[2J{}", "k".repeat(400));
+        let result = parse(tool, &with(args, &hostile, json!(1)));
+        let text = result.unwrap_err().to_result("c").content;
+        assert!(!text.chars().any(char::is_control) && text.chars().count() < 400, "{tool:?}: {text}");
+    }
+}
+
+#[test]
+fn text_and_number_bounds_are_enforced_for_every_field() {
+    for tool in ToolName::ALL {
+        for (name, kind, required) in bounds(tool) {
+            let at = |value: Value| parse(tool, &with(sample(tool), name, value));
+            let label = format!("{tool:?}.{name}");
+            match kind {
+                Kind::Text { min, max, .. } => {
+                    assert!(at(json!("a".repeat(max))).is_ok(), "{label}: exactly the maximum");
+                    assert!(invalid(&at(json!("a".repeat(max + 1)))), "{label}: one byte over the maximum");
+                    if min > 0 {
+                        assert!(invalid(&at(json!("a".repeat(min - 1)))), "{label}: below the minimum");
+                    }
+                    assert!(at(json!("a".repeat(min))).is_ok(), "{label}: exactly the minimum");
+                    assert!(invalid(&at(json!(7))), "{label}: a number for text");
+                    assert!(invalid(&at(json!(["a"]))), "{label}: a list for text");
+                    // Bytes are counted, not characters: two-byte characters reach the bound at half the count.
+                    if max >= 2 {
+                        assert!(invalid(&at(json!("é".repeat(max / 2 + 1)))), "{label}: bytes, not characters");
+                    }
+                }
+                Kind::Int { min, max, .. } => {
+                    assert!(at(json!(min)).is_ok(), "{label}: exactly the minimum");
+                    assert!(at(json!(max)).is_ok(), "{label}: exactly the maximum");
+                    assert!(invalid(&at(json!(max + 1))), "{label}: above the maximum");
+                    if min > 0 {
+                        assert!(invalid(&at(json!(min - 1))), "{label}: below the minimum");
+                    }
+                    assert!(invalid(&at(json!(-1))), "{label}: a negative number");
+                    assert!(invalid(&at(json!(1.5))), "{label}: a fraction");
+                    assert!(invalid(&at(json!(min as f64))), "{label}: a float where an integer is expected");
+                    assert!(invalid(&at(json!(min.to_string()))), "{label}: a string for a number");
+                    assert!(invalid(&at(json!(true))), "{label}: a flag for a number");
+                }
+                Kind::Flag { .. } => {
+                    assert!(at(json!(true)).is_ok() && at(json!(false)).is_ok(), "{label}");
+                    assert!(invalid(&at(json!("true"))), "{label}: a string for a flag");
+                    assert!(invalid(&at(json!(1))), "{label}: a number for a flag");
+                }
+            }
+            if required {
+                assert!(invalid(&at(Value::Null)), "{label}: null for a required field");
+            } else {
+                assert!(at(Value::Null).is_ok(), "{label}: null for an optional field means it is left out");
+            }
+        }
+    }
+}
+
+#[test]
+fn control_characters_are_refused_where_the_field_does_not_allow_them() {
+    let refused = ['\0', '\u{1b}', '\u{7f}', '\u{85}', '\u{1}', '\u{9f}'];
+    let breaks = ['\n', '\t', '\r'];
+    let allowed = ['\u{202e}', '\u{200b}', '\u{e0041}', '\u{ad}', '\u{feff}'];
+    let mut checked = 0;
+    for tool in ToolName::ALL {
+        for (name, kind, _) in bounds(tool) {
+            let Kind::Text { lines, .. } = kind else { continue };
+            let at = |c: char| parse(tool, &with(sample(tool), name, json!(format!("a{c}b"))));
+            for c in refused {
+                assert!(invalid(&at(c)), "{tool:?}.{name}: U+{:04X} is refused", u32::from(c));
+            }
+            for c in breaks {
+                assert_eq!(at(c).is_ok(), lines != Lines::Reject, "{tool:?}.{name}: {c:?} with {lines:?}");
+            }
+            for c in allowed {
+                assert!(at(c).is_ok(), "{tool:?}.{name}: U+{:04X} is allowed and shown escaped", u32::from(c));
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 11, "every text field of the seven tools was checked");
+    // The card spells the allowed ones out.
+    assert_eq!(visible("a\u{202e}b\u{200b}c\u{e0041}"), "a\\u{202e}b\\u{200b}c\\u{e0041}");
+}
+
+#[test]
+fn a_wrong_type_or_a_missing_field_is_refused_with_scrubbed_text() {
+    let canary = "CANARY-9c41";
+    for tool in ToolName::ALL {
+        let mut args = sample(tool);
+        for value in args.as_object_mut().unwrap().values_mut() {
+            if let Some(text) = value.as_str() {
+                *value = json!(format!("{canary} {text}"));
+            }
+        }
+        for (name, kind, required) in bounds(tool) {
+            let wrong = match kind {
+                Kind::Text { .. } => json!(canary.len()),
+                Kind::Int { .. } | Kind::Flag { .. } => json!(canary),
+            };
+            let mut attempts = vec![with(args.clone(), name, wrong)];
+            if required {
+                attempts.push(without_field(args.clone(), name));
+                attempts.push(with(args.clone(), name, Value::Null));
+            }
+            for attempt in attempts {
+                let result = parse(tool, &attempt);
+                assert!(invalid(&result), "{tool:?}.{name}: {result:?}");
+                let text = result.unwrap_err().to_result("c").content;
+                assert!(text.contains(name), "{tool:?}.{name} is named: {text}");
+                assert!(!text.contains(canary) && !text.chars().any(char::is_control), "{tool:?}.{name}: {text}");
+            }
+        }
+        for not_an_object in [json!([]), json!("x"), json!(null), json!(5), json!(true)] {
+            assert!(invalid(&parse(tool, &not_an_object)), "{tool:?}: {not_an_object}");
+        }
+    }
+
+    // An unknown tool name is scrubbed and bounded.
+    let hostile = format!("\u{1b}[2J{}", "y".repeat(300));
+    for name in ["format_disk", hostile.as_str(), ""] {
+        let Err(ToolError::UnknownTool(detail)) = Tool::parse(name, &json!({})) else {
+            panic!("{name:?} is not a tool");
+        };
+        assert!(detail.as_str().chars().count() <= 241 && !detail.as_str().contains('\u{1b}'), "{detail:?}");
+    }
+    assert!(matches!(Tool::parse("READ_FILE", &json!({ "path": "/a" })), Err(ToolError::UnknownTool(_))));
+}
+
+#[test]
+fn the_card_shows_every_field_escaped_and_the_hash_covers_all_of_them() {
+    let table = table_with(&[]);
+    let host = FakeHost::remote();
+    let scope3 = scope("c1", 1, 3);
+    let field = |pending: &holzwave_core::ai::tools::Pending, name: &str| {
+        pending.payload.iter().find(|f| f.name == name).map(|f| (f.value.clone(), f.bytes))
+    };
+
+    // A command with a line break, a tab and a direction override.
+    let command = "printf 'a\nb'\t\u{202e}x";
+    let pending = table
+        .propose(&host, &scope3, &call("run", "run_command", json!({ "command": command, "cwd": "/srv/app" })))
+        .unwrap();
+    let names: Vec<&str> = pending.payload.iter().map(|f| f.name).collect();
+    assert_eq!(names, ["tool", "pane", "target", "remote", "command", "cwd", "timeout_secs", "resolved_cwd"]);
+    assert_eq!(field(&pending, "command"), Some(("printf 'a\\nb'\\t\\u{202e}x".to_owned(), command.len())));
+    assert_eq!(field(&pending, "timeout_secs").map(|f| f.0), Some("60".to_owned()), "the effective timeout is shown");
+    assert_eq!(field(&pending, "resolved_cwd").map(|f| f.0), Some("/srv/app".to_owned()));
+    assert_eq!(field(&pending, "tool").map(|f| f.0), Some("run_command".to_owned()));
+    assert_eq!(pending.effect, holzwave_core::ai::tools::Effect::Exec);
+
+    // A file write shows its content as it is, with the carriage return spelled out.
+    let content = "line1\nline2\r\nend\t\\";
+    let pending = table
+        .propose(&host, &scope3, &call("w", "write_file", json!({ "path": "/srv/app/out.txt", "content": content })))
+        .unwrap();
+    assert_eq!(field(&pending, "content"), Some(("line1\nline2\\r\nend\t\\\\".to_owned(), content.len())));
+    let names: Vec<&str> = pending.payload.iter().map(|f| f.name).collect();
+    assert_eq!(names, ["tool", "pane", "target", "remote", "path", "content", "resolved_path"]);
+
+    // Every part of the world the decision covers changes the hash.
+    let write = |path: &str| call("h", "write_file", json!({ "path": path, "content": "x" }));
+    let hash_in = |host: &FakeHost, scope: &Scope, call: &ToolCall| {
+        let table = table_with(&[]);
+        table.propose(host, scope, call).unwrap().hash
+    };
+    let base = hash_in(&FakeHost::remote(), &scope3, &write("/srv/app/a.txt"));
+    let redirected = FakeHost::remote();
+    redirected.redirect("/srv/app/a.txt", "/srv/app/b.txt");
+    let variants = [
+        ("the raw path", hash_in(&FakeHost::remote(), &scope3, &write("/srv/app/c.txt"))),
+        ("the pane", hash_in(&FakeHost::remote(), &scope("c1", 1, 4), &write("/srv/app/a.txt"))),
+        ("the target label", hash_in(&FakeHost::new(FsKind::Remote, "other box"), &scope3, &write("/srv/app/a.txt"))),
+        ("the remote flag", hash_in(&FakeHost::new(FsKind::Local, "build box"), &scope3, &write("/srv/app/a.txt"))),
+        ("the resolved path", hash_in(&redirected, &scope3, &write("/srv/app/a.txt"))),
+        ("a stamp", hash_in(&FakeHost::remote().with_stamp("/srv/app/a.txt", 1), &scope3, &write("/srv/app/a.txt"))),
+        ("another stamp", hash_in(&FakeHost::remote().with_stamp("/srv/app/a.txt", 2), &scope3, &write("/srv/app/a.txt"))),
+        (
+            "the content",
+            hash_in(&FakeHost::remote(), &scope3, &call("h", "write_file", json!({ "path": "/srv/app/a.txt", "content": "y" }))),
+        ),
+    ];
+    let mut seen = BTreeSet::from([base.clone()]);
+    for (what, hash) in &variants {
+        assert_ne!(*hash, base, "changing {what} changes the hash");
+        assert!(seen.insert(hash.clone()), "changing {what} gives a hash that another change gave too");
+    }
+}
+
+/// SHA-256 over the documented layout, computed here and not by the code under test.
+fn expected_hash(pairs: &[(&str, &str)]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"holzwave.tool.v1\0");
+    for (name, value) in pairs {
+        hasher.update((name.len() as u32).to_be_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((value.len() as u32).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn the_hash_layout_is_versioned_and_length_prefixed() {
+    assert_eq!(HASH_PREFIX, b"holzwave.tool.v1\0");
+    let pair = |n: &str, v: &str| (n.to_owned(), v.to_owned());
+
+    let list = [pair("tool", "read_file"), pair("pane", "3"), pair("path", "/a/b")];
+    assert_eq!(hex(&payload_hash(&list)), expected_hash(&[("tool", "read_file"), ("pane", "3"), ("path", "/a/b")]));
+    assert_eq!(hex(&payload_hash(&[])), expected_hash(&[]), "an empty list is the hash of the prefix");
+
+    // Where a name ends and a value begins is part of the hash.
+    assert_ne!(payload_hash(&[pair("a", "bc")]), payload_hash(&[pair("ab", "c")]));
+    assert_ne!(payload_hash(&[pair("a", ""), pair("b", "c")]), payload_hash(&[pair("a", "b"), pair("", "c")]));
+    // So is the order.
+    assert_ne!(payload_hash(&[pair("x", "1"), pair("y", "2")]), payload_hash(&[pair("y", "2"), pair("x", "1")]));
+
+    // The hash of a real card is the hash of the layout over the raw values the call and the host gave.
+    let host = FakeHost::remote().with_file(NOTES, "alpha beta");
+    let table = table_with(&[]);
+    let pending = table.propose(&host, &scope("c1", 1, 3), &read_call("call_1", NOTES)).unwrap();
+    let expected = expected_hash(&[
+        ("tool", "read_file"),
+        ("pane", "3"),
+        ("target", "build box"),
+        ("remote", "true"),
+        ("path", NOTES),
+        ("offset", "0"),
+        ("limit", "16384"),
+        ("resolved_path", NOTES),
+    ]);
+    assert_eq!(pending.hash, expected);
+}
+
+#[test]
+fn escaping_for_the_card_is_injective_and_shows_hidden_characters() {
+    assert_eq!(visible("plain text, 100% ok: é中😀"), "plain text, 100% ok: é中😀");
+    assert_eq!(visible(""), "");
+    let cases = [
+        ("\\", "\\\\"),
+        ("\n", "\\n"),
+        ("\r", "\\r"),
+        ("\t", "\\t"),
+        ("\u{1b}", "\\u{1b}"),
+        ("\0", "\\u{0}"),
+        ("\u{7f}", "\\u{7f}"),
+        ("\u{85}", "\\u{85}"),
+        ("\u{ad}", "\\u{ad}"),
+        ("\u{61c}", "\\u{61c}"),
+        ("\u{200b}", "\\u{200b}"),
+        ("\u{200f}", "\\u{200f}"),
+        ("\u{202e}", "\\u{202e}"),
+        ("\u{2028}", "\\u{2028}"),
+        ("\u{2066}", "\\u{2066}"),
+        ("\u{feff}", "\\u{feff}"),
+        ("\u{e0041}", "\\u{e0041}"),
+    ];
+    for (raw, shown) in cases {
+        assert_eq!(visible(raw), shown, "{raw:?}");
+    }
+    // The multi-line form keeps a line break and a tab and still spells out the rest.
+    assert_eq!(visible_multiline("a\nb\tc\r\\\u{1b}"), "a\nb\tc\\r\\\\\\u{1b}");
+
+    // No two different texts give the same output: every string of up to three characters over a hostile alphabet.
+    let alphabet = ["a", "\\", "\n", "\t", "\u{1b}", "\u{202e}", "\u{200b}", "n", "\r"];
+    let mut strings = vec![String::new()];
+    let mut layer = vec![String::new()];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for prefix in &layer {
+            for letter in alphabet {
+                next.push(format!("{prefix}{letter}"));
+            }
+        }
+        strings.extend(next.iter().cloned());
+        layer = next;
+    }
+    for (name, show) in [("visible", visible as fn(&str) -> String), ("visible_multiline", visible_multiline)] {
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        for text in &strings {
+            if let Some(other) = seen.insert(show(text), text.clone()) {
+                panic!("{name}: {other:?} and {text:?} look the same: {:?}", show(text));
+            }
+        }
+        assert_eq!(seen.len(), strings.len());
+    }
+}
+
+#[test]
+fn tools_the_host_does_not_offer_are_not_declared_to_the_model() {
+    let everything = FakeHost::remote();
+    let declared: Vec<String> = specs(&everything, 3).into_iter().map(|spec| spec.name).collect();
+    let all: Vec<&str> = ToolName::ALL.iter().map(|tool| tool.as_str()).collect();
+    assert_eq!(declared, all);
+    assert_eq!(all, ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file", "run_command"]);
+    for tool in ToolName::ALL {
+        assert_eq!(ToolName::from_name(tool.as_str()), Some(tool));
+    }
+    assert_eq!(ToolName::from_name("shell"), None);
+
+    // A host that offers only the read tools declares only those.
+    let reading = FakeHost::remote().without(ToolName::WriteFile).without(ToolName::EditFile).without(ToolName::RunCommand);
+    let declared: Vec<String> = specs(&reading, 3).into_iter().map(|spec| spec.name).collect();
+    assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane"]);
+    assert!(specs(&FakeHost::remote().without(ToolName::ReadFile), 3).iter().all(|spec| spec.name != "read_file"));
+
+    // And a call to a tool it does not offer is refused before the host is asked anything else.
+    let table = table_with(&[]);
+    let call = call("w", "write_file", sample(ToolName::WriteFile));
+    let error = table.propose(&reading, &scope("c1", 1, 3), &call).unwrap_err();
+    assert_eq!(error, ToolError::Unavailable);
+    assert_eq!(reading.resolve_count(), 0);
+    assert!(table.pending("c1").is_empty());
+}
+
+#[test]
+fn no_debug_output_of_a_tool_type_shows_arguments_paths_or_output() {
+    let canary = "CANARY-9c41";
+    let text = |extra: &str| format!("/srv/{canary}/{extra}");
+    let calls = [
+        json!({ "path": text("a") }),
+        json!({ "path": text("b") }),
+        json!({ "pattern": canary, "path": text("c") }),
+        json!({ "pane": 3 }),
+        json!({ "path": text("d"), "content": format!("{canary} body") }),
+        json!({ "path": text("e"), "old_text": canary, "new_text": format!("{canary} new") }),
+        json!({ "command": format!("echo {canary}"), "cwd": text("f") }),
+    ];
+    for (tool, args) in ToolName::ALL.into_iter().zip(calls) {
+        let parsed = parse(tool, &args).unwrap_or_else(|e| panic!("{tool:?}: {e}"));
+        for shown in [format!("{parsed:?}"), format!("{parsed:#?}")] {
+            assert!(!shown.contains(canary), "{tool:?}: {shown}");
+            assert!(shown.contains("bytes>") || tool == ToolName::ReadPane, "{tool:?} shows a size: {shown}");
+        }
+        // The argument struct on its own.
+        let inner = match &parsed {
+            Tool::ReadFile(a) => format!("{a:?}{a:#?}"),
+            Tool::ListDir(a) => format!("{a:?}{a:#?}"),
+            Tool::Grep(a) => format!("{a:?}{a:#?}"),
+            Tool::ReadPane(a) => format!("{a:?}{a:#?}"),
+            Tool::WriteFile(a) => format!("{a:?}{a:#?}"),
+            Tool::EditFile(a) => format!("{a:?}{a:#?}"),
+            Tool::RunCommand(a) => format!("{a:?}{a:#?}"),
+        };
+        assert!(!inner.contains(canary), "{tool:?}: {inner}");
+    }
+
+    let resolved = Resolved::local(3, "This computer").with_path(text("g")).with_cwd(text("h")).with_stamp(5);
+    for shown in [format!("{resolved:?}"), format!("{resolved:#?}")] {
+        assert!(!shown.contains(canary) && shown.contains("bytes>"), "{shown}");
+    }
+    let output = ToolOutput::new(format!("{canary} output"));
+    for shown in [format!("{output:?}"), format!("{output:#?}")] {
+        assert!(!shown.contains(canary) && shown.contains("bytes>"), "{shown}");
+    }
+    let scope = scope("c1", 1, 3);
+    assert!(format!("{scope:?}").contains("c1"));
+
+    // A card and a ticket, obtained through a real run.
+    let host = FakeHost::remote().with_file(&text("a"), "body");
+    let table = table_with(&[]);
+    let pending = table.propose(&host, &scope, &read_call("call_1", &text("a"))).unwrap();
+    for shown in [format!("{pending:?}"), format!("{pending:#?}"), format!("{table:?}")] {
+        assert!(!shown.contains(canary), "{shown}");
+    }
+    assert!(format!("{pending:?}").contains("bytes>"));
+    table.decide("c1", "call_1", Decision::Allow, &pending.hash).unwrap();
+    table.run(&host, &scope, "call_1", &CancelToken::new()).unwrap();
+    let tickets = host.ticket_debug();
+    assert_eq!(tickets.len(), 2);
+    for shown in tickets {
+        assert!(!shown.contains(canary) && shown.contains("bytes>"), "{shown}");
+    }
+}
+
+#[test]
+fn tool_output_is_bounded_on_a_character_boundary_and_marked() {
+    // 40 KiB of three-byte characters.
+    let glyphs = ['€', '中', 'あ'];
+    let long: String = (0..14_000).map(|i| glyphs[i % 3]).collect();
+    assert!(long.len() > 40 * 1024);
+    let output = ToolOutput::new(long.clone());
+    let shown = output.text();
+    assert!(shown.len() <= MAX_RESULT_BYTES, "{} bytes", shown.len());
+    assert!(output.truncated() && output.omitted() > 0);
+    assert!(shown.starts_with("€中あ€中あ") && long.ends_with(&shown[shown.len() - 9..]));
+    let marker = format!("\n[... {} bytes omitted ...]\n", output.omitted());
+    let at = shown.find(&marker).expect("the marker line is there");
+    let (head, tail) = (&shown[..at], &shown[at + marker.len()..]);
+    assert!(long.starts_with(head) && long.ends_with(tail));
+    assert_eq!(head.len() + tail.len() + output.omitted(), long.len(), "the count names what was cut");
+    assert_eq!(shown.matches("bytes omitted").count(), 1);
+    assert!(output.clone().into_text().len() <= MAX_RESULT_BYTES);
+
+    // Four-byte characters and a very long input cut cleanly too.
+    for text in ["😀".repeat(20_000), "x".repeat(10 * 1024 * 1024), format!("{}é", "x".repeat(MAX_RESULT_BYTES))] {
+        let output = ToolOutput::new(text.clone());
+        assert!(output.text().len() <= MAX_RESULT_BYTES && output.truncated(), "{} bytes in", text.len());
+        assert!(output.text().starts_with(&text[..8]) && text.ends_with(&output.text()[output.text().len() - 4..]));
+    }
+
+    // Text at the limit and below it is returned as it is.
+    for len in [0, 1, MAX_RESULT_BYTES - 1, MAX_RESULT_BYTES] {
+        let text = "y".repeat(len);
+        let output = ToolOutput::new(text.clone());
+        assert_eq!((output.text(), output.truncated(), output.omitted()), (text.as_str(), false, 0));
+    }
+    let output = ToolOutput::new("y".repeat(MAX_RESULT_BYTES + 1));
+    assert!(output.truncated() && output.text().len() <= MAX_RESULT_BYTES);
 }
