@@ -5,3 +5,6 @@
 //! can name that one file as the only first-party code that knows the client crate.
 
 pub mod http;
+pub mod provider;
+pub mod scripted;
+pub mod types;
