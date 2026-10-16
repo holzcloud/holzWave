@@ -11,17 +11,21 @@
 mod common;
 
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream};
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use common::fake_http::{Ending, FakeHttp, Reply};
 use holzwave_core::ai::http::{
-    Call, Exchange, Framing, Header, Http, HttpConfig, NetworkPolicy, Origin, Outcome, ProxyPolicy, Refusal, Resolver,
-    Scheme, SecretHeader, Target, classify_ip, proxy_for,
+    Call, Exchange, Frame, Framing, Header, Http, HttpConfig, NetworkPolicy, Origin, Outcome, ProxyPolicy, Refusal,
+    Rejection, Resolver, RetryPolicy, Scheme, SecretHeader, Target, classify_ip, proxy_for, retries_phrase,
+    retries_status, status_error, transport_phrase,
 };
-use holzwave_core::ai::provider::{AiError, CancelToken, ChatRequest, Completion, Detail, Flow, Provider, StreamEvent};
+use holzwave_core::ai::provider::{
+    AiError, CancelToken, ChatRequest, Completion, Detail, ErrorClass, Flow, Provider, StreamEvent,
+};
 use holzwave_core::ai::sse::StreamEnd;
 use holzwave_core::ai::types::{ApiKey, Capabilities, Locality, Message, Role, StopReason, Usage};
 use holzwave_core::ai::wire::{Endpoint, HttpProvider, Wire, WireAdapter, WireRequest, WireTurn};
@@ -67,12 +71,7 @@ impl WireAdapter for LineAdapter {
 }
 
 impl WireTurn for LineTurn {
-    fn frame(
-        &mut self,
-        frame: holzwave_core::ai::http::Frame<'_>,
-        out: &mut dyn FnMut(StreamEvent) -> Flow,
-    ) -> Result<Flow, AiError> {
-        use holzwave_core::ai::http::Frame;
+    fn frame(&mut self, frame: Frame<'_>, out: &mut dyn FnMut(StreamEvent) -> Flow) -> Result<Flow, AiError> {
         match frame {
             Frame::Event(event) if event.is_done() => {
                 self.done = true;
@@ -107,9 +106,24 @@ fn endpoint(fake: &FakeHttp, wire: Wire) -> Endpoint {
 }
 
 fn provider_for(fake: &FakeHttp, wire: Wire) -> (Arc<HttpProvider>, Arc<Http>) {
-    let http = Arc::new(Http::new(HttpConfig::standard()));
+    provider_with(fake, wire, HttpConfig::standard())
+}
+
+/// A provider on the fake server with its own bounds and times.
+fn provider_with(fake: &FakeHttp, wire: Wire, config: HttpConfig) -> (Arc<HttpProvider>, Arc<Http>) {
+    let http = Arc::new(Http::new(config));
     let provider = HttpProvider::new("line", endpoint(fake, wire), Box::new(LineAdapter::new(wire)), http.clone());
     (Arc::new(provider), http)
+}
+
+/// Small times for the tests that wait: 300 ms of silence ends a stream, a retry waits 5 ms.
+fn quick() -> HttpConfig {
+    let standard = HttpConfig::standard();
+    HttpConfig {
+        idle_timeout: Duration::from_millis(300),
+        retry: RetryPolicy { base_delay: Duration::from_millis(5), ..standard.retry },
+        ..standard
+    }
 }
 
 fn request(text: &str) -> ChatRequest {
@@ -203,6 +217,12 @@ impl StubResolver {
             .map(|answer| answer.iter().map(|text| text.parse().expect("an address")).collect())
             .collect();
         Arc::new(StubResolver { answers, calls: AtomicUsize::new(0), delay: Duration::ZERO })
+    }
+
+    /// A resolver that takes `delay` to answer.
+    fn slow(answer: &[&str], delay: Duration) -> Arc<StubResolver> {
+        let answers = vec![answer.iter().map(|text| text.parse().expect("an address")).collect()];
+        Arc::new(StubResolver { answers, calls: AtomicUsize::new(0), delay })
     }
 
     fn calls(&self) -> usize {
@@ -949,5 +969,628 @@ fn the_origin_scope_round_trips() {
         "",
     ] {
         assert!(Origin::from_scope(bad).is_err(), "{bad:?}");
+    }
+}
+
+// ---- bounds ----------------------------------------------------------------------------------------------
+
+#[test]
+fn a_request_over_its_bound_is_refused_before_any_connection() {
+    let fake = FakeHttp::start(vec![good_stream()]);
+    let http = Http::new(HttpConfig { max_request_bytes: 1024, ..HttpConfig::standard() });
+    let target = Target::parse(&fake.base(), false).expect("accepted");
+    let policy = NetworkPolicy::new(false, false);
+
+    let big = vec![b'x'; 2048];
+    let call = Call::new(&target, policy, "/v1/lines", &big, Framing::Sse);
+    let error = http.post_stream(&call, &mut |_| Flow::Continue, &CancelToken::new()).expect_err("over the bound");
+    assert_eq!(error.class(), ErrorClass::InvalidRequest, "{error:?}");
+    assert_eq!(fake.accepted(), 0);
+    assert_eq!(http.attempts(), 0);
+
+    let exact = vec![b'x'; 1024];
+    let call = Call::new(&target, policy, "/v1/lines", &exact, Framing::Sse);
+    http.post_stream(&call, &mut |_| Flow::Continue, &CancelToken::new()).expect("exactly at the bound is sent");
+    assert_eq!(fake.seen()[0].body.len(), 1024);
+    assert_eq!(http.attempts(), 1);
+}
+
+#[test]
+fn a_stream_over_its_total_bound_is_cut_with_a_protocol_error() {
+    // 4096 events of 15 bytes each: about 60 KiB, against a bound of 4096 bytes.
+    let chunks: Vec<Vec<u8>> = (0..4096).map(|i| format!("data: e{i:05}\n\n").into_bytes()).collect();
+    let fake = FakeHttp::start(vec![Reply::sse_bytes(chunks).ending(Ending::Hold)]);
+    let (provider, _) = provider_with(&fake, Wire::OpenAiChat, HttpConfig { max_stream_bytes: 4096, ..quick() });
+
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+
+    assert!(matches!(outcome.result, Err(AiError::Protocol(_))), "{:?}", outcome.result);
+    assert!(!outcome.events.is_empty(), "some events arrived before the cut");
+    assert!(outcome.events.len() < 4096, "the stream was cut, {} events arrived", outcome.events.len());
+    assert!(fake.wait_closed(0, Duration::from_secs(1)).is_some(), "the connection was closed");
+}
+
+#[test]
+fn an_oversize_event_is_a_protocol_error() {
+    let mut big = b"data: ".to_vec();
+    big.extend(std::iter::repeat_n(b'a', 3 * 1024 * 1024));
+    let fake = FakeHttp::start(vec![Reply::sse_bytes(vec![big]).ending(Ending::Hold)]);
+    let (provider, _) = provider_with(&fake, Wire::OpenAiChat, quick());
+
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+
+    assert!(matches!(outcome.result, Err(AiError::Protocol(_))), "{:?}", outcome.result);
+    assert!(outcome.events.is_empty(), "the closure is never called for a line over the bound");
+    assert!(fake.wait_closed(0, Duration::from_secs(1)).is_some(), "the connection was closed");
+}
+
+#[test]
+fn an_error_body_is_read_up_to_its_bound_only() {
+    let fake = FakeHttp::start(vec![Reply::status(401).body(vec![b'x'; 100 * 1024])]);
+    let http = Http::new(HttpConfig { max_error_body: 1024, ..quick() });
+    let target = Target::parse(&fake.base(), false).expect("accepted");
+
+    let exchange = post_to(&http, &target, NetworkPolicy::new(false, false)).expect("an answer");
+
+    match exchange.outcome {
+        Outcome::Rejected(rejection) => {
+            assert_eq!(rejection.status, 401);
+            assert_eq!(rejection.body.len(), 1024, "exactly the bytes that fit");
+        }
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+    assert_eq!(fake.accepted(), 1, "a 401 is not retried");
+}
+
+#[test]
+fn a_silent_server_and_a_stalled_stream_end_in_a_timeout() {
+    let silent = FakeHttp::start(vec![Reply::Hang]);
+    let (provider, _) = provider_with(&silent, Wire::OpenAiChat, quick());
+    let started = Instant::now();
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+    assert!(matches!(outcome.result, Err(AiError::Timeout)), "{:?}", outcome.result);
+    assert!(outcome.events.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+
+    let stalled = FakeHttp::start(vec![Reply::sse(&["data: a\n\n"]).ending(Ending::Hold)]);
+    let (provider, _) = provider_with(&stalled, Wire::OpenAiChat, quick());
+    let started = Instant::now();
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+    assert_eq!(outcome.texts(), ["a"], "the event that arrived was delivered");
+    assert!(matches!(outcome.result, Err(AiError::Timeout)), "{:?}", outcome.result);
+    assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+}
+
+// ---- retry -----------------------------------------------------------------------------------------------
+
+#[test]
+fn a_rate_limit_with_a_short_retry_after_is_waited_for_and_retried() {
+    let fake = FakeHttp::start(vec![Reply::status(429).header("retry-after", "1"), good_stream()]);
+    let (provider, http) = provider_with(&fake, Wire::OpenAiChat, quick());
+
+    let started = Instant::now();
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+
+    outcome.result.as_ref().expect("the retry succeeds");
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(3), "waited {elapsed:?}");
+    assert_eq!(fake.accepted(), 2);
+    assert_eq!(http.attempts(), 2);
+}
+
+#[test]
+fn a_long_retry_after_is_reported_and_not_waited_for() {
+    let fake = FakeHttp::start(vec![Reply::status(429).header("retry-after", "3600")]);
+    let (provider, _) = provider_with(&fake, Wire::OpenAiChat, quick());
+
+    let started = Instant::now();
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+
+    assert_eq!(outcome.result, Err(AiError::RateLimited { retry_after: Some(Duration::from_secs(3600)) }));
+    assert!(started.elapsed() < Duration::from_secs(1), "reported at once, took {:?}", started.elapsed());
+    assert_eq!(fake.accepted(), 1);
+
+    // A date or garbage is no wait at all, and more than a day is cut to a day.
+    let fake = FakeHttp::start(vec![
+        Reply::status(429).header("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT"),
+        Reply::status(429).header("retry-after", "999999999"),
+    ]);
+    let http = Http::new(HttpConfig { retry: RetryPolicy { max_retries: 0, ..quick().retry }, ..quick() });
+    let target = Target::parse(&fake.base(), false).expect("accepted");
+    let first = post_to(&http, &target, NetworkPolicy::new(false, false)).expect("an answer");
+    let second = post_to(&http, &target, NetworkPolicy::new(false, false)).expect("an answer");
+    match (first.outcome, second.outcome) {
+        (Outcome::Rejected(a), Outcome::Rejected(b)) => {
+            assert_eq!(a.retry_after, None);
+            assert_eq!(b.retry_after, Some(Duration::from_secs(86_400)));
+        }
+        other => panic!("expected two rejections, got {other:?}"),
+    }
+}
+
+#[test]
+fn server_errors_are_retried_up_to_the_limit_and_client_errors_are_not() {
+    // (status, connections expected, class of the final error)
+    let table = [
+        (503, 3, ErrorClass::Overload),
+        (529, 3, ErrorClass::Overload),
+        (500, 3, ErrorClass::Server),
+        (502, 3, ErrorClass::Server),
+        (504, 3, ErrorClass::Server),
+        (429, 3, ErrorClass::RateLimit),
+        (400, 1, ErrorClass::InvalidRequest),
+        (401, 1, ErrorClass::Auth),
+        (403, 1, ErrorClass::Auth),
+        (404, 1, ErrorClass::InvalidRequest),
+        (422, 1, ErrorClass::InvalidRequest),
+    ];
+    for (status, connections, class) in table {
+        let fake = FakeHttp::start(vec![Reply::status(status)]);
+        let (provider, http) = provider_with(&fake, Wire::OpenAiChat, quick());
+        let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+        let error = outcome.result.expect_err("an error status");
+        assert_eq!(error.class(), class, "status {status}: {error:?}");
+        assert_eq!(fake.accepted(), connections, "status {status}");
+        assert_eq!(http.attempts(), connections as u64, "status {status}");
+        if status == 500 {
+            assert!(matches!(error, AiError::Server { status: 500, .. }), "{error:?}");
+        }
+    }
+    // A transient failure that clears is not an error.
+    let fake = FakeHttp::start(vec![Reply::status(503), Reply::status(500), good_stream()]);
+    let (provider, _) = provider_with(&fake, Wire::OpenAiChat, quick());
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+    outcome.result.expect("the third try succeeds");
+    assert_eq!(fake.accepted(), 3);
+
+    assert!([429, 500, 502, 503, 504, 529].iter().all(|status| retries_status(*status)));
+    for status in [100u16, 200, 204, 301, 302, 400, 401, 403, 404, 408, 413, 422, 501, 505, 530] {
+        assert!(!retries_status(status), "{status}");
+    }
+}
+
+/// A port nobody listens on.
+fn closed_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener.local_addr().expect("address").port()
+}
+
+#[test]
+fn a_connect_error_is_retried_and_then_reported() {
+    let port = closed_port();
+    let target = Target::parse(&format!("http://127.0.0.1:{port}"), false).expect("accepted");
+    let endpoint = Endpoint::new(Wire::OpenAiChat, target, NetworkPolicy::new(false, false));
+    let http = Arc::new(Http::new(quick()));
+    let provider = HttpProvider::new("line", endpoint, Box::new(LineAdapter::new(Wire::OpenAiChat)), http.clone());
+
+    let outcome = run(&provider, &request("hi"), &CancelToken::new());
+
+    let error = outcome.result.expect_err("nothing listens");
+    assert!(matches!(error, AiError::Network(_)), "{error:?}");
+    assert_eq!(http.attempts(), 3, "one try and two retries");
+    let shown = format!("{error} {error:?} {error:#?}");
+    assert!(!shown.contains("127.0.0.1") && !shown.contains(&port.to_string()) && !shown.contains("://"), "{shown}");
+
+    // The pure predicates: every phrase is retried but the refused certificate.
+    let phrases = all_phrases();
+    assert_eq!(phrases.iter().filter(|phrase| !retries_phrase(phrase)).count(), 1);
+    assert!(!retries_phrase("the server certificate was not accepted"));
+    assert!(retries_phrase("the server refused the connection"));
+}
+
+#[test]
+fn nothing_is_retried_after_the_first_byte_of_the_body() {
+    let fake = FakeHttp::start(vec![Reply::sse(&["data: a\n\n"]).ending(Ending::Drop)]);
+    let (provider, http) = provider_with(&fake, Wire::OpenAiChat, quick());
+
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+
+    assert_eq!(outcome.texts(), ["a"], "one delivered event");
+    assert!(outcome.result.is_err(), "{:?}", outcome.result);
+    assert_eq!(fake.accepted(), 1, "one connection");
+    assert_eq!(http.attempts(), 1);
+}
+
+#[test]
+fn a_redirect_is_a_policy_error_and_is_never_followed() {
+    let target = FakeHttp::start(vec![good_stream()]);
+    let first = FakeHttp::start(vec![Reply::status(302).header("location", &format!("{}/v1/lines", target.base()))]);
+    let (provider, _) = provider_with(&first, Wire::OpenAiChat, quick());
+
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+
+    let error = outcome.result.expect_err("a redirect");
+    assert_eq!(error.class(), ErrorClass::Policy, "{error:?}");
+    assert_eq!(first.accepted(), 1);
+    assert_eq!(target.accepted(), 0, "the target of the redirect saw nothing");
+}
+
+// ---- errors ----------------------------------------------------------------------------------------------
+
+#[test]
+fn status_codes_map_to_stable_error_classes() {
+    let table = [
+        (400u16, ErrorClass::InvalidRequest),
+        (401, ErrorClass::Auth),
+        (402, ErrorClass::Auth),
+        (403, ErrorClass::Auth),
+        (404, ErrorClass::InvalidRequest),
+        (408, ErrorClass::Timeout),
+        (413, ErrorClass::ContextLength),
+        (422, ErrorClass::InvalidRequest),
+        (429, ErrorClass::RateLimit),
+        (500, ErrorClass::Server),
+        (502, ErrorClass::Server),
+        (503, ErrorClass::Overload),
+        (504, ErrorClass::Server),
+        (529, ErrorClass::Overload),
+        (302, ErrorClass::Policy),
+        (100, ErrorClass::Protocol),
+    ];
+    for (status, class) in table {
+        let rejection = Rejection { status, retry_after: None, body: b"SECRET BODY TEXT".to_vec() };
+        let error = status_error(&rejection);
+        assert_eq!(error.class(), class, "{status}");
+        let shown = format!("{error} {error:?}");
+        assert!(!shown.contains("SECRET BODY"), "body text in the error for {status}: {shown}");
+        if matches!(
+            class,
+            ErrorClass::Auth
+                | ErrorClass::InvalidRequest
+                | ErrorClass::Server
+                | ErrorClass::Policy
+                | ErrorClass::Protocol
+        ) {
+            assert!(shown.contains(&status.to_string()), "the status is in the text for {status}: {shown}");
+        }
+    }
+    let limited = status_error(&Rejection { status: 429, retry_after: Some(Duration::from_secs(7)), body: Vec::new() });
+    assert_eq!(limited, AiError::RateLimited { retry_after: Some(Duration::from_secs(7)) });
+}
+
+/// A synthetic error with a fixed text and an optional cause.
+#[derive(Debug)]
+struct Text(&'static str, Option<Box<dyn std::error::Error + 'static>>);
+
+impl std::fmt::Display for Text {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Text {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.1.as_deref()
+    }
+}
+
+fn all_phrases() -> Vec<&'static str> {
+    let io = |kind| transport_phrase(&io::Error::from(kind));
+    vec![
+        io(io::ErrorKind::ConnectionRefused),
+        io(io::ErrorKind::ConnectionReset),
+        io(io::ErrorKind::TimedOut),
+        transport_phrase(&Text("invalid peer certificate: UnknownIssuer", None)),
+        io(io::ErrorKind::NotFound),
+        io(io::ErrorKind::Other),
+    ]
+}
+
+#[test]
+fn transport_errors_become_fixed_phrases_without_addresses() {
+    let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
+    assert_eq!(transport_phrase(&refused), "the server refused the connection");
+    for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::ConnectionAborted] {
+        assert_eq!(transport_phrase(&io::Error::from(kind)), "the connection was reset", "{kind:?}");
+    }
+    assert_eq!(transport_phrase(&io::Error::from(io::ErrorKind::TimedOut)), "the connection timed out");
+    assert_eq!(
+        transport_phrase(&Text("invalid peer certificate: UnknownIssuer", None)),
+        "the server certificate was not accepted"
+    );
+    let nested = Text("handshake failed", Some(Box::new(Text("received fatal alert: BadCertificate", None))));
+    assert_eq!(transport_phrase(&nested), "the server certificate was not accepted", "found in the chain");
+    assert_eq!(transport_phrase(&io::Error::from(io::ErrorKind::NotFound)), "the host name could not be resolved");
+    assert_eq!(
+        transport_phrase(&Text("dns error: failed to lookup address", None)),
+        "the host name could not be resolved"
+    );
+    assert_eq!(transport_phrase(&Text("failed to resolve host", None)), "the host name could not be resolved");
+    assert_eq!(transport_phrase(&io::Error::from(io::ErrorKind::Other)), "the connection failed");
+    let wrapped = Text("error sending request", Some(Box::new(io::Error::from(io::ErrorKind::ConnectionRefused))));
+    assert_eq!(transport_phrase(&wrapped), "the server refused the connection", "an io error in the chain");
+    // The library's text, an address or a port never comes back.
+    let leaky = Text("connect to 10.1.2.3:8443 failed", None);
+    let phrase = transport_phrase(&leaky);
+    assert!(!phrase.contains("10.1.2.3") && !phrase.contains("8443"), "{phrase}");
+
+    let mut phrases = all_phrases();
+    phrases.sort_unstable();
+    phrases.dedup();
+    assert_eq!(phrases.len(), 6, "the six phrases are pairwise different");
+}
+
+// ---- cancel ----------------------------------------------------------------------------------------------
+
+/// Runs `call` with a token that another thread cancels `after` the start. Returns the result, the moment the call
+/// returned and the moment the token was cancelled.
+fn cancelled_after(
+    after: Duration,
+    call: impl FnOnce(&CancelToken) -> Result<Exchange, AiError>,
+) -> (Result<Exchange, AiError>, Instant, Instant) {
+    let cancel = CancelToken::new();
+    thread::scope(|scope| {
+        let canceller = cancel.clone();
+        let handle = scope.spawn(move || {
+            thread::sleep(after);
+            let at = Instant::now();
+            canceller.cancel();
+            at
+        });
+        let result = call(&cancel);
+        let returned = Instant::now();
+        (result, returned, handle.join().expect("the canceller"))
+    })
+}
+
+#[test]
+fn a_cancel_closes_the_socket_within_250_ms() {
+    let fake = FakeHttp::start(vec![Reply::sse(&["data: a\n\n"]).ending(Ending::Hold)]);
+    let http = Http::new(HttpConfig::standard());
+    let target = Target::parse(&fake.base(), false).expect("accepted");
+    let call = Call::new(&target, NetworkPolicy::new(false, false), "/v1/lines", b"{}", Framing::Sse);
+    let cancel = CancelToken::new();
+    let cancelled_at = Mutex::new(None);
+
+    let result = http.post_stream(
+        &call,
+        &mut |_| {
+            *cancelled_at.lock().expect("lock") = Some(Instant::now());
+            cancel.cancel();
+            Flow::Continue
+        },
+        &cancel,
+    );
+    let returned = Instant::now();
+
+    assert!(matches!(result, Err(AiError::Cancelled)), "{result:?}");
+    let cancelled_at = cancelled_at.lock().expect("lock").expect("the first event reached the closure");
+    let closed = fake.wait_closed(0, Duration::from_secs(5)).expect("the server saw the socket close");
+    let return_ms = returned.saturating_duration_since(cancelled_at);
+    let close_ms = closed.saturating_duration_since(cancelled_at);
+    println!("cancel return: {} ms", return_ms.as_millis());
+    println!("socket close: {} ms", close_ms.as_millis());
+    println!("(in microseconds: return {}, close {})", return_ms.as_micros(), close_ms.as_micros());
+    assert!(return_ms < Duration::from_millis(250), "the call returned after {return_ms:?}");
+    assert!(close_ms < Duration::from_millis(250), "the socket closed after {close_ms:?}");
+}
+
+#[test]
+fn a_cancel_before_the_response_or_during_resolution_or_a_retry_wait_returns_at_once() {
+    let bound = Duration::from_millis(250);
+
+    // A stream that stalls after its first event, cancelled from another thread while the next chunk is awaited.
+    let stalled = FakeHttp::start(vec![Reply::sse(&["data: a\n\n"]).ending(Ending::Hold)]);
+    let stalled_http = Http::new(HttpConfig::standard());
+    let stalled_target = Target::parse(&stalled.base(), false).expect("accepted");
+    let (result, returned, cancelled) = cancelled_after(Duration::from_millis(100), |cancel| {
+        let call = Call::new(&stalled_target, NetworkPolicy::new(false, false), "/v1/lines", b"{}", Framing::Sse);
+        stalled_http.post_stream(&call, &mut |_| Flow::Continue, cancel)
+    });
+    assert!(matches!(result, Err(AiError::Cancelled)), "{result:?}");
+    let stalled_return = returned.saturating_duration_since(cancelled);
+    let closed = stalled.wait_closed(0, Duration::from_secs(5)).expect("the socket was closed");
+    let stalled_close = closed.saturating_duration_since(cancelled);
+    println!(
+        "cancel of a stalled stream: return {} us, socket close {} us",
+        stalled_return.as_micros(),
+        stalled_close.as_micros()
+    );
+    assert!(stalled_return < bound, "returned after {stalled_return:?}");
+    assert!(stalled_close < bound, "closed after {stalled_close:?}");
+
+    // A server that never answers: the call returns and the socket closes.
+    let hanging = FakeHttp::start(vec![Reply::Hang]);
+    let http = Http::new(HttpConfig::standard());
+    let target = Target::parse(&hanging.base(), false).expect("accepted");
+    let (result, returned, cancelled) = cancelled_after(Duration::from_millis(50), |cancel| {
+        let call = Call::new(&target, NetworkPolicy::new(false, false), "/v1/lines", b"{}", Framing::Sse);
+        http.post_stream(&call, &mut |_| Flow::Continue, cancel)
+    });
+    assert!(matches!(result, Err(AiError::Cancelled)), "{result:?}");
+    let hang_return = returned.saturating_duration_since(cancelled);
+    let closed = hanging.wait_closed(0, Duration::from_secs(5)).expect("the socket was closed");
+    let hang_close = closed.saturating_duration_since(cancelled);
+    println!(
+        "cancel of a silent server: return {} ms, socket close {} ms",
+        hang_return.as_millis(),
+        hang_close.as_millis()
+    );
+    assert!(hang_return < bound, "returned after {hang_return:?}");
+    assert!(hang_close < bound, "closed after {hang_close:?}");
+
+    // A lookup that takes five seconds.
+    let stub = StubResolver::slow(&["127.0.0.1"], Duration::from_secs(5));
+    let slow_http = http_with(&stub);
+    let named = Target::parse("http://slow.test:9", true).expect("accepted");
+    let (result, returned, cancelled) = cancelled_after(Duration::from_millis(50), |cancel| {
+        let call = Call::new(&named, NetworkPolicy::new(true, false), "/v1/lines", b"{}", Framing::Sse);
+        slow_http.post_stream(&call, &mut |_| Flow::Continue, cancel)
+    });
+    assert!(matches!(result, Err(AiError::Cancelled)), "{result:?}");
+    let resolve_return = returned.saturating_duration_since(cancelled);
+    println!("cancel of a lookup: return {} ms", resolve_return.as_millis());
+    assert!(resolve_return < bound, "returned after {resolve_return:?}");
+    // Dropping the chokepoint does not wait for the lookup that is still running.
+    let dropping = Instant::now();
+    drop(slow_http);
+    assert!(dropping.elapsed() < Duration::from_secs(1), "the drop waited {:?}", dropping.elapsed());
+
+    // A retry wait of ten seconds.
+    let waiting = FakeHttp::start(vec![Reply::status(429).header("retry-after", "10"), good_stream()]);
+    let retry_http = Http::new(HttpConfig::standard());
+    let waits_for = Target::parse(&waiting.base(), false).expect("accepted");
+    let (result, returned, cancelled) = cancelled_after(Duration::from_millis(300), |cancel| {
+        let call = Call::new(&waits_for, NetworkPolicy::new(false, false), "/v1/lines", b"{}", Framing::Sse);
+        retry_http.post_stream(&call, &mut |_| Flow::Continue, cancel)
+    });
+    assert!(matches!(result, Err(AiError::Cancelled)), "{result:?}");
+    let wait_return = returned.saturating_duration_since(cancelled);
+    println!("cancel of a retry wait: return {} ms", wait_return.as_millis());
+    assert!(wait_return < bound, "returned after {wait_return:?}");
+    assert_eq!(waiting.accepted(), 1, "no second connection was opened");
+
+    // A token that is cancelled before the call sends nothing.
+    let cancelled_early = CancelToken::new();
+    cancelled_early.cancel();
+    let call = Call::new(&waits_for, NetworkPolicy::new(false, false), "/v1/lines", b"{}", Framing::Sse);
+    let result = retry_http.post_stream(&call, &mut |_| Flow::Continue, &cancelled_early);
+    assert!(matches!(result, Err(AiError::Cancelled)), "{result:?}");
+    assert_eq!(waiting.accepted(), 1);
+}
+
+#[test]
+fn flow_stop_from_the_callback_closes_the_connection() {
+    let fake = FakeHttp::start(vec![Reply::sse(&["data: a\n\n", "data: b\n\n"]).ending(Ending::Hold)]);
+    let http = Http::new(HttpConfig::standard());
+    let target = Target::parse(&fake.base(), false).expect("accepted");
+    let call = Call::new(&target, NetworkPolicy::new(false, false), "/v1/lines", b"{}", Framing::Sse);
+    let mut frames = 0;
+
+    let result = http.post_stream(
+        &call,
+        &mut |_| {
+            frames += 1;
+            Flow::Stop
+        },
+        &CancelToken::new(),
+    );
+    let returned = Instant::now();
+
+    assert!(matches!(result, Err(AiError::Cancelled)), "{result:?}");
+    assert_eq!(frames, 1, "nothing is delivered after a Stop");
+    let closed = fake.wait_closed(0, Duration::from_secs(5)).expect("the server saw the socket close");
+    let after = closed.saturating_duration_since(returned);
+    assert!(after < Duration::from_millis(250), "the socket closed {after:?} after the return");
+}
+
+#[test]
+fn a_stream_without_its_terminal_event_is_an_error_and_so_is_a_cut_one() {
+    // A clean end without [DONE].
+    let fake = FakeHttp::start(vec![Reply::sse(&["data: a\n\n"])]);
+    let (provider, _) = provider_with(&fake, Wire::OpenAiChat, quick());
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+    assert_eq!(outcome.texts(), ["a"], "the complete events are delivered");
+    assert!(matches!(outcome.result, Err(AiError::Protocol(_))), "{:?}", outcome.result);
+
+    // A stream cut in the middle of an event.
+    let fake = FakeHttp::start(vec![Reply::sse(&["data: a\n\n", "data: par"]).ending(Ending::Drop)]);
+    let (provider, _) = provider_with(&fake, Wire::OpenAiChat, quick());
+    let outcome = run(provider.as_ref(), &request("hi"), &CancelToken::new());
+    assert_eq!(outcome.texts(), ["a"]);
+    assert!(matches!(outcome.result, Err(AiError::Network(_))), "{:?}", outcome.result);
+}
+
+#[test]
+fn a_blocking_call_inside_a_runtime_is_an_error_not_a_panic() {
+    let fake = FakeHttp::start(vec![good_stream()]);
+    let (provider, http) = provider_with(&fake, Wire::OpenAiChat, quick());
+    let target = Target::parse(&fake.base(), false).expect("accepted");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime");
+
+    let (stream, classify) = runtime.block_on(async {
+        let stream = provider.stream(&request("hi"), &mut |_| Flow::Continue, &CancelToken::new());
+        let classify = http.classify(&target, &NetworkPolicy::new(false, false), &CancelToken::new());
+        (stream, classify)
+    });
+
+    assert!(matches!(stream, Err(AiError::Unavailable(_))), "{stream:?}");
+    assert!(matches!(classify, Err(AiError::Unavailable(_))), "{classify:?}");
+    assert_eq!(fake.accepted(), 0);
+    // Outside the runtime the same provider works.
+    provider.stream(&request("hi"), &mut |_| Flow::Continue, &CancelToken::new()).expect("a plain thread");
+}
+
+#[test]
+fn construction_and_capabilities_open_no_socket() {
+    let fake = FakeHttp::start(vec![good_stream()]);
+    let http = Arc::new(Http::new(HttpConfig::standard()));
+    let endpoint = endpoint(&fake, Wire::OpenAiChat);
+    let provider = HttpProvider::new("line", endpoint, Box::new(LineAdapter::new(Wire::OpenAiChat)), http.clone());
+
+    assert_eq!(provider.id(), "line");
+    assert_eq!(provider.capabilities("m").locality, Locality::Loopback);
+    assert_eq!(provider.locality(), Locality::Loopback);
+    let _ = provider.endpoint();
+    let cloud = Target::parse("https://api.example.com", false).expect("accepted");
+    let unknown = HttpProvider::new(
+        "cloud",
+        Endpoint::new(Wire::OpenAiChat, cloud, NetworkPolicy::new(false, false)),
+        Box::new(LineAdapter::new(Wire::OpenAiChat)),
+        http.clone(),
+    );
+    assert_eq!(unknown.locality(), Locality::Cloud, "a name is the cloud until it is resolved");
+
+    assert_eq!(fake.accepted(), 0);
+    assert_eq!(http.attempts(), 0);
+    assert!(format!("{http:?}").contains("started: false"), "no runtime thread is started by construction");
+}
+
+#[test]
+fn debug_output_never_shows_keys_headers_bodies_or_paths() {
+    let canary = "CANARY-DEBUG-7f3a";
+    let origin = Origin::from_scope("https://api.example.com:443").expect("a scope");
+    let secret =
+        SecretHeader::new("x-api-key", "", ApiKey::new(format!("sk-{canary}")), origin.clone()).expect("secret");
+    let header = Header::new("x-title", canary).expect("header");
+    let base = format!("https://api.example.com/{canary}");
+    let target = Target::parse(&base, false).expect("accepted");
+    let path = format!("/v1/{canary}");
+    let body = format!("{{\"text\":\"{canary}\"}}").into_bytes();
+    let call = Call::new(&target, NetworkPolicy::new(false, false), &path, &body, Framing::Sse)
+        .header(&header)
+        .secret(&secret);
+    let rejection = Rejection { status: 400, retry_after: None, body: canary.as_bytes().to_vec() };
+    let wire_request = WireRequest { path: path.clone(), headers: vec![header.clone()], body: body.clone() };
+    let endpoint_target = Target::parse(&base, false).expect("accepted");
+    let endpoint = Endpoint::new(Wire::OpenAiChat, endpoint_target, NetworkPolicy::new(false, false))
+        .with_header(header.clone())
+        .with_secret(
+            SecretHeader::new("authorization", "Bearer ", ApiKey::new(format!("sk-{canary}")), origin).expect("secret"),
+        );
+    let http = Arc::new(Http::new(HttpConfig::standard()));
+    let provider_target = Target::parse(&base, false).expect("accepted");
+    let provider = HttpProvider::new(
+        "line",
+        Endpoint::new(Wire::OpenAiChat, provider_target, NetworkPolicy::new(false, false)),
+        Box::new(LineAdapter::new(Wire::OpenAiChat)),
+        http.clone(),
+    );
+    let exchange = Exchange { locality: Locality::Cloud, outcome: Outcome::Rejected(rejection.clone()) };
+
+    let texts: Vec<(&str, String, &str)> = vec![
+        ("SecretHeader", format!("{secret:?}"), "<redacted>"),
+        ("SecretHeader", format!("{secret:#?}"), "<redacted>"),
+        ("Header", format!("{header:?}"), "bytes"),
+        ("Header", format!("{header:#?}"), "bytes"),
+        ("Call", format!("{call:?}"), "bytes"),
+        ("Call", format!("{call:#?}"), "bytes"),
+        ("Rejection", format!("{rejection:?}"), "bytes"),
+        ("Rejection", format!("{rejection:#?}"), "bytes"),
+        ("Exchange", format!("{exchange:?}"), "bytes"),
+        ("Endpoint", format!("{endpoint:?}"), "secrets"),
+        ("Endpoint", format!("{endpoint:#?}"), "secrets"),
+        ("HttpProvider", format!("{provider:?}"), "line"),
+        ("HttpProvider", format!("{provider:#?}"), "line"),
+        ("Http", format!("{http:?}"), "attempts"),
+        ("Http", format!("{http:#?}"), "attempts"),
+        ("Target", format!("{target:?}"), "api.example.com"),
+        ("Target", format!("{target:#?}"), "api.example.com"),
+        ("WireRequest", format!("{wire_request:?}"), "bytes"),
+        ("WireRequest", format!("{wire_request:#?}"), "bytes"),
+    ];
+    for (label, text, marker) in texts {
+        assert!(!text.contains(canary), "{label} shows a canary: {text}");
+        assert!(text.contains(marker), "{label} shows no {marker:?}: {text}");
     }
 }

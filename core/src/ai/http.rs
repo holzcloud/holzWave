@@ -1166,6 +1166,7 @@ impl Http {
     /// Resolves and classifies the host of `target` without sending anything. Blocking. This performs a name lookup, so
     /// it is for an explicit user action only.
     pub fn classify(&self, target: &Target, policy: &NetworkPolicy, cancel: &CancelToken) -> Result<Resolved, AiError> {
+        no_runtime_here()?;
         if cancel.is_cancelled() {
             return Err(AiError::Cancelled);
         }
@@ -1231,6 +1232,10 @@ impl Http {
 
     /// The address and headers of a call.
     fn prepare(&self, call: &Call<'_>) -> Result<Prepared, AiError> {
+        // The body is the one unbounded input of ours, so it is bounded before anything is resolved or connected.
+        if call.body.len() > self.config.max_request_bytes {
+            return Err(AiError::InvalidRequest(Detail::new("the request is larger than the limit")));
+        }
         let (path, query) = split_path(call.path)?;
         let mut url = call.target.url.clone();
         url.set_path(&format!("{}{}", call.target.base_path, path));
@@ -1281,6 +1286,7 @@ impl Http {
         on_frame: &mut dyn FnMut(Frame<'_>) -> Flow,
         cancel: &CancelToken,
     ) -> Result<Exchange, AiError> {
+        no_runtime_here()?;
         if cancel.is_cancelled() {
             return Err(AiError::Cancelled);
         }
@@ -1297,8 +1303,53 @@ impl Http {
     ) -> Result<Exchange, AiError> {
         let resolved = raced(cancel, self.resolve(call.target, &call.policy)).await??;
         let client = self.client_for(call.target, &resolved)?;
-        let outcome = self.attempt(&client, call, prepared, on_frame, cancel).await?;
-        Ok(Exchange { locality: resolved.locality, outcome })
+        let retry = self.config.retry;
+        let mut tries: u32 = 0;
+        loop {
+            tries += 1;
+            let retries_left = tries <= retry.max_retries;
+            // A request is repeated only when nothing of its body has been handed to the decoder: a failed connect, or
+            // an answer whose status says "try again". A stream that has started is never repeated.
+            let wait = match self.attempt(&client, call, prepared, on_frame, cancel).await? {
+                Try::Streamed(end) => {
+                    return Ok(Exchange { locality: resolved.locality, outcome: Outcome::Streamed(end) });
+                }
+                Try::Rejected(rejection) => {
+                    let wait = match rejection.retry_after {
+                        // A server that asks for a long wait is reported, not waited for.
+                        Some(asked) if asked > retry.max_wait => None,
+                        Some(asked) => Some(asked),
+                        None => Some(self.backoff(tries)),
+                    };
+                    match wait {
+                        Some(wait) if retries_left && retries_status(rejection.status) => wait,
+                        _ => {
+                            return Ok(Exchange { locality: resolved.locality, outcome: Outcome::Rejected(rejection) });
+                        }
+                    }
+                }
+                Try::ConnectFailed(phrase) => {
+                    if !retries_left || !retries_phrase(phrase) {
+                        return Err(network_error(phrase));
+                    }
+                    self.backoff(tries)
+                }
+            };
+            raced(cancel, tokio::time::sleep(wait)).await?;
+        }
+    }
+
+    /// The wait before retry number `tries`: the base delay doubled for each earlier retry, capped, plus up to a quarter
+    /// of jitter so that several clients do not come back together. Without randomness there is no jitter.
+    fn backoff(&self, tries: u32) -> Duration {
+        let retry = self.config.retry;
+        let doubled = retry.base_delay.saturating_mul(1u32 << tries.saturating_sub(1).min(16));
+        let wait = doubled.min(retry.max_wait);
+        let mut raw = [0u8; 4];
+        match getrandom::fill(&mut raw) {
+            Ok(()) => wait + wait.mul_f64(f64::from(u32::from_le_bytes(raw)) / f64::from(u32::MAX) * 0.25),
+            Err(_) => wait,
+        }
     }
 
     /// One request on one connection, up to the end of the body.
@@ -1309,28 +1360,91 @@ impl Http {
         prepared: &Prepared,
         on_frame: &mut dyn FnMut(Frame<'_>) -> Flow,
         cancel: &CancelToken,
-    ) -> Result<Outcome, AiError> {
+    ) -> Result<Try, AiError> {
         let request = client.post(prepared.url.clone()).headers(prepared.headers.clone()).body(call.body.to_vec());
         self.attempts.fetch_add(1, Ordering::Relaxed);
-        let mut response = raced(cancel, request.send()).await?.map_err(map_error)?;
+        let mut response = match raced(cancel, request.send()).await? {
+            Ok(response) => response,
+            Err(error) => {
+                let error = error.without_url();
+                if error.is_connect() {
+                    return Ok(Try::ConnectFailed(transport_phrase(&error)));
+                }
+                return Err(map_error(error));
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             let retry_after = retry_after(response.headers());
-            return Ok(Outcome::Rejected(Rejection { status: status.as_u16(), retry_after, body: Vec::new() }));
+            let body = read_error_body(&mut response, self.config.max_error_body, cancel).await?;
+            return Ok(Try::Rejected(Rejection { status: status.as_u16(), retry_after, body }));
         }
         // Each chunk goes straight into the decoder, so a frame reaches the callback when it arrives.
         let mut decoder = Decoder::new(call.framing);
+        let mut received: usize = 0;
         loop {
             let chunk = match raced(cancel, response.chunk()).await?.map_err(map_error)? {
                 Some(chunk) => chunk,
-                None => return Ok(Outcome::Streamed(decoder.finish())),
+                None => return Ok(Try::Streamed(decoder.finish())),
             };
+            received = received.saturating_add(chunk.len());
+            // Leaving drops the response, which closes the connection.
+            if received > self.config.max_stream_bytes {
+                return Err(AiError::Protocol(Detail::new("the response is larger than the limit")));
+            }
             match decoder.push(&chunk, on_frame) {
                 Ok(Flow::Continue) => {}
-                // Leaving drops the response, which closes the connection.
                 Ok(Flow::Stop) => return Err(AiError::Cancelled),
                 Err(error) => return Err(AiError::from(error)),
             }
+        }
+    }
+}
+
+/// How one request on one connection ended.
+enum Try {
+    /// The body arrived; the end says whether it was clean.
+    Streamed(StreamEnd),
+    /// The server answered with a status that is not a success.
+    Rejected(Rejection),
+    /// No connection was made; the phrase says why.
+    ConnectFailed(&'static str),
+}
+
+/// The start of the body of an error answer: at most `limit` bytes, exactly the ones that fit. The rest is not read,
+/// and the connection is dropped with the response.
+async fn read_error_body(
+    response: &mut reqwest::Response,
+    limit: usize,
+    cancel: &CancelToken,
+) -> Result<Vec<u8>, AiError> {
+    let mut body = Vec::new();
+    while body.len() < limit {
+        match raced(cancel, response.chunk()).await? {
+            Ok(Some(chunk)) => {
+                let room = limit - body.len();
+                body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            // The end of the body, or a body that failed: the status alone is enough to report.
+            Ok(None) | Err(_) => break,
+        }
+    }
+    Ok(body)
+}
+
+/// `block_on` panics inside an async context, so a call from one is an error instead.
+fn no_runtime_here() -> Result<(), AiError> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(unavailable("the blocking call was made from an async context"));
+    }
+    Ok(())
+}
+
+impl Drop for Http {
+    fn drop(&mut self) {
+        // A name lookup that is still running must not make the drop wait for it.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
         }
     }
 }
