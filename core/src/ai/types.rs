@@ -15,6 +15,7 @@ use std::io;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 /// A byte count that prints as `<N bytes>`: how the `Debug` of a type stands in for text it holds.
 pub(crate) struct Size(pub usize);
@@ -193,6 +194,92 @@ impl fmt::Debug for ToolCall {
     }
 }
 
+/// What running a tool produced, sent back to the model.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolResult {
+    /// The id of the call this answers.
+    pub call_id: String,
+    /// What the tool produced, or why it failed.
+    pub content: String,
+    /// Whether the tool failed.
+    pub is_error: bool,
+}
+
+impl fmt::Debug for ToolResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolResult")
+            .field("call_id", &self.call_id)
+            .field("is_error", &self.is_error)
+            .field("content", &Size(self.content.len()))
+            .finish()
+    }
+}
+
+/// What kind of terminal or file content a context item holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextKind {
+    /// Text the user selected.
+    Selection,
+    /// The visible screen of a pane.
+    Screen,
+    /// The last command and its output.
+    LastCommand,
+    /// A file.
+    File,
+    /// A rendered preview.
+    Preview,
+}
+
+/// Who a context was approved for: the provider and where it runs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Consent {
+    /// The provider id the user approved the context for.
+    pub provider: String,
+    /// Where that provider runs.
+    pub locality: Locality,
+}
+
+/// One item of a context, described without its text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteItem {
+    /// What the item is.
+    pub kind: ContextKind,
+    /// The label the user saw in the offer.
+    pub label: String,
+    /// The size of the text that was approved.
+    pub bytes: u64,
+}
+
+/// The record a message keeps of the context it carried.
+///
+/// It names the approved envelope by its hash and lists the items by label and size. `stored` holds the text only when
+/// the user chose to keep it; the default is the redacted marker (`None`). `stored` is never sent to a provider: a
+/// follow-up message does not send earlier terminal text again unless the user approves it again.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextNote {
+    /// The SHA-256 of the approved envelope, in lower-case hex.
+    pub hash: String,
+    /// The items, described.
+    pub items: Vec<NoteItem>,
+    /// The text, when the user kept it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored: Option<String>,
+    /// Who the context was approved for.
+    pub consented_to: Consent,
+}
+
+impl fmt::Debug for ContextNote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ContextNote")
+            .field("hash", &self.hash)
+            .field("items", &self.items)
+            .field("stored", &self.stored.as_ref().map(|text| Size(text.len())))
+            .field("consented_to", &self.consented_to)
+            .finish()
+    }
+}
+
 /// The provider-native assistant turn, kept exactly as the provider sent it.
 ///
 /// Signed reasoning blocks, encrypted reasoning items and thought signatures only work when they are sent back
@@ -223,6 +310,10 @@ pub enum Part {
     },
     /// A call the model made.
     ToolCall(ToolCall),
+    /// The result of a tool call.
+    ToolResult(ToolResult),
+    /// A record of the approved context this message carried.
+    Context(ContextNote),
 }
 
 impl fmt::Debug for Part {
@@ -230,6 +321,8 @@ impl fmt::Debug for Part {
         match self {
             Part::Text { text } => f.debug_tuple("Text").field(&Size(text.len())).finish(),
             Part::ToolCall(call) => f.debug_tuple("ToolCall").field(call).finish(),
+            Part::ToolResult(result) => f.debug_tuple("ToolResult").field(result).finish(),
+            Part::Context(note) => f.debug_tuple("Context").field(note).finish(),
         }
     }
 }
@@ -290,6 +383,14 @@ impl Message {
             })
             .collect()
     }
+
+    /// The provider-native turn, only when it was written by the adapter with this wire tag.
+    ///
+    /// An adapter that finds a blob of another wire drops it and keeps the text and the tool results: a signed
+    /// reasoning block or an encrypted item means nothing to another provider and must not be sent to it.
+    pub fn native_for(&self, wire: &str) -> Option<&Value> {
+        self.native.as_ref().filter(|native| native.wire == wire).map(|native| &native.json)
+    }
 }
 
 impl fmt::Debug for Message {
@@ -304,5 +405,75 @@ impl fmt::Debug for Message {
             .field("status", &self.status)
             .field("native", &self.native)
             .finish()
+    }
+}
+
+/// An API key. It is wiped from memory when dropped and has no way out except [`ApiKey::expose`]: no `Clone`, no
+/// serialisation, no `Display`, no comparison, and a `Debug` that prints `ApiKey(<redacted>)`.
+///
+/// A key has no way to be copied:
+///
+/// ```compile_fail
+/// use holzwave_core::ai::types::ApiKey;
+/// let key = ApiKey::new("secret".to_owned());
+/// let copy = key.clone();
+/// ```
+///
+/// It has no serialisation:
+///
+/// ```compile_fail
+/// use holzwave_core::ai::types::ApiKey;
+/// let key = ApiKey::new("secret".to_owned());
+/// let json = serde_json::to_string(&key);
+/// ```
+///
+/// It cannot be formatted for display:
+///
+/// ```compile_fail
+/// use holzwave_core::ai::types::ApiKey;
+/// let key = ApiKey::new("secret".to_owned());
+/// let shown = format!("{key}");
+/// ```
+///
+/// The failing examples above stand next to this one, which uses the same imports and constructor, so a typo cannot
+/// make them pass:
+///
+/// ```
+/// use holzwave_core::ai::types::ApiKey;
+/// let key = ApiKey::new("secret".to_owned());
+/// assert_eq!(key.expose(), "secret");
+/// assert_eq!(format!("{key:?}"), "ApiKey(<redacted>)");
+/// ```
+pub struct ApiKey(Zeroizing<String>);
+
+impl ApiKey {
+    /// Wraps a key. The string is moved in and wiped with the key.
+    pub fn new(key: String) -> Self {
+        Self(Zeroizing::new(key))
+    }
+
+    /// The key, for the one place that puts it in a request header.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether there is no key.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// `text` with every occurrence of the key replaced by `<redacted>`, for text that may echo the key (an error
+    /// body, a URL). An empty key masks nothing.
+    pub fn redact_in(&self, text: &str) -> String {
+        if self.0.is_empty() {
+            return text.to_owned();
+        }
+        text.replace(self.0.as_str(), "<redacted>")
+    }
+}
+
+impl fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ApiKey(<redacted>)")
     }
 }

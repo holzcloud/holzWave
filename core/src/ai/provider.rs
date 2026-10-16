@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use super::types::{
@@ -442,7 +443,90 @@ pub enum AiError {
     Policy(Detail),
 }
 
+/// The stable class of an [`AiError`]: the name the page and the logs use. The names are part of the interface and do
+/// not change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass {
+    /// The user stopped the turn.
+    Cancelled,
+    /// The credentials were refused.
+    Auth,
+    /// Too many requests.
+    RateLimit,
+    /// The provider is overloaded.
+    Overload,
+    /// The conversation does not fit the model.
+    ContextLength,
+    /// The content filter stopped the answer.
+    ContentFilter,
+    /// The request was malformed.
+    InvalidRequest,
+    /// The provider or model cannot be used.
+    Unavailable,
+    /// The connection failed.
+    Network,
+    /// The provider went quiet.
+    Timeout,
+    /// The answer could not be read.
+    Protocol,
+    /// The provider reported an error.
+    Server,
+    /// A rule of the application refused the request.
+    Policy,
+}
+
+impl ErrorClass {
+    /// The stable name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorClass::Cancelled => "cancelled",
+            ErrorClass::Auth => "auth",
+            ErrorClass::RateLimit => "rate_limit",
+            ErrorClass::Overload => "overload",
+            ErrorClass::ContextLength => "context_length",
+            ErrorClass::ContentFilter => "content_filter",
+            ErrorClass::InvalidRequest => "invalid_request",
+            ErrorClass::Unavailable => "unavailable",
+            ErrorClass::Network => "network",
+            ErrorClass::Timeout => "timeout",
+            ErrorClass::Protocol => "protocol",
+            ErrorClass::Server => "server",
+            ErrorClass::Policy => "policy",
+        }
+    }
+}
+
 impl AiError {
+    /// The stable class of this error.
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            AiError::Cancelled => ErrorClass::Cancelled,
+            AiError::Auth(_) => ErrorClass::Auth,
+            AiError::RateLimited { .. } => ErrorClass::RateLimit,
+            AiError::Overloaded => ErrorClass::Overload,
+            AiError::ContextLength => ErrorClass::ContextLength,
+            AiError::ContentFilter => ErrorClass::ContentFilter,
+            AiError::InvalidRequest(_) => ErrorClass::InvalidRequest,
+            AiError::Unavailable(_) => ErrorClass::Unavailable,
+            AiError::Network(_) => ErrorClass::Network,
+            AiError::Timeout => ErrorClass::Timeout,
+            AiError::Protocol(_) => ErrorClass::Protocol,
+            AiError::Server { .. } => ErrorClass::Server,
+            AiError::Policy(_) => ErrorClass::Policy,
+        }
+    }
+
+    /// Whether trying the same request again later can work: a rate limit, an overload, a network failure, or a server
+    /// error with a status of 500 or more.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            AiError::RateLimited { .. } | AiError::Overloaded | AiError::Network(_) => true,
+            AiError::Server { status, .. } => *status >= 500,
+            _ => false,
+        }
+    }
+
     fn phrase(&self) -> (&'static str, Option<&Detail>) {
         match self {
             AiError::Cancelled => ("the request was cancelled", None),
@@ -479,3 +563,9 @@ impl fmt::Display for AiError {
 }
 
 impl std::error::Error for AiError {}
+
+impl From<AiError> for crate::Error {
+    fn from(error: AiError) -> Self {
+        crate::Error::Unsupported(format!("ai: {error}"))
+    }
+}
