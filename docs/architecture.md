@@ -317,7 +317,7 @@ path in the URL, so the page cannot ask for a file it was not given; a grant end
 | Asset | Threat | Control |
 |---|---|---|
 | Passwords, keys, tokens | read from disk | OS keychain only; profile files hold references |
-| Terminal output | sent to an AI service unasked | context leaves the device only on explicit, per-request consent; local provider is the default |
+| Terminal output | sent to an AI service unasked | consent is per pane: the terminal's content leaves the device only after the user shares that pane, and every send still shows exactly what goes out; local and on-device providers ask the same way unless the user turns that off in settings; the local provider is the default |
 | Synced settings | read by the server | end-to-end encryption, the server sees ciphertext and sizes |
 | The PTY | input injected by page content | strict CSP, no untrusted HTML in the main page, previews sandboxed |
 | Layout / settings files | corrupt or hostile file crashes the app | validated on load, fall back to a fresh state |

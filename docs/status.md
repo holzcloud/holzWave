@@ -15,8 +15,8 @@
   connections open as local panes. Tested against an in-process SSH server; not yet tried against real hosts.
 - **Your own sync (planned).** Settings, themes, profiles and layouts over WebDAV/Nextcloud, end-to-end encrypted, no
   server of ours.
-- **AI with consent (planned).** Terminal context leaves the device only when you allow that one request. Local models
-  first.
+- **AI with consent (planned).** Terminal context leaves the device only after you share that pane, and every send
+  shows what goes out. Local models first.
 - **Few dependencies.** No frontend framework and no bundler. Security-critical code (VT parsing, SSH) comes from
   established libraries, never hand-rolled.
 
@@ -31,7 +31,7 @@
 
 - One Rust core for desktop and mobile, so the same layout and sync work on a phone.
 - Sync without a server of ours: your Nextcloud, encrypted end to end.
-- AI that only sees terminal output when you allow that request.
+- AI that only sees terminal output after you share that pane.
 - Few dependencies, measured performance, and a documented plan that says what is not built.
 
 ## Stack
