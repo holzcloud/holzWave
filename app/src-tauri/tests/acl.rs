@@ -6,6 +6,8 @@
 use std::collections::BTreeSet;
 
 const LIB_RS: &str = include_str!("../src/lib.rs");
+const COMMANDS_RS: &str = include_str!("../src/commands.rs");
+const HOST_RS: &str = include_str!("../src/ai_host.rs");
 const BUILD_RS: &str = include_str!("../build.rs");
 const MENU_RS: &str = include_str!("../src/menu.rs");
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
@@ -349,4 +351,157 @@ fn the_global_tauri_object_stays_and_nothing_points_at_the_network() {
     let dist = conf.pointer("/build/frontendDist").and_then(|v| v.as_str()).expect("build.frontendDist is a string");
     assert!(!dist.contains("://"), "frontendDist points at {dist}");
     assert!(conf.pointer("/app/security/dangerousDisableAssetCspModification").is_none(), "asset CSP is modified by Tauri");
+}
+
+// ---- the AI commands ----------------------------------------------------------------------------------------------
+
+/// The commands of the AI chat the page may call, reviewed one by one and sorted. A command that is added to the
+/// manifest with an `ai_` name fails `the_ai_commands_are_exactly_the_reviewed_list` until someone has asked of it:
+/// can it return a key, accept consent for terminal content, or decide a tool call? If yes, it does not belong here.
+const AI_COMMANDS: [&str; 12] = [
+    "ai_cancel",
+    "ai_conversation_delete",
+    "ai_conversation_list",
+    "ai_conversation_new",
+    "ai_has_key",
+    "ai_key_clear",
+    "ai_key_set",
+    "ai_profile_remove",
+    "ai_profile_save",
+    "ai_profiles",
+    "ai_send",
+    "ai_turn_snapshot",
+];
+
+#[test]
+fn the_ai_commands_are_exactly_the_reviewed_list() {
+    let handler = handler_commands(LIB_RS).expect("handler list");
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    let permissions = capability_permissions().expect("capability permissions");
+    let reviewed: BTreeSet<String> = AI_COMMANDS.iter().map(|n| (*n).to_owned()).collect();
+    assert_eq!(reviewed.len(), AI_COMMANDS.len(), "AI_COMMANDS lists a command twice");
+    assert!(AI_COMMANDS.windows(2).all(|pair| pair[0] < pair[1]), "AI_COMMANDS is sorted");
+    let ai = |names: &BTreeSet<String>| -> BTreeSet<String> { names.iter().filter(|n| n.starts_with("ai_")).cloned().collect() };
+
+    for (what, found) in [("the build.rs manifest", ai(&manifest)), ("the invoke handler", ai(&handler))] {
+        let unreviewed: Vec<&String> = found.difference(&reviewed).collect();
+        assert!(
+            unreviewed.is_empty(),
+            "{what} lists ai_ commands that nobody reviewed: {unreviewed:?}. Before adding one to AI_COMMANDS in acl.rs, ask whether it \
+             can return a key, accept consent for terminal content or decide a tool call"
+        );
+        let missing: Vec<&String> = reviewed.difference(&found).collect();
+        assert!(missing.is_empty(), "{what} lost reviewed ai_ commands: {missing:?}");
+    }
+    let granted: BTreeSet<String> = reviewed.iter().map(|name| permission_of(name)).collect();
+    let in_capability: BTreeSet<String> = permissions.iter().filter(|p| p.starts_with("allow-ai-")).cloned().collect();
+    assert_eq!(in_capability, granted, "the capability grants the reviewed ai_ commands and no other");
+    // Every one of them is a command function of commands.rs.
+    for name in AI_COMMANDS {
+        assert!(return_type(COMMANDS_RS, name).is_some(), "{name} is not a command function of commands.rs");
+    }
+}
+
+/// The text between `->` and the body of the function `name` in `source`; empty for a function that returns nothing.
+/// `None` when there is no such function.
+fn return_type(source: &str, name: &str) -> Option<String> {
+    let at = source.find(&format!("pub fn {name}("))?;
+    let rest = &source[at..];
+    let open = rest.find('(')?;
+    let (mut depth, mut close) = (0i32, None);
+    for (i, c) in rest[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let after = &rest[close? + 1..];
+    let head = after[..after.find('{')?].trim();
+    Some(head.strip_prefix("->").map_or(String::new(), |ty| ty.trim().to_owned()))
+}
+
+/// What is wrong with the key commands and the `ai_` commands among `names`, as sentences. A command whose name holds
+/// `key` (the keyboard command `key` aside) may answer nothing or a flag, never data; no `ai_` command may mention a
+/// key type in its answer.
+fn key_command_problems(commands_rs: &str, names: &BTreeSet<String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    for name in names {
+        let Some(answer) = return_type(commands_rs, name) else {
+            problems.push(format!("{name} is in the manifest but is not a command function of commands.rs"));
+            continue;
+        };
+        if name.contains("key") && name != "key" && answer != "Result<(), AiFault>" && answer != "Result<bool, AiFault>" {
+            problems.push(format!("{name} answers `{answer}`: a command named for a key may answer nothing or a flag, never data"));
+        }
+        if name.starts_with("ai_") {
+            for word in ["ApiKey", "Secret", "Zeroizing"] {
+                if answer.contains(word) {
+                    problems.push(format!("{name} answers `{answer}`, which mentions {word}"));
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// The public fields in the part of the host that ships whose names say they hold a key, a secret, a token or a
+/// password.
+fn host_field_problems(host_rs: &str) -> Vec<String> {
+    let shipped = host_rs.split("\n#[cfg(test)]\nmod ").next().unwrap_or(host_rs);
+    code_lines(shipped)
+        .into_iter()
+        .filter_map(|line| line.trim_start().strip_prefix("pub "))
+        .filter_map(|rest| rest.split_once(':'))
+        .map(|(name, _)| name.trim())
+        .filter(|name| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
+        .filter(|name| ["key", "secret", "token", "password"].iter().any(|word| name.contains(word)))
+        .map(|name| format!("the host has a public field `{name}`, which could hold a key"))
+        .collect()
+}
+
+#[test]
+fn no_command_returns_a_key_and_the_key_commands_return_nothing_or_a_flag() {
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    let problems = key_command_problems(COMMANDS_RS, &manifest);
+    assert!(problems.is_empty(), "a command could hand a key to the page:\n  {}", problems.join("\n  "));
+    assert_eq!(return_type(COMMANDS_RS, "ai_key_set").as_deref(), Some("Result<(), AiFault>"));
+    assert_eq!(return_type(COMMANDS_RS, "ai_key_clear").as_deref(), Some("Result<(), AiFault>"));
+    assert_eq!(return_type(COMMANDS_RS, "ai_has_key").as_deref(), Some("Result<bool, AiFault>"));
+    let fields = host_field_problems(HOST_RS);
+    assert!(fields.is_empty(), "{}", fields.join("\n"));
+}
+
+#[test]
+fn the_return_type_scanner_flags_a_getter() {
+    let source = "\
+pub fn ai_key_get(core: State<Arc<AppCore>>, profile: String) -> Result<String, AiFault> {\n    todo()\n}\n\
+pub fn ai_key_put(core: State<Arc<AppCore>>, profile: String, api_key: String) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_key_peek(core: State<Arc<AppCore>>) -> Option<ApiKey> {\n    todo()\n}\n\
+pub fn ai_note(core: State<Arc<AppCore>>) -> Result<Zeroizing<String>, AiFault> {\n    todo()\n}\n\
+pub fn key(core: State<Arc<AppCore>>, pane: PaneId) {\n    todo()\n}\n";
+    assert_eq!(return_type(source, "ai_key_get").as_deref(), Some("Result<String, AiFault>"));
+    assert_eq!(return_type(source, "key").as_deref(), Some(""));
+    assert_eq!(return_type(source, "nothing"), None);
+
+    assert_eq!(key_command_problems(source, &set(&["ai_key_put", "key"])), Vec::<String>::new(), "a setter and the keyboard pass");
+    let getter = key_command_problems(source, &set(&["ai_key_get"]));
+    assert_eq!(getter.len(), 1, "{getter:?}");
+    assert!(getter[0].contains("ai_key_get") && getter[0].contains("never data"));
+    let typed = key_command_problems(source, &set(&["ai_key_peek"]));
+    assert!(typed.iter().any(|p| p.contains("ApiKey")), "{typed:?}");
+    let secret = key_command_problems(source, &set(&["ai_note"]));
+    assert!(secret.iter().any(|p| p.contains("Zeroizing")), "{secret:?}");
+    let missing = key_command_problems(source, &set(&["ai_gone"]));
+    assert!(missing[0].contains("not a command function"));
+
+    let fields = host_field_problems("pub struct S {\n    pub api_key: String,\n    pub name: String,\n}\n#[cfg(test)]\nmod tests {\n    pub token: u8,\n}\n");
+    assert_eq!(fields.len(), 1, "{fields:?}");
+    assert!(fields[0].contains("api_key"));
 }

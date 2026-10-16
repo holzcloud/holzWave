@@ -482,6 +482,16 @@ pub fn run() {
             commands::widget_note_save,
             commands::ai_send,
             commands::ai_turn_snapshot,
+            commands::ai_conversation_new,
+            commands::ai_conversation_list,
+            commands::ai_conversation_delete,
+            commands::ai_cancel,
+            commands::ai_profiles,
+            commands::ai_profile_save,
+            commands::ai_profile_remove,
+            commands::ai_key_set,
+            commands::ai_key_clear,
+            commands::ai_has_key,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")

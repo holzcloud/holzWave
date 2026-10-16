@@ -84,6 +84,16 @@ fn main() {
     "file_save",
     "ai_send",
     "ai_turn_snapshot",
+    "ai_conversation_new",
+    "ai_conversation_list",
+    "ai_conversation_delete",
+    "ai_cancel",
+    "ai_profiles",
+    "ai_profile_save",
+    "ai_profile_remove",
+    "ai_key_set",
+    "ai_key_clear",
+    "ai_has_key",
   ]);
   tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)).expect("tauri build failed");
 }

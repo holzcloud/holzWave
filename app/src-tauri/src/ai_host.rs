@@ -9,21 +9,29 @@
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
-use holzwave_core::ai::profiles::{KeyError, KeyVault, ProfileError};
+use holzwave_core::ai::profiles::{KeyError, KeySlot, KeyStatus, KeyVault, Preset, ProfileInput, ProfileView, Removal};
 use holzwave_core::ai::provider::Provider;
 use holzwave_core::ai::service::events::{AiEvent, ChatState};
 use holzwave_core::ai::service::{AiService, AiSink, SendRequest, ServiceError, TurnTicket};
-use holzwave_core::ai::store::{ConversationId, JsonDirStore, StoreError};
+use holzwave_core::ai::store::{ConversationId, ConversationSummary, JsonDirStore, StoreError};
 use holzwave_core::ai::tools::DenyPolicy;
+use holzwave_core::ai::types::ApiKey;
+use holzwave_core::ai::wire::Wire;
 use holzwave_core::layout::PaneId;
 use holzwave_core::secrets::KeychainStore;
-use serde::{Serialize, Serializer};
+use holzwave_core::settings::Settings;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::state::{AppCore, Out, Sink, Target};
 
 /// The folder of the data directory that holds one file per chat.
 pub const CHATS_DIR: &str = "chats";
+
+/// How long the end of the app waits for running turns to stop. A turn that is cancelled ends within a quarter of a
+/// second and keeps the text it had; the bound is for one that is stuck.
+const SHUTDOWN_BOUND: Duration = Duration::from_secs(1);
 
 /// What the host is built from besides the data directory: the keychain the profile keys live in, and a clock for the
 /// tests. Nothing is read from either until a call needs it.
@@ -117,6 +125,11 @@ impl AiFault {
         AiFault { code: "no_such_pane", reason: None, text: "that pane is not open".to_owned() }
     }
 
+    /// A profile id that no profile has.
+    pub fn unknown_profile() -> AiFault {
+        AiFault { code: "profile", reason: Some("unknown_profile"), text: "there is no such profile".to_owned() }
+    }
+
     /// The service's refusal, with the name of its reason. The matches have no wildcard arm, so a variant that the
     /// core adds later does not compile here until it has a name.
     pub fn from_service(error: &ServiceError) -> AiFault {
@@ -164,6 +177,87 @@ pub struct TicketView {
 impl From<TurnTicket> for TicketView {
     fn from(ticket: TurnTicket) -> TicketView {
         TicketView { conversation: ticket.conversation.as_str().to_owned(), turn: ticket.turn }
+    }
+}
+
+/// The chats in the store, newest first, and one line for each file that could not be listed. The lines never quote a
+/// chat.
+#[derive(Debug, Serialize)]
+pub struct ConversationList {
+    pub chats: Vec<ConversationSummary>,
+    pub notes: Vec<String>,
+}
+
+/// The profiles as the settings dialog shows them: a status for each key and never a key, and what loading `ai.json`
+/// had to say.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AiProfiles {
+    pub profiles: Vec<ProfileView>,
+    pub notes: Vec<String>,
+}
+
+/// What removing a profile did: whether the profile is gone, and whether no key of it is left in the keychain. The
+/// members are private so that no public member of the host carries a key's name; they are read on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct RemovalView {
+    removed: bool,
+    key_deleted: bool,
+}
+
+impl From<Removal> for RemovalView {
+    fn from(removal: Removal) -> RemovalView {
+        RemovalView { removed: removal.removed, key_deleted: removal.key_deleted }
+    }
+}
+
+/// What the settings dialog sends to make or change a profile. It has no member for a key: a key goes through
+/// `ai_key_set` and is never read back, and an object with any other member is refused. Only `name` and `preset` are
+/// required. `Debug` prints the preset and sizes, never the name or the address.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileInputMsg {
+    /// The profile to change; absent or null makes a new one with an id made from the name.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub preset: Preset,
+    /// The wire; absent or null keeps the wire of the profile, or the default of the preset for a new one.
+    #[serde(default)]
+    pub wire: Option<Wire>,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub allow_lan_http: bool,
+    #[serde(default)]
+    pub acknowledge_gateway: bool,
+}
+
+impl ProfileInputMsg {
+    /// The core's input. It starts from the core's own constructor and assigns the public members, so a member that
+    /// the core adds later keeps its default.
+    pub fn into_input(self) -> ProfileInput {
+        let mut input = ProfileInput::new(self.name, self.preset);
+        input.id = self.id;
+        input.wire = self.wire;
+        input.base_url = self.base_url;
+        input.model = self.model;
+        input.allow_lan_http = self.allow_lan_http;
+        input.acknowledge_gateway = self.acknowledge_gateway;
+        input
+    }
+}
+
+impl fmt::Debug for ProfileInputMsg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProfileInputMsg")
+            .field("preset", &self.preset)
+            .field("has_id", &self.id.is_some())
+            .field("name_bytes", &self.name.len())
+            .field("base_url_bytes", &self.base_url.len())
+            .field("model_bytes", &self.model.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -227,6 +321,89 @@ impl AiHost {
         let id = parse_conversation(conversation)?;
         self.service.snapshot(&id).map_err(|e| AiFault::from_service(&e))
     }
+
+    /// A fresh chat id. No file is made before the first message.
+    pub fn conversation_new(&self) -> Result<String, AiFault> {
+        self.service.new_conversation().map(|id| id.as_str().to_owned()).map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// The chats in the store, newest first.
+    pub fn conversation_list(&self) -> Result<ConversationList, AiFault> {
+        let listing = self.service.list_conversations().map_err(|e| AiFault::from_service(&e))?;
+        Ok(ConversationList { chats: listing.chats, notes: listing.notes })
+    }
+
+    /// Deletes a chat and stops its turn. Answers whether a file was removed.
+    pub fn conversation_delete(&self, conversation: &str) -> Result<bool, AiFault> {
+        let id = parse_conversation(conversation)?;
+        self.service.delete_conversation(&id).map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// Stops the turn of a chat. Answers whether the chat had a turn.
+    pub fn cancel(&self, conversation: &str) -> Result<bool, AiFault> {
+        let id = parse_conversation(conversation)?;
+        Ok(self.service.cancel(&id))
+    }
+
+    /// The profiles with the status of their keys. This reads the keychain, so call it when the dialog opens.
+    pub fn profiles(&self) -> AiProfiles {
+        AiProfiles { profiles: self.service.profiles(), notes: self.service.config_notes() }
+    }
+
+    /// Makes a profile or changes one. Answers its id.
+    pub fn profile_save(&self, input: ProfileInputMsg) -> Result<String, AiFault> {
+        self.service.save_profile(input.into_input()).map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// Removes a profile and its keys, and stops the turns that use it.
+    pub fn profile_remove(&self, profile: &str) -> Result<RemovalView, AiFault> {
+        self.service.remove_profile(profile).map(RemovalView::from).map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// Saves a key in the keychain. The string becomes the core's key type as the first act, so no copy of the text
+    /// stays here, and nothing is answered but whether it worked: no call of the shell returns a key.
+    pub fn key_set(&self, profile: &str, slot: KeySlot, key: String) -> Result<(), AiFault> {
+        let key = ApiKey::new(key);
+        self.service.set_key(profile, slot, key).map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// Removes a key from the keychain and stops the turns that use the profile.
+    pub fn key_clear(&self, profile: &str, slot: KeySlot) -> Result<(), AiFault> {
+        self.service.clear_key(profile, slot).map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// Whether a usable key is saved in `slot` of `profile`: the status of the slot is the present one. The status is
+    /// read once for every profile, which reads the keychain.
+    pub fn has_key(&self, profile: &str, slot: KeySlot) -> Result<bool, AiFault> {
+        let views = self.service.profiles();
+        let view = views.iter().find(|view| view.id == profile).ok_or_else(AiFault::unknown_profile)?;
+        let status = match slot {
+            KeySlot::Provider => Some(view.key),
+            KeySlot::Gateway => view.gateway_key,
+        };
+        Ok(status == Some(KeyStatus::Present))
+    }
+
+    /// Tells the service the two settings it reads (`ai_local_only`, `ai_persist_context`). Call it at start and on
+    /// every change of the settings; the effect (turns it stopped) is not needed by the shell.
+    pub fn apply_settings(&self, settings: &Settings) {
+        let _ = self.service.apply_settings(settings);
+    }
+
+    /// Tells the service that a pane left the layout: the calls that wait for a decision in turns that act for it are
+    /// voided. Answers how many.
+    pub fn pane_closed(&self, pane: PaneId) -> usize {
+        self.service.pane_closed(pane)
+    }
+
+    /// Ends the running turns (they keep the text they had) and waits for them for at most [`SHUTDOWN_BOUND`]. A send
+    /// after this is refused. Safe to call more than once.
+    pub fn shutdown(&self) {
+        let left = self.service.shutdown(SHUTDOWN_BOUND);
+        if left > 0 {
+            eprintln!("holzwave: {left} assistant turn(s) did not end within the shutdown bound");
+        }
+    }
 }
 
 /// The id of a chat, parsed at the boundary: nothing else is ever used as a file name.
@@ -271,13 +448,18 @@ mod tests {
     use holzwave_core::ai::service::events::ApplyResult;
     use holzwave_core::ai::types::{Capabilities, Locality, Part};
     use holzwave_core::layout::MAIN_WINDOW;
-    use serde_json::Value;
+    use holzwave_core::secrets::MemoryStore;
+    use holzwave_core::settings::SETTINGS_FILE;
+    use serde_json::{Value, json};
 
     use crate::state::ShellSpec;
     use crate::windows::{CursorSpot, Place};
 
     /// The text a user types in these tests; it appears in test code only, so a hit anywhere else is a leak.
     const TEXT_CANARY: &str = "zq-host-text-8d3b27f1c4";
+
+    /// The key a user saves in these tests; it appears in test code only, so a hit anywhere else is a leak.
+    const KEY_CANARY: &str = "zq-host-key-5a91c3e7d0";
 
     /// A scratch data directory, removed at the end of the test. Declared before the core, so the core is dropped
     /// first and a late write cannot bring the directory back.
@@ -345,7 +527,21 @@ mod tests {
 
         /// Whether a turn of `chat` has ended.
         fn ended(&self, chat: &str) -> bool {
-            self.ai_events().iter().any(|(_, p)| p.0.conversation == chat && p.0.kind.name() == "turn_ended")
+            self.saw(chat, "turn_ended")
+        }
+
+        /// Whether an event of this kind was sent for `chat`.
+        fn saw(&self, chat: &str, kind: &str) -> bool {
+            self.ai_events().iter().any(|(_, p)| p.0.conversation == chat && p.0.kind.name() == kind)
+        }
+
+        /// The last `turn_ended` event of `chat`, as the page receives it.
+        fn end_of(&self, chat: &str) -> Option<Value> {
+            self.ai_events()
+                .iter()
+                .rev()
+                .find(|(_, p)| p.0.conversation == chat && p.0.kind.name() == "turn_ended")
+                .map(|(_, p)| json_of(&*p.0))
         }
     }
 
@@ -384,6 +580,41 @@ mod tests {
 
     fn json_of<T: Serialize>(value: &T) -> Value {
         serde_json::to_value(value).expect("serialises")
+    }
+
+    /// The pane that has the focus in the main window.
+    fn pane_of(core: &AppCore) -> PaneId {
+        core.view_in(MAIN_WINDOW).expect("main").focus
+    }
+
+    /// Registers `provider` under `id` and keeps a handle to read what it was asked.
+    fn register(core: &AppCore, id: &str, provider: ScriptedProvider) -> Arc<ScriptedProvider> {
+        let provider = Arc::new(provider);
+        core.ai().register_provider(id, provider.clone()).expect("registered");
+        provider
+    }
+
+    /// A turn that streams one piece of text and then goes quiet for thirty seconds, or until it is cancelled.
+    fn stalling() -> Script {
+        Script::new().text("partial").stall(Duration::from_secs(30))
+    }
+
+    /// Every way a fault can be printed or sent, as one text.
+    fn printed(fault: &AiFault) -> String {
+        format!("{} {fault:?} {fault:#?}", json_of(fault))
+    }
+
+    fn profile_msg(name: &str, preset: Preset) -> ProfileInputMsg {
+        ProfileInputMsg {
+            id: None,
+            name: name.to_owned(),
+            preset,
+            wire: None,
+            base_url: String::new(),
+            model: String::new(),
+            allow_lan_http: false,
+            acknowledge_gateway: false,
+        }
     }
 
     // ---- the tracer -------------------------------------------------------------------------------------------
@@ -489,5 +720,369 @@ mod tests {
         assert!(rec.ai_events().is_empty(), "no event");
         assert_eq!(provider.calls(), 0, "the provider was not called");
         assert!(!scratch.chats().exists(), "nothing was stored");
+    }
+
+    // ---- conversations ----------------------------------------------------------------------------------------
+
+    #[test]
+    fn conversations_are_created_listed_and_deleted_and_a_bad_id_is_refused() {
+        let scratch = Scratch::new("chats");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider =
+            register(&core, "scripted", scripted("scripted", Locality::OnDevice).with_turn(Script::reply("ok")));
+        let pane = pane_of(&core);
+        let ai = core.ai();
+
+        // An id that is not a chat id never reaches the store, whatever the call.
+        let long = "a".repeat(65);
+        for bad in ["", "../etc/passwd", "a/b", long.as_str()] {
+            let sent = core.ai_send(bad, "hello".to_owned(), pane, Some("scripted".to_owned()), None);
+            for fault in [ai.conversation_delete(bad).err(), ai.cancel(bad).err(), ai.snapshot(bad).err(), sent.err()] {
+                let fault = fault.expect("refused");
+                assert_eq!((fault.code, fault.reason), ("invalid_conversation", None), "{bad:?}");
+                assert_eq!(fault.text, "that chat id is not valid");
+            }
+        }
+        assert!(!scratch.chats().exists(), "a refused id touched the disk");
+        assert_eq!(provider.calls(), 0);
+        assert!(rec.ai_events().is_empty());
+
+        // A new id is a valid id, differs from the last one, and makes no file.
+        let first = ai.conversation_new().expect("an id");
+        let second = ai.conversation_new().expect("another id");
+        assert_ne!(first, second);
+        assert!(ConversationId::parse(&first).is_ok() && ConversationId::parse(&second).is_ok());
+        assert!(!scratch.chats().exists(), "a new id makes no file");
+
+        // A chat that was never saved is an empty state, and has no turn to cancel.
+        let empty = ai.snapshot(&first).expect("an empty state");
+        assert_eq!((empty.turn, empty.running, empty.messages.len()), (0, false, 0));
+        assert_eq!(ai.cancel(&first), Ok(false));
+
+        // After one send the list holds exactly that chat.
+        core.ai_send(&first, "hello".to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&first)));
+        let list = ai.conversation_list().expect("a list");
+        assert_eq!(list.chats.len(), 1);
+        assert_eq!(list.chats[0].id.as_str(), first);
+        assert!(!list.chats[0].title.is_empty());
+        assert!(list.notes.is_empty());
+
+        // Delete removes the file once.
+        let file = scratch.chats().join(format!("{first}.json"));
+        assert!(file.is_file());
+        assert_eq!(ai.conversation_delete(&first), Ok(true));
+        assert!(ai.conversation_list().expect("a list").chats.is_empty());
+        assert!(!file.exists());
+        assert_eq!(ai.conversation_delete(&first), Ok(false));
+    }
+
+    // ---- profiles and keys ------------------------------------------------------------------------------------
+
+    /// `ai.json` of the scratch directory, when there is one, is JSON and holds no key.
+    fn assert_ai_json_clean(scratch: &Scratch) {
+        if let Ok(text) = std::fs::read_to_string(scratch.0.join("ai.json")) {
+            serde_json::from_str::<Value>(&text).expect("ai.json is JSON");
+            assert!(!text.contains(KEY_CANARY), "ai.json holds the key");
+        }
+    }
+
+    #[test]
+    fn profiles_and_keys_go_through_the_calls_and_no_answer_holds_a_key() {
+        let scratch = Scratch::new("keys");
+        let (core, rec) = core_with(&scratch.0, KeyVault::new(Arc::new(MemoryStore::default())));
+        let ai = core.ai();
+        let mut faults: Vec<AiFault> = Vec::new();
+        let mut answers: Vec<String> = Vec::new();
+
+        let id = ai.profile_save(profile_msg("Claude", Preset::Anthropic)).expect("saved");
+        let listed = ai.profiles();
+        answers.push(json_of(&listed).to_string());
+        assert_eq!(listed.profiles.len(), 1);
+        assert_eq!(listed.profiles[0].id, id);
+        assert_eq!(listed.profiles[0].key, KeyStatus::NotSet);
+        assert!(listed.notes.is_empty());
+        assert_eq!(ai.has_key(&id, KeySlot::Provider), Ok(false));
+        assert_ai_json_clean(&scratch);
+
+        // A key that is too long is refused and nothing is stored.
+        let fault = ai.key_set(&id, KeySlot::Provider, KEY_CANARY.repeat(200)).expect_err("too long");
+        assert_eq!(fault.code, "key");
+        faults.push(fault);
+        assert_eq!(ai.has_key(&id, KeySlot::Provider), Ok(false));
+
+        // A key is written and the calls only say that it is there.
+        ai.key_set(&id, KeySlot::Provider, KEY_CANARY.to_owned()).expect("stored");
+        assert_eq!(ai.has_key(&id, KeySlot::Provider), Ok(true));
+        let listed = ai.profiles();
+        answers.push(json_of(&listed).to_string());
+        assert_eq!(listed.profiles[0].key, KeyStatus::Present);
+        assert_ai_json_clean(&scratch);
+
+        // A slot the kind of provider does not have, and a profile that does not exist.
+        let fault = ai.key_set(&id, KeySlot::Gateway, KEY_CANARY.to_owned()).expect_err("no such slot");
+        assert_eq!((fault.code, fault.reason), ("key", Some("no_such_slot")));
+        faults.push(fault);
+        let fault = ai.key_set("nobody", KeySlot::Provider, KEY_CANARY.to_owned()).expect_err("unknown");
+        assert_eq!((fault.code, fault.reason), ("key", Some("unknown_profile")));
+        faults.push(fault);
+        let fault = ai.has_key("nobody", KeySlot::Provider).expect_err("unknown");
+        assert_eq!((fault.code, fault.reason), ("profile", Some("unknown_profile")));
+        faults.push(fault);
+
+        // Clearing makes the key go; removing the profile removes it.
+        ai.key_clear(&id, KeySlot::Provider).expect("cleared");
+        assert_eq!(ai.has_key(&id, KeySlot::Provider), Ok(false));
+        ai.key_set(&id, KeySlot::Provider, KEY_CANARY.to_owned()).expect("stored again");
+        let removal = ai.profile_remove(&id).expect("removed");
+        assert_eq!(removal, RemovalView { removed: true, key_deleted: true });
+        assert!(ai.profiles().profiles.is_empty());
+        assert_ai_json_clean(&scratch);
+
+        // A refused profile is a reason the dialog can act on.
+        let mut bad = profile_msg("x", Preset::Anthropic);
+        bad.name = String::new();
+        let fault = ai.profile_save(bad).expect_err("no name");
+        assert_eq!((fault.code, fault.reason), ("profile", Some("name")));
+        faults.push(fault);
+
+        // Without a keychain a key is refused by name, and nothing else changes.
+        let other = Scratch::new("keys-none");
+        let (bare, _) = core_with(&other.0, KeyVault::unavailable());
+        let id = bare.ai().profile_save(profile_msg("Claude", Preset::Anthropic)).expect("saved");
+        let fault = bare.ai().key_set(&id, KeySlot::Provider, KEY_CANARY.to_owned()).expect_err("no keychain");
+        assert_eq!((fault.code, fault.reason), ("key", Some("no_secure_store")));
+        faults.push(fault);
+        assert_ai_json_clean(&other);
+
+        for fault in &faults {
+            assert!(!printed(fault).contains(KEY_CANARY), "a fault shows the key: {fault:?}");
+        }
+        for answer in &answers {
+            assert!(!answer.contains(KEY_CANARY), "an answer shows the key");
+        }
+        assert!(!format!("{:?}", rec.all()).contains(KEY_CANARY), "an event shows the key");
+
+        // The input has no member for a key, and prints no name or address.
+        assert!(
+            serde_json::from_value::<ProfileInputMsg>(json!({"name": "x", "preset": "anthropic", "extra": 1})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProfileInputMsg>(json!({"name": "x", "preset": "anthropic", "api_key": "k"}))
+                .is_err()
+        );
+        let mut msg = profile_msg("NameMarker-93", Preset::Custom);
+        msg.base_url = "AddressMarker-77".to_owned();
+        let text = format!("{msg:?} {msg:#?}");
+        assert!(!text.contains("NameMarker-93") && !text.contains("AddressMarker-77"), "{text}");
+    }
+
+    // ---- refusals ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_refusal_reaches_the_page_as_a_code_a_reason_and_a_fixed_text() {
+        let scratch = Scratch::new("faults");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        register(&core, "slow", scripted("slow", Locality::OnDevice).with_turn(stalling()));
+        let pane = pane_of(&core);
+        let chat = core.ai().conversation_new().expect("an id");
+        let mut faults = Vec::new();
+
+        let fault = core.ai_send(&chat, "  \n\t".to_owned(), pane, Some("slow".to_owned()), None).expect_err("empty");
+        assert_eq!((fault.code, fault.reason), ("empty_text", None));
+        assert_eq!(fault.text, ServiceError::EmptyText.to_string());
+        faults.push(fault);
+
+        let long = format!("{TEXT_CANARY}{}", "x".repeat(131_073 - TEXT_CANARY.len()));
+        assert_eq!(long.len(), 131_073);
+        let fault = core.ai_send(&chat, long, pane, Some("slow".to_owned()), None).expect_err("too long");
+        assert_eq!(fault.code, "text_too_long");
+        assert!(!printed(&fault).contains(TEXT_CANARY), "a fault shows the text");
+        faults.push(fault);
+
+        let fault = core.ai_send(&chat, "hello".to_owned(), pane, None, None).expect_err("no provider");
+        assert_eq!(fault.code, "no_profile");
+        faults.push(fault);
+
+        // A chat runs one turn at a time, and a cancel ends it.
+        core.ai_send(&chat, "go".to_owned(), pane, Some("slow".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(5), || rec.saw(&chat, "delta")), "the turn is running");
+        let fault = core.ai_send(&chat, "again".to_owned(), pane, Some("slow".to_owned()), None).expect_err("busy");
+        assert_eq!(fault.code, "busy");
+        faults.push(fault);
+        assert_eq!(core.ai().cancel(&chat), Ok(true));
+        assert!(wait_for(Duration::from_secs(1), || rec.ended(&chat)), "a cancel ends the turn");
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], "cancelled");
+
+        for fault in &faults {
+            let value = json_of(fault);
+            let mut members: Vec<&str> = value.as_object().expect("an object").keys().map(String::as_str).collect();
+            members.sort_unstable();
+            assert_eq!(members, ["code", "reason", "text"]);
+            assert!(!fault.text.is_empty());
+        }
+    }
+
+    // ---- settings ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn local_only_reaches_the_service_at_start_on_a_change_and_on_a_reload() {
+        // (a) A settings file that says local only is honoured before the first command can run.
+        {
+            let scratch = Scratch::new("local-start");
+            std::fs::write(scratch.0.join(SETTINGS_FILE), r#"{"ai_local_only": true}"#).expect("settings.json");
+            let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+            let cloud = register(&core, "cloud", scripted("cloud", Locality::Cloud).with_turn(Script::reply("never")));
+            let device =
+                register(&core, "device", scripted("device", Locality::OnDevice).with_turn(Script::reply("fine")));
+            let pane = pane_of(&core);
+
+            let one = core.ai().conversation_new().expect("an id");
+            core.ai_send(&one, "hello".to_owned(), pane, Some("cloud".to_owned()), None).expect("sent");
+            assert!(wait_for(Duration::from_secs(5), || rec.ended(&one)));
+            let end = rec.end_of(&one).expect("an end");
+            assert_eq!(end["end"], "failed");
+            assert_eq!(end["error"]["class"], "policy");
+            assert_eq!(cloud.calls(), 0, "the cloud provider was not called");
+
+            let two = core.ai().conversation_new().expect("an id");
+            core.ai_send(&two, "hello".to_owned(), pane, Some("device".to_owned()), None).expect("sent");
+            assert!(wait_for(Duration::from_secs(5), || rec.ended(&two)));
+            assert_eq!(rec.end_of(&two).expect("an end")["end"], "done");
+            assert_eq!(device.calls(), 1);
+        }
+
+        // (b) A change stops the turn that leaves the device and not the one that stays.
+        {
+            let scratch = Scratch::new("local-change");
+            let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+            let cloud = register(
+                &core,
+                "cloud",
+                scripted("cloud", Locality::Cloud).with_turn(stalling()).with_turn(Script::reply("again")),
+            );
+            register(&core, "device", scripted("device", Locality::OnDevice).with_turn(stalling()));
+            let pane = pane_of(&core);
+
+            let away = core.ai().conversation_new().expect("an id");
+            let here = core.ai().conversation_new().expect("an id");
+            core.ai_send(&away, "hello".to_owned(), pane, Some("cloud".to_owned()), None).expect("sent");
+            core.ai_send(&here, "hello".to_owned(), pane, Some("device".to_owned()), None).expect("sent");
+            assert!(wait_for(Duration::from_secs(5), || rec.saw(&away, "delta") && rec.saw(&here, "delta")));
+
+            core.set_setting("ai_local_only", json!(true)).expect("saved");
+            assert!(wait_for(Duration::from_secs(1), || rec.ended(&away)), "the cloud turn is stopped");
+            assert_eq!(rec.end_of(&away).expect("an end")["end"], "cancelled");
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(!rec.ended(&here), "the on-device turn goes on");
+
+            core.reset_setting("ai_local_only").expect("reset");
+            let again = core.ai().conversation_new().expect("an id");
+            core.ai_send(&again, "hello".to_owned(), pane, Some("cloud".to_owned()), None).expect("sent");
+            assert!(wait_for(Duration::from_secs(5), || rec.ended(&again)));
+            assert_eq!(rec.end_of(&again).expect("an end")["end"], "done");
+            assert_eq!(cloud.calls(), 2, "the cloud provider is reached again");
+            core.ai().cancel(&here).expect("a valid id");
+        }
+
+        // (c) A hand edit of the file is picked up by a reload.
+        {
+            let scratch = Scratch::new("local-reload");
+            let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+            register(&core, "cloud", scripted("cloud", Locality::Cloud).with_turn(stalling()));
+            let pane = pane_of(&core);
+            let chat = core.ai().conversation_new().expect("an id");
+            core.ai_send(&chat, "hello".to_owned(), pane, Some("cloud".to_owned()), None).expect("sent");
+            assert!(wait_for(Duration::from_secs(5), || rec.saw(&chat, "delta")));
+
+            std::fs::write(scratch.0.join(SETTINGS_FILE), r#"{"ai_local_only": true}"#).expect("settings.json");
+            core.reload_settings();
+
+            assert!(wait_for(Duration::from_secs(1), || rec.ended(&chat)), "the cloud turn is stopped");
+            assert_eq!(rec.end_of(&chat).expect("an end")["end"], "cancelled");
+        }
+    }
+
+    // ---- the end of the app and closed panes -----------------------------------------------------------------
+
+    #[test]
+    fn ending_the_app_ends_running_turns_and_cancel_stops_one() {
+        let scratch = Scratch::new("exit");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        register(&core, "slow", scripted("slow", Locality::OnDevice).with_turn(stalling()).with_turn(stalling()));
+        let pane = pane_of(&core);
+
+        // A cancel stops one turn and says so.
+        let one = core.ai().conversation_new().expect("an id");
+        core.ai_send(&one, "hello".to_owned(), pane, Some("slow".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(5), || rec.saw(&one, "delta")));
+        assert_eq!(core.ai().cancel(&one), Ok(true));
+        assert!(wait_for(Duration::from_secs(1), || rec.ended(&one)));
+        assert_eq!(rec.end_of(&one).expect("an end")["end"], "cancelled");
+        assert_eq!(core.ai().cancel(&one), Ok(false), "the turn is over");
+
+        // The end of the app stops the rest, and a send after it is refused.
+        let two = core.ai().conversation_new().expect("an id");
+        core.ai_send(&two, "hello".to_owned(), pane, Some("slow".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(5), || rec.saw(&two, "delta")));
+        core.shutdown();
+        assert!(wait_for(Duration::from_secs(2), || rec.ended(&two)), "shutdown ends the turn");
+        assert_eq!(rec.end_of(&two).expect("an end")["end"], "cancelled");
+        assert_eq!(core.ai().service().active_turns(), 0);
+        let three = core.ai().conversation_new().expect("an id");
+        let fault = core.ai_send(&three, "late".to_owned(), pane, Some("slow".to_owned()), None).expect_err("refused");
+        assert_eq!(fault.code, "shutting_down");
+    }
+
+    /// The text of the function whose signature holds `signature`: the lines after it up to the closing brace at
+    /// its own indentation.
+    fn body_of(source: &str, signature: &str) -> String {
+        let lines: Vec<&str> = source.lines().collect();
+        let start =
+            lines.iter().position(|line| line.contains(signature)).unwrap_or_else(|| panic!("{signature} is gone"));
+        let indent = lines[start].len() - lines[start].trim_start().len();
+        let mut body = String::new();
+        for line in &lines[start + 1..] {
+            let here = line.len() - line.trim_start().len();
+            if here == indent && line.trim_start().starts_with('}') {
+                return body;
+            }
+            body.push_str(line);
+            body.push('\n');
+        }
+        panic!("{signature} is not closed");
+    }
+
+    #[test]
+    fn a_pane_that_leaves_the_layout_is_told_to_the_service_by_every_path() {
+        // The core is told in one place, and every path that takes a pane out of a layout goes through it.
+        let source = include_str!("state.rs");
+        assert!(body_of(source, "fn forget_pane(").contains("self.ai.pane_closed(pane)"));
+        for path in ["fn close_pane_in(", "fn end_panes(", "fn window_closed(", "fn pane_gone("] {
+            assert!(body_of(source, path).contains("self.forget_pane("), "{path} does not forget the pane");
+        }
+        // The settings and the end of the app reach the service too.
+        for place in ["fn new_with_ai(", "fn set_setting(", "fn reload_settings("] {
+            assert!(body_of(source, place).contains("apply_settings"), "{place} does not apply the settings");
+        }
+        assert!(body_of(source, "pub fn shutdown(").contains("self.ai.shutdown()"));
+        assert!(!body_of(source, "fn reset_setting(").contains("apply_settings"), "reset goes through set_setting");
+        assert!(body_of(source, "fn reset_setting(").contains("self.set_setting("));
+
+        // Closing a pane of two still works, and the pane is not open any more.
+        let scratch = Scratch::new("panes");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let view = core.split_in(MAIN_WINDOW, true).expect("split");
+        let ids: Vec<PaneId> = view.panes.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|id| core.pane_is_open(*id)));
+        let closing = ids[1];
+        assert!(core.close_pane_in(MAIN_WINDOW, closing).is_ok());
+        assert!(!core.pane_is_open(closing));
+        assert!(core.pane_is_open(ids[0]));
+        assert!(rec.all().iter().any(|(_, out)| matches!(out, Out::Layout(_))), "the layout was announced");
+        let fault =
+            core.ai_send(&core.ai().conversation_new().expect("an id"), "hello".to_owned(), closing, None, None);
+        assert_eq!(fault.expect_err("refused").code, "no_such_pane");
     }
 }

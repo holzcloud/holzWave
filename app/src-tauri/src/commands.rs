@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use holzwave_core::ai::profiles::KeySlot;
 use holzwave_core::ai::service::events::ChatState;
 use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
@@ -35,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
-use crate::ai_host::{AiFault, TicketView};
+use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
 use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
 use crate::windows::DropKind;
 
@@ -900,4 +901,71 @@ pub fn ai_send(
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn ai_turn_snapshot(core: State<Arc<AppCore>>, conversation: String) -> Result<ChatState, AiFault> {
     core.ai().snapshot(&conversation)
+}
+
+/// A fresh chat id. No file is made until the first message is sent.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_conversation_new(core: State<Arc<AppCore>>) -> Result<String, AiFault> {
+    core.ai().conversation_new()
+}
+
+/// The saved chats, newest first, and one note for each file that could not be listed.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_conversation_list(core: State<Arc<AppCore>>) -> Result<ConversationList, AiFault> {
+    core.ai().conversation_list()
+}
+
+/// Delete a chat and stop its turn. Answers whether a file was removed.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_conversation_delete(core: State<Arc<AppCore>>, conversation: String) -> Result<bool, AiFault> {
+    core.ai().conversation_delete(&conversation)
+}
+
+/// Stop the turn of a chat; it keeps the text it had. Answers whether the chat had a turn.
+#[tauri::command(rename_all = "snake_case")]
+pub fn ai_cancel(core: State<Arc<AppCore>>, conversation: String) -> Result<bool, AiFault> {
+    core.ai().cancel(&conversation)
+}
+
+/// The profiles with the state of each key (never a key). This reads the keychain, so the settings dialog calls it
+/// when it opens and not before.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_profiles(core: State<Arc<AppCore>>) -> AiProfiles {
+    core.ai().profiles()
+}
+
+/// Make a profile or change one. Answers its id. The input has no member for a key.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_profile_save(core: State<Arc<AppCore>>, input: ProfileInputMsg) -> Result<String, AiFault> {
+    core.ai().profile_save(input)
+}
+
+/// Remove a profile and its keys, and stop the turns that use it.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_profile_remove(core: State<Arc<AppCore>>, profile: String) -> Result<RemovalView, AiFault> {
+    core.ai().profile_remove(&profile)
+}
+
+/// Save a key in the system keychain: it is written and never read back. A profile's address is part of the saved
+/// record, so a key is used only for the address it was saved for. Answers nothing.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_key_set(
+    core: State<Arc<AppCore>>,
+    profile: String,
+    slot: KeySlot,
+    api_key: String,
+) -> Result<(), AiFault> {
+    core.ai().key_set(&profile, slot, api_key)
+}
+
+/// Remove a key from the system keychain and stop the turns that use the profile. Answers nothing.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_key_clear(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -> Result<(), AiFault> {
+    core.ai().key_clear(&profile, slot)
+}
+
+/// Whether a usable key is saved for the profile. Answers a flag, never the key.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_has_key(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -> Result<bool, AiFault> {
+    core.ai().has_key(&profile, slot)
 }

@@ -718,7 +718,8 @@ impl AppCore {
     }
 
     /// [`AppCore::new`] with the keychain and the clock of the AI service passed in, which is how the tests give it a
-    /// vault of their own.
+    /// vault of their own. The two AI settings of `settings.json` are applied before the core is returned, so a
+    /// hand-edited file is honoured before the first command can run.
     pub fn new_with_ai(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec, ai: AiParts) -> Arc<AppCore> {
         // What the sync downloaded last time is put in place before anything is read.
         let applied = holzwave_core::sync::engine::promote_incoming(&dir);
@@ -792,7 +793,7 @@ impl AppCore {
         });
         let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
         let host = AiHost::new(&dir, sink.clone(), ai);
-        Arc::new_cyclic(|me| AppCore {
+        let core = Arc::new_cyclic(|me| AppCore {
             dir,
             windows,
             routes,
@@ -821,7 +822,11 @@ impl AppCore {
             exiting: AtomicBool::new(false),
             view_rev: AtomicU64::new(0),
             me: me.clone(),
-        })
+        });
+        // The settings are read under the config lock and the lock is released before the service is called.
+        let settings = lock(&core.config).settings.clone();
+        core.ai.apply_settings(&settings);
+        core
     }
 
     /// The AI chat service of the shell.
@@ -1380,27 +1385,25 @@ impl AppCore {
         if self.exiting.load(Ordering::SeqCst) {
             return;
         }
-        let slots = {
+        let (panes, slots) = {
             let mut set = lock(&self.windows);
             let Some(panes) = set.close_window(label) else {
                 return;
             };
             self.sync_routes(&set);
             let mut panes_map = lock(&self.panes);
-            panes.into_iter().filter_map(|pane| panes_map.remove(&pane).map(|slot| (pane, slot))).collect::<Vec<_>>()
+            let slots = panes.iter().filter_map(|pane| panes_map.remove(pane)).collect::<Vec<_>>();
+            (panes, slots)
         };
         // The panes are not in any layout now; their shells end on their own threads.
-        let gone: Vec<PaneId> = {
-            let mut gone = Vec::new();
-            for (pane, slot) in slots {
-                gone.push(pane);
-                if let Slot::Running(handle) = &slot {
-                    handle.close();
-                }
+        for slot in slots {
+            if let Slot::Running(handle) = &slot {
+                handle.close();
             }
-            gone
-        };
-        for pane in gone {
+        }
+        // Every pane of the window is forgotten, also one whose shell never started: it has no slot, but it left the
+        // layout all the same, and the chat turns that act for it have to hear of it.
+        for pane in panes {
             self.forget_pane(pane);
         }
         lock(&self.session).forget_window(label);
@@ -1755,6 +1758,8 @@ impl AppCore {
         self.connections.forget(pane);
         self.blocks.forget(pane);
         self.session_saver.touch();
+        // Last, with no guard alive: the calls of the chat turns that act for this pane are voided.
+        self.ai.pane_closed(pane);
     }
 
     /// A pane reported a new title (from its sink, on the engine thread of the pane). Remembered for the window that
@@ -1905,6 +1910,9 @@ impl AppCore {
         };
         self.push_to_panes(&before, &after);
         self.sink.send(Target::All, Out::Settings(view.clone()));
+        // Still under `settings_io`, which only the settings commands wait on: two changes reach the service in the
+        // order they were made. The service never calls back into the core.
+        self.ai.apply_settings(&view.settings);
         Ok(view)
     }
 
@@ -1948,6 +1956,7 @@ impl AppCore {
         };
         self.push_to_panes(&before, &after);
         self.sink.send(Target::All, Out::Settings(view.clone()));
+        self.ai.apply_settings(&view.settings);
         view
     }
 
@@ -2042,10 +2051,13 @@ impl AppCore {
     }
 
     /// End everything and wait, for at most three seconds: the layout is written, every shell is closed and joined.
-    /// Safe to call more than once, and from the exit events of the app. Called by `Drop` too.
+    /// Running chat turns are stopped first and waited for at most one second more. Safe to call more than once, and
+    /// from the exit events of the app. Called by `Drop` too.
     pub fn shutdown(&self) {
         // First: panes that end from now on are not taken out of the layout.
         self.exiting.store(true, Ordering::SeqCst);
+        // Running chat turns end now and keep the text they had, before the layout is flushed and the process ends.
+        self.ai.shutdown();
         self.saver.flush();
         self.flush_session();
         let handles = self.running();
@@ -6044,6 +6056,19 @@ mod tests {
         let told: Vec<_> = rec.sent().into_iter().skip(sent_before).filter(|(_, o)| matches!(o, Out::Layout(_))).collect();
         assert!(told.is_empty(), "a window that is going away is not sent a layout: {told:?}");
         assert_eq!(rec.exit_count(), 0, "the app goes on");
+    }
+
+    #[test]
+    fn closing_a_window_forgets_a_pane_whose_shell_never_started() {
+        // A pane that never started has no slot, but it left the layout all the same: what the core remembered of it
+        // (and the chat turns that act for it) go with it.
+        let (core, _rec, _dir, _first, second, label) = two_windows("sleep 30");
+        lock(&core.last_title).insert(second, "never started".to_owned());
+
+        core.window_closed(&label);
+
+        assert_eq!(core.window_labels(), vec![MAIN_WINDOW.to_owned()]);
+        assert!(!lock(&core.last_title).contains_key(&second), "the pane was not forgotten");
     }
 
     #[cfg(unix)]

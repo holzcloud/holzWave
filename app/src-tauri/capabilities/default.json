@@ -85,6 +85,16 @@
     "allow-widgets-list",
     "allow-widget-note-save",
     "allow-ai-send",
-    "allow-ai-turn-snapshot"
+    "allow-ai-turn-snapshot",
+    "allow-ai-conversation-new",
+    "allow-ai-conversation-list",
+    "allow-ai-conversation-delete",
+    "allow-ai-cancel",
+    "allow-ai-profiles",
+    "allow-ai-profile-save",
+    "allow-ai-profile-remove",
+    "allow-ai-key-set",
+    "allow-ai-key-clear",
+    "allow-ai-has-key"
   ]
 }

@@ -42,6 +42,34 @@
     "version": "0.0.1-alpha2"
   },
   "commands": {
+    "ai_cancel": [
+      "conversation"
+    ],
+    "ai_conversation_delete": [
+      "conversation"
+    ],
+    "ai_conversation_list": [],
+    "ai_conversation_new": [],
+    "ai_has_key": [
+      "profile",
+      "slot"
+    ],
+    "ai_key_clear": [
+      "profile",
+      "slot"
+    ],
+    "ai_key_set": [
+      "profile",
+      "slot",
+      "api_key"
+    ],
+    "ai_profile_remove": [
+      "profile"
+    ],
+    "ai_profile_save": [
+      "input"
+    ],
+    "ai_profiles": [],
     "ai_send": [
       "conversation",
       "text",
