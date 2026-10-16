@@ -26,6 +26,8 @@
 //! - **The loop blocks.** [`Agent::run_turn`] belongs on a turn thread, never on a thread that serves page commands.
 //!   The only thread the loop starts is the short-lived one that denies an unanswered card.
 
+mod history;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -39,6 +41,8 @@ use super::redact::{self, Keep};
 use super::tools::{
     ApprovalTable, Decision, MAX_RESULT_BYTES, Pending, Scope, ToolError, ToolHost, ToolName, denied_result, specs,
 };
+use history::{fit, fixed_bytes, message_bytes, strip_stored};
+
 use super::types::{Capabilities, Message, MessageStatus, Part, Role, Size, StopReason, ToolCall, ToolResult, Usage};
 
 /// The most provider requests one turn makes.
@@ -399,7 +403,12 @@ impl<'a> Agent<'a> {
             repeats: HashMap::new(),
             streak: 0,
             result_bytes: 0,
+            turn_start: 0,
+            spent: 0,
+            request_size: 0,
+            announced: (0, 0),
         };
+        run.turn_start = run.messages.len() - 1;
         let end = run.drive();
         TurnOutcome { end, rounds: run.rounds, usage: run.usage, messages: run.produced }
     }
@@ -530,6 +539,14 @@ struct Run<'r> {
     streak: u32,
     /// Bytes of cleaned results so far.
     result_bytes: usize,
+    /// The index of the user message this turn answers in the working copy.
+    turn_start: usize,
+    /// Tokens spent so far, as reported or estimated.
+    spent: u64,
+    /// The bytes of the request that was sent last, for the estimate of a round that reports no usage.
+    request_size: usize,
+    /// The counts of the last `Trimmed` event, so an event is sent only when they change.
+    announced: (u32, u32),
 }
 
 impl Run<'_> {
@@ -571,6 +588,15 @@ impl Run<'_> {
         capabilities.max_output_tokens.map_or(ours, |own| own.min(ours))
     }
 
+    /// The most bytes a request may hold: ours, and what the model's window leaves after the answer it may write.
+    fn request_budget(&self, capabilities: &Capabilities, output_limit: u32) -> usize {
+        let ours = self.limits.max_request_bytes;
+        capabilities.context_tokens.map_or(ours, |window| {
+            let room = (window as usize).saturating_sub(output_limit as usize);
+            ours.min(room.saturating_mul(BYTES_PER_TOKEN))
+        })
+    }
+
     fn drive(&mut self) -> TurnEnd {
         loop {
             match self.round() {
@@ -588,19 +614,37 @@ impl Run<'_> {
         if self.rounds >= self.limits.max_rounds {
             return Next::End(TurnEnd::Limit(Limit::Steps));
         }
+        if self.spent >= self.limits.max_turn_tokens {
+            return Next::End(TurnEnd::Limit(Limit::Tokens));
+        }
         let provider = self.provider;
         let capabilities = provider.capabilities(&self.model);
         let tools = if capabilities.tools { specs(self.host, self.scope.pane) } else { Vec::new() };
         let declared: HashSet<String> = tools.iter().map(|tool| tool.name.clone()).collect();
 
+        let output_limit = self.output_limit(&capabilities);
         let mut request = ChatRequest::new(self.model.clone());
         request.system = self.system.clone();
         request.messages = self.messages.clone();
         request.tools = tools;
         request.context = self.context.clone();
-        request.max_output_tokens = Some(self.output_limit(&capabilities));
+        request.max_output_tokens = Some(output_limit);
+
+        // The request is trimmed on its own copy; the working copy and the history passed in stay whole.
+        strip_stored(&mut request.messages);
+        let fixed = fixed_bytes(&request.system, &request.tools, &request.context);
+        let pinned: HashSet<String> = request.context.iter().map(ApprovedContext::hash_hex).collect();
+        let budget = self.request_budget(&capabilities, output_limit);
+        let Ok(trim) = fit(&mut request.messages, self.turn_start, &pinned, budget, fixed) else {
+            return Next::End(TurnEnd::Failed(AiError::ContextLength));
+        };
+        self.request_size = fixed.saturating_add(request.messages.iter().map(message_bytes).sum::<usize>());
         if let Err(error) = request.check_consent(provider.id()) {
             return Next::End(TurnEnd::Failed(error));
+        }
+        if (trim.results, trim.exchanges) != self.announced {
+            self.announced = (trim.results, trim.exchanges);
+            self.emit(AgentEvent::Trimmed { results: trim.results, exchanges: trim.exchanges });
         }
 
         self.rounds += 1;
@@ -658,6 +702,18 @@ impl Run<'_> {
         Next::End(end)
     }
 
+    /// Adds the tokens of a round to the budget: what the provider reported, else an estimate of the bytes that went
+    /// out and came back.
+    fn spend(&mut self, reported: Usage, reply: &Message) {
+        let counted = u64::from(reported.input_tokens).saturating_add(u64::from(reported.output_tokens));
+        let tokens = if counted > 0 {
+            counted
+        } else {
+            estimate_tokens(self.request_size.saturating_add(message_bytes(reply)))
+        };
+        self.spent = self.spent.saturating_add(tokens);
+    }
+
     /// A stream that ended cleanly: the assistant message, then the step that answers its calls.
     fn finish_round(&mut self, collector: Collector, completion: Completion, declared: &HashSet<String>) -> Next {
         let reported = if completion.usage == Usage::default() { collector.usage() } else { completion.usage };
@@ -666,7 +722,16 @@ impl Run<'_> {
         let calls: Vec<ToolCall> = collector.tool_calls().to_vec();
         let stop_reason = completion.stop_reason;
         let (id, ts) = (self.next_id(), self.now());
+        if let Some(why) = malformed_batch(&calls) {
+            // A batch the loop cannot answer call by call is not run at all: the text stays, the calls go.
+            let mut message = collector.into_message(id, ts, self.model.clone(), MessageStatus::Failed, None);
+            message.parts.retain(|part| !matches!(part, Part::ToolCall(_)));
+            message.usage = (reported != Usage::default()).then_some(reported);
+            self.record(message);
+            return Next::End(TurnEnd::Failed(AiError::Protocol(Detail::new(why))));
+        }
         let message = collector.into_message(id, ts, self.model.clone(), MessageStatus::Complete, Some(completion));
+        self.spend(reported, &message);
         self.record(message);
         if calls.is_empty() {
             return Next::End(TurnEnd::Done(stop_reason));
@@ -776,6 +841,18 @@ impl Run<'_> {
         });
         result
     }
+}
+
+/// Why a batch of calls cannot be answered call by call: an empty id, or one id used twice.
+fn malformed_batch(calls: &[ToolCall]) -> Option<&'static str> {
+    if calls.iter().any(|call| call.id.is_empty()) {
+        return Some("a tool call came without an id");
+    }
+    let mut seen: HashSet<&str> = HashSet::with_capacity(calls.len());
+    if calls.iter().any(|call| !seen.insert(call.id.as_str())) {
+        return Some("two tool calls of one step share an id");
+    }
+    None
 }
 
 /// The one door a tool string enters the transcript through: cleaned, redacted, neutralised and bounded.
