@@ -12,6 +12,7 @@
 //!   forces a conscious D-03 decision in this file);
 //! * the dependency closure of the app: no telemetry or network client crate, except the named exceptions with a
 //!   reason and their exact set of parents;
+//! * the lock holds one TLS stack, rustls with the ring provider: no second crypto provider, no native TLS, no OpenSSL;
 //! * the sources: no network API in the production Rust of every workspace member or in the page, except the named
 //!   hits with a reason (a file is skipped only when it is a declared `#[cfg(test)] mod tests;`);
 //! * the page policy (no remote origin in the CSP except the named ones, no dev server URL, no updater) and the
@@ -484,6 +485,48 @@ fn closure(graph: &Graph, start: &str) -> BTreeSet<String> {
 /// The packages of the lock file that list `name` as a dependency.
 fn parents_of(graph: &Graph, name: &str) -> BTreeSet<String> {
     graph.iter().filter(|(_, deps)| deps.contains(name)).map(|(owner, _)| owner.clone()).collect()
+}
+
+/// TLS stacks that must not be in the lock, each with the reason: the AI client and the SSH and WebDAV clients share
+/// one stack, rustls with the ring provider. Whole package names only (`openssl-probe`, which finds certificate paths,
+/// is not `openssl`).
+const FORBIDDEN_TLS_STACKS: &[(&str, &str)] = &[
+    ("aws-lc-rs", "a second crypto provider with a C toolchain; the owner chose ring"),
+    ("aws-lc-sys", "the C library behind aws-lc-rs, which needs a C toolchain on every platform"),
+    ("native-tls", "a second TLS backend that bypasses the pinned rustls configuration"),
+    ("hyper-tls", "the native TLS connector of hyper, a second TLS backend"),
+    ("tokio-native-tls", "the native TLS adapter of tokio, a second TLS backend"),
+    ("openssl", "the system OpenSSL: absent on Windows and a supply-chain surface of its own"),
+    ("openssl-sys", "the bindings to the system OpenSSL: absent on Windows and a supply-chain surface of its own"),
+];
+
+/// What is wrong with the TLS stacks of a lock, one sentence each: every forbidden package that exists in `graph`,
+/// naming the packages that depend on it, and a graph in which `rustls` is absent or does not depend on `ring` (the one
+/// stack must be there, and it must be ring).
+fn tls_stack_problems(graph: &Graph) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, why) in FORBIDDEN_TLS_STACKS {
+        if graph.contains_key(*name) {
+            problems.push(format!(
+                "{name} is in the lock (parents: {:?}) and the lock must hold one TLS stack, rustls with ring: {why}",
+                parents_of(graph, name)
+            ));
+        }
+    }
+    match graph.get("rustls") {
+        None => problems.push("rustls is not in the lock: the one TLS stack is missing".to_owned()),
+        Some(dependencies) if !dependencies.contains("ring") => {
+            problems.push("rustls does not depend on ring: the one TLS stack must use the ring provider".to_owned());
+        }
+        Some(_) => {}
+    }
+    problems
+}
+
+#[test]
+fn the_lock_has_one_tls_stack_rustls_with_ring() {
+    let problems = tls_stack_problems(&lock_graph());
+    assert!(problems.is_empty(), "the TLS stack of the lock changed:\n  {}", problems.join("\n  "));
 }
 
 fn is_denied(name: &str) -> bool {
@@ -1187,6 +1230,63 @@ fn closure_guard_reports_a_stale_exception() {
 }
 
 // ---- the guards can fail ----------------------------------------------------------------------------------
+
+#[test]
+fn tls_guard_reports_a_second_tls_stack() {
+    let graph = parse_lock(&toy_lock(&[
+        ("app", &["rustls", "native-tls", "openssl"]),
+        ("rustls", &["ring"]),
+        ("ring", &[]),
+        ("native-tls", &["openssl"]),
+        ("openssl", &[]),
+    ]));
+
+    let problems = tls_stack_problems(&graph);
+
+    assert_eq!(problems.len(), 2, "{problems:?}");
+    assert!(problems.iter().any(|p| p.starts_with("native-tls is in the lock")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.starts_with("openssl is in the lock")), "{problems:?}");
+}
+
+#[test]
+fn tls_guard_names_the_parent_of_the_forbidden_crate() {
+    let graph = parse_lock(&toy_lock(&[
+        ("app", &["rustls"]),
+        ("rustls", &["ring", "aws-lc-rs"]),
+        ("ring", &[]),
+        ("aws-lc-rs", &[]),
+    ]));
+
+    let problems = tls_stack_problems(&graph);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].starts_with("aws-lc-rs is in the lock"), "{problems:?}");
+    assert!(problems[0].contains(r#"{"rustls"}"#), "the parent is not named: {problems:?}");
+}
+
+#[test]
+fn tls_guard_matches_whole_names_only() {
+    // `openssl-probe` finds certificate paths and is linked today; it is not the system OpenSSL.
+    let graph = parse_lock(&toy_lock(&[
+        ("app", &["rustls", "openssl-probe"]),
+        ("rustls", &["ring"]),
+        ("ring", &[]),
+        ("openssl-probe", &[]),
+    ]));
+
+    assert_eq!(tls_stack_problems(&graph), Vec::<String>::new());
+}
+
+#[test]
+fn tls_guard_reports_a_rustls_without_ring() {
+    let without_ring = parse_lock(&toy_lock(&[("app", &["rustls"]), ("rustls", &[])]));
+    let problems = tls_stack_problems(&without_ring);
+    assert_eq!(problems, ["rustls does not depend on ring: the one TLS stack must use the ring provider".to_owned()]);
+
+    let no_rustls = parse_lock(&toy_lock(&[("app", &["ring"]), ("ring", &[])]));
+    let problems = tls_stack_problems(&no_rustls);
+    assert_eq!(problems, ["rustls is not in the lock: the one TLS stack is missing".to_owned()]);
+}
 
 #[test]
 fn members_of_reads_the_workspace_array() {

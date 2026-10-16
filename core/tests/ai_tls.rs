@@ -12,7 +12,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use holzwave_core::ai::http::{ClientOptions, ProxyPolicy, build_client};
 
@@ -164,7 +164,17 @@ fn respond(writer: &mut TcpStream, path: &str) -> io::Result<()> {
         writer.write_all(b"0\r\n\r\n")?;
         return writer.flush();
     }
-    writer.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")?;
+    match path {
+        "/redirect" => {
+            writer.write_all(b"HTTP/1.1 302 Found\r\nlocation: /events/1\r\ncontent-length: 0\r\n\r\n")?;
+        }
+        // The request is read and recorded, and the answer never comes.
+        "/silent" => {
+            thread::sleep(Duration::from_secs(5));
+            return Ok(());
+        }
+        _ => writer.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")?,
+    }
     writer.flush()
 }
 
@@ -217,4 +227,72 @@ fn a_chunked_event_stream_arrives_in_order_through_the_built_client() {
     assert_eq!(requests[0].header("accept-encoding"), None, "a compression header was sent");
     assert_eq!(server.accepted(), 1);
     assert!(rustls::crypto::CryptoProvider::get_default().is_none(), "a request installed a process-wide provider");
+}
+
+// ---- the guarantees of the client -------------------------------------------------------------------------
+
+#[test]
+fn a_redirect_is_returned_and_never_followed() {
+    let server = Loopback::start();
+    let client = build_client(&ClientOptions::new(false, ProxyPolicy::Direct)).expect("a client");
+
+    let (status, location, body) = runtime().block_on(async {
+        let response = client.post(server.url("/redirect")).body("the prompt").send().await.expect("a response");
+        let status = response.status().as_u16();
+        let location = response.headers().get("location").map(|v| v.to_str().expect("text").to_owned());
+        (status, location, response.bytes().await.expect("a body").to_vec())
+    });
+
+    assert_eq!(status, 302, "the redirect was followed or hidden");
+    assert_eq!(location.as_deref(), Some("/events/1"));
+    assert!(body.is_empty(), "the body came from the target of the redirect: {body:?}");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "the prompt was sent again: {requests:?}");
+    assert_eq!(requests[0].line, "POST /redirect HTTP/1.1");
+    assert_eq!(requests[0].body, b"the prompt");
+}
+
+#[test]
+fn https_only_refuses_a_plain_url_before_any_connection() {
+    let server = Loopback::start();
+    let client = build_client(&ClientOptions::new(true, ProxyPolicy::Direct)).expect("a client");
+
+    let error = runtime()
+        .block_on(async { client.post(server.url("/events/1")).body("the prompt").send().await })
+        .expect_err("a plain url must be refused");
+
+    assert!(error.is_builder(), "the refusal is not a builder error: {error}");
+    assert_eq!(server.accepted(), 0, "a connection was opened for a refused request");
+    assert!(server.requests().is_empty());
+}
+
+#[test]
+fn a_silent_server_ends_in_a_read_timeout() {
+    let server = Loopback::start();
+    let options = ClientOptions { read_timeout: Duration::from_millis(300), ..ClientOptions::new(false, ProxyPolicy::Direct) };
+    let client = build_client(&options).expect("a client");
+
+    let started = Instant::now();
+    let error = runtime()
+        .block_on(async { client.post(server.url("/silent")).body("the prompt").send().await })
+        .expect_err("a silent server must end in an error");
+
+    assert!(error.is_timeout(), "the error is not a timeout: {error}");
+    assert!(started.elapsed() < Duration::from_secs(3), "the timeout took {:?}", started.elapsed());
+    assert_eq!(server.requests().len(), 1, "the request did not reach the server");
+}
+
+#[test]
+fn a_closed_port_is_a_connect_error() {
+    // Bind a port, note it, and close it: nobody listens there any more.
+    let port = TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("address").port();
+    let client = build_client(&ClientOptions::new(false, ProxyPolicy::Direct)).expect("a client");
+
+    let started = Instant::now();
+    let error = runtime()
+        .block_on(async { client.post(format!("http://127.0.0.1:{port}/")).body("the prompt").send().await })
+        .expect_err("a closed port must be an error");
+
+    assert!(error.is_connect(), "the error is not a connect error: {error}");
+    assert!(started.elapsed() < Duration::from_secs(3), "the refusal took {:?}", started.elapsed());
 }
