@@ -489,8 +489,10 @@ That claim is a test, not a promise: `core/tests/project_policy.rs` fails when
 - first-party Rust or page sources use a network API or an absolute URL;
 - the page policy allows a remote origin, or an updater or a CI workflow appears.
 
-One honest exception is named in the test: the Tauri 3 alpha links `reqwest` for a dev-server proxy that a desktop
-build never starts (the app sets no `devUrl`).
+Two honest exceptions are named in the test, both for the crate `reqwest`. The Tauri 3 alpha links it for a dev-server
+proxy that a desktop build never starts (the app sets no `devUrl`). `holzwave-core` links it for the AI chat client in
+`core/src/ai/http.rs`, the only first-party file allowed to name it, which uses rustls with the platform's certificate
+verifier; building that client opens no connection.
 
 ## `sync.json` and `sync_state.json`
 

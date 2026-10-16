@@ -443,7 +443,8 @@ All of it runs locally; GitHub builds only on request.
    against the rows last sent (section 6); a full-frame encode costs 0.47 ms on 160x50.
 4. SQLite crate choice (`rusqlite` against `sqlx`) with the dependency budget in mind.
 5. Tauri 3 alpha links `reqwest` unconditionally, for a dev-server proxy that a desktop build never creates. The policy
-   test names it as an exception with its exact parent (`tauri`); when a later Tauri 3 release makes it optional, the
-   exception goes.
+   test names it as an exception with its exact parents: `tauri` and, for the AI chat client of Phase 7,
+   `holzwave-core` (`core/src/ai/http.rs`). When a later Tauri 3 release makes the proxy optional, only the Tauri side
+   goes; the AI chat client stays.
 
 See also: [design.md](design.md) for colour, type, components and the window direction.
