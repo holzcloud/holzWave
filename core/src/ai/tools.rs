@@ -25,7 +25,7 @@ use crate::layout::PaneId;
 use super::provider::{CancelToken, Detail};
 use super::types::{Size, ToolResult, ToolSpec};
 
-pub use approval::{ApprovalTable, Decision, PayloadField, Pending, Ticket, denied_result};
+pub use approval::{ApprovalTable, Decision, PayloadField, Pending, TaintSource, Ticket, denied_result};
 pub use catalog::{
     EditFile, Effect, Field, FieldKind, Grep, HASH_PREFIX, ListDir, Newlines, ReadFile, ReadPane, RunCommand, Tool,
     ToolName, WriteFile, fields_of, payload_hash, visible, visible_multiline,
