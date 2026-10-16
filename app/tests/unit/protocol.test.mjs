@@ -45,7 +45,7 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai"]);
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
   assert.deepEqual(keys(golden.events.cwd), ["cwd", "pane"]);
   const exits = golden.events["pane-exit"];
@@ -199,6 +199,136 @@ test("the command table has snake_case argument names and no raw input command",
   }
   assert.deepEqual(golden.commands.paste, ["pane", "text", "allow_unsafe"]);
   assert.deepEqual(golden.commands.start_pane, ["pane", "cols", "rows", "cell_w", "cell_h"]);
+});
+
+// ---- the AI chat --------------------------------------------------------------------------------------------------
+
+test("the ai event and the twelve ai commands are pinned", () => {
+  // One event of a chat turn, flat, for every window: the page routes it by conversation.
+  assert.equal(golden.events.names.at(-1), "ai");
+  assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
+  assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
+  // The commands: exactly these and exactly these arguments. A send has no argument that could carry terminal text,
+  // a context offer or a decision; a key command has no way to hand a key back.
+  const expected = {
+    ai_conversation_new: [],
+    ai_conversation_list: [],
+    ai_conversation_delete: ["conversation"],
+    ai_send: ["conversation", "text", "pane", "profile", "model"],
+    ai_cancel: ["conversation"],
+    ai_turn_snapshot: ["conversation"],
+    ai_profiles: [],
+    ai_profile_save: ["input"],
+    ai_profile_remove: ["profile"],
+    ai_key_set: ["profile", "slot", "api_key"],
+    ai_key_clear: ["profile", "slot"],
+    ai_has_key: ["profile", "slot"],
+  };
+  const found = Object.fromEntries(Object.entries(golden.commands).filter(([name]) => name.startsWith("ai_")));
+  assert.deepEqual(keys(found), keys(expected));
+  for (const [name, args] of Object.entries(expected)) assert.deepEqual(golden.commands[name], args, name);
+});
+
+test("the answers and inputs of the ai commands are pinned", () => {
+  const answers = golden.answers.ai;
+  assert.deepEqual(keys(answers), ["conversations", "fault", "profiles", "removal", "ticket"]);
+  assert.deepEqual(keys(answers.ticket), ["conversation", "turn"]);
+  // A refusal is an object, never a string: a code, a reason a dialog can act on (or null) and a fixed text.
+  assert.equal(answers.fault.length, 2, "one with a reason and one without");
+  for (const fault of answers.fault) {
+    assert.deepEqual(keys(fault), ["code", "reason", "text"]);
+    assert.equal(typeof fault.code, "string");
+    assert.equal(typeof fault.text, "string");
+  }
+  assert.equal(typeof answers.fault[0].reason, "string");
+  assert.equal(answers.fault[1].reason, null);
+  assert.deepEqual(keys(answers.conversations), ["chats", "notes"]);
+  for (const chat of answers.conversations.chats) {
+    assert.deepEqual(keys(chat), ["created", "id", "model", "profile", "title", "updated"]);
+  }
+  assert.ok(answers.conversations.notes.every((note) => typeof note === "string"));
+  assert.deepEqual(keys(answers.profiles), ["notes", "profiles"]);
+  for (const profile of answers.profiles.profiles) {
+    assert.deepEqual(keys(profile), [
+      "allow_lan_http", "base_url", "disclosure", "gateway_key", "host", "id", "key", "model", "name", "preset", "wire",
+    ]);
+    assert.equal(typeof profile.key, "string", "a key is a status, never the key");
+  }
+  assert.deepEqual(keys(answers.removal), ["key_deleted", "removed"]);
+
+  // What the settings dialog sends: eight members at most, none of them a key.
+  const allowed = ["acknowledge_gateway", "allow_lan_http", "base_url", "id", "model", "name", "preset", "wire"];
+  assert.ok(golden.ops.ai_profile_input.length >= 2);
+  for (const input of golden.ops.ai_profile_input) {
+    assert.ok(keys(input).every((member) => allowed.includes(member)), keys(input).join());
+    assert.ok("name" in input && "preset" in input);
+  }
+  assert.deepEqual(golden.ops.key_slot, ["provider", "gateway"]);
+});
+
+/** Every member name of every object in `value`. */
+function memberNames(value, out = []) {
+  if (Array.isArray(value)) value.forEach((item) => memberNames(item, out));
+  else if (value !== null && typeof value === "object") {
+    for (const [name, member] of Object.entries(value)) {
+      out.push(name);
+      memberNames(member, out);
+    }
+  }
+  return out;
+}
+
+test("the recorded ai stream is pinned and holds no key, native turn or stored context", () => {
+  const stream = JSON.parse(readFileSync(join(here, "../fixtures/ai_stream.json"), "utf8"));
+  assert.deepEqual(keys(stream), ["conversation", "events", "snapshots", "states"]);
+  assert.equal(stream.conversation, "chat-golden");
+  assert.equal(stream.events.length, stream.states.length, "one state after every event");
+  assert.ok(stream.events.length > 0);
+
+  const kinds = ["turn_started", "delta", "reasoning", "usage", "trimmed", "message", "tool_proposed", "tool_result", "turn_ended"];
+  for (const event of stream.events) {
+    for (const member of ["conversation", "turn", "seq", "kind"]) assert.ok(member in event, `${member} in ${event.kind}`);
+    assert.ok(kinds.includes(event.kind), event.kind);
+    assert.equal(event.conversation, stream.conversation);
+  }
+
+  // Turns run in order; each starts and ends the same way and counts its seq 1, 2, 3 without a hole.
+  const turns = [];
+  for (const event of stream.events) {
+    const last = turns.at(-1);
+    if (last && last.turn === event.turn) last.events.push(event);
+    else turns.push({ turn: event.turn, events: [event] });
+  }
+  assert.equal(turns.length, 3);
+  assert.equal(new Set(turns.map((t) => t.turn)).size, 3, "a turn number is not used twice");
+  for (const { events } of turns) {
+    assert.equal(events[0].kind, "turn_started");
+    assert.equal(events.at(-1).kind, "turn_ended");
+    assert.deepEqual(events.map((e) => e.seq), events.map((_, i) => i + 1));
+  }
+  assert.deepEqual(turns.map((t) => t.events.at(-1).end), ["done", "failed", "cancelled"]);
+
+  // The state after each event follows the event, and has exactly the documented members.
+  const stateMembers = ["conversation", "ended", "messages", "model", "partial", "pending", "profile", "running", "seq", "title", "trimmed", "turn", "usage"];
+  stream.states.forEach((state, i) => {
+    assert.equal(state.seq, stream.events[i].seq);
+    assert.equal(state.turn, stream.events[i].turn);
+    assert.deepEqual(keys(state), stateMembers);
+  });
+
+  // A snapshot taken live is the state after the event it names.
+  assert.equal(stream.snapshots.length, 4);
+  for (const snapshot of stream.snapshots) {
+    assert.deepEqual(keys(snapshot), ["after", "state"]);
+    assert.deepEqual(snapshot.state, stream.states[snapshot.after]);
+  }
+  assert.equal(stream.snapshots[2].state.running, true, "one snapshot is taken in the middle of a turn");
+
+  // The page gets views: no provider-native turn, no stored context text, no key.
+  const names = memberNames(stream);
+  for (const forbidden of ["native", "stored", "api_key", "key"]) {
+    assert.ok(!names.includes(forbidden), `the stream has a member named ${forbidden}`);
+  }
 });
 
 // ---- call-site scanner --------------------------------------------------------------------------------------------

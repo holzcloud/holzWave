@@ -1,5 +1,60 @@
 {
   "answers": {
+    "ai": {
+      "conversations": {
+        "chats": [
+          {
+            "created": 1800000000,
+            "id": "chat-1",
+            "model": "claude-sonnet",
+            "profile": "claude",
+            "title": "What is a pty?",
+            "updated": 1800000060
+          }
+        ],
+        "notes": [
+          "chat-2: the file cannot be used"
+        ]
+      },
+      "fault": [
+        {
+          "code": "key",
+          "reason": "no_such_slot",
+          "text": "the key was refused: this kind of provider has no such key"
+        },
+        {
+          "code": "no_such_pane",
+          "reason": null,
+          "text": "that pane is not open"
+        }
+      ],
+      "profiles": {
+        "notes": [],
+        "profiles": [
+          {
+            "allow_lan_http": false,
+            "base_url": "https://api.anthropic.com",
+            "disclosure": null,
+            "gateway_key": null,
+            "host": "api.anthropic.com",
+            "id": "claude",
+            "key": "present",
+            "model": "claude-sonnet",
+            "name": "Claude",
+            "preset": "anthropic",
+            "wire": "anthropic"
+          }
+        ]
+      },
+      "removal": {
+        "key_deleted": true,
+        "removed": true
+      },
+      "ticket": {
+        "conversation": "chat-1",
+        "turn": 5
+      }
+    },
     "copy_mode": [
       {
         "active": true,
@@ -342,6 +397,13 @@
     "window_ready": []
   },
   "events": {
+    "ai": {
+      "conversation": "chat-1",
+      "kind": "delta",
+      "seq": 2,
+      "text": "Hel",
+      "turn": 5
+    },
     "cwd": {
       "cwd": "/Users/holz/Projects/holzWave",
       "pane": 3
@@ -384,7 +446,8 @@
       "settings",
       "incoming-drop",
       "drag-hover",
-      "drag-end"
+      "drag-end",
+      "ai"
     ],
     "pane-exit": [
       {
@@ -809,6 +872,28 @@
     ]
   },
   "ops": {
+    "ai_profile_input": [
+      {
+        "acknowledge_gateway": false,
+        "allow_lan_http": false,
+        "base_url": "",
+        "id": null,
+        "model": "",
+        "name": "Claude",
+        "preset": "anthropic",
+        "wire": null
+      },
+      {
+        "acknowledge_gateway": true,
+        "allow_lan_http": true,
+        "base_url": "http://127.0.0.1:11434",
+        "id": "local",
+        "model": "llama3",
+        "name": "Local",
+        "preset": "ollama",
+        "wire": "openai_chat"
+      }
+    ],
     "copy_mode": [
       {
         "kind": "enter"
@@ -874,6 +959,10 @@
     "drop_kind": [
       "pane",
       "tab"
+    ],
+    "key_slot": [
+      "provider",
+      "gateway"
     ],
     "search": [
       {

@@ -1,0 +1,1356 @@
+{
+  "conversation": "chat-golden",
+  "events": [
+    {
+      "conversation": "chat-golden",
+      "kind": "turn_started",
+      "message": {
+        "id": "m1800000000-user",
+        "model": null,
+        "parts": [
+          {
+            "text": "What is a pty?",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "route": {
+        "host": null,
+        "locality": "on_device",
+        "model": "scripted",
+        "profile": "scripted"
+      },
+      "seq": 1,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "reasoning",
+      "seq": 2,
+      "text": "Checking the question.",
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "delta",
+      "seq": 3,
+      "text": "Hello there.",
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "input_tokens": 11,
+      "kind": "usage",
+      "output_tokens": 5,
+      "seq": 4,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000000-1",
+        "model": "scripted",
+        "parts": [
+          {
+            "text": "Hello there.",
+            "type": "text"
+          }
+        ],
+        "role": "assistant",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 5
+        }
+      },
+      "seq": 5,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "end": "done",
+      "error": null,
+      "kind": "turn_ended",
+      "rounds": 1,
+      "saved": true,
+      "seq": 6,
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 11,
+        "output_tokens": 5
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "turn_started",
+      "message": {
+        "id": "m1800000001-user",
+        "model": null,
+        "parts": [
+          {
+            "text": "And a tty?",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "route": {
+        "host": null,
+        "locality": "on_device",
+        "model": "scripted",
+        "profile": "scripted"
+      },
+      "seq": 1,
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "end": "failed",
+      "error": {
+        "class": "overload",
+        "text": "the provider is overloaded"
+      },
+      "kind": "turn_ended",
+      "rounds": 1,
+      "saved": true,
+      "seq": 2,
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "turn_started",
+      "message": {
+        "id": "m1800000002-user",
+        "model": null,
+        "parts": [
+          {
+            "text": "Explain a pipe.",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "route": {
+        "host": null,
+        "locality": "on_device",
+        "model": "scripted",
+        "profile": "scripted"
+      },
+      "seq": 1,
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "delta",
+      "seq": 2,
+      "text": "partial",
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000002-1",
+        "model": "scripted",
+        "parts": [
+          {
+            "text": "partial",
+            "type": "text"
+          }
+        ],
+        "role": "assistant",
+        "status": "cancelled",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 3,
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "end": "cancelled",
+      "error": null,
+      "kind": "turn_ended",
+      "rounds": 1,
+      "saved": true,
+      "seq": 4,
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ],
+  "snapshots": [
+    {
+      "after": 5,
+      "state": {
+        "conversation": "chat-golden",
+        "ended": {
+          "end": "done",
+          "error": null,
+          "rounds": 1,
+          "saved": true,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        },
+        "messages": [
+          {
+            "id": "m1800000000-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "What is a pty?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "Hello there.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": {
+              "input_tokens": 11,
+              "output_tokens": 5
+            }
+          }
+        ],
+        "model": "scripted",
+        "partial": {
+          "reasoning": "",
+          "text": ""
+        },
+        "pending": [],
+        "profile": "scripted",
+        "running": false,
+        "seq": 6,
+        "title": "What is a pty?",
+        "trimmed": {
+          "exchanges": 0,
+          "results": 0
+        },
+        "turn": 1800000000,
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 5
+        }
+      }
+    },
+    {
+      "after": 7,
+      "state": {
+        "conversation": "chat-golden",
+        "ended": {
+          "end": "failed",
+          "error": {
+            "class": "overload",
+            "text": "the provider is overloaded"
+          },
+          "rounds": 1,
+          "saved": true,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        },
+        "messages": [
+          {
+            "id": "m1800000000-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "What is a pty?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "Hello there.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": {
+              "input_tokens": 11,
+              "output_tokens": 5
+            }
+          },
+          {
+            "id": "m1800000001-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "And a tty?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          }
+        ],
+        "model": "scripted",
+        "partial": {
+          "reasoning": "",
+          "text": ""
+        },
+        "pending": [],
+        "profile": "scripted",
+        "running": false,
+        "seq": 2,
+        "title": "What is a pty?",
+        "trimmed": {
+          "exchanges": 0,
+          "results": 0
+        },
+        "turn": 1800000001,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "after": 9,
+      "state": {
+        "conversation": "chat-golden",
+        "ended": null,
+        "messages": [
+          {
+            "id": "m1800000000-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "What is a pty?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "Hello there.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": {
+              "input_tokens": 11,
+              "output_tokens": 5
+            }
+          },
+          {
+            "id": "m1800000001-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "And a tty?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000002-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "Explain a pipe.",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          }
+        ],
+        "model": "scripted",
+        "partial": {
+          "reasoning": "",
+          "text": "partial"
+        },
+        "pending": [],
+        "profile": "scripted",
+        "running": true,
+        "seq": 2,
+        "title": "What is a pty?",
+        "trimmed": {
+          "exchanges": 0,
+          "results": 0
+        },
+        "turn": 1800000002,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "after": 11,
+      "state": {
+        "conversation": "chat-golden",
+        "ended": {
+          "end": "cancelled",
+          "error": null,
+          "rounds": 1,
+          "saved": true,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        },
+        "messages": [
+          {
+            "id": "m1800000000-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "What is a pty?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "Hello there.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": {
+              "input_tokens": 11,
+              "output_tokens": 5
+            }
+          },
+          {
+            "id": "m1800000001-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "And a tty?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000002-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "Explain a pipe.",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000002-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "partial",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "cancelled",
+            "ts": 1800000000,
+            "usage": null
+          }
+        ],
+        "model": "scripted",
+        "partial": {
+          "reasoning": "",
+          "text": ""
+        },
+        "pending": [],
+        "profile": "scripted",
+        "running": false,
+        "seq": 4,
+        "title": "What is a pty?",
+        "trimmed": {
+          "exchanges": 0,
+          "results": 0
+        },
+        "turn": 1800000002,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    }
+  ],
+  "states": [
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 1,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "Checking the question.",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 2,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "Checking the question.",
+        "text": "Hello there."
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 3,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "Checking the question.",
+        "text": "Hello there."
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 4,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 11,
+        "output_tokens": 5
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Hello there.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 5,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 11,
+        "output_tokens": 5
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": {
+        "end": "done",
+        "error": null,
+        "rounds": 1,
+        "saved": true,
+        "usage": {
+          "input_tokens": 11,
+          "output_tokens": 5
+        }
+      },
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Hello there.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": false,
+      "seq": 6,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 11,
+        "output_tokens": 5
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Hello there.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "And a tty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 1,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": {
+        "end": "failed",
+        "error": {
+          "class": "overload",
+          "text": "the provider is overloaded"
+        },
+        "rounds": 1,
+        "saved": true,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Hello there.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "And a tty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": false,
+      "seq": 2,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Hello there.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "And a tty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Explain a pipe.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 1,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Hello there.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "And a tty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Explain a pipe.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": "partial"
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 2,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Hello there.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "And a tty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Explain a pipe.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "partial",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "cancelled",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 3,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": {
+        "end": "cancelled",
+        "error": null,
+        "rounds": 1,
+        "saved": true,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What is a pty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Hello there.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 5
+          }
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "And a tty?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Explain a pipe.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "partial",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "cancelled",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": false,
+      "seq": 4,
+      "title": "What is a pty?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}

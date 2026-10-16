@@ -444,6 +444,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
+    use holzwave_core::ai::provider::AiError;
     use holzwave_core::ai::scripted::{Script, ScriptedProvider};
     use holzwave_core::ai::service::events::ApplyResult;
     use holzwave_core::ai::types::{Capabilities, Locality, Part};
@@ -528,6 +529,11 @@ mod tests {
         /// Whether a turn of `chat` has ended.
         fn ended(&self, chat: &str) -> bool {
             self.saw(chat, "turn_ended")
+        }
+
+        /// How many turns of `chat` have ended.
+        fn ended_turns(&self, chat: &str) -> usize {
+            self.ai_events().iter().filter(|(_, p)| p.0.conversation == chat && p.0.kind.name() == "turn_ended").count()
         }
 
         /// Whether an event of this kind was sent for `chat`.
@@ -1084,5 +1090,156 @@ mod tests {
         let fault =
             core.ai_send(&core.ai().conversation_new().expect("an id"), "hello".to_owned(), closing, None, None);
         assert_eq!(fault.expect_err("refused").code, "no_such_pane");
+    }
+
+    // ---- the recorded run -------------------------------------------------------------------------------------
+
+    /// What stands for the real, random chat id in the recorded run.
+    const GOLDEN_CHAT: &str = "chat-golden";
+
+    /// `value` with every string that is `real` replaced by the fixed chat id.
+    fn anonymise(value: &mut Value, real: &str) {
+        match value {
+            Value::String(text) if text == real => *text = GOLDEN_CHAT.to_owned(),
+            Value::Array(items) => items.iter_mut().for_each(|item| anonymise(item, real)),
+            Value::Object(members) => members.values_mut().for_each(|member| anonymise(member, real)),
+            _ => {}
+        }
+    }
+
+    /// Every member name of every object in `value`.
+    fn member_names(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Array(items) => items.iter().for_each(|item| member_names(item, out)),
+            Value::Object(members) => {
+                for (name, member) in members {
+                    out.push(name.clone());
+                    member_names(member, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Plays three turns on the scripted provider (one that finishes with reasoning and usage, one that fails, one
+    /// that is cancelled while it streams) and records every `ai` event, the state after each, and the snapshots
+    /// taken live. Nothing reads a clock and nothing sleeps for a fixed time.
+    fn record_run() -> Value {
+        let scratch = Scratch::new("stream");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        register(
+            &core,
+            "scripted",
+            scripted("scripted", Locality::OnDevice)
+                .with_turn(Script::new().reasoning("Checking the question.").text("Hello there.").usage(11, 5))
+                .with_turn(Script::new().fail(AiError::Overloaded))
+                .with_turn(stalling()),
+        );
+        let chat = core.ai().conversation_new().expect("an id");
+        let pane = pane_of(&core);
+        let send =
+            |text: &str| core.ai_send(&chat, text.to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+        let snapshot = || json_of(&core.ai().snapshot(&chat).expect("a snapshot"));
+        let last_index = || rec.ai_events().len() - 1;
+        let wait = Duration::from_secs(5);
+        let mut snapshots: Vec<(usize, Value)> = Vec::new();
+
+        send("What is a pty?");
+        assert!(wait_for(wait, || rec.ended_turns(&chat) == 1));
+        snapshots.push((last_index(), snapshot()));
+
+        send("And a tty?");
+        assert!(wait_for(wait, || rec.ended_turns(&chat) == 2));
+        snapshots.push((last_index(), snapshot()));
+
+        let third = send("Explain a pipe.");
+        let streaming = || rec.ai_events().iter().any(|(_, p)| p.0.turn == third.turn && p.0.kind.name() == "delta");
+        assert!(wait_for(wait, streaming));
+        snapshots.push((last_index(), snapshot()));
+        assert_eq!(core.ai().cancel(&chat), Ok(true));
+        assert!(wait_for(wait, || rec.ended_turns(&chat) == 3));
+        snapshots.push((last_index(), snapshot()));
+
+        let events: Vec<AiPayload> = rec.ai_events().into_iter().map(|(_, payload)| payload).collect();
+        let mut state = ChatState::new(&chat);
+        let mut states: Vec<Value> = Vec::new();
+        for payload in &events {
+            assert_eq!(state.apply(&payload.0), ApplyResult::Applied, "{payload:?}");
+            states.push(json_of(&state));
+        }
+
+        // Three turns, each counting from 1 without a hole, in the kinds the script makes.
+        let mut turns: Vec<u64> = events.iter().map(|p| p.0.turn).collect();
+        turns.dedup();
+        assert_eq!(turns.len(), 3, "three different turn numbers");
+        let of_turn = |turn: u64| events.iter().filter(move |p| p.0.turn == turn);
+        for turn in &turns {
+            let seqs: Vec<u64> = of_turn(*turn).map(|p| p.0.seq).collect();
+            assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>(), "turn {turn}");
+        }
+        let kinds = |turn: u64| of_turn(turn).map(|p| p.0.kind.name()).collect::<Vec<_>>();
+        assert_eq!(kinds(turns[0]), ["turn_started", "reasoning", "delta", "usage", "message", "turn_ended"]);
+        assert_eq!(kinds(turns[1]), ["turn_started", "turn_ended"]);
+        assert_eq!(kinds(turns[2]), ["turn_started", "delta", "message", "turn_ended"]);
+        let end_of = |turn: u64| json_of(&*of_turn(turn).next_back().expect("an event").0);
+        assert_eq!(end_of(turns[0])["end"], "done");
+        assert_eq!(end_of(turns[1])["end"], "failed");
+        assert!(end_of(turns[1])["error"]["class"].is_string() && end_of(turns[1])["error"]["text"].is_string());
+        assert_eq!(end_of(turns[2])["end"], "cancelled");
+        let cut = of_turn(turns[2]).find(|p| p.0.kind.name() == "message").expect("the partial answer is kept");
+        assert_eq!(json_of(&*cut.0)["message"]["status"], "cancelled");
+
+        // Every snapshot is the state the events fold to at that point, and the one in the middle of a turn runs.
+        for (after, live) in &snapshots {
+            assert_eq!(live, &states[*after], "the snapshot after event {after}");
+        }
+        assert_eq!(snapshots[2].1["running"], true);
+
+        let mut document = json!({
+            "conversation": chat,
+            "events": events.iter().map(|payload| json_of(&*payload.0)).collect::<Vec<_>>(),
+            "states": states,
+            "snapshots": snapshots.iter().map(|(after, live)| json!({"after": after, "state": live})).collect::<Vec<_>>(),
+        });
+        anonymise(&mut document, &chat);
+        document
+    }
+
+    fn stream_golden_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/ai_stream.json")
+    }
+
+    fn update_fixtures() -> bool {
+        std::env::var("UPDATE_FIXTURES").is_ok_and(|value| value == "1")
+    }
+
+    #[test]
+    fn the_scripted_run_is_stable_and_matches_the_ai_stream_golden() {
+        let first = record_run();
+        let second = record_run();
+        assert_eq!(first, second, "two runs of the same script record the same stream");
+
+        // The page gets views: no provider-native turn, no stored context, no key, and none of the canaries.
+        let mut names = Vec::new();
+        member_names(&first, &mut names);
+        for forbidden in ["native", "stored", "api_key", "key"] {
+            assert!(!names.iter().any(|name| name == forbidden), "the stream has a member named {forbidden}");
+        }
+        let text = first.to_string();
+        assert!(!text.contains(TEXT_CANARY) && !text.contains(KEY_CANARY));
+
+        let mut expected = serde_json::to_string_pretty(&first).expect("json");
+        expected.push('\n');
+        let path = stream_golden_path();
+        if update_fixtures() {
+            std::fs::write(&path, &expected).expect("write ai_stream.json");
+            return;
+        }
+        let on_disk = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is missing ({e}); run with UPDATE_FIXTURES=1", path.display()));
+        assert!(
+            on_disk == expected,
+            "the recorded run differs from ai_stream.json; review it and run with UPDATE_FIXTURES=1"
+        );
     }
 }

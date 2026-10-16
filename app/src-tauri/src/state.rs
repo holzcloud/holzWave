@@ -6956,10 +6956,16 @@ mod protocol {
 
     use serde_json::{Value, json};
 
+    use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
     use crate::commands::{
         CopyMotionMsg, CopyOpMsg, CopyStateMsg, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg, SearchOpMsg,
         SelectModeMsg, SelectOpMsg,
     };
+    use holzwave_core::ai::profiles::{KeyError, KeySlot, KeyStatus, Preset, ProfileView, Removal};
+    use holzwave_core::ai::service::ServiceError;
+    use holzwave_core::ai::service::events::{AiEvent, AiEventKind};
+    use holzwave_core::ai::store::{ConversationId, ConversationSummary};
+    use holzwave_core::ai::wire::Wire;
     use holzwave_core::layout::Axis;
     use holzwave_core::wire::{ModesMsg, SearchMsg};
 
@@ -7130,6 +7136,12 @@ mod protocol {
             Out::IncomingDrop { kind: DropKind::Pane, pane: 3, x: 412.5, y: 96.0 },
             Out::DragHover { kind: DropKind::Pane, pane: 3, x: 412.5, y: 96.0 },
             Out::DragEnd,
+            Out::Ai(AiPayload::new(AiEvent {
+                conversation: "chat-1".into(),
+                turn: 5,
+                seq: 2,
+                kind: AiEventKind::Delta { text: "Hel".into() },
+            })),
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -7174,6 +7186,7 @@ mod protocol {
                     to_value(&Out::DragHover { kind: DropKind::Tab, pane: 4, x: 40.0, y: 12.0 }),
                 ],
                 "drag-end": payload(8),
+                "ai": payload(9),
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {
@@ -7207,6 +7220,29 @@ mod protocol {
                 ]),
                 "copy_mode": ops(copy_ops),
                 "drop_kind": ops(vec![DropKind::Pane, DropKind::Tab]),
+                "ai_profile_input": ops(vec![
+                    ProfileInputMsg {
+                        id: None,
+                        name: "Claude".into(),
+                        preset: Preset::Anthropic,
+                        wire: None,
+                        base_url: String::new(),
+                        model: String::new(),
+                        allow_lan_http: false,
+                        acknowledge_gateway: false,
+                    },
+                    ProfileInputMsg {
+                        id: Some("local".into()),
+                        name: "Local".into(),
+                        preset: Preset::Ollama,
+                        wire: Some(Wire::OpenAiChat),
+                        base_url: "http://127.0.0.1:11434".into(),
+                        model: "llama3".into(),
+                        allow_lan_http: true,
+                        acknowledge_gateway: true,
+                    },
+                ]),
+                "key_slot": ops(vec![KeySlot::Provider, KeySlot::Gateway]),
             },
             "paste": [
                 to_value(&PasteOutcomeMsg::from(PasteOutcome::Written)),
@@ -7227,6 +7263,41 @@ mod protocol {
                     to_value(&Released::Handed { to: "main".into() }),
                     to_value(&Released::Cancelled),
                 ],
+                "ai": {
+                    "ticket": to_value(&TicketView { conversation: "chat-1".into(), turn: 5 }),
+                    "fault": [
+                        to_value(&AiFault::from_service(&ServiceError::Key(KeyError::NoSuchSlot))),
+                        to_value(&AiFault::no_such_pane()),
+                    ],
+                    "conversations": to_value(&ConversationList {
+                        chats: vec![ConversationSummary {
+                            id: ConversationId::parse("chat-1").expect("a chat id"),
+                            title: "What is a pty?".into(),
+                            created: 1_800_000_000,
+                            updated: 1_800_000_060,
+                            profile: Some("claude".into()),
+                            model: Some("claude-sonnet".into()),
+                        }],
+                        notes: vec!["chat-2: the file cannot be used".into()],
+                    }),
+                    "profiles": to_value(&AiProfiles {
+                        profiles: vec![ProfileView {
+                            id: "claude".into(),
+                            name: "Claude".into(),
+                            preset: Preset::Anthropic,
+                            wire: Wire::Anthropic,
+                            base_url: "https://api.anthropic.com".into(),
+                            model: "claude-sonnet".into(),
+                            allow_lan_http: false,
+                            host: "api.anthropic.com".into(),
+                            key: KeyStatus::Present,
+                            gateway_key: None,
+                            disclosure: None,
+                        }],
+                        notes: Vec::new(),
+                    }),
+                    "removal": to_value(&RemovalView::from(Removal { removed: true, key_deleted: true })),
+                },
             },
         })
     }
