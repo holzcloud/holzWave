@@ -343,3 +343,467 @@ export function applyChatEvent(state: ChatState, event: ChatEvent): { state: Cha
   }
   return { state: next, result: "applied" };
 }
+
+// ---- the readers --------------------------------------------------------------------------------------------------
+//
+// What reaches the page is untrusted: a corrupt file, a newer core or a hostile value must not become a state. Each
+// reader checks every member against the declaration in the core, builds its result by naming the known members one by
+// one (so a member the page does not use, such as a provider-native turn or stored context text, is never kept and a
+// member named like the prototype cannot reach a result) and answers `null` for anything else.
+
+/** The most messages a state may hold. The core's own limit is lower, so more than this is a corrupt or hostile value. */
+export const MAX_MESSAGES = 4096;
+/** The most parts one message may hold. The core's own limit is lower. */
+export const MAX_PARTS = 1024;
+/** The most calls that may wait for a decision at once. The core's own limit is lower. */
+export const MAX_PENDING = 64;
+/** The most items one context part may list. The core's own limit is lower. */
+export const MAX_ITEMS = 64;
+/** The most events a feed holds while it waits for a snapshot. */
+export const MAX_HELD = 1024;
+
+/** How deep and how wide the members of a pending entry that pass through may be. */
+const MAX_PASS_DEPTH = 8;
+const MAX_PASS_NODES = 4096;
+
+const ROLES: readonly Role[] = ["user", "assistant", "tool"];
+const STATUSES: readonly MessageStatus[] = ["complete", "cancelled", "failed", "interrupted"];
+const LOCALITIES: readonly Locality[] = ["on_device", "loopback", "lan", "cloud"];
+const CONTEXT_KINDS: readonly ContextKind[] = ["selection", "screen", "last_command", "file", "preview"];
+/** The longest `end` word the page accepts. */
+const MAX_END_CHARS = 64;
+
+type Obj = Record<string, unknown>;
+
+function obj(raw: unknown): Obj | undefined {
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Obj) : undefined;
+}
+
+/** An own member of `o`; an inherited one never counts. */
+function member(o: Obj, key: string): unknown {
+  return Object.hasOwn(o, key) ? o[key] : undefined;
+}
+
+/** A safe integer from `min` to `max`, or undefined. */
+function int(v: unknown, min: number, max: number): number | undefined {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= min && v <= max ? v : undefined;
+}
+
+/** A count the core keeps in 32 bits. */
+function u32(v: unknown): number | undefined {
+  return int(v, 0, 0xffffffff);
+}
+
+/** A count the core keeps in 64 bits, as far as a number can hold it. */
+function u64(v: unknown): number | undefined {
+  return int(v, 0, Number.MAX_SAFE_INTEGER);
+}
+
+function str(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+/** A string or null; undefined when it is neither. */
+function strOrNull(v: unknown): string | null | undefined {
+  return v === null ? null : str(v);
+}
+
+function flag(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
+}
+
+function oneOf<T extends string>(v: unknown, words: readonly T[]): T | undefined {
+  return typeof v === "string" ? words.find((w) => w === v) : undefined;
+}
+
+/** The elements of a list that is at most `max` long; undefined for anything else. */
+function items(v: unknown, max: number): unknown[] | undefined {
+  return Array.isArray(v) && v.length <= max ? (v as unknown[]) : undefined;
+}
+
+/** Reads every element with `read`; undefined as soon as one is refused. */
+function each<T>(list: unknown[], read: (raw: unknown) => T | undefined): T[] | undefined {
+  const out: T[] = [];
+  for (const raw of list) {
+    const one = read(raw);
+    if (one === undefined) return undefined;
+    out.push(one);
+  }
+  return out;
+}
+
+function readUsage(raw: unknown): Usage | undefined {
+  const o = obj(raw);
+  if (!o) return undefined;
+  const input = u32(member(o, "input_tokens"));
+  const output = u32(member(o, "output_tokens"));
+  return input === undefined || output === undefined ? undefined : { input_tokens: input, output_tokens: output };
+}
+
+function readTrimmed(raw: unknown): Trimmed | undefined {
+  const o = obj(raw);
+  if (!o) return undefined;
+  const results = u32(member(o, "results"));
+  const exchanges = u32(member(o, "exchanges"));
+  return results === undefined || exchanges === undefined ? undefined : { results, exchanges };
+}
+
+function readRoute(raw: unknown): Route | undefined {
+  const o = obj(raw);
+  if (!o) return undefined;
+  const profile = str(member(o, "profile"));
+  const model = str(member(o, "model"));
+  const host = strOrNull(member(o, "host"));
+  const locality = oneOf(member(o, "locality"), LOCALITIES);
+  if (profile === undefined || model === undefined || host === undefined || locality === undefined) return undefined;
+  return { profile, model, host, locality };
+}
+
+function readItem(raw: unknown): ChatItem | undefined {
+  const o = obj(raw);
+  if (!o) return undefined;
+  const kind = oneOf(member(o, "kind"), CONTEXT_KINDS);
+  const label = str(member(o, "label"));
+  const bytes = u64(member(o, "bytes"));
+  return kind === undefined || label === undefined || bytes === undefined ? undefined : { kind, label, bytes };
+}
+
+function readPart(raw: unknown): ChatPart | undefined {
+  const o = obj(raw);
+  if (!o) return undefined;
+  switch (member(o, "type")) {
+    case "text": {
+      const text = str(member(o, "text"));
+      return text === undefined ? undefined : { type: "text", text };
+    }
+    case "tool_call": {
+      const id = str(member(o, "id"));
+      const name = str(member(o, "name"));
+      const summary = str(member(o, "summary"));
+      return id === undefined || name === undefined || summary === undefined ? undefined : { type: "tool_call", id, name, summary };
+    }
+    case "tool_result": {
+      const callId = str(member(o, "call_id"));
+      const content = str(member(o, "content"));
+      const isError = flag(member(o, "is_error"));
+      if (callId === undefined || content === undefined || isError === undefined) return undefined;
+      return { type: "tool_result", call_id: callId, content, is_error: isError };
+    }
+    case "context": {
+      const hash = str(member(o, "hash"));
+      const provider = str(member(o, "provider"));
+      const locality = oneOf(member(o, "locality"), LOCALITIES);
+      const list = items(member(o, "items"), MAX_ITEMS);
+      const read = list === undefined ? undefined : each(list, readItem);
+      if (hash === undefined || provider === undefined || locality === undefined || read === undefined) return undefined;
+      return { type: "context", hash, items: read, provider, locality };
+    }
+    default:
+      return undefined;
+  }
+}
+
+function readMessageValue(raw: unknown): ChatMessage | undefined {
+  const o = obj(raw);
+  if (!o) return undefined;
+  const id = str(member(o, "id"));
+  const role = oneOf(member(o, "role"), ROLES);
+  const ts = u64(member(o, "ts"));
+  const model = strOrNull(member(o, "model"));
+  const status = oneOf(member(o, "status"), STATUSES);
+  const usageRaw = member(o, "usage");
+  const usage = usageRaw === null ? null : readUsage(usageRaw);
+  const list = items(member(o, "parts"), MAX_PARTS);
+  const parts = list === undefined ? undefined : each(list, readPart);
+  if (id === undefined || role === undefined || ts === undefined || model === undefined) return undefined;
+  if (status === undefined || usage === undefined || parts === undefined) return undefined;
+  return { id, role, ts, model, status, usage, parts };
+}
+
+/** A copy of a JSON value that keeps no member named like the prototype; undefined when it is too deep, too wide or not JSON. */
+function copyData(v: unknown, depth: number, budget: { left: number }): unknown {
+  budget.left -= 1;
+  if (budget.left < 0) return undefined;
+  if (v === null || typeof v === "string" || typeof v === "boolean") return v;
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+  if (depth >= MAX_PASS_DEPTH || typeof v !== "object") return undefined;
+  if (Array.isArray(v)) {
+    const out: unknown[] = [];
+    for (const element of v as unknown[]) {
+      const copy = copyData(element, depth + 1, budget);
+      if (copy === undefined) return undefined;
+      out.push(copy);
+    }
+    return out;
+  }
+  const out: Obj = {};
+  for (const key of Object.keys(v)) {
+    if (key === "__proto__") continue;
+    const copy = copyData((v as Obj)[key], depth + 1, budget);
+    if (copy === undefined) return undefined;
+    out[key] = copy;
+  }
+  return out;
+}
+
+/**
+ * A pending entry: `conversation`, `call_id` and `tool` are checked (the entry must belong to the chat that carries
+ * it), every other member the core sent is passed through for the approval card.
+ */
+function readPending(raw: unknown, conversation: string): PendingCall | undefined {
+  const o = obj(raw);
+  if (!o) return undefined;
+  const owner = str(member(o, "conversation"));
+  const callId = str(member(o, "call_id"));
+  const tool = str(member(o, "tool"));
+  if (owner !== conversation || callId === undefined || tool === undefined) return undefined;
+  const out: PendingCall = { conversation: owner, call_id: callId, tool };
+  const budget = { left: MAX_PASS_NODES };
+  for (const key of Object.keys(o)) {
+    if (key === "__proto__" || key === "conversation" || key === "call_id" || key === "tool") continue;
+    const copy = copyData(o[key], 0, budget);
+    if (copy === undefined) return undefined;
+    out[key] = copy;
+  }
+  return out;
+}
+
+/** The members of an `EndView`; they sit in an object of their own in a state and at the top of a `turn_ended` event. */
+function readEnd(o: Obj): EndView | undefined {
+  const end = str(member(o, "end"));
+  const errorRaw = member(o, "error");
+  let error: ErrorView | null | undefined = null;
+  if (errorRaw !== null) {
+    const e = obj(errorRaw);
+    const cls = e === undefined ? undefined : str(member(e, "class"));
+    const text = e === undefined ? undefined : str(member(e, "text"));
+    error = cls === undefined || text === undefined ? undefined : { class: cls, text };
+  }
+  const rounds = u32(member(o, "rounds"));
+  const usage = readUsage(member(o, "usage"));
+  const saved = flag(member(o, "saved"));
+  if (end === undefined || end.length === 0 || end.length > MAX_END_CHARS) return undefined;
+  if (error === undefined || rounds === undefined || usage === undefined || saved === undefined) return undefined;
+  return { end, error, rounds, usage, saved };
+}
+
+/** A message, or null when it is not one. Only the members the page uses are kept. */
+export function readChatMessage(raw: unknown): ChatMessage | null {
+  return readMessageValue(raw) ?? null;
+}
+
+/** An event, or null when it is not one. The caller treats null as an event it did not receive. */
+export function readChatEvent(raw: unknown): ChatEvent | null {
+  const o = obj(raw);
+  if (!o) return null;
+  const conversation = member(o, "conversation");
+  const turn = u64(member(o, "turn"));
+  const seq = int(member(o, "seq"), 1, Number.MAX_SAFE_INTEGER);
+  if (!isChatId(conversation) || turn === undefined || seq === undefined) return null;
+  switch (member(o, "kind")) {
+    case "turn_started": {
+      const message = readMessageValue(member(o, "message"));
+      const route = readRoute(member(o, "route"));
+      return message === undefined || route === undefined ? null : { conversation, turn, seq, kind: "turn_started", message, route };
+    }
+    case "delta": {
+      const text = str(member(o, "text"));
+      return text === undefined ? null : { conversation, turn, seq, kind: "delta", text };
+    }
+    case "reasoning": {
+      const text = str(member(o, "text"));
+      return text === undefined ? null : { conversation, turn, seq, kind: "reasoning", text };
+    }
+    case "usage": {
+      const usage = readUsage(o);
+      return usage === undefined ? null : { conversation, turn, seq, kind: "usage", ...usage };
+    }
+    case "trimmed": {
+      const trimmed = readTrimmed(o);
+      return trimmed === undefined ? null : { conversation, turn, seq, kind: "trimmed", ...trimmed };
+    }
+    case "message": {
+      const message = readMessageValue(member(o, "message"));
+      return message === undefined ? null : { conversation, turn, seq, kind: "message", message };
+    }
+    case "tool_proposed": {
+      const pending = readPending(member(o, "pending"), conversation);
+      return pending === undefined ? null : { conversation, turn, seq, kind: "tool_proposed", pending };
+    }
+    case "tool_result": {
+      const callId = str(member(o, "call_id"));
+      const tool = str(member(o, "tool"));
+      const content = str(member(o, "content"));
+      const isError = flag(member(o, "is_error"));
+      const redactions = u32(member(o, "redactions"));
+      if (callId === undefined || tool === undefined || content === undefined) return null;
+      if (isError === undefined || redactions === undefined) return null;
+      return { conversation, turn, seq, kind: "tool_result", call_id: callId, tool, content, is_error: isError, redactions };
+    }
+    case "turn_ended": {
+      const end = readEnd(o);
+      return end === undefined ? null : { conversation, turn, seq, kind: "turn_ended", ...end };
+    }
+    default:
+      return null;
+  }
+}
+
+/** A state, or null when any member is missing, has the wrong type or is over its cap. Unknown members are dropped. */
+export function readChatState(raw: unknown): ChatState | null {
+  const o = obj(raw);
+  if (!o) return null;
+  const conversation = member(o, "conversation");
+  const title = str(member(o, "title"));
+  const profile = strOrNull(member(o, "profile"));
+  const model = strOrNull(member(o, "model"));
+  const turn = u64(member(o, "turn"));
+  const seq = u64(member(o, "seq"));
+  const running = flag(member(o, "running"));
+  if (!isChatId(conversation) || title === undefined || profile === undefined || model === undefined) return null;
+  if (turn === undefined || seq === undefined || running === undefined) return null;
+  const messageList = items(member(o, "messages"), MAX_MESSAGES);
+  const messages = messageList === undefined ? undefined : each(messageList, readMessageValue);
+  const partialRaw = obj(member(o, "partial"));
+  const partialText = partialRaw === undefined ? undefined : str(member(partialRaw, "text"));
+  const partialReasoning = partialRaw === undefined ? undefined : str(member(partialRaw, "reasoning"));
+  const pendingList = items(member(o, "pending"), MAX_PENDING);
+  const pending = pendingList === undefined ? undefined : each(pendingList, (p) => readPending(p, conversation));
+  const usage = readUsage(member(o, "usage"));
+  const trimmed = readTrimmed(member(o, "trimmed"));
+  const endedRaw = member(o, "ended");
+  const endedObj = obj(endedRaw);
+  const ended = endedRaw === null ? null : endedObj === undefined ? undefined : readEnd(endedObj);
+  if (messages === undefined || partialText === undefined || partialReasoning === undefined) return null;
+  if (pending === undefined || usage === undefined || trimmed === undefined || ended === undefined) return null;
+  return {
+    conversation,
+    title,
+    profile,
+    model,
+    turn,
+    seq,
+    running,
+    messages,
+    partial: { text: partialText, reasoning: partialReasoning },
+    pending,
+    usage,
+    trimmed,
+    ended,
+  };
+}
+
+// ---- the feed -----------------------------------------------------------------------------------------------------
+
+/** What `ChatFeed.receive` did: applied, nothing to do, kept for later, or the caller must ask for a snapshot now. */
+export type FeedResult = "applied" | "stale" | "held" | "snapshot";
+/** What `ChatFeed.install` did: the snapshot stands, another snapshot is needed, or it was not asked for. */
+export type InstallResult = "installed" | "again" | "refused";
+
+/**
+ * One chat's state kept up to date from the events of the core. A sequence gap is never guessed at: the feed answers
+ * `snapshot` once, keeps the events that arrive meanwhile (a delta is not self-contained, so dropping it would lose
+ * text) and replays them after the snapshot through the same reducer.
+ *
+ * The feed has no timer, no wait and no link to the core; the chat view does the asking. The order for the caller:
+ * construct the feed, ask the core for a snapshot and hand the answer to `install`. When `receive` answers `snapshot`,
+ * ask for a snapshot and `install` it. When `install` answers `again`, ask once more. When a request is rejected, call
+ * `failed`. Call `awaitSnapshot` before asking for a snapshot at any other time (a window gaining focus, a send that
+ * returned, a reload): a last event that was lost cannot be seen from the events, and this is how it is repaired.
+ */
+export class ChatFeed {
+  private readonly id: string;
+  private current: ChatState;
+  private isWaiting = false;
+  private held: ChatEvent[] = [];
+
+  /** A feed that waits for its first snapshot. */
+  constructor(conversation: string) {
+    this.id = conversation;
+    this.current = newChatState(conversation);
+    this.awaitSnapshot();
+  }
+
+  get conversation(): string {
+    return this.id;
+  }
+
+  /** The state so far; replaced, never changed in place. */
+  get state(): ChatState {
+    return this.current;
+  }
+
+  /** Whether a snapshot is awaited. */
+  get waiting(): boolean {
+    return this.isWaiting;
+  }
+
+  /** Gives the feed one event. Another chat's event is `stale` and touches nothing. */
+  receive(event: ChatEvent): FeedResult {
+    if (event.conversation !== this.id) return "stale";
+    if (this.isWaiting) {
+      if (this.held.length >= MAX_HELD) {
+        // Not an expected path: drop what was held and ask again, a fresher snapshot holds it all.
+        this.held = [];
+        return "snapshot";
+      }
+      this.held.push(event);
+      return "held";
+    }
+    const out = applyChatEvent(this.current, event);
+    if (out.result === "applied") {
+      this.current = out.state;
+      return "applied";
+    }
+    if (out.result === "stale") return "stale";
+    this.isWaiting = true;
+    this.held = [event];
+    return "snapshot";
+  }
+
+  /**
+   * Hands over the answer to a snapshot request. The state becomes the snapshot; the held events it already contains
+   * (the last one of its turn at or below its `seq`, and everything before it) are dropped, and the others are replayed.
+   * A replay that meets a gap stops: the snapshot was older than the hole, and the answer is `again`.
+   */
+  install(snapshot: ChatState): InstallResult {
+    if (!this.isWaiting || snapshot.conversation !== this.id) return "refused";
+    const held = this.held;
+    this.held = [];
+    this.isWaiting = false;
+    let from = 0;
+    for (let i = held.length - 1; i >= 0; i--) {
+      const e = held[i];
+      if (e !== undefined && e.turn === snapshot.turn && e.seq <= snapshot.seq) {
+        from = i + 1;
+        break;
+      }
+    }
+    let state = snapshot;
+    for (let i = from; i < held.length; i++) {
+      const e = held[i];
+      if (e === undefined) continue;
+      const out = applyChatEvent(state, e);
+      if (out.result === "applied") {
+        state = out.state;
+      } else if (out.result === "gap") {
+        this.current = state;
+        this.isWaiting = true;
+        return "again";
+      }
+    }
+    this.current = state;
+    return "installed";
+  }
+
+  /** The snapshot request was rejected: stop waiting and forget the held events; the next event that does not fit asks again. */
+  failed(): void {
+    this.isWaiting = false;
+    this.held = [];
+  }
+
+  /** A snapshot is about to be asked for: hold the events until it arrives. */
+  awaitSnapshot(): void {
+    this.isWaiting = true;
+  }
+}
