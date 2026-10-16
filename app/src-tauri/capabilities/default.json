@@ -83,6 +83,8 @@
     "allow-history-delete",
     "allow-history-clear",
     "allow-widgets-list",
-    "allow-widget-note-save"
+    "allow-widget-note-save",
+    "allow-ai-send",
+    "allow-ai-turn-snapshot"
   ]
 }

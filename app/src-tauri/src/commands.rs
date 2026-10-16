@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use holzwave_core::ai::service::events::ChatState;
 use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
@@ -34,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
+use crate::ai_host::{AiFault, TicketView};
 use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
 use crate::windows::DropKind;
 
@@ -869,4 +871,33 @@ pub fn widgets_list(core: State<Arc<AppCore>>) -> crate::state::WidgetsView {
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn widget_note_save(core: State<Arc<AppCore>>, id: String, text: String) -> Result<(), String> {
     core.widget_note_save(&id, &text)
+}
+
+// ---- the AI chat -------------------------------------------------------------------------------------------------
+//
+// A refusal of these commands reaches the page as the object `{code, reason, text}` (`AiFault`), not as a string. The
+// events of a turn arrive as the event `ai` for every window; the page routes them by conversation.
+
+/// Send the typed `text` to the chat `conversation`, as a message of the user in `pane`. The answer is the ticket of
+/// the turn, at once; the reply arrives as `ai` events, and anything that goes wrong later arrives as the end of the
+/// turn. `profile` and `model` may be null or empty: the chat then uses the provider and model it is pinned to. Only
+/// the typed text leaves: the command has no argument that could carry terminal content or a decision. A pane that is
+/// not open is refused as `no_such_pane`.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_send(
+    core: State<Arc<AppCore>>,
+    conversation: String,
+    text: String,
+    pane: PaneId,
+    profile: Option<String>,
+    model: Option<String>,
+) -> Result<TicketView, AiFault> {
+    core.ai_send(&conversation, text, pane, profile, model)
+}
+
+/// The state of a chat right now: what a page that saw every `ai` event of it holds. The page asks for it when it
+/// opens a chat and when it misses an event.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_turn_snapshot(core: State<Arc<AppCore>>, conversation: String) -> Result<ChatState, AiFault> {
+    core.ai().snapshot(&conversation)
 }

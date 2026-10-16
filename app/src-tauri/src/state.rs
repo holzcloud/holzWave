@@ -39,6 +39,7 @@ use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::ai_host::{AiHost, AiParts, AiPayload};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
@@ -364,6 +365,9 @@ pub enum Out {
     /// The drag that was over this window left it, ended (released anywhere, Escape) or lost its window: the page
     /// takes the outline away.
     DragEnd,
+    /// One event of a chat turn, for every window: the page routes it by conversation and rebuilds the chat from the
+    /// `seq` of the turn, or from a snapshot when one is missing.
+    Ai(AiPayload),
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -381,6 +385,7 @@ impl Out {
             Out::IncomingDrop { .. } => "incoming-drop",
             Out::DragHover { .. } => "drag-hover",
             Out::DragEnd => "drag-end",
+            Out::Ai(_) => "ai",
             Out::Exit => "exit",
         }
     }
@@ -426,6 +431,7 @@ impl Serialize for Out {
                 IncomingDropPayload { kind: *kind, pane: *pane, x: *x, y: *y }.serialize(serializer)
             }
             Out::DragEnd => serializer.serialize_unit(),
+            Out::Ai(payload) => payload.serialize(serializer),
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -688,6 +694,8 @@ pub struct AppCore {
     monitor: holzwave_core::monitor::Monitor,
     /// The encrypted sync: its account, its runs and what the page shows of them.
     sync: crate::sync::SyncRuntime,
+    /// The AI chat service and the calls the commands make on it. It owns its threads and takes no lock of the core.
+    ai: AiHost,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
     saver: Debounced,
     /// How many times the saver job wrote the file, for tests.
@@ -706,6 +714,12 @@ impl AppCore {
     /// a layout file of before windows is one window) and start nothing: the webview starts each pane once it knows
     /// the pane's size, and the shell opens the windows other than `main` (see [`AppCore::restored_windows`]).
     pub fn new(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec) -> Arc<AppCore> {
+        AppCore::new_with_ai(dir, sink, shell, AiParts::system())
+    }
+
+    /// [`AppCore::new`] with the keychain and the clock of the AI service passed in, which is how the tests give it a
+    /// vault of their own.
+    pub fn new_with_ai(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec, ai: AiParts) -> Arc<AppCore> {
         // What the sync downloaded last time is put in place before anything is read.
         let applied = holzwave_core::sync::engine::promote_incoming(&dir);
         if !applied.is_empty() {
@@ -777,6 +791,7 @@ impl AppCore {
             holzwave_core::history::History::in_memory().expect("in-memory history")
         });
         let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
+        let host = AiHost::new(&dir, sink.clone(), ai);
         Arc::new_cyclic(|me| AppCore {
             dir,
             windows,
@@ -797,6 +812,7 @@ impl AppCore {
             connections,
             blocks,
             sync,
+            ai: host,
             monitor: holzwave_core::monitor::Monitor::new(),
             history,
             ipc: Mutex::new(None),
@@ -806,6 +822,16 @@ impl AppCore {
             view_rev: AtomicU64::new(0),
             me: me.clone(),
         })
+    }
+
+    /// The AI chat service of the shell.
+    pub fn ai(&self) -> &AiHost {
+        &self.ai
+    }
+
+    /// Whether `pane` is in a layout of some window. The lock of the table of routes is released before this returns.
+    pub fn pane_is_open(&self, pane: PaneId) -> bool {
+        lock(&self.routes).live.contains_key(&pane)
     }
 
     /// The view of the window `label`. An unknown label is the error `no such window`.

@@ -82,6 +82,8 @@ fn main() {
     "file_revoke",
     "file_range",
     "file_save",
+    "ai_send",
+    "ai_turn_snapshot",
   ]);
   tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)).expect("tauri build failed");
 }

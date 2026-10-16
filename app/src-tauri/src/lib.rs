@@ -5,11 +5,13 @@
 //! core's [`state::Out`] events into Tauri events, and it registers the commands of [`commands`].
 //!
 //! Webview contract: the events are `frame` (a frame message of the core), `layout` (the view), `title`
-//! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}` and `settings` (a settings view); command
-//! arguments are snake_case. Every event but `settings` and `exit` is emitted to one window, the one that holds the
-//! pane (or whose layout changed), with `emit_str_to(label, ..)`; a page has to listen with its own label, because a
+//! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}`, `settings` (a settings view) and `ai` (one event
+//! of a chat turn, `{conversation, turn, seq, kind, ...}`, which the page routes by conversation); command arguments
+//! are snake_case. Every event but `settings`, `ai` and `exit` is emitted to one window, the one that holds the pane
+//! (or whose layout changed), with `emit_str_to(label, ..)`; a page has to listen with its own label, because a
 //! listener without a target receives the events of every window.
 
+mod ai_host;
 mod commands;
 mod files_protocol;
 mod menu;
@@ -478,6 +480,8 @@ pub fn run() {
             commands::history_clear,
             commands::widgets_list,
             commands::widget_note_save,
+            commands::ai_send,
+            commands::ai_turn_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")
