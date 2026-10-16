@@ -1,0 +1,1 @@
+//! The OpenAI Responses dialect.

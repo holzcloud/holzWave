@@ -4,6 +4,9 @@
 //! is allowed here.
 #![allow(dead_code)]
 
+/// An in-process HTTP/1.1 server for the AI tests: chunked event streams, stalls, drops, error statuses, request capture.
+pub mod fake_http;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};

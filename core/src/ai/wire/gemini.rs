@@ -1,0 +1,1 @@
+//! The Gemini streamGenerateContent dialect.

@@ -243,6 +243,12 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
          connects to nothing); no other first-party file may name the client crate",
     ),
     (
+        "core/src/ai/http.rs",
+        "std::net",
+        "the address types of the standard library: the file classifies a resolved address, pins the checked addresses \
+         and asks the system resolver for the addresses of a host name; it opens no socket and listens on none",
+    ),
+    (
         "core/src/widgets.rs",
         "https://",
         "the scheme check valid_url of a list item: it fetches nothing, the page passes the address to open_url \
