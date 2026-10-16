@@ -31,6 +31,7 @@
 //! member in it: the content of a failed result already says so and is sent unchanged.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt;
 
 use serde::Deserialize;
@@ -50,6 +51,12 @@ pub const PATH: &str = "/responses";
 
 /// The value of `include` that asks for the encrypted reasoning, so a reasoning item can be sent back with storage off.
 pub const INCLUDE_ENCRYPTED: &str = "reasoning.encrypted_content";
+
+/// The most output items one reply may hold, and the most a stored turn may replay.
+pub const MAX_OUTPUT_ITEMS: usize = 256;
+
+/// The most tools one request may declare.
+pub const MAX_TOOLS: usize = 128;
 
 /// The adapter of the Responses dialect. It has no field: everything it needs comes with the request.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,6 +81,15 @@ fn invalid(phrase: &str) -> AiError {
     AiError::InvalidRequest(Detail::new(phrase))
 }
 
+const PHRASE_NO_MESSAGES: &str = "the request has no messages";
+const PHRASE_NO_INPUT: &str = "the request has nothing to send";
+const PHRASE_WRONG_PART: &str = "a message holds a part that does not belong to its role";
+const PHRASE_TOO_MANY_TOOLS: &str = "the request declares more tools than one request allows";
+const PHRASE_CALL_ID: &str = "a tool call has no id";
+const PHRASE_SAME_CALL: &str = "two tool calls share an id";
+const PHRASE_ORPHAN: &str = "a tool result does not answer an earlier tool call";
+const PHRASE_TWO_RESULTS: &str = "a tool call has more than one result";
+const PHRASE_UNANSWERED: &str = "a tool call has no result before the next message";
 const PHRASE_FRAME: &str = "the response is not an event stream";
 const PHRASE_UNREADABLE: &str = "the response holds an event that cannot be read";
 const PHRASE_MEMBER: &str = "the response holds an event without a member it needs";
@@ -112,6 +128,9 @@ impl WireAdapter for OpenAiResponsesAdapter {
     }
 
     fn request(&self, req: &ChatRequest, caps: &Capabilities) -> Result<WireRequest, AiError> {
+        if caps.tools && req.tools.len() > MAX_TOOLS {
+            return Err(invalid(PHRASE_TOO_MANY_TOOLS));
+        }
         let input = render_input(req)?;
         let mut body = Map::new();
         body.insert("model".to_owned(), Value::String(req.model.clone()));
@@ -154,24 +173,37 @@ fn tool_declaration(tool: &ToolSpec) -> Value {
     })
 }
 
-/// The `input` array: the messages of the request in order, each written by the rules of its role.
+/// The `input` array: the messages of the request in order, each written by the rules of its role, and every call
+/// paired with its result.
 fn render_input(req: &ChatRequest) -> Result<Vec<Value>, AiError> {
+    check_parts(req)?;
     let mut input = Vec::with_capacity(req.messages.len() + 1);
+    let mut pairing = Pairing::default();
     for message in &req.messages {
         match message.role {
             Role::User => {
                 let content = user_content(req, message);
                 if !content.is_empty() {
+                    pairing.expect_none_open()?;
                     input.push(json!({ "role": "user", "content": content }));
                 }
             }
-            Role::Assistant => match usable_turn(message, &req.model) {
-                Some(items) => input.extend(items.iter().cloned()),
-                None => plain_assistant(message, &mut input),
-            },
+            Role::Assistant => {
+                let first = input.len();
+                match usable_turn(message, &req.model) {
+                    Some(items) => input.extend(items.iter().cloned()),
+                    None => plain_assistant(message, &mut input),
+                }
+                for item in &input[first..] {
+                    if item_type(item) == Some("function_call") {
+                        pairing.call(text_of(item, "call_id").unwrap_or(""))?;
+                    }
+                }
+            }
             Role::Tool => {
                 for part in &message.parts {
                     if let Part::ToolResult(result) = part {
+                        pairing.result(&result.call_id)?;
                         input.push(json!({
                             "type": "function_call_output",
                             "call_id": result.call_id,
@@ -182,7 +214,72 @@ fn render_input(req: &ChatRequest) -> Result<Vec<Value>, AiError> {
             }
         }
     }
+    pairing.expect_none_open()?;
+    if input.is_empty() {
+        return Err(invalid(PHRASE_NO_INPUT));
+    }
     Ok(input)
+}
+
+/// Checks that every part belongs to the role of its message: a user holds text and context, the model holds text and
+/// calls, a tool holds results. A violation is an error with a fixed phrase that holds no text of the request.
+fn check_parts(req: &ChatRequest) -> Result<(), AiError> {
+    if req.messages.is_empty() {
+        return Err(invalid(PHRASE_NO_MESSAGES));
+    }
+    for message in &req.messages {
+        for part in &message.parts {
+            let fits = matches!(
+                (message.role, part),
+                (Role::User, Part::Text { .. } | Part::Context(_))
+                    | (Role::Assistant, Part::Text { .. } | Part::ToolCall(_))
+                    | (Role::Tool, Part::ToolResult(_))
+            );
+            if !fits {
+                return Err(invalid(PHRASE_WRONG_PART));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pairs calls and results over the rendered items, in order, whether the calls come from a replayed turn or from the
+/// parts of a message. A result needs an earlier call that has no result yet, and no call may be left without a result
+/// when a user message follows or the input ends. The dialect refuses a half pair, so the request is refused here,
+/// before any connection, with a phrase that names the kind of problem and nothing of the request.
+#[derive(Default)]
+struct Pairing {
+    /// Every call id seen so far.
+    seen: HashSet<String>,
+    /// The call ids that have no result yet.
+    open: HashSet<String>,
+}
+
+impl Pairing {
+    fn call(&mut self, id: &str) -> Result<(), AiError> {
+        if id.is_empty() {
+            return Err(invalid(PHRASE_CALL_ID));
+        }
+        if !self.seen.insert(id.to_owned()) {
+            return Err(invalid(PHRASE_SAME_CALL));
+        }
+        self.open.insert(id.to_owned());
+        Ok(())
+    }
+
+    fn result(&mut self, id: &str) -> Result<(), AiError> {
+        if self.open.remove(id) {
+            Ok(())
+        } else if self.seen.contains(id) {
+            Err(invalid(PHRASE_TWO_RESULTS))
+        } else {
+            Err(invalid(PHRASE_ORPHAN))
+        }
+    }
+
+    fn expect_none_open(&self) -> Result<(), AiError> {
+        if self.open.is_empty() { Ok(()) } else { Err(invalid(PHRASE_UNANSWERED)) }
+    }
 }
 
 /// The content of a user message: one `input_text` part per non-empty text and per context note, in part order.
@@ -226,15 +323,29 @@ fn context_text(req: &ChatRequest, note: &ContextNote) -> String {
 /// The longest label in a marker line, in characters.
 pub const MARKER_LABEL_CHARS: usize = 80;
 
-/// The item types a stored turn may replay and the checks each needs, for a stored turn written by this dialect.
+/// The stored turn of an assistant message, when it may be replayed.
 ///
-/// The stored turn is the array of output items of one reply. It is replayed only when the message was written by the
-/// model of this request. Anything else is rendered from the parts instead.
+/// The stored turn is the array of output items of one reply, and it comes from disk: it may be stale, from another
+/// model or damaged, and the server rejects a reasoning item without its encrypted content. It is replayed only when
+/// all of this holds: the message was written by the model of this request; it was stored by this dialect; it is a
+/// non-empty array of at most [`MAX_OUTPUT_ITEMS`] objects; every object is an assistant message, a reasoning item with
+/// a non-empty encrypted content, or a function call with a non-empty call id. Any other stored turn gives `None`, and
+/// the message is then written from its parts: a damaged file degrades, it never stops the chat.
 fn usable_turn<'a>(message: &'a Message, model: &str) -> Option<&'a Vec<Value>> {
     if message.model.as_deref() != Some(model) {
         return None;
     }
-    message.native_for(Wire::OpenAiResponses.tag())?.as_array()
+    let items = message.native_for(Wire::OpenAiResponses.tag())?.as_array()?;
+    if items.is_empty() || items.len() > MAX_OUTPUT_ITEMS {
+        return None;
+    }
+    let whole = items.iter().all(|item| match item_type(item) {
+        Some("reasoning") => text_of(item, "encrypted_content").is_some_and(|text| !text.is_empty()),
+        Some("message") => text_of(item, "role") == Some("assistant"),
+        Some("function_call") => text_of(item, "call_id").is_some_and(|id| !id.is_empty()),
+        _ => false,
+    });
+    whole.then_some(items)
 }
 
 /// An assistant message written from its parts: text as assistant messages, calls as function-call items without ids.
