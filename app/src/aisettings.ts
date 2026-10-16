@@ -269,6 +269,10 @@ async function show(focus: string | undefined): Promise<void> {
     const lanLabel = el("label", "", lanWrap);
     lanLabel.htmlFor = "aiset-lan";
     lanLabel.textContent = "Plain http on my local network";
+    const lanHint = el("p", "aiset-hint", lanWrap);
+    lanHint.id = "aiset-lan-hint";
+    lanHint.textContent = "Only for a server on your own network. Never for the internet.";
+    lanInput.setAttribute("aria-describedby", lanHint.id);
 
     const modelWrap = field("aiset-model", "Model");
     const modelInput = el("input", "", modelWrap);

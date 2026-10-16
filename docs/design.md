@@ -216,6 +216,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Previews | ![](design/previews.png) | file browser (local and SFTP) with image, PDF and video panes, see 6.5 |
 | Sync | ![](design/sync.png) | Nextcloud endpoint, last sync, end-to-end encryption, conflicts with their backup |
 | AI chat | ![](design/ai-chat-pane.png) ![](design/ai-chat-states.png) | the chat as a pane beside the shell (6.12): the bar with the provider chip and the place word, Markdown replies, a reply that streams with `Stop`; then the picker, a stopped reply, a failed turn and a long draft |
+| AI providers | ![](design/ai-providers.png) | the dialog for providers, keys, the two privacy settings and the gateway disclosure (6.13) |
 | AI chat (sidebar) | ![](design/ai-chat.png) | the column form, which replaces the sidebar; the column and its consent card are drawn ahead of the work that builds them |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
@@ -251,7 +252,7 @@ the bottom bar holds the tabs of the shown workspace. Tokens are the ones above;
 
 ![Phone](design/7-phone.png)
 
-A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12).
+A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12). The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text.
 
 ### 6.7 Platforms
 
@@ -482,6 +483,8 @@ list says "No provider yet."
 - The buttons `Save` (solid `--hw-rose-deep`, `--hw-on-accent` text) and `Remove provider` (hairline); the first click on
   `Remove provider` turns it into `Click again to remove`, and any other action disarms it.
 
+![AI providers](design/ai-providers.png)
+
 **Keys.** A key is typed once and goes to the keychain in one call; it is never shown, echoed, kept or put into a
 provider. The field has no show toggle. The state of a key is one word, with the colour as the second cue:
 
@@ -521,6 +524,8 @@ word never appears in this dialog: where a request goes is told by the chat afte
 **Narrow screens (640 px and narrower).** The dialog is the screen: full width and height, no radius, no shadow. The
 fields stack, and the rows, options, inputs and buttons are at least 44 px high; input text is at least 16 px. The rules
 of the chat sheet (6.12) apply.
+
+![AI providers on a phone](design/ai-providers-phone.png)
 
 **Accessibility.** Every control has a visible label; a field with a refusal is `aria-invalid` and `aria-describedby` its
 error; the status line is `role="status"`; the list and the option groups are radio groups. Nothing moves, so

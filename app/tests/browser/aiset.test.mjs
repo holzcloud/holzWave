@@ -3,7 +3,7 @@
 // the golden that the core writes (`tests/fixtures/ai_profiles.json`).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { PROFILE, boot, calls, choosePreset, fillField, openAi, openDialog, sendText } from "./ai-lib.mjs";
+import { PROFILE, VIEW_CHAT_ONLY, boot, calls, chatBlock, choosePreset, fillField, openAi, openDialog, sendText } from "./ai-lib.mjs";
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
@@ -18,6 +18,8 @@ export default async function ({ page, url, errors }) {
   await disclosureCase(page, url);
   await entryCase(page, url);
   await guardCase(page, url);
+  await narrowCase(page, url);
+  await modesCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -786,4 +788,146 @@ async function guardCase(page, url) {
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 1);
   assert.equal((await calls(page, "ai_send"))[0].profile, "local-1");
   assert.equal(await page.locator(dlg).count(), 0, "the guard did not open the dialog");
+}
+
+// ---- narrow screens and the display modes -----------------------------------------------------------------------------------
+
+/** Open the page at `size` with a chat and the provider that waits for its review, and open the dialog from the registry. */
+async function openSized(page, url, size) {
+  await page.setViewportSize(size);
+  await boot(page, url, {
+    profiles: [ROUTER, PROFILE], view: VIEW_CHAT_ONLY, blocks: [chatBlock("chat-x")], starts: 1, settings: true,
+  });
+  await seedKeys(page);
+  await page.waitForSelector(".block-chat");
+  await page.locator(".chat-input").focus();
+  await page.waitForFunction(() => document.querySelector(".chat-setup")?.textContent === "Providers… (1 to review)");
+  await page.evaluate(() => window.__registry.runAction("ai.settings"));
+  await openDialog(page);
+  await page.waitForFunction(() => document.querySelector(".aiset-allow") && !document.querySelector(".aiset-disclosure").hidden);
+}
+
+/** The heights of the targets of the dialog, by name. */
+const targets = (page) =>
+  page.evaluate(() => {
+    const groups = {
+      row: ".aiset-row", option: ".aiset-option", check: ".aiset-check", add: ".aiset-add", save: ".aiset-save",
+      close: ".aiset-close", allow: ".aiset-allow", remove: ".aiset-remove", clear: ".aiset-key-clear",
+      text: 'input[type="text"]', key: "#aiset-key",
+    };
+    const out = {};
+    for (const [name, sel] of Object.entries(groups)) {
+      out[name] = [...document.querySelectorAll(`.dlg.ai-settings ${sel}`)]
+        .filter((n) => n.getClientRects().length > 0)
+        .map((n) => n.getBoundingClientRect().height);
+    }
+    out.textFont = [...document.querySelectorAll('.dlg.ai-settings input[type="text"], #aiset-key')].map((n) => parseFloat(getComputedStyle(n).fontSize));
+    return out;
+  });
+
+async function narrowCase(page, url) {
+  await openSized(page, url, { width: 390, height: 780 });
+  const phone = await targets(page);
+  for (const [name, list] of Object.entries(phone)) {
+    if (name === "textFont") continue;
+    assert.ok(list.length > 0, `a ${name} is on screen`);
+    for (const h of list) assert.ok(h >= 44 - 0.5, `${name} is ${h} px high at 390 px`);
+  }
+  for (const f of phone.textFont) assert.ok(f >= 16, `input text is ${f} px`);
+  const sheet = await page.locator(dlg).evaluate((n) => {
+    const r = n.getBoundingClientRect();
+    const css = getComputedStyle(n);
+    return { w: r.width, h: r.height, vw: innerWidth, vh: innerHeight, radius: css.borderTopLeftRadius, shadow: css.boxShadow };
+  });
+  assert.equal(sheet.w, sheet.vw, "as wide as the screen");
+  assert.equal(sheet.h, sheet.vh, "as high as the screen");
+  assert.equal(sheet.radius, "0px");
+  assert.equal(sheet.shadow, "none");
+  // The fields stack: the label is above its field.
+  const stacked = await page.evaluate(() => {
+    const label = document.querySelector('label[for="aiset-name"]').getBoundingClientRect();
+    const input = document.getElementById("aiset-name").getBoundingClientRect();
+    return { above: label.bottom <= input.top + 1, sameColumn: Math.abs(label.left - input.left) < 1 };
+  });
+  assert.deepEqual(stacked, { above: true, sameColumn: true });
+  assert.ok((await page.locator(".chat-setup").evaluate((n) => n.getBoundingClientRect().height)) >= 44 - 0.5, "the chat bar's button");
+
+  // A desktop window: 28 px targets, a box narrower than the window with its radius and its shadow, at most 40 rem wide.
+  await openSized(page, url, { width: 1000, height: 640 });
+  const desk = await targets(page);
+  for (const [name, list] of Object.entries(desk)) {
+    if (name === "textFont") continue;
+    for (const h of list) assert.ok(h >= 28 - 0.5, `${name} is ${h} px high on the desktop`);
+  }
+  const box = await page.locator(dlg).evaluate((n) => {
+    const r = n.getBoundingClientRect();
+    const css = getComputedStyle(n);
+    return {
+      w: r.width, vw: innerWidth, radius: parseFloat(css.borderTopLeftRadius), shadow: css.boxShadow,
+      rem: parseFloat(getComputedStyle(document.documentElement).fontSize),
+    };
+  });
+  assert.ok(box.vw - box.w >= 40, `the box leaves ${box.vw - box.w} px of the window`);
+  assert.ok(box.w <= 40 * box.rem + 0.5, `the box is ${box.w} px wide`);
+  assert.ok(box.radius > 0);
+  assert.notEqual(box.shadow, "none");
+  await page.setViewportSize({ width: 1000, height: 640 });
+}
+
+async function modesCase(page, url) {
+  await openSized(page, url, { width: 1000, height: 640 });
+  const edge = () => page.locator("fieldset.aiset-group").first().evaluate((n) => getComputedStyle(n).borderTopColor);
+  const duration = (sel) => page.locator(sel).first().evaluate((n) => getComputedStyle(n).transitionDuration);
+  const root = (add, name) => page.evaluate(([a, n]) => document.documentElement.classList[a ? "add" : "remove"](n), [add, name]);
+
+  // Higher contrast: the hairlines follow `--hw-line`, which that mode swaps.
+  const normal = await edge();
+  await root(true, "contrast-high");
+  assert.notEqual(await edge(), normal, "the hairline of a group follows the token");
+  await root(false, "contrast-high");
+  assert.equal(await edge(), normal);
+
+  // The dialog has no motion at all, with or without the setting; the chat's button has some until the setting removes it.
+  assert.equal(await duration(".aiset-row"), "0s");
+  assert.equal(await duration(".aiset-save"), "0s");
+  assert.notEqual(await duration(".chat-setup"), "0s");
+  await root(true, "motion-reduce");
+  assert.equal(await duration(".aiset-row"), "0s");
+  assert.equal(await duration(".aiset-save"), "0s");
+  assert.equal(await duration(".chat-setup"), "0s");
+  await root(false, "motion-reduce");
+
+  // Forced colours: the style sheet outlines the chosen row, the card and the key state with a system colour.
+  const css = await (await fetch(`${url}aisettings.css`)).text();
+  const forced = css.slice(css.indexOf("@media (forced-colors: active)"));
+  assert.ok(forced.startsWith("@media"), "aisettings.css has a forced-colors block");
+  assert.match(forced, /\.aiset-row\[data-chosen="true"\][^{]*\{[^}]*outline[^}]*(Highlight|CanvasText)/);
+  assert.match(forced, /\.aiset-disclosure[^{]*\{[^}]*outline[^}]*(Highlight|CanvasText)/);
+  assert.match(forced, /\.aiset-keystate[^{]*\{[^}]*outline[^}]*(Highlight|CanvasText)/);
+
+  // The focus ring is 2 px for the keyboard; a text field's ring is the rose token.
+  const rose = await page.evaluate(() => {
+    const probe = document.createElement("i");
+    probe.style.color = "var(--hw-rose)";
+    document.body.append(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  });
+  await page.locator("#aiset-name").focus();
+  await page.keyboard.press("a");
+  const ring = await page.locator("#aiset-name").evaluate((n) => ({ width: getComputedStyle(n).outlineWidth, color: getComputedStyle(n).outlineColor }));
+  assert.equal(ring.width, "2px");
+  assert.equal(ring.color, rose, "the field's ring is rose");
+  for (let i = 0; i < 60 && (await page.evaluate(() => document.activeElement?.className)) !== "aiset-save"; i++) await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "aiset-save");
+  assert.equal(await page.locator(".aiset-save").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "a button: a 2 px ring");
+
+  // Nothing of the dialog has a gradient or a filter.
+  const flat = await page.evaluate(() =>
+    [...document.querySelectorAll(".dlg.ai-settings, .dlg.ai-settings *")]
+      .filter((n) => getComputedStyle(n).backgroundImage !== "none" || getComputedStyle(n).filter !== "none")
+      .map((n) => n.className),
+  );
+  assert.deepEqual(flat, []);
 }

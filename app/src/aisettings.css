@@ -52,7 +52,7 @@
                             margin: 0 0 .5rem; }
 .ai-settings .aiset-field > label { color: var(--hw-ink-2); }
 .ai-settings .aiset-field > .aiset-hint { grid-column: 2; margin: .167rem 0 0; }
-.ai-settings .aiset-check { grid-template-columns: 1rem minmax(0, 1fr); }
+.ai-settings .aiset-check { grid-template-columns: 1rem minmax(0, 1fr); min-height: max(28px, calc(28rem / 12)); }
 .ai-settings .aiset-check > label { color: var(--hw-ink); }
 .ai-settings .aiset-choice { min-width: 0; margin: 0 0 .5rem; padding: 0; border: 0; }
 .ai-settings .aiset-choice > legend { padding: 0; color: var(--hw-ink-2); }
@@ -96,6 +96,37 @@
 .ai-settings .aiset-disclosure-body { margin: 0 0 .5rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
 .ai-settings button.aiset-allow { max-width: 100%; border-color: var(--hw-warn); color: var(--hw-ink); text-transform: none;
                                   overflow-wrap: anywhere; }
+
+/* ---- narrow screens: 640 px and narrower ------------------------------------------------------------------------------ */
+
+/* The dialog is the screen: the whole window, no radius and no shadow. The fields stack, every target is at least 44 px high
+   and the text of a field at least 16 px (a smaller one makes a phone zoom into the field). Outside this block the same
+   targets keep their 28 px minimum. */
+@media (max-width: 640px) {
+  .dlg.ai-settings { width: 100vw; height: 100vh; height: 100dvh; max-height: 100vh; max-height: 100dvh; border: 0; border-radius: 0;
+                     box-shadow: none; }
+  .ai-settings .aiset-row, .ai-settings .aiset-option, .ai-settings .aiset-check, .ai-settings button,
+  .ai-settings input[type="text"], .ai-settings input[type="password"] { min-height: max(44px, calc(44rem / 12)); }
+  .ai-settings input[type="text"], .ai-settings input[type="password"] { font-size: max(16px, 1rem); }
+  .ai-settings input[type="radio"], .ai-settings input[type="checkbox"] { width: 1.25rem; height: 1.25rem; }
+  .ai-settings .aiset-field { grid-template-columns: minmax(0, 1fr); row-gap: .167rem; }
+  .ai-settings .aiset-field > .aiset-hint, .ai-settings .aiset-error { grid-column: 1; }
+  .ai-settings .aiset-check { grid-template-columns: 1.25rem minmax(0, 1fr); align-items: center; }
+  .ai-settings .aiset-check > .aiset-hint { grid-column: 2; }
+  .ai-settings .aiset-row { flex-wrap: wrap; row-gap: 0; padding-top: .333rem; padding-bottom: .333rem; }
+  .ai-settings .aiset-host { margin-left: 0; }
+  .ai-settings .aiset-keyrow { flex-wrap: wrap; }
+  .ai-settings .aiset-form-actions { flex-wrap: wrap; }
+}
+
+/* ---- forced colours: system colours outline the chosen row, the card and a key that needs attention ---------------------- */
+
+@media (forced-colors: active) {
+  :root .ai-settings .aiset-row[data-chosen="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  :root .ai-settings .aiset-disclosure { outline: 2px solid CanvasText; outline-offset: -2px; }
+  :root .ai-settings .aiset-keystate[data-tone="warn"], :root .ai-settings .aiset-gateway-state[data-tone="warn"],
+  :root .ai-settings .aiset-key[data-tone="warn"] { outline: 2px solid Highlight; outline-offset: 2px; }
+}
 
 /* A hidden part is hidden, whatever display its class gives it: this rule comes last on purpose. */
 .ai-settings [hidden] { display: none; }
