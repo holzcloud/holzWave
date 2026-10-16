@@ -31,11 +31,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use serde::de::{self, Deserializer};
+use serde::de::{self, Deserializer, IgnoredAny};
 use serde::{Deserialize, Serialize, Serializer};
 
+use super::provider::Detail;
 use super::types::{Message, Part, Size};
-use crate::persist::{read_limited, write_atomic_private};
+use crate::persist::{bad_path, read_limited, write_atomic_private};
 
 /// The version of the file form this build writes and reads.
 ///
@@ -55,6 +56,13 @@ pub const MAX_ID_LEN: usize = 64;
 pub const MAX_LABEL: usize = 256;
 /// What a tool output is replaced by when it is not stored.
 pub const NOT_STORED: &str = "[tool output not stored]";
+
+/// Names Windows reserves for devices, in any case and with any extension. An id equal to one cannot be a file name
+/// there, so it is refused everywhere and a data directory can be copied between systems.
+const DEVICE_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
 
 // ---- errors -------------------------------------------------------------------------------------------------------
 
@@ -137,8 +145,9 @@ impl From<StoreError> for crate::Error {
 
 /// The id of a conversation, which is also its file name.
 ///
-/// It is a validated type, not a string: 1 to [`MAX_ID_LEN`] characters of `A-Z a-z 0-9 _ -`, checked in
-/// [`ConversationId::parse`] and again when it is deserialised. A value taken from the page therefore cannot name a
+/// It is a validated type, not a string: 1 to [`MAX_ID_LEN`] characters of `A-Z a-z 0-9 _ -` that are not a Windows
+/// device name (`CON`, `NUL`, `COM1` and so on, in any case), checked in [`ConversationId::parse`] and again when it
+/// is deserialised. A value taken from the page therefore cannot name a
 /// path outside the chat directory. An id is not a credential, so it may be printed.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct ConversationId(String);
@@ -147,7 +156,8 @@ impl ConversationId {
     /// Checks `text` and wraps it.
     pub fn parse(text: &str) -> Result<Self, StoreError> {
         let shape = (1..=MAX_ID_LEN).contains(&text.len())
-            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+            && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            && !DEVICE_NAMES.iter().any(|device| device.eq_ignore_ascii_case(text));
         if shape { Ok(Self(text.to_owned())) } else { Err(StoreError::InvalidId) }
     }
 
@@ -370,7 +380,9 @@ struct FileOut<'a> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileIn {
-    version: u32,
+    /// Required by the form; its value was judged before this struct was read.
+    #[serde(rename = "version")]
+    _version: u32,
     id: ConversationId,
     title: String,
     created: i64,
@@ -380,7 +392,51 @@ struct FileIn {
     messages: Vec<Message>,
 }
 
-/// The conversation as the bytes of its file: compact JSON and one newline.
+/// The file form for listing: everything but the messages, which are counted and skipped without being built.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileHeader {
+    /// Required by the form; its value was judged before this struct was read.
+    #[serde(rename = "version")]
+    _version: u32,
+    id: ConversationId,
+    title: String,
+    created: i64,
+    updated: i64,
+    profile: Option<String>,
+    model: Option<String>,
+    messages: Vec<IgnoredAny>,
+}
+
+/// Reads only the version, so a file of a newer form is recognised before its other fields are judged.
+#[derive(Deserialize)]
+struct Probe {
+    version: Option<u32>,
+}
+
+/// Whether `text` is a short plain label: at most [`MAX_LABEL`] bytes and no control character.
+fn is_label(text: &str) -> bool {
+    text.len() <= MAX_LABEL && !text.chars().any(char::is_control)
+}
+
+/// What a store writes for `conversation`: checked against the limits that need no disk, with a scrubbed title and the
+/// storage policy applied. The caller's value is not changed.
+fn prepare(conversation: &Conversation, storage: ContextStorage) -> Result<Conversation, StoreError> {
+    if conversation.messages.len() > MAX_MESSAGES {
+        return Err(StoreError::Invalid("too many messages"));
+    }
+    let labels = conversation.profile.iter().chain(conversation.model.iter());
+    if !labels.into_iter().all(|label| is_label(label)) {
+        return Err(StoreError::Invalid("profile or model is not a short plain label"));
+    }
+    let mut stored = conversation.clone();
+    stored.title = Detail::new(&stored.title).as_str().to_owned();
+    apply_storage(&mut stored, storage);
+    Ok(stored)
+}
+
+/// The conversation as the bytes of its file: compact JSON and one newline. Over [`MAX_CHAT_BYTES`] is refused here,
+/// before anything is written.
 fn encode(conversation: &Conversation) -> Result<Vec<u8>, StoreError> {
     let file = FileOut {
         version: FORMAT_VERSION,
@@ -394,6 +450,10 @@ fn encode(conversation: &Conversation) -> Result<Vec<u8>, StoreError> {
     };
     let mut bytes = serde_json::to_vec(&file).map_err(|_| StoreError::Invalid("the chat cannot be written as JSON"))?;
     bytes.push(b'\n');
+    let size = bytes.len() as u64;
+    if size > MAX_CHAT_BYTES {
+        return Err(StoreError::TooLarge { bytes: size, max: MAX_CHAT_BYTES });
+    }
     Ok(bytes)
 }
 
@@ -410,19 +470,39 @@ fn json_reason(error: &serde_json::Error) -> String {
     }
 }
 
-/// The conversation in `bytes`, which must be the file of `expected`.
-fn decode(bytes: &[u8], expected: &ConversationId) -> Result<Conversation, StoreError> {
+/// Judges the shape and the version of a file before any other field: a document that is not an object, one without
+/// a version or with version 0 is damaged, and one of a newer version is [`StoreError::Newer`], whatever else it holds.
+fn check_version(bytes: &[u8], expected: &ConversationId) -> Result<(), StoreError> {
     let damaged = |reason: String| StoreError::Damaged { id: expected.clone(), reason };
-    let file: FileIn = serde_json::from_slice(bytes).map_err(|e| damaged(json_reason(&e)))?;
-    if file.version != FORMAT_VERSION {
-        return Err(damaged(format!("version {} is not {FORMAT_VERSION}", file.version)));
+    if bytes.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+        return Err(damaged("the file is not a JSON object".to_owned()));
     }
+    let probe: Probe = serde_json::from_slice(bytes).map_err(|e| damaged(json_reason(&e)))?;
+    match probe.version {
+        None => Err(damaged("the file has no version".to_owned())),
+        Some(found) if found > FORMAT_VERSION => {
+            Err(StoreError::Newer { id: expected.clone(), found, supported: FORMAT_VERSION })
+        }
+        Some(found) if found != FORMAT_VERSION => Err(damaged(format!("version {found} is not {FORMAT_VERSION}"))),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The conversation in `bytes`, which must be the file of `expected`. Reads strictly.
+fn decode(bytes: &[u8], expected: &ConversationId) -> Result<Conversation, StoreError> {
+    let damaged = |reason: &str| StoreError::Damaged { id: expected.clone(), reason: reason.to_owned() };
+    check_version(bytes, expected)?;
+    let file: FileIn = serde_json::from_slice(bytes)
+        .map_err(|e| StoreError::Damaged { id: expected.clone(), reason: json_reason(&e) })?;
     if &file.id != expected {
-        return Err(damaged("the id does not match the file name".to_owned()));
+        return Err(damaged("the id does not match the file name"));
+    }
+    if file.messages.len() > MAX_MESSAGES {
+        return Err(damaged("too many messages"));
     }
     Ok(Conversation {
         id: file.id,
-        title: file.title,
+        title: Detail::new(&file.title).as_str().to_owned(),
         created: file.created,
         updated: file.updated,
         profile: file.profile,
@@ -431,8 +511,98 @@ fn decode(bytes: &[u8], expected: &ConversationId) -> Result<Conversation, Store
     })
 }
 
+/// The list entry in `bytes`, judged by the same rules as [`decode`] without building the messages.
+fn decode_summary(bytes: &[u8], expected: &ConversationId) -> Result<ConversationSummary, StoreError> {
+    let damaged = |reason: &str| StoreError::Damaged { id: expected.clone(), reason: reason.to_owned() };
+    check_version(bytes, expected)?;
+    let file: FileHeader = serde_json::from_slice(bytes)
+        .map_err(|e| StoreError::Damaged { id: expected.clone(), reason: json_reason(&e) })?;
+    if &file.id != expected {
+        return Err(damaged("the id does not match the file name"));
+    }
+    if file.messages.len() > MAX_MESSAGES {
+        return Err(damaged("too many messages"));
+    }
+    Ok(ConversationSummary {
+        id: file.id,
+        title: Detail::new(&file.title).as_str().to_owned(),
+        created: file.created,
+        updated: file.updated,
+        profile: file.profile,
+        model: file.model,
+    })
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Keeps a file that could not be used: renames it to its `.bad` sibling, replacing an older copy, and returns the
+/// [`StoreError::Damaged`] that says why. A rename that finds no file means another thread already moved it. The reason
+/// names the kept file by name, never by path, and never quotes what was in it.
+fn quarantine(path: &Path, id: &ConversationId, reason: String) -> StoreError {
+    let kept = match fs::rename(path, bad_path(path)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    };
+    let reason = match kept {
+        Ok(()) => format!("{reason}; the file was kept as {id}.json.bad"),
+        Err(e) => format!("{reason}; and it could not be kept: {e}"),
+    };
+    StoreError::Damaged { id: id.clone(), reason }
+}
+
+/// Reads and judges the file of one chat with `decode`.
+///
+/// `Ok(None)` when there is no file. A symlink or any other file that is not a regular file is damage that is neither
+/// opened nor moved, so a link named like a chat never leads the store to its target. A file over [`MAX_CHAT_BYTES`]
+/// is not read and is moved aside. A [`StoreError::Damaged`] from `decode` moves the file aside too; a
+/// [`StoreError::Newer`] leaves it exactly where it is.
+fn read_with<T>(
+    path: &Path,
+    id: &ConversationId,
+    decode: impl FnOnce(&[u8], &ConversationId) -> Result<T, StoreError>,
+) -> Result<Option<T>, StoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(StoreError::Damaged { id: id.clone(), reason: "not a regular file".to_owned() }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    let bytes = match read_limited(path, MAX_CHAT_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+            return Err(quarantine(path, id, format!("larger than {MAX_CHAT_BYTES} bytes")));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    match decode(&bytes, id) {
+        Ok(value) => Ok(Some(value)),
+        Err(StoreError::Damaged { reason, .. }) => Err(quarantine(path, id, reason)),
+        Err(other) => Err(other),
+    }
+}
+
+/// The conversation in the file at `path`; see [`read_with`].
+fn read_chat(path: &Path, id: &ConversationId) -> Result<Option<Conversation>, StoreError> {
+    read_with(path, id, decode)
+}
+
+/// The note a listing keeps for a chat it could not list, or the error when it is not a problem of that one chat.
+fn note_for(error: StoreError) -> Result<String, StoreError> {
+    match error {
+        StoreError::Damaged { id, reason } => Ok(format!("{id}: {reason}")),
+        StoreError::Newer { id, found, supported } => {
+            Ok(format!("{id}: written by a newer version of the app (format {found}, this build reads {supported})"))
+        }
+        other => Err(other),
+    }
+}
+
+/// The id of a chat file from its directory entry name: `<valid id>.json`. Other names are not chats.
+fn chat_id(name: &std::ffi::OsStr) -> Option<ConversationId> {
+    name.to_str().and_then(|name| name.strip_suffix(".json")).and_then(|stem| ConversationId::parse(stem).ok())
 }
 
 // ---- the directory store ------------------------------------------------------------------------------------------
@@ -443,14 +613,22 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Nothing touches the disk at construction; the directory is created, owner-only, at the first save.
 pub struct JsonDirStore {
     dir: PathBuf,
+    max_chats: usize,
     /// Serialises writers, so the fixed temporary name of one chat cannot collide.
     write: Mutex<()>,
 }
 
 impl JsonDirStore {
-    /// A store over `dir`, which need not exist yet.
+    /// A store over `dir`, which need not exist yet, holding at most [`MAX_CHATS`] chats.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), write: Mutex::new(()) }
+        Self { dir: dir.into(), max_chats: MAX_CHATS, write: Mutex::new(()) }
+    }
+
+    /// The same store limited to `n` chats, clamped to 1 up to [`MAX_CHATS`].
+    #[must_use]
+    pub fn with_max_chats(mut self, n: usize) -> Self {
+        self.max_chats = n.clamp(1, MAX_CHATS);
+        self
     }
 
     /// The directory the chats live in.
@@ -478,15 +656,43 @@ impl JsonDirStore {
         builder.create(&self.dir)
     }
 
-    /// Writes finished bytes. The caller holds the write lock, which the parameter proves.
+    /// How many regular files in the directory are named like a chat.
+    fn chat_count(&self) -> io::Result<usize> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let mut count = 0;
+        for entry in entries {
+            let entry = entry?;
+            if chat_id(&entry.file_name()).is_some() && entry.file_type()?.is_file() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Writes finished bytes. The caller holds the write lock, which the parameter proves. A chat that does not exist
+    /// yet is refused when the directory already holds as many as it may; one that exists can always be saved.
     fn write_bytes(&self, _held: &MutexGuard<'_, ()>, id: &ConversationId, bytes: &[u8]) -> Result<(), StoreError> {
+        let path = self.path_of(id);
+        if matches!(fs::symlink_metadata(&path), Err(e) if e.kind() == io::ErrorKind::NotFound)
+            && self.chat_count()? >= self.max_chats
+        {
+            return Err(StoreError::Full { max: self.max_chats });
+        }
         self.ensure_dir()?;
-        write_atomic_private(&self.path_of(id), bytes)?;
+        write_atomic_private(&path, bytes)?;
         Ok(())
     }
 }
 
 impl ConversationStore for JsonDirStore {
+    /// Reads each chat file once, so the cost of a listing is bounded by [`MAX_CHATS`] times [`MAX_CHAT_BYTES`]; more
+    /// files than that are not looked at, and one note says so. A file that cannot be used is moved aside as in
+    /// [`load`](ConversationStore::load) (a newer one stays where it is) and reported in `notes`; names that are not
+    /// `<valid id>.json` are ignored.
     fn list(&self) -> Result<Listing, StoreError> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
@@ -494,21 +700,19 @@ impl ConversationStore for JsonDirStore {
             Err(e) => return Err(e.into()),
         };
         let mut listing = Listing::default();
+        let mut looked_at = 0;
         for entry in entries {
             let entry = entry?;
-            let name = entry.file_name();
-            let Some(id) = name
-                .to_str()
-                .and_then(|name| name.strip_suffix(".json"))
-                .and_then(|stem| ConversationId::parse(stem).ok())
-            else {
-                continue;
-            };
-            match self.load(&id) {
-                Ok(Some(chat)) => listing.chats.push(chat.summary()),
+            let Some(id) = chat_id(&entry.file_name()) else { continue };
+            if looked_at == MAX_CHATS {
+                listing.notes.push(format!("more than {MAX_CHATS} chats: the rest are not listed"));
+                break;
+            }
+            looked_at += 1;
+            match read_with(&self.path_of(&id), &id, decode_summary) {
+                Ok(Some(summary)) => listing.chats.push(summary),
                 Ok(None) => {}
-                Err(StoreError::Damaged { id, reason }) => listing.notes.push(format!("{id}: {reason}")),
-                Err(e) => return Err(e),
+                Err(e) => listing.notes.push(note_for(e)?),
             }
         }
         listing.chats.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
@@ -516,20 +720,17 @@ impl ConversationStore for JsonDirStore {
     }
 
     fn load(&self, id: &ConversationId) -> Result<Option<Conversation>, StoreError> {
-        match read_limited(&self.path_of(id), MAX_CHAT_BYTES)? {
-            None => Ok(None),
-            Some(bytes) => decode(&bytes, id).map(Some),
-        }
+        read_chat(&self.path_of(id), id)
     }
 
     fn save(&self, conversation: &Conversation, storage: ContextStorage) -> Result<(), StoreError> {
-        let mut stored = conversation.clone();
-        apply_storage(&mut stored, storage);
+        let stored = prepare(conversation, storage)?;
         let bytes = encode(&stored)?;
         let held = lock(&self.write);
         self.write_bytes(&held, &stored.id, &bytes)
     }
 
+    /// A symlink named like a chat is removed as a link and its target is never touched.
     fn delete(&self, id: &ConversationId) -> Result<bool, StoreError> {
         let _held = lock(&self.write);
         let mut removed = false;

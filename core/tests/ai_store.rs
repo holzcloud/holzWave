@@ -10,8 +10,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common::scratch_dir;
+use holzwave_core::ai::provider::MAX_DETAIL;
 use holzwave_core::ai::store::{
-    ContextStorage, Conversation, ConversationId, ConversationStore, JsonDirStore, NOT_STORED,
+    ContextStorage, Conversation, ConversationId, ConversationStore, JsonDirStore, MAX_CHAT_BYTES, MAX_CHATS, MAX_ID_LEN,
+    MAX_LABEL, MAX_MESSAGES, NOT_STORED, StoreError,
 };
 use holzwave_core::ai::types::{
     Consent, ContextKind, ContextNote, Locality, Message, MessageStatus, NoteItem, Opaque, Part, Role, ToolCall,
@@ -258,4 +260,402 @@ fn delete_removes_every_copy_of_the_chat() {
     assert!(store.delete(&id("only")).unwrap());
     assert_eq!(names(&chats), vec!["notes.txt", "stays.json"]);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+// ---- helpers for planted files ------------------------------------------------------------------------------------
+
+/// The chat directory, created.
+fn chats_dir(dir: &Path) -> std::path::PathBuf {
+    let chats = dir.join("chats");
+    std::fs::create_dir_all(&chats).unwrap();
+    chats
+}
+
+/// Plants a file in the chat directory under `name`.
+fn plant(dir: &Path, name: &str, bytes: &[u8]) {
+    std::fs::write(chats_dir(dir).join(name), bytes).unwrap();
+}
+
+/// A version 1 chat document with the given id, for planting.
+fn document(id: &str) -> Value {
+    json!({"version": 1, "id": id, "title": "T", "created": 1, "updated": 2, "messages": []})
+}
+
+fn damage_reason(error: StoreError) -> String {
+    match error {
+        StoreError::Damaged { reason, .. } => reason,
+        other => panic!("expected Damaged, got {other:?}"),
+    }
+}
+
+// ---- ids ----------------------------------------------------------------------------------------------------------
+
+#[test]
+fn ids_are_checked_at_parse_deserialize_and_for_device_names() {
+    let long = "a".repeat(MAX_ID_LEN);
+    for good in ["a", "chat-1", "Chat_One-2", long.as_str(), "com10", "console", "nulx"] {
+        assert_eq!(ConversationId::parse(good).unwrap().as_str(), good);
+    }
+    let too_long = "a".repeat(MAX_ID_LEN + 1);
+    for bad in [
+        "", too_long.as_str(), "../x", "a/b", "a\\b", "a.b", ".hidden", "a b", "\u{e9}", "a\0b", "NUL", "nul", "Con", "aux",
+        "PRN", "com1", "COM9", "Lpt1", "lpt9",
+    ] {
+        assert_eq!(ConversationId::parse(bad), Err(StoreError::InvalidId), "{bad:?} must be refused");
+    }
+    assert!(serde_json::from_str::<ConversationId>("\"../x\"").is_err());
+    assert!(serde_json::from_str::<ConversationId>("\"NUL\"").is_err());
+    assert_eq!(serde_json::from_str::<ConversationId>("\"chat-1\"").unwrap(), id("chat-1"));
+    assert_eq!(serde_json::to_string(&id("chat-1")).unwrap(), "\"chat-1\"");
+}
+
+#[test]
+fn generated_ids_are_random_hex_that_parse_back() {
+    let (a, b) = (ConversationId::generate().unwrap(), ConversationId::generate().unwrap());
+    assert_ne!(a, b);
+    for generated in [&a, &b] {
+        let text = generated.as_str();
+        assert_eq!(text.len(), 32);
+        assert!(text.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)), "{text}");
+        assert_eq!(&ConversationId::parse(text).unwrap(), generated);
+    }
+}
+
+// ---- limits -------------------------------------------------------------------------------------------------------
+
+#[test]
+fn an_oversize_chat_is_refused_on_save() {
+    let dir = scratch_dir("store-big");
+    let store = store(&dir);
+    let big = chat("big", &"x".repeat(9 << 20));
+    match store.save(&big, ContextStorage::default()) {
+        Err(StoreError::TooLarge { bytes, max }) => {
+            assert_eq!(max, MAX_CHAT_BYTES);
+            assert!(bytes > max);
+        }
+        other => panic!("expected TooLarge, got {other:?}"),
+    }
+    assert!(!dir.join("chats").exists(), "a refused save must not touch the disk");
+
+    // A refused save over an existing chat leaves the old one as it was.
+    store.save(&chat("big", "small"), ContextStorage::default()).unwrap();
+    let before = bytes_of(&dir, "big");
+    assert!(matches!(store.save(&big, ContextStorage::default()), Err(StoreError::TooLarge { .. })));
+    assert_eq!(bytes_of(&dir, "big"), before);
+    assert_eq!(names(&dir.join("chats")), vec!["big.json"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn too_many_messages_or_a_long_label_is_refused() {
+    let dir = scratch_dir("store-limits");
+    let store = store(&dir);
+
+    let mut many = chat("many", "x");
+    many.messages = (0..=MAX_MESSAGES).map(|n| Message::user_text(format!("m{n}"), "x", 1)).collect();
+    assert_eq!(many.messages.len(), MAX_MESSAGES + 1);
+    assert!(matches!(store.save(&many, ContextStorage::default()), Err(StoreError::Invalid(_))));
+    many.messages.pop();
+    store.save(&many, ContextStorage::default()).unwrap();
+    assert_eq!(store.load(&id("many")).unwrap().unwrap().messages.len(), MAX_MESSAGES);
+
+    let mut labelled = chat("labelled", "x");
+    labelled.profile = Some("p".repeat(MAX_LABEL + 1));
+    assert!(matches!(store.save(&labelled, ContextStorage::default()), Err(StoreError::Invalid(_))));
+    labelled.profile = None;
+    labelled.model = Some("m".repeat(MAX_LABEL + 1));
+    assert!(matches!(store.save(&labelled, ContextStorage::default()), Err(StoreError::Invalid(_))));
+    labelled.model = Some("bad\nmodel".to_owned());
+    assert!(matches!(store.save(&labelled, ContextStorage::default()), Err(StoreError::Invalid(_))));
+    labelled.model = Some("m".repeat(MAX_LABEL));
+    labelled.profile = Some("p".repeat(MAX_LABEL));
+    store.save(&labelled, ContextStorage::default()).unwrap();
+    assert_eq!(names(&dir.join("chats")), vec!["labelled.json", "many.json"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_number_of_chats_is_bounded_but_an_existing_chat_can_still_be_saved() {
+    let dir = scratch_dir("store-count");
+    let store = JsonDirStore::new(dir.join("chats")).with_max_chats(3);
+    for name in ["a", "b", "c"] {
+        store.save(&chat(name, name), ContextStorage::default()).unwrap();
+    }
+    assert_eq!(store.save(&chat("d", "d"), ContextStorage::default()), Err(StoreError::Full { max: 3 }));
+    assert!(!dir.join("chats").join("d.json").exists());
+    store.save(&chat("b", "changed"), ContextStorage::default()).unwrap();
+    assert_eq!(store.load(&id("b")).unwrap().unwrap().title, "changed");
+    assert!(store.delete(&id("a")).unwrap());
+    store.save(&chat("d", "d"), ContextStorage::default()).unwrap();
+
+    // Zero behaves as one.
+    let one = JsonDirStore::new(dir.join("one")).with_max_chats(0);
+    one.save(&chat("a", "a"), ContextStorage::default()).unwrap();
+    assert_eq!(one.save(&chat("b", "b"), ContextStorage::default()), Err(StoreError::Full { max: 1 }));
+
+    // A value above the cap behaves as the cap: fill a directory to it by name and ask for one more.
+    let many = scratch_dir("store-count-cap");
+    for n in 0..MAX_CHATS {
+        plant(&many, &format!("c{n}.json"), b"");
+    }
+    let capped = JsonDirStore::new(many.join("chats")).with_max_chats(MAX_CHATS * 10);
+    assert_eq!(capped.save(&chat("extra", "x"), ContextStorage::default()), Err(StoreError::Full { max: MAX_CHATS }));
+    std::fs::remove_dir_all(many).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+// ---- hostile and damaged files ------------------------------------------------------------------------------------
+
+#[test]
+fn an_oversize_file_is_never_read_and_is_moved_aside() {
+    let dir = scratch_dir("store-oversize");
+    let chats = chats_dir(&dir);
+    let big = std::fs::File::create(chats.join("big.json")).unwrap();
+    big.set_len(16 << 20).unwrap();
+    drop(big);
+    let store = store(&dir);
+
+    let reason = damage_reason(store.load(&id("big")).unwrap_err());
+    assert!(reason.contains(&MAX_CHAT_BYTES.to_string()), "{reason}");
+    assert!(!chats.join("big.json").exists());
+    assert_eq!(std::fs::metadata(chats.join("big.json.bad")).unwrap().len(), 16 << 20);
+    assert!(store.load(&id("big")).unwrap().is_none());
+
+    store.save(&chat("big", "again"), ContextStorage::default()).unwrap();
+    assert_eq!(store.load(&id("big")).unwrap().unwrap().title, "again");
+    assert!(chats.join("big.json.bad").exists(), "the kept copy stays");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_damaged_chat_is_moved_aside_and_its_bytes_are_kept() {
+    let dir = scratch_dir("store-damaged");
+    let chats = chats_dir(&dir);
+    plant(&dir, "junk.json", b"{ not json");
+    plant(&dir, "junk2.json", b"{ not json");
+    let store = store(&dir);
+
+    let reason = damage_reason(store.load(&id("junk")).unwrap_err());
+    assert!(reason.contains("junk.json.bad"), "{reason}");
+    assert!(!chats.join("junk.json").exists());
+    assert_eq!(std::fs::read(chats.join("junk.json.bad")).unwrap(), b"{ not json");
+    assert!(store.load(&id("junk")).unwrap().is_none());
+
+    let listing = store.list().unwrap();
+    assert!(listing.chats.is_empty());
+    assert_eq!(listing.notes.len(), 1, "{:?}", listing.notes);
+    assert!(listing.notes[0].starts_with("junk2: "), "{:?}", listing.notes);
+    assert!(!chats.join("junk2.json").exists());
+    assert_eq!(std::fs::read(chats.join("junk2.json.bad")).unwrap(), b"{ not json");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_reason_for_damage_never_quotes_the_file() {
+    let dir = scratch_dir("store-quote");
+    let store = store(&dir);
+
+    let mut wrong_type = document("c1");
+    wrong_type["created"] = json!(CANARY);
+    let mut unknown_field = document("c1");
+    unknown_field[CANARY] = json!(1);
+    let mut bad_id = document("c1");
+    bad_id["id"] = json!(format!("{CANARY}/../x"));
+    let mut wrong_id = document("c1");
+    wrong_id["id"] = json!(CANARY);
+    let mut wrong_title_type = document("c1");
+    wrong_title_type["title"] = json!({ CANARY: CANARY });
+
+    for (n, doc) in [wrong_type, unknown_field, bad_id, wrong_id, wrong_title_type].iter().enumerate() {
+        plant(&dir, "c1.json", doc.to_string().as_bytes());
+        let error = store.load(&id("c1")).unwrap_err();
+        let shown = error.to_string();
+        let debugged = format!("{error:?}");
+        let reason = damage_reason(error);
+        assert!(!reason.contains(CANARY) && !shown.contains(CANARY) && !debugged.contains(CANARY), "case {n}: {reason}");
+        assert!(reason.contains("line") && reason.contains("column") || reason.contains("id does not match"), "{reason}");
+        std::fs::remove_file(dir.join("chats").join("c1.json.bad")).unwrap();
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_file_that_does_not_match_its_name_or_the_format_is_damaged() {
+    let dir = scratch_dir("store-format");
+    let chats = chats_dir(&dir);
+    let store = store(&dir);
+
+    let mut version_zero = document("c1");
+    version_zero["version"] = json!(0);
+    let mut no_version = document("c1");
+    no_version.as_object_mut().unwrap().remove("version");
+    let mut extra_field = document("c1");
+    extra_field["extra"] = json!(true);
+    let other_id = document("someone-else");
+    let mut many = document("c1");
+    many["messages"] = Value::Array(vec![serde_json::to_value(Message::user_text("m", "x", 1)).unwrap(); MAX_MESSAGES + 1]);
+
+    for (case, doc) in [
+        ("version 0", version_zero),
+        ("no version", no_version),
+        ("an unknown field", extra_field),
+        ("a different id", other_id),
+        ("too many messages", many),
+    ] {
+        let bytes = doc.to_string().into_bytes();
+        plant(&dir, "c1.json", &bytes);
+        assert!(matches!(store.load(&id("c1")), Err(StoreError::Damaged { .. })), "{case}");
+        assert!(!chats.join("c1.json").exists(), "{case}: the file is moved");
+        assert_eq!(std::fs::read(chats.join("c1.json.bad")).unwrap(), bytes, "{case}: its bytes are kept");
+    }
+
+    // A document that is not an object is damage as well.
+    plant(&dir, "c1.json", b"[1, \"c1\", \"T\", 1, 2, null, null, []]");
+    assert!(matches!(store.load(&id("c1")), Err(StoreError::Damaged { .. })));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_newer_version_is_neither_read_moved_nor_overwritten() {
+    let dir = scratch_dir("store-newer");
+    let chats = chats_dir(&dir);
+    let bytes = br#"{"version":2,"anything":true}"#;
+    plant(&dir, "future.json", bytes);
+    let store = store(&dir);
+
+    match store.load(&id("future")) {
+        Err(StoreError::Newer { found: 2, supported: 1, id: found_id }) => assert_eq!(found_id, id("future")),
+        other => panic!("expected Newer, got {other:?}"),
+    }
+    let listing = store.list().unwrap();
+    assert!(listing.chats.is_empty());
+    assert_eq!(listing.notes.len(), 1);
+    assert!(listing.notes[0].starts_with("future: ") && listing.notes[0].contains("2"), "{:?}", listing.notes);
+    assert_eq!(std::fs::read(chats.join("future.json")).unwrap(), bytes);
+    assert_eq!(names(&chats), vec!["future.json"], "no .bad file appears");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_named_like_a_chat_is_not_followed() {
+    let dir = scratch_dir("store-symlink");
+    let chats = chats_dir(&dir);
+    let target = dir.join("secret.txt");
+    std::fs::write(&target, b"SECRET-TARGET-TEXT").unwrap();
+    std::os::unix::fs::symlink(&target, chats.join("evil.json")).unwrap();
+    let store = store(&dir);
+
+    let reason = damage_reason(store.load(&id("evil")).unwrap_err());
+    assert_eq!(reason, "not a regular file");
+    assert!(std::fs::symlink_metadata(chats.join("evil.json")).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read(&target).unwrap(), b"SECRET-TARGET-TEXT");
+
+    let listing = store.list().unwrap();
+    assert!(listing.chats.is_empty());
+    assert_eq!(listing.notes, vec!["evil: not a regular file".to_owned()]);
+
+    assert!(store.delete(&id("evil")).unwrap());
+    assert!(std::fs::symlink_metadata(chats.join("evil.json")).is_err(), "the link is gone");
+    assert_eq!(std::fs::read(&target).unwrap(), b"SECRET-TARGET-TEXT", "the target is untouched");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+// ---- what is written ----------------------------------------------------------------------------------------------
+
+#[test]
+fn titles_are_scrubbed_of_control_and_bidi_characters() {
+    let dir = scratch_dir("store-title");
+    let store = store(&dir);
+    let hostile = format!("bad\u{1b}[2J\nline\u{202e}rtl\u{200b}zw\u{e0041}tag {}", "w".repeat(500));
+    let mut c = chat("title", "x");
+    c.title = hostile;
+    store.save(&c, ContextStorage::default()).unwrap();
+
+    let title = store.load(&id("title")).unwrap().unwrap().title;
+    assert!(
+        !title.chars().any(|ch| ch.is_control() || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{200b}'..='\u{200f}' | '\u{e0000}'..='\u{e007f}')),
+        "{title:?}"
+    );
+    assert!(!title.contains("  "), "white space is collapsed");
+    assert!(title.chars().count() <= MAX_DETAIL + 1, "{} characters", title.chars().count());
+    assert!(title.starts_with("bad [2J line rtl zw tag"), "{title:?}");
+
+    // The scrub is idempotent, so a saved chat saved again changes no byte.
+    let first = bytes_of(&dir, "title");
+    store.save(&store.load(&id("title")).unwrap().unwrap(), ContextStorage::default()).unwrap();
+    assert_eq!(bytes_of(&dir, "title"), first);
+
+    let mut plain = chat("plain", "x");
+    plain.title = "Fix the build in the CI pipeline".to_owned();
+    store.save(&plain, ContextStorage::default()).unwrap();
+    assert_eq!(store.load(&id("plain")).unwrap().unwrap().title, "Fix the build in the CI pipeline");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_chat_file_shape_is_pinned() {
+    // A change to these literals is a change of the file format: it needs a new version and a migration in the store
+    // module, not an edited test.
+    let dir = scratch_dir("store-shape");
+    let store = store(&dir);
+
+    let mut c = Conversation::new(id("c1"), 1);
+    c.title = "T".to_owned();
+    c.updated = 2;
+    store.save(&c, ContextStorage::default()).unwrap();
+    assert_eq!(
+        String::from_utf8(bytes_of(&dir, "c1")).unwrap(),
+        "{\"version\":1,\"id\":\"c1\",\"title\":\"T\",\"created\":1,\"updated\":2,\"messages\":[]}\n"
+    );
+
+    let message = Message::user_text("m1", "hi", 3);
+    c.profile = Some("p".to_owned());
+    c.model = Some("m".to_owned());
+    c.messages.push(message.clone());
+    store.save(&c, ContextStorage::default()).unwrap();
+    let expected = format!(
+        "{{\"version\":1,\"id\":\"c1\",\"title\":\"T\",\"created\":1,\"updated\":2,\"profile\":\"p\",\"model\":\"m\",\"messages\":[{}]}}\n",
+        serde_json::to_string(&message).unwrap()
+    );
+    assert_eq!(String::from_utf8(bytes_of(&dir, "c1")).unwrap(), expected);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn list_reports_what_it_skipped() {
+    let dir = scratch_dir("store-skipped");
+    let chats = chats_dir(&dir);
+    let store = store(&dir);
+    store.save(&chat("fine", "fine"), ContextStorage::default()).unwrap();
+    plant(&dir, "junk.json", b"{ not json");
+    plant(&dir, "future.json", br#"{"version":9}"#);
+    let mut quoted = document("quoted");
+    quoted["created"] = json!(CANARY);
+    plant(&dir, "quoted.json", quoted.to_string().as_bytes());
+    std::fs::create_dir(chats.join("folder.json")).unwrap();
+
+    let listing = store.list().unwrap();
+    assert_eq!(listing.chats.len(), 1);
+    assert_eq!(listing.chats[0].id, id("fine"));
+    let mut notes = listing.notes.clone();
+    notes.sort();
+    assert_eq!(notes.len(), 4, "{notes:?}");
+    for (note, prefix) in notes.iter().zip(["folder: ", "future: ", "junk: ", "quoted: "]) {
+        assert!(note.starts_with(prefix), "{note}");
+        assert!(!note.contains(CANARY));
+    }
+    assert!(notes[0].ends_with("not a regular file"));
+    assert!(chats.join("folder.json").is_dir(), "a directory is reported, not removed");
+    std::fs::remove_dir_all(dir).unwrap();
+
+    // A directory with more chat files than the limit is not read beyond it.
+    let many = scratch_dir("store-skipped-many");
+    for n in 0..=MAX_CHATS {
+        plant(&many, &format!("c{n}.json"), b"");
+    }
+    let listing = JsonDirStore::new(many.join("chats")).list().unwrap();
+    assert_eq!(listing.notes.len(), MAX_CHATS + 1);
+    assert!(listing.notes.iter().any(|n| n.starts_with("more than ")), "{:?}", listing.notes.last());
+    std::fs::remove_dir_all(many).unwrap();
 }
