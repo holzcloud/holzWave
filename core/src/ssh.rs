@@ -9,6 +9,7 @@
 //! Secrets (a key's passphrase, a password) are given by the caller in [`SshAuth`] and are never written to disk or
 //! to the screen here. Host keys are checked against a `known_hosts` file ([`HostKeyPolicy`]).
 
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -18,8 +19,8 @@ use std::time::Duration;
 
 use russh::client::{self, Handle};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, known_hosts, load_secret_key};
-use russh::{ChannelMsg, Disconnect};
-use tokio::sync::mpsc as tmpsc;
+use russh::{Channel, ChannelMsg, Disconnect, Sig};
+use tokio::sync::{mpsc as tmpsc, watch};
 
 use crate::conn::{ConnState, Link, SharedState};
 use crate::{Error, Result};
@@ -574,6 +575,369 @@ pub fn learn_host_key(host: &str, port: u16, key: &PublicKey, path: &std::path::
     known_hosts::learn_known_hosts_path(host, port, key, path).map_err(|e| Error::Pty(e.to_string()))
 }
 
+// ---- exec: one command on a saved connection, without a terminal -------------------------------------------------
+
+/// The longest command [`SshExec::exec`] accepts, in bytes (T-07-024).
+pub const MAX_EXEC_COMMAND: usize = 16 * 1024;
+/// The output kept per stream when the caller does not say (T-07-024).
+pub const DEFAULT_EXEC_OUTPUT: usize = 64 * 1024;
+/// The most output kept per stream, whatever the caller asks for (T-07-024).
+pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
+/// How long a command may run when the caller does not say (T-07-025).
+pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest a command may run, whatever the caller asks for (T-07-025).
+pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Connect and log in: the bound [`crate::files::SftpSource`] uses too (T-07-025).
+const EXEC_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Open the channel and write the request (T-07-025).
+const EXEC_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What a caller of [`SshExec::exec`] bounds a command with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecLimits {
+    /// The most bytes kept of each of stdout and stderr: the last ones. At most [`MAX_EXEC_OUTPUT`].
+    pub max_output: usize,
+    /// The wall-clock time the command may run, from the moment the request was written. At most [`MAX_EXEC_TIMEOUT`].
+    pub timeout: Duration,
+}
+
+impl Default for ExecLimits {
+    fn default() -> Self {
+        Self { max_output: DEFAULT_EXEC_OUTPUT, timeout: DEFAULT_EXEC_TIMEOUT }
+    }
+}
+
+/// A switch that stops a running [`SshExec::exec`]. One per run: the caller keeps a clone and calls
+/// [`ExecCancel::cancel`] from any thread; the run ends promptly with [`ExecEnd::Cancelled`] and keeps what it read.
+#[derive(Clone, Debug)]
+pub struct ExecCancel(Arc<watch::Sender<bool>>);
+
+impl Default for ExecCancel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExecCancel {
+    pub fn new() -> Self {
+        Self(Arc::new(watch::channel(false).0))
+    }
+
+    /// Stop the run that holds this switch. Idempotent, and callable from any thread.
+    pub fn cancel(&self) {
+        self.0.send_replace(true);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
+
+    /// Completes once [`ExecCancel::cancel`] was called, and otherwise never.
+    async fn cancelled(&self) {
+        let mut rx = self.0.subscribe();
+        // The sender lives in `self`, so the wait cannot fail while this future exists.
+        if rx.wait_for(|cancelled| *cancelled).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// How a command ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecEnd {
+    /// The server closed the channel: the command ended (or closed its output, see [`ExecResult::status`]).
+    Finished,
+    /// The time limit passed. The client sent signal KILL and closed the channel; the command may still run (T-07-026).
+    TimedOut,
+    /// The caller cancelled. The same stop as for a time-out (T-07-026).
+    Cancelled,
+    /// The connection broke while the command ran, so whether it finished is unknown. This code never runs the
+    /// command again (T-07-023): the caller treats the result as an error with partial output.
+    Lost,
+}
+
+/// What a command printed and how it ended.
+///
+/// The output fields are bytes, not text: a cut can split a UTF-8 sequence, so callers decode lossily. They are raw and
+/// not sanitised: the consumer redacts secrets and removes escape sequences before it shows or sends them (T-07-029).
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExecResult {
+    /// The last [`ExecLimits::max_output`] bytes of standard output.
+    pub stdout: Vec<u8>,
+    /// The last [`ExecLimits::max_output`] bytes of standard error (extended data of type 1).
+    pub stderr: Vec<u8>,
+    /// The remote exit code; 128 plus the signal number for a process ended by a signal; `None` when the command did
+    /// not end by itself (time-out, cancel, lost connection) or the server sent no status.
+    pub status: Option<u32>,
+    pub end: ExecEnd,
+    /// Whether any output was dropped to stay inside the limit.
+    pub truncated: bool,
+    /// The number of bytes dropped, both streams together.
+    pub dropped: u64,
+}
+
+impl std::fmt::Debug for ExecResult {
+    // The output may hold a secret; only its size is shown (T-07-027).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecResult")
+            .field("stdout_bytes", &self.stdout.len())
+            .field("stderr_bytes", &self.stderr.len())
+            .field("status", &self.status)
+            .field("end", &self.end)
+            .field("truncated", &self.truncated)
+            .field("dropped", &self.dropped)
+            .finish()
+    }
+}
+
+/// The last `cap` bytes of everything pushed, and the count of the bytes that fell off the front (T-07-024). A deque,
+/// so a chunk is appended and the excess is taken off the front without moving what stays.
+struct Tail {
+    cap: usize,
+    bytes: VecDeque<u8>,
+    dropped: u64,
+}
+
+impl Tail {
+    fn new(cap: usize) -> Self {
+        Self { cap, bytes: VecDeque::new(), dropped: 0 }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        if chunk.len() >= self.cap {
+            // The chunk alone fills the buffer: everything before it, and the front of the chunk, is dropped.
+            let lost = self.bytes.len() + (chunk.len() - self.cap);
+            self.dropped = self.dropped.saturating_add(lost as u64);
+            self.bytes.clear();
+            self.bytes.extend(&chunk[chunk.len() - self.cap..]);
+            return;
+        }
+        let excess = (self.bytes.len() + chunk.len()).saturating_sub(self.cap);
+        if excess > 0 {
+            self.bytes.drain(..excess);
+            self.dropped = self.dropped.saturating_add(excess as u64);
+        }
+        self.bytes.extend(chunk);
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        Vec::from(self.bytes)
+    }
+}
+
+/// A copy of `target` in which this host and every jump host checks host keys strictly. Refuses a host without a known
+/// hosts file and a host set to accept any key.
+///
+/// Why: [`Client::check_server_key`] learns an unknown key under [`HostKeyPolicy::AcceptNew`] and accepts every key when
+/// there is no file. For a shell the user types into that is trust on first use; an action an agent takes must never be
+/// the first contact with a host (T-07-021). A host can therefore be used by exec only after the user's own pane or file
+/// browser learned its key.
+fn require_pinned_hosts(target: &SshTarget) -> Result<SshTarget> {
+    fn pin(target: &mut SshTarget) -> Result<()> {
+        if target.known_hosts.is_none() {
+            return Err(exec_error(format!("{} has no known_hosts file, so its host key cannot be checked", target.host)));
+        }
+        if target.host_key == HostKeyPolicy::AcceptAny {
+            return Err(exec_error(format!("{} is set to accept any host key", target.host)));
+        }
+        target.host_key = HostKeyPolicy::Strict;
+        match target.jump.as_deref_mut() {
+            Some(jump) => pin(jump),
+            None => Ok(()),
+        }
+    }
+    let mut pinned = target.clone();
+    pin(&mut pinned)?;
+    Ok(pinned)
+}
+
+/// A refusal or failure of an exec: a fixed phrase or the reason `open_session` gave, never the command or a credential
+/// (T-07-027).
+fn exec_error(text: impl std::fmt::Display) -> Error {
+    Error::Unsupported(format!("ssh exec: {text}"))
+}
+
+/// The POSIX number of a signal the SSH protocol names, for the exit status `128 + n` of a shell. A name this code does
+/// not know counts as 0.
+fn signal_number(signal: &Sig) -> u32 {
+    match signal {
+        Sig::HUP => 1,
+        Sig::INT => 2,
+        Sig::QUIT => 3,
+        Sig::ILL => 4,
+        Sig::ABRT => 6,
+        Sig::FPE => 8,
+        Sig::KILL => 9,
+        Sig::USR1 => 10,
+        Sig::SEGV => 11,
+        Sig::PIPE => 13,
+        Sig::ALRM => 14,
+        Sig::TERM => 15,
+        Sig::Custom(_) => 0,
+    }
+}
+
+/// Stop a command: signal KILL, then close the channel. Errors are ignored and the whole stop is bounded, so a dead
+/// connection cannot hold the caller.
+///
+/// A server may ignore the signal and a shell may leave child processes running; the channel is closed either way. A
+/// caller who needs a hard stop wraps the command with `timeout` itself (T-07-026).
+async fn stop(channel: &Channel<client::Msg>) {
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        let _ = channel.signal(Sig::KILL).await;
+        let _ = channel.close().await;
+    })
+    .await;
+}
+
+/// Run commands on the host of a saved connection, one channel per command, without a terminal.
+///
+/// The connection is made on the first [`SshExec::exec`] by the same function the SFTP source uses
+/// ([`open_session`]), so jump hosts, authentication and the host key check are not repeated here. It never learns a host
+/// key (see [`require_pinned_hosts`]), is bounded in output and time, and reports how a command ended. The connection is
+/// kept for the next call.
+pub struct SshExec {
+    label: String,
+    /// The pinned copy of the target the caller gave.
+    target: SshTarget,
+    runtime: tokio::runtime::Runtime,
+    conn: tokio::sync::Mutex<Option<Arc<Handle<Client>>>>,
+}
+
+impl SshExec {
+    /// Prepare an exec primitive for `target`. Opens no socket: nothing connects before the first call of
+    /// [`SshExec::exec`].
+    ///
+    /// Fails for a host (or jump host) without a known hosts file and for one set to accept any key: the host key of an
+    /// exec connection is always checked and never learned (T-07-021).
+    pub fn new(label: impl Into<String>, target: SshTarget) -> Result<Self> {
+        let target = require_pinned_hosts(&target)?;
+        // One worker thread drives keepalives and replies between calls (as in `SftpSource`); callers only wait.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("hw-exec")
+            .build()
+            .map_err(|e| Error::Pty(format!("ssh exec runtime: {e}")))?;
+        Ok(Self { label: label.into(), target, runtime, conn: tokio::sync::Mutex::new(None) })
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Run `command` on the host and return its output, its exit status and how it ended.
+    ///
+    /// This blocks: never call it from an async task or from the UI thread, and never drop an `SshExec` inside an async
+    /// context (the rules of `SftpSource`). `reconnect` and `startup` of the target are ignored. The command runs in the
+    /// account's login shell exactly as given: nothing is quoted or interpreted here, and a caller that builds a command
+    /// from data quotes it for a POSIX shell itself (T-07-028). The run is bounded by `limits.timeout`, measured from the
+    /// moment the request was written; connecting and opening the channel have their own bounds.
+    ///
+    /// A command is written at most once. [`ExecEnd::Lost`] means the connection broke while it ran: it may or may not
+    /// have finished, and this code never runs it again (T-07-023).
+    pub fn exec(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
+        self.runtime.block_on(self.run(command, limits, cancel))
+    }
+
+    /// The cached connection, or a new one. The `bool` says the connection was made by this call.
+    async fn connection(&self) -> Result<(Arc<Handle<Client>>, bool)> {
+        let mut slot = self.conn.lock().await;
+        if let Some(handle) = slot.as_ref().filter(|handle| !handle.is_closed()) {
+            return Ok((handle.clone(), false));
+        }
+        let handle = tokio::time::timeout(EXEC_CONNECT_TIMEOUT, open_session(&self.target))
+            .await
+            .map_err(|_| exec_error("the connection timed out"))?
+            .map_err(exec_error)?;
+        let handle = Arc::new(handle);
+        *slot = Some(handle.clone());
+        Ok((handle, true))
+    }
+
+    async fn run(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
+        let nothing = |end| ExecResult { stdout: Vec::new(), stderr: Vec::new(), status: None, end, truncated: false, dropped: 0 };
+        // Connect and open the channel. A cancel here ends the run before anything is written, and the abandoned
+        // connect leaves nothing half-made in the cache.
+        let opened = async {
+            let (handle, _fresh) = self.connection().await?;
+            tokio::time::timeout(EXEC_OPEN_TIMEOUT, handle.channel_open_session())
+                .await
+                .map_err(|_| exec_error("opening a channel timed out"))?
+                .map_err(exec_error)
+        };
+        let channel = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Ok(nothing(ExecEnd::Cancelled)),
+            opened = opened => opened?,
+        };
+        // Nothing but the command is requested: no terminal, no environment, no agent forwarding, no X11 (T-07-022).
+        // The end of input follows at once, so a command that reads it does not wait for the time-out.
+        tokio::time::timeout(EXEC_OPEN_TIMEOUT, async {
+            channel.exec(true, command).await?;
+            let _ = channel.eof().await;
+            Ok::<(), russh::Error>(())
+        })
+        .await
+        .map_err(|_| exec_error("writing the command timed out"))?
+        .map_err(exec_error)?;
+        pump(channel, limits, cancel).await
+    }
+}
+
+/// Read a command's channel until it ends, the time runs out or the caller cancels.
+async fn pump(mut channel: Channel<client::Msg>, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
+    let mut stdout = Tail::new(limits.max_output);
+    let mut stderr = Tail::new(limits.max_output);
+    let mut status: Option<u32> = None;
+    // An end of output or a close was seen; only a close, the deadline or a cancel ends the wait, because an exit status
+    // can still follow the end of output and a process that closed its output may still run.
+    let mut output_ended = false;
+    let cancelled = cancel.cancelled();
+    tokio::pin!(cancelled);
+    let deadline = tokio::time::sleep(limits.timeout);
+    tokio::pin!(deadline);
+    let end = loop {
+        tokio::select! {
+            biased;
+            () = &mut cancelled => {
+                stop(&channel).await;
+                break ExecEnd::Cancelled;
+            }
+            () = &mut deadline => {
+                stop(&channel).await;
+                break ExecEnd::TimedOut;
+            }
+            msg = channel.wait() => match msg {
+                Some(ChannelMsg::Success) => {}
+                Some(ChannelMsg::Failure) => return Err(exec_error("the server refused to run the command")),
+                Some(ChannelMsg::Data { data }) => stdout.push(&data),
+                Some(ChannelMsg::ExtendedData { data, ext }) => {
+                    if ext == 1 {
+                        stderr.push(&data);
+                    }
+                }
+                Some(ChannelMsg::ExitStatus { exit_status }) => status = Some(exit_status),
+                Some(ChannelMsg::ExitSignal { signal_name, .. }) => status = Some(128 + signal_number(&signal_name)),
+                Some(ChannelMsg::Eof) => output_ended = true,
+                Some(ChannelMsg::Close) => break ExecEnd::Finished,
+                Some(_) => {}
+                None if output_ended => break ExecEnd::Finished,
+                None => break ExecEnd::Lost,
+            },
+        }
+    };
+    let dropped = stdout.dropped().saturating_add(stderr.dropped());
+    Ok(ExecResult { stdout: stdout.into_vec(), stderr: stderr.into_vec(), status, end, truncated: dropped > 0, dropped })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,5 +1258,425 @@ mod tests {
         assert!(!format!("{auth:?}").contains("hunter2"));
         let auth = SshAuth::Key { path: "/k".into(), passphrase: Some("hunter2".into()) };
         assert!(!format!("{auth:?}").contains("hunter2"));
+    }
+
+    // ---- the exec server and the exec tests ----------------------------------------------------------------------
+
+    /// What the exec server saw, shared with the test that started it.
+    #[derive(Default)]
+    struct ExecSeen {
+        /// Connections accepted so far; the index of a connection is the count before it.
+        connections: AtomicUsize,
+        /// `channel_close` and `channel_eof` calls: the client closed, or ended its input.
+        closes: AtomicUsize,
+        eofs: AtomicUsize,
+        /// Requests an exec channel must never make.
+        ptys: AtomicUsize,
+        envs: AtomicUsize,
+        agents: AtomicUsize,
+        /// Every command text, in the order received.
+        commands: Mutex<Vec<String>>,
+        /// Every signal name the client sent (`KILL`).
+        signals: Mutex<Vec<String>>,
+    }
+
+    impl ExecSeen {
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+    }
+
+    /// The exec server: password `pw` for user `holz`, and a "shell" whose commands are the verbs of `exec_request`.
+    #[derive(Clone)]
+    struct ExecFake {
+        seen: Arc<ExecSeen>,
+        /// The index of this connection.
+        index: usize,
+        /// Channels of a `cat` command: it ends when the client's end of input arrives.
+        cats: std::collections::HashSet<ChannelId>,
+    }
+
+    impl server::Server for ExecFake {
+        type Handler = Self;
+        fn new_client(&mut self, _: Option<SocketAddr>) -> Self {
+            let mut handler = self.clone();
+            handler.index = self.seen.connections.fetch_add(1, Ordering::SeqCst);
+            handler
+        }
+    }
+
+    /// End a command the way a shell does: the exit status, the end of output, then the close.
+    fn end_command(session: &mut Session, channel: ChannelId, status: u32) -> std::result::Result<(), russh::Error> {
+        session.exit_status_request(channel, status)?;
+        session.eof(channel)?;
+        session.close(channel)?;
+        Ok(())
+    }
+
+    impl server::Handler for ExecFake {
+        type Error = russh::Error;
+
+        async fn auth_password(&mut self, user: &str, password: &str) -> std::result::Result<Auth, Self::Error> {
+            Ok(if user == "holz" && password == "pw" { Auth::Accept } else { Auth::reject() })
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _channel: Channel<Msg>,
+            reply: server::ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> std::result::Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn pty_request(
+            &mut self,
+            _channel: ChannelId,
+            _term: &str,
+            _cols: u32,
+            _rows: u32,
+            _px_w: u32,
+            _px_h: u32,
+            _modes: &[(russh::Pty, u32)],
+            _session: &mut Session,
+        ) -> std::result::Result<(), Self::Error> {
+            self.seen.ptys.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn env_request(
+            &mut self,
+            _channel: ChannelId,
+            _name: &str,
+            _value: &str,
+            _session: &mut Session,
+        ) -> std::result::Result<(), Self::Error> {
+            self.seen.envs.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn agent_request(&mut self, _channel: ChannelId, _session: &mut Session) -> std::result::Result<bool, Self::Error> {
+            self.seen.agents.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }
+
+        async fn channel_eof(&mut self, channel: ChannelId, session: &mut Session) -> std::result::Result<(), Self::Error> {
+            self.seen.eofs.fetch_add(1, Ordering::SeqCst);
+            if self.cats.remove(&channel) {
+                session.data(channel, b"eof\n".to_vec())?;
+                end_command(session, channel, 0)?;
+            }
+            Ok(())
+        }
+
+        async fn channel_close(&mut self, _channel: ChannelId, _session: &mut Session) -> std::result::Result<(), Self::Error> {
+            self.seen.closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn signal(&mut self, _channel: ChannelId, signal: Sig, _session: &mut Session) -> std::result::Result<(), Self::Error> {
+            self.seen.signals.lock().unwrap().push(format!("{signal:?}"));
+            Ok(())
+        }
+
+        async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> std::result::Result<(), Self::Error> {
+            let command = String::from_utf8_lossy(data).to_string();
+            self.seen.commands.lock().unwrap().push(command.clone());
+            let (verb, arg) = command.split_once(' ').unwrap_or((command.as_str(), ""));
+            session.channel_success(channel)?;
+            match verb {
+                "say" => {
+                    session.data(channel, format!("{arg}\n").into_bytes())?;
+                    end_command(session, channel, 0)?;
+                }
+                // Reads its input like `cat`: it ends only when the client's end of input arrives.
+                "cat" => {
+                    self.cats.insert(channel);
+                }
+                "mixed" => {
+                    session.data(channel, b"out-1\n".to_vec())?;
+                    session.extended_data(channel, 1, b"err-1\n".to_vec())?;
+                    session.data(channel, b"out-2\n".to_vec())?;
+                    end_command(session, channel, 3)?;
+                }
+                // Any other verb is a command the "shell" does not know.
+                _ => {
+                    session.extended_data(channel, 1, b"not found\n".to_vec())?;
+                    end_command(session, channel, 127)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    struct ExecServer {
+        addr: SocketAddr,
+        key: PrivateKey,
+        seen: Arc<ExecSeen>,
+    }
+
+    /// Start the exec server on a thread of its own; it runs until the process ends.
+    fn serve_exec() -> ExecServer {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let config = Arc::new(server::Config {
+            keys: vec![key.clone()],
+            auth_rejection_time: Duration::from_millis(0),
+            auth_rejection_time_initial: Some(Duration::from_millis(0)),
+            ..Default::default()
+        });
+        let seen = Arc::new(ExecSeen::default());
+        let mut fake = ExecFake { seen: seen.clone(), index: 0, cats: Default::default() };
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                tx.send(socket.local_addr().unwrap()).unwrap();
+                let _ = fake.run_on_socket(config, &socket).await;
+            });
+        });
+        ExecServer { addr: rx.recv().unwrap(), key, seen }
+    }
+
+    /// A directory of the test's own, removed when the test ends (also when it fails).
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch_dir(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("holzwave-exec-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    /// A saved connection to the exec server the way `profiles.rs` builds one: a known hosts file, trust on first use,
+    /// and the server's key already learned (as if the user's own pane had connected before).
+    fn exec_target(server: &ExecServer, dir: &std::path::Path) -> SshTarget {
+        let known = dir.join("known_hosts");
+        let mut t = target(server.addr);
+        t.known_hosts = Some(known.clone());
+        t.host_key = HostKeyPolicy::AcceptNew;
+        learn_host_key("127.0.0.1", server.addr.port(), server.key.public_key(), &known).unwrap();
+        t
+    }
+
+    /// The same target with an existing empty known hosts file: the server's key is unknown.
+    fn exec_target_untrusted(server: &ExecServer, dir: &std::path::Path) -> SshTarget {
+        let known = dir.join("known_hosts");
+        std::fs::write(&known, "").unwrap();
+        let mut t = target(server.addr);
+        t.known_hosts = Some(known);
+        t.host_key = HostKeyPolicy::AcceptNew;
+        t
+    }
+
+    fn run_default(exec: &SshExec, command: &str) -> ExecResult {
+        exec.exec(command, &ExecLimits::default(), &ExecCancel::new()).unwrap()
+    }
+
+    /// The error of a target `SshExec::new` refuses (`SshExec` has no `Debug`, so `unwrap_err` cannot be used).
+    fn refusal(target: SshTarget) -> String {
+        match SshExec::new("Test host", target) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("the target was accepted"),
+        }
+    }
+
+    /// Poll `condition` until it holds, or fail after five seconds.
+    fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            assert!(Instant::now() < deadline, "{what} was never seen");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn exec_round_trip_carries_stdout_stderr_and_exit_status_spike_s5() {
+        let server = serve_exec();
+        let dir = scratch_dir("s5");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        assert_eq!(exec.label(), "Test host");
+        let result = run_default(&exec, "mixed");
+        assert_eq!(result.stdout, b"out-1\nout-2\n", "stdout: Data");
+        assert_eq!(result.stderr, b"err-1\n", "stderr: ExtendedData with type 1");
+        assert_eq!(result.status, Some(3), "the exit status");
+        assert_eq!(result.end, ExecEnd::Finished);
+        assert!(!result.truncated);
+        assert_eq!(result.dropped, 0);
+    }
+
+    #[test]
+    fn exec_asks_for_no_terminal_no_environment_and_no_agent_and_closes_stdin() {
+        let server = serve_exec();
+        let dir = scratch_dir("channel");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let result = run_default(&exec, "say hello");
+        assert_eq!(result.stdout, b"hello\n");
+        assert!(result.stderr.is_empty());
+        assert_eq!(result.status, Some(0));
+        // A command that reads its input ends as soon as the client ends it, instead of waiting for the time-out.
+        let limits = ExecLimits { max_output: DEFAULT_EXEC_OUTPUT, timeout: Duration::from_secs(10) };
+        let started = Instant::now();
+        let result = exec.exec("cat", &limits, &ExecCancel::new()).unwrap();
+        assert_eq!(result.stdout, b"eof\n");
+        assert_eq!(result.end, ExecEnd::Finished);
+        assert!(started.elapsed() < Duration::from_secs(5), "the end of input was not sent at once");
+        wait_until("the client's end of input", || server.seen.eofs.load(Ordering::SeqCst) >= 1);
+        assert_eq!(server.seen.commands(), vec!["say hello".to_string(), "cat".to_string()], "each command is written once, as given");
+        assert_eq!(server.seen.ptys.load(Ordering::SeqCst), 0, "no terminal");
+        assert_eq!(server.seen.envs.load(Ordering::SeqCst), 0, "no environment");
+        assert_eq!(server.seen.agents.load(Ordering::SeqCst), 0, "no agent forwarding");
+    }
+
+    #[test]
+    fn exec_never_learns_a_host_key() {
+        let server = serve_exec();
+        let dir = scratch_dir("learn");
+        let target = exec_target_untrusted(&server, dir.path());
+        assert_eq!(target.host_key, HostKeyPolicy::AcceptNew, "the policy the caller gave would have learned the key");
+        let known = target.known_hosts.clone().unwrap();
+        let exec = SshExec::new("Test host", target).unwrap();
+        let error = exec.exec("say hello", &ExecLimits::default(), &ExecCancel::new()).unwrap_err().to_string();
+        assert!(error.contains("is not known"), "{error}");
+        assert_eq!(std::fs::read_to_string(&known).unwrap(), "", "no key was written");
+        assert!(server.seen.commands().is_empty(), "no command reached the server");
+    }
+
+    #[test]
+    fn exec_refuses_a_changed_host_key() {
+        let first = serve_exec();
+        let second = serve_exec();
+        let dir = scratch_dir("changed");
+        let known = dir.path().join("known_hosts");
+        // The first server's key is known under the second server's name.
+        learn_host_key("127.0.0.1", second.addr.port(), first.key.public_key(), &known).unwrap();
+        let mut t = target(second.addr);
+        t.known_hosts = Some(known);
+        t.host_key = HostKeyPolicy::AcceptNew;
+        let exec = SshExec::new("Test host", t).unwrap();
+        let error = exec.exec("say hello", &ExecLimits::default(), &ExecCancel::new()).unwrap_err().to_string();
+        assert!(error.contains("CHANGED"), "{error}");
+        assert!(second.seen.commands().is_empty());
+    }
+
+    #[test]
+    fn exec_refuses_targets_whose_keys_it_cannot_check() {
+        let mut no_file = SshTarget::new("alpha.example", "holz", SshAuth::Password("pw".into()));
+        no_file.known_hosts = None;
+        let error = refusal(no_file.clone());
+        assert!(error.contains("alpha.example") && error.contains("known_hosts"), "{error}");
+
+        let mut any = no_file.clone();
+        any.known_hosts = Some("/nonexistent/known_hosts".into());
+        any.host_key = HostKeyPolicy::AcceptAny;
+        let error = refusal(any.clone());
+        assert!(error.contains("alpha.example") && error.contains("any host key"), "{error}");
+
+        // The same two checks apply to a jump host, and the error names it.
+        let mut good = no_file.clone();
+        good.known_hosts = Some("/nonexistent/known_hosts".into());
+        let mut jump_no_file = SshTarget::new("bastion.example", "holz", SshAuth::Password("pw".into()));
+        jump_no_file.known_hosts = None;
+        let mut via = good.clone();
+        via.jump = Some(Box::new(jump_no_file));
+        let error = refusal(via);
+        assert!(error.contains("bastion.example") && error.contains("known_hosts"), "{error}");
+        let mut jump_any = SshTarget::new("bastion.example", "holz", SshAuth::Password("pw".into()));
+        jump_any.known_hosts = Some("/nonexistent/known_hosts".into());
+        jump_any.host_key = HostKeyPolicy::AcceptAny;
+        let mut via = good;
+        via.jump = Some(Box::new(jump_any));
+        let error = refusal(via);
+        assert!(error.contains("bastion.example") && error.contains("any host key"), "{error}");
+    }
+
+    #[test]
+    fn exec_pins_every_host_of_a_jump_chain() {
+        let known = std::path::PathBuf::from("/nonexistent/known_hosts");
+        let mut inner = SshTarget::new("inner.example", "holz", SshAuth::Password("pw".into()));
+        inner.known_hosts = Some(known.clone());
+        let mut middle = SshTarget::new("middle.example", "holz", SshAuth::Password("pw".into()));
+        middle.known_hosts = Some(known.clone());
+        middle.jump = Some(Box::new(inner));
+        let mut outer = SshTarget::new("outer.example", "holz", SshAuth::Password("pw".into()));
+        outer.known_hosts = Some(known);
+        outer.jump = Some(Box::new(middle));
+
+        let pinned = require_pinned_hosts(&outer).unwrap();
+        assert_eq!(pinned.host_key, HostKeyPolicy::Strict);
+        let middle = pinned.jump.as_deref().unwrap();
+        assert_eq!(middle.host_key, HostKeyPolicy::Strict);
+        assert_eq!(middle.jump.as_deref().unwrap().host_key, HostKeyPolicy::Strict);
+        // The caller's target is untouched: the pinned one is a copy.
+        assert_eq!(outer.host_key, HostKeyPolicy::AcceptNew);
+        assert_eq!(outer.jump.as_deref().unwrap().host_key, HostKeyPolicy::AcceptNew);
+    }
+
+    #[test]
+    fn exec_tail_keeps_the_last_bytes_and_counts_the_rest() {
+        // 3 then 4 bytes at cap 5: the last 5 of the 7 remain.
+        let mut tail = Tail::new(5);
+        tail.push(b"abc");
+        tail.push(b"defg");
+        assert_eq!(tail.dropped(), 2);
+        assert_eq!(tail.into_vec(), b"cdefg");
+
+        // One push longer than the cap keeps its last `cap` bytes.
+        let mut tail = Tail::new(4);
+        tail.push(b"xy");
+        tail.push(b"0123456789");
+        assert_eq!(tail.dropped(), 8);
+        assert_eq!(tail.into_vec(), b"6789");
+
+        // A cap of 1 keeps the last byte.
+        let mut tail = Tail::new(1);
+        tail.push(b"ab");
+        tail.push(b"c");
+        assert_eq!(tail.dropped(), 2);
+        assert_eq!(tail.into_vec(), b"c");
+
+        // An empty push changes nothing.
+        let mut tail = Tail::new(3);
+        tail.push(b"ab");
+        tail.push(b"");
+        assert_eq!(tail.dropped(), 0);
+        assert_eq!(tail.into_vec(), b"ab");
+
+        // Order survives the wrap of the ring: many small pushes against a small cap.
+        let mut tail = Tail::new(7);
+        let all: Vec<u8> = (0..100u8).collect();
+        for chunk in all.chunks(3) {
+            tail.push(chunk);
+        }
+        assert_eq!(tail.dropped(), 93);
+        assert_eq!(tail.into_vec(), all[93..].to_vec());
+    }
+
+    #[test]
+    fn exec_result_debug_hides_the_output() {
+        let result = ExecResult {
+            stdout: b"secret-marker".to_vec(),
+            stderr: b"err".to_vec(),
+            status: Some(0),
+            end: ExecEnd::Finished,
+            truncated: false,
+            dropped: 0,
+        };
+        let shown = format!("{result:?}");
+        assert!(!shown.contains("secret-marker"), "{shown}");
+        assert!(shown.contains("13"), "the byte count of stdout is shown: {shown}");
     }
 }
