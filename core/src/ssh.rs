@@ -8,6 +8,13 @@
 //!
 //! Secrets (a key's passphrase, a password) are given by the caller in [`SshAuth`] and are never written to disk or
 //! to the screen here. Host keys are checked against a `known_hosts` file ([`HostKeyPolicy`]).
+//!
+//! [`SshExec`] is the other way in: it runs one command at a time per call on the host of a saved connection, on a
+//! channel that asks for no terminal, no environment and no agent forwarding, and never types into a pane. It never
+//! learns a host key (an unknown or changed key is refused), keeps only the last bytes of each output stream up to a
+//! cap, ends a command at a time limit or when the caller cancels, and reports in an [`ExecResult`] what the command
+//! printed, its exit status and how it ended ([`ExecEnd`]). A command is written at most once: a connection lost while
+//! it runs is reported as [`ExecEnd::Lost`] and the command is not run again.
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -633,6 +640,7 @@ impl Default for ExecCancel {
 }
 
 impl ExecCancel {
+    /// A switch that is not raised.
     pub fn new() -> Self {
         Self(Arc::new(watch::channel(false).0))
     }
@@ -642,6 +650,7 @@ impl ExecCancel {
         self.0.send_replace(true);
     }
 
+    /// Whether [`ExecCancel::cancel`] was called.
     pub fn is_cancelled(&self) -> bool {
         *self.0.borrow()
     }
@@ -858,6 +867,7 @@ impl SshExec {
         Ok(Self { label: label.into(), target, runtime, conn: tokio::sync::Mutex::new(None) })
     }
 
+    /// The name the caller gave, for its own messages.
     pub fn label(&self) -> &str {
         &self.label
     }
@@ -893,33 +903,67 @@ impl SshExec {
         Ok((handle, true))
     }
 
+    /// Forget `stale` if it is still the cached connection. Compared by identity, so the connection a parallel call made
+    /// in the meantime is never thrown away.
+    async fn invalidate(&self, stale: &Arc<Handle<Client>>) {
+        let mut slot = self.conn.lock().await;
+        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, stale)) {
+            *slot = None;
+        }
+    }
+
+    /// The whole run of one command.
+    ///
+    /// A command is written at most once (T-07-023). A cached connection that cannot open a channel, or cannot take the
+    /// request, is replaced once; the same failure on a connection this call just made, a refused request, and every
+    /// failure after the request was written are final. A connection lost while the command runs gives
+    /// [`ExecEnd::Lost`], and nothing is ever tried again after that.
     async fn run(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
         let nothing = |end| ExecResult { stdout: Vec::new(), stderr: Vec::new(), status: None, end, truncated: false, dropped: 0 };
-        // Connect and open the channel. A cancel here ends the run before anything is written, and the abandoned
-        // connect leaves nothing half-made in the cache.
-        let opened = async {
-            let (handle, _fresh) = self.connection().await?;
-            tokio::time::timeout(EXEC_OPEN_TIMEOUT, handle.channel_open_session())
-                .await
-                .map_err(|_| exec_error("opening a channel timed out"))?
-                .map_err(exec_error)
-        };
-        let channel = tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Ok(nothing(ExecEnd::Cancelled)),
-            opened = opened => opened?,
-        };
-        // Nothing but the command is requested: no terminal, no environment, no agent forwarding, no X11 (T-07-022).
-        // The end of input follows at once, so a command that reads it does not wait for the time-out.
-        tokio::time::timeout(EXEC_OPEN_TIMEOUT, async {
-            channel.exec(true, command).await?;
-            let _ = channel.eof().await;
-            Ok::<(), russh::Error>(())
-        })
-        .await
-        .map_err(|_| exec_error("writing the command timed out"))?
-        .map_err(exec_error)?;
-        pump(channel, limits, cancel).await
+        let mut replaced = false;
+        loop {
+            // Connect and open the channel. A cancel here ends the run before anything is written, and the abandoned
+            // connect leaves nothing half-made in the cache.
+            let opening = async {
+                let (handle, fresh) = self.connection().await?;
+                let channel = match tokio::time::timeout(EXEC_OPEN_TIMEOUT, handle.channel_open_session()).await {
+                    Ok(Ok(channel)) => Ok(channel),
+                    Ok(Err(e)) => Err(exec_error(e)),
+                    Err(_) => Err(exec_error("opening a channel timed out")),
+                };
+                Ok::<_, Error>((handle, fresh, channel))
+            };
+            let (handle, fresh, channel) = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(nothing(ExecEnd::Cancelled)),
+                opening = opening => opening?,
+            };
+            // Nothing but the command is requested: no terminal, no environment, no agent forwarding, no X11
+            // (T-07-022). The end of input follows at once, so a command that reads it does not wait for the time-out.
+            let why = match channel {
+                Ok(channel) => match tokio::time::timeout(EXEC_OPEN_TIMEOUT, channel.exec(true, command)).await {
+                    Ok(Ok(())) => {
+                        let _ = channel.eof().await;
+                        // From here the command is written: no failure below is tried again.
+                        let result = pump(channel, limits, cancel).await?;
+                        if result.end == ExecEnd::Lost {
+                            self.invalidate(&handle).await;
+                        }
+                        return Ok(result);
+                    }
+                    Ok(Err(e)) => exec_error(e),
+                    Err(_) => exec_error("writing the command timed out"),
+                },
+                Err(why) => why,
+            };
+            // The request was not written. A connection this call just made is not tried again, and a cached one is
+            // replaced once.
+            if fresh || replaced {
+                return Err(why);
+            }
+            replaced = true;
+            self.invalidate(&handle).await;
+        }
     }
 }
 
@@ -1320,12 +1364,25 @@ mod tests {
         }
     }
 
+    /// Which session channels the exec server accepts.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ChannelPolicy {
+        Open,
+        /// The first channel of a connection is accepted and every later one is rejected: a cached connection that
+        /// has gone bad without being closed.
+        RejectAfterFirst,
+        RejectAll,
+    }
+
     /// The exec server: password `pw` for user `holz`, and a "shell" whose commands are the verbs of `exec_request`.
     #[derive(Clone)]
     struct ExecFake {
         seen: Arc<ExecSeen>,
         /// The index of this connection.
         index: usize,
+        policy: ChannelPolicy,
+        /// Channels opened on this connection so far.
+        channels: usize,
         /// Channels of a `cat` command: it ends when the client's end of input arrives.
         cats: std::collections::HashSet<ChannelId>,
     }
@@ -1360,7 +1417,18 @@ mod tests {
             reply: server::ChannelOpenHandle,
             _session: &mut Session,
         ) -> std::result::Result<(), Self::Error> {
-            reply.accept().await;
+            self.channels += 1;
+            let accept = match self.policy {
+                ChannelPolicy::Open => true,
+                ChannelPolicy::RejectAfterFirst => self.channels == 1,
+                ChannelPolicy::RejectAll => false,
+            };
+            if accept {
+                reply.accept().await;
+            } else {
+                // A dropped handle rejects the channel.
+                drop(reply);
+            }
             Ok(())
         }
 
@@ -1448,6 +1516,41 @@ mod tests {
                     }
                     end_command(session, channel, 0)?;
                 }
+                // `conn <index>`: which connection of the server ran the command.
+                "conn" => {
+                    session.data(channel, format!("conn {}\n", self.index).into_bytes())?;
+                    end_command(session, channel, 0)?;
+                }
+                // The server drops the connection 50 ms after the command, without a reply.
+                "cut" => {
+                    let handle = session.handle();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        let _ = handle.disconnect(Disconnect::ByApplication, "cut".into(), "en".into()).await;
+                    });
+                }
+                // A finished command, and then the server drops the idle connection.
+                "bye" => {
+                    session.data(channel, b"bye\n".to_vec())?;
+                    end_command(session, channel, 0)?;
+                    let handle = session.handle();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let _ = handle.disconnect(Disconnect::ByApplication, "bye".into(), "en".into()).await;
+                    });
+                }
+                // `nap <ms>`: a slow command, so two calls overlap.
+                "nap" => {
+                    let wait: u64 = arg.parse().unwrap();
+                    let handle = session.handle();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                        let _ = handle.data(channel, b"napped\n".to_vec()).await;
+                        let _ = handle.exit_status_request(channel, 0).await;
+                        let _ = handle.eof(channel).await;
+                        let _ = handle.close(channel).await;
+                    });
+                }
                 // Prints a line and then never ends.
                 "partial" => session.data(channel, format!("{arg}\n").into_bytes())?,
                 // Closes without an exit status.
@@ -1496,6 +1599,10 @@ mod tests {
 
     /// Start the exec server on a thread of its own; it runs until the process ends.
     fn serve_exec() -> ExecServer {
+        serve_exec_with(ChannelPolicy::Open)
+    }
+
+    fn serve_exec_with(policy: ChannelPolicy) -> ExecServer {
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let config = Arc::new(server::Config {
             keys: vec![key.clone()],
@@ -1504,7 +1611,7 @@ mod tests {
             ..Default::default()
         });
         let seen = Arc::new(ExecSeen::default());
-        let mut fake = ExecFake { seen: seen.clone(), index: 0, cats: Default::default() };
+        let mut fake = ExecFake { seen: seen.clone(), index: 0, policy, channels: 0, cats: Default::default() };
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -1948,5 +2055,134 @@ mod tests {
         let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
         let error = exec.exec("refuse", &ExecLimits::default(), &ExecCancel::new()).unwrap_err().to_string();
         assert!(error.contains("refused"), "{error}");
+    }
+
+    #[test]
+    fn exec_replaces_a_cached_connection_once_when_no_channel_opens_on_it() {
+        let server = serve_exec_with(ChannelPolicy::RejectAfterFirst);
+        let dir = scratch_dir("replace");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        assert_eq!(run_default(&exec, "conn").stdout, b"conn 0\n");
+        // The cached connection refuses the next channel; it is replaced, and the command runs on the new one.
+        assert_eq!(run_default(&exec, "conn").stdout, b"conn 1\n");
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 2);
+        assert_eq!(server.seen.commands(), vec!["conn".to_string(), "conn".to_string()], "once per connection");
+    }
+
+    #[test]
+    fn exec_does_not_retry_on_a_connection_it_just_made() {
+        let server = serve_exec_with(ChannelPolicy::RejectAll);
+        let dir = scratch_dir("noretry");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let error = exec.exec("conn", &ExecLimits::default(), &ExecCancel::new()).unwrap_err().to_string();
+        assert!(error.starts_with("unsupported: ssh exec: "), "{error}");
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 1);
+        assert!(server.seen.commands().is_empty());
+    }
+
+    #[test]
+    fn exec_never_runs_a_command_twice_when_the_connection_is_lost_while_it_runs() {
+        let server = serve_exec();
+        let dir = scratch_dir("lost");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let result = run_default(&exec, "cut");
+        assert_eq!(result.end, ExecEnd::Lost);
+        assert!(result.stdout.is_empty());
+        assert_eq!(result.status, None);
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 1);
+        assert_eq!(server.seen.commands().iter().filter(|c| *c == "cut").count(), 1, "the command was written once");
+        // The lost connection is forgotten: the next command runs on a new one, and `cut` is still not repeated.
+        assert_eq!(run_default(&exec, "conn").stdout, b"conn 1\n");
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 2);
+        assert_eq!(server.seen.commands().iter().filter(|c| *c == "cut").count(), 1);
+    }
+
+    #[test]
+    fn exec_replaces_a_connection_the_server_closed_while_idle() {
+        let server = serve_exec();
+        let dir = scratch_dir("idle");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let result = run_default(&exec, "bye");
+        assert_eq!(result.stdout, b"bye\n");
+        assert_eq!(result.end, ExecEnd::Finished);
+        wait_until("the cached connection to be closed", || {
+            exec.runtime.block_on(async { exec.conn.lock().await.as_ref().is_some_and(|handle| handle.is_closed()) })
+        });
+        // No attempt on the dead handle: the next command goes straight to a new connection.
+        assert_eq!(run_default(&exec, "conn").stdout, b"conn 1\n");
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn exec_calls_at_the_same_time_share_one_connection() {
+        let server = serve_exec();
+        let dir = scratch_dir("parallel");
+        let exec = Arc::new(SshExec::new("Test host", exec_target(&server, dir.path())).unwrap());
+        let calls: Vec<_> = (0..2)
+            .map(|_| {
+                let exec = exec.clone();
+                thread::spawn(move || run_default(&exec, "nap 300"))
+            })
+            .collect();
+        for call in calls {
+            let result = call.join().unwrap();
+            assert_eq!(result.stdout, b"napped\n");
+            assert_eq!(result.end, ExecEnd::Finished);
+        }
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn exec_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SshExec>();
+        assert_send_sync::<ExecCancel>();
+        assert_send_sync::<ExecResult>();
+    }
+
+    /// Against a real SSH server, for the questions the in-process server cannot answer: the order of exit status and
+    /// close, whether a signal request stops a process, the sessions limit. Plan 07-44 records what it prints.
+    #[test]
+    #[ignore = "needs a real SSH server: set HOLZWAVE_TEST_SSH_HOST, _USER, _KEY, _KNOWN_HOSTS and optionally _PORT"]
+    fn exec_against_a_real_host() {
+        fn var(name: &str) -> String {
+            std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
+        }
+        let mut t = SshTarget::new(
+            var("HOLZWAVE_TEST_SSH_HOST"),
+            var("HOLZWAVE_TEST_SSH_USER"),
+            SshAuth::Key { path: var("HOLZWAVE_TEST_SSH_KEY").into(), passphrase: None },
+        );
+        if let Ok(port) = std::env::var("HOLZWAVE_TEST_SSH_PORT") {
+            t.port = port.parse().expect("HOLZWAVE_TEST_SSH_PORT is a port number");
+        }
+        t.known_hosts = Some(var("HOLZWAVE_TEST_SSH_KNOWN_HOSTS").into());
+        t.host_key = HostKeyPolicy::Strict;
+        let exec = SshExec::new("Real host", t).unwrap();
+
+        let result = run_default(&exec, "sh -c 'echo out; echo err >&2; exit 3'");
+        assert_eq!(result.stdout, b"out\n");
+        assert_eq!(result.stderr, b"err\n");
+        assert_eq!(result.status, Some(3));
+        assert_eq!(result.end, ExecEnd::Finished);
+
+        // The input is closed at once, so `cat` ends instead of waiting.
+        let started = Instant::now();
+        let result = run_default(&exec, "cat");
+        assert_eq!((result.status, result.end), (Some(0), ExecEnd::Finished));
+        assert!(started.elapsed() < Duration::from_secs(10), "cat waited for input");
+
+        let limits = ExecLimits { max_output: 1000, timeout: Duration::from_secs(30) };
+        let result = exec.exec("head -c 3000000 /dev/zero", &limits, &ExecCancel::new()).unwrap();
+        assert_eq!(result.stdout.len(), 1000);
+        assert_eq!(result.dropped, 2_999_000);
+
+        // For a human to read: what a process killed by a signal reports, and what a timed-out `sleep 30` does.
+        let result = run_default(&exec, "sh -c 'kill -TERM $$'");
+        println!("killed by TERM: status {:?}, end {:?}", result.status, result.end);
+        let limits = ExecLimits { max_output: 1000, timeout: Duration::from_secs(1) };
+        let started = Instant::now();
+        let result = exec.exec("sleep 30", &limits, &ExecCancel::new()).unwrap();
+        println!("sleep 30 with a 1 s limit: end {:?} after {:?}, status {:?}", result.end, started.elapsed(), result.status);
     }
 }
