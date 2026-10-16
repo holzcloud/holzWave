@@ -12,12 +12,17 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use common::fake_http::{FakeHttp, Reply};
-use holzwave_core::ai::profiles::{AiConfig, KeySlot, KeyVault, Preset, ProfileInput};
+use holzwave_core::ai::agent::INTERRUPTED_RESULT;
+use holzwave_core::ai::gate::{ApprovedContext, Destination, OfferRequest, RequestItem};
+use holzwave_core::ai::profiles::{
+    AiConfig, KeyError, KeySlot, KeyStatus, KeyVault, Preset, ProfileError, ProfileInput, account,
+};
 use holzwave_core::ai::provider::{AiError, CancelToken, ChatRequest, Completion, Flow, Provider, StreamEvent};
+use holzwave_core::ai::redact::SourceText;
 use holzwave_core::ai::scripted::{Script, ScriptedProvider};
 use holzwave_core::ai::service::coalesce::{Batch, Coalescer, DeltaKind};
 use holzwave_core::ai::service::events::{
@@ -29,16 +34,17 @@ use holzwave_core::ai::service::{
 };
 use holzwave_core::ai::store::{
     ContextStorage, Conversation, ConversationId, ConversationStore, JsonDirStore, Listing, MemoryStore as ChatMemory,
-    Scrub, StoreError,
+    NOT_STORED, Scrub, StoreError,
 };
-use holzwave_core::ai::tools::{Resolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput};
+use holzwave_core::ai::tools::{Decision, Resolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput};
 use holzwave_core::ai::types::{
     ApiKey, Capabilities, Consent, ContextKind, ContextNote, Locality, Message, MessageStatus, NoteItem, Opaque, Part,
     Role, StopReason, ToolCall, Usage,
 };
 use holzwave_core::ai::wire::Wire;
 use holzwave_core::layout::PaneId;
-use holzwave_core::secrets::MemoryStore;
+use holzwave_core::secrets::{MemoryStore, SecretStore};
+use holzwave_core::settings::Settings;
 use serde_json::{Value, json};
 
 /// The key of every test. It appears in test code only: a hit anywhere else is a leak.
@@ -801,6 +807,9 @@ fn building_the_service_and_every_idle_call_open_no_socket_and_each_send_makes_e
     let rig = Rig::new("svc-quiet");
     rig.profile(&format!("{}/v1", fake.base()), "test-model", Some(KEY_CANARY));
     let service = rig.service();
+    // The shell holds one service and calls it from many threads.
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    assert_send_sync(&service);
     let chat = service.new_conversation().expect("a chat id");
     let listing = service.list_conversations().expect("a listing");
     assert!(listing.chats.is_empty());
@@ -1265,6 +1274,7 @@ fn deleting_a_chat_cancels_its_turn_and_the_turn_cannot_write_it_back() {
         "scripted",
         ScriptedProvider::new("scripted").with_turn(Script::new().text("partial").stall(Duration::from_secs(30))),
     );
+    register(&service, "quick", ScriptedProvider::new("quick").with_turn(Script::reply("done")));
     let chat = service.new_conversation().expect("a chat id");
 
     send_to(&service, &chat, "scripted", "write me a poem", 1);
@@ -1289,12 +1299,36 @@ fn deleting_a_chat_cancels_its_turn_and_the_turn_cannot_write_it_back() {
     assert!(state.messages.is_empty() && !state.running, "the deleted chat is gone: {state:?}");
     let unknown = service.new_conversation().expect("a chat id");
     assert!(matches!(service.delete_conversation(&unknown), Ok(false)));
+
+    // The turn that ended after the delete left nothing behind: a new chat with the same id starts clean.
+    let fresh = Conversation::new(chat.clone(), 5);
+    rig.store.save(&fresh, ContextStorage::Marker).expect("stored");
+    let state = service.snapshot(&chat).expect("a snapshot");
+    assert!(state.turn == 0 && state.ended.is_none(), "a deleted turn is not remembered: {state:?}");
+
+    // Deleting a chat whose turn has ended forgets that turn too.
+    let finished = service.new_conversation().expect("a chat id");
+    send_to(&service, &finished, "quick", "hello", 1);
+    assert!(rig.sink.wait_ended(&finished, 1, Duration::from_secs(5)));
+    assert!(service.snapshot(&finished).expect("a snapshot").ended.is_some());
+    assert!(matches!(service.delete_conversation(&finished), Ok(true)));
+    rig.store.save(&Conversation::new(finished.clone(), 5), ContextStorage::Marker).expect("stored");
+    let state = service.snapshot(&finished).expect("a snapshot");
+    assert!(state.turn == 0 && state.ended.is_none(), "an ended turn is forgotten with its chat: {state:?}");
 }
 
 // ---- pane close ---------------------------------------------------------------------------------------------------
 
-/// A host that offers the file reader and answers with a short text.
-struct ReadHost;
+/// A host that offers the file reader and answers with a fixed text.
+struct ReadHost {
+    output: String,
+}
+
+impl ReadHost {
+    fn new(output: &str) -> ReadHost {
+        ReadHost { output: output.to_owned() }
+    }
+}
 
 impl ToolHost for ReadHost {
     fn available(&self, tool: ToolName, _pane: PaneId) -> bool {
@@ -1310,7 +1344,7 @@ impl ToolHost for ReadHost {
     }
 
     fn run(&self, _ticket: &Ticket, _cancel: &CancelToken) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput::new("short text".to_owned()))
+        Ok(ToolOutput::new(self.output.clone()))
     }
 }
 
@@ -1318,7 +1352,7 @@ impl ToolHost for ReadHost {
 fn closing_a_pane_voids_its_pending_approval_and_the_turn_ends_cancelled() {
     let rig = Rig::new("svc-pane");
     let service = AiService::builder(rig.store.clone(), rig.sink.clone() as Arc<dyn AiSink>, &rig.config_dir)
-        .tool_host(Arc::new(ReadHost))
+        .tool_host(Arc::new(ReadHost::new("short text")))
         .build();
     register(
         &service,
@@ -1485,6 +1519,667 @@ fn a_registered_provider_is_used_before_a_profile_and_the_output_budget_follows_
     let refused = service.send(SendRequest::new(chat, "late".to_owned(), 1).profile("scripted"));
     assert!(matches!(refused, Err(ServiceError::ShuttingDown)));
     assert_eq!(ServiceError::ShuttingDown.code(), "shutting_down");
+}
+
+// ---- context ------------------------------------------------------------------------------------------------------
+
+/// The text of a context that appears in test code only: a hit anywhere else is a leak.
+const CTX_CANARY: &str = "zq-ctx-canary-0b7d52c8a1";
+
+/// A context the user approved for `provider`, made through the service's own gate.
+fn approve(service: &AiService, provider: &str, text: &str) -> ApprovedContext {
+    let destination = Destination { host: "127.0.0.1".to_owned(), locality: Locality::Loopback };
+    let item = RequestItem::new(ContextKind::Selection, "pane 1", SourceText::plain(text));
+    let offer = service.gate().offer(OfferRequest::new(provider, destination, vec![item])).expect("an offer");
+    service.gate().approve(offer.id(), &[1], provider).expect("an approval")
+}
+
+/// The raw text of the file of a chat.
+fn chat_file(rig: &Rig, chat: &ConversationId) -> String {
+    fs::read_to_string(rig.chats_dir().join(format!("{chat}.json"))).expect("the chat file")
+}
+
+fn setting(local_only: bool, persist: bool) -> Settings {
+    Settings { ai_local_only: local_only, ai_persist_context: persist, ..Settings::default() }
+}
+
+#[test]
+fn approved_context_goes_out_once_with_its_turn_and_a_follow_up_does_not_send_it_again() {
+    let fake = FakeHttp::start(vec![answer(&["Hello"], Duration::ZERO)]);
+    let rig = Rig::on_disk("svc-context");
+    rig.profile(&format!("{}/v1", fake.base()), "test-model", None);
+    let service = rig.service();
+    let chat = service.new_conversation().expect("a chat id");
+    let approved = approve(&service, "local", &format!("output {CTX_CANARY}"));
+    let hash = approved.hash_hex();
+    let typed = format!("what does this mean? {TEXT_CANARY}");
+
+    service
+        .send(SendRequest::new(chat.clone(), typed.clone(), 1).profile("local").context(vec![approved.clone()]))
+        .expect("accepted");
+    assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(5)));
+    assert_eq!(rig.sink.last_end(&chat).end, "done");
+
+    // The text goes out once, wrapped in the envelope, before the instruction.
+    let first = fake.seen()[0].body_text();
+    assert_eq!(first.matches(CTX_CANARY).count(), 1, "the context text is in the request exactly once");
+    assert!(first.find(CTX_CANARY) < first.find(TEXT_CANARY), "the context comes before the instruction");
+    assert!(first.contains("holzwave-context"));
+    // The page sees the label and the size, never the text.
+    let started = rig.sink.of(&chat).into_iter().next().expect("events");
+    let AiEventKind::TurnStarted { message, .. } = &started.kind else { panic!("turn_started first") };
+    let ChatPart::Context { hash: shown, items, provider, locality } = &message.parts[0] else {
+        panic!("a context part first, not {:?}", message.parts[0])
+    };
+    assert_eq!((shown.as_str(), provider.as_str(), *locality), (hash.as_str(), "local", Locality::Loopback));
+    assert_eq!((items[0].label.as_str(), items[0].bytes), ("pane 1", approved.items()[0].bytes));
+    assert!(matches!(message.parts[1], ChatPart::Text { .. }));
+    for event in rig.sink.of(&chat) {
+        assert!(!to_text(&event).contains(CTX_CANARY) && !format!("{event:?}").contains(CTX_CANARY));
+    }
+    // The file keeps the note with its hash and the consent, and no text.
+    let file = chat_file(&rig, &chat);
+    assert!(file.contains(&hash) && file.contains("consented_to"), "{file}");
+    assert!(!file.contains(CTX_CANARY));
+
+    // A follow-up does not send the context again; it holds the first answer.
+    rig.say(&service, &chat, "and one more thing");
+    let second = fake.seen()[1].body_text();
+    assert!(!second.contains(CTX_CANARY), "the context was sent again");
+    assert!(second.contains("Hello"), "the first answer is part of the history");
+    assert_eq!(fake.accepted(), 2);
+
+    // Too many, the same twice, and one approved for another provider.
+    let fresh = service.new_conversation().expect("a chat id");
+    let five: Vec<ApprovedContext> = (0..5).map(|index| approve(&service, "local", &format!("part {index}"))).collect();
+    let result = service.send(SendRequest::new(fresh.clone(), "x".to_owned(), 1).profile("local").context(five));
+    assert!(matches!(result, Err(ServiceError::ContextTooMany)), "{result:?}");
+    let twice = vec![approved.clone(), approved.clone()];
+    let result = service.send(SendRequest::new(fresh.clone(), "x".to_owned(), 1).profile("local").context(twice));
+    assert!(matches!(result, Err(ServiceError::ContextDuplicate)), "{result:?}");
+    assert!(rig.store.load(&fresh).expect("a readable store").is_none() && rig.sink.of(&fresh).is_empty());
+    assert_eq!(service.active_turns(), 0);
+    let foreign = approve(&service, "other", &format!("secret {CTX_CANARY}"));
+    service
+        .send(SendRequest::new(fresh.clone(), "x".to_owned(), 1).profile("local").context(vec![foreign]))
+        .expect("accepted; the refusal arrives as the end of the turn");
+    assert!(rig.sink.wait_ended(&fresh, 1, Duration::from_secs(5)));
+    let end = rig.sink.last_end(&fresh);
+    let error = end.error.expect("an error");
+    assert_eq!((end.end.as_str(), error.class.as_str()), ("failed", "policy"));
+    assert_eq!(error.text, "the shared context was approved for another provider");
+    assert_eq!(rig.sink.kinds(&fresh), ["turn_ended"]);
+    assert!(rig.store.load(&fresh).expect("a readable store").is_none(), "nothing is stored");
+    assert_eq!(fake.accepted(), 2, "no request left for a context of another provider");
+}
+
+/// A chat store whose private-text rewrite can fail or wait for the test.
+struct ScrubStore {
+    inner: JsonDirStore,
+    mode: ScrubMode,
+    calls: AtomicUsize,
+}
+
+enum ScrubMode {
+    Pass,
+    Fail,
+    /// Waits until the flag is set.
+    Block(Arc<(Mutex<bool>, Condvar)>),
+}
+
+impl ConversationStore for ScrubStore {
+    fn list(&self) -> Result<Listing, StoreError> {
+        self.inner.list()
+    }
+
+    fn load(&self, id: &ConversationId) -> Result<Option<Conversation>, StoreError> {
+        self.inner.load(id)
+    }
+
+    fn save(&self, conversation: &Conversation, storage: ContextStorage) -> Result<(), StoreError> {
+        self.inner.save(conversation, storage)
+    }
+
+    fn delete(&self, id: &ConversationId) -> Result<bool, StoreError> {
+        self.inner.delete(id)
+    }
+
+    fn scrub_private_text(&self) -> Result<Scrub, StoreError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match &self.mode {
+            ScrubMode::Pass => self.inner.scrub_private_text(),
+            ScrubMode::Fail => Err(StoreError::Io("the disk went away".to_owned())),
+            ScrubMode::Block(gate) => {
+                let (released, wake) = &**gate;
+                let mut open = lock(released);
+                while !*open {
+                    open = wake.wait(open).unwrap_or_else(PoisonError::into_inner);
+                }
+                drop(open);
+                self.inner.scrub_private_text()
+            }
+        }
+    }
+}
+
+fn scrub_rig(tag: &str, mode: ScrubMode) -> (Rig, Arc<ScrubStore>) {
+    let dir = common::scratch_dir(tag);
+    let store = Arc::new(ScrubStore { inner: JsonDirStore::new(dir.join("chats")), mode, calls: AtomicUsize::new(0) });
+    (Rig::in_dir(dir, store.clone()), store)
+}
+
+#[test]
+fn terminal_context_is_stored_as_a_marker_and_switching_the_persist_setting_off_scrubs_the_files() {
+    let fake = FakeHttp::start(vec![answer(&["Hello"], Duration::ZERO)]);
+    let (rig, store) = scrub_rig("svc-persist", ScrubMode::Pass);
+    rig.profile(&format!("{}/v1", fake.base()), "test-model", None);
+    let service = rig.service();
+    let chat = service.new_conversation().expect("a chat id");
+    let say_with = |name: &str, expected_turns: usize| {
+        let approved = approve(&service, "local", &format!("{CTX_CANARY}-{name}"));
+        service
+            .send(SendRequest::new(chat.clone(), format!("about {name}"), 1).profile("local").context(vec![approved]))
+            .expect("accepted");
+        assert!(rig.sink.wait_ended(&chat, expected_turns, Duration::from_secs(5)));
+        chat_file(&rig, &chat)
+    };
+
+    // The default stores a marker.
+    let file = say_with("a", 1);
+    assert!(!file.contains(&format!("{CTX_CANARY}-a")), "a context is a marker by default");
+    // Switching it on stores the text of the next context.
+    let effect = service.apply_settings(&setting(false, true));
+    assert_eq!((effect.cancelled, effect.scrub_started), (0, false));
+    let file = say_with("b", 2);
+    assert_eq!(file.matches(&format!("{CTX_CANARY}-b")).count(), 1, "the text is kept while the setting is on");
+    assert!(!file.contains(&format!("{CTX_CANARY}-a")));
+    // The same value again changes nothing.
+    assert_eq!(
+        service.apply_settings(&setting(false, true)),
+        holzwave_core::ai::service::SettingsEffect { cancelled: 0, scrub_started: false }
+    );
+    // Switching it off rewrites the files on a thread of its own.
+    assert!(service.scrub_report().is_none());
+    let effect = service.apply_settings(&setting(false, false));
+    assert!(effect.scrub_started);
+    assert!(common::wait_until(Duration::from_secs(5), || service.scrub_report().is_some()));
+    let report = service.scrub_report().expect("a report");
+    assert!(!report.failed && report.rewritten >= 1, "{report:?}");
+    assert!(!chat_file(&rig, &chat).contains(&format!("{CTX_CANARY}-b")), "the text is gone from the file");
+    // And a later context is a marker again.
+    let file = say_with("c", 3);
+    assert!(!file.contains(&format!("{CTX_CANARY}-c")));
+    assert!(!service.apply_settings(&setting(false, false)).scrub_started, "nothing changed");
+    assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+
+    // Tool output follows the same switch as terminal context.
+    let tools = Rig::on_disk("svc-persist-tools");
+    let service = AiService::builder(tools.store.clone(), tools.sink.clone() as Arc<dyn AiSink>, &tools.config_dir)
+        .tool_host(Arc::new(ReadHost::new(&format!("{CTX_CANARY}-tool"))))
+        .build();
+    let mut provider = ScriptedProvider::new("scripted");
+    for _ in 0..2 {
+        provider = provider
+            .with_turn(
+                Script::new()
+                    .tool_call("call_1", "read_file", json!({ "path": "/srv/notes.txt" }))
+                    .stop(StopReason::ToolUse),
+            )
+            .with_turn(Script::reply("done"));
+    }
+    register(&service, "scripted", provider);
+    for keep in [false, true] {
+        service.apply_settings(&setting(false, keep));
+        let chat = service.new_conversation().expect("a chat id");
+        send_to(&service, &chat, "scripted", "read the notes", 1);
+        assert!(common::wait_until(Duration::from_secs(5), || tools.sink.kinds(&chat).contains(&"tool_proposed")));
+        let card = service.approvals().pending(chat.as_str()).remove(0);
+        service.approvals().decide(chat.as_str(), &card.call_id, Decision::Allow, &card.hash).expect("decided");
+        assert!(tools.sink.wait_ended(&chat, 1, Duration::from_secs(5)));
+        assert_eq!(tools.sink.last_end(&chat).end, "done");
+        let file = chat_file(&tools, &chat);
+        assert_eq!(
+            file.contains(&format!("{CTX_CANARY}-tool")),
+            keep,
+            "tool output is stored only while the setting is on"
+        );
+        assert_eq!(file.contains(NOT_STORED), !keep);
+    }
+
+    // A store that fails: the report says so.
+    let (rig, _) = scrub_rig("svc-scrub-fail", ScrubMode::Fail);
+    let service = rig.service();
+    service.apply_settings(&setting(false, true));
+    assert!(service.apply_settings(&setting(false, false)).scrub_started);
+    assert!(common::wait_until(Duration::from_secs(5), || service.scrub_report().is_some()));
+    assert_eq!(service.scrub_report().map(|report| report.failed), Some(true));
+
+    // A store that waits: a second switch-off does not start a second rewrite.
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (rig, store) = scrub_rig("svc-scrub-wait", ScrubMode::Block(gate.clone()));
+    let service = rig.service();
+    service.apply_settings(&setting(false, true));
+    assert!(service.apply_settings(&setting(false, false)).scrub_started);
+    assert!(common::wait_until(Duration::from_secs(5), || store.calls.load(Ordering::SeqCst) == 1));
+    service.apply_settings(&setting(false, true));
+    assert!(!service.apply_settings(&setting(false, false)).scrub_started, "one rewrite runs at a time");
+    assert!(service.scrub_report().is_none(), "the rewrite has not ended");
+    *lock(&gate.0) = true;
+    gate.1.notify_all();
+    assert!(common::wait_until(Duration::from_secs(5), || service.scrub_report().is_some()));
+    assert_eq!(store.calls.load(Ordering::SeqCst), 1);
+}
+
+// ---- restart ------------------------------------------------------------------------------------------------------
+
+fn fixed_clock() -> i64 {
+    1_800_000_000
+}
+
+#[test]
+fn a_restarted_service_continues_a_stored_chat_repairs_a_dangling_call_and_never_reuses_an_id() {
+    let fake = FakeHttp::start(vec![answer(&["Hello"], Duration::ZERO)]);
+    let rig = Rig::on_disk("svc-restart");
+    rig.profile(&format!("{}/v1", fake.base()), "test-model", None);
+    let build = || {
+        AiService::builder(rig.store.clone(), rig.sink.clone() as Arc<dyn AiSink>, &rig.config_dir)
+            .vault(rig.vault())
+            .clock(fixed_clock)
+            .build()
+    };
+    let first = build();
+    let chat = first.new_conversation().expect("a chat id");
+    let before =
+        first.send(SendRequest::new(chat.clone(), "first run".to_owned(), 1).profile("local")).expect("accepted");
+    assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(5)));
+    assert_eq!(first.shutdown(Duration::from_secs(1)), 0);
+    drop(first);
+
+    // A second service over the same directory with the same clock draws the same first number; the chat's ids stay unique.
+    let second = build();
+    let reopened = second.snapshot(&chat).expect("a snapshot");
+    assert_eq!(reopened.messages.len(), 2, "both stored messages are there");
+    assert!(!reopened.running && reopened.title == "first run");
+    let after =
+        second.send(SendRequest::new(chat.clone(), "second run".to_owned(), 1)).expect("accepted: the chat is pinned");
+    assert_ne!(after.turn, before.turn, "the number of the first run is not used again");
+    assert!(rig.sink.wait_ended(&chat, 2, Duration::from_secs(5)));
+    let stored = rig.store.load(&chat).expect("a readable store").expect("stored");
+    let mut ids: Vec<&str> = stored.messages.iter().map(|message| message.id.as_str()).collect();
+    assert_eq!(ids.len(), 4);
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 4, "every message id is unique: {ids:?}");
+    assert_eq!(fake.accepted(), 2);
+
+    // A chat that was interrupted holds a call with no result; the snapshot and the next request show the repair.
+    let broken = second.new_conversation().expect("a chat id");
+    let mut stored = Conversation::new(broken.clone(), 100);
+    stored.profile = Some("local".to_owned());
+    stored.model = Some("test-model".to_owned());
+    stored.title = "interrupted".to_owned();
+    stored.messages = vec![
+        Message::user_text("m5-user", "read it", 100),
+        Message::new(
+            "m5-1",
+            Role::Assistant,
+            vec![Part::ToolCall(ToolCall {
+                id: "call_1".to_owned(),
+                name: "read_file".to_owned(),
+                args: json!({ "path": "/srv/a" }),
+            })],
+            101,
+        ),
+    ];
+    rig.store.save(&stored, ContextStorage::Marker).expect("a chat is stored");
+    let state = second.snapshot(&broken).expect("a snapshot");
+    assert_eq!(state.messages[1].status, MessageStatus::Interrupted);
+    let repair = state.messages.last().expect("a repair message");
+    let ChatPart::ToolResult { content, is_error, .. } = &repair.parts[0] else {
+        panic!("a tool result, not {:?}", repair.parts[0])
+    };
+    assert_eq!((content.as_str(), *is_error), (INTERRUPTED_RESULT, true));
+    second.send(SendRequest::new(broken.clone(), "go on".to_owned(), 1)).expect("accepted");
+    assert!(rig.sink.wait_ended(&broken, 1, Duration::from_secs(5)));
+    assert!(fake.seen()[2].body_text().contains(INTERRUPTED_RESULT), "the next request holds the repaired transcript");
+    let repaired = rig.store.load(&broken).expect("a readable store").expect("stored");
+    let ids: Vec<&str> = repaired.messages.iter().map(|message| message.id.as_str()).collect();
+    assert!(ids.contains(&"m5-1-repair"), "the saved chat holds the repair: {ids:?}");
+    assert_eq!(repaired.messages[1].status, MessageStatus::Interrupted);
+
+    // A chat id with no file is an empty state.
+    let unknown = second.new_conversation().expect("a chat id");
+    let empty = second.snapshot(&unknown).expect("a snapshot");
+    assert!(empty.messages.is_empty() && empty.title.is_empty() && empty.turn == 0);
+
+    // The list is newest first.
+    for (name, updated) in [("old", 10), ("new", 30), ("mid", 20)] {
+        let mut listed = Conversation::new(ConversationId::parse(name).expect("an id"), updated);
+        listed.title = name.to_owned();
+        rig.store.save(&listed, ContextStorage::Marker).expect("stored");
+    }
+    let listing = second.list_conversations().expect("a listing");
+    assert!(listing.chats.windows(2).all(|pair| pair[0].updated >= pair[1].updated), "newest first");
+    let order: Vec<&str> =
+        listing.chats.iter().map(|listed| listed.id.as_str()).filter(|id| ["old", "new", "mid"].contains(id)).collect();
+    assert_eq!(order, ["new", "mid", "old"]);
+}
+
+// ---- titles -------------------------------------------------------------------------------------------------------
+
+#[test]
+fn titles_are_the_first_line_of_the_user_text_scrubbed_and_cut() {
+    let line = "abcdefghij".repeat(20);
+    let long = format!("  \n {line} \n second line");
+    assert_eq!(title_from(&long), format!("{}\u{2026}", "abcdefghij".repeat(6)));
+    assert_eq!(title_from("short title\nsecond"), "short title");
+    assert_eq!(title_from(&"x".repeat(60)), "x".repeat(60), "a line of exactly 60 characters is not cut");
+    let dirty = title_from("one\u{202e}two\u{200b}three\u{1b}four");
+    assert!(!dirty.chars().any(|c| matches!(c, '\u{202e}' | '\u{200b}' | '\u{1b}')), "{dirty:?}");
+    assert!(dirty.starts_with("one") && dirty.ends_with("four"));
+    assert_eq!(title_from(" \n\t \n"), "");
+
+    // A chat keeps its first title, and the title of the live state and of the stored chat are the same. No request is
+    // made for a title.
+    let fake = FakeHttp::start(vec![answer(&["Hello"], Duration::ZERO)]);
+    let rig = Rig::new("svc-titles");
+    rig.profile(&format!("{}/v1", fake.base()), "test-model", None);
+    let service = rig.service();
+    let chat = service.new_conversation().expect("a chat id");
+    rig.say(&service, &chat, &format!("How do I list files?\nsecond line {TEXT_CANARY}"));
+    rig.say(&service, &chat, "something else entirely");
+    let stored = rig.store.load(&chat).expect("a readable store").expect("stored");
+    assert_eq!(stored.title, "How do I list files?");
+    assert_eq!(service.snapshot(&chat).expect("a snapshot").title, stored.title);
+    let folded = Fold::of(
+        &chat,
+        &rig.sink.of(&chat).into_iter().filter(|event| event.turn == rig.sink.of(&chat)[0].turn).collect::<Vec<_>>(),
+    );
+    assert_eq!(folded.state.title, stored.title);
+    assert_eq!(fake.accepted(), 2, "two sends, two requests, none for a title");
+}
+
+// ---- revocation and local only ------------------------------------------------------------------------------------
+
+/// A scripted provider that says `partial` and then goes quiet, with these capabilities.
+fn quiet_provider(id: &str, locality: Locality) -> ScriptedProvider {
+    let capabilities = Capabilities {
+        tools: false,
+        reasoning: false,
+        vision: false,
+        context_tokens: Some(32_768),
+        max_output_tokens: Some(4096),
+        locality,
+    };
+    ScriptedProvider::new(id)
+        .with_capabilities(capabilities)
+        .with_turn(Script::new().text("partial").stall(Duration::from_secs(30)))
+}
+
+#[test]
+fn revoking_a_profile_or_switching_local_only_on_cancels_the_turns_it_forbids() {
+    // Removing a profile and clearing its key stop the turns that use it, and only those.
+    let fake = FakeHttp::start(vec![Reply::Hang]);
+    let rig = Rig::new("svc-revoke");
+    let vault = rig.vault();
+    let mut config = AiConfig::default();
+    let base = format!("{}/v1", fake.base());
+    add_profile(&mut config, &vault, "Alpha", Wire::OpenAiChat, &base, "test-model", Some(KEY_CANARY));
+    add_profile(&mut config, &vault, "Beta", Wire::OpenAiChat, &base, "test-model", Some(KEY_CANARY));
+    config.save(&rig.config_dir).expect("ai.json");
+    let service = rig.service();
+    let chats: Vec<ConversationId> = (0..3).map(|_| service.new_conversation().expect("a chat id")).collect();
+    for (chat, profile) in chats.iter().zip(["alpha", "alpha", "beta"]) {
+        send_to(&service, chat, profile, "hang", 1);
+    }
+    assert!(fake.wait_accepted(3, Duration::from_secs(5)), "all three requests are out");
+    assert_eq!(service.active_turns(), 3);
+
+    let removal = service.remove_profile("alpha").expect("removed");
+    assert!(removal.removed && removal.key_deleted);
+    assert!(
+        rig.sink.wait_ended(&chats[0], 1, Duration::from_secs(1))
+            && rig.sink.wait_ended(&chats[1], 1, Duration::from_secs(1))
+    );
+    assert_eq!(rig.sink.last_end(&chats[0]).end, "cancelled");
+    assert_eq!(rig.sink.last_end(&chats[1]).end, "cancelled");
+    assert_eq!(rig.sink.ended(&chats[2]), 0, "a turn of another profile keeps running");
+    assert_eq!(service.active_turns(), 1);
+    let names: Vec<String> = service.profiles().into_iter().map(|profile| profile.id).collect();
+    assert_eq!(names, ["beta"]);
+    assert!(rig.secrets.get(&account("alpha", KeySlot::Provider)).expect("a readable keychain").is_none());
+
+    service.clear_key("beta", KeySlot::Provider).expect("cleared");
+    assert!(rig.sink.wait_ended(&chats[2], 1, Duration::from_secs(1)));
+    assert_eq!(rig.sink.last_end(&chats[2]).end, "cancelled");
+    assert_eq!(service.profiles()[0].key, KeyStatus::NotSet);
+    assert!(rig.secrets.get(&account("beta", KeySlot::Provider)).expect("a readable keychain").is_none());
+
+    // Switching "local only" on stops the turns whose destination leaves the device, and refuses new ones.
+    let rig = Rig::new("svc-local-only");
+    let service = rig.service();
+    let cloud =
+        register(&service, "cloud", quiet_provider("cloud", Locality::Cloud).with_turn(Script::reply("now allowed")));
+    let device = register(&service, "device", quiet_provider("device", Locality::OnDevice));
+    let (cloud_chat, device_chat) =
+        (service.new_conversation().expect("a chat id"), service.new_conversation().expect("a chat id"));
+    send_to(&service, &cloud_chat, "cloud", "hello", 1);
+    send_to(&service, &device_chat, "device", "hello", 2);
+    assert!(common::wait_until(Duration::from_secs(5), || cloud.calls() == 1 && device.calls() == 1));
+    let effect = service.apply_settings(&setting(true, false));
+    assert_eq!((effect.cancelled, effect.scrub_started), (1, false));
+    assert!(rig.sink.wait_ended(&cloud_chat, 1, Duration::from_secs(1)));
+    assert_eq!(rig.sink.last_end(&cloud_chat).end, "cancelled");
+    assert_eq!(rig.sink.ended(&device_chat), 0, "an on-device turn keeps running");
+    assert_eq!(service.apply_settings(&setting(true, false)).cancelled, 0, "the same setting again stops nothing");
+
+    let refused = service.new_conversation().expect("a chat id");
+    send_to(&service, &refused, "cloud", "hello again", 1);
+    assert!(rig.sink.wait_ended(&refused, 1, Duration::from_secs(5)));
+    let end = rig.sink.last_end(&refused);
+    let error = end.error.expect("an error");
+    assert_eq!((end.end.as_str(), error.class.as_str(), error.text.as_str()), ("failed", "policy", "local only is on"));
+    assert_eq!(cloud.calls(), 1, "the provider was not called");
+
+    service.apply_settings(&setting(false, false));
+    let allowed = service.new_conversation().expect("a chat id");
+    send_to(&service, &allowed, "cloud", "hello once more", 1);
+    assert!(rig.sink.wait_ended(&allowed, 1, Duration::from_secs(5)));
+    assert_eq!(rig.sink.last_end(&allowed).end, "done");
+    assert_eq!(service.shutdown(Duration::from_secs(5)), 0);
+}
+
+// ---- profile calls ------------------------------------------------------------------------------------------------
+
+#[test]
+fn profile_calls_save_after_every_change_and_no_call_returns_a_key() {
+    let fake = FakeHttp::start(vec![Reply::Close]);
+    let rig = Rig::new("svc-profiles");
+    let service = rig.service();
+    let file = rig.config_dir.join("ai.json");
+    let base = format!("{}/v1", fake.base());
+
+    let mut input = ProfileInput::new("Workstation", Preset::Custom);
+    input.wire = Some(Wire::OpenAiChat);
+    input.base_url = base.clone();
+    input.model = "test-model".to_owned();
+    let id = service.save_profile(input).expect("saved");
+    assert_eq!(id, "workstation");
+    let text = fs::read_to_string(&file).expect("ai.json is written");
+    let (parsed, status) = AiConfig::from_json(&text);
+    assert!(matches!(status, holzwave_core::layout::LoadStatus::Clean));
+    assert!(parsed.get("workstation").is_some_and(|profile| !profile.key_set));
+    assert!(!text.contains(KEY_CANARY));
+
+    service.set_key("workstation", KeySlot::Provider, ApiKey::new(KEY_CANARY.to_owned())).expect("the key is saved");
+    let views = service.profiles();
+    assert_eq!(views[0].key, KeyStatus::Present);
+    let text = fs::read_to_string(&file).expect("ai.json");
+    assert!(
+        AiConfig::from_json(&text).0.get("workstation").is_some_and(|profile| profile.key_set),
+        "the marker is saved"
+    );
+    assert!(!text.contains(KEY_CANARY) && !to_text(&views).contains(KEY_CANARY));
+    let entry = rig.secrets.get(&account("workstation", KeySlot::Provider)).expect("a keychain").expect("an entry");
+    assert!(entry.contains(KEY_CANARY), "the key lives in the keychain");
+
+    service.clear_key("workstation", KeySlot::Provider).expect("cleared");
+    assert_eq!(service.profiles()[0].key, KeyStatus::NotSet);
+    assert!(rig.secrets.get(&account("workstation", KeySlot::Provider)).expect("a keychain").is_none());
+    let removal = service.remove_profile("workstation").expect("removed");
+    assert!(removal.removed);
+    assert!(AiConfig::from_json(&fs::read_to_string(&file).expect("ai.json")).0.profiles().is_empty());
+
+    // The id of a registered provider is taken, whether it is typed or made from the name.
+    register(&service, "scripted", ScriptedProvider::new("scripted"));
+    let mut typed = ProfileInput::new("Anything", Preset::Custom);
+    typed.id = Some("scripted".to_owned());
+    typed.wire = Some(Wire::OpenAiChat);
+    typed.base_url = base.clone();
+    assert!(matches!(service.save_profile(typed), Err(ServiceError::IdTaken)));
+    let mut named = ProfileInput::new("Scripted", Preset::Custom);
+    named.wire = Some(Wire::OpenAiChat);
+    named.base_url = base;
+    assert!(matches!(service.save_profile(named), Err(ServiceError::IdTaken)));
+    assert!(service.profiles().is_empty(), "a refused profile is not kept");
+
+    // A refusal shows its code and a fixed phrase, never the input.
+    let bad = ProfileInput::new(format!("bad\u{7}name {TEXT_CANARY}"), Preset::Custom);
+    let error = service.save_profile(bad).expect_err("a name with a control character");
+    assert_eq!(error.code(), "profile");
+    assert!(error.to_string().contains(&ProfileError::Name.to_string()) && !error.to_string().contains(TEXT_CANARY));
+    assert!(!format!("{error:?}").contains(TEXT_CANARY));
+    let error =
+        service.set_key("nobody", KeySlot::Provider, ApiKey::new(KEY_CANARY.to_owned())).expect_err("no such profile");
+    assert_eq!(error.code(), "key");
+    assert!(matches!(error, ServiceError::Key(KeyError::UnknownProfile)));
+    assert!(!error.to_string().contains(KEY_CANARY) && !format!("{error:?}").contains(KEY_CANARY));
+    assert_eq!(fake.accepted(), 0, "the profile calls open no connection");
+
+    // A damaged file starts the service with no profiles, a note that quotes nothing, and the bytes kept aside.
+    let damaged = Rig::new("svc-damaged");
+    fs::write(damaged.config_dir.join("ai.json"), format!("{{\"profiles\": [ {TEXT_CANARY}")).expect("a damaged file");
+    let service = damaged.service();
+    assert!(service.profiles().is_empty());
+    let notes = service.config_notes();
+    assert!(!notes.is_empty() && notes.iter().all(|note| !note.contains(TEXT_CANARY)), "{notes:?}");
+    let kept = fs::read_to_string(damaged.config_dir.join("ai.json.bad")).expect("the bytes are kept");
+    assert!(kept.contains(TEXT_CANARY));
+}
+
+// ---- Debug and views ----------------------------------------------------------------------------------------------
+
+#[test]
+fn no_service_type_prints_text_or_a_key_in_debug_and_no_view_carries_a_native_turn_or_stored_context() {
+    let rig = Rig::new("svc-debug");
+    let base = "http://127.0.0.1:9/v1";
+    rig.profile(base, "test-model", Some(KEY_CANARY));
+    let builder =
+        AiService::builder(rig.store.clone(), rig.sink.clone() as Arc<dyn AiSink>, &rig.config_dir).vault(rig.vault());
+    let shown = format!("{builder:?}{builder:#?}");
+    let service = builder.build();
+    let chat = service.new_conversation().expect("a chat id");
+    let approved = approve(&service, "local", &format!("output {CTX_CANARY}"));
+    let request = SendRequest::new(chat.clone(), format!("question {TEXT_CANARY}"), 3)
+        .profile("local")
+        .context(vec![approved.clone()]);
+    let ticket = TurnTicket { conversation: chat.clone(), turn: 5 };
+    let errors = [
+        ServiceError::EmptyText,
+        ServiceError::TextTooLong,
+        ServiceError::Busy,
+        ServiceError::TooManyTurns,
+        ServiceError::ShuttingDown,
+        ServiceError::NoProfile,
+        ServiceError::ContextTooMany,
+        ServiceError::ContextDuplicate,
+        ServiceError::Spawn,
+        ServiceError::Store(StoreError::Io(format!("{KEY_CANARY} {TEXT_CANARY}"))),
+        ServiceError::Profile(ProfileError::Name),
+        ServiceError::Key(KeyError::Invalid("the key is empty")),
+        ServiceError::ConfigWrite,
+        ServiceError::IdTaken,
+    ];
+    let mut shown = shown;
+    shown.push_str(&format!("{service:?}{service:#?}{request:?}{request:#?}{ticket:?}{ticket:#?}"));
+    for error in &errors {
+        shown.push_str(&format!("{error:?}{error:#?}{error}"));
+    }
+
+    // Every kind of event, a state and its parts, with the canaries in every text field.
+    let mut message = Message::new(
+        "m1-user",
+        Role::User,
+        vec![
+            Part::Context(ContextNote::for_approved(&approved, Some(format!("stored {CTX_CANARY}")))),
+            Part::Text { text: format!("question {TEXT_CANARY}") },
+            Part::ToolCall(ToolCall {
+                id: "c1".to_owned(),
+                name: "read_file".to_owned(),
+                args: json!({ "path": TEXT_CANARY }),
+            }),
+        ],
+        100,
+    );
+    message.native = Some(Opaque { wire: "anthropic".to_owned(), json: json!({ "signature": "NATIVE-BLOB" }) });
+    let view = ChatMessage::from_message(&message);
+    let route = Route {
+        profile: "local".to_owned(),
+        model: "test-model".to_owned(),
+        host: Some("127.0.0.1:9".to_owned()),
+        locality: Locality::Loopback,
+    };
+    let end = EndView {
+        end: "failed".to_owned(),
+        error: Some(ErrorView { class: "server".to_owned(), text: format!("{TEXT_CANARY} {KEY_CANARY}") }),
+        rounds: 1,
+        usage: Usage::default(),
+        saved: true,
+    };
+    let kinds = vec![
+        AiEventKind::TurnStarted { message: view.clone(), route: route.clone() },
+        AiEventKind::Delta { text: TEXT_CANARY.to_owned() },
+        AiEventKind::Reasoning { text: TEXT_CANARY.to_owned() },
+        AiEventKind::Usage(Usage::default()),
+        AiEventKind::Trimmed(Trimmed { results: 1, exchanges: 1 }),
+        AiEventKind::Message { message: view.clone() },
+        AiEventKind::ToolProposed { pending: pending_card("c1") },
+        AiEventKind::ToolResult {
+            call_id: "c1".to_owned(),
+            tool: "read_file".to_owned(),
+            content: TEXT_CANARY.to_owned(),
+            is_error: false,
+            redactions: 0,
+        },
+        AiEventKind::TurnEnded(end.clone()),
+    ];
+    let mut state = ChatState::new("c1");
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let event = event(1, index as u64 + 1, kind);
+        shown.push_str(&format!("{event:?}{event:#?}"));
+        state.apply(&event);
+    }
+    state.partial = Partial { text: TEXT_CANARY.to_owned(), reasoning: TEXT_CANARY.to_owned() };
+    shown.push_str(&format!("{state:?}{state:#?}{view:?}{view:#?}{route:?}{end:?}{end:#?}"));
+    for part in &view.parts {
+        shown.push_str(&format!("{part:?}{part:#?}"));
+    }
+    for canary in [KEY_CANARY, TEXT_CANARY, CTX_CANARY, "NATIVE-BLOB"] {
+        assert!(!shown.contains(canary), "{canary} is printed");
+    }
+
+    // A stored assistant message with a native turn reaches the page without it.
+    let held = service.new_conversation().expect("a chat id");
+    let mut stored = Conversation::new(held.clone(), 100);
+    let mut reply = Message::new("m1-1", Role::Assistant, vec![Part::Text { text: "an answer".to_owned() }], 101);
+    reply.native = Some(Opaque { wire: "anthropic".to_owned(), json: json!({ "signature": "NATIVE-BLOB" }) });
+    stored.messages = vec![Message::user_text("m1-user", "hello", 100), reply];
+    rig.store.save(&stored, ContextStorage::Text).expect("stored");
+    let snapshot = to_text(&service.snapshot(&held).expect("a snapshot"));
+    assert!(snapshot.contains("an answer"));
+    for word in ["NATIVE-BLOB", "native", "stored", "signature"] {
+        assert!(!snapshot.contains(word), "the snapshot holds {word}: {snapshot}");
+    }
 }
 
 /// The scratch directory of a rig, for tests that read files.

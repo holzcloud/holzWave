@@ -48,16 +48,17 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::ai::agent::{Agent, AgentEvent, Limits, TurnEnd, TurnRequest, repair_dangling};
-use crate::ai::gate::Gate;
+use crate::ai::gate::{ApprovedContext, Gate};
 use crate::ai::http::{Http, HttpConfig, Origin};
-use crate::ai::profiles::{AiConfig, KeyVault};
+use crate::ai::profiles::{AiConfig, KeyError, KeySlot, KeyVault, ProfileError, ProfileInput, ProfileView, Removal};
 use crate::ai::provider::{AiError, CancelToken, ErrorClass, Provider};
 use crate::ai::store::{ContextStorage, Conversation, ConversationId, ConversationStore, Listing, StoreError};
 use crate::ai::tools::{
     ApprovalTable, DenyPolicy, Resolved as ToolResolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput,
 };
-use crate::ai::types::{Message, Usage};
+use crate::ai::types::{ApiKey, ContextNote, Message, Part, Role, Usage};
 use crate::layout::{LoadStatus, PaneId};
+use crate::settings::Settings;
 
 pub use events::{
     AiEvent, AiEventKind, ApplyResult, ChatItem, ChatMessage, ChatPart, ChatState, EndView, ErrorView, LastTurn,
@@ -171,9 +172,9 @@ pub enum ServiceError {
     /// The conversation store refused the request.
     Store(StoreError),
     /// A profile was refused.
-    Profile(crate::ai::profiles::ProfileError),
+    Profile(ProfileError),
     /// A key was refused.
-    Key(crate::ai::profiles::KeyError),
+    Key(KeyError),
     /// The provider settings could not be written. The change stays in effect until the app closes.
     ConfigWrite,
     /// A profile or a registered provider already has this id.
@@ -229,11 +230,11 @@ impl fmt::Debug for ServiceError {
             ServiceError::Profile(error) => write!(f, "Profile({})", error.reason()),
             ServiceError::Key(error) => {
                 let name = match error {
-                    crate::ai::profiles::KeyError::NoSecureStore => "NoSecureStore",
-                    crate::ai::profiles::KeyError::Store => "Store",
-                    crate::ai::profiles::KeyError::Invalid(_) => "Invalid",
-                    crate::ai::profiles::KeyError::UnknownProfile => "UnknownProfile",
-                    crate::ai::profiles::KeyError::NoSuchSlot => "NoSuchSlot",
+                    KeyError::NoSecureStore => "NoSecureStore",
+                    KeyError::Store => "Store",
+                    KeyError::Invalid(_) => "Invalid",
+                    KeyError::UnknownProfile => "UnknownProfile",
+                    KeyError::NoSuchSlot => "NoSuchSlot",
                 };
                 write!(f, "Key({name})")
             }
@@ -259,12 +260,13 @@ pub struct SendRequest {
     pane: PaneId,
     profile: Option<String>,
     model: Option<String>,
+    context: Vec<ApprovedContext>,
 }
 
 impl SendRequest {
     /// A message for `conversation`, typed in `pane`.
     pub fn new(conversation: ConversationId, text: String, pane: PaneId) -> SendRequest {
-        SendRequest { conversation, text, pane, profile: None, model: None }
+        SendRequest { conversation, text, pane, profile: None, model: None, context: Vec::new() }
     }
 
     /// Sends through this profile and pins the chat to it.
@@ -280,6 +282,14 @@ impl SendRequest {
         self.model = Some(model.into());
         self
     }
+
+    /// Attaches context the user approved, at most [`MAX_CONTEXTS_PER_TURN`] and none twice. A context travels with
+    /// this message only: a later message does not send it again unless the user approves it again.
+    #[must_use]
+    pub fn context(mut self, context: Vec<ApprovedContext>) -> SendRequest {
+        self.context = context;
+        self
+    }
 }
 
 impl fmt::Debug for SendRequest {
@@ -290,8 +300,28 @@ impl fmt::Debug for SendRequest {
             .field("pane", &self.pane)
             .field("profile", &self.profile)
             .field("model", &self.model)
+            .field("contexts", &self.context.len())
             .finish()
     }
+}
+
+/// What `apply_settings` did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettingsEffect {
+    /// How many running turns were stopped because "local only" was switched on and their destination leaves the
+    /// device.
+    pub cancelled: usize,
+    /// Whether switching off "keep terminal context in saved chats" started the rewrite of the chat files.
+    pub scrub_started: bool,
+}
+
+/// How the rewrite of the chat files ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrubReport {
+    /// How many chats held stored context or tool output and were written again without it.
+    pub rewritten: usize,
+    /// Whether the store failed or a chat could not be looked at, so text may remain on disk.
+    pub failed: bool,
 }
 
 /// What `send` answers at once: which turn will carry the message.
@@ -311,10 +341,13 @@ struct ConfigState {
     notes: Vec<String>,
 }
 
-/// What a turn has resolved so far.
+/// What a turn has resolved so far: the profile (known from the start), then the provider and the model. A setting or
+/// a revocation that comes in while the turn runs reads it to decide whether the turn must stop.
 #[derive(Default)]
 struct TurnInfo {
     profile: Option<String>,
+    provider: Option<Arc<dyn Provider>>,
+    model: Option<String>,
 }
 
 /// One running turn, shared by the slot table, the turn thread and the callers that cancel or look at it.
@@ -359,7 +392,11 @@ struct Inner {
     sink: Arc<dyn AiSink>,
     http: Arc<Http>,
     vault: KeyVault,
+    config_dir: PathBuf,
     config: Mutex<ConfigState>,
+    /// Serialises the calls that change the profiles, so the config lock is held only to copy or to replace them and
+    /// never while the keychain is written.
+    edit: Mutex<()>,
     gate: Gate,
     approvals: ApprovalTable,
     host: Arc<dyn ToolHost>,
@@ -380,6 +417,13 @@ struct Inner {
     outbox: Mutex<VecDeque<AiEvent>>,
     delivery: Mutex<()>,
     closing: AtomicBool,
+    /// The setting "local only": turns whose destination leaves the device are stopped and refused.
+    local_only: AtomicBool,
+    /// The setting "keep terminal context in saved chats".
+    persist: AtomicBool,
+    /// Set while a scrub of the chat files runs, so a second switch-off starts none.
+    scrubbing: AtomicBool,
+    scrub_report: Mutex<Option<ScrubReport>>,
 }
 
 impl Inner {
@@ -460,7 +504,10 @@ impl Inner {
         if turn.deleted.load(Ordering::SeqCst) {
             return true;
         }
-        self.store.save(conversation, ContextStorage::Marker).is_ok()
+        // Read inside the lock: a save that starts after the switch is turned off cannot keep text, and a save that was
+        // under way is rewritten by the scrub that waits for this lock.
+        let storage = if self.persist.load(Ordering::SeqCst) { ContextStorage::Text } else { ContextStorage::Marker };
+        self.store.save(conversation, storage).is_ok()
     }
 
     /// Stops a turn: sets its token and voids the calls that wait for a decision.
@@ -469,12 +516,65 @@ impl Inner {
         self.approvals.cancel_turn(&turn.scope());
     }
 
+    /// Stops the turns that use the profile `profile`: its key or the profile itself was taken away.
+    fn revoke(&self, profile: &str) {
+        let running: Vec<Arc<Turn>> = lock(&self.turns).values().cloned().collect();
+        for turn in &running {
+            if lock(&turn.info).profile.as_deref() == Some(profile) {
+                self.stop_turn(turn);
+            }
+        }
+    }
+
+    /// Stops the turns whose destination leaves the device, judged by the provider's capabilities now. Returns how
+    /// many were stopped.
+    fn stop_leaving(&self) -> usize {
+        let running: Vec<Arc<Turn>> = lock(&self.turns).values().cloned().collect();
+        let mut stopped = 0;
+        for turn in &running {
+            let (provider, model) = {
+                let info = lock(&turn.info);
+                (info.provider.clone(), info.model.clone())
+            };
+            if let (Some(provider), Some(model)) = (provider, model)
+                && provider.capabilities(&model).locality.leaves_device()
+            {
+                self.stop_turn(turn);
+                stopped += 1;
+            }
+        }
+        stopped
+    }
+
     /// Stops every running turn.
     fn stop_all(&self) {
         let running: Vec<Arc<Turn>> = lock(&self.turns).values().cloned().collect();
         for turn in &running {
             self.stop_turn(turn);
         }
+    }
+
+    /// Changes the profiles on a copy and keeps the copy when it differs. The calls that change the profiles are
+    /// serialised by the edit lock, so the keychain is written without holding the config lock that every send needs.
+    /// A change is saved to `ai.json`; when that fails the change stays in effect until the app closes. A profile whose
+    /// id a registered provider has taken is refused.
+    fn amend<T>(&self, change: impl FnOnce(&mut AiConfig) -> T) -> Amended<T> {
+        let _edit = lock(&self.edit);
+        let current = self.config_copy();
+        let mut next = current.clone();
+        let output = change(&mut next);
+        if next == current {
+            return Amended { output, changed: false, outcome: Ok(()) };
+        }
+        {
+            let mut state = lock(&self.config);
+            if next.profiles().iter().any(|profile| self.registry.contains(&profile.id)) {
+                return Amended { output, changed: false, outcome: Err(ServiceError::IdTaken) };
+            }
+            state.config = next.clone();
+        }
+        let outcome = next.save(&self.config_dir).map_err(|_| ServiceError::ConfigWrite);
+        Amended { output, changed: true, outcome }
     }
 
     /// The current profiles, copied so that no lock is held while the keychain is read.
@@ -739,7 +839,9 @@ impl ServiceBuilder {
             sink: self.sink,
             http,
             vault: self.vault,
+            config_dir: self.config_dir,
             config: Mutex::new(ConfigState { config, notes }),
+            edit: Mutex::new(()),
             gate: Gate::new(),
             approvals: ApprovalTable::new(self.policy),
             host: self.host,
@@ -753,6 +855,10 @@ impl ServiceBuilder {
             outbox: Mutex::new(VecDeque::new()),
             delivery: Mutex::new(()),
             closing: AtomicBool::new(false),
+            local_only: AtomicBool::new(false),
+            persist: AtomicBool::new(false),
+            scrubbing: AtomicBool::new(false),
+            scrub_report: Mutex::new(None),
         };
         AiService { inner: Arc::new(inner) }
     }
@@ -847,6 +953,16 @@ impl AiService {
         if request.text.len() > MAX_USER_TEXT_BYTES {
             return Err(ServiceError::TextTooLong);
         }
+        if request.context.len() > MAX_CONTEXTS_PER_TURN {
+            return Err(ServiceError::ContextTooMany);
+        }
+        let twice =
+            request.context.iter().enumerate().any(|(index, context)| {
+                request.context[..index].iter().any(|earlier| earlier.hash() == context.hash())
+            });
+        if twice {
+            return Err(ServiceError::ContextDuplicate);
+        }
         let turn = inner.reserve(&request.conversation, request.pane)?;
         let mut slot = Slot { inner, turn: &turn, armed: true };
 
@@ -874,7 +990,14 @@ impl AiService {
         // The slot is new, so the cell is empty.
         let _ = turn.emitter.set(emitter);
 
-        let job = Job { conversation, text: request.text, profile, model: request.model, prefix: format!("m{number}") };
+        let job = Job {
+            conversation,
+            text: request.text,
+            profile,
+            model: request.model,
+            prefix: format!("m{number}"),
+            context: request.context,
+        };
         let thread_inner = Arc::clone(inner);
         let thread_turn = Arc::clone(&turn);
         let started = thread::Builder::new()
@@ -885,6 +1008,87 @@ impl AiService {
         }
         slot.armed = false;
         Ok(TurnTicket { conversation: request.conversation, turn: number })
+    }
+
+    // ---- providers and profiles -----------------------------------------------------------------------------
+
+    /// The profiles as the settings dialog shows them: a status for each key, never a key. This reads the keychain for
+    /// every profile whose marker says a key was saved, so call it when the dialog opens and not at launch.
+    pub fn profiles(&self) -> Vec<ProfileView> {
+        self.inner.config_copy().views(&self.inner.vault)
+    }
+
+    /// Makes a profile or changes one, saves `ai.json` and returns the id.
+    pub fn save_profile(&self, input: ProfileInput) -> Result<String, ServiceError> {
+        if input.id.as_deref().is_some_and(|id| self.inner.registry.contains(id)) {
+            return Err(ServiceError::IdTaken);
+        }
+        let amended = self.inner.amend(|config| config.upsert(input));
+        match amended.output {
+            Err(error) => Err(ServiceError::Profile(error)),
+            Ok(id) => amended.outcome.map(|()| id),
+        }
+    }
+
+    /// Removes a profile and its keys, saves `ai.json` and stops the turns that use the profile.
+    pub fn remove_profile(&self, id: &str) -> Result<Removal, ServiceError> {
+        let vault = &self.inner.vault;
+        let amended = self.inner.amend(|config| config.remove(id, vault));
+        if amended.output.removed {
+            self.inner.revoke(id);
+        }
+        amended.outcome.map(|()| amended.output)
+    }
+
+    /// Saves a key in the keychain. The key is handed on at once and is not kept; nothing in the service returns one.
+    pub fn set_key(&self, id: &str, slot: KeySlot, key: ApiKey) -> Result<(), ServiceError> {
+        let vault = &self.inner.vault;
+        let amended = self.inner.amend(|config| config.set_key(vault, id, slot, key));
+        match amended.output {
+            Err(error) => Err(ServiceError::Key(error)),
+            Ok(()) => amended.outcome,
+        }
+    }
+
+    /// Removes a key from the keychain and stops the turns that use the profile.
+    pub fn clear_key(&self, id: &str, slot: KeySlot) -> Result<(), ServiceError> {
+        let vault = &self.inner.vault;
+        let amended = self.inner.amend(|config| config.clear_key(vault, id, slot));
+        if amended.changed {
+            self.inner.revoke(id);
+        }
+        match amended.output {
+            Err(error) => Err(ServiceError::Key(error)),
+            Ok(()) => amended.outcome,
+        }
+    }
+
+    // ---- settings -------------------------------------------------------------------------------------------
+
+    /// Applies the two settings the service reads: `ai_local_only` and `ai_persist_context`. Both start off, so call
+    /// this at launch and on every change of the settings.
+    ///
+    /// Switching "local only" on stops the running turns whose destination leaves the device. Switching "keep terminal
+    /// context in saved chats" off rewrites the chat files without it, on a thread of its own; the result is read with
+    /// [`AiService::scrub_report`]. A change that is seen in this run only: text that an older run left in a chat file
+    /// stays until the setting is switched off again.
+    pub fn apply_settings(&self, settings: &Settings) -> SettingsEffect {
+        let inner = &self.inner;
+        let was_local = inner.local_only.swap(settings.ai_local_only, Ordering::SeqCst);
+        let was_persisting = inner.persist.swap(settings.ai_persist_context, Ordering::SeqCst);
+        let mut effect = SettingsEffect { cancelled: 0, scrub_started: false };
+        if !was_local && settings.ai_local_only {
+            effect.cancelled = inner.stop_leaving();
+        }
+        if was_persisting && !settings.ai_persist_context {
+            effect.scrub_started = start_scrub(inner);
+        }
+        effect
+    }
+
+    /// How the last rewrite of the chat files ended; `None` while one runs and before the first.
+    pub fn scrub_report(&self) -> Option<ScrubReport> {
+        *lock(&self.inner.scrub_report)
     }
 
     /// What loading `ai.json` had to say: the notes of a repair or the reason of a reset, and nothing for a clean
@@ -958,7 +1162,7 @@ impl AiService {
             && id.len() <= 40
             && id.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'));
         if !valid {
-            return Err(ServiceError::Profile(crate::ai::profiles::ProfileError::Id));
+            return Err(ServiceError::Profile(ProfileError::Id));
         }
         // The config lock is held while the registry is asked, so a profile cannot take the id in between.
         let config = lock(&self.inner.config);
@@ -1003,6 +1207,43 @@ impl Drop for Slot<'_> {
     }
 }
 
+/// What `Inner::amend` did.
+struct Amended<T> {
+    /// What the change returned.
+    output: T,
+    /// Whether the profiles differ now.
+    changed: bool,
+    /// Whether the new profiles were saved.
+    outcome: Result<(), ServiceError>,
+}
+
+/// Starts the rewrite of the chat files without private text, unless one is running. The thread takes the write lock,
+/// so a save that was under way finishes first and is rewritten, and a save that starts later sees the new setting.
+fn start_scrub(inner: &Arc<Inner>) -> bool {
+    if inner.scrubbing.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    *lock(&inner.scrub_report) = None;
+    let worker = Arc::clone(inner);
+    let started = thread::Builder::new().name("ai-scrub".to_owned()).spawn(move || {
+        let report = {
+            let _write = lock(&worker.write_lock);
+            match worker.store.scrub_private_text() {
+                Ok(scrub) => ScrubReport { rewritten: scrub.rewritten, failed: !scrub.notes.is_empty() },
+                Err(_) => ScrubReport { rewritten: 0, failed: true },
+            }
+        };
+        *lock(&worker.scrub_report) = Some(report);
+        worker.scrubbing.store(false, Ordering::SeqCst);
+    });
+    if started.is_err() {
+        *lock(&inner.scrub_report) = Some(ScrubReport { rewritten: 0, failed: true });
+        inner.scrubbing.store(false, Ordering::SeqCst);
+        return false;
+    }
+    true
+}
+
 // ---- the turn thread ----------------------------------------------------------------------------------------------
 
 /// What the turn thread is given.
@@ -1012,6 +1253,7 @@ struct Job {
     profile: String,
     model: Option<String>,
     prefix: String,
+    context: Vec<ApprovedContext>,
 }
 
 /// A provider chosen for a turn.
@@ -1020,6 +1262,11 @@ struct Chosen {
     host: Option<String>,
     /// The model the profile names.
     model: Option<String>,
+    /// Whether the provider was registered by id instead of built from a profile.
+    registered: bool,
+    /// Whether "local only" was on when the profile was resolved. Then the chokepoint judges the real address of every
+    /// request, and the service has nothing to add.
+    local_only: bool,
 }
 
 /// An end that carries a fixed phrase of the service instead of the text of an error.
@@ -1080,10 +1327,17 @@ impl Inner {
     fn provider_for(&self, profile: &str) -> Result<Chosen, AiError> {
         // A registered provider is used as it is, before any profile; its model defaults to its own id.
         if let Some(provider) = self.registry.get(profile) {
-            return Ok(Chosen { provider, host: None, model: Some(profile.to_owned()) });
+            return Ok(Chosen {
+                provider,
+                host: None,
+                model: Some(profile.to_owned()),
+                registered: true,
+                local_only: self.local_only.load(Ordering::SeqCst),
+            });
         }
         let config = self.config_copy();
-        let resolved = config.resolve(profile, &self.vault, false)?;
+        let local_only = self.local_only.load(Ordering::SeqCst);
+        let resolved = config.resolve(profile, &self.vault, local_only)?;
         let origin = Origin::from_scope(resolved.scope()).map_err(|_| {
             AiError::Policy(crate::ai::provider::Detail::new("the address of the provider cannot be used"))
         })?;
@@ -1091,14 +1345,18 @@ impl Inner {
         let host = resolved.host_label().to_owned();
         let model = resolved.model().to_owned();
         let provider = resolved.into_provider(adapter, Arc::clone(&self.http));
-        Ok(Chosen { provider: Arc::new(provider), host: Some(host), model: Some(model) })
+        Ok(Chosen { provider: Arc::new(provider), host: Some(host), model: Some(model), registered: false, local_only })
     }
 }
 
 /// Runs one turn on its thread and returns how it ended. It always returns an end; a panic is the guard's business.
 fn turn_body(inner: &Arc<Inner>, turn: &Arc<Turn>, emitter: &Emitter, job: Job) -> EndView {
-    let Job { mut conversation, text, profile, model: requested, prefix } = job;
+    let Job { mut conversation, text, profile, model: requested, prefix, context } = job;
 
+    // A context is bound to the provider the user approved it for. Nothing is resolved, stored or sent before this.
+    if context.iter().any(|approved| approved.provider() != profile) {
+        return refused(ErrorClass::Policy, "the shared context was approved for another provider", true);
+    }
     let chosen = match inner.provider_for(&profile) {
         Ok(chosen) => chosen,
         Err(error) => return failed(&error, true),
@@ -1114,9 +1372,34 @@ fn turn_body(inner: &Arc<Inner>, turn: &Arc<Turn>, emitter: &Emitter, job: Job) 
         return refused(ErrorClass::InvalidRequest, "the model name is not valid", true);
     }
 
+    // The provider is recorded before the setting is read: a switch that comes in later finds the provider and stops
+    // the turn, and a switch that came in earlier is seen here. A provider built from a profile is judged by the
+    // chokepoint when "local only" was already on at resolution; a registered provider has no chokepoint to do it.
+    let capabilities = chosen.provider.capabilities(&model);
+    {
+        let mut info = lock(&turn.info);
+        info.provider = Some(Arc::clone(&chosen.provider));
+        info.model = Some(model.clone());
+    }
+    if inner.local_only.load(Ordering::SeqCst)
+        && (chosen.registered || !chosen.local_only)
+        && capabilities.locality.leaves_device()
+    {
+        return refused(ErrorClass::Policy, "local only is on", true);
+    }
+
     // The user's message is saved before anything is sent: a chat that cannot be written does not talk to a provider.
     let ts = inner.now();
-    let user = Message::user_text(format!("{prefix}-user"), text.clone(), ts);
+    // The notes come first and the instruction last. A note keeps the text only while the user allows it.
+    let keep_text = inner.persist.load(Ordering::SeqCst);
+    let mut parts: Vec<Part> = context
+        .iter()
+        .map(|approved| {
+            Part::Context(ContextNote::for_approved(approved, keep_text.then(|| approved.envelope().to_owned())))
+        })
+        .collect();
+    parts.push(Part::Text { text: text.clone() });
+    let user = Message::new(format!("{prefix}-user"), Role::User, parts, ts);
     conversation.profile = Some(profile.clone());
     conversation.model = Some(model.clone());
     if conversation.title.is_empty() {
@@ -1129,7 +1412,6 @@ fn turn_body(inner: &Arc<Inner>, turn: &Arc<Turn>, emitter: &Emitter, job: Job) 
         return refused(ErrorClass::Unavailable, "the chat could not be saved", false);
     }
 
-    let capabilities = chosen.provider.capabilities(&model);
     emitter.emit(AiEventKind::TurnStarted {
         message: ChatMessage::from_message(&user),
         route: Route {
@@ -1145,7 +1427,7 @@ fn turn_body(inner: &Arc<Inner>, turn: &Arc<Turn>, emitter: &Emitter, job: Job) 
         model,
         system: SYSTEM_PROMPT.to_owned(),
         messages: conversation.messages.clone(),
-        context: Vec::new(),
+        context,
         id_prefix: prefix,
     };
     // A model that reasons needs room for its thinking and its answer; the loop clamps this by the model's own limit.
