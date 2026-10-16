@@ -141,7 +141,7 @@ parts kept.
 
 The interactive source of every image in this section is [design/haarlinie-voll.html](design/haarlinie-voll.html): one
 page with a view picker (daily, palette, new block, search, copy mode, connections, settings, shortcuts, previews, sync,
-AI chat, drag) and a platform switch. The PNGs are rendered from it.
+AI chat, AI chat states, AI sidebar, drag) and a platform switch. The PNGs are rendered from it.
 
 **Rules**
 
@@ -214,7 +214,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Shortcuts | ![](design/shortcuts.png) | the key binding editor, see 6.4 |
 | Previews | ![](design/previews.png) | file browser (local and SFTP) with image, PDF and video panes, see 6.5 |
 | Sync | ![](design/sync.png) | Nextcloud endpoint, last sync, end-to-end encryption, conflicts with their backup |
-| AI chat | ![](design/ai-chat.png) | replaces the sidebar; terminal content is sent only after a per-pane consent |
+| AI chat | ![](design/ai-chat-pane.png) ![](design/ai-chat-states.png) | the chat as a pane beside the shell (6.12): the bar with the provider chip and the place word, Markdown replies, a reply that streams with `Stop`; then the picker, a stopped reply, a failed turn and a long draft |
+| AI chat (sidebar) | ![](design/ai-chat.png) | the column form, which replaces the sidebar; the column and its consent card are drawn ahead of the work that builds them |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -248,6 +249,8 @@ top, the tabs of the active workspace as a list. The key row (`esc tab ctrl alt 
 the bottom bar holds the tabs of the shown workspace. Tokens are the ones above; touch targets are at least 44 px.
 
 ![Phone](design/7-phone.png)
+
+A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12).
 
 ### 6.7 Platforms
 
@@ -390,10 +393,13 @@ status line and the composer.
   colour and the words are two cues.
 - **Status line.** One line, `role="status"`: `working`, `thinking`, `writing`, `stopping`, a refused send in the core's
   words, and after a turn `reply finished`, `reply stopped` or `reply failed`. It clears when the user types.
-- **Composer.** A multi-line field (1 to 8 rows) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
+- **Composer.** A multi-line field (1 to 8 rows, in the chat text face) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
   that becomes `Stop` (hairline) while a turn runs. Below the field, left: `≈ 12 tokens` (UTF-8 bytes divided by 3,
   rounded up, the rule of the core) and the keys `⏎ send · ⇧⏎ new line · Esc stop`; right: the button. Over 131072 bytes
   the count reads `too long · 131074 of 131072 bytes` (warn, underlined) and `Send` is disabled.
+
+![AI chat pane](design/ai-chat-pane.png)
+![AI chat states](design/ai-chat-states.png)
 
 **States and their second cue.**
 
@@ -419,6 +425,8 @@ Closing the pane stops a running reply.
 **Narrow screens (640 px and narrower).** The pane is the screen. `Send`, the chip, the picker rows and the composer are at
 least 44 px high, and the composer text is at least 16 px. The picker is a sheet from the bottom edge (24 px radius on
 top, a hairline) and carries the only shadow of the chat.
+
+![AI chat on a phone](design/ai-chat-phone.png)
 
 **Accessibility.** The chip's `aria-label` says where the request goes. The picker is a `radiogroup`. Nothing moves, so
 `motion-reduce` has nothing to remove. Every hairline is `--hw-line`, so `contrast-high` holds. Under forced colours the

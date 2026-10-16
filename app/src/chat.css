@@ -117,3 +117,25 @@
 :root:not(.motion-reduce) .chat-composer .chat-send, :root:not(.motion-reduce) .ai-btn {
   transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), border-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1);
 }
+
+/* ---- narrow screens: 640 px and narrower --------------------------------------------------------------------------- */
+
+/* The pane is the screen: every target is at least 44 px, the composer text at least 16 px (a smaller one makes a phone
+   zoom into the field), and the picker is a sheet from the bottom edge with a 24 px radius on top (2 rem at the base
+   size). The sheet is the one floating layer of the chat and the only element of it with a shadow. */
+/* The breakpoint is the sidebar's own. */ @media (max-width: 640px) {
+  .chat-bar .chat-chip, .chat-picker .chat-choice, .chat-composer .chat-send, .chat-input { min-height: max(44px, calc(44rem / 12)); }
+  .chat-composer .chat-send { min-width: max(44px, calc(44rem / 12)); }
+  .chat-input { font-size: max(16px, 1.083rem); }
+  .chat-picker { position: fixed; left: 0; right: 0; bottom: 0; z-index: 8; box-sizing: border-box; max-height: 60vh; overflow-y: auto;
+                 background: var(--hw-pane); border: 0; border-top: 1px solid var(--hw-line); border-radius: 2rem 2rem 0 0;
+                 box-shadow: 0 -1rem 3rem rgb(0 0 0 / .5); }
+}
+
+/* ---- forced colours: system colours outline the chip, the chosen row and the pressed button ------------------------- */
+
+@media (forced-colors: active) {
+  :root .chat-bar .chat-chip { outline: 2px solid Highlight; outline-offset: -2px; }
+  :root .chat-picker .chat-choice[aria-checked="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  :root .ai-btn[aria-pressed="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+}

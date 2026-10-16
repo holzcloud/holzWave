@@ -50,7 +50,7 @@ export const VIEW = {
  * mock: `block_open` splits the focused pane to the right, focuses the new pane and lists its block in `pane_blocks`.
  * `blocks` are the blocks that exist at the start.
  */
-export async function boot(page, url, { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "" } = {}) {
+export async function boot(page, url, { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2 } = {}) {
   await page.addInitScript(
     ([saved, shown, existing, chats]) => {
       window.__MOCK__.reset();
@@ -78,8 +78,8 @@ export async function boot(page, url, { profiles = [PROFILE], view = VIEW, block
     [profiles, view, blocks, states],
   );
   await page.goto(`${url}index.html?renderer=canvas${search}`);
-  await page.waitForSelector(".divider");
-  await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
+  if (view.dividers.length > 0) await page.waitForSelector(".divider");
+  await page.waitForFunction((n) => window.__MOCK__.callsOf("start_pane").length >= n, starts);
   await page.evaluate(async () => {
     window.__registry = await import(new URL("actions.js", location.href).href);
   });
@@ -103,6 +103,16 @@ export const VIEW3 = {
   tabs: [{ title: "shell", active: true, focus: 2, panes: 3 }],
   workspaces: [{ name: "main", active: true, panes: 3 }],
   panes: [[1, { x: 0, y: 0, w: 0.5, h: 1 }], [2, { x: 0.5, y: 0, w: 0.25, h: 1 }], [3, { x: 0.75, y: 0, w: 0.25, h: 1 }]],
+};
+
+/** One pane, the chat: the screen of a phone. */
+export const VIEW_CHAT_ONLY = {
+  ...VIEW,
+  workspaces: [{ name: "main", active: true, panes: 1 }],
+  tabs: [{ title: "chat", active: true, focus: 3, panes: 1 }],
+  focus: 3,
+  panes: [[3, { x: 0, y: 0, w: 1, h: 1 }]],
+  dividers: [],
 };
 
 /** The chat block of pane 3 as the core lists it. */

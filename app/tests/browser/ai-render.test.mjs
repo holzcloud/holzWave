@@ -3,7 +3,7 @@
 // handler, a style, an image or a `javascript:` link that a broken sanitiser let through still never reaches the DOM, no
 // request leaves for an image, and a link that carries data is text followed by its address.
 import assert from "node:assert/strict";
-import { boot, calls, openAi, sendText } from "./ai-lib.mjs";
+import { OTHER_PROFILE, PROFILE, VIEW_CHAT_ONLY, boot, calls, chatBlock, openAi, sendText } from "./ai-lib.mjs";
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(8000);
@@ -14,6 +14,8 @@ export default async function ({ page, url, errors }) {
   const refused = /style-src-(elem|attr) blocked inline \(.*safehtml\.js\)/;
   errors.splice(0, errors.length, ...errors.filter((e) => !refused.test(e)));
   await linkCase(page, url);
+  await narrowCase(page, url);
+  await modesCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -181,4 +183,145 @@ async function linkCase(page, url) {
   // Text that is no link does nothing when it is clicked.
   await text.locator("p").click({ position: { x: 200, y: 5 } });
   assert.equal((await calls(page, "open_url")).length, 1);
+}
+
+/** A chat that fills the screen, with two saved profiles so that the chip is a button; `size` is the window. */
+async function openOnly(page, url, size) {
+  await page.setViewportSize(size);
+  await boot(page, url, {
+    profiles: [PROFILE, OTHER_PROFILE],
+    view: VIEW_CHAT_ONLY,
+    blocks: [chatBlock("chat-x")],
+    states: { "chat-x": { title: "Earlier question", profile: "local-1", model: "llama3.2" } },
+    starts: 1,
+  });
+  await page.waitForSelector(".block-chat");
+  await page.locator(".chat-input").focus();
+  await page.waitForFunction(() => document.querySelector(".chat-chip")?.tagName === "BUTTON");
+}
+
+/** The sizes of the controls of the chat, in CSS pixels. */
+const sizes = (page) =>
+  page.evaluate(() => {
+    const box = (sel) => [...document.querySelectorAll(sel)].map((n) => {
+      const r = n.getBoundingClientRect();
+      return { w: r.width, h: r.height };
+    });
+    return {
+      send: box(".chat-send"), chip: box(".chat-chip"), choice: box(".chat-choice"), input: box(".chat-input"),
+      inputFont: parseFloat(getComputedStyle(document.querySelector(".chat-input")).fontSize),
+    };
+  });
+
+async function narrowCase(page, url) {
+  // A phone: every target is at least 44 px, the composer text at least 16 px, the picker is a sheet from the bottom edge.
+  await openOnly(page, url, { width: 390, height: 780 });
+  await page.locator(".chat-chip").click();
+  await page.waitForSelector(".chat-picker");
+  const phone = await sizes(page);
+  for (const [name, list] of [["send", phone.send], ["chip", phone.chip], ["choice", phone.choice], ["input", phone.input]]) {
+    assert.ok(list.length > 0, `a ${name} exists`);
+    for (const b of list) assert.ok(b.h >= 44 - 0.5, `${name} is ${b.h} px high at 390 px`);
+  }
+  assert.ok(phone.send[0].w >= 44 - 0.5, `Send is ${phone.send[0].w} px wide`);
+  assert.ok(phone.inputFont >= 16, `composer text is ${phone.inputFont} px`);
+  const sheet = await page.locator(".chat-picker").evaluate((n) => {
+    const r = n.getBoundingClientRect();
+    const css = getComputedStyle(n);
+    return {
+      position: css.position, bottom: r.bottom, left: r.left, width: r.width, view: innerHeight, viewWidth: innerWidth,
+      topLeft: parseFloat(css.borderTopLeftRadius), topRight: parseFloat(css.borderTopRightRadius),
+      bottomLeft: parseFloat(css.borderBottomLeftRadius), height: r.height,
+    };
+  });
+  assert.equal(sheet.position, "fixed");
+  assert.equal(sheet.bottom, sheet.view, "the sheet sits on the bottom edge");
+  assert.equal(sheet.width, sheet.viewWidth, "and spans the width");
+  assert.equal(sheet.left, 0);
+  assert.ok(sheet.topLeft >= 24 && sheet.topRight >= 24, `a 24 px radius on top (${sheet.topLeft})`);
+  assert.equal(sheet.bottomLeft, 0);
+  assert.ok(sheet.height <= sheet.view * 0.6 + 1, "at most 60 % of the window");
+  // The sheet is the only element of the chat with a shadow.
+  const shadows = await page.evaluate(() =>
+    [...document.querySelectorAll(".block-chat *")].filter((n) => getComputedStyle(n).boxShadow !== "none").map((n) => n.className),
+  );
+  assert.deepEqual(shadows, ["chat-picker"]);
+
+  // A desktop window: 28 px, a picker that is a row of the pane and has no shadow.
+  await openOnly(page, url, { width: 1000, height: 640 });
+  await page.locator(".chat-chip").click();
+  await page.waitForSelector(".chat-picker");
+  const desk = await sizes(page);
+  for (const [name, list] of [["send", desk.send], ["chip", desk.chip], ["choice", desk.choice], ["input", desk.input]]) {
+    for (const b of list) assert.ok(b.h >= 28 - 0.5, `${name} is ${b.h} px high on the desktop`);
+    for (const b of list) assert.ok(b.h < 44, `${name} keeps the desktop size (${b.h})`);
+  }
+  const flat = await page.locator(".chat-picker").evaluate((n) => ({ position: getComputedStyle(n).position, shadow: getComputedStyle(n).boxShadow }));
+  assert.notEqual(flat.position, "fixed");
+  assert.equal(flat.shadow, "none");
+  assert.deepEqual(
+    await page.evaluate(() => [...document.querySelectorAll(".block-chat *")].filter((n) => getComputedStyle(n).boxShadow !== "none").map((n) => n.className)),
+    [],
+    "no shadow at all on the desktop",
+  );
+  await page.setViewportSize({ width: 1000, height: 640 });
+}
+
+async function modesCase(page, url) {
+  await openOnly(page, url, { width: 1000, height: 640 });
+  const edge = () => page.locator(".chat-bar").evaluate((n) => getComputedStyle(n).borderBottomColor);
+  const duration = (sel) => page.locator(sel).evaluate((n) => getComputedStyle(n).transitionDuration);
+  const root = (add, name) => page.evaluate(([a, n]) => document.documentElement.classList[a ? "add" : "remove"](n), [add, name]);
+
+  // Higher contrast: the hairlines follow `--hw-line`, which that mode swaps.
+  const normal = await edge();
+  await root(true, "contrast-high");
+  assert.notEqual(await edge(), normal, "the bar's hairline follows the token");
+  await root(false, "contrast-high");
+  assert.equal(await edge(), normal);
+
+  // Reduced motion: the transitions of the chat are gone.
+  assert.notEqual(await duration(".chat-send"), "0s");
+  assert.notEqual(await duration(".chat-chip"), "0s");
+  await root(true, "motion-reduce");
+  assert.equal(await duration(".chat-send"), "0s");
+  assert.equal(await duration(".chat-chip"), "0s");
+  await root(false, "motion-reduce");
+
+  // Forced colours: the style sheet outlines the chip and the chosen row with a system colour.
+  const css = await (await fetch(`${url}chat.css`)).text();
+  const forced = css.slice(css.indexOf("@media (forced-colors: active)"));
+  assert.ok(forced.startsWith("@media"), "chat.css has a forced-colors block");
+  assert.match(forced, /\.chat-chip[^{]*\{[^}]*outline[^}]*Highlight/);
+  assert.match(forced, /\.chat-choice\[aria-checked="true"\][^{]*\{[^}]*outline[^}]*Highlight/);
+
+  // The focus ring is 2 px for the keyboard; the composer's ring is the rose token.
+  const rose = await page.evaluate(() => {
+    const probe = document.createElement("i");
+    probe.style.color = "var(--hw-rose)";
+    document.body.append(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  });
+  await page.locator(".chat-input").focus();
+  const ring = await page.locator(".chat-input").evaluate((n) => ({ width: getComputedStyle(n).outlineWidth, color: getComputedStyle(n).outlineColor }));
+  assert.equal(ring.color, rose, "the composer's ring is rose");
+  assert.equal(ring.width, "2px");
+  await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-send");
+  assert.equal(await page.locator(".chat-send").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "Send: a 2 px ring");
+  await page.locator(".chat-input").focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-chip");
+  assert.equal(await page.locator(".chat-chip").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "the chip: a 2 px ring");
+
+  // Nothing of the chat has a gradient or a filter.
+  const flat = await page.evaluate(() =>
+    [...document.querySelectorAll(".block-chat, .block-chat *")]
+      .filter((n) => getComputedStyle(n).backgroundImage !== "none" || getComputedStyle(n).filter !== "none")
+      .map((n) => n.className),
+  );
+  assert.deepEqual(flat, []);
 }
