@@ -25,6 +25,8 @@
 //! [`ConversationStore::delete`] is an unlink. It removes the files of a chat; it does not overwrite their blocks, so
 //! it makes no promise that the bytes are unrecoverable from the disk.
 
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -309,6 +311,15 @@ pub struct Listing {
     pub notes: Vec<String>,
 }
 
+/// What [`ConversationStore::scrub_private_text`] did.
+#[derive(Debug, Default)]
+pub struct Scrub {
+    /// How many chats held stored context or tool output and were written again in the marker form.
+    pub rewritten: usize,
+    /// One line `"<id>: <reason>"` for each chat that could not be looked at. A note never quotes file content.
+    pub notes: Vec<String>,
+}
+
 // ---- the trait ----------------------------------------------------------------------------------------------------
 
 /// Where conversations are kept.
@@ -330,8 +341,16 @@ pub trait ConversationStore: Send + Sync {
     /// Removes the chat: its file and any temporary or kept-aside copy of it. `true` when at least one file was
     /// removed.
     ///
-    /// This is an unlink, not a secure overwrite.
+    /// This is an unlink, not a secure overwrite: the files are removed, their blocks are not overwritten, so the
+    /// bytes may be recoverable from the disk until it reuses them.
     fn delete(&self, id: &ConversationId) -> Result<bool, StoreError>;
+
+    /// Writes every chat that still holds stored context or tool output again in the marker form, so that switching
+    /// the setting that keeps them off makes the files on disk match it. A chat without such text is not rewritten.
+    ///
+    /// A chat that cannot be used is reported in [`Scrub::notes`] and the scan goes on. The service calls this when the
+    /// setting is switched off.
+    fn scrub_private_text(&self) -> Result<Scrub, StoreError>;
 }
 
 // ---- the storage policy -------------------------------------------------------------------------------------------
@@ -357,6 +376,15 @@ fn apply_storage(conversation: &mut Conversation, storage: ContextStorage) {
             }
         }
     }
+}
+
+/// Whether the conversation holds text that [`apply_storage`] with [`ContextStorage::Marker`] would remove.
+fn holds_private_text(conversation: &Conversation) -> bool {
+    conversation.messages.iter().flat_map(|message| &message.parts).any(|part| match part {
+        Part::Context(note) => note.stored.is_some(),
+        Part::ToolResult(result) => result.content != NOT_STORED,
+        Part::Text { .. } | Part::ToolCall(_) => false,
+    })
 }
 
 // ---- the file form ------------------------------------------------------------------------------------------------
@@ -500,6 +528,9 @@ fn decode(bytes: &[u8], expected: &ConversationId) -> Result<Conversation, Store
     if file.messages.len() > MAX_MESSAGES {
         return Err(damaged("too many messages"));
     }
+    if !file.profile.iter().chain(file.model.iter()).all(|label| is_label(label)) {
+        return Err(damaged("profile or model is not a short plain label"));
+    }
     Ok(Conversation {
         id: file.id,
         title: Detail::new(&file.title).as_str().to_owned(),
@@ -522,6 +553,9 @@ fn decode_summary(bytes: &[u8], expected: &ConversationId) -> Result<Conversatio
     }
     if file.messages.len() > MAX_MESSAGES {
         return Err(damaged("too many messages"));
+    }
+    if !file.profile.iter().chain(file.model.iter()).all(|label| is_label(label)) {
+        return Err(damaged("profile or model is not a short plain label"));
     }
     Ok(ConversationSummary {
         id: file.id,
@@ -601,8 +635,13 @@ fn note_for(error: StoreError) -> Result<String, StoreError> {
 }
 
 /// The id of a chat file from its directory entry name: `<valid id>.json`. Other names are not chats.
-fn chat_id(name: &std::ffi::OsStr) -> Option<ConversationId> {
+fn chat_id(name: &OsStr) -> Option<ConversationId> {
     name.to_str().and_then(|name| name.strip_suffix(".json")).and_then(|stem| ConversationId::parse(stem).ok())
+}
+
+/// Newest `updated` first, ties by id.
+fn sort_newest_first(chats: &mut [ConversationSummary]) {
+    chats.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
 }
 
 // ---- the directory store ------------------------------------------------------------------------------------------
@@ -673,6 +712,26 @@ impl JsonDirStore {
         Ok(count)
     }
 
+    /// The ids of the chat files in the directory, at most [`MAX_CHATS`] of them, and whether there are more. The names
+    /// are collected before anything is moved or rewritten, so the scan does not depend on how the directory behaves
+    /// while it changes.
+    fn chat_ids(&self) -> Result<(Vec<ConversationId>, bool), StoreError> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), false)),
+            Err(e) => return Err(e.into()),
+        };
+        let mut ids = Vec::new();
+        for entry in entries {
+            let Some(id) = chat_id(&entry?.file_name()) else { continue };
+            if ids.len() == MAX_CHATS {
+                return Ok((ids, true));
+            }
+            ids.push(id);
+        }
+        Ok((ids, false))
+    }
+
     /// Writes finished bytes. The caller holds the write lock, which the parameter proves. A chat that does not exist
     /// yet is refused when the directory already holds as many as it may; one that exists can always be saved.
     fn write_bytes(&self, _held: &MutexGuard<'_, ()>, id: &ConversationId, bytes: &[u8]) -> Result<(), StoreError> {
@@ -694,28 +753,19 @@ impl ConversationStore for JsonDirStore {
     /// [`load`](ConversationStore::load) (a newer one stays where it is) and reported in `notes`; names that are not
     /// `<valid id>.json` are ignored.
     fn list(&self) -> Result<Listing, StoreError> {
-        let entries = match fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Listing::default()),
-            Err(e) => return Err(e.into()),
-        };
+        let (ids, truncated) = self.chat_ids()?;
         let mut listing = Listing::default();
-        let mut looked_at = 0;
-        for entry in entries {
-            let entry = entry?;
-            let Some(id) = chat_id(&entry.file_name()) else { continue };
-            if looked_at == MAX_CHATS {
-                listing.notes.push(format!("more than {MAX_CHATS} chats: the rest are not listed"));
-                break;
-            }
-            looked_at += 1;
+        for id in ids {
             match read_with(&self.path_of(&id), &id, decode_summary) {
                 Ok(Some(summary)) => listing.chats.push(summary),
                 Ok(None) => {}
                 Err(e) => listing.notes.push(note_for(e)?),
             }
         }
-        listing.chats.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+        if truncated {
+            listing.notes.push(format!("more than {MAX_CHATS} chats: the rest are not listed"));
+        }
+        sort_newest_first(&mut listing.chats);
         Ok(listing)
     }
 
@@ -742,5 +792,122 @@ impl ConversationStore for JsonDirStore {
             }
         }
         Ok(removed)
+    }
+
+    /// Chats that hold no private text are not touched. A `.bad` copy is not rewritten: it cannot be parsed, and
+    /// [`delete`](ConversationStore::delete) removes it.
+    fn scrub_private_text(&self) -> Result<Scrub, StoreError> {
+        let held = lock(&self.write);
+        let (ids, truncated) = self.chat_ids()?;
+        let mut scrub = Scrub::default();
+        for id in ids {
+            match read_chat(&self.path_of(&id), &id) {
+                Ok(Some(chat)) if holds_private_text(&chat) => {
+                    let bytes = encode(&prepare(&chat, ContextStorage::Marker)?)?;
+                    self.write_bytes(&held, &id, &bytes)?;
+                    scrub.rewritten += 1;
+                }
+                Ok(_) => {}
+                Err(e) => scrub.notes.push(note_for(e)?),
+            }
+        }
+        if truncated {
+            scrub.notes.push(format!("more than {MAX_CHATS} chats: the rest were not looked at"));
+        }
+        Ok(scrub)
+    }
+}
+
+impl fmt::Debug for JsonDirStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JsonDirStore").field("dir", &self.dir).field("max_chats", &self.max_chats).finish()
+    }
+}
+
+// ---- the in-memory store ------------------------------------------------------------------------------------------
+
+/// A store that lives in memory, for tests of the code that uses a store.
+///
+/// It is the file form without the files: it keeps the exact encoded bytes of each chat and runs the same policy,
+/// limits and id rule as [`JsonDirStore`], so a test cannot pass against behaviour the real store lacks. `Debug` prints
+/// the number of chats only.
+pub struct MemoryStore {
+    chats: Mutex<BTreeMap<ConversationId, Vec<u8>>>,
+    max_chats: usize,
+}
+
+impl MemoryStore {
+    /// An empty store holding at most [`MAX_CHATS`] chats.
+    pub fn new() -> Self {
+        Self { chats: Mutex::new(BTreeMap::new()), max_chats: MAX_CHATS }
+    }
+
+    /// The same store limited to `n` chats, clamped to 1 up to [`MAX_CHATS`].
+    #[must_use]
+    pub fn with_max_chats(mut self, n: usize) -> Self {
+        self.max_chats = n.clamp(1, MAX_CHATS);
+        self
+    }
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for MemoryStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryStore").field("chats", &lock(&self.chats).len()).finish()
+    }
+}
+
+impl ConversationStore for MemoryStore {
+    fn list(&self) -> Result<Listing, StoreError> {
+        let chats = lock(&self.chats);
+        let mut listing = Listing::default();
+        for (id, bytes) in chats.iter() {
+            match decode_summary(bytes, id) {
+                Ok(summary) => listing.chats.push(summary),
+                Err(e) => listing.notes.push(note_for(e)?),
+            }
+        }
+        sort_newest_first(&mut listing.chats);
+        Ok(listing)
+    }
+
+    fn load(&self, id: &ConversationId) -> Result<Option<Conversation>, StoreError> {
+        lock(&self.chats).get(id).map(|bytes| decode(bytes, id)).transpose()
+    }
+
+    fn save(&self, conversation: &Conversation, storage: ContextStorage) -> Result<(), StoreError> {
+        let stored = prepare(conversation, storage)?;
+        let bytes = encode(&stored)?;
+        let mut chats = lock(&self.chats);
+        if !chats.contains_key(&stored.id) && chats.len() >= self.max_chats {
+            return Err(StoreError::Full { max: self.max_chats });
+        }
+        chats.insert(stored.id, bytes);
+        Ok(())
+    }
+
+    fn delete(&self, id: &ConversationId) -> Result<bool, StoreError> {
+        Ok(lock(&self.chats).remove(id).is_some())
+    }
+
+    fn scrub_private_text(&self) -> Result<Scrub, StoreError> {
+        let mut chats = lock(&self.chats);
+        let mut scrub = Scrub::default();
+        for (id, bytes) in chats.iter_mut() {
+            match decode(bytes, id) {
+                Ok(chat) if holds_private_text(&chat) => {
+                    *bytes = encode(&prepare(&chat, ContextStorage::Marker)?)?;
+                    scrub.rewritten += 1;
+                }
+                Ok(_) => {}
+                Err(e) => scrub.notes.push(note_for(e)?),
+            }
+        }
+        Ok(scrub)
     }
 }
