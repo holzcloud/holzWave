@@ -8,6 +8,9 @@
 //!
 //! Everything a block reads goes through [`FileSource`], with the limits of [`crate::files`]. The page never sees a
 //! path it did not ask for and never gets a file larger than [`PREVIEW_LIMIT`] in one piece.
+//!
+//! A chat pane keeps only the id of its conversation here: the messages belong to the conversation store, and the id is
+//! checked by the one definition of an id ([`ConversationId::parse`]) wherever a chat block is stored or read.
 
 use std::collections::HashMap;
 use std::fs;
@@ -17,6 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ai::store::ConversationId;
 use crate::connections::Connections;
 use crate::files::{Entry, FileSource, Listing, LocalSource};
 use crate::layout::PaneId;
@@ -44,6 +48,9 @@ pub enum BlockKind {
     Preview,
     /// The system monitor of this computer. It has no path.
     Monitor,
+    /// A conversation with an AI model. Its path is the id of the conversation; the messages are kept by the
+    /// conversation store, never in `pane_blocks.json`.
+    Chat,
 }
 
 /// What a block pane shows.
@@ -155,7 +162,12 @@ impl Blocks {
     pub fn update(&self, pane: PaneId, path: &str) -> Result<()> {
         let mut panes = self.panes();
         let block = panes.get_mut(&pane).ok_or_else(|| Error::Unsupported("no such block".into()))?;
-        if path.is_empty() || path.len() > crate::files::MAX_PATH || path.contains('\0') {
+        if block.kind == BlockKind::Chat {
+            // The fixed phrase holds nothing of the refused value.
+            if ConversationId::parse(path).is_err() {
+                return Err(Error::Unsupported("a chat block can only name a conversation by a valid chat id".into()));
+            }
+        } else if path.is_empty() || path.len() > crate::files::MAX_PATH || path.contains('\0') {
             return Err(Error::Unsupported("the path is empty, too long or has a NUL".into()));
         }
         block.path = path.to_owned();
@@ -332,15 +344,20 @@ impl Blocks {
 }
 
 fn valid(block: &Block) -> bool {
-    // The monitor looks at this computer and has no path.
-    if block.kind == BlockKind::Monitor {
-        return block.source == LOCAL && block.path.is_empty();
+    match block.kind {
+        // The monitor looks at this computer and has no path.
+        BlockKind::Monitor => block.source == LOCAL && block.path.is_empty(),
+        // A chat lives on this computer and its path is a conversation id: the store's own rule decides (length,
+        // characters, device names), so no second copy of it exists.
+        BlockKind::Chat => block.source == LOCAL && ConversationId::parse(&block.path).is_ok(),
+        BlockKind::Files | BlockKind::Preview => {
+            !block.source.is_empty()
+                && block.source.len() <= 64
+                && !block.path.is_empty()
+                && block.path.len() <= crate::files::MAX_PATH
+                && !block.path.contains('\0')
+        }
     }
-    !block.source.is_empty()
-        && block.source.len() <= 64
-        && !block.path.is_empty()
-        && block.path.len() <= crate::files::MAX_PATH
-        && !block.path.contains('\0')
 }
 
 #[cfg(test)]
@@ -389,6 +406,116 @@ mod tests {
         assert!(blocks.assign(3, monitor(LOCAL, "/x")).is_err());
         assert_eq!(Blocks::load(&d, None, &[1]).block_of(1).unwrap().kind, BlockKind::Monitor, "it survives a restart");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    fn chat(path: &str) -> Block {
+        Block { kind: BlockKind::Chat, source: LOCAL.into(), path: path.into() }
+    }
+
+    #[test]
+    fn a_chat_block_holds_a_conversation_id_and_survives_a_restart() {
+        let (d, blocks, conns) = setup("chat");
+        blocks.assign(1, chat("chat-golden")).unwrap();
+        assert_eq!(blocks.block_of(1), Some(chat("chat-golden")));
+        let views = blocks.views(&conns);
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].source_label, "This computer");
+        // The same literal object is read by `readBlocks` in the page test of the block state.
+        let literal = serde_json::json!({
+            "pane": 1, "kind": "chat", "source": "local", "path": "chat-golden", "source_label": "This computer"
+        });
+        assert_eq!(serde_json::to_value(&views[0]).unwrap(), literal);
+        let text = fs::read_to_string(d.join(BLOCKS_FILE)).unwrap();
+        assert!(text.contains("\"kind\": \"chat\""), "the kind is written as chat: {text}");
+        assert!(text.contains("chat-golden"), "{text}");
+        assert!(!text.contains("messages"), "the file keeps the id and no messages: {text}");
+        assert_eq!(Blocks::load(&d, None, &[1]).block_of(1), Some(chat("chat-golden")), "it survives a restart");
+        assert!(Blocks::load(&d, None, &[2]).block_of(1).is_none(), "a pane that left the layout is dropped");
+        let made = ConversationId::generate().unwrap();
+        blocks.assign(2, chat(made.as_str())).unwrap();
+        assert_eq!(blocks.block_of(2).unwrap().path, made.as_str());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_chat_block_needs_this_computer_and_a_valid_chat_id() {
+        let (d, blocks, _) = setup("chatvalid");
+        let on = |source: &str, path: &str| Block { kind: BlockKind::Chat, source: source.into(), path: path.into() };
+        let long = "a".repeat(65);
+        let refused =
+            ["../etc/passwd", "a/b", "a\\b", "a.b", "con", "NUL", long.as_str(), "chat\0", "\u{e9}", "", "a b"];
+        for path in refused {
+            let err = blocks.assign(1, chat(path)).unwrap_err().to_string();
+            assert!(path.is_empty() || !err.contains(path), "the refusal holds none of the value: {err}");
+        }
+        assert!(blocks.assign(1, on("talos", "chat-1")).is_err(), "a chat lives on this computer");
+        assert!(blocks.assign(1, on("", "chat-1")).is_err());
+        assert!(blocks.assign(1, on(LOCAL, "")).is_err());
+        let err = blocks.assign(1, chat("../etc/passwd")).unwrap_err().to_string();
+        assert!(!err.contains("etc/passwd"), "the refusal holds none of the value: {err}");
+        let (d2, fresh, conns) = setup("chatvalid2");
+        for path in refused {
+            let _ = fresh.assign(1, chat(path));
+        }
+        assert!(fresh.assign(1, on("talos", "chat-1")).is_err());
+        assert!(fresh.views(&conns).is_empty(), "nothing was stored");
+        assert!(!d2.join(BLOCKS_FILE).exists(), "nothing was written");
+        let sixty_four = "a".repeat(64);
+        for path in ["chat-1", "Chat_One-2", sixty_four.as_str()] {
+            blocks.assign(1, chat(path)).unwrap();
+            assert_eq!(blocks.block_of(1).unwrap().path, path);
+        }
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&d2);
+    }
+
+    #[test]
+    fn a_chat_block_can_only_move_to_another_valid_chat_id() {
+        let (d, blocks, _) = setup("chatupdate");
+        blocks.assign(1, chat("chat-1")).unwrap();
+        blocks.assign(2, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into() }).unwrap();
+        blocks.update(1, "chat-2").unwrap();
+        assert_eq!(blocks.block_of(1).unwrap().path, "chat-2");
+        assert_eq!(Blocks::load(&d, None, &[1, 2]).block_of(1).unwrap().path, "chat-2");
+        let long = "a".repeat(65);
+        for path in ["../x", "", "a b", long.as_str()] {
+            let err = blocks.update(1, path).unwrap_err().to_string();
+            assert!(path.is_empty() || !err.contains(path), "the refusal holds none of the value: {err}");
+            assert_eq!(blocks.block_of(1).unwrap().path, "chat-2", "memory is unchanged after {path:?}");
+            assert_eq!(Blocks::load(&d, None, &[1]).block_of(1).unwrap().path, "chat-2", "the file is unchanged");
+        }
+        blocks.update(2, "/var").unwrap();
+        assert_eq!(blocks.block_of(2).unwrap().path, "/var", "the rule of a file browser is unchanged");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_block_file_with_a_bad_chat_id_loses_only_that_block() {
+        let d = dir("chatfile");
+        let file = r#"{
+            "1": {"kind": "chat", "source": "local", "path": "chat-1"},
+            "2": {"kind": "chat", "source": "local", "path": "../x"},
+            "3": {"kind": "chat", "source": "talos", "path": "chat-3"},
+            "4": {"kind": "files", "source": "local", "path": "/tmp"}
+        }"#;
+        fs::write(d.join(BLOCKS_FILE), file).unwrap();
+        let blocks = Blocks::load(&d, None, &[1, 2, 3, 4]);
+        assert_eq!(blocks.block_of(1), Some(chat("chat-1")));
+        assert!(blocks.block_of(2).is_none() && blocks.block_of(3).is_none());
+        assert_eq!(blocks.block_of(4).unwrap().kind, BlockKind::Files);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn block_kinds_keep_their_names_in_the_file() {
+        let name = |kind: BlockKind| serde_json::to_string(&kind).unwrap();
+        assert_eq!(name(BlockKind::Files), "\"files\"");
+        assert_eq!(name(BlockKind::Preview), "\"preview\"");
+        assert_eq!(name(BlockKind::Monitor), "\"monitor\"");
+        assert_eq!(name(BlockKind::Chat), "\"chat\"");
+        assert_eq!(serde_json::from_str::<BlockKind>("\"chat\"").unwrap(), BlockKind::Chat);
+        assert!(serde_json::from_str::<BlockKind>("\"Chat\"").is_err());
+        assert!(serde_json::from_str::<BlockKind>("\"terminal\"").is_err());
     }
 
     #[test]

@@ -2,7 +2,9 @@
 // icons of a file list. Pure: no DOM, so node can test it. Every name comes from the core or from a remote machine and
 // is put on the screen with `textContent` only.
 
-export type BlockKind = "files" | "preview" | "monitor";
+import { isChatId } from "./chatstate.js";
+
+export type BlockKind = "files" | "preview" | "monitor" | "chat";
 
 /** What a block pane shows, as the core lists it. */
 export interface BlockInfo {
@@ -10,7 +12,7 @@ export interface BlockInfo {
   kind: BlockKind;
   /** `local` or the id of a saved SSH connection. */
   source: string;
-  /** A directory for a browser, a file for a preview. */
+  /** A directory for a browser, a file for a preview, the id of the conversation for a chat. */
   path: string;
   /** The name of the source for the header. */
   source_label: string;
@@ -50,7 +52,7 @@ export interface Opened {
 /** The block of each pane that has one. Replaced as a whole by every answer of `pane_blocks`. */
 export const paneBlocks = new Map<number, BlockInfo>();
 
-const KINDS: ReadonlySet<string> = new Set(["files", "preview", "monitor"]);
+const KINDS: ReadonlySet<string> = new Set(["files", "preview", "monitor", "chat"]);
 
 /** Read the answer of `pane_blocks`; an entry that is not well formed is dropped. */
 export function readBlocks(raw: unknown): BlockInfo[] {
@@ -61,6 +63,8 @@ export function readBlocks(raw: unknown): BlockInfo[] {
     const o = item as Record<string, unknown>;
     if (typeof o.pane !== "number" || typeof o.kind !== "string" || !KINDS.has(o.kind)) continue;
     if (typeof o.source !== "string" || typeof o.path !== "string") continue;
+    // A chat's path becomes the argument of chat commands: one that is not a plausible chat id never leaves this list.
+    if (o.kind === "chat" && !isChatId(o.path)) continue;
     out.push({
       pane: o.pane,
       kind: o.kind as BlockKind,
@@ -160,14 +164,19 @@ export function shortDate(secs: number | null, now: Date = new Date()): string {
   return `${day}  ${d.getFullYear()}`;
 }
 
-/** The title of a block pane's header. */
+/**
+ * The title of a block pane's header. The words of a chat block (`chat` here, its source label in `blockContext`) are
+ * the ones its header shows until the chat view draws it; the core refuses more ids than `readBlocks` does.
+ */
 export function blockTitle(b: BlockInfo): string {
+  if (b.kind === "chat") return "chat";
   return b.kind === "files" ? "files" : b.kind === "monitor" ? "system" : baseName(b.path);
 }
 
 /** The context of a block pane's header: where it reads from, and for a browser the folder. */
 export function blockContext(b: BlockInfo): string {
   if (b.kind === "monitor") return "local · 1 s";
+  if (b.kind === "chat") return b.source_label;
   return b.kind === "files" ? `${b.source_label} · ${b.path}` : `${b.source_label} · preview`;
 }
 

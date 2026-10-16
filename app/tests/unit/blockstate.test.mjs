@@ -18,6 +18,33 @@ test("the list of blocks is read entry by entry and what is not well formed is d
   assert.equal(list[1].source_label, "talos", "a missing label is the source's id");
 });
 
+// The object the core pins for a chat block (blocks.rs, a_chat_block_holds_a_conversation_id_and_survives_a_restart).
+const CHAT = { pane: 1, kind: "chat", source: "local", path: "chat-golden", source_label: "This computer" };
+
+test("a chat block is read with its conversation id and a bad id drops only that entry", () => {
+  const files = { pane: 5, kind: "files", source: "local", path: "/home", source_label: "This computer" };
+  const sent = structuredClone([
+    CHAT,
+    { ...CHAT, pane: 2, path: "../x" },
+    { ...CHAT, pane: 3, path: "" },
+    { ...CHAT, pane: 4, path: "a b" },
+    { ...CHAT, pane: 6, path: "a".repeat(65) },
+    { ...CHAT, pane: 7, path: 42 },
+    files,
+  ]);
+  const list = readBlocks(sent);
+  assert.deepEqual(list, [CHAT, files]);
+  assert.deepEqual(list[0], sent[0], "the block comes back as it was passed in");
+});
+
+test("a chat block has the words of a chat", () => {
+  assert.equal(blockTitle(CHAT), "chat");
+  assert.equal(blockContext(CHAT), "This computer");
+  const monitor = { pane: 2, kind: "monitor", source: "local", path: "", source_label: "This computer" };
+  assert.equal(blockTitle(monitor), "system");
+  assert.equal(blockContext(monitor), "local \u00b7 1 s");
+});
+
 test("the same answer twice is no change", () => {
   paneBlocks.clear();
   const one = [{ pane: 1, kind: "files", source: "local", path: "/", source_label: "This computer" }];
