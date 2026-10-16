@@ -95,6 +95,7 @@
     "allow-ai-profile-remove",
     "allow-ai-key-set",
     "allow-ai-key-clear",
-    "allow-ai-has-key"
+    "allow-ai-has-key",
+    "allow-markdown-render"
   ]
 }

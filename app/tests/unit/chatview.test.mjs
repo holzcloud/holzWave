@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   BYTES_PER_TOKEN, MAX_TEXT_BYTES, chipView, endNote, estimateTokens, faultText, leavesComputer, localityWord, outcomeWord, pickProfile,
-  readProfiles, roleWord, statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
+  linkKind, readProfiles, roleWord, statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
 } from "../../dist/chatview.js";
 
 const entry = (id, extra = {}) => ({ id, name: `Name ${id}`, model: "llama3.2", host: "localhost", ...extra });
@@ -220,4 +220,25 @@ test("usage and counts are written compactly", () => {
   assert.equal(titleWords("  a\u0000b\u202e  c\n\td "), "a b c d");
   assert.equal(titleWords("x".repeat(200)).length, 80);
   assert.equal(titleWords(""), "");
+});
+
+test("a link is opened only when its address carries no data", () => {
+  const web = (rest) => `${"https"}://${rest}`;
+  // A plain address, with a path or a fragment, is a link.
+  for (const ok of [web("example.org/docs"), web("example.org"), web("example.org/a/b.html#section"), web("example.org/#top"), `${"http"}://example.org/x`, "mailto:a@example.org"]) {
+    assert.equal(linkKind(ok), "open", ok);
+  }
+  // A query string, a user name, a password: not a link.
+  for (const data of [
+    web("example.org/?d=SECRET"), web("example.org/a?x"), web("user@example.org/"), web("user:pass@example.org/"), web(":pass@example.org/"),
+    "mailto:a@example.org?subject=x", "mailto:a@example.org?body=SECRET",
+  ]) {
+    assert.equal(linkKind(data), "inert", data);
+  }
+  // Another scheme, nothing, text that is no address, and too long an address.
+  for (const other of ["javascript:alert(1)", "data:text/html;base64,AAAA", "file:///etc/passwd", "ftp://example.org/x", "tel:+41000", "", "not an address", "//example.org/x", "/relative/path", web(`example.org/${"a".repeat(3000)}`)]) {
+    assert.equal(linkKind(other), "inert", other.slice(0, 40));
+  }
+  assert.equal(linkKind(web(`example.org/${"a".repeat(1900)}`)), "open", "a long address under the limit is still a link");
+  assert.equal(linkKind(web("EXAMPLE.org/Docs")), "open");
 });

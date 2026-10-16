@@ -38,6 +38,7 @@ export const CHORDS: ReadonlyMap<string, string> = new Map([
   ["Cmd+Shift+Space", "hints.open"],
   ["Cmd+Shift+H", "history.open"],
   ["Cmd+B", "sidebar.toggle"],
+  ["Cmd+Shift+A", "ai.open"],
   ["Cmd+=", "font.increase"],
   ["Cmd+-", "font.decrease"],
   ["Cmd+0", "font.reset"],

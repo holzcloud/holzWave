@@ -293,6 +293,7 @@ GNOME's input method takes for emoji.
 | `hints.open` | `Cmd+Shift+Space` | `Ctrl+Shift+Space` | `Ctrl+Shift+Space` |
 | `history.open` | `Cmd+Shift+H` | `Ctrl+Shift+H` | `Ctrl+Shift+H` |
 | `sidebar.toggle` | `Cmd+B` | `Ctrl+Shift+B` | `Ctrl+Shift+B` |
+| `ai.open` | `Cmd+Shift+A` | `Ctrl+Shift+A` | `Ctrl+Shift+A` |
 | `font.increase` | `Cmd+=` | `Ctrl+Shift+=` | `Ctrl+Shift+=` |
 | `font.decrease` | `Cmd+-` | `Ctrl+Shift+-` | `Ctrl+Shift+-` |
 | `font.reset` | `Cmd+0` | `Ctrl+Shift+0` | `Ctrl+Shift+0` |
@@ -301,6 +302,11 @@ GNOME's input method takes for emoji.
 | `pane.swap_next`, `pane.move_next_tab`, `pane.move_prev_tab` | none | none | none |
 | `pane.move_to_new_window`, `tab.move_to_new_window` | none | none | none |
 | `tab.close`, `workspace.close` | none | none | none |
+| `ai.new_chat` | none | none | none |
+
+`ai.open` shows the AI chat: it focuses the chat pane of the shown tab when there is one, and otherwise opens a new chat as
+a pane to the right of the focused pane. `ai.new_chat` always starts a new conversation in a new pane. Both are also in the
+command palette (`AI chat`, `New AI chat`), and the title bar's `✦ AI` button does what `ai.open` does.
 
 The line-editing actions send fixed bytes to the shell's line editor (`edit.word_back` and `edit.word_forward` send
 `ESC b` and `ESC f`, `edit.line_start` and `edit.line_end` send `Ctrl+A` and `Ctrl+E`, `edit.delete_word_back` sends

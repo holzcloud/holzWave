@@ -4,6 +4,10 @@
 // `ai_send`, nothing else.
 //
 // Every string goes onto the screen with `textContent` or a text node: model text and user text are never markup here.
+// The one exception is a finished assistant reply, which the core renders with the sanitiser the previews use
+// (`markdown_render`) and which the page copies a second time through its own allow-list (`appendSafe`), so a broken
+// sanitiser still cannot put a script, a handler, an image or a `javascript:` link on the page. No image is ever made. A
+// link opens in the system browser by a click only, and one whose address carries data is text followed by the address.
 // Nothing in this module decides, grants or approves anything; the parts of a message that are not text (tool calls,
 // context, pending approvals) draw nothing until the plans that build them. Where a request goes is told by the core's
 // route and the profile list, never guessed; the profile list is read only when the user acts (the composer gets the
@@ -16,13 +20,14 @@ import { paneBlocks, setChatTitle } from "./blockstate.js";
 import { ChatFeed, isChatId, messageText, readChatEvent, readChatState } from "./chatstate.js";
 import type { ChatMessage, Route } from "./chatstate.js";
 import {
-  MAX_TEXT_BYTES, chipView, endNote, faultText, outcomeWord, pickProfile, readProfiles, roleWord, statusLabel, statusWord,
-  titleWords, tokenWords, usageWords, utf8Bytes,
+  MAX_TEXT_BYTES, chipView, endNote, faultText, linkKind, outcomeWord, pickProfile, readProfiles, roleWord, statusLabel,
+  statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
 } from "./chatview.js";
 import type { ChipView, EndNote, ProfileChoice } from "./chatview.js";
 import { el, loadStyles } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
+import { appendSafe } from "./safehtml.js";
 import { applyView } from "./scene.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
@@ -55,6 +60,14 @@ const BOTTOM_SLACK = 24;
 const ENTER_AFTER_COMPOSITION_MS = 80;
 /** The keys that the composer shows, as the design says. */
 const HINT = "⏎ send · ⇧⏎ new line · Esc stop";
+/** How many rendered replies are kept, so a redraw, a snapshot or a tab switch never asks the core again. */
+const MARKDOWN_KEPT = 64;
+/** The most characters of rendered replies that are kept together. */
+const MARKDOWN_BUDGET = 8 * 1024 * 1024;
+/** The longest rendered reply the page copies; a longer answer leaves the reply as plain text. */
+const MAX_RENDERED = 8 * 1024 * 1024;
+/** The longest address written after the text of a link that is not one, in characters. */
+const SHOWN_HREF = 300;
 
 /** One line under the transcript: a refusal or a hint of the page (`error`, `note`). */
 interface Notice {
@@ -90,6 +103,27 @@ interface Session {
   /** A turn started in this window, so its outcome may be said; cleared words stay cleared until the next turn. */
   sawTurn: boolean;
   dismissed: boolean;
+}
+
+/** The rendered HTML of finished replies by message id, with the text it was made from; the oldest goes first. */
+const rendered = new Map<string, { text: string; html: string }>();
+let renderedChars = 0;
+
+/** Keep the rendered `html` of the reply `id` made from `text`, within the count and the budget of the cache. */
+function keepRendered(id: string, text: string, html: string): void {
+  const before = rendered.get(id);
+  if (before !== undefined) {
+    renderedChars -= before.html.length;
+    rendered.delete(id);
+  }
+  rendered.set(id, { text, html });
+  renderedChars += html.length;
+  for (const [oldest, entry] of rendered) {
+    if (rendered.size <= MARKDOWN_KEPT && renderedChars <= MARKDOWN_BUDGET) break;
+    if (oldest === id) continue;
+    renderedChars -= entry.html.length;
+    rendered.delete(oldest);
+  }
 }
 
 const sessions = new Map<string, Session>();
@@ -234,6 +268,8 @@ interface Article {
   plain: string | null;
   /** The word after the role that is drawn now. */
   label: string | null;
+  /** `none`: plain text, not asked yet; `asked`: the core renders it; `done`: nothing more to do (rendered or kept plain). */
+  markdown: "none" | "asked" | "done";
 }
 
 /** Whether `parent` holds exactly `nodes`, in order. */
@@ -253,6 +289,27 @@ function drawWho(a: Article, role: string, label: string): void {
     const stat = el("span", "chat-stat");
     stat.textContent = label;
     a.who.append(document.createTextNode(" · "), stat);
+  }
+}
+
+/**
+ * Make every link of a rendered reply safe to show: one without an address is its text, one whose address carries data
+ * is its text followed by the address in brackets, and the rest keep the address as a tooltip and the class `chat-link`.
+ * A link never opens a window by itself: the click handler of the log opens it through the shell.
+ */
+function fixLinks(root: Element): void {
+  for (const link of Array.from(root.querySelectorAll("a"))) {
+    const href = link.getAttribute("href");
+    if (href === null || href === "") {
+      link.replaceWith(document.createTextNode(link.textContent ?? ""));
+    } else if (linkKind(href) === "inert") {
+      const shown = Array.from(href).slice(0, SHOWN_HREF).join("");
+      link.replaceWith(document.createTextNode(`${link.textContent ?? ""} [${shown}]`));
+    } else {
+      link.removeAttribute("target");
+      link.classList.add("chat-link");
+      link.title = href;
+    }
   }
 }
 
@@ -337,6 +394,18 @@ class Mounted implements ChatView {
     this.sendButton.addEventListener("click", () => {
       if (this.session.feed.state.running) this.stop();
       else void this.submit();
+    });
+    // The page never follows a link by itself: a click on a safe link is opened by the shell in the system browser, any
+    // other click or middle click on a link does nothing.
+    this.log.addEventListener("click", (e) => {
+      const link = e.target instanceof Element ? e.target.closest("a") : null;
+      if (link === null) return;
+      e.preventDefault();
+      const url = link.classList.contains("chat-link") ? link.getAttribute("href") : null;
+      if (url !== null && linkKind(url) === "open") void call("open_url", { url }).catch(() => {});
+    });
+    this.log.addEventListener("auxclick", (e) => {
+      if (e.target instanceof Element && e.target.closest("a") !== null) e.preventDefault();
     });
     // A click on the pane's empty parts gives the keyboard to the composer, not to the terminal behind the pane.
     this.onMouseDown = (e: MouseEvent): void => {
@@ -475,7 +544,7 @@ class Mounted implements ChatView {
         const text = el("div", "chat-text", node);
         this.streamed = document.createTextNode("");
         text.append(this.streamed);
-        this.streaming = { node, who, text, plain: null, label: null };
+        this.streaming = { node, who, text, plain: null, label: null, markdown: "done" };
       }
       drawWho(this.streaming, "assistant", statusWord(st));
       if (this.streamed.data !== st.partial.text) this.streamed.data = st.partial.text;
@@ -511,16 +580,54 @@ class Mounted implements ChatView {
     node.dataset.status = m.status;
     const who = el("div", "chat-who label", node);
     const text = el("div", "chat-text", node);
-    return { node, who, text, plain: null, label: null };
+    return { node, who, text, plain: null, label: null, markdown: "none" };
   }
 
   private updateArticle(a: Article, m: ChatMessage): void {
     a.node.dataset.status = m.status;
     drawWho(a, m.role, statusLabel(m.status));
     const plain = messageText(m);
-    if (a.plain === plain) return;
-    a.plain = plain;
-    a.text.textContent = plain;
+    if (a.plain !== plain) {
+      a.plain = plain;
+      a.markdown = "none";
+      a.text.classList.remove("chat-md");
+      a.text.textContent = plain;
+    }
+    // Only a finished reply of the assistant is Markdown: not a user's message, not one that is streaming, and not one
+    // that stopped, failed or was cut.
+    if (m.role === "assistant" && m.status === "complete" && plain !== "" && a.markdown === "none") this.render(a, m.id, plain);
+  }
+
+  /** Make the finished reply `text` Markdown: from the cache, or by asking the core once. */
+  private render(a: Article, id: string, text: string): void {
+    const kept = rendered.get(id);
+    if (kept !== undefined && kept.text === text) {
+      this.fill(a, kept.html);
+      return;
+    }
+    a.markdown = "asked";
+    call("markdown_render", { text })
+      .then((answer: unknown) => {
+        // A null answer (a text the renderer does not take), a long one and a reply that changed meanwhile keep the plain text.
+        if (typeof answer !== "string" || answer.length > MAX_RENDERED) {
+          if (a.plain === text) a.markdown = "done";
+          return;
+        }
+        keepRendered(id, text, answer);
+        if (this.alive && a.plain === text && a.markdown === "asked") this.fill(a, answer);
+      })
+      .catch(() => {
+        if (a.plain === text) a.markdown = "done";
+      });
+  }
+
+  /** Replace the plain text of a reply by the core's HTML, copied through the page's allow-list. */
+  private fill(a: Article, html: string): void {
+    a.markdown = "done";
+    a.text.replaceChildren();
+    appendSafe(html, a.text);
+    a.text.classList.add("chat-md");
+    fixLinks(a.text);
   }
 
   /** The row after the last message when a turn failed or was cut: a mark, the class in words and the core's line. */

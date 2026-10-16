@@ -196,7 +196,7 @@ const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
 }
 
 /// The base part of the macOS default table. Order is the order of the editor, and the other tables keep it.
-static BASE_MACOS: [ActionInfo; 45] = [
+static BASE_MACOS: [ActionInfo; 47] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -228,6 +228,7 @@ static BASE_MACOS: [ActionInfo; 45] = [
     action("hints.open", "Show hints", "Cmd+Shift+Space"),
     action("history.open", "Search the history", "Cmd+Shift+H"),
     action("sidebar.toggle", "Show or hide the sidebar", "Cmd+B"),
+    action("ai.open", "Open the AI chat", "Cmd+Shift+A"),
     action("font.increase", "Increase font size", "Cmd+="),
     action("font.decrease", "Decrease font size", "Cmd+-"),
     action("font.reset", "Reset font size", "Cmd+0"),
@@ -242,10 +243,11 @@ static BASE_MACOS: [ActionInfo; 45] = [
     unbound("tab.move_to_new_window", "Move tab to new window"),
     unbound("tab.close", "Close tab"),
     unbound("workspace.close", "Close workspace"),
+    unbound("ai.new_chat", "New AI chat"),
 ];
 
 /// The base part for Windows and Linux: the same actions in the same order, on `Ctrl+Shift` (see the module docs).
-static BASE_OTHER: [ActionInfo; 45] = [
+static BASE_OTHER: [ActionInfo; 47] = [
     action("pane.split_right", "Split pane right", "Ctrl+Shift+D"),
     action("pane.split_down", "Split pane down", "Ctrl+Shift+O"),
     action("pane.close", "Close pane", "Ctrl+Shift+W"),
@@ -277,6 +279,7 @@ static BASE_OTHER: [ActionInfo; 45] = [
     action("hints.open", "Show hints", "Ctrl+Shift+Space"),
     action("history.open", "Search the history", "Ctrl+Shift+H"),
     action("sidebar.toggle", "Show or hide the sidebar", "Ctrl+Shift+B"),
+    action("ai.open", "Open the AI chat", "Ctrl+Shift+A"),
     action("font.increase", "Increase font size", "Ctrl+Shift+="),
     action("font.decrease", "Decrease font size", "Ctrl+Shift+-"),
     action("font.reset", "Reset font size", "Ctrl+Shift+0"),
@@ -291,6 +294,7 @@ static BASE_OTHER: [ActionInfo; 45] = [
     unbound("tab.move_to_new_window", "Move tab to new window"),
     unbound("tab.close", "Close tab"),
     unbound("workspace.close", "Close workspace"),
+    unbound("ai.new_chat", "New AI chat"),
 ];
 
 /// The line-editing actions with the macOS standard as default: Option moves and deletes by word, Cmd by line.

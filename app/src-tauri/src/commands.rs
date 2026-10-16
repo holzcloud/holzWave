@@ -969,3 +969,12 @@ pub fn ai_key_clear(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -
 pub fn ai_has_key(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -> Result<bool, AiFault> {
     core.ai().has_key(&profile, slot)
 }
+
+/// Render the Markdown of a chat reply as HTML, with the sanitiser the previews use: an allow-list of tags and of link
+/// schemes, no images, no styles, no scripts. Answers nothing when the text is larger than the renderer takes. The page
+/// copies the answer through an allow-list of its own a second time and never trusts this one alone. It holds no state,
+/// so it needs no handle.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn markdown_render(text: String) -> Option<String> {
+    holzwave_core::preview::render_markdown(&text)
+}

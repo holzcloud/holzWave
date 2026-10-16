@@ -94,6 +94,7 @@ fn main() {
     "ai_key_set",
     "ai_key_clear",
     "ai_has_key",
+    "markdown_render",
   ]);
   tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)).expect("tauri build failed");
 }

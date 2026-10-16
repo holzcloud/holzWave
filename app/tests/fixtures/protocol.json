@@ -240,6 +240,9 @@
       "release",
       "composing"
     ],
+    "markdown_render": [
+      "text"
+    ],
     "monitor_sample": [],
     "mouse": [
       "pane",
@@ -648,6 +651,12 @@
           "title": "Show or hide the sidebar"
         },
         {
+          "action": "ai.open",
+          "chord": "Cmd+Shift+A",
+          "is_default": true,
+          "title": "Open the AI chat"
+        },
+        {
           "action": "font.increase",
           "chord": "Cmd+=",
           "is_default": true,
@@ -730,6 +739,12 @@
           "chord": null,
           "is_default": true,
           "title": "Close workspace"
+        },
+        {
+          "action": "ai.new_chat",
+          "chord": null,
+          "is_default": true,
+          "title": "New AI chat"
         },
         {
           "action": "edit.word_back",
@@ -1205,6 +1220,12 @@
         "title": "Show or hide the sidebar"
       },
       {
+        "action": "ai.open",
+        "chord": "Cmd+Shift+A",
+        "is_default": true,
+        "title": "Open the AI chat"
+      },
+      {
         "action": "font.increase",
         "chord": "Cmd+=",
         "is_default": true,
@@ -1287,6 +1308,12 @@
         "chord": null,
         "is_default": true,
         "title": "Close workspace"
+      },
+      {
+        "action": "ai.new_chat",
+        "chord": null,
+        "is_default": true,
+        "title": "New AI chat"
       },
       {
         "action": "edit.word_back",

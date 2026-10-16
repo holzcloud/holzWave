@@ -338,3 +338,29 @@ export function endNote(state: ChatState): EndNote | null {
 export function titleWords(title: string): string {
   return Array.from(title.replace(UNSAFE, " ").replace(/\s+/g, " ").trim()).slice(0, 80).join("");
 }
+
+// ---- links in a reply --------------------------------------------------------------------------------------------------
+
+/** The longest address the page opens, in characters. */
+const MAX_HREF = 2000;
+
+/**
+ * Whether a link of a model's reply may be clicked. A reply written after an injected instruction can hide data in an
+ * address, so an address that carries a query string or a user name (and a password) is not a link: the page shows its
+ * text followed by the address. Only `http`, `https` and `mailto` are links, an address that cannot be read is not one,
+ * and a fragment alone does not make a link inert.
+ */
+export function linkKind(href: string): "open" | "inert" {
+  if (href === "" || href.length > MAX_HREF) return "inert";
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return "inert";
+  }
+  if (url.protocol === "http:" || url.protocol === "https:") {
+    return url.search === "" && url.username === "" && url.password === "" ? "open" : "inert";
+  }
+  if (url.protocol === "mailto:") return url.search === "" ? "open" : "inert";
+  return "inert";
+}

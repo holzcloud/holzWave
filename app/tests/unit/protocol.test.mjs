@@ -229,6 +229,20 @@ test("the ai event and the twelve ai commands are pinned", () => {
   for (const [name, args] of Object.entries(expected)) assert.deepEqual(golden.commands[name], args, name);
 });
 
+test("the markdown command takes only the text", () => {
+  assert.deepEqual(golden.commands.markdown_render, ["text"]);
+  assert.ok(!golden.commands.markdown_render.includes("pane"), "no argument names a pane or a file");
+  const sites = sources(srcDir).flatMap((file) =>
+    callSites(readFileSync(file, "utf8")).map((site) => ({ ...site, file: file.slice(srcDir.length + 1) })),
+  );
+  const render = sites.filter((s) => s.command === "markdown_render");
+  assert.ok(render.length >= 1, "the chat renders a finished reply through the command");
+  for (const site of render) assert.deepEqual(site.keys, ["text"], `${site.file}:${site.line}`);
+  const open = sites.filter((s) => s.command === "open_url" && s.file === "chat.ts");
+  assert.ok(open.length >= 1, "a link of a reply is opened through open_url");
+  for (const site of open) assert.deepEqual(site.keys, ["url"], `${site.file}:${site.line}`);
+});
+
 test("the answers and inputs of the ai commands are pinned", () => {
   const answers = golden.answers.ai;
   assert.deepEqual(keys(answers), ["conversations", "fault", "profiles", "removal", "ticket"]);

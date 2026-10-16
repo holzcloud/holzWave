@@ -75,7 +75,9 @@ fn parse_exposes_modifiers_and_key_as_fields() {
 
 /// The action table of `os`, after checking that it is the full set: a loop over an empty table would pass vacuously.
 fn all_actions(os: &str) -> &'static [ActionInfo] {
-    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 3 + 6 + 3 + 2 + 2, "the {os} table holds 49 actions");
+    // 15 named defaults, nine tab and nine workspace selections, the history and sidebar actions, the chat action, the
+    // eleven that are unbound until the user binds them, and the six line-editing actions.
+    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 2 + 1 + 11 + 6, "the {os} table holds 53 actions");
     actions_for(os)
 }
 
@@ -98,6 +100,7 @@ fn the_default_table_holds_every_action_of_the_decisions() {
         ("search.open", "Cmd+F"),
         ("copy_mode.enter", "Cmd+Shift+X"),
         ("hints.open", "Cmd+Shift+Space"),
+        ("ai.open", "Cmd+Shift+A"),
         ("font.increase", "Cmd+="),
         ("font.decrease", "Cmd+-"),
         ("font.reset", "Cmd+0"),
@@ -183,9 +186,10 @@ fn the_host_functions_use_the_table_of_the_os_the_build_runs_on() {
 }
 
 #[test]
-fn the_macos_table_still_has_its_ten_unbound_actions_on_every_platform() {
+fn the_unbound_actions_stay_unbound_on_every_platform() {
     for os in OSES {
         for id in [
+            "ai.new_chat",
             "tab.rename",
             "pane.rename",
             "workspace.rename",
@@ -216,6 +220,7 @@ fn windows_and_linux_use_ctrl_shift_and_the_decided_chords() {
         ("search.open", "Ctrl+Shift+F"),
         ("copy_mode.enter", "Ctrl+Shift+X"),
         ("hints.open", "Ctrl+Shift+Space"),
+        ("ai.open", "Ctrl+Shift+A"),
         ("font.increase", "Ctrl+Shift+="),
         ("font.decrease", "Ctrl+Shift+-"),
         ("font.reset", "Ctrl+Shift+0"),

@@ -160,6 +160,7 @@ const EXPECTED = {
   "Cmd+Shift+Space": "hints.open",
   "Cmd+Shift+H": "history.open",
   "Cmd+B": "sidebar.toggle",
+  "Cmd+Shift+A": "ai.open",
   "Cmd+=": "font.increase",
   "Cmd+-": "font.decrease",
   "Cmd+0": "font.reset",
@@ -181,6 +182,12 @@ test("the chord table holds every id of the shared interface under its default c
     assert.equal(actionIdFor(chord), id, chord);
   }
   assert.equal(CHORDS.size, Object.keys(EXPECTED).length, "the table has chords nobody listed");
+});
+
+test("the chord table holds ai.open", () => {
+  assert.equal(actionIdFor("Cmd+Shift+A"), "ai.open");
+  assert.equal(CHORDS.size, Object.keys(EXPECTED).length, "the table and the list agree");
+  assert.ok(![...CHORDS.values()].includes("ai.new_chat"), "ai.new_chat has no chord");
 });
 
 test("chords are in the canonical form and each action has exactly one chord", () => {

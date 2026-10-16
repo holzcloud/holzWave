@@ -35,6 +35,7 @@
 //       setState(id, partial)  set members of a chat's state, for example an interrupted message or a pinned profile
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
 //     `ai_turn_snapshot` and `ai_profiles` have defaults; a rejection is the object `{code, reason, text}` as the core's.
+//     `markdown_render` answers the text as one escaped paragraph; a test scripts other HTML with `on("markdown_render", fn)`.
 //
 // Defaults: one workspace, one tab, panes 1 and 2 side by side and one Row divider at ratio 0.5. The layout
 // commands (the close commands too) return the current view, `set_ratio` clamps to 0.1..0.9, `release_outside` answers `{outcome: "cancelled"}`,
@@ -225,6 +226,9 @@
       return Array.isArray(p) ? { profiles: structuredClone(p), notes: [] } : structuredClone(p);
     },
     ai_turn_snapshot: ({ conversation }) => structuredClone(chatOf(conversation)),
+    // The core's renderer of Markdown: here the text as one escaped paragraph, unless a test scripts it with `on`.
+    markdown_render: ({ text }) =>
+      `<p>${String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</p>`,
     ai_send: ({ conversation, text, profile, model }) => {
       if (typeof text !== "string" || text.trim() === "") throw fault("empty_text", "the message is empty");
       if (ai.running !== null) throw fault("busy", "a reply is already running");

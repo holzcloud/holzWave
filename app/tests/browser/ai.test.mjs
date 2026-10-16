@@ -13,6 +13,7 @@ export default async function ({ page, url, errors }) {
   await faultCase(page, url);
   await pickerCase(page, url);
   await stopCase(page, url);
+  await actionsCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -326,4 +327,35 @@ async function stopCase(page, url) {
   assert.equal(await page.locator(".chat-send").getAttribute("data-mode"), "stop");
   await page.locator(".chat-send").click();
   await page.waitForFunction(() => document.querySelector(".chat-send")?.dataset.mode === "send");
+}
+
+async function actionsCase(page, url) {
+  await boot(page, url);
+  // The palette lists both actions.
+  await page.keyboard.press("Meta+k");
+  await page.waitForFunction(() => document.activeElement?.classList.contains("palette-input"));
+  await page.locator(".palette-input").fill("AI");
+  const titles = await page.locator(".palette-row .palette-title").allTextContents();
+  assert.ok(titles.includes("AI chat"), `the palette lists AI chat: ${titles}`);
+  assert.ok(titles.includes("New AI chat"), `the palette lists New AI chat: ${titles}`);
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+
+  // The chord opens a chat when the tab has none, and only focuses it when it has one. It reaches no terminal.
+  await page.keyboard.press("Meta+Shift+A");
+  await page.waitForSelector('.block[data-pane="3"].block-chat');
+  assert.equal((await calls(page, "ai_conversation_new")).length, 1);
+  await page.evaluate(() => document.getElementById("ime").focus());
+  await page.keyboard.press("Meta+Shift+A");
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+  assert.equal((await calls(page, "ai_conversation_new")).length, 1, "the second press made no chat");
+  assert.equal((await calls(page, "block_open")).length, 1);
+  assert.equal((await calls(page, "key")).length, 0, "the chord reached no terminal");
+
+  // `ai.new_chat` always starts a conversation in a new pane.
+  await page.evaluate(() => window.__registry.runAction("ai.new_chat"));
+  await page.waitForSelector('.block[data-pane="4"].block-chat');
+  assert.equal((await calls(page, "ai_conversation_new")).length, 2);
+  assert.equal((await calls(page, "block_open")).length, 2);
+  assert.deepEqual((await calls(page, "block_open"))[1], { kind: "chat", source: "local", path: "chat-mock-2", placement: "right" });
 }

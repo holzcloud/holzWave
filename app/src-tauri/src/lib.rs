@@ -492,6 +492,7 @@ pub fn run() {
             commands::ai_key_set,
             commands::ai_key_clear,
             commands::ai_has_key,
+            commands::markdown_render,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")
