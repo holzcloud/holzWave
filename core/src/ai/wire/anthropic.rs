@@ -4,16 +4,27 @@
 //! - **The request is a pure function** of the [`ChatRequest`] and the [`Capabilities`]: the same input gives the same
 //!   bytes. The body holds the model, an output bound that is always present, the stream flag, the system prompt when
 //!   there is one, the messages and, when the request declares some, the tools. Nothing else is written: no sampling
-//!   parameter, no forced tool choice, no caching marker and no hosted feature. A key belongs to the
-//!   [`Endpoint`](super::Endpoint) and is added by the chokepoint, never here.
+//!   parameter, no forced tool choice, no caching marker, no effort setting, no model fallback and no hosted feature
+//!   (server-side tools, a remote tool connector, web access). A key belongs to the [`Endpoint`](super::Endpoint) and is
+//!   added by the chokepoint, never here.
 //! - **Two flavors.** [`Flavor::FirstParty`] is the vendor's own host and nothing else; [`Flavor::Gateway`] is every
-//!   other address and sends the core fields only. Fields that only the vendor's host is known to accept are added for
-//!   the first flavor alone.
-//! - **The assistant turn is kept as the provider sent it.** The content blocks are assembled from the stream into
-//!   [`Completion::native`] as an [`Opaque`] with the wire tag `anthropic` whose JSON is the array of content blocks.
+//!   other address and sends the core fields only. The reasoning request and its binding controls are added for the
+//!   first flavor alone, on a model that supports adaptive reasoning.
+//! - **Messages are written by side.** Tool results and user parts share one user message with the results first; empty
+//!   text and empty messages are dropped; neighbours of one side merge; a request must end with a user message.
+//! - **Terminal text leaves only as an approved envelope.** A context note is written from the envelope of the approval
+//!   the request itself carries. A note without an approval is history: one marker line with labels and byte counts, and
+//!   the text a note may have kept is never read.
+//! - **The assistant turn is kept as the provider sent it.** Reasoning blocks with their signatures, redacted reasoning,
+//!   text and tool uses are assembled from the stream into [`Completion::native`] as an [`Opaque`] with the wire tag
+//!   `anthropic` whose JSON is the array of content blocks, and the next request carries them unchanged and in order. A
+//!   stored turn that is not in that shape is ignored and the normalised parts are written instead.
 //! - **The answer is read into typed events.** Text is borrowed from the frame while it is parsed. Unknown event types,
 //!   unknown delta types and unknown extra fields are ignored; the structure the adapter depends on is checked, and a
 //!   stream that breaks it fails the turn with a fixed phrase that holds no stream text.
+//! - **A tool call is released once, after a clean end.** Fragments are collected by a
+//!   [`ToolAssembler`](crate::ai::sse::ToolAssembler) and handed out from [`WireTurn::finish`] only, after the final
+//!   event and a clean end of the stream.
 //! - **Nothing here touches the network, a key or the environment.** The turn never prints the stream: its `Debug` shows
 //!   counts and sizes only.
 
@@ -22,13 +33,17 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{Endpoint, Wire, WireAdapter, WireRequest, WireTurn};
 use crate::ai::http::{Frame, Header, Origin, Rejection};
 use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, StreamEvent};
-use crate::ai::sse::StreamEnd;
-use crate::ai::types::{Capabilities, Locality, Opaque, Part, Role, Size, StopReason, Usage};
+use crate::ai::redact::clean_label;
+use crate::ai::sse::{StreamEnd, ToolAssembler};
+use crate::ai::types::{
+    Capabilities, ContextKind, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolCall,
+    ToolResult, ToolSpec, Usage,
+};
 
 // ---- constants and flavors --------------------------------------------------------------------------------
 
@@ -36,6 +51,8 @@ use crate::ai::types::{Capabilities, Locality, Opaque, Part, Role, Size, StopRea
 pub const API_VERSION: &str = "2023-06-01";
 /// The path of the Messages endpoint below the base address. A gateway prefix belongs to the base address.
 pub const MESSAGES_PATH: &str = "/v1/messages";
+/// The beta that the binding controls of the reasoning request need. It is sent with the first flavor only.
+pub const BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 /// The host name of the vendor's own service. Only this host, over https on port 443, gets [`Flavor::FirstParty`].
 pub const FIRST_PARTY_HOST: &str = "api.anthropic.com";
 /// The output bound sent when the caller gives none, in tokens.
@@ -95,6 +112,42 @@ impl fmt::Debug for AnthropicAdapter {
     }
 }
 
+// ---- model families ---------------------------------------------------------------------------------------
+
+/// What is known about a family of models: whether it supports adaptive reasoning and its limits.
+struct Family {
+    prefix: &'static str,
+    adaptive: bool,
+    context_tokens: u32,
+    output_tokens: Option<u32>,
+}
+
+/// The families the adapter knows. The numbers are the values of the vendor's model table as cached on 2026-10-06. They
+/// only clamp the output bound and fill [`Capabilities`]; nothing sent depends on them except whether the reasoning
+/// request is written. A model that matches no row is unknown and gets no reasoning request and no limit.
+const FAMILIES: [Family; 10] = [
+    Family { prefix: "claude-fable-5", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-mythos-5", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-opus-5", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-opus-4-8", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-opus-4-7", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-opus-4-6", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-sonnet-5", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-sonnet-4-6", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-haiku-5", adaptive: true, context_tokens: 1_000_000, output_tokens: Some(128_000) },
+    Family { prefix: "claude-haiku-4-5", adaptive: false, context_tokens: 200_000, output_tokens: None },
+];
+
+/// The family of `model`. A vendor prefix up to the last `/` is dropped. A row matches when the name is the prefix or
+/// goes on with a hyphen right after it, so `claude-opus-5-5` is of the family `claude-opus-5` and `claude-opus-50` is
+/// of none.
+fn family_of(model: &str) -> Option<&'static Family> {
+    let name = model.rsplit('/').next().unwrap_or(model);
+    FAMILIES
+        .iter()
+        .find(|family| name.strip_prefix(family.prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with('-')))
+}
+
 // ---- errors -----------------------------------------------------------------------------------------------
 
 /// An error of the answer: a fixed phrase and nothing from the stream.
@@ -114,14 +167,50 @@ const PHRASE_UNKNOWN_BLOCK: &str = "the response holds a content block type this
 const PHRASE_NO_MESSAGE: &str = "the response holds no message";
 const PHRASE_NO_STOP: &str = "the response ended without its final event";
 const PHRASE_TRUNCATED: &str = "the response stream ended before the message was complete";
+const PHRASE_BAD_TOOL: &str = "the response holds a tool use without an id or a name";
 
 // ---- the request ------------------------------------------------------------------------------------------
+
+/// The text a tool result carries when the tool printed nothing: the provider refuses an empty result.
+const NO_OUTPUT: &str = "(no output)";
 
 /// One message as it is written: a role and its content blocks.
 #[derive(Serialize)]
 struct WireMessage {
     role: &'static str,
     content: Vec<Value>,
+}
+
+/// One declared tool. The schema is borrowed as it is, and nothing marks the definition as strict.
+#[derive(Serialize)]
+struct ToolDecl<'a> {
+    name: &'a str,
+    description: &'a str,
+    input_schema: &'a Value,
+}
+
+/// What the preserved reasoning does when the history was edited: the block is dropped instead of failing the request.
+#[derive(Serialize)]
+struct BlockBinding {
+    prefix_mismatch_behavior: &'static str,
+}
+
+/// The reasoning request of the first flavor: adaptive, with a summary the chat can show, and with the binding controls.
+#[derive(Serialize)]
+struct Thinking {
+    r#type: &'static str,
+    display: &'static str,
+    block_binding: BlockBinding,
+}
+
+impl Thinking {
+    fn adaptive() -> Self {
+        Self {
+            r#type: "adaptive",
+            display: "summarized",
+            block_binding: BlockBinding { prefix_mismatch_behavior: "drop_block" },
+        }
+    }
 }
 
 /// The request body. Every optional member is left out when it is not set; no member outside this list is ever written.
@@ -133,37 +222,275 @@ struct Body<'a> {
     #[serde(skip_serializing_if = "str::is_empty")]
     system: &'a str,
     messages: Vec<WireMessage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ToolDecl<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<Thinking>,
 }
 
-/// The text blocks of the request: the user and assistant messages with their text, in order. Empty text is skipped and
-/// a message with no block is dropped.
-fn text_messages(req: &ChatRequest) -> Result<Vec<WireMessage>, AiError> {
-    let mut messages = Vec::with_capacity(req.messages.len());
-    for message in &req.messages {
-        let role = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => return Err(invalid("the request holds a part this version cannot send")),
-        };
-        let mut content = Vec::new();
+/// The five stable words that name a kind of context.
+fn kind_name(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Selection => "selection",
+        ContextKind::Screen => "screen",
+        ContextKind::LastCommand => "last_command",
+        ContextKind::File => "file",
+        ContextKind::Preview => "preview",
+    }
+}
+
+/// What a context note becomes in a request. With an approval in the request: the envelope the user saw, unchanged.
+/// Without one the note is history, and one marker line stands in for it: the kind, the cleaned label and the size of
+/// each item. Nothing else of the note is read, and the text it may have kept never.
+fn context_text(req: &ChatRequest, note: &ContextNote) -> String {
+    if let Some(approved) = req.approved_for(&note.hash) {
+        return approved.envelope().to_owned();
+    }
+    let items: Vec<String> = note
+        .items
+        .iter()
+        .map(|item| {
+            let label = clean_label(&item.label).text.replace('"', "'");
+            format!("{} \"{label}\" ({} bytes)", kind_name(item.kind), item.bytes)
+        })
+        .collect();
+    if items.is_empty() {
+        return "[terminal context from an earlier message is not sent again]".to_owned();
+    }
+    format!("[terminal context from an earlier message is not sent again: {}]", items.join("; "))
+}
+
+/// Which side of the conversation a message is written on: tool results belong to the user side.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    User,
+    Assistant,
+}
+
+/// A message before it is serialised.
+struct Rendered {
+    side: Side,
+    blocks: Vec<Value>,
+}
+
+fn block_type(block: &Value) -> Option<&str> {
+    block.get("type").and_then(Value::as_str)
+}
+
+fn push_text(blocks: &mut Vec<Value>, text: &str) {
+    if !text.is_empty() {
+        blocks.push(json!({ "type": "text", "text": text }));
+    }
+}
+
+fn result_block(result: &ToolResult) -> Value {
+    let content = if result.content.is_empty() { NO_OUTPUT } else { result.content.as_str() };
+    let mut block = json!({ "type": "tool_result", "tool_use_id": result.call_id, "content": content });
+    if result.is_error {
+        block["is_error"] = Value::Bool(true);
+    }
+    block
+}
+
+fn use_block(call: &ToolCall) -> Value {
+    let input = if call.args.is_object() { call.args.clone() } else { json!({}) };
+    json!({ "type": "tool_use", "id": call.id, "name": call.name, "input": input })
+}
+
+/// The blocks of a message of the user side, in the order of its parts.
+fn user_blocks(req: &ChatRequest, message: &Message) -> Vec<Value> {
+    let mut blocks = Vec::with_capacity(message.parts.len());
+    for part in &message.parts {
+        match part {
+            Part::Text { text } => push_text(&mut blocks, text),
+            Part::ToolResult(result) => blocks.push(result_block(result)),
+            Part::Context(note) => push_text(&mut blocks, &context_text(req, note)),
+            Part::ToolCall(_) => {}
+        }
+    }
+    blocks
+}
+
+/// Whether a stored block is of a kind this adapter assembles.
+fn is_known_block(block: &Value) -> bool {
+    block.is_object() && matches!(block_type(block), Some("text" | "thinking" | "redacted_thinking" | "tool_use"))
+}
+
+/// The stored provider-native turn of `message`, reconciled with its call parts: the blocks as the provider sent them,
+/// without a tool use that no call part names, and with a tool use appended for every call part the turn lacks. A turn
+/// of another wire, of another shape or with a block of another kind is not used.
+fn native_blocks(message: &Message) -> Option<Vec<Value>> {
+    let Value::Array(stored) = message.native_for(Wire::Anthropic.tag())? else {
+        return None;
+    };
+    if stored.is_empty() || !stored.iter().all(is_known_block) {
+        return None;
+    }
+    let calls: Vec<&ToolCall> = message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::ToolCall(call) => Some(call),
+            _ => None,
+        })
+        .collect();
+    let id_of = |block: &Value| block.get("id").and_then(Value::as_str).map(str::to_owned);
+    let mut blocks: Vec<Value> = stored
+        .iter()
+        .filter(|block| {
+            block_type(block) != Some("tool_use")
+                || id_of(block).is_some_and(|id| calls.iter().any(|call| call.id == id))
+        })
+        .cloned()
+        .collect();
+    for call in calls {
+        let present = blocks
+            .iter()
+            .any(|block| block_type(block) == Some("tool_use") && id_of(block).as_deref() == Some(&call.id));
+        if !present {
+            blocks.push(use_block(call));
+        }
+    }
+    Some(blocks)
+}
+
+/// The blocks of a message of the assistant side: the stored native turn when it can be used, else the text parts and
+/// then one tool use per call part. Empty text is dropped either way, since the provider refuses it.
+fn assistant_blocks(message: &Message) -> Vec<Value> {
+    let mut blocks = native_blocks(message).unwrap_or_else(|| {
+        let mut blocks = Vec::with_capacity(message.parts.len());
         for part in &message.parts {
-            match part {
-                Part::Text { text } => {
-                    if !text.is_empty() {
-                        content.push(serde_json::json!({ "type": "text", "text": text }));
-                    }
-                }
-                _ => return Err(invalid("the request holds a part this version cannot send")),
+            if let Part::Text { text } = part {
+                push_text(&mut blocks, text);
             }
         }
-        if !content.is_empty() {
-            messages.push(WireMessage { role, content });
+        for part in &message.parts {
+            if let Part::ToolCall(call) = part {
+                blocks.push(use_block(call));
+            }
+        }
+        blocks
+    });
+    blocks.retain(|block| {
+        block_type(block) != Some("text")
+            || block.get("text").and_then(Value::as_str).is_some_and(|text| !text.is_empty())
+    });
+    blocks
+}
+
+/// Adds a message to the list, merging it into the one before it when both are of one side. A message with no block is
+/// dropped, so its neighbours become adjacent.
+fn push_merged(list: &mut Vec<Rendered>, side: Side, blocks: Vec<Value>) {
+    if blocks.is_empty() {
+        return;
+    }
+    match list.last_mut() {
+        Some(last) if last.side == side => last.blocks.extend(blocks),
+        _ => list.push(Rendered { side, blocks }),
+    }
+}
+
+/// The ids that the message next to `neighbour` may answer: the `key` member of its blocks of kind `kind`, when it is on
+/// the other `side`.
+fn neighbour_ids(neighbour: Option<&Rendered>, side: Side, kind: &str, key: &str) -> Vec<String> {
+    match neighbour {
+        Some(other) if other.side == side => other
+            .blocks
+            .iter()
+            .filter(|block| block_type(block) == Some(kind))
+            .filter_map(|block| block.get(key).and_then(Value::as_str).map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Drops the tool uses that the next user message does not answer and the tool results that the message before does not
+/// ask for, because the provider refuses a request with half a pair. A message that loses its last block goes, and its
+/// neighbours merge.
+fn pair_tools(list: &mut Vec<Rendered>) {
+    loop {
+        let mut changed = false;
+        for index in 0..list.len() {
+            let (kind, key, allowed) = match list[index].side {
+                Side::Assistant => {
+                    ("tool_use", "id", neighbour_ids(list.get(index + 1), Side::User, "tool_result", "tool_use_id"))
+                }
+                Side::User => (
+                    "tool_result",
+                    "tool_use_id",
+                    neighbour_ids(
+                        index.checked_sub(1).and_then(|before| list.get(before)),
+                        Side::Assistant,
+                        "tool_use",
+                        "id",
+                    ),
+                ),
+            };
+            let before = list[index].blocks.len();
+            list[index].blocks.retain(|block| {
+                block_type(block) != Some(kind)
+                    || block.get(key).and_then(Value::as_str).is_some_and(|id| allowed.iter().any(|known| known == id))
+            });
+            changed |= list[index].blocks.len() != before;
+        }
+        if !changed {
+            return;
+        }
+        for message in std::mem::take(list) {
+            push_merged(list, message.side, message.blocks);
         }
     }
-    if messages.is_empty() {
-        return Err(invalid("the request has no messages"));
+}
+
+/// The messages of the request, written by side. The list is never empty and ends with a user message.
+fn render(req: &ChatRequest) -> Result<Vec<WireMessage>, AiError> {
+    let mut list: Vec<Rendered> = Vec::with_capacity(req.messages.len());
+    for message in &req.messages {
+        match message.role {
+            Role::User | Role::Tool => push_merged(&mut list, Side::User, user_blocks(req, message)),
+            Role::Assistant => push_merged(&mut list, Side::Assistant, assistant_blocks(message)),
+        }
     }
-    Ok(messages)
+    pair_tools(&mut list);
+    match list.last() {
+        None => return Err(invalid("the request has no messages")),
+        Some(last) if last.side != Side::User => return Err(invalid("the request does not end with a user message")),
+        Some(_) => {}
+    }
+    Ok(list
+        .into_iter()
+        .map(|message| match message.side {
+            Side::Assistant => WireMessage { role: "assistant", content: message.blocks },
+            Side::User => {
+                // The results answer the tool uses of the message before, so they come first, in order.
+                let (mut content, rest): (Vec<Value>, Vec<Value>) =
+                    message.blocks.into_iter().partition(|block| block_type(block) == Some("tool_result"));
+                content.extend(rest);
+                WireMessage { role: "user", content }
+            }
+        })
+        .collect())
+}
+
+/// The declared tools, each with exactly a name, a description and a schema. A tool with no name or a schema that is not
+/// an object schema is refused here instead of by the provider.
+fn declared_tools(tools: &[ToolSpec]) -> Result<Vec<ToolDecl<'_>>, AiError> {
+    tools
+        .iter()
+        .map(|tool| {
+            if tool.name.is_empty() {
+                return Err(invalid("a tool has no name"));
+            }
+            if tool.input_schema.get("type").and_then(Value::as_str) != Some("object") {
+                return Err(invalid("the schema of a tool is not an object schema"));
+            }
+            Ok(ToolDecl { name: &tool.name, description: &tool.description, input_schema: &tool.input_schema })
+        })
+        .collect()
+}
+
+fn header(name: &str, value: &str) -> Result<Header, AiError> {
+    Header::new(name, value).map_err(|_| invalid("a header of the request is not valid"))
 }
 
 impl WireAdapter for AnthropicAdapter {
@@ -171,25 +498,48 @@ impl WireAdapter for AnthropicAdapter {
         Wire::Anthropic
     }
 
-    fn capabilities(&self, _model: &str, locality: Locality) -> Capabilities {
-        Capabilities { tools: true, ..Capabilities::conservative(locality) }
+    fn capabilities(&self, model: &str, locality: Locality) -> Capabilities {
+        match family_of(model) {
+            Some(family) => Capabilities {
+                tools: true,
+                reasoning: family.adaptive,
+                vision: true,
+                context_tokens: Some(family.context_tokens),
+                max_output_tokens: family.output_tokens,
+                locality,
+            },
+            None => Capabilities { tools: true, ..Capabilities::conservative(locality) },
+        }
     }
 
-    fn request(&self, req: &ChatRequest, _caps: &Capabilities) -> Result<WireRequest, AiError> {
+    fn request(&self, req: &ChatRequest, caps: &Capabilities) -> Result<WireRequest, AiError> {
         if req.model.is_empty() {
             return Err(invalid("the request names no model"));
         }
-        let max_tokens = match req.max_output_tokens {
+        let wanted = match req.max_output_tokens {
             Some(0) => return Err(invalid("the output bound must be more than zero")),
             Some(limit) => limit,
             None => DEFAULT_MAX_TOKENS,
         };
-        let body =
-            Body { model: &req.model, max_tokens, stream: true, system: &req.system, messages: text_messages(req)? };
+        let max_tokens = caps.max_output_tokens.map_or(wanted, |known| wanted.min(known));
+        // The reasoning request and its binding controls are for the vendor's own host: a gateway may not accept the
+        // field, and a history that was edited legitimately must not end a chat on the other side.
+        let thinking = (self.flavor == Flavor::FirstParty && caps.reasoning).then(Thinking::adaptive);
+        let body = Body {
+            model: &req.model,
+            max_tokens,
+            stream: true,
+            system: &req.system,
+            messages: render(req)?,
+            tools: declared_tools(&req.tools)?,
+            thinking,
+        };
+        let mut headers = vec![header("anthropic-version", API_VERSION)?];
+        if body.thinking.is_some() {
+            headers.push(header("anthropic-beta", BINDING_BETA)?);
+        }
         let body = serde_json::to_vec(&body).map_err(|_| invalid("the request could not be written as JSON"))?;
-        let version =
-            Header::new("anthropic-version", API_VERSION).map_err(|_| invalid("the version header is not valid"))?;
-        Ok(WireRequest { path: MESSAGES_PATH.to_owned(), headers: vec![version], body })
+        Ok(WireRequest { path: MESSAGES_PATH.to_owned(), headers, body })
     }
 
     fn turn(&self) -> Box<dyn WireTurn> {
@@ -275,19 +625,23 @@ enum Event<'a> {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Delta<'a> {
-    TextDelta {
+    #[serde(rename = "text_delta")]
+    Text {
         #[serde(default, borrow)]
         text: Cow<'a, str>,
     },
-    ThinkingDelta {
+    #[serde(rename = "thinking_delta")]
+    Thinking {
         #[serde(default, borrow)]
         thinking: Cow<'a, str>,
     },
-    SignatureDelta {
+    #[serde(rename = "signature_delta")]
+    Signature {
         #[serde(default, borrow)]
         signature: Cow<'a, str>,
     },
-    InputJsonDelta {
+    #[serde(rename = "input_json_delta")]
+    InputJson {
         #[serde(default, borrow)]
         partial_json: Cow<'a, str>,
     },
@@ -297,10 +651,17 @@ enum Delta<'a> {
 
 // ---- the turn ---------------------------------------------------------------------------------------------
 
-/// One content block of the assistant turn, as far as it has arrived.
+/// One content block of the assistant turn, as far as it has arrived. `start` is the object the provider opened the
+/// block with; it is kept so that members this version does not know are replayed with the block.
 enum Block {
-    /// A text block: the start object as the provider sent it, the text so far and whether the block was closed.
+    /// A text block: the text so far and whether the block was closed.
     Text { start: Value, text: String, done: bool },
+    /// A reasoning block: the summary so far and the signature. An omitted summary is empty; the signature is not.
+    Thinking { start: Value, thinking: String, signature: String, done: bool },
+    /// A reasoning block the provider withheld. It is kept exactly as it was opened.
+    Redacted { start: Value },
+    /// A tool use: its id, and whether its arguments were closed. The arguments live in the assembler.
+    Tool { start: Value, id: String, done: bool },
 }
 
 impl fmt::Debug for Block {
@@ -308,6 +669,16 @@ impl fmt::Debug for Block {
         match self {
             Block::Text { text, done, .. } => {
                 f.debug_struct("Text").field("text", &Size(text.len())).field("done", done).finish()
+            }
+            Block::Thinking { thinking, signature, done, .. } => f
+                .debug_struct("Thinking")
+                .field("thinking", &Size(thinking.len()))
+                .field("signature", &Size(signature.len()))
+                .field("done", done)
+                .finish(),
+            Block::Redacted { .. } => f.debug_struct("Redacted").finish(),
+            Block::Tool { id, done, .. } => {
+                f.debug_struct("Tool").field("id", &Size(id.len())).field("done", done).finish()
             }
         }
     }
@@ -338,6 +709,7 @@ struct AnthropicTurn {
     started: bool,
     stopped: bool,
     blocks: BTreeMap<u32, Block>,
+    assembler: ToolAssembler,
     input: u64,
     cache_creation: u64,
     cache_read: u64,
@@ -351,6 +723,7 @@ impl fmt::Debug for AnthropicTurn {
             .field("started", &self.started)
             .field("stopped", &self.stopped)
             .field("blocks", &self.blocks)
+            .field("assembler", &self.assembler)
             .finish()
     }
 }
@@ -359,12 +732,25 @@ fn saturate(count: u64) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
 }
 
+/// The text member `key` of `object`, empty when it is missing or not text.
+fn text_of<'v>(object: &'v Value, key: &str) -> &'v str {
+    object.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+/// Sets the member `key` of `object` to `value`, when `object` is an object.
+fn set(object: &mut Value, key: &str, value: Value) {
+    if let Some(map) = object.as_object_mut() {
+        map.insert(key.to_owned(), value);
+    }
+}
+
 impl AnthropicTurn {
     fn new() -> Self {
         Self {
             started: false,
             stopped: false,
             blocks: BTreeMap::new(),
+            assembler: ToolAssembler::new(),
             input: 0,
             cache_creation: 0,
             cache_read: 0,
@@ -416,10 +802,7 @@ impl AnthropicTurn {
             }
             Event::ContentBlockStop { index } => {
                 self.require_started()?;
-                match self.blocks.get_mut(&index) {
-                    Some(Block::Text { done, .. }) => *done = true,
-                    None => return Err(protocol("the response closes a content block that was never opened")),
-                }
+                self.close_block(index)?;
             }
             Event::MessageDelta { delta, usage } => {
                 self.require_started()?;
@@ -453,20 +836,43 @@ impl AnthropicTurn {
         if self.blocks.contains_key(&index) {
             return Err(protocol("the response opens a content block twice"));
         }
-        match start.get("type").and_then(Value::as_str) {
+        let mut flow = Flow::Continue;
+        let block = match start.get("type").and_then(Value::as_str) {
             Some("text") => {
-                let initial = start.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
-                let mut start = start.clone();
-                if let Some(object) = start.as_object_mut() {
-                    object.insert("text".to_owned(), Value::String(String::new()));
+                let text = text_of(start, "text").to_owned();
+                if !text.is_empty() {
+                    flow = out(StreamEvent::TextDelta(text.clone()));
                 }
-                let flow =
-                    if initial.is_empty() { Flow::Continue } else { out(StreamEvent::TextDelta(initial.clone())) };
-                self.blocks.insert(index, Block::Text { start, text: initial, done: false });
-                Ok(flow)
+                let mut start = start.clone();
+                set(&mut start, "text", Value::String(String::new()));
+                Block::Text { start, text, done: false }
             }
-            _ => Err(protocol(PHRASE_UNKNOWN_BLOCK)),
-        }
+            Some("thinking") => {
+                let thinking = text_of(start, "thinking").to_owned();
+                let signature = text_of(start, "signature").to_owned();
+                if !thinking.is_empty() {
+                    flow = out(StreamEvent::ReasoningDelta(thinking.clone()));
+                }
+                let mut start = start.clone();
+                set(&mut start, "thinking", Value::String(String::new()));
+                set(&mut start, "signature", Value::String(String::new()));
+                Block::Thinking { start, thinking, signature, done: false }
+            }
+            Some("redacted_thinking") => Block::Redacted { start: start.clone() },
+            Some("tool_use") => {
+                let (id, name) = (text_of(start, "id"), text_of(start, "name"));
+                if id.is_empty() || name.is_empty() {
+                    return Err(protocol(PHRASE_BAD_TOOL));
+                }
+                self.assembler.fragment(index, Some(id), Some(name), "").map_err(AiError::from)?;
+                let mut start = start.clone();
+                set(&mut start, "input", json!({}));
+                Block::Tool { start, id: id.to_owned(), done: false }
+            }
+            _ => return Err(protocol(PHRASE_UNKNOWN_BLOCK)),
+        };
+        self.blocks.insert(index, block);
+        Ok(flow)
     }
 
     fn delta(
@@ -479,16 +885,43 @@ impl AnthropicTurn {
             return Err(protocol("the response sends a delta for a content block that is not open"));
         };
         match (block, delta) {
-            (Block::Text { text, .. }, Delta::TextDelta { text: piece }) => {
+            (Block::Text { text, .. }, Delta::Text { text: piece }) => {
                 if piece.is_empty() {
                     return Ok(Flow::Continue);
                 }
                 text.push_str(&piece);
                 Ok(out(StreamEvent::TextDelta(piece.into_owned())))
             }
-            (_, Delta::Other) => Ok(Flow::Continue),
+            (Block::Thinking { thinking, .. }, Delta::Thinking { thinking: piece }) => {
+                if piece.is_empty() {
+                    return Ok(Flow::Continue);
+                }
+                thinking.push_str(&piece);
+                Ok(out(StreamEvent::ReasoningDelta(piece.into_owned())))
+            }
+            (Block::Thinking { signature, .. }, Delta::Signature { signature: piece }) => {
+                signature.push_str(&piece);
+                Ok(Flow::Continue)
+            }
+            (Block::Tool { .. }, Delta::InputJson { partial_json }) => {
+                self.assembler.fragment(index, None, None, &partial_json).map_err(AiError::from)?;
+                Ok(Flow::Continue)
+            }
             _ => Ok(Flow::Continue),
         }
+    }
+
+    fn close_block(&mut self, index: u32) -> Result<(), AiError> {
+        match self.blocks.get_mut(&index) {
+            Some(Block::Text { done, .. } | Block::Thinking { done, .. }) => *done = true,
+            Some(Block::Redacted { .. }) => {}
+            Some(Block::Tool { done, .. }) => {
+                *done = true;
+                self.assembler.complete(index).map_err(AiError::from)?;
+            }
+            None => return Err(protocol("the response closes a content block that was never opened")),
+        }
+        Ok(())
     }
 }
 
@@ -507,7 +940,7 @@ impl WireTurn for AnthropicTurn {
     fn finish(
         self: Box<Self>,
         end: StreamEnd,
-        _out: &mut dyn FnMut(StreamEvent) -> Flow,
+        out: &mut dyn FnMut(StreamEvent) -> Flow,
     ) -> Result<Completion, AiError> {
         match end {
             StreamEnd::Stopped => return Err(AiError::Cancelled),
@@ -528,14 +961,29 @@ impl WireTurn for AnthropicTurn {
             Some(Stop::Refusal) => StopReason::Refusal,
             Some(Stop::Other) | None => StopReason::Other,
         };
-        let mut content = Vec::new();
-        for block in self.blocks.into_values() {
+        let AnthropicTurn { blocks, assembler, .. } = *self;
+        let calls = assembler.finish(end, true).map_err(AiError::from)?;
+        let mut content = Vec::with_capacity(blocks.len());
+        for block in blocks.into_values() {
             match block {
-                Block::Text { mut start, text, done } => {
-                    if done && !text.is_empty() {
-                        if let Some(object) = start.as_object_mut() {
-                            object.insert("text".to_owned(), Value::String(text));
-                        }
+                Block::Text { mut start, text, .. } => {
+                    if !text.is_empty() {
+                        set(&mut start, "text", Value::String(text));
+                        content.push(start);
+                    }
+                }
+                Block::Thinking { mut start, thinking, signature, .. } => {
+                    // A reasoning block without a signature cannot be replayed, so it is not kept.
+                    if !signature.is_empty() {
+                        set(&mut start, "thinking", Value::String(thinking));
+                        set(&mut start, "signature", Value::String(signature));
+                        content.push(start);
+                    }
+                }
+                Block::Redacted { start } => content.push(start),
+                Block::Tool { mut start, id, .. } => {
+                    if let Some(call) = calls.iter().find(|call| call.id == id) {
+                        set(&mut start, "input", call.args.clone());
                         content.push(start);
                     }
                 }
@@ -543,6 +991,131 @@ impl WireTurn for AnthropicTurn {
         }
         let native = (!content.is_empty())
             .then(|| Opaque { wire: Wire::Anthropic.tag().to_owned(), json: Value::Array(content) });
+        for call in calls {
+            if out(StreamEvent::ToolCall(call)) == Flow::Stop {
+                return Err(AiError::Cancelled);
+            }
+        }
         Ok(Completion { stop_reason, usage, native })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::gate::{Destination, Gate, OfferRequest, RequestItem};
+    use crate::ai::redact::SourceText;
+    use crate::ai::types::{Consent, NoteItem};
+
+    #[test]
+    fn model_families_decide_thinking_and_capabilities() {
+        let adapter = AnthropicAdapter::new(Flavor::Gateway);
+        let adaptive = [
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-opus-4-8",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ];
+        for name in adaptive {
+            for model in [name.to_owned(), format!("vendor/{name}")] {
+                let caps = adapter.capabilities(&model, Locality::Cloud);
+                assert!(caps.tools && caps.reasoning && caps.vision, "{model}: {caps:?}");
+                assert_eq!(caps.context_tokens, Some(1_000_000), "{model}");
+                assert_eq!(caps.max_output_tokens, Some(128_000), "{model}");
+                assert_eq!(caps.locality, Locality::Cloud);
+            }
+        }
+
+        let small = adapter.capabilities("claude-haiku-4-5", Locality::Cloud);
+        assert!(small.tools && small.vision && !small.reasoning, "{small:?}");
+        assert_eq!(small.context_tokens, Some(200_000));
+        assert_eq!(small.max_output_tokens, None);
+
+        for model in ["claude-opus-4-5", "claude-opus-50", "claude-opus-5x", "qwen2.5-coder", "", "/"] {
+            let caps = adapter.capabilities(model, Locality::Loopback);
+            assert!(caps.tools, "{model}: an unknown model may still call tools");
+            assert!(!caps.reasoning && !caps.vision, "{model}: {caps:?}");
+            assert_eq!((caps.context_tokens, caps.max_output_tokens), (None, None), "{model}");
+            assert_eq!(caps.locality, Locality::Loopback);
+        }
+    }
+
+    fn approved(provider: &str, text: &str) -> crate::ai::gate::ApprovedContext {
+        let gate = Gate::new();
+        let destination = Destination { host: "localhost".to_owned(), locality: Locality::Loopback };
+        let item = RequestItem::new(ContextKind::Screen, "build pane", SourceText::plain(text));
+        let offer = gate.offer(OfferRequest::new(provider, destination, vec![item])).expect("an offer");
+        gate.approve(offer.id(), &[1], provider).expect("an approval")
+    }
+
+    #[test]
+    fn context_notes_render_the_envelope_only_when_approved_for_this_request() {
+        let context = approved("anthropic", "error: the linker failed");
+        let envelope = context.envelope().to_owned();
+        let note = ContextNote::for_approved(&context, Some("CANARY-STORED-TEXT".to_owned()));
+        let message = Message::new(
+            "u1",
+            Role::User,
+            vec![Part::Context(note.clone()), Part::Text { text: "what failed?".to_owned() }],
+            1,
+        );
+
+        // With the approval in the request: the envelope, unchanged, as its own block in the place of the note.
+        let mut request = ChatRequest::new("claude-opus-5-5");
+        request.messages.push(message.clone());
+        request.context.push(context.clone());
+        assert_eq!(context_text(&request, &note), envelope);
+        let blocks = user_blocks(&request, &request.messages[0]);
+        assert_eq!(
+            blocks,
+            vec![json!({ "type": "text", "text": envelope }), json!({ "type": "text", "text": "what failed?" })]
+        );
+        assert_eq!(serde_json::to_string(&blocks).expect("JSON").matches("the linker failed").count(), 1);
+
+        // Without it the note is history: one marker line that names the kind, the label and the size, and never the
+        // envelope or the text the note kept.
+        let mut history = ChatRequest::new("claude-opus-5-5");
+        history.messages.push(message);
+        let marker = context_text(&history, &note);
+        assert_eq!(
+            marker,
+            format!(
+                "[terminal context from an earlier message is not sent again: screen \"build pane\" ({} bytes)]",
+                context.items()[0].bytes
+            )
+        );
+        assert!(!marker.contains("linker") && !marker.contains("CANARY-STORED-TEXT"), "{marker}");
+        let blocks = user_blocks(&history, &history.messages[0]);
+        assert_eq!(blocks.len(), 2);
+        assert!(!serde_json::to_string(&blocks).expect("JSON").contains("CANARY-STORED-TEXT"));
+
+        // A note that was approved for a different request does not match: the hash is the key.
+        let other = approved("anthropic", "another screen");
+        let mut mismatch = ChatRequest::new("claude-opus-5-5");
+        mismatch.context.push(other);
+        assert_eq!(context_text(&mismatch, &note), marker);
+
+        // Several items are listed in order, a quote in a label cannot close the quoted label, and a note with no item
+        // is one short line.
+        let many = ContextNote {
+            hash: "0".repeat(64),
+            items: vec![
+                NoteItem { kind: ContextKind::File, label: "src/\"main\".rs".to_owned(), bytes: 12 },
+                NoteItem { kind: ContextKind::LastCommand, label: "cargo test".to_owned(), bytes: 3 },
+            ],
+            stored: None,
+            consented_to: Consent { provider: "anthropic".to_owned(), locality: Locality::Cloud },
+        };
+        assert_eq!(
+            context_text(&history, &many),
+            "[terminal context from an earlier message is not sent again: file \"src/'main'.rs\" (12 bytes); last_command \"cargo test\" (3 bytes)]"
+        );
+        let bare = ContextNote { items: Vec::new(), ..many };
+        assert_eq!(context_text(&history, &bare), "[terminal context from an earlier message is not sent again]");
     }
 }
