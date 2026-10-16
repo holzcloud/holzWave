@@ -38,7 +38,7 @@ one.
 | `connections.json` | the saved SSH, WSL and Docker connections, without secrets | when a connection is saved or deleted | no |
 | `pane_connections.json` | which pane runs which connection | when it changes | yes |
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
-| `pane_blocks.json` | which pane shows a file browser or a preview, of which source and path | when it changes | yes |
+| `pane_blocks.json` | which pane shows a file browser, a preview, the system monitor or a chat, of which source and path (for a chat the path is the id of its conversation and the messages are not in this file) | when it changes | yes |
 | `ai.json` | the AI provider profiles, without keys | when a profile is saved or deleted | yes |
 | `<name>.bad` | the bytes of a file that could not be used | when such a file is loaded | |
 
