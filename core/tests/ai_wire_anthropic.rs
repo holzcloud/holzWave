@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use common::Xorshift64;
 use common::fake_http::{Ending, FakeHttp, Reply};
 use holzwave_core::ai::gate::{ApprovedContext, Destination, Gate, OfferRequest, RequestItem};
-use holzwave_core::ai::http::{Frame, Framing, Http, HttpConfig, NetworkPolicy, SecretHeader, Target};
+use holzwave_core::ai::http::{
+    Frame, Framing, Http, HttpConfig, NetworkPolicy, Rejection, RetryPolicy, SecretHeader, Target,
+};
 use holzwave_core::ai::provider::{
     AiError, CancelToken, ChatRequest, Collector, Completion, ErrorClass, Flow, Provider, StreamEvent,
 };
@@ -148,7 +150,7 @@ fn drive_with<T: AsRef<[u8]>>(chunks: &[T], answer: &mut dyn FnMut(&Ev) -> Flow)
     let mut turn = AnthropicAdapter::new(Flavor::Gateway).turn();
     let mut decoder = SseDecoder::new();
     let mut events: Vec<(Instant, Ev)> = Vec::new();
-    let mut collector = Collector::new();
+    let mut collector = Collector::with_limit(usize::MAX);
     let mut failure: Option<AiError> = None;
     let result = {
         let mut out = |event: StreamEvent| {
@@ -1037,4 +1039,730 @@ fn max_tokens_is_always_sent_and_never_above_the_known_limit() {
     assert_eq!(sent("anthropic/claude-sonnet-5-5", Some(500_000)), json!(128_000));
     assert_eq!(sent("qwen2.5-coder", Some(500_000)), json!(500_000));
     assert_eq!(sent("claude-haiku-4-5", Some(500_000)), json!(500_000));
+}
+
+// ---- hardening: errors, stop reasons, the structure of a stream, bounds ------------------------------------
+
+/// Text that a server must never be able to put on the screen through an error or a `Debug` line.
+const CANARY: &str = "CANARY-SERVER-TEXT";
+
+fn error_event(kind: &str) -> Value {
+    json!({ "type": "error", "error": { "type": kind, "message": CANARY } })
+}
+
+fn json_delta(index: u32, fragment: &str) -> Value {
+    delta(index, json!({ "type": "input_json_delta", "partial_json": fragment }))
+}
+
+fn tool_block(id: &str) -> Value {
+    json!({ "type": "tool_use", "id": id, "name": "read_file", "input": {} })
+}
+
+/// A stream whose text block says `Part`, followed by `tail`.
+fn part_then(tail: Vec<Value>) -> Vec<u8> {
+    let mut events = vec![message_start(10, 1), block_start(0, text_block()), text_delta(0, "Part")];
+    events.extend(tail);
+    sse(&events)
+}
+
+/// Every way an error can be shown.
+fn shown(error: &AiError) -> String {
+    format!("{error} {error:?} {error:#?}")
+}
+
+#[test]
+fn a_mid_stream_error_event_becomes_a_stable_error_class() {
+    let table: [(&str, ErrorClass); 12] = [
+        ("overloaded_error", ErrorClass::Overload),
+        ("rate_limit_error", ErrorClass::RateLimit),
+        ("authentication_error", ErrorClass::Auth),
+        ("permission_error", ErrorClass::Auth),
+        ("billing_error", ErrorClass::Auth),
+        ("invalid_request_error", ErrorClass::InvalidRequest),
+        ("not_found_error", ErrorClass::InvalidRequest),
+        ("conflict_error", ErrorClass::InvalidRequest),
+        ("request_too_large", ErrorClass::ContextLength),
+        ("timeout_error", ErrorClass::Timeout),
+        ("api_error", ErrorClass::Server),
+        ("a_type_nobody_knows", ErrorClass::Protocol),
+    ];
+    let after_the_error = || vec![text_delta(0, "AFTER"), block_stop(0), message_delta("end_turn", 3), message_stop()];
+    for (kind, class) in table {
+        let mut tail = vec![error_event(kind)];
+        tail.extend(after_the_error());
+        let run = play(&part_then(tail));
+        let error = run.error();
+        assert_eq!(error.class(), class, "{kind}: {error:?}");
+        assert!(run.evs().contains(&text("Part")), "{kind}: the text before the error was delivered");
+        assert!(!run.evs().contains(&text("AFTER")), "{kind}: nothing is delivered after the failure");
+        assert!(run.calls().is_empty(), "{kind}");
+        assert!(!shown(error).contains(CANARY), "{kind}: the message of the provider reached the error: {error}");
+    }
+
+    // The details of two classes: no wait is invented, and a server error has a status.
+    let run = play(&part_then(vec![error_event("rate_limit_error")]));
+    assert_eq!(run.error(), &AiError::RateLimited { retry_after: None });
+    let run = play(&part_then(vec![error_event("api_error")]));
+    assert!(matches!(run.error(), AiError::Server { status: 500, .. }), "{:?}", run.error());
+
+    // An error event without a usable error object is a stream the adapter cannot read.
+    for event in [
+        json!({ "type": "error" }),
+        json!({ "type": "error", "error": null }),
+        json!({ "type": "error", "error": CANARY }),
+        json!({ "type": "error", "error": { "message": CANARY } }),
+    ] {
+        let run = play(&part_then(vec![event.clone(), text_delta(0, "AFTER")]));
+        assert_eq!(run.error().class(), ErrorClass::Protocol, "{event}");
+        assert!(!run.evs().contains(&text("AFTER")), "{event}");
+        assert!(!shown(run.error()).contains(CANARY), "{event}");
+    }
+
+    // An error before the message even starts is read the same way.
+    let run = play(&sse(&[error_event("overloaded_error")]));
+    assert_eq!(run.error(), &AiError::Overloaded);
+}
+
+#[test]
+fn a_refusal_ends_the_turn_without_tool_calls() {
+    let refusal = json!({ "type": "message_delta",
+        "delta": { "stop_reason": "refusal", "stop_sequence": null,
+                   "stop_details": { "type": "refusal", "category": "cyber", "explanation": null } },
+        "usage": { "output_tokens": 5 } });
+    let stream = sse(&[
+        message_start(10, 1),
+        block_start(0, text_block()),
+        text_delta(0, "I cannot"),
+        block_stop(0),
+        block_start(1, tool_block("toolu_R1")),
+        json_delta(1, "{\"path\": \"a\"}"),
+        block_stop(1),
+        refusal,
+        message_stop(),
+    ]);
+    let run = play(&stream);
+
+    assert_eq!(run.error(), &AiError::ContentFilter);
+    assert_eq!(run.error().class(), ErrorClass::ContentFilter);
+    assert!(run.evs().contains(&text("I cannot")), "the text before the refusal stays with the caller");
+    assert!(run.calls().is_empty(), "a refused turn makes no tool call: {:?}", run.evs());
+}
+
+#[test]
+fn a_turn_stopped_by_max_tokens_never_emits_a_tool_call() {
+    let thinking = |signature: Option<&str>| {
+        let mut events = vec![
+            block_start(0, json!({ "type": "thinking", "thinking": "", "signature": "" })),
+            delta(0, json!({ "type": "thinking_delta", "thinking": "T" })),
+        ];
+        if let Some(signature) = signature {
+            events.push(delta(0, json!({ "type": "signature_delta", "signature": signature })));
+        }
+        events.push(block_stop(0));
+        events
+    };
+
+    // A tool use that never gets its stop: the turn is cut and ends normally, with no call and no tool block.
+    let mut events = vec![message_start(10, 1)];
+    events.extend(thinking(Some("SIG-MAX==")));
+    events.extend([
+        block_start(1, text_block()),
+        text_delta(1, "partial"),
+        block_stop(1),
+        block_start(2, tool_block("toolu_CUT")),
+        json_delta(2, "{\"path\": \"sr"),
+        message_delta("max_tokens", 9),
+        message_stop(),
+    ]);
+    let run = play(&sse(&events));
+    assert_eq!(run.completion().stop_reason, StopReason::MaxTokens);
+    assert!(run.calls().is_empty(), "{:?}", run.evs());
+    assert_eq!(
+        run.native(),
+        Some(json!([
+            { "type": "thinking", "thinking": "T", "signature": "SIG-MAX==" },
+            { "type": "text", "text": "partial" }
+        ]))
+    );
+
+    // A tool use that is complete, in a turn that was cut: still no call and no tool block.
+    let run = play(&sse(&[
+        message_start(10, 1),
+        block_start(0, text_block()),
+        text_delta(0, "partial"),
+        block_stop(0),
+        block_start(1, tool_block("toolu_DONE")),
+        json_delta(1, "{\"path\": \"a\"}"),
+        block_stop(1),
+        message_delta("max_tokens", 9),
+        message_stop(),
+    ]));
+    assert_eq!(run.completion().stop_reason, StopReason::MaxTokens);
+    assert!(run.calls().is_empty(), "{:?}", run.evs());
+    assert_eq!(run.native(), Some(json!([{ "type": "text", "text": "partial" }])));
+
+    // A reasoning block that never received a signature cannot be replayed, so it is not in the native turn.
+    let mut events = vec![message_start(10, 1)];
+    events.extend(thinking(None));
+    events.extend([
+        block_start(1, text_block()),
+        text_delta(1, "answer"),
+        block_stop(1),
+        message_delta("end_turn", 4),
+        message_stop(),
+    ]);
+    let run = play(&sse(&events));
+    assert_eq!(run.completion().stop_reason, StopReason::EndTurn);
+    assert_eq!(run.evs(), vec![Ev::Usage(10, 1), Ev::Reasoning("T".to_owned()), text("answer"), Ev::Usage(10, 4)]);
+    assert_eq!(run.native(), Some(json!([{ "type": "text", "text": "answer" }])));
+
+    // Other stop reasons end normally and map as the table says.
+    for (reason, stop) in
+        [("end_turn", StopReason::EndTurn), ("stop_sequence", StopReason::EndTurn), ("pause_turn", StopReason::Other)]
+    {
+        let run = play(&sse(&[
+            message_start(10, 1),
+            block_start(0, text_block()),
+            text_delta(0, "x"),
+            block_stop(0),
+            message_delta(reason, 4),
+            message_stop(),
+        ]));
+        assert_eq!(run.completion().stop_reason, stop, "{reason}");
+    }
+
+    // A stop for a tool use with no complete call is a stream the adapter cannot trust.
+    let open = play(&sse(&[
+        message_start(10, 1),
+        block_start(0, tool_block("toolu_OPEN")),
+        json_delta(0, "{\"path\": "),
+        message_delta("tool_use", 4),
+        message_stop(),
+    ]));
+    assert_eq!(open.error().class(), ErrorClass::Protocol);
+    let none = play(&sse(&[
+        message_start(10, 1),
+        block_start(0, text_block()),
+        text_delta(0, "x"),
+        block_stop(0),
+        message_delta("tool_use", 4),
+        message_stop(),
+    ]));
+    assert_eq!(none.error().class(), ErrorClass::Protocol);
+    assert!(none.calls().is_empty() && open.calls().is_empty());
+}
+
+#[test]
+fn no_tool_call_is_emitted_from_any_cut_of_the_tool_stream() {
+    let bytes = fixture("thinking_tool_turn.sse");
+    for cut in 0..bytes.len() {
+        let run = drive(&[&bytes[..cut]]);
+        assert!(run.calls().is_empty(), "a tool call came from a stream cut at offset {cut}");
+        let class = run.error().class();
+        assert!(matches!(class, ErrorClass::Network | ErrorClass::Protocol), "cut at {cut}: {class:?}");
+    }
+    let whole = play(&bytes);
+    assert_eq!(whole.calls().len(), 1);
+    assert_eq!(whole.completion().stop_reason, StopReason::ToolUse);
+}
+
+#[test]
+fn unknown_events_and_deltas_are_ignored_but_unknown_blocks_fail_closed() {
+    // Tolerant: unknown events, unknown deltas and unknown members change nothing, also after the final event.
+    let start_with_extras = json!({ "type": "message_start", "message": {
+        "id": "msg_X", "type": "message", "role": "assistant", "model": "m", "content": [],
+        "stop_reason": null, "stop_sequence": null, "input_transformations": [], "future": { "a": 1 },
+        "usage": { "input_tokens": 10, "output_tokens": 1, "service_tier": "standard",
+                   "cache_creation": { "ephemeral_5m_input_tokens": 0 } }
+    } });
+    let end_with_extras = json!({ "type": "message_delta",
+        "delta": { "stop_reason": "end_turn", "stop_sequence": null, "future": 1 },
+        "usage": { "output_tokens": 7, "server_tool_use": { "web_search_requests": 0 }, "service_tier": "standard" } });
+    let run = play(&sse(&[
+        json!({ "type": "ping" }),
+        start_with_extras,
+        json!({ "type": "future_event", "anything": [1, 2, 3] }),
+        block_start(0, text_block()),
+        delta(0, json!({ "type": "citations_delta", "citation": { "type": "char_location", "cited_text": "x" } })),
+        delta(0, json!({ "type": "text_delta", "text": "ok", "extra_member": true })),
+        block_stop(0),
+        end_with_extras,
+        message_stop(),
+        json!({ "type": "ping" }),
+        json!({ "type": "another_future_event" }),
+        json!({ "type": "content_block_delta", "index": 9, "delta": { "type": "text_delta", "text": "LATE" } }),
+    ]));
+    assert_eq!(run.evs(), vec![Ev::Usage(10, 1), text("ok"), Ev::Usage(10, 7)]);
+    assert_eq!(run.completion().stop_reason, StopReason::EndTurn);
+
+    // Strict: the structure the adapter depends on. Each of these fails the turn with a protocol error that holds no
+    // stream text, and nothing is delivered after the offending event.
+    let with = |offence: Vec<Value>| -> Vec<Value> {
+        let mut events = vec![message_start(10, 1), block_start(0, text_block()), text_delta(0, "BEFORE")];
+        events.extend(offence);
+        events.extend([text_delta(0, "AFTER"), block_stop(0), message_delta("end_turn", 3), message_stop()]);
+        events
+    };
+    let cases: Vec<(&str, Vec<Value>)> = vec![
+        (
+            "a server tool block",
+            with(vec![block_start(1, json!({ "type": "server_tool_use", "id": "s1", "name": "w", "input": {} }))]),
+        ),
+        ("an unknown block type", with(vec![block_start(1, json!({ "type": CANARY }))])),
+        ("a block without a type", with(vec![block_start(1, json!({ "text": CANARY }))])),
+        (
+            "a block start before the message start",
+            vec![block_start(0, text_block()), text_delta(0, "AFTER"), message_start(10, 1), message_stop()],
+        ),
+        ("a second message start", with(vec![message_start(10, 1)])),
+        ("an index opened twice", with(vec![block_start(0, text_block())])),
+        ("a delta for an index never opened", with(vec![text_delta(7, "x")])),
+        (
+            "a reasoning delta on a text block",
+            with(vec![delta(0, json!({ "type": "thinking_delta", "thinking": "x" }))]),
+        ),
+        (
+            "a signature delta on a text block",
+            with(vec![delta(0, json!({ "type": "signature_delta", "signature": "x" }))]),
+        ),
+        ("an argument delta on a text block", with(vec![json_delta(0, "{}")])),
+        (
+            "a tool use with an empty id",
+            with(vec![block_start(1, json!({ "type": "tool_use", "id": "", "name": "read_file", "input": {} }))]),
+        ),
+        (
+            "a tool use without an id",
+            with(vec![block_start(1, json!({ "type": "tool_use", "name": "read_file", "input": {} }))]),
+        ),
+        (
+            "a tool use without a name",
+            with(vec![block_start(1, json!({ "type": "tool_use", "id": "toolu_1", "input": {} }))]),
+        ),
+        ("a stop for a block never opened", with(vec![block_stop(5)])),
+        ("a delta after the stop of its block", with(vec![block_stop(0)])),
+        ("a repeated stop", with(vec![block_stop(0), block_stop(0)])),
+        (
+            "a delta that is not an object",
+            with(vec![json!({ "type": "content_block_delta", "index": 0, "delta": CANARY })]),
+        ),
+        ("an event without an index", with(vec![json!({ "type": "content_block_stop" })])),
+        ("an event without a type", with(vec![json!({ "index": 0 })])),
+        ("data that is a number", with(vec![json!(42)])),
+    ];
+    for (name, events) in cases {
+        let run = play(&sse_lenient(&events));
+        let error = run.error();
+        assert_eq!(error.class(), ErrorClass::Protocol, "{name}: {error:?}");
+        assert!(!run.evs().contains(&text("AFTER")), "{name}: a delta was delivered after the offence");
+        assert!(!shown(error).contains(CANARY), "{name}: stream text reached the error: {error}");
+    }
+
+    // A data line that is not JSON, and a frame that is not an event.
+    let mut raw = sse(&[message_start(10, 1), block_start(0, text_block()), text_delta(0, "BEFORE")]);
+    raw.extend_from_slice(format!("event: content_block_delta\ndata: {CANARY} is not json\n\n").as_bytes());
+    raw.extend(sse(&[text_delta(0, "AFTER")]));
+    let run = play(&raw);
+    assert_eq!(run.error().class(), ErrorClass::Protocol);
+    assert!(run.evs().contains(&text("BEFORE")) && !run.evs().contains(&text("AFTER")));
+    assert!(!shown(run.error()).contains(CANARY));
+
+    let mut turn = AnthropicAdapter::new(Flavor::Gateway).turn();
+    let error =
+        turn.frame(Frame::Line(CANARY.as_bytes()), &mut |_| Flow::Continue).expect_err("a line is not an event");
+    assert_eq!(error.class(), ErrorClass::Protocol);
+    assert!(!shown(&error).contains(CANARY));
+
+    // After a failure the turn reads nothing and delivers nothing, and it cannot be finished as a success.
+    let mut delivered = 0;
+    let mut decoder = SseDecoder::new();
+    decoder
+        .push(&sse(&[message_start(10, 1), block_start(0, text_block()), text_delta(0, "AFTER")]), &mut |event| {
+            let flow = turn.frame(Frame::Event(event), &mut |_| {
+                delivered += 1;
+                Flow::Continue
+            });
+            assert_eq!(flow, Ok(Flow::Stop));
+            Flow::Continue
+        })
+        .expect("the bytes decode");
+    assert_eq!(delivered, 0);
+    let error = turn.finish(decoder.finish(), &mut |_| Flow::Continue).expect_err("a failed turn is not a success");
+    assert_eq!(error.class(), ErrorClass::Protocol);
+
+    // A failure after the final event still makes the turn a failure.
+    let mut turn = AnthropicAdapter::new(Flavor::Gateway).turn();
+    let mut decoder = SseDecoder::new();
+    decoder
+        .push(&fixture("text_turn.sse"), &mut |event| {
+            turn.frame(Frame::Event(event), &mut |_| Flow::Continue).expect("a frame");
+            Flow::Continue
+        })
+        .expect("the bytes decode");
+    turn.frame(Frame::Line(b"late"), &mut |_| Flow::Continue).expect_err("a line is not an event");
+    let error = turn.finish(decoder.finish(), &mut |_| Flow::Continue).expect_err("a failed turn is not a success");
+    assert_eq!(error.class(), ErrorClass::Protocol);
+}
+
+/// Like `sse`, for events that may lack a type: a value without one is written as a message event.
+fn sse_lenient(events: &[Value]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for event in events {
+        let name = event.get("type").and_then(Value::as_str).unwrap_or("message");
+        let data = serde_json::to_string(event).expect("JSON");
+        out.extend_from_slice(format!("event: {name}\ndata: {data}\n\n").as_bytes());
+    }
+    out
+}
+
+#[test]
+fn a_stream_that_ends_cleanly_without_message_stop_is_a_protocol_error() {
+    let bytes = fixture("text_turn.sse");
+
+    // The stream ends on an event boundary, after the last delta and before the final event.
+    let boundary = after(&bytes, b"\"usage\":{\"output_tokens\":12}}\n\n");
+    let run = play(&bytes[..boundary]);
+    assert_eq!(run.error().class(), ErrorClass::Protocol, "{:?}", run.error());
+    assert!(run.calls().is_empty());
+
+    // Nothing at all is not a message.
+    assert_eq!(play(b"").error().class(), ErrorClass::Protocol);
+
+    // A partial event is pending when the stream ends: the connection broke.
+    let run = play(&bytes[..bytes.len() - 5]);
+    assert_eq!(run.error().class(), ErrorClass::Network, "{:?}", run.error());
+    let run = play(&bytes[..boundary + 10]);
+    assert_eq!(run.error().class(), ErrorClass::Network, "{:?}", run.error());
+
+    // The whole stream is fine, and a consumer that answers Stop ends the turn as cancelled.
+    assert!(play(&bytes).result.is_ok());
+    let run = drive_with(&[&bytes[..]], &mut |ev| if matches!(ev, Ev::Text(_)) { Flow::Stop } else { Flow::Continue });
+    assert_eq!(run.result, Err(AiError::Cancelled));
+    assert_eq!(
+        run.evs().iter().filter(|ev| matches!(ev, Ev::Text(_))).count(),
+        1,
+        "nothing more is delivered after a stop"
+    );
+}
+
+#[test]
+fn bounds_hold_for_blocks_bytes_and_tool_arguments() {
+    // Blocks: 64 pass, the 65th fails, and an index far above the limit fails.
+    let blocks = |count: u32| {
+        let mut events = vec![message_start(10, 1)];
+        for index in 0..count {
+            events.push(block_start(index, text_block()));
+            events.push(block_stop(index));
+        }
+        events.extend([message_delta("end_turn", 2), message_stop()]);
+        sse(&events)
+    };
+    let limit = u32::try_from(MAX_BLOCKS).expect("a small number");
+    assert!(play(&blocks(limit)).result.is_ok(), "{MAX_BLOCKS} blocks are allowed");
+    let run = play(&blocks(limit + 1));
+    assert_eq!(run.error().class(), ErrorClass::Protocol, "block number {} is not", MAX_BLOCKS + 1);
+    let far = play(&sse(&[message_start(10, 1), block_start(1000, text_block())]));
+    assert_eq!(far.error().class(), ErrorClass::Protocol);
+
+    // Text: deltas of 64 KiB are accepted up to the total and the first one that crosses it ends the turn.
+    let piece = "a".repeat(64 * 1024);
+    let text_stream = |deltas: usize| {
+        let mut events = vec![message_start(10, 1), block_start(0, text_block())];
+        events.extend((0..deltas).map(|_| text_delta(0, &piece)));
+        events.extend([block_stop(0), message_delta("end_turn", 2), message_stop()]);
+        sse(&events)
+    };
+    let in_chunks = |bytes: &[u8]| -> Vec<Vec<u8>> { bytes.chunks(64 * 1024).map(<[u8]>::to_vec).collect() };
+    let within = drive(&in_chunks(&text_stream(100)));
+    assert!(within.result.is_ok(), "{:?}", within.result.as_ref().err());
+    let crossing = MAX_TURN_BYTES / piece.len() + 2;
+    let over = drive(&in_chunks(&text_stream(crossing)));
+    assert_eq!(over.error().class(), ErrorClass::Protocol);
+    let delivered: usize = over.evs().iter().map(|ev| if let Ev::Text(text) = ev { text.len() } else { 0 }).sum();
+    assert!(delivered <= MAX_TURN_BYTES, "{delivered} bytes of text were delivered");
+    assert!(delivered + 2 * piece.len() >= MAX_TURN_BYTES, "the turn ended long before the bound: {delivered}");
+
+    // A signature and the data of a redacted block count toward the same total.
+    let megabyte = "r".repeat(1_000_000);
+    let withheld = |redacted: usize, signatures: usize| {
+        let mut events = vec![message_start(10, 1)];
+        for index in 0..redacted {
+            let index = u32::try_from(index).expect("a small number");
+            events.push(block_start(index, json!({ "type": "redacted_thinking", "data": megabyte })));
+            events.push(block_stop(index));
+        }
+        let index = u32::try_from(redacted).expect("a small number");
+        events.push(block_start(index, json!({ "type": "thinking", "thinking": "", "signature": "" })));
+        events
+            .extend((0..signatures).map(|_| delta(index, json!({ "type": "signature_delta", "signature": megabyte }))));
+        events.extend([block_stop(index), message_delta("end_turn", 2), message_stop()]);
+        sse(&events)
+    };
+    assert!(drive(&in_chunks(&withheld(4, 4))).result.is_ok(), "8 million bytes are within the bound");
+    for (redacted, signatures) in [(4, 5), (5, 4), (0, 9), (9, 0)] {
+        let run = drive(&in_chunks(&withheld(redacted, signatures)));
+        assert_eq!(run.error().class(), ErrorClass::Protocol, "{redacted} redacted blocks and {signatures} signatures");
+    }
+
+    // Tool arguments: the fragments of one call stop at the limit of the assembler.
+    let fragment = "a".repeat(64 * 1024);
+    let tool_stream = |fragments: usize| {
+        let mut events =
+            vec![message_start(10, 1), block_start(0, tool_block("toolu_BIG")), json_delta(0, "{\"k\": \"")];
+        events.extend((0..fragments).map(|_| json_delta(0, &fragment)));
+        events.extend([json_delta(0, "\"}"), block_stop(0), message_delta("tool_use", 2), message_stop()]);
+        sse(&events)
+    };
+    let within = drive(&in_chunks(&tool_stream(60)));
+    assert_eq!(within.completion().stop_reason, StopReason::ToolUse);
+    assert_eq!(within.calls().len(), 1);
+    let over = drive(&in_chunks(&tool_stream(70)));
+    assert_eq!(over.error().class(), ErrorClass::Protocol);
+    assert!(over.calls().is_empty());
+
+    // The arguments count toward the same total as the text: each part is within its own bound, the two together are not.
+    let mixed = |deltas: usize, fragments: usize| {
+        let mut events = vec![message_start(10, 1), block_start(0, text_block())];
+        events.extend((0..deltas).map(|_| text_delta(0, &piece)));
+        events.extend([block_stop(0), block_start(1, tool_block("toolu_MIX")), json_delta(1, "{\"k\": \"")]);
+        events.extend((0..fragments).map(|_| json_delta(1, &fragment)));
+        events.extend([json_delta(1, "\"}"), block_stop(1), message_delta("tool_use", 2), message_stop()]);
+        sse(&events)
+    };
+    assert_eq!(drive(&in_chunks(&mixed(40, 40))).calls().len(), 1, "5 MiB in all");
+    assert_eq!(drive(&in_chunks(&mixed(80, 50))).error().class(), ErrorClass::Protocol, "more than 8 MiB in all");
+}
+
+/// An endpoint that holds the canary key, for the tests that read an error body.
+fn keyed_endpoint() -> Endpoint {
+    let target = Target::parse("http://127.0.0.1:9", false).expect("a loopback base address");
+    let origin = target.origin().clone();
+    let secret =
+        SecretHeader::new("x-api-key", "", ApiKey::new(canary_key().to_owned()), origin).expect("a key header");
+    Endpoint::new(Wire::Anthropic, target, NetworkPolicy::new(false, false)).with_secret(secret)
+}
+
+/// The error body of the vendor's reference.
+fn error_body(kind: &str, message: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "type": "error",
+        "error": { "type": kind, "message": message },
+        "request_id": "req_011CTESTREQUEST"
+    }))
+    .expect("JSON")
+}
+
+fn reject(status: u16, retry_after: Option<Duration>, body: Vec<u8>) -> Option<AiError> {
+    let rejection = Rejection { status, retry_after, body };
+    AnthropicAdapter::new(Flavor::FirstParty).rejection(&rejection, &keyed_endpoint())
+}
+
+/// The text an error carries, when its class carries any.
+fn detail_of(error: &AiError) -> String {
+    match error {
+        AiError::Auth(detail) | AiError::InvalidRequest(detail) | AiError::Protocol(detail) => {
+            detail.as_str().to_owned()
+        }
+        AiError::Server { detail, .. } => detail.as_str().to_owned(),
+        _ => String::new(),
+    }
+}
+
+#[test]
+fn http_rejections_map_by_error_type_and_scrub_provider_text() {
+    let seven = Some(Duration::from_secs(7));
+    let table: Vec<(u16, Option<Duration>, &str, &str, ErrorClass)> = vec![
+        (529, None, "overloaded_error", "Overloaded", ErrorClass::Overload),
+        (429, seven, "rate_limit_error", "slow down", ErrorClass::RateLimit),
+        (401, None, "authentication_error", "invalid x-api-key", ErrorClass::Auth),
+        (402, None, "billing_error", "credit balance is too low", ErrorClass::Auth),
+        (403, None, "permission_error", "not allowed", ErrorClass::Auth),
+        (
+            400,
+            None,
+            "invalid_request_error",
+            "messages: text content blocks must be non-empty",
+            ErrorClass::InvalidRequest,
+        ),
+        (404, None, "not_found_error", "model: claude-nothing", ErrorClass::InvalidRequest),
+        (409, None, "conflict_error", "try again", ErrorClass::InvalidRequest),
+        (
+            413,
+            None,
+            "request_too_large",
+            "Request exceeds the maximum allowed number of bytes",
+            ErrorClass::ContextLength,
+        ),
+        (500, None, "api_error", "Internal server error", ErrorClass::Server),
+        (504, None, "timeout_error", "Request timed out", ErrorClass::Timeout),
+    ];
+    for (status, retry, kind, message, class) in table {
+        let error = reject(status, retry, error_body(kind, message)).unwrap_or_else(|| panic!("{kind} was not read"));
+        assert_eq!(error.class(), class, "{status} {kind}: {error:?}");
+    }
+    assert_eq!(reject(529, None, error_body("overloaded_error", "Overloaded")), Some(AiError::Overloaded));
+    assert_eq!(
+        reject(429, seven, error_body("rate_limit_error", "slow down")),
+        Some(AiError::RateLimited { retry_after: seven })
+    );
+    assert!(matches!(reject(500, None, error_body("api_error", "boom")), Some(AiError::Server { status: 500, .. })));
+    assert!(matches!(reject(503, None, error_body("api_error", "boom")), Some(AiError::Server { status: 503, .. })));
+
+    // A prompt that is too long is a context error, whichever words surround it; a bad signature is a plain bad request.
+    let long =
+        reject(400, None, error_body("invalid_request_error", "prompt is too long: 250001 tokens > 200000 maximum"));
+    assert_eq!(long, Some(AiError::ContextLength));
+    let signature = "messages.1.content.0: Invalid `signature` in `thinking` block";
+    let bad = reject(400, None, error_body("invalid_request_error", signature)).expect("an error");
+    assert_eq!(bad.class(), ErrorClass::InvalidRequest);
+    assert!(detail_of(&bad).chars().count() <= 240);
+    assert!(detail_of(&bad).contains("signature"), "the message is shown, scrubbed: {bad}");
+
+    // A key that the provider echoes never survives, and neither do control, direction and zero-width characters.
+    let echoed = format!("invalid x-api-key {} given", canary_key());
+    let auth = reject(401, None, error_body("authentication_error", &echoed)).expect("an error");
+    assert_eq!(auth.class(), ErrorClass::Auth);
+    assert!(!shown(&auth).contains(canary_key()), "{auth}");
+    assert!(detail_of(&auth).contains("<redacted>"), "{auth}");
+    let nasty = format!("{}\u{1b}[31m\u{202e}\u{200b}{}", "x".repeat(500), "z".repeat(1497));
+    assert_eq!(nasty.chars().count(), 2000 + 4);
+    let error = reject(400, None, error_body("invalid_request_error", &nasty)).expect("an error");
+    let text = detail_of(&error);
+    assert!(text.chars().count() <= 240, "{} characters", text.chars().count());
+    assert!(!text.contains('\u{1b}') && !text.contains('\u{202e}') && !text.contains('\u{200b}'), "{text:?}");
+
+    // What is not the vendor's error shape falls back to the status.
+    for body in [
+        Vec::new(),
+        b"not json at all".to_vec(),
+        b"[1, 2, 3]".to_vec(),
+        br#"{"type":"error"}"#.to_vec(),
+        br#"{"error":"a string"}"#.to_vec(),
+        br#"{"error":null}"#.to_vec(),
+        br#"{"error":{"message":"no type"}}"#.to_vec(),
+        error_body("an_error_nobody_knows", "x"),
+    ] {
+        assert_eq!(reject(400, None, body.clone()), None, "{}", String::from_utf8_lossy(&body));
+    }
+
+    // End to end: the key header is a real one, the provider echoes it, and the error that comes out has it masked.
+    let fake = FakeHttp::start(vec![Reply::status(401).body(error_body("authentication_error", &echoed))]);
+    let (provider, _) = make_provider(&fake, Flavor::Gateway);
+    let run = stream_once(provider.as_ref(), &request("claude-opus-5-5", "hi"), false);
+    assert_eq!(run.error().class(), ErrorClass::Auth, "{:?}", run.error());
+    assert!(!shown(run.error()).contains(canary_key()));
+    assert_eq!(fake.accepted(), 1, "an authentication error is not retried");
+}
+
+#[test]
+fn an_overloaded_response_is_retried_and_reported_as_overloaded() {
+    let fake = FakeHttp::start(vec![Reply::status(529).body(error_body("overloaded_error", CANARY))]);
+    let standard = HttpConfig::standard();
+    let config =
+        HttpConfig { retry: RetryPolicy { base_delay: Duration::from_millis(5), ..standard.retry }, ..standard };
+    let (provider, _) = make_provider_with(&fake, Flavor::Gateway, config);
+
+    let run = stream_once(provider.as_ref(), &request("claude-opus-5-5", "hi"), false);
+
+    assert_eq!(run.result, Err(AiError::Overloaded));
+    assert!(run.events.is_empty(), "nothing is delivered for a rejected request");
+    assert_eq!(fake.accepted(), 3, "one try and two retries");
+    assert!(!shown(run.error()).contains(CANARY));
+}
+
+// ---- the live check ---------------------------------------------------------------------------------------
+
+/// The completion of a live step, or a panic that names the step and the error class and nothing else.
+fn live_completion<'a>(run: &'a Run, step: &str) -> &'a Completion {
+    run.result
+        .as_ref()
+        .unwrap_or_else(|error| panic!("live {step}: the turn failed with the class {}", error.class().as_str()))
+}
+
+/// Proves the hand-written fixtures against the real service. It is ignored because it needs a key and a network.
+///
+/// What it does: three requests in sequence to the vendor's own address with the adapter of the first-party flavor. A text
+/// turn that asks for one word. A turn with one declared tool that the prompt tells the model to call, which must end in a
+/// tool use with one call. The replay of that conversation (the user message, the stored native turn of the model, the
+/// tool result), which must end with text.
+///
+/// What it costs: a fraction of a cent on the cheapest current model.
+///
+/// How to run it, with a throwaway key:
+///
+/// ```text
+/// HOLZWAVE_LIVE_ANTHROPIC_KEY=... cargo test --locked -p holzwave-core --no-default-features \
+///     --test ai_wire_anthropic -- --ignored live_contract_check_against_the_real_service --nocapture
+/// ```
+///
+/// `HOLZWAVE_LIVE_ANTHROPIC_MODEL` names another model (the default is `claude-haiku-5-5`). The test prints counts, sizes,
+/// stop reasons and whether a signature was present, never text, the key or a header.
+#[test]
+#[ignore = "needs a key and a network: run by hand, see the doc comment"]
+fn live_contract_check_against_the_real_service() {
+    let key = std::env::var("HOLZWAVE_LIVE_ANTHROPIC_KEY")
+        .expect("set HOLZWAVE_LIVE_ANTHROPIC_KEY to a throwaway key to run the live check");
+    let model = std::env::var("HOLZWAVE_LIVE_ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-haiku-5-5".to_owned());
+    let target = Target::parse("https://api.anthropic.com", false).expect("the vendor address");
+    let origin = target.origin().clone();
+    let adapter = AnthropicAdapter::for_origin(&origin);
+    assert_eq!(adapter.flavor(), Flavor::FirstParty);
+    let secret = SecretHeader::new("x-api-key", "", ApiKey::new(key), origin).expect("a key header");
+    let endpoint = Endpoint::new(Wire::Anthropic, target, NetworkPolicy::new(false, false)).with_secret(secret);
+    let provider =
+        HttpProvider::new("anthropic-live", endpoint, Box::new(adapter), Arc::new(Http::new(HttpConfig::standard())));
+    let summary = |step: &str, run: &Run| {
+        let completion = live_completion(run, step);
+        let native = completion.native.as_ref().map(|native| &native.json);
+        let blocks = native.and_then(Value::as_array).map_or(0, Vec::len);
+        let signed = native.is_some_and(|json| has_member(json, "signature"));
+        println!(
+            "live {step}: stop {} input {} output {} text {} bytes reasoning {} bytes calls {} native blocks {blocks} signature {signed}",
+            stop_name(completion.stop_reason),
+            completion.usage.input_tokens,
+            completion.usage.output_tokens,
+            run.collector.text().len(),
+            run.collector.reasoning().len(),
+            run.calls().len(),
+        );
+    };
+
+    // 1. A text turn.
+    let mut first = request(&model, "Reply with exactly one word: ready");
+    first.max_output_tokens = Some(4096);
+    let run = stream_once(&provider, &first, false);
+    summary("text turn", &run);
+    assert_eq!(live_completion(&run, "text turn").stop_reason, StopReason::EndTurn);
+    assert!(!run.collector.text().is_empty(), "the text turn answered nothing");
+
+    // 2. A tool turn.
+    let echo = ToolSpec {
+        name: "echo".to_owned(),
+        description: "Echoes the text back".to_owned(),
+        input_schema: json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"]
+        }),
+    };
+    let mut tool_turn =
+        request(&model, "Call the echo tool once with the text hello. Do not write anything before the call.");
+    tool_turn.max_output_tokens = Some(4096);
+    tool_turn.tools.push(echo);
+    let run = stream_once(&provider, &tool_turn, false);
+    summary("tool turn", &run);
+    assert_eq!(live_completion(&run, "tool turn").stop_reason, StopReason::ToolUse);
+    let calls = run.calls();
+    assert_eq!(calls.len(), 1, "the tool turn made {} calls", calls.len());
+    let Ev::Tool(call_id, call_name, _) = calls[0].clone() else { unreachable!() };
+    assert_eq!(call_name, "echo");
+
+    // 3. The replay of the conversation, with the native turn of the model and the result of the call.
+    let assistant_message = run.into_message("a1", &model);
+    assert!(assistant_message.native_for("anthropic").is_some(), "the tool turn kept no native turn");
+    tool_turn.messages.push(assistant_message);
+    tool_turn.messages.push(tool_message("t1", &call_id, "hello", false));
+    let run = stream_once(&provider, &tool_turn, false);
+    summary("replay", &run);
+    assert_eq!(live_completion(&run, "replay").stop_reason, StopReason::EndTurn);
+    assert!(!run.collector.text().is_empty(), "the replay answered nothing");
 }

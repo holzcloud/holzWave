@@ -31,18 +31,19 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{Endpoint, Wire, WireAdapter, WireRequest, WireTurn};
 use crate::ai::http::{Frame, Header, Origin, Rejection};
-use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, StreamEvent};
+use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, MAX_DETAIL, StreamEvent};
 use crate::ai::redact::clean_label;
 use crate::ai::sse::{StreamEnd, ToolAssembler};
 use crate::ai::types::{
     Capabilities, ContextKind, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolCall,
-    ToolResult, ToolSpec, Usage,
+    ToolResult, ToolSpec, Usage, json_size,
 };
 
 // ---- constants and flavors --------------------------------------------------------------------------------
@@ -168,6 +169,38 @@ const PHRASE_NO_MESSAGE: &str = "the response holds no message";
 const PHRASE_NO_STOP: &str = "the response ended without its final event";
 const PHRASE_TRUNCATED: &str = "the response stream ended before the message was complete";
 const PHRASE_BAD_TOOL: &str = "the response holds a tool use without an id or a name";
+const PHRASE_TOO_MANY_BLOCKS: &str = "the response holds more content blocks than one turn allows";
+const PHRASE_TOO_LARGE: &str = "the response is larger than one turn allows";
+const PHRASE_MISFIT: &str = "the response sends a delta that does not fit its content block";
+const PHRASE_NO_CALL: &str = "the model stopped to use a tool without making a complete call";
+const PHRASE_FAILED_EARLIER: &str = "the response was refused earlier";
+
+/// The error for the type name of a provider error, or `None` for a type this version does not know. `detail` is the text
+/// to show for the classes that carry some; a status is given for an HTTP answer and a wait for a rate limit.
+fn error_of(kind: &str, status: Option<u16>, retry_after: Option<Duration>, detail: Detail) -> Option<AiError> {
+    Some(match kind {
+        "overloaded_error" => AiError::Overloaded,
+        "rate_limit_error" => AiError::RateLimited { retry_after },
+        "authentication_error" | "permission_error" | "billing_error" => AiError::Auth(detail),
+        "invalid_request_error" | "not_found_error" | "conflict_error" => AiError::InvalidRequest(detail),
+        "request_too_large" => AiError::ContextLength,
+        "timeout_error" => AiError::Timeout,
+        "api_error" => AiError::Server { status: status.unwrap_or(500), detail },
+        _ => return None,
+    })
+}
+
+/// Text of an error body, made safe to show: every key of the endpoint is masked, control, direction and zero-width
+/// characters are replaced, and the whole is within the limit of a detail.
+fn shown_text(endpoint: &Endpoint, message: &str) -> Detail {
+    let detail = endpoint.scrub(message);
+    // A detail that was cut ends in an ellipsis after its limit, so it is cut once more to fit the limit as a whole.
+    if detail.as_str().chars().count() > MAX_DETAIL {
+        let kept: String = detail.as_str().chars().take(MAX_DETAIL - 1).collect();
+        return Detail::new(&format!("{}\u{2026}", kept.trim_end()));
+    }
+    detail
+}
 
 // ---- the request ------------------------------------------------------------------------------------------
 
@@ -546,9 +579,41 @@ impl WireAdapter for AnthropicAdapter {
         Box::new(AnthropicTurn::new())
     }
 
-    fn rejection(&self, _rejection: &Rejection, _endpoint: &Endpoint) -> Option<AiError> {
-        None
+    fn rejection(&self, rejection: &Rejection, endpoint: &Endpoint) -> Option<AiError> {
+        rejected(rejection, endpoint)
     }
+}
+
+// ---- error bodies -----------------------------------------------------------------------------------------
+
+/// The error object of the vendor's error body. Unknown members are ignored.
+#[derive(Deserialize)]
+struct ErrorObject {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// The error body of an answer that was not a success: `{"type":"error","error":{"type":..,"message":..}}`.
+#[derive(Deserialize)]
+struct ErrorEnvelope {
+    #[serde(default)]
+    error: Option<ErrorObject>,
+}
+
+/// The error of an HTTP answer, read from its body. A body that is not the vendor's error shape, or names a type this
+/// version does not know, gives `None` and the status decides. The message of the provider is shown only through
+/// [`Endpoint::scrub`], which masks the keys of the endpoint.
+fn rejected(rejection: &Rejection, endpoint: &Endpoint) -> Option<AiError> {
+    let envelope: ErrorEnvelope = serde_json::from_slice(&rejection.body).ok()?;
+    let object = envelope.error?;
+    let kind = object.kind?;
+    let message = object.message.unwrap_or_default();
+    if kind == "invalid_request_error" && message.to_lowercase().contains("prompt is too long") {
+        return Some(AiError::ContextLength);
+    }
+    error_of(&kind, Some(rejection.status), rejection.retry_after, shown_text(endpoint, &message))
 }
 
 // ---- typed events -----------------------------------------------------------------------------------------
@@ -659,7 +724,7 @@ enum Block {
     /// A reasoning block: the summary so far and the signature. An omitted summary is empty; the signature is not.
     Thinking { start: Value, thinking: String, signature: String, done: bool },
     /// A reasoning block the provider withheld. It is kept exactly as it was opened.
-    Redacted { start: Value },
+    Redacted { start: Value, done: bool },
     /// A tool use: its id, and whether its arguments were closed. The arguments live in the assembler.
     Tool { start: Value, id: String, done: bool },
 }
@@ -676,10 +741,22 @@ impl fmt::Debug for Block {
                 .field("signature", &Size(signature.len()))
                 .field("done", done)
                 .finish(),
-            Block::Redacted { .. } => f.debug_struct("Redacted").finish(),
+            Block::Redacted { done, .. } => f.debug_struct("Redacted").field("done", done).finish(),
             Block::Tool { id, done, .. } => {
                 f.debug_struct("Tool").field("id", &Size(id.len())).field("done", done).finish()
             }
+        }
+    }
+}
+
+impl Block {
+    /// Whether the provider closed the block. A closed block takes no more deltas and no second stop.
+    fn is_done(&self) -> bool {
+        match self {
+            Block::Text { done, .. }
+            | Block::Thinking { done, .. }
+            | Block::Redacted { done, .. }
+            | Block::Tool { done, .. } => *done,
         }
     }
 }
@@ -715,6 +792,10 @@ struct AnthropicTurn {
     cache_read: u64,
     output: u64,
     stop: Option<Stop>,
+    /// The text, reasoning, signature, redacted data and tool-argument bytes of the turn so far.
+    bytes: usize,
+    /// An error was returned: nothing more is read or delivered.
+    failed: bool,
 }
 
 impl fmt::Debug for AnthropicTurn {
@@ -722,14 +803,23 @@ impl fmt::Debug for AnthropicTurn {
         f.debug_struct("AnthropicTurn")
             .field("started", &self.started)
             .field("stopped", &self.stopped)
+            .field("failed", &self.failed)
             .field("blocks", &self.blocks)
             .field("assembler", &self.assembler)
+            .field("accumulated", &Size(self.bytes))
             .finish()
     }
 }
 
 fn saturate(count: u64) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// Adds `bytes` to the running total of a turn. Passing [`MAX_TURN_BYTES`] ends the turn, before the bytes are delivered or
+/// kept.
+fn charge(total: &mut usize, bytes: usize) -> Result<(), AiError> {
+    *total = total.saturating_add(bytes);
+    if *total > MAX_TURN_BYTES { Err(protocol(PHRASE_TOO_LARGE)) } else { Ok(()) }
 }
 
 /// The text member `key` of `object`, empty when it is missing or not text.
@@ -756,6 +846,8 @@ impl AnthropicTurn {
             cache_read: 0,
             output: 0,
             stop: None,
+            bytes: 0,
+            failed: false,
         }
     }
 
@@ -817,7 +909,12 @@ impl AnthropicTurn {
                 self.require_started()?;
                 self.stopped = true;
             }
-            Event::Error { .. } => return Err(protocol(PHRASE_ERROR_EVENT)),
+            Event::Error { error } => {
+                // The message of the provider is never read: the turn has no endpoint to mask a key with.
+                let kind = error.and_then(|error| error.kind);
+                let known = kind.and_then(|kind| error_of(&kind, None, None, Detail::new(PHRASE_ERROR_EVENT)));
+                return Err(known.unwrap_or_else(|| protocol(PHRASE_ERROR_EVENT)));
+            }
             Event::Ping | Event::Other => {}
         }
         Ok(Flow::Continue)
@@ -833,9 +930,14 @@ impl AnthropicTurn {
         start: &Value,
         out: &mut dyn FnMut(StreamEvent) -> Flow,
     ) -> Result<Flow, AiError> {
+        if !usize::try_from(index).is_ok_and(|index| index < MAX_BLOCKS) {
+            return Err(protocol(PHRASE_TOO_MANY_BLOCKS));
+        }
         if self.blocks.contains_key(&index) {
             return Err(protocol("the response opens a content block twice"));
         }
+        // The whole object counts: it holds the first text, the data of a redacted block, and whatever else was sent.
+        charge(&mut self.bytes, json_size(start).0)?;
         let mut flow = Flow::Continue;
         let block = match start.get("type").and_then(Value::as_str) {
             Some("text") => {
@@ -858,7 +960,7 @@ impl AnthropicTurn {
                 set(&mut start, "signature", Value::String(String::new()));
                 Block::Thinking { start, thinking, signature, done: false }
             }
-            Some("redacted_thinking") => Block::Redacted { start: start.clone() },
+            Some("redacted_thinking") => Block::Redacted { start: start.clone(), done: false },
             Some("tool_use") => {
                 let (id, name) = (text_of(start, "id"), text_of(start, "name"));
                 if id.is_empty() || name.is_empty() {
@@ -884,11 +986,19 @@ impl AnthropicTurn {
         let Some(block) = self.blocks.get_mut(&index) else {
             return Err(protocol("the response sends a delta for a content block that is not open"));
         };
+        // A kind of delta this version does not know is ignored, whatever block it comes in.
+        if matches!(delta, Delta::Other) {
+            return Ok(Flow::Continue);
+        }
+        if block.is_done() {
+            return Err(protocol(PHRASE_MISFIT));
+        }
         match (block, delta) {
             (Block::Text { text, .. }, Delta::Text { text: piece }) => {
                 if piece.is_empty() {
                     return Ok(Flow::Continue);
                 }
+                charge(&mut self.bytes, piece.len())?;
                 text.push_str(&piece);
                 Ok(out(StreamEvent::TextDelta(piece.into_owned())))
             }
@@ -896,45 +1006,62 @@ impl AnthropicTurn {
                 if piece.is_empty() {
                     return Ok(Flow::Continue);
                 }
+                charge(&mut self.bytes, piece.len())?;
                 thinking.push_str(&piece);
                 Ok(out(StreamEvent::ReasoningDelta(piece.into_owned())))
             }
             (Block::Thinking { signature, .. }, Delta::Signature { signature: piece }) => {
+                charge(&mut self.bytes, piece.len())?;
                 signature.push_str(&piece);
                 Ok(Flow::Continue)
             }
             (Block::Tool { .. }, Delta::InputJson { partial_json }) => {
+                charge(&mut self.bytes, partial_json.len())?;
                 self.assembler.fragment(index, None, None, &partial_json).map_err(AiError::from)?;
                 Ok(Flow::Continue)
             }
-            _ => Ok(Flow::Continue),
+            _ => Err(protocol(PHRASE_MISFIT)),
         }
     }
 
     fn close_block(&mut self, index: u32) -> Result<(), AiError> {
-        match self.blocks.get_mut(&index) {
-            Some(Block::Text { done, .. } | Block::Thinking { done, .. }) => *done = true,
-            Some(Block::Redacted { .. }) => {}
-            Some(Block::Tool { done, .. }) => {
+        let Some(block) = self.blocks.get_mut(&index) else {
+            return Err(protocol("the response closes a content block that was never opened"));
+        };
+        if block.is_done() {
+            return Err(protocol("the response closes a content block twice"));
+        }
+        match block {
+            Block::Text { done, .. } | Block::Thinking { done, .. } | Block::Redacted { done, .. } => *done = true,
+            Block::Tool { done, .. } => {
                 *done = true;
                 self.assembler.complete(index).map_err(AiError::from)?;
             }
-            None => return Err(protocol("the response closes a content block that was never opened")),
         }
         Ok(())
     }
-}
 
-impl WireTurn for AnthropicTurn {
-    fn frame(&mut self, frame: Frame<'_>, out: &mut dyn FnMut(StreamEvent) -> Flow) -> Result<Flow, AiError> {
+    fn read(&mut self, frame: Frame<'_>, out: &mut dyn FnMut(StreamEvent) -> Flow) -> Result<Flow, AiError> {
         let Frame::Event(event) = frame else {
             return Err(protocol(PHRASE_FRAME));
         };
+        // After the final event nothing is read: a provider may add events there, and none of them matters.
         if self.stopped || event.is_done() || event.data().trim().is_empty() {
             return Ok(Flow::Continue);
         }
         let event: Event<'_> = serde_json::from_str(event.data()).map_err(|_| protocol(PHRASE_UNREADABLE))?;
         self.handle(event, out)
+    }
+}
+
+impl WireTurn for AnthropicTurn {
+    fn frame(&mut self, frame: Frame<'_>, out: &mut dyn FnMut(StreamEvent) -> Flow) -> Result<Flow, AiError> {
+        if self.failed {
+            return Ok(Flow::Stop);
+        }
+        let result = self.read(frame, out);
+        self.failed = result.is_err();
+        result
     }
 
     fn finish(
@@ -942,6 +1069,9 @@ impl WireTurn for AnthropicTurn {
         end: StreamEnd,
         out: &mut dyn FnMut(StreamEvent) -> Flow,
     ) -> Result<Completion, AiError> {
+        if self.failed {
+            return Err(protocol(PHRASE_FAILED_EARLIER));
+        }
         match end {
             StreamEnd::Stopped => return Err(AiError::Cancelled),
             StreamEnd::Truncated { .. } => return Err(AiError::Network(Detail::new(PHRASE_TRUNCATED))),
@@ -961,8 +1091,25 @@ impl WireTurn for AnthropicTurn {
             Some(Stop::Refusal) => StopReason::Refusal,
             Some(Stop::Other) | None => StopReason::Other,
         };
+        // The provider declined: whatever tool uses came before are not made, and the text stays with the caller.
+        if self.stop == Some(Stop::Refusal) {
+            return Err(AiError::ContentFilter);
+        }
+        let tool_turn = self.stop == Some(Stop::ToolUse);
         let AnthropicTurn { blocks, assembler, .. } = *self;
-        let calls = assembler.finish(end, true).map_err(AiError::from)?;
+        let released = assembler.finish(end, true);
+        let calls = if tool_turn {
+            let calls = released.map_err(AiError::from)?;
+            if calls.is_empty() {
+                return Err(protocol(PHRASE_NO_CALL));
+            }
+            calls
+        } else {
+            // A turn that did not end as a tool-use turn (cut by the output bound, or ended in some other way) makes no
+            // call, whatever fragments or complete calls it held, and it keeps no tool block in its native turn.
+            let _ = released;
+            Vec::new()
+        };
         let mut content = Vec::with_capacity(blocks.len());
         for block in blocks.into_values() {
             match block {
@@ -980,7 +1127,7 @@ impl WireTurn for AnthropicTurn {
                         content.push(start);
                     }
                 }
-                Block::Redacted { start } => content.push(start),
+                Block::Redacted { start, .. } => content.push(start),
                 Block::Tool { mut start, id, .. } => {
                     if let Some(call) = calls.iter().find(|call| call.id == id) {
                         set(&mut start, "input", call.args.clone());
@@ -1117,5 +1264,50 @@ mod tests {
         );
         let bare = ContextNote { items: Vec::new(), ..many };
         assert_eq!(context_text(&history, &bare), "[terminal context from an earlier message is not sent again]");
+    }
+
+    #[test]
+    fn debug_output_never_shows_stream_or_request_text() {
+        use crate::ai::sse::SseDecoder;
+
+        const CANARY: &str = "CANARY-STREAM-TEXT";
+        let events = [
+            json!({ "type": "message_start", "message": { "usage": { "input_tokens": 5, "output_tokens": 1 } } }),
+            json!({ "type": "content_block_start", "index": 0,
+                    "content_block": { "type": "thinking", "thinking": "", "signature": "" } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": CANARY } }),
+            json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": CANARY } }),
+            json!({ "type": "content_block_stop", "index": 0 }),
+            json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text", "text": CANARY } }),
+            json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": CANARY } }),
+            json!({ "type": "content_block_start", "index": 2,
+                    "content_block": { "type": "redacted_thinking", "data": CANARY } }),
+            json!({ "type": "content_block_start", "index": 3,
+                    "content_block": { "type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {} } }),
+            json!({ "type": "content_block_delta", "index": 3,
+                    "delta": { "type": "input_json_delta", "partial_json": format!("{{\"path\": \"{CANARY}") } }),
+        ];
+        let mut bytes = Vec::new();
+        for event in &events {
+            bytes.extend_from_slice(format!("data: {event}\n\n").as_bytes());
+        }
+        let mut turn = AnthropicTurn::new();
+        let mut decoder = SseDecoder::new();
+        let mut frames = 0;
+        decoder
+            .push(&bytes, &mut |event| {
+                turn.frame(Frame::Event(event), &mut |_| Flow::Continue).expect("a frame");
+                frames += 1;
+                Flow::Continue
+            })
+            .expect("the bytes decode");
+        assert_eq!(frames, events.len());
+
+        let adapter = AnthropicAdapter::new(Flavor::FirstParty);
+        for shown in [format!("{turn:?}"), format!("{turn:#?}"), format!("{adapter:?}"), format!("{adapter:#?}")] {
+            assert!(!shown.contains(CANARY), "the stream text reached a Debug line: {shown}");
+        }
+        assert!(format!("{turn:?}").contains("bytes"), "{turn:?}");
+        assert_eq!(format!("{adapter:?}"), "AnthropicAdapter { flavor: \"first_party\" }");
     }
 }
