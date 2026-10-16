@@ -71,9 +71,24 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
             ("pulldown-cmark", "Markdown parser of previews (preview.rs)"),
             ("quick-xml", "parser of the WebDAV multistatus answers (sync/webdav.rs)"),
             ("rand", "dev dependency only: random SSH host keys for the in-process test servers (ssh.rs, files.rs tests)"),
+            (
+                "reqwest",
+                "the HTTP client of the AI chat, built in ai/http.rs and named in that file only (see EXCEPTIONS and \
+                 PERMITTED_HITS)",
+            ),
             ("rusqlite", "SQLite store of the command history, bundled (history.rs)"),
             ("russh", "SSH client for shell and SFTP connections (ssh.rs, files.rs)"),
             ("russh-sftp", "SFTP file access over an SSH connection (files.rs)"),
+            (
+                "rustls",
+                "TLS of the AI client (ai/http.rs): the ring provider is passed to the configuration explicitly and no \
+                 process default is installed; the rustls and ring that ureq already links, so the lock holds one TLS stack",
+            ),
+            (
+                "rustls-platform-verifier",
+                "certificate checks of the AI client against the operating system's trust store (ai/http.rs), the choice \
+                 the WebDAV transport made",
+            ),
             ("serde", "derive of every file format and wire type the user or the page can send"),
             ("serde_json", "JSON of every file format the user can edit and of the wire to the page"),
             ("sha2", "SHA-256 content hashes of the sync engine (sync/engine)"),
@@ -177,11 +192,24 @@ type Exception = (&'static str, &'static [&'static str], &'static str);
 /// `PROXY_DEV_SERVER = cfg!(all(dev, mobile))`: a desktop build never creates the client, and `tauri.conf.json`
 /// sets no `devUrl` (checked by `page_policy_has_no_remote_origin`). `hyper-util` is below `reqwest` only.
 ///
+/// `holzwave-core` is the second parent of `reqwest` since Phase 7: the HTTP client of the AI chat, built in
+/// `core/src/ai/http.rs` (the one file `PERMITTED_HITS` lets name it). `hyper-rustls` is its rustls connector and the
+/// second parent of `hyper-util`.
+///
 /// `ureq` is the WebDAV client of the sync and has exactly one parent, `holzwave-core`. A slice, so that a later plan
 /// appends one entry without editing a length; every entry needs a reason and a crate that is still in the closure.
 const EXCEPTIONS: &[Exception] = &[
-    ("reqwest", &["tauri"], "tauri's dev-server proxy; not instantiated on desktop and devUrl is unset"),
-    ("hyper-util", &["reqwest"], "the HTTP client of reqwest, reachable only through it"),
+    (
+        "reqwest",
+        &["holzwave-core", "tauri"],
+        "two uses: tauri's dev-server proxy, which is not instantiated on desktop and has no devUrl; and the HTTP client \
+         of the AI chat in core/src/ai/http.rs, rustls with the ring provider and the platform verifier, no redirects",
+    ),
+    (
+        "hyper-util",
+        &["hyper-rustls", "reqwest"],
+        "the HTTP client below reqwest and its rustls connector, reachable through them only",
+    ),
     (
         "ureq",
         &["holzwave-core"],
@@ -201,6 +229,12 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
         "core/src/sync/webdav.rs",
         "ureq",
         "the WebDAV transport of the sync, a named exception of the closure guard (see EXCEPTIONS)",
+    ),
+    (
+        "core/src/ai/http.rs",
+        "reqwest",
+        "the one HTTP chokepoint of the AI client: it builds the client and opens no socket by itself (building a client \
+         connects to nothing); no other first-party file may name the client crate",
     ),
     (
         "core/src/widgets.rs",
@@ -788,17 +822,24 @@ fn app_closure_contains_no_telemetry_or_network_client_crates() {
 
 #[test]
 fn reqwest_parents_are_the_documented_set() {
-    // tauri links reqwest for its dev-server proxy (see EXCEPTIONS). The set of crates that depend on it must stay
-    // exactly {tauri}: a second parent means another crate brought an HTTP client in.
+    // tauri links reqwest for its dev-server proxy and holzwave-core for the HTTP client of the AI chat (see
+    // EXCEPTIONS). The set of crates that depend on it must stay exactly these two: a third parent means another crate
+    // brought an HTTP client in.
     let graph = lock_graph();
     let parents = parents_of(&graph, "reqwest");
     if !graph.contains_key("reqwest") {
         assert!(parents.is_empty(), "reqwest is absent from the lock but listed as a dependency of {parents:?}");
         return;
     }
-    assert_eq!(parents, set(&["tauri"]), "the parents of reqwest changed");
-    // hyper-util is the HTTP client below reqwest: nothing else may reach it.
-    assert_eq!(parents_of(&graph, "hyper-util"), set(&["reqwest"]), "hyper-util has a parent besides reqwest");
+    assert_eq!(parents, set(&["holzwave-core", "tauri"]), "the parents of reqwest changed");
+    // hyper-util is the HTTP client below reqwest and its rustls connector: nothing else may reach it.
+    assert_eq!(
+        parents_of(&graph, "hyper-util"),
+        set(&["hyper-rustls", "reqwest"]),
+        "hyper-util has a parent besides hyper-rustls and reqwest"
+    );
+    // hyper-rustls is the connector of reqwest: nothing else may use it.
+    assert_eq!(parents_of(&graph, "hyper-rustls"), set(&["reqwest"]), "hyper-rustls has a parent besides reqwest");
 }
 
 /// Whether `version` is an exact pin: it starts with an ASCII digit, holds only ASCII letters, digits, `.`, `-` and

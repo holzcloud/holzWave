@@ -6,6 +6,7 @@
 //!
 //! Modules:
 //!
+//! - [`ai`]: the AI chat core; [`ai::http`] builds the one HTTP client that reaches a provider.
 //! - [`engine`]: the [`TerminalEngine`] trait and the screen model it produces.
 //! - [`layout`]: the pure tab and pane layout model.
 //! - [`platform`]: the per-OS decisions (default shell, locale, polling) as pure functions of an `Os`.
@@ -28,6 +29,7 @@
 //! - [`pane`]: the pane actor with engine thread, PTY reader and writer, and frame pacing.
 //! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
 
+pub mod ai;
 pub mod blocks;
 pub mod conn;
 pub mod connections;

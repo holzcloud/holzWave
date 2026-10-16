@@ -1,0 +1,220 @@
+//! The HTTP client of the AI chat (`holzwave_core::ai::http`), against a server in this process.
+//!
+//! No test here reaches the network. `Loopback` is a small HTTP/1.1 server on `127.0.0.1` that records what it was sent
+//! and answers by path, so a test can say what the client must do (stream in order, follow no redirect, send no
+//! compression header, end a silent server) and what the server must have seen. Plan 07-12 builds the shared fake server
+//! in `tests/common` and may move this one there.
+//!
+//! The tests of the TLS handshake itself need a real endpoint; they are the two ignored tests at the end.
+
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use holzwave_core::ai::http::{ClientOptions, ProxyPolicy, build_client};
+
+/// The longest request head the server reads.
+const HEAD_LIMIT: usize = 16 * 1024;
+
+/// The largest request body the server reads.
+const BODY_LIMIT: usize = 1024 * 1024;
+
+/// One request as the server read it. Header names are lowercased.
+#[derive(Clone, Debug)]
+struct Seen {
+    line: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl Seen {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str())
+    }
+}
+
+/// An HTTP/1.1 server with keep-alive on a free loopback port. It stops accepting when it is dropped.
+struct Loopback {
+    addr: SocketAddr,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    accepted: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Loopback {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let addr = listener.local_addr().expect("local address");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (seen_in, accepted_in, stop_in) = (seen.clone(), accepted.clone(), stop.clone());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop_in.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(stream) = stream else { continue };
+                accepted_in.fetch_add(1, Ordering::SeqCst);
+                let seen = seen_in.clone();
+                thread::spawn(move || serve(stream, &seen));
+            }
+        });
+        Self { addr, seen, accepted, stop }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
+    }
+
+    fn requests(&self) -> Vec<Seen> {
+        self.seen.lock().expect("seen").clone()
+    }
+
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Loopback {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wake the accept call so the thread sees the flag.
+        let _ = TcpStream::connect(self.addr);
+    }
+}
+
+/// Reads one request: the head up to the blank line (bounded) and as many body bytes as `content-length` says.
+fn read_request(reader: &mut BufReader<TcpStream>) -> Option<Seen> {
+    let mut line = String::new();
+    let mut used = reader.read_line(&mut line).ok()?;
+    if used == 0 {
+        return None;
+    }
+    let request_line = line.trim_end().to_owned();
+    let mut headers = Vec::new();
+    loop {
+        line.clear();
+        used += reader.read_line(&mut line).ok()?;
+        if used > HEAD_LIMIT || line.is_empty() {
+            return None;
+        }
+        let text = line.trim_end();
+        if text.is_empty() {
+            break;
+        }
+        let (name, value) = text.split_once(':')?;
+        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
+    }
+    let length = headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = vec![0; length.min(BODY_LIMIT)];
+    reader.read_exact(&mut body).ok()?;
+    Some(Seen { line: request_line, headers, body })
+}
+
+fn serve(stream: TcpStream, seen: &Mutex<Vec<Seen>>) {
+    let _ = stream.set_nodelay(true);
+    let Ok(mut writer) = stream.try_clone() else { return };
+    let mut reader = BufReader::new(stream);
+    while let Some(request) = read_request(&mut reader) {
+        let path = request.line.split_whitespace().nth(1).unwrap_or("/").to_owned();
+        seen.lock().expect("seen").push(request);
+        if respond(&mut writer, &path).is_err() {
+            break;
+        }
+    }
+}
+
+/// The text of event `i`: a data line and a blank line.
+fn event(i: usize) -> String {
+    format!("data: {{\"i\":{i}}}\n\n")
+}
+
+/// The head of a chunked event stream.
+fn stream_head(writer: &mut TcpStream) -> io::Result<()> {
+    writer.write_all(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+    )?;
+    writer.flush()
+}
+
+/// One chunk in a single write, so that the framing is never split by the server.
+fn chunk(writer: &mut TcpStream, data: &str) -> io::Result<()> {
+    let mut frame = format!("{:x}\r\n", data.len()).into_bytes();
+    frame.extend_from_slice(data.as_bytes());
+    frame.extend_from_slice(b"\r\n");
+    writer.write_all(&frame)?;
+    writer.flush()
+}
+
+fn respond(writer: &mut TcpStream, path: &str) -> io::Result<()> {
+    if let Some(count) = path.strip_prefix("/events/").and_then(|n| n.parse::<usize>().ok()) {
+        stream_head(writer)?;
+        for i in 0..count {
+            chunk(writer, &event(i))?;
+            thread::sleep(Duration::from_millis(5));
+        }
+        writer.write_all(b"0\r\n\r\n")?;
+        return writer.flush();
+    }
+    writer.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")?;
+    writer.flush()
+}
+
+/// A current-thread runtime with the timer and the I/O driver: `connect_timeout` needs the timer.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime")
+}
+
+// ---- the tracer -------------------------------------------------------------------------------------------
+
+#[test]
+fn the_client_is_built_from_the_ring_provider_and_installs_no_process_default() {
+    build_client(&ClientOptions::new(false, ProxyPolicy::Direct)).expect("a client");
+    build_client(&ClientOptions::new(true, ProxyPolicy::System)).expect("a client that follows the proxy settings");
+
+    assert!(
+        rustls::crypto::CryptoProvider::get_default().is_none(),
+        "building the client installed a process-wide crypto provider: the SSH and WebDAV clients would change"
+    );
+}
+
+#[test]
+fn a_chunked_event_stream_arrives_in_order_through_the_built_client() {
+    let server = Loopback::start();
+    let client = build_client(&ClientOptions::new(false, ProxyPolicy::Direct)).expect("a client");
+
+    let (status, content_type, chunks) = runtime().block_on(async {
+        let mut response = client.post(server.url("/events/3")).body("ping").send().await.expect("a response");
+        let status = response.status().as_u16();
+        let content_type = response.headers().get("content-type").map(|v| v.to_str().expect("text").to_owned());
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        while let Some(piece) = response.chunk().await.expect("a chunk") {
+            chunks.push(piece.to_vec());
+        }
+        (status, content_type, chunks)
+    });
+
+    assert_eq!(status, 200);
+    assert_eq!(content_type.as_deref(), Some("text/event-stream"));
+    assert!(!chunks.is_empty(), "no chunk was delivered");
+    assert!(chunks.iter().all(|piece| !piece.is_empty()), "an empty chunk was delivered: {chunks:?}");
+    let body: Vec<u8> = chunks.concat();
+    let expected = format!("{}{}{}", event(0), event(1), event(2));
+    assert_eq!(String::from_utf8(body).expect("utf-8"), expected, "the events arrived out of order or damaged");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "the server saw {requests:?}");
+    assert_eq!(requests[0].line, "POST /events/3 HTTP/1.1");
+    assert_eq!(requests[0].body, b"ping");
+    assert_eq!(requests[0].header("accept-encoding"), None, "a compression header was sent");
+    assert_eq!(server.accepted(), 1);
+    assert!(rustls::crypto::CryptoProvider::get_default().is_none(), "a request installed a process-wide provider");
+}
