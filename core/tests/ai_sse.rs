@@ -6,8 +6,12 @@
 //! can reconnect, and that stream text never reaches a `Debug` line. A failing case names the chunk size or the split
 //! point in its message.
 
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
 use holzwave_core::ai::provider::{Collector, Flow, StreamEvent};
-use holzwave_core::ai::sse::{FrameError, Limits, MAX_EVENT, MAX_LINE, SseDecoder, StreamEnd};
+use holzwave_core::ai::sse::{FrameError, Limits, MAX_EVENT, MAX_LINE, NdjsonDecoder, SseDecoder, StreamEnd};
 use holzwave_core::ai::types::Usage;
 use serde_json::Value;
 
@@ -174,6 +178,11 @@ fn lf_crlf_and_cr_line_endings_decode_to_the_same_events() {
         assert_eq!(got.events, vec![ev("message", "a\nb")], "split at {at}");
         assert_eq!(got.end, StreamEnd::Clean, "split at {at}");
     }
+
+    // An empty chunk between the CR and the LF says nothing: the LF still belongs to the CR.
+    let got = decode(&[b"data: a\r", b"", b"\n", b"", b"\r", b"", b"\n"], Limits::DEFAULT);
+    assert_eq!(got.events, vec![ev("message", "a")]);
+    assert_eq!(got.end, StreamEnd::Clean);
 
     // Two carriage returns and a line feed are two line ends: the second one is a blank line.
     let double = b"data: a\r\r\ndata: b\r\n\r\n";
@@ -436,5 +445,519 @@ fn decoder_and_event_debug_show_sizes_never_stream_text() {
     for text in shown {
         assert!(!text.contains(CANARY), "the event leaks stream text: {text}");
         assert!(text.contains("bytes"), "the event shows sizes: {text}");
+    }
+}
+
+// ---- the independent reference decoders -----------------------------------------------------------------
+
+/// What a reference decoder made of a whole byte string.
+struct Reference {
+    events: Vec<(String, String)>,
+    /// A partial line, undispatched data or a pending event name was left over.
+    pending: bool,
+}
+
+/// A second implementation of the event-stream rules that reads the whole byte string at once and shares no code with
+/// the crate: replace every CRLF pair by LF and then every remaining CR by LF, split at LF, treat the text after the
+/// last LF as the partial line, drop one leading byte order mark from the first completed line, then apply the fields.
+fn reference_sse(bytes: &[u8]) -> Reference {
+    let mut norm = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' {
+            norm.push(b'\n');
+            if bytes.get(i + 1) == Some(&b'\n') {
+                i += 1;
+            }
+        } else {
+            norm.push(bytes[i]);
+        }
+        i += 1;
+    }
+    let mut lines: Vec<&[u8]> = norm.split(|&b| b == b'\n').collect();
+    let partial = lines.pop().expect("split yields at least one piece");
+    if let Some(first) = lines.first_mut()
+        && first.starts_with(&[0xEF, 0xBB, 0xBF])
+    {
+        *first = &first[3..];
+    }
+    let mut events = Vec::new();
+    let mut data: Vec<u8> = Vec::new();
+    let mut name: Vec<u8> = Vec::new();
+    let mut data_seen = false;
+    for line in lines {
+        if line.is_empty() {
+            if data_seen {
+                data.pop();
+                let event = if name.is_empty() { "message".to_owned() } else { String::from_utf8(name.clone()).unwrap() };
+                events.push((event, String::from_utf8(data.clone()).unwrap()));
+            }
+            data.clear();
+            name.clear();
+            data_seen = false;
+        } else if line[0] == b':' {
+            // a comment
+        } else {
+            let (field, value): (&[u8], &[u8]) = match line.iter().position(|&b| b == b':') {
+                Some(at) => {
+                    let value = &line[at + 1..];
+                    (&line[..at], if value.first() == Some(&b' ') { &value[1..] } else { value })
+                }
+                None => (line, &[]),
+            };
+            if field == b"data" {
+                data.extend_from_slice(value);
+                data.push(b'\n');
+                data_seen = true;
+            } else if field == b"event" {
+                name = value.to_vec();
+            }
+        }
+    }
+    Reference { events, pending: !partial.is_empty() || data_seen || !name.is_empty() }
+}
+
+/// The same for newline-delimited records: a line feed ends a record, one carriage return in front of it is dropped,
+/// empty records are skipped, and the text after the last line feed is pending.
+fn reference_ndjson(bytes: &[u8]) -> (Vec<Vec<u8>>, bool) {
+    let mut lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+    let partial = lines.pop().expect("split yields at least one piece");
+    let records = lines
+        .into_iter()
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| !line.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+    (records, !partial.is_empty())
+}
+
+/// The golden streams: named byte strings, each in LF, CRLF, CR and mixed form where that is meaningful.
+fn goldens() -> Vec<(String, Vec<u8>)> {
+    let basic = golden_basic();
+    let chat = b": keepalive\n\ndata: {\"c\":\"Hel\"}\n\ndata: {\"c\":\"lo\"}\n\ndata: [DONE]\n\n".to_vec();
+    let fields = b"id: 1\nretry: 100\nevent: m\ndata: one\ndata: two\n\nfoo\ndata:  spaced\n\nevent: e\ndata\n\ndata:\n\nevent: lost\n\ndata: z\n\n".to_vec();
+    let chars = "data: \u{e9}x\u{65e5}y\u{1f600}\n\ndata: a\u{e9}b\u{65e5}c\u{1f600}d\n\nevent: \u{e9}\ndata: z\u{1f600}\n\n"
+        .as_bytes()
+        .to_vec();
+    let mut bom = vec![0xEF, 0xBB, 0xBF];
+    bom.extend_from_slice(b": c\ndata: a\n\ndata: b\n\n");
+    let mut out = Vec::new();
+    for (name, lf) in [("basic", basic), ("chat", chat), ("fields", fields), ("chars", chars), ("bom", bom)] {
+        out.push((format!("{name}/crlf"), to_crlf(&lf)));
+        out.push((format!("{name}/cr"), to_cr(&lf)));
+        out.push((format!("{name}/mixed"), to_mixed(&lf)));
+        out.push((format!("{name}/lf"), lf));
+    }
+    out
+}
+
+/// Fails with the stream name and the way it was split unless the incremental decoder equals the reference.
+fn assert_like_reference(name: &str, bytes: &[u8], chunks: &[&[u8]], how: &str) {
+    let want = reference_sse(bytes);
+    let got = decode(chunks, Limits::DEFAULT);
+    assert_eq!(got.last, Ok(Flow::Continue), "{name}: {how}");
+    assert_eq!(got.events, want.events, "{name}: {how}");
+    match got.end {
+        StreamEnd::Clean => assert!(!want.pending, "{name}: {how}: clean, but the reference has something pending"),
+        StreamEnd::Truncated { discarded } => {
+            assert!(want.pending && discarded > 0, "{name}: {how}: truncated ({discarded}) but the reference is clean")
+        }
+        StreamEnd::Stopped => panic!("{name}: {how}: stopped without a Stop"),
+    }
+}
+
+/// A small seeded generator (xorshift), so a failure can be replayed from the seed in its message.
+struct XorShift(u64);
+
+impl XorShift {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
+// ---- split at every offset ------------------------------------------------------------------------------
+
+#[test]
+fn every_golden_stream_split_at_every_offset_decodes_like_the_reference() {
+    let mut streams = 0;
+    let mut splits = 0;
+    let mut expected = 0;
+    for (name, bytes) in goldens() {
+        streams += 1;
+        expected += bytes.len() + 1;
+        assert_like_reference(&name, &bytes, &[&bytes], "unsplit");
+        for at in 0..=bytes.len() {
+            assert_like_reference(&name, &bytes, &[&bytes[..at], &bytes[at..]], &format!("split at {at}"));
+            splits += 1;
+        }
+    }
+    println!("split at every offset: {streams} golden streams, {splits} split points");
+    assert_eq!(streams, 20, "five stories in four line-ending forms");
+    assert_eq!(splits, expected, "every offset from 0 to the length was tried");
+}
+
+#[test]
+fn every_pair_of_split_points_on_the_small_streams_decodes_like_the_reference() {
+    let mut streams = 0;
+    let mut pairs = 0;
+    for (name, bytes) in goldens().into_iter().filter(|(_, bytes)| bytes.len() < 150) {
+        streams += 1;
+        for a in 0..=bytes.len() {
+            for b in a..=bytes.len() {
+                assert_like_reference(&name, &bytes, &[&bytes[..a], &bytes[a..b], &bytes[b..]], &format!("splits at {a} and {b}"));
+                pairs += 1;
+            }
+        }
+    }
+    println!("every pair of split points: {streams} golden streams, {pairs} pairs");
+    assert!(streams >= 10 && pairs > 10_000);
+}
+
+#[test]
+fn single_byte_chunks_and_seeded_random_chunks_decode_like_the_reference() {
+    let seeds: [u64; 5] = [1, 42, 2024, 0x9E37_79B9_7F4A_7C15, 0xDEAD_BEEF_CAFE_F00D];
+    let mut runs = 0;
+    for (name, bytes) in goldens() {
+        assert_like_reference(&name, &bytes, &chunks_of(&bytes, 1), "one byte at a time");
+        for seed in seeds {
+            let mut rng = XorShift(seed);
+            for round in 0..40 {
+                let mut chunks = Vec::new();
+                let mut at = 0;
+                while at < bytes.len() {
+                    let len = 1 + (rng.next() % 40) as usize;
+                    let end = (at + len).min(bytes.len());
+                    chunks.push(&bytes[at..end]);
+                    at = end;
+                }
+                assert_like_reference(&name, &bytes, &chunks, &format!("seed {seed}, round {round}"));
+                runs += 1;
+            }
+        }
+    }
+    println!("random chunk lengths 1 to 40: {runs} runs over {} seeds", seeds.len());
+}
+
+#[test]
+fn a_stream_cut_at_any_byte_delivers_only_whole_events_and_finish_reports_the_cut() {
+    let mut cuts = 0;
+    for (name, bytes) in goldens() {
+        let full = reference_sse(&bytes);
+        for len in 0..=bytes.len() {
+            let prefix = &bytes[..len];
+            let want = reference_sse(prefix);
+            assert!(full.events.starts_with(&want.events), "{name}: the reference of a prefix is a prefix, cut at {len}");
+            for size in [prefix.len().max(1), 3] {
+                let got = decode(&chunks_of(prefix, size), Limits::DEFAULT);
+                assert_eq!(got.events, want.events, "{name}: cut at {len}, chunks of {size}");
+                assert!(full.events.starts_with(&got.events), "{name}: cut at {len} delivered something that is not a prefix");
+                match got.end {
+                    StreamEnd::Clean => assert!(!want.pending, "{name}: cut at {len}: clean with something pending"),
+                    StreamEnd::Truncated { discarded } => {
+                        assert!(want.pending && discarded > 0, "{name}: cut at {len}: truncated without anything pending")
+                    }
+                    StreamEnd::Stopped => panic!("{name}: cut at {len}: stopped"),
+                }
+            }
+            cuts += 1;
+        }
+    }
+    println!("cut at every byte: {cuts} prefixes");
+}
+
+// ---- the byte order mark --------------------------------------------------------------------------------
+
+#[test]
+fn a_byte_order_mark_is_dropped_at_the_start_only_even_when_split() {
+    let bom = [0xEF, 0xBB, 0xBF];
+    let with = |rest: &[u8]| {
+        let mut v = bom.to_vec();
+        v.extend_from_slice(rest);
+        v
+    };
+
+    // Dropped, one chunk and byte by byte.
+    let stream = with(b"data: a\n\n");
+    assert_eq!(events_of(&stream), vec![ev("message", "a")]);
+    assert_eq!(decode(&chunks_of(&stream, 1), Limits::DEFAULT).events, vec![ev("message", "a")]);
+    // Dropped when the three bytes arrive in separate chunks.
+    let parts: [&[u8]; 4] = [&stream[0..1], &stream[1..2], &stream[2..3], &stream[3..]];
+    let got = decode(&parts, Limits::DEFAULT);
+    assert_eq!(got.events, vec![ev("message", "a")]);
+    assert_eq!(got.end, StreamEnd::Clean);
+    // Dropped when the first line is a comment, or blank.
+    assert_eq!(events_of(&with(b": c\ndata: a\n\n")), vec![ev("message", "a")]);
+    assert_eq!(events_of(&with(b"\ndata: a\n\n")), vec![ev("message", "a")]);
+
+    // After the first line the same bytes are text.
+    let late = events_of("data: a\n\ndata: \u{feff}b\n\n".as_bytes());
+    assert_eq!(late, vec![ev("message", "a"), ev("message", "\u{feff}b")]);
+    assert!(late[1].1.contains('\u{feff}'));
+    // At the start of a later line they spoil the field name, so that line is ignored.
+    assert_eq!(events_of("data: a\n\n\u{feff}data: b\n\n".as_bytes()), vec![ev("message", "a")]);
+    // Only one is dropped.
+    let two = with("\u{feff}data: x\n\n".as_bytes());
+    assert!(events_of(&two).is_empty(), "a second mark spoils the name of the first line");
+
+    // A stream that is only the three bytes holds a partial line.
+    let only = decode(&[&bom], Limits::DEFAULT);
+    assert!(only.events.is_empty());
+    assert_eq!(only.end, StreamEnd::Truncated { discarded: 3 });
+    let partial = decode(&[&bom[..2]], Limits::DEFAULT);
+    assert!(matches!(partial.end, StreamEnd::Truncated { discarded: 2 }));
+}
+
+// ---- hostile input --------------------------------------------------------------------------------------
+
+#[test]
+fn floods_of_comments_and_blank_lines_hold_no_memory_and_dispatch_nothing() {
+    let comments = ": x\n".repeat(1_000_000).into_bytes();
+    let blanks = vec![b'\n'; 1_000_000];
+    for (name, flood) in [("comment lines", comments), ("blank lines", blanks)] {
+        let mut decoder = SseDecoder::new();
+        let mut seen = 0usize;
+        let mut worst = 0usize;
+        for chunk in flood.chunks(64 * 1024) {
+            decoder
+                .push(chunk, &mut |_| {
+                    seen += 1;
+                    Flow::Continue
+                })
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            worst = worst.max(decoder.buffered());
+        }
+        assert_eq!(seen, 0, "{name} dispatch nothing");
+        assert!(worst <= 64, "{name} held {worst} bytes");
+        assert!(decoder.capacity() <= 4096, "{name} reserved {} bytes", decoder.capacity());
+        assert_eq!(decoder.finish(), StreamEnd::Clean, "{name}");
+    }
+}
+
+#[test]
+fn a_megabyte_line_in_single_byte_chunks_costs_linear_time() {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let started = Instant::now();
+        let payload = MAX_LINE - 6; // "data: " is six bytes, so the line is exactly the default limit
+        let mut line = b"data: ".to_vec();
+        line.resize(MAX_LINE, b'a');
+        let mut decoder = SseDecoder::new();
+        let mut events = Vec::new();
+        for byte in line.chunks(1) {
+            decoder
+                .push(byte, &mut |_| Flow::Continue)
+                .expect("a line at the limit passes");
+        }
+        let result = decoder.push(b"\n\n", &mut |event| {
+            events.push(event.data().len());
+            Flow::Continue
+        });
+        let _ = tx.send((result, events, payload, started.elapsed(), decoder.finish()));
+    });
+    let (result, events, payload, took, end) =
+        rx.recv_timeout(Duration::from_secs(30)).expect("a quadratic scan would not finish within 30 seconds");
+    println!("a 1 MiB line, one byte per push: {took:?}");
+    assert_eq!(result, Ok(Flow::Continue));
+    assert_eq!(events, vec![payload], "one event of 1 MiB minus 6 bytes");
+    assert_eq!(end, StreamEnd::Clean);
+}
+
+#[test]
+fn buffers_stop_growing_after_warm_up() {
+    let mut stream = Vec::new();
+    let mut boundaries = Vec::new();
+    for i in 0..2000 {
+        stream.extend_from_slice(format!("event: delta\ndata: {{\"t\":\"x{i:04}\"}}\n\n").as_bytes());
+        boundaries.push(stream.len());
+    }
+    let mut decoder = SseDecoder::new();
+    let mut seen = 0usize;
+    let mut position = 0usize;
+    let mut capacity = 0usize;
+    for pass in 0..3 {
+        for chunk in stream.chunks(997) {
+            decoder
+                .push(chunk, &mut |_| {
+                    seen += 1;
+                    Flow::Continue
+                })
+                .unwrap();
+            position += chunk.len();
+            // The offsets of the later passes are shifted by the length of the stream, so look the boundary up.
+            let at = position % stream.len();
+            if at == 0 || boundaries.binary_search(&at).is_ok() {
+                assert_eq!(decoder.buffered(), 0, "pass {pass}: at an event boundary (offset {at}) nothing is held");
+            }
+        }
+        assert_eq!(decoder.buffered(), 0, "pass {pass}: the stream ends at an event boundary");
+        if pass == 0 {
+            capacity = decoder.capacity();
+            assert!(capacity > 0);
+        } else {
+            assert_eq!(decoder.capacity(), capacity, "pass {pass}: the buffers grew after warm-up");
+        }
+    }
+    println!("capacity after warm-up: {capacity} bytes");
+    assert_eq!(seen, 6000);
+}
+
+// ---- newline-delimited records --------------------------------------------------------------------------
+
+/// What the NDJSON decoder made of some chunks.
+struct DecodedLines {
+    records: Vec<Vec<u8>>,
+    last: Result<Flow, FrameError>,
+    end: StreamEnd,
+}
+
+fn decode_lines(decoder: NdjsonDecoder, chunks: &[&[u8]]) -> DecodedLines {
+    let mut decoder = decoder;
+    let mut records = Vec::new();
+    let mut last = Ok(Flow::Continue);
+    for chunk in chunks {
+        last = decoder.push(chunk, &mut |line| {
+            records.push(line.to_vec());
+            Flow::Continue
+        });
+    }
+    DecodedLines { records, last, end: decoder.finish() }
+}
+
+#[test]
+fn ndjson_lines_split_at_every_offset_decode_like_the_reference() {
+    let lf = b"{\"a\":1}\n{\"b\":\"\xc3\xa9 \xf0\x9f\x98\x80\"}\n{\"c\":[1,2,3]}\n".to_vec();
+    let blanks = b"{\"a\":1}\n\n\r\n\r\r\n{\"b\":2}\n".to_vec();
+    let mut streams = vec![("lf", lf.clone()), ("crlf", to_crlf(&lf)), ("mixed", to_mixed(&lf)), ("blanks", blanks)];
+    streams.push(("cut", b"{\"a\":1}\n{\"b\":".to_vec()));
+    streams.push(("lone cr", b"{\"a\":1}\r{\"b\":2}\n".to_vec()));
+    let mut splits = 0;
+    for (name, bytes) in streams {
+        let (want, pending) = reference_ndjson(&bytes);
+        for at in 0..=bytes.len() {
+            let got = decode_lines(NdjsonDecoder::new(), &[&bytes[..at], &bytes[at..]]);
+            assert_eq!(got.records, want, "{name}: split at {at}");
+            assert_eq!(got.last, Ok(Flow::Continue), "{name}: split at {at}");
+            match got.end {
+                StreamEnd::Clean => assert!(!pending, "{name}: split at {at}"),
+                StreamEnd::Truncated { discarded } => assert!(pending && discarded > 0, "{name}: split at {at}"),
+                StreamEnd::Stopped => panic!("{name}: stopped"),
+            }
+            splits += 1;
+        }
+        let got = decode_lines(NdjsonDecoder::new(), &chunks_of(&bytes, 1));
+        assert_eq!(got.records, want, "{name}: one byte at a time");
+    }
+    println!("ndjson split at every offset: {splits} split points");
+    // One carriage return is dropped in front of a line feed, so `\r\r\n` leaves a record that holds one.
+    let (records, _) = reference_ndjson(b"{\"a\":1}\n\n\r\n\r\r\n{\"b\":2}\n");
+    assert_eq!(records, vec![b"{\"a\":1}".to_vec(), b"\r".to_vec(), b"{\"b\":2}".to_vec()]);
+}
+
+#[test]
+fn ndjson_enforces_its_bound_skips_blank_lines_reports_a_cut_record_and_hides_its_text() {
+    let record = |n: usize| "a".repeat(n).into_bytes();
+    let with_end = |n: usize, end: &[u8]| {
+        let mut v = record(n);
+        v.extend_from_slice(end);
+        v
+    };
+
+    // Blank lines, and a line that holds only a carriage return, are skipped.
+    let got = decode_lines(NdjsonDecoder::new(), &[b"\n\r\n{\"a\":1}\n\n\r\n"]);
+    assert_eq!(got.records, vec![b"{\"a\":1}".to_vec()]);
+    assert_eq!(got.end, StreamEnd::Clean);
+
+    // Exactly at the bound passes, one more fails: with a line feed, with a CRLF, and before the line end arrives.
+    let got = decode_lines(NdjsonDecoder::with_limit(16), &[&with_end(16, b"\n")]);
+    assert_eq!(got.records, vec![record(16)], "16 bytes pass");
+    let got = decode_lines(NdjsonDecoder::with_limit(16), &[&with_end(16, b"\r\n")]);
+    assert_eq!(got.records, vec![record(16)], "16 bytes and a CRLF pass");
+    let got = decode_lines(NdjsonDecoder::with_limit(16), &[&with_end(16, b"\r"), b"\n"]);
+    assert_eq!(got.records, vec![record(16)], "the carriage return may arrive before the line feed");
+    let got = decode_lines(NdjsonDecoder::with_limit(16), &[&with_end(17, b"\n")]);
+    assert_eq!(got.last, Err(FrameError::LineTooLong { limit: 16 }), "17 bytes fail");
+    assert!(got.records.is_empty());
+    let got = decode_lines(NdjsonDecoder::with_limit(16), &[&with_end(17, b"\r\n")]);
+    assert_eq!(got.last, Err(FrameError::LineTooLong { limit: 16 }), "17 bytes and a CRLF fail");
+
+    // It fails before the line end arrives, and then stays failed with nothing held.
+    let mut decoder = NdjsonDecoder::with_limit(16);
+    assert_eq!(decoder.push(&record(16), &mut |_| Flow::Continue), Ok(Flow::Continue));
+    assert_eq!(decoder.push(b"a", &mut |_| Flow::Continue), Err(FrameError::LineTooLong { limit: 16 }));
+    assert_eq!(decoder.buffered(), 0);
+    assert_eq!(decoder.capacity(), 0);
+    let mut seen = 0;
+    assert_eq!(
+        decoder.push(b"{}\n", &mut |_| {
+            seen += 1;
+            Flow::Continue
+        }),
+        Err(FrameError::LineTooLong { limit: 16 }),
+        "the same error again"
+    );
+    assert_eq!(seen, 0);
+    assert!(matches!(decoder.finish(), StreamEnd::Truncated { .. }));
+    // A record is bounded by the default too.
+    assert_eq!(NdjsonDecoder::new().push(&vec![b'a'; MAX_EVENT + 1], &mut |_| Flow::Continue), Err(FrameError::LineTooLong { limit: MAX_EVENT }));
+
+    // A last record without a line end was not delivered and is reported as a cut.
+    let got = decode_lines(NdjsonDecoder::new(), &[b"{\"a\":1}\n{\"b\":2}"]);
+    assert_eq!(got.records, vec![b"{\"a\":1}".to_vec()]);
+    assert_eq!(got.end, StreamEnd::Truncated { discarded: 7 });
+    assert_eq!(decode_lines(NdjsonDecoder::new(), &[]).end, StreamEnd::Clean);
+
+    // A Stop stops the stream.
+    let mut decoder = NdjsonDecoder::new();
+    let mut seen = 0;
+    let result = decoder.push(b"1\n2\n3\n", &mut |_| {
+        seen += 1;
+        if seen == 2 { Flow::Stop } else { Flow::Continue }
+    });
+    assert_eq!(result, Ok(Flow::Stop));
+    assert_eq!(seen, 2);
+    assert_eq!(decoder.push(b"4\n", &mut |_| panic!("delivered after a stop")), Ok(Flow::Stop));
+    assert_eq!(decoder.buffered(), 0);
+    assert_eq!(decoder.finish(), StreamEnd::Stopped);
+
+    // Debug shows sizes, never the pending record.
+    let mut decoder = NdjsonDecoder::new();
+    decoder.push(format!("{{\"k\":\"{CANARY}").as_bytes(), &mut |_| Flow::Continue).unwrap();
+    assert!(decoder.buffered() > 0);
+    for shown in [format!("{decoder:?}"), format!("{decoder:#?}")] {
+        assert!(!shown.contains(CANARY), "leaks stream text: {shown}");
+        assert!(shown.contains("bytes"), "shows sizes: {shown}");
+    }
+}
+
+// ---- speed ----------------------------------------------------------------------------------------------
+
+#[test]
+#[ignore = "measures speed and prints it; run with --ignored --nocapture, preferably with --release"]
+fn decoder_throughput_is_measured() {
+    const EVENTS: usize = 200_000;
+    let stream = "data: {\"t\":\"x\"}\n\n".repeat(EVENTS).into_bytes();
+    for chunk_size in [16_384usize, 7] {
+        let mut decoder = SseDecoder::new();
+        let mut seen = 0usize;
+        let started = Instant::now();
+        for chunk in stream.chunks(chunk_size) {
+            decoder
+                .push(chunk, &mut |_| {
+                    seen += 1;
+                    Flow::Continue
+                })
+                .unwrap();
+        }
+        let secs = started.elapsed().as_secs_f64();
+        assert_eq!(seen, EVENTS);
+        assert_eq!(decoder.finish(), StreamEnd::Clean);
+        println!(
+            "sse throughput: {:.1} MiB/s, {:.0} events/s ({chunk_size} byte chunks)",
+            stream.len() as f64 / (1024.0 * 1024.0) / secs,
+            EVENTS as f64 / secs
+        );
     }
 }

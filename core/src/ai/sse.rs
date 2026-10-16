@@ -19,6 +19,9 @@ use std::fmt;
 use super::provider::{AiError, Detail, Flow};
 use super::types::Size;
 
+/// The UTF-8 byte order mark, dropped at the start of an event stream.
+const BYTE_ORDER_MARK: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
 /// The longest line, without its terminator: 1 MiB.
 pub const MAX_LINE: usize = 1_048_576;
 /// The most an event may hold while it is pending: 4 MiB.
@@ -118,6 +121,26 @@ impl State {
     }
 }
 
+impl State {
+    /// The answer a push gives without looking at its bytes, when the decoder is no longer running.
+    fn gate(self) -> Option<Result<Flow, FrameError>> {
+        match self {
+            State::Running => None,
+            State::Stopped => Some(Ok(Flow::Stop)),
+            State::Failed { error, .. } => Some(Err(error)),
+        }
+    }
+}
+
+/// The state a decoder moves to after a step that did not simply continue; `pending` is how much it was holding.
+fn settled(result: &Result<Flow, FrameError>, pending: usize) -> Option<State> {
+    match result {
+        Ok(Flow::Continue) => None,
+        Ok(Flow::Stop) => Some(State::Stopped),
+        Err(error) => Some(State::Failed { error: *error, dropped: pending }),
+    }
+}
+
 /// The verdict of `finish` for a decoder in `state` that still holds `pending` bytes.
 fn verdict(state: State, pending: usize) -> StreamEnd {
     match state {
@@ -192,8 +215,7 @@ pub struct SseDecoder {
     data_seen: bool,
     /// The previous chunk ended with a carriage return, so a line feed that starts this chunk belongs to it.
     skip_lf: bool,
-    /// The first line has not been processed yet.
-    #[allow(dead_code)]
+    /// The first line has not been processed yet; it may start with a byte order mark.
     first_line: bool,
     state: State,
 }
@@ -234,25 +256,15 @@ impl SseDecoder {
         chunk: &[u8],
         on_event: &mut dyn FnMut(SseEvent<'_>) -> Flow,
     ) -> Result<Flow, FrameError> {
-        match self.state {
-            State::Failed { error, .. } => return Err(error),
-            State::Stopped => return Ok(Flow::Stop),
-            State::Running => {}
+        if let Some(answer) = self.state.gate() {
+            return answer;
         }
-        match self.scan(chunk, on_event) {
-            Ok(Flow::Continue) => Ok(Flow::Continue),
-            Ok(Flow::Stop) => {
-                self.release();
-                self.state = State::Stopped;
-                Ok(Flow::Stop)
-            }
-            Err(error) => {
-                let dropped = self.buffered();
-                self.release();
-                self.state = State::Failed { error, dropped };
-                Err(error)
-            }
+        let result = self.scan(chunk, on_event);
+        if let Some(state) = settled(&result, self.buffered()) {
+            self.release();
+            self.state = state;
         }
+        result
     }
 
     /// The verdict at the end of the stream. Nothing that is pending is dispatched: the standard says an event needs
@@ -287,9 +299,11 @@ impl SseDecoder {
         on_event: &mut dyn FnMut(SseEvent<'_>) -> Flow,
     ) -> Result<Flow, FrameError> {
         let mut rest = chunk;
-        if self.skip_lf {
+        // A line feed that starts the chunk belongs to the carriage return that ended the last one. An empty chunk
+        // says nothing, so the flag waits for the first byte that does.
+        if self.skip_lf && !rest.is_empty() {
             self.skip_lf = false;
-            if rest.first() == Some(&b'\n') {
+            if rest[0] == b'\n' {
                 rest = &rest[1..];
             }
         }
@@ -350,7 +364,12 @@ impl SseDecoder {
         line: &[u8],
         on_event: &mut dyn FnMut(SseEvent<'_>) -> Flow,
     ) -> Result<Flow, FrameError> {
-        self.first_line = false;
+        let mut line = line;
+        if self.first_line {
+            // The standard drops one byte order mark at the start of the stream, and only there.
+            self.first_line = false;
+            line = line.strip_prefix(&BYTE_ORDER_MARK).unwrap_or(line);
+        }
         if line.is_empty() {
             return self.dispatch(on_event);
         }
@@ -414,6 +433,138 @@ impl fmt::Debug for SseDecoder {
             .field("state", &self.state.name())
             .field("buffered", &Size(self.buffered()))
             .field("limits", &self.limits)
+            .finish()
+    }
+}
+
+// ---- the newline-delimited JSON decoder -----------------------------------------------------------------
+
+/// A decoder for a stream of records that a line feed ends, the framing of the Ollama native stream.
+///
+/// A record is delivered without its line feed and without one carriage return in front of it; empty records are
+/// skipped. The bytes are not validated as UTF-8: the JSON parser of the adapter does that. A record is delivered only
+/// with its line feed, so a last record without one is a cut stream and is reported by [`NdjsonDecoder::finish`]. A lone
+/// carriage return does not end a record, because a raw one cannot occur inside a JSON string.
+///
+/// The bound is on the record. Like [`SseDecoder`] it stays failed after its first error, and it does not scan a byte
+/// twice.
+pub struct NdjsonDecoder {
+    limit: usize,
+    carry: Vec<u8>,
+    state: State,
+}
+
+impl Default for NdjsonDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NdjsonDecoder {
+    /// A decoder with a record bound of [`MAX_EVENT`].
+    pub fn new() -> Self {
+        Self::with_limit(MAX_EVENT)
+    }
+
+    /// A decoder that accepts records of at most `limit` bytes.
+    pub fn with_limit(limit: usize) -> Self {
+        Self { limit, carry: Vec::new(), state: State::Running }
+    }
+
+    /// Takes one chunk and calls `on_line` for every record it completes, in order. The record is borrowed for the
+    /// call. An `Err` is final; after `Ok(Flow::Stop)` later pushes deliver nothing and return `Ok(Flow::Stop)`.
+    pub fn push(
+        &mut self,
+        chunk: &[u8],
+        on_line: &mut dyn FnMut(&[u8]) -> Flow,
+    ) -> Result<Flow, FrameError> {
+        if let Some(answer) = self.state.gate() {
+            return answer;
+        }
+        let result = self.scan(chunk, on_line);
+        if let Some(state) = settled(&result, self.buffered()) {
+            self.carry = Vec::new();
+            self.state = state;
+        }
+        result
+    }
+
+    /// The verdict at the end of the stream. A partial record is never delivered.
+    #[must_use]
+    pub fn finish(self) -> StreamEnd {
+        verdict(self.state, self.buffered())
+    }
+
+    /// The bytes held for a record that is not finished.
+    pub fn buffered(&self) -> usize {
+        self.carry.len()
+    }
+
+    /// The bytes the decoder has reserved.
+    pub fn capacity(&self) -> usize {
+        self.carry.capacity()
+    }
+
+    fn scan(&mut self, chunk: &[u8], on_line: &mut dyn FnMut(&[u8]) -> Flow) -> Result<Flow, FrameError> {
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            let Some(end) = rest.iter().position(|&b| b == b'\n') else {
+                // No line feed yet. The pending bytes may be a record of `limit` bytes and the carriage return of its
+                // CRLF, so one byte more is allowed when it is a carriage return.
+                let total = self.carry.len() + rest.len();
+                let ends_in_cr = rest.last() == Some(&b'\r');
+                if total > self.limit && !(total == self.limit.saturating_add(1) && ends_in_cr) {
+                    return Err(FrameError::LineTooLong { limit: self.limit });
+                }
+                self.carry.extend_from_slice(rest);
+                break;
+            };
+            let tail = &rest[..end];
+            rest = &rest[end + 1..];
+            if self.record(tail, on_line)? == Flow::Stop {
+                return Ok(Flow::Stop);
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Finishes a record whose last part is `tail`: straight from the chunk when nothing was carried, else through the
+    /// carry buffer, which is put back empty so its capacity is kept.
+    fn record(&mut self, tail: &[u8], on_line: &mut dyn FnMut(&[u8]) -> Flow) -> Result<Flow, FrameError> {
+        if self.carry.is_empty() {
+            return self.emit(tail, on_line);
+        }
+        let ends_in_cr = tail.last().or(self.carry.last()) == Some(&b'\r');
+        if self.carry.len() + tail.len() - usize::from(ends_in_cr) > self.limit {
+            return Err(FrameError::LineTooLong { limit: self.limit });
+        }
+        self.carry.extend_from_slice(tail);
+        let line = std::mem::take(&mut self.carry);
+        let result = self.emit(&line, on_line);
+        self.carry = line;
+        self.carry.clear();
+        result
+    }
+
+    /// One complete record, with the carriage return of a CRLF still on it.
+    fn emit(&mut self, line: &[u8], on_line: &mut dyn FnMut(&[u8]) -> Flow) -> Result<Flow, FrameError> {
+        let record = line.strip_suffix(b"\r").unwrap_or(line);
+        if record.len() > self.limit {
+            return Err(FrameError::LineTooLong { limit: self.limit });
+        }
+        if record.is_empty() {
+            return Ok(Flow::Continue);
+        }
+        Ok(on_line(record))
+    }
+}
+
+impl fmt::Debug for NdjsonDecoder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NdjsonDecoder")
+            .field("state", &self.state.name())
+            .field("buffered", &Size(self.buffered()))
+            .field("limit", &self.limit)
             .finish()
     }
 }
