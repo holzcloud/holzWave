@@ -34,8 +34,8 @@ use crate::ai::http::Frame;
 use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, StreamEvent};
 use crate::ai::sse::{SseEvent, StreamEnd, ToolAssembler};
 use crate::ai::types::{
-    Capabilities, ContextKind, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolResult, Usage,
-    json_size,
+    Capabilities, ContextKind, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolResult,
+    ToolSpec, Usage, json_size,
 };
 
 // ---- constants --------------------------------------------------------------------------------------------
@@ -74,6 +74,9 @@ pub const MAX_DESCRIPTION: usize = 4096;
 /// The largest serialised tool schema, in bytes: 32 KiB.
 pub const MAX_SCHEMA_BYTES: usize = 32_768;
 
+/// The longest tool name, in characters.
+const MAX_TOOL_NAME: usize = 128;
+
 /// The suffix of the stream path.
 const STREAM_METHOD: &str = ":streamGenerateContent?alt=sse";
 
@@ -93,6 +96,16 @@ const PHRASE_MODEL: &str = "the model name is not valid for this service";
 const PHRASE_WRITE: &str = "the request could not be written as JSON";
 const PHRASE_LIMIT: &str = "the output limit must be more than zero";
 const PHRASE_NO_MESSAGES: &str = "the request has no messages";
+const PHRASE_NO_INPUT: &str = "the request has nothing to send";
+const PHRASE_WRONG_PART: &str = "a message holds a part that does not belong to its role";
+const PHRASE_EDGES: &str = "the conversation must start and end with a user message";
+const PHRASE_CALL_ARGS: &str = "a tool call has arguments that are not an object";
+const PHRASE_TOO_MANY_TOOLS: &str = "the request declares more tools than one request allows";
+const PHRASE_TOOL_NAME: &str = "a tool name is not allowed";
+const PHRASE_TOOL_TWICE: &str = "two tools share a name";
+const PHRASE_TOOL_DESCRIPTION: &str = "a tool description is missing or too long";
+const PHRASE_TOOL_SCHEMA: &str = "a tool schema is not a JSON object schema";
+const PHRASE_TOOL_SCHEMA_SIZE: &str = "a tool schema is larger than one request allows";
 const PHRASE_ORPHAN: &str = "a tool result does not answer a tool call of the reply before it";
 const PHRASE_TWO_RESULTS: &str = "a tool call has more than one result";
 const PHRASE_UNANSWERED: &str = "a tool call has no result in the message after it";
@@ -204,19 +217,53 @@ fn build_body(req: &ChatRequest, caps: &Capabilities) -> Result<Value, AiError> 
     Ok(Value::Object(body))
 }
 
-/// The function declarations of the request, in order, with each schema passed through unchanged.
+/// The function declarations of the request, in order, with each schema passed through unchanged after the checks of
+/// [`check_tool`]. The request is refused before any connection when a declaration is not usable.
 fn tool_declarations(req: &ChatRequest) -> Result<Vec<Value>, AiError> {
-    Ok(req
-        .tools
-        .iter()
-        .map(|tool| {
-            json!({
-                "name": tool.name,
-                "description": tool.description,
-                "parametersJsonSchema": tool.input_schema,
-            })
-        })
-        .collect())
+    if req.tools.len() > MAX_TOOLS {
+        return Err(invalid(PHRASE_TOO_MANY_TOOLS));
+    }
+    let mut names: HashSet<String> = HashSet::new();
+    let mut declarations = Vec::with_capacity(req.tools.len());
+    for tool in &req.tools {
+        check_tool(tool, &mut names)?;
+        declarations.push(json!({
+            "name": tool.name,
+            "description": tool.description,
+            "parametersJsonSchema": tool.input_schema,
+        }));
+    }
+    Ok(declarations)
+}
+
+/// Checks one declaration: a name of 1 to [`MAX_TOOL_NAME`] letters, digits, `_` and `-` that starts with a letter or
+/// `_` and is not used twice; a description that is not empty and has at most [`MAX_DESCRIPTION`] bytes; a schema that
+/// is a JSON object whose `type` is `object`, serialised in at most [`MAX_SCHEMA_BYTES`] bytes. Every phrase is fixed:
+/// the declaration is data of the application, but it is never echoed.
+fn check_tool(tool: &ToolSpec, names: &mut HashSet<String>) -> Result<(), AiError> {
+    let bytes = tool.name.as_bytes();
+    let name_ok = !bytes.is_empty()
+        && bytes.len() <= MAX_TOOL_NAME
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+    if !name_ok {
+        return Err(invalid(PHRASE_TOOL_NAME));
+    }
+    if !names.insert(tool.name.clone()) {
+        return Err(invalid(PHRASE_TOOL_TWICE));
+    }
+    if tool.description.trim().is_empty() || tool.description.len() > MAX_DESCRIPTION {
+        return Err(invalid(PHRASE_TOOL_DESCRIPTION));
+    }
+    let is_object_schema =
+        tool.input_schema.as_object().is_some_and(|schema| schema.get("type") == Some(&json!("object")));
+    if !is_object_schema {
+        return Err(invalid(PHRASE_TOOL_SCHEMA));
+    }
+    if json_size(&tool.input_schema).0 > MAX_SCHEMA_BYTES {
+        return Err(invalid(PHRASE_TOOL_SCHEMA_SIZE));
+    }
+    Ok(())
 }
 
 /// A call of a model reply, as a later result has to name it.
@@ -257,6 +304,7 @@ fn build_contents(req: &ChatRequest) -> Result<Vec<Value>, AiError> {
     if req.messages.is_empty() {
         return Err(invalid(PHRASE_NO_MESSAGES));
     }
+    check_parts(req)?;
     let mut runs: Vec<(Side, Vec<&Message>)> = Vec::new();
     for message in req.messages.iter().filter(|message| has_content(message)) {
         let side = side_of(message.role);
@@ -264,6 +312,13 @@ fn build_contents(req: &ChatRequest) -> Result<Vec<Value>, AiError> {
             Some((last, members)) if *last == side => members.push(message),
             _ => runs.push((side, vec![message])),
         }
+    }
+    // A conversation starts and ends with the user: the service refuses a content list that ends with the model, and a
+    // model content with calls needs the user content that answers them.
+    match (runs.first(), runs.last()) {
+        (None, _) | (_, None) => return Err(invalid(PHRASE_NO_INPUT)),
+        (Some((Side::User, _)), Some((Side::User, _))) => {}
+        _ => return Err(invalid(PHRASE_EDGES)),
     }
     let mut contents = Vec::with_capacity(runs.len());
     // The calls of the model content right before the run being written.
@@ -285,6 +340,25 @@ fn build_contents(req: &ChatRequest) -> Result<Vec<Value>, AiError> {
         }
     }
     Ok(contents)
+}
+
+/// Checks that every part belongs to the role of its message: a user holds text and context, the model holds text and
+/// calls, a tool holds results. A violation is an error with a fixed phrase that holds no text of the request.
+fn check_parts(req: &ChatRequest) -> Result<(), AiError> {
+    for message in &req.messages {
+        for part in &message.parts {
+            let fits = matches!(
+                (message.role, part),
+                (Role::User, Part::Text { .. } | Part::Context(_))
+                    | (Role::Assistant, Part::Text { .. } | Part::ToolCall(_))
+                    | (Role::Tool, Part::ToolResult(_))
+            );
+            if !fits {
+                return Err(invalid(PHRASE_WRONG_PART));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The parts of a user-side content: the function responses first, in the order of the calls they answer, then the
@@ -360,6 +434,9 @@ fn model_parts(members: &[&Message]) -> Result<(Vec<Value>, Vec<CallRef>), AiErr
                     match part {
                         Part::Text { text } if !text.is_empty() => parts.push(json!({ "text": text })),
                         Part::ToolCall(call) => {
+                            if !call.args.is_object() {
+                                return Err(invalid(PHRASE_CALL_ARGS));
+                            }
                             parts.push(json!({ "functionCall": { "name": call.name, "args": call.args } }));
                             calls.push(CallRef { id: call.id.clone(), name: call.name.clone(), wire_id: None });
                         }
