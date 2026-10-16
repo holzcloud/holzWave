@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"parts":[{"text":"I will read the file."}],"role":"model"},"index":0}],"usageMetadata":{"promptTokenCount":42,"totalTokenCount":42},"modelVersion":"gemini-test","responseId":"r2"}
+
+data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"notes/a b.txt"}},"thoughtSignature":"c2lnbmF0dXJlLWZpeHR1cmUtMDAwMS1ub3QtYS1jcmVkZW50aWFs"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":42,"candidatesTokenCount":11,"thoughtsTokenCount":57,"totalTokenCount":110},"modelVersion":"gemini-test","responseId":"r2"}
+
