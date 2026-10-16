@@ -76,6 +76,9 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |
 | `cursor_trail` | boolean | | `false` | at once; fades a short trail behind a cursor that jumps (below) |
 | `shell` | string | one program: an absolute path or a bare name, at most 4096 bytes, no control characters; empty means the platform default; a value that cannot be started falls back to the platform default with a warning | `""` | for panes started afterwards; a running pane keeps its shell (below) |
+| `ai_local_only` | boolean | | `false` | at once; refuses every AI request whose destination leaves this computer (below) |
+| `ai_local_context` | string | `"ask"`, `"auto"` | `"ask"` | at once; whether a model on this computer asks before shared terminal content goes to it (below) |
+| `ai_persist_context` | boolean | | `false` | for chats saved afterwards; keeps the terminal text and tool output of a chat in its file (below) |
 | `keybindings` | object | action id to chord text, at most 512 entries, each text at most 128 bytes | `{}` | at once |
 
 `option_as_alt` is off by default so that a Swiss layout types `|`, `[` and `{` with Option (D-12).
@@ -88,6 +91,13 @@ cutting; the core still scrolls by whole rows and a frame is drawn the moment it
 that moves by more than one cell leaves up to six fading ghost cells on the way. Neither effect runs on the alternate
 screen of a full-screen program (nothing scrolls there) or while the cursor is hidden or in the off phase of its blink,
 and nothing animates, so nothing is drawn, while the screen is idle.
+
+`ai_local_only` refuses an AI request before any connection is made unless the destination is this computer; it also blocks
+the local network, so a server on another machine of your own is refused too. `ai_local_context` is `"ask"` or `"auto"`: with
+`"ask"` a model that runs on this computer asks before shared terminal content goes to it, the same way a cloud provider does;
+with `"auto"` it does not ask again. `ai_persist_context` set to `false` keeps a marker instead of the terminal text and the
+tool output of a chat in the chat's file; `true` keeps the text there. The three keys are part of `settings.json`, so they travel
+with the synced settings between your own devices.
 
 `shell` is the program a new pane starts, and only the program: one string that is never split at blanks and never run
 through another shell, so arguments cannot be given here. The arguments follow from the program's file name, without a

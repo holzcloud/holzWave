@@ -6,8 +6,9 @@ mod common;
 use common::scratch_dir;
 use holzwave_core::engine::Color;
 use holzwave_core::layout::LoadStatus;
-use holzwave_core::settings::{Blink, Contrast, Motion, SETTINGS_FILE, Settings};
+use holzwave_core::settings::{AiLocalContext, Blink, Contrast, Motion, SETTINGS_FILE, Settings};
 use holzwave_core::theme::{Rgb, ThemeKind, ThemeRegistry};
+use serde_json::json;
 
 fn rgb(text: &str) -> Color {
     let c = Rgb::parse(text).unwrap_or_else(|| panic!("{text} is a colour"));
@@ -33,6 +34,9 @@ fn defaults_match_the_decisions() {
     assert!(!s.cursor_trail, "DESK-28: the effects are opt-in");
     assert!(s.keybindings.is_empty());
     assert_eq!(s.shell, "", "DESK-30: empty means the platform default");
+    assert!(!s.ai_local_only, "the AI switch that blocks every destination off this computer starts off");
+    assert_eq!(s.ai_local_context, AiLocalContext::Ask, "a local model asks like a cloud one");
+    assert!(!s.ai_persist_context, "terminal text is not kept in a saved chat by default");
 }
 
 // ---- the document ----------------------------------------------------------------------------------
@@ -69,6 +73,9 @@ fn the_document_is_pretty_printed_with_a_trailing_newline_and_a_stable_key_order
         "\"smooth_scroll\"",
         "\"cursor_trail\"",
         "\"shell\"",
+        "\"ai_local_only\"",
+        "\"ai_local_context\"",
+        "\"ai_persist_context\"",
         "\"keybindings\"",
     ];
     let mut at = 0;
@@ -85,10 +92,12 @@ fn enums_are_written_in_lower_case() {
     s.cursor_blink = Blink::On;
     s.motion = Motion::Reduce;
     s.contrast = Contrast::High;
+    s.ai_local_context = AiLocalContext::Auto;
     let text = s.to_json();
     assert!(text.contains("\"cursor_blink\": \"on\""), "{text}");
     assert!(text.contains("\"motion\": \"reduce\""), "{text}");
     assert!(text.contains("\"contrast\": \"high\""), "{text}");
+    assert!(text.contains("\"ai_local_context\": \"auto\""), "{text}");
 }
 
 #[test]
@@ -111,6 +120,71 @@ fn unknown_keys_are_ignored_and_reported() {
     assert_eq!(notes.len(), 2, "{notes:?}");
     assert!(notes.iter().any(|n| n.contains("future_thing")), "{notes:?}");
     assert!(notes.iter().any(|n| n.contains("another")), "{notes:?}");
+}
+
+#[test]
+fn the_ai_settings_default_to_the_private_choices() {
+    let s = Settings::default();
+    assert!(!s.ai_local_only);
+    assert_eq!(s.ai_local_context, AiLocalContext::Ask);
+    assert_eq!(AiLocalContext::default(), AiLocalContext::Ask);
+    assert!(!s.ai_persist_context);
+
+    // A file from before the three keys existed has none of them and loads clean with the defaults.
+    let (old, status) = Settings::from_json(r#"{"font_size": 15, "shell": ""}"#);
+    assert_eq!(status, LoadStatus::Clean);
+    assert_eq!(old.font_size, 15);
+    assert!(!old.ai_local_only && !old.ai_persist_context);
+    assert_eq!(old.ai_local_context, AiLocalContext::Ask);
+
+    // A saved document names the three keys with the defaults, after `shell` and before `keybindings`.
+    let text = s.to_json();
+    assert!(text.contains("\"ai_local_only\": false"), "{text}");
+    assert!(text.contains("\"ai_local_context\": \"ask\""), "{text}");
+    assert!(text.contains("\"ai_persist_context\": false"), "{text}");
+}
+
+#[test]
+fn a_wrong_typed_ai_setting_costs_only_that_key_and_an_old_file_loads_unchanged() {
+    let (s, status) = Settings::from_json(r#"{"ai_local_context": "sometimes", "font_size": 16}"#);
+    assert_eq!(s.ai_local_context, AiLocalContext::Ask, "only the AI key goes back to its default");
+    assert_eq!(s.font_size, 16, "the other keys are kept");
+    let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("ai_local_context"), "{notes:?}");
+
+    let (s, status) = Settings::from_json(r#"{"ai_local_only": "yes", "ai_persist_context": true, "font_size": 18}"#);
+    assert!(!s.ai_local_only, "the default for the broken key");
+    assert!(s.ai_persist_context, "the other keys are kept");
+    assert_eq!(s.font_size, 18);
+    let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("ai_local_only"), "{notes:?}");
+
+    // The values written by hand are read.
+    let (s, status) =
+        Settings::from_json(r#"{"ai_local_only": true, "ai_local_context": "auto", "ai_persist_context": true}"#);
+    assert_eq!(status, LoadStatus::Clean);
+    assert!(s.ai_local_only && s.ai_persist_context);
+    assert_eq!(s.ai_local_context, AiLocalContext::Auto);
+}
+
+#[test]
+fn the_ai_context_choice_is_written_in_lower_case_and_refuses_other_words() {
+    let mut s = Settings::default();
+    s.set_value("ai_local_context", json!("auto")).unwrap();
+    assert_eq!(s.ai_local_context, AiLocalContext::Auto);
+    assert!(s.to_json().contains("\"ai_local_context\": \"auto\""));
+    s.set_value("ai_local_context", json!("ask")).unwrap();
+    assert_eq!(s.ai_local_context, AiLocalContext::Ask);
+    assert!(s.to_json().contains("\"ai_local_context\": \"ask\""));
+
+    s.ai_local_context = AiLocalContext::Auto;
+    let before = s.clone();
+    for value in [json!("always"), json!("Auto"), json!("ASK"), json!(true), json!(1), json!(null), json!(["ask"])] {
+        assert!(s.set_value("ai_local_context", value.clone()).is_err(), "{value} must be refused");
+        assert_eq!(s, before, "{value} must not change anything");
+    }
 }
 
 // ---- the file --------------------------------------------------------------------------------------
@@ -528,6 +602,9 @@ mod validation {
         s.set_value("confirm_multiline_paste", json!(false)).unwrap();
         s.set_value("smooth_scroll", json!(true)).unwrap();
         s.set_value("cursor_trail", json!(true)).unwrap();
+        s.set_value("ai_local_only", json!(true)).unwrap();
+        s.set_value("ai_local_context", json!("auto")).unwrap();
+        s.set_value("ai_persist_context", json!(true)).unwrap();
         s.set_value("shell", json!(r"C:\Program Files\PowerShell\7\pwsh.exe")).unwrap();
         s.set_value("keybindings", json!({"pane.split_right": "Cmd+D", "pane.close": ""})).unwrap();
         assert_eq!(s.theme, "Papier");
@@ -535,6 +612,8 @@ mod validation {
         assert_eq!((s.cursor_blink, s.motion, s.contrast), (Blink::Off, Motion::Reduce, Contrast::High));
         assert!(!s.confirm_multiline_paste);
         assert!(s.smooth_scroll && s.cursor_trail);
+        assert!(s.ai_local_only && s.ai_persist_context);
+        assert_eq!(s.ai_local_context, AiLocalContext::Auto);
         assert_eq!(s.shell, r"C:\Program Files\PowerShell\7\pwsh.exe");
         assert_eq!(s.keybindings.len(), 2);
     }
@@ -551,6 +630,16 @@ mod validation {
             ("option_as_alt", json!("yes")),
             ("smooth_scroll", json!(1)),
             ("cursor_trail", json!("on")),
+            ("ai_local_only", json!("yes")),
+            ("ai_local_only", json!(1)),
+            ("ai_local_only", json!(null)),
+            ("ai_persist_context", json!("yes")),
+            ("ai_persist_context", json!(1)),
+            ("ai_persist_context", json!(null)),
+            ("ai_local_context", json!("always")),
+            ("ai_local_context", json!(true)),
+            ("ai_local_context", json!(1)),
+            ("ai_local_context", json!(null)),
             ("shell", json!(5)),
             ("shell", json!(["pwsh"])),
             ("shell", json!(null)),

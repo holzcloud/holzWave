@@ -100,6 +100,18 @@ pub enum Contrast {
     High,
 }
 
+/// Whether a model that runs on this computer asks before shared terminal content goes to it, as a cloud provider does.
+///
+/// `Ask` is the default: a local model is asked about in the same way as a remote one. `Auto` sends the content that
+/// the user chose to share with a model on this computer without asking again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiLocalContext {
+    #[default]
+    Ask,
+    Auto,
+}
+
 /// The user settings. Every field has a default, so a missing key never fails a load.
 ///
 /// The field order is the key order of the file.
@@ -132,6 +144,12 @@ pub struct Settings {
     /// The program a new pane starts: one string, never split and never run through another shell. Empty means the
     /// platform default of [`crate::platform::shell_launch`]. It applies to panes started afterwards.
     pub shell: String,
+    /// Refuse every AI request whose destination leaves this computer, the local network included.
+    pub ai_local_only: bool,
+    /// Whether a model on this computer asks before shared terminal content goes to it ([`AiLocalContext`]).
+    pub ai_local_context: AiLocalContext,
+    /// Keep the terminal text and the tool output of a chat in its file. Off: only a marker is kept.
+    pub ai_persist_context: bool,
     /// Overrides of the default key bindings: action id to chord. Validated by the key binding resolver.
     pub keybindings: BTreeMap<String, String>,
 }
@@ -152,6 +170,9 @@ impl Default for Settings {
             smooth_scroll: false,
             cursor_trail: false,
             shell: String::new(),
+            ai_local_only: false,
+            ai_local_context: AiLocalContext::Ask,
+            ai_persist_context: false,
             keybindings: BTreeMap::new(),
         }
     }

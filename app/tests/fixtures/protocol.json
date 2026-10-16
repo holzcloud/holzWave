@@ -668,6 +668,9 @@
         }
       ],
       "settings": {
+        "ai_local_context": "ask",
+        "ai_local_only": false,
+        "ai_persist_context": false,
         "confirm_multiline_paste": true,
         "contrast": "system",
         "cursor_blink": "system",
@@ -1196,6 +1199,9 @@
       }
     ],
     "settings": {
+      "ai_local_context": "ask",
+      "ai_local_only": false,
+      "ai_persist_context": false,
       "confirm_multiline_paste": true,
       "contrast": "system",
       "cursor_blink": "system",

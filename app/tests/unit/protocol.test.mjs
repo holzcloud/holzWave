@@ -99,14 +99,18 @@ test("the settings view has exactly the documented keys at every level and the s
   assert.deepEqual(keys(view), ["keybindings", "settings", "theme", "themes", "warnings"]);
   assert.deepEqual(golden.events.settings, view, "the settings event payload is the settings view");
   assert.deepEqual(keys(view.settings), [
-    "confirm_multiline_paste", "contrast", "cursor_blink", "cursor_trail", "font_size", "keybindings", "motion",
-    "option_as_alt", "scrollback_lines", "shell", "smooth_scroll", "theme", "ui_scale", "version",
+    "ai_local_context", "ai_local_only", "ai_persist_context", "confirm_multiline_paste", "contrast", "cursor_blink",
+    "cursor_trail", "font_size", "keybindings", "motion", "option_as_alt", "scrollback_lines", "shell", "smooth_scroll",
+    "theme", "ui_scale", "version",
   ]);
   assert.equal(typeof view.settings.theme, "string");
   assert.equal(typeof view.settings.option_as_alt, "boolean");
   assert.equal(view.settings.smooth_scroll, false, "DESK-28: the effects are off by default");
   assert.equal(view.settings.cursor_trail, false, "DESK-28: the effects are off by default");
   assert.equal(view.settings.shell, "", "DESK-30: empty means the platform default; the dialog has no row for it");
+  assert.equal(view.settings.ai_local_only, false, "the switch that blocks every destination off this computer starts off");
+  assert.equal(view.settings.ai_local_context, "ask", "a model on this computer asks like a cloud one by default");
+  assert.equal(view.settings.ai_persist_context, false, "terminal text is not kept in a saved chat by default");
   assert.ok(view.themes.length >= 3);
   for (const t of view.themes) {
     assert.deepEqual(keys(t), ["builtin", "kind", "name"]);
