@@ -21,7 +21,10 @@
 //     ai               the AI chat of the core, played from the shapes of app/tests/fixtures/ai_stream.json:
 //       profiles       the `profiles` member of the answer of `ai_profiles` (default none). A profile view carries the
 //                      members of the core's `ProfileView` and the mock-only member `locality` (`on_device`,
-//                      `loopback`, `lan` or `cloud`), which the route of a turn reports; it defaults to `loopback`
+//                      `loopback`, `lan` or `cloud`), which the route of a turn reports; it defaults to `loopback`.
+//                      The answer of `ai_profiles` is `{profiles, notes}` with copies of these entries without the
+//                      mock-only member; `ai_profile_save` changes this list (the profile part is live)
+//       notes          the `notes` member of the answer of `ai_profiles` (default none): the core's lines about its file
 //       script(turn)   queue the script of the next turn: `reasoning` (text), `chunks` (the text deltas, default
 //                      `["Hello ", "there."]`), `usage` ({input_tokens, output_tokens}, default 11 and 5), `fail`
 //                      ({class, text}: the turn fails before any text), `limit` (an end word such as `limit_steps`: the
@@ -34,7 +37,10 @@
 //       chat(id)       a copy of the state of a chat (the empty state for an unknown chat)
 //       setState(id, partial)  set members of a chat's state, for example an interrupted message or a pinned profile
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
-//     `ai_turn_snapshot` and `ai_profiles` have defaults; a rejection is the object `{code, reason, text}` as the core's.
+//     `ai_turn_snapshot`, `ai_profiles` and `ai_profile_save` have defaults; a rejection is the object
+//     `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input with a member outside the eight of
+//     the shell's `ProfileInputMsg`, makes the id of a new profile from its name and answers the id; the address of an
+//     empty `base_url` comes from a small table of the mock's own (not the core's).
 //     `markdown_render` answers the text as one escaped paragraph; a test scripts other HTML with `on("markdown_render", fn)`.
 //
 // Defaults: one workspace, one tab, panes 1 and 2 side by side and one Row divider at ratio 0.5. The layout
@@ -110,6 +116,7 @@
     holdLeft: null, // events to produce before the pump pauses; null: no pause
     dropLeft: 0,
     timer: 0,
+    notes: [],
   };
   const emptyState = (id) => ({
     conversation: id, title: "", profile: null, model: null, turn: 0, seq: 0, running: false, messages: [],
@@ -217,13 +224,88 @@
     }
     return out.map((e, i) => ({ conversation, turn, seq: i + 1, ...e }));
   };
+  // ---- the providers: the profile part of the core, played from the shapes of the shell's golden -----------------------
+  /** The saved entries, whichever form `profiles` was given in (a list, or a whole `{profiles, notes}` answer). */
+  const stored = () => (Array.isArray(ai.profiles) ? ai.profiles : (ai.profiles.profiles ??= []));
+  const noteLines = () => (ai.notes.length > 0 || Array.isArray(ai.profiles) ? ai.notes : (ai.profiles.notes ?? []));
+  /** Mock-only: the address a type starts with and the shapes it speaks. These are the mock's values, not the core's. */
+  const MOCK_TYPES = {
+    anthropic: { base: "https://api.anthropic.com", wires: ["anthropic"] },
+    openai: { base: "https://api.openai.com/v1", wires: ["openai_responses"] },
+    gemini: { base: "https://generativelanguage.googleapis.com/v1beta", wires: ["gemini"] },
+    ollama: { base: "http://127.0.0.1:11434", wires: ["ollama"] },
+    lm_studio: { base: "http://127.0.0.1:1234/v1", wires: ["openai_chat"] },
+    llama_cpp: { base: "http://127.0.0.1:9931/v1", wires: ["openai_chat"] },
+    openrouter: { base: "https://openrouter.ai/api/v1", wires: ["openai_chat"] },
+    vercel_gateway: { base: "https://ai-gateway.vercel.sh/v1", wires: ["openai_chat", "anthropic"] },
+    cloudflare_gateway: { base: "", wires: ["anthropic", "openai_responses", "openai_chat", "gemini"] },
+    litellm: { base: "http://127.0.0.1:4000/v1", wires: ["openai_chat"] },
+    custom: { base: "", wires: ["openai_chat", "openai_responses", "anthropic", "gemini", "ollama"] },
+  };
+  const SAVE_MEMBERS = ["id", "name", "preset", "wire", "base_url", "model", "allow_lan_http", "acknowledge_gateway"];
+  const hostOf = (base) => {
+    try {
+      return new URL(base).host;
+    } catch {
+      return "";
+    }
+  };
+  const localityOf = (base) => {
+    let host = "";
+    try {
+      host = new URL(base).hostname;
+    } catch {
+      return "cloud";
+    }
+    return host === "localhost" || host.endsWith(".localhost") || host === "[::1]" || /^127\./.test(host) ? "loopback" : "cloud";
+  };
+  const idFrom = (name, taken) => {
+    const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/g, "") || "provider";
+    let id = base;
+    for (let n = 2; taken(id); n += 1) id = `${base}-${n}`;
+    return id;
+  };
+  /** The entries as `ai_profiles` lists them: the mock-only members are left out. */
+  const listed = () =>
+    stored().map((entry) => {
+      const { locality: _locality, ...view } = structuredClone(entry);
+      return view;
+    });
   const aiCommands = {
     ai_conversation_new: () => `chat-mock-${++ai.chatNo}`,
     ai_conversation_list: () => ({ chats: [], notes: [] }),
     ai_conversation_delete: ({ conversation }) => ai.chats.delete(conversation),
-    ai_profiles: () => {
-      const p = ai.profiles;
-      return Array.isArray(p) ? { profiles: structuredClone(p), notes: [] } : structuredClone(p);
+    ai_profiles: () => ({ profiles: listed(), notes: structuredClone(noteLines()) }),
+    ai_profile_save: ({ input }) => {
+      if (input === null || typeof input !== "object" || Object.keys(input).some((name) => !SAVE_MEMBERS.includes(name))) {
+        throw fault("profile", "the request was not understood");
+      }
+      const list = stored();
+      const name = typeof input.name === "string" ? input.name.trim() : "";
+      if (name === "") throw fault("profile", "the name must be 1 to 80 characters without control characters", "name");
+      const type = MOCK_TYPES[input.preset];
+      if (!type) throw fault("profile", "the request was not understood");
+      const found = input.id === null ? undefined : list.find((p) => p.id === input.id);
+      if (input.id !== null && !found) throw fault("profile", "there is no profile with this id", "unknown_profile");
+      const typed = typeof input.base_url === "string" ? input.base_url.trim() : "";
+      const base = typed === "" ? type.base : typed;
+      const entry = {
+        id: found ? found.id : idFrom(name, (id) => list.some((p) => p.id === id)),
+        name,
+        preset: input.preset,
+        wire: input.wire ?? type.wires[0],
+        base_url: base,
+        model: typeof input.model === "string" ? input.model.trim() : "",
+        allow_lan_http: input.allow_lan_http === true,
+        host: hostOf(base),
+        key: found ? found.key : "not_set",
+        gateway_key: found ? found.gateway_key : input.preset === "cloudflare_gateway" ? "not_set" : null,
+        disclosure: null,
+        locality: localityOf(base),
+      };
+      if (found) Object.assign(found, entry);
+      else list.push(entry);
+      return entry.id;
     },
     ai_turn_snapshot: ({ conversation }) => structuredClone(chatOf(conversation)),
     // The core's renderer of Markdown: here the text as one escaped paragraph, unless a test scripts it with `on`.
@@ -276,6 +358,12 @@
     set profiles(value) {
       ai.profiles = value;
     },
+    get notes() {
+      return ai.notes;
+    },
+    set notes(value) {
+      ai.notes = value;
+    },
     sent: ai.sent,
     script: (turn) => void ai.scripts.push(turn),
     hold: (n) => void (ai.holdLeft = n),
@@ -292,6 +380,7 @@
       clearTimeout(ai.timer);
       Object.assign(ai, {
         profiles: [], scripts: [], chatNo: 0, turnNo: NOW, queue: [], running: null, holdLeft: null, dropLeft: 0, timer: 0,
+        notes: [],
       });
       ai.chats.clear();
       ai.sent.length = 0;

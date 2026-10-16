@@ -96,6 +96,7 @@ default.
 | Overlays | command palette, theme picker, connection manager: 24 px radius, the only elements with a shadow |
 | Empty state | the logo's plank with one line of text; no illustrations |
 | Chat pane | a pane of its own kind (6.12): header `chat`, a bar with the provider chip, a transcript, a status line and a composer; flat and hairline, the only shadow is the provider sheet on a phone |
+| AI providers dialog | the box of the Settings dialog (6.13): groups under `.label` legends, a list of providers as a radio group, a form with a write-only key field, a disclosure card for a gateway or a server of the user's own; on a phone it is the screen |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
 No motion in the terminal grid itself. `prefers-reduced-motion` removes all transitions.
@@ -377,7 +378,9 @@ status line and the composer.
   `cloud`; `local network` and `cloud` are in the warn colour, and the word is the cue. The place word is shown only once
   a turn has told it, from the core's route, and is never guessed from a name, a preset or an address. At the right end
   the tokens of the last turn (`in 1.2k · out 340`). With one saved profile the chip is plain text; with two or more it
-  is a button (`aria-haspopup`, `aria-expanded`); with none it reads `no provider set up` and is not a button.
+  is a button (`aria-haspopup`, `aria-expanded`); with none it reads `no provider set up` and is not a button. After the
+  usage comes a button, `Providers…`, whose text is `Set up…` while the list of providers is known to be empty; it opens
+  the dialog of 6.13. While a provider waits for its review (6.13) the text carries the count: `Providers… (1 to review)`.
 - **Picker.** A radio group under the bar, flat and hairline (a bottom sheet at 640 px and narrower). One row per
   profile: `●` or `○`, the name, the model and the host. The chosen row has the rose wash and a 2 px rose bar on its left
   and `aria-checked`. The arrows move and choose; `Enter`, `Space` and `Escape` close it. With two or more profiles and
@@ -431,3 +434,95 @@ top, a hairline) and carries the only shadow of the chat.
 **Accessibility.** The chip's `aria-label` says where the request goes. The picker is a `radiogroup`. Nothing moves, so
 `motion-reduce` has nothing to remove. Every hairline is `--hw-line`, so `contrast-high` holds. Under forced colours the
 chosen row and the chip get a system-colour outline.
+
+### 6.13 AI providers
+
+The dialog in which the user adds the providers the chat talks to, keeps their keys and sets the two privacy switches.
+It looks and keys like the Settings dialog and does nothing else: it contacts no server, lists no models and scans for
+nothing.
+
+**Ways in.** The bar button `Providers…` of the chat (the text is `Set up…` while the list of providers is known to be
+empty), the palette entry `AI providers…` (it has no chord) and the button `AI providers` of the Settings dialog, beside
+`Key bindings`. One dialog at a time; a second ask while it is open changes nothing. When it closes the keyboard goes back
+to where it came from: the composer of the chat, else the terminal.
+
+**Box.** The box of the Settings dialog (a floating layer: hairline, 8 px radius, the one shadow), 40 rem wide, scrolling
+inside. From the top: the title `AI providers`; the status line (`role="status"`, one line: `Saved.`, `Removed.`,
+`Allowed.`, `Saving…`, or a refusal in words in the warn colour); the notes of the core about its provider file, only
+when it sent any; three groups separated by hairlines, each a fieldset under a `.label` legend; then the button `Close`.
+While it is open it takes the keys: nothing reaches the terminal, `Tab` stays inside, the arrows move inside a radio
+group, `Enter` in a text field saves and `Escape` closes.
+
+**Privacy.** A checkbox `Local only` with the hint "Refuse every request whose destination is not this computer. A server
+on your local network counts as not this computer." and a radio group `Models on this computer` with `Ask first` and
+`Do not ask`, hint "Whether a model on this computer needs your consent before it sees terminal text. A provider that is
+not on this computer always asks." Both controls show only what the core answered: a refused value goes back to the last
+good one, and a change made by hand in the settings file shows without a request.
+
+**Providers.** A radio group with one row per provider: a native radio, the name, `Type · model` dim, the host in mono and
+the key word. The row of the edited provider has the rose wash and a 2 px rose bar on its left. A row whose address awaits
+review also says `review` in the warn colour with a `!` before it. `Add provider` sits below the list; with none, the
+list says "No provider yet."
+
+**Provider.** The legend is `Provider`, or `New provider` while adding. In this order:
+
+- `Name`.
+- `Type`, a radio group of the eleven types in the order of the core. The type of a saved provider cannot change, and the
+  line says so: "The type of a saved provider cannot change. Add a new provider for another type."
+- `API shape`, a radio group shown only for a type that speaks more than one (Vercel two, Cloudflare four, Custom five).
+- `Address`, a text field. The hint reads "Leave empty to use the address of this type." or, for a type with no default,
+  "Required: the address of your gateway or server." The core's refusal appears under the field in the danger colour,
+  underlined and with a `!` mark; the field is `aria-invalid`. The page checks nothing itself: the address goes as typed.
+- A checkbox `Plain http on my local network` ("Only for a server on your own network. Never for the internet.").
+- `Model`, a text field. "Type the model name the provider uses. holzWave does not ask the provider for a list."
+- `API key`, a password field that is never filled in. Beside it the key word, below it the advice for that state, and
+  `Remove key` when a key state other than `no key` exists. A saved key is replaced by entering a new one.
+- `Gateway token`, the same, only for the Cloudflare type.
+- The disclosure card, when the core asks for one (below).
+- The buttons `Save` (solid `--hw-rose-deep`, `--hw-on-accent` text) and `Remove provider` (hairline); the first click on
+  `Remove provider` turns it into `Click again to remove`, and any other action disarms it.
+
+**Keys.** A key is typed once and goes to the keychain in one call; it is never shown, echoed, kept or put into a
+provider. The field has no show toggle. The state of a key is one word, with the colour as the second cue:
+
+| State | Word | Colour and cue | Advice |
+|---|---|---|---|
+| none saved | `no key` | warn when the type needs a key, else plain | |
+| saved | `key saved` | ok | The key is stored in the system keychain. It is never shown again; enter a new one to replace it. |
+| missing | `key missing` | warn, underlined | The keychain has no key for this provider. Enter it again. |
+| other address | `key for another address` | warn, underlined | The address changed after the key was saved, so the key is not used. Enter the key again. |
+| damaged | `key damaged` | warn, underlined | The saved key record is damaged. Enter the key again. |
+| unreadable | `keychain unreadable` | warn, underlined | The keychain could not be read. Try again later. |
+| no keychain | `no keychain` | warn, underlined | This device has no system keychain, so a key cannot be saved. A server that needs no key still works. |
+
+**Disclosure card.** Shown only when the core's view of a provider carries a disclosure. A hairline box with a 2 px warn
+bar on its left, the mark `!`, a title (`Gateway: {host}` or `Your own server: {host}`), the body and the button
+`Allow {host}` (hairline). Gateway: "A gateway relays your prompts to other providers and may keep a log of them.
+holzWave sends nothing to {host} until you allow it." Own server: "holzWave cannot tell who runs {host} or what it keeps.
+It sees every prompt you send to it. holzWave sends nothing until you allow it." For the OpenRouter type one more
+sentence: "holzWave asks OpenRouter not to use providers that keep your data. OpenRouter can still log what it receives."
+`Save` never allows anything: only the button `Allow {host}` does, once per address, with the saved fields and not the
+unsaved edits. A changed host asks again. The chat does not send with a provider that waits for this review; it opens
+the dialog on that provider and keeps the draft.
+
+**Nothing is probed.** No test connection, no model list, no scan for local servers; saving contacts nothing. A place
+word never appears in this dialog: where a request goes is told by the chat after a turn.
+
+**States and their second cue.**
+
+| State | Colour | Second cue |
+|---|---|---|
+| edited provider | rose wash | `●` radio, 2 px bar on the left |
+| review pending | warn | the word `review` underlined with a `!` before it, the card in the form |
+| refused field | danger | words under the field, underlined, `!` mark, `aria-invalid` |
+| key needs attention | warn | the key word, underlined |
+| armed removal | danger border | the text `Click again to remove` |
+
+**Narrow screens (640 px and narrower).** The dialog is the screen: full width and height, no radius, no shadow. The
+fields stack, and the rows, options, inputs and buttons are at least 44 px high; input text is at least 16 px. The rules
+of the chat sheet (6.12) apply.
+
+**Accessibility.** Every control has a visible label; a field with a refusal is `aria-invalid` and `aria-describedby` its
+error; the status line is `role="status"`; the list and the option groups are radio groups. Nothing moves, so
+`motion-reduce` has nothing to remove. Every hairline is `--hw-line`, so `contrast-high` holds. Under forced colours the
+chosen row and the card get a system-colour outline.

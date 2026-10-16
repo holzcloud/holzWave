@@ -314,6 +314,9 @@ async function modesCase(page, url) {
   await page.locator(".chat-input").focus();
   await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Shift+Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-setup", "the providers button is last in the bar");
+  assert.equal(await page.locator(".chat-setup").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "the button: a 2 px ring");
+  await page.keyboard.press("Shift+Tab");
   assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-chip");
   assert.equal(await page.locator(".chat-chip").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "the chip: a 2 px ring");
 

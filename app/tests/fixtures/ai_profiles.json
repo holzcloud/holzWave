@@ -1,0 +1,276 @@
+{
+  "key_states": [
+    "not_set",
+    "present",
+    "missing",
+    "wrong_address",
+    "damaged",
+    "unreadable",
+    "no_secure_store"
+  ],
+  "presets": [
+    {
+      "address": {
+        "anthropic": "default"
+      },
+      "disclosure": null,
+      "gateway_token": false,
+      "key": "required",
+      "label": "Anthropic",
+      "tag": "anthropic",
+      "wires": [
+        "anthropic"
+      ]
+    },
+    {
+      "address": {
+        "openai_responses": "default"
+      },
+      "disclosure": null,
+      "gateway_token": false,
+      "key": "required",
+      "label": "OpenAI",
+      "tag": "openai",
+      "wires": [
+        "openai_responses"
+      ]
+    },
+    {
+      "address": {
+        "gemini": "default"
+      },
+      "disclosure": null,
+      "gateway_token": false,
+      "key": "required",
+      "label": "Google Gemini",
+      "tag": "gemini",
+      "wires": [
+        "gemini"
+      ]
+    },
+    {
+      "address": {
+        "ollama": "default"
+      },
+      "disclosure": null,
+      "gateway_token": false,
+      "key": "optional",
+      "label": "Ollama",
+      "tag": "ollama",
+      "wires": [
+        "ollama"
+      ]
+    },
+    {
+      "address": {
+        "openai_chat": "default"
+      },
+      "disclosure": null,
+      "gateway_token": false,
+      "key": "optional",
+      "label": "LM Studio",
+      "tag": "lm_studio",
+      "wires": [
+        "openai_chat"
+      ]
+    },
+    {
+      "address": {
+        "openai_chat": "default"
+      },
+      "disclosure": null,
+      "gateway_token": false,
+      "key": "optional",
+      "label": "llama.cpp",
+      "tag": "llama_cpp",
+      "wires": [
+        "openai_chat"
+      ]
+    },
+    {
+      "address": {
+        "openai_chat": "default"
+      },
+      "disclosure": "gateway",
+      "gateway_token": false,
+      "key": "required",
+      "label": "OpenRouter",
+      "tag": "openrouter",
+      "wires": [
+        "openai_chat"
+      ]
+    },
+    {
+      "address": {
+        "anthropic": "default",
+        "openai_chat": "default"
+      },
+      "disclosure": "gateway",
+      "gateway_token": false,
+      "key": "required",
+      "label": "Vercel AI Gateway",
+      "tag": "vercel_gateway",
+      "wires": [
+        "openai_chat",
+        "anthropic"
+      ]
+    },
+    {
+      "address": {
+        "anthropic": "required",
+        "gemini": "required",
+        "openai_chat": "required",
+        "openai_responses": "required"
+      },
+      "disclosure": "gateway",
+      "gateway_token": true,
+      "key": "optional",
+      "label": "Cloudflare AI Gateway",
+      "tag": "cloudflare_gateway",
+      "wires": [
+        "anthropic",
+        "openai_responses",
+        "openai_chat",
+        "gemini"
+      ]
+    },
+    {
+      "address": {
+        "openai_chat": "default"
+      },
+      "disclosure": "gateway",
+      "gateway_token": false,
+      "key": "optional",
+      "label": "LiteLLM",
+      "tag": "litellm",
+      "wires": [
+        "openai_chat"
+      ]
+    },
+    {
+      "address": {
+        "anthropic": "required",
+        "gemini": "required",
+        "ollama": "required",
+        "openai_chat": "required",
+        "openai_responses": "required"
+      },
+      "disclosure": "third_party",
+      "gateway_token": false,
+      "key": "optional",
+      "label": "Custom",
+      "tag": "custom",
+      "wires": [
+        "openai_chat",
+        "openai_responses",
+        "anthropic",
+        "gemini",
+        "ollama"
+      ]
+    }
+  ],
+  "profile_reasons": [
+    "id",
+    "reserved_id",
+    "name",
+    "model",
+    "wire",
+    "preset_change",
+    "needs_address",
+    "too_many",
+    "unknown_profile"
+  ],
+  "refusals": [
+    "syntax",
+    "too_long",
+    "scheme",
+    "credentials",
+    "host",
+    "port",
+    "query",
+    "path",
+    "plain_http",
+    "link_local",
+    "metadata",
+    "unspecified",
+    "multicast",
+    "reserved",
+    "local_only",
+    "key_scope",
+    "key_in_url",
+    "header"
+  ],
+  "views": [
+    {
+      "allow_lan_http": false,
+      "base_url": "http://127.0.0.1:11434",
+      "disclosure": null,
+      "gateway_key": null,
+      "host": "127.0.0.1:11434",
+      "id": "local",
+      "key": "not_set",
+      "model": "",
+      "name": "Local",
+      "preset": "ollama",
+      "wire": "ollama"
+    },
+    {
+      "allow_lan_http": false,
+      "base_url": "https://api.anthropic.com",
+      "disclosure": null,
+      "gateway_key": null,
+      "host": "api.anthropic.com",
+      "id": "claude",
+      "key": "present",
+      "model": "",
+      "name": "Claude",
+      "preset": "anthropic",
+      "wire": "anthropic"
+    },
+    {
+      "allow_lan_http": false,
+      "base_url": "https://openrouter.ai/api/v1",
+      "disclosure": {
+        "host": "openrouter.ai",
+        "kind": "gateway"
+      },
+      "gateway_key": null,
+      "host": "openrouter.ai",
+      "id": "router",
+      "key": "present",
+      "model": "",
+      "name": "Router",
+      "preset": "openrouter",
+      "wire": "openai_chat"
+    },
+    {
+      "allow_lan_http": false,
+      "base_url": "https://gateway.ai.cloudflare.com/v1/account/gateway/anthropic",
+      "disclosure": null,
+      "gateway_key": "present",
+      "host": "gateway.ai.cloudflare.com",
+      "id": "edge",
+      "key": "present",
+      "model": "",
+      "name": "Edge",
+      "preset": "cloudflare_gateway",
+      "wire": "anthropic"
+    },
+    {
+      "allow_lan_http": false,
+      "base_url": "https://other.example.net/v1",
+      "disclosure": {
+        "host": "other.example.net",
+        "kind": "third_party"
+      },
+      "gateway_key": null,
+      "host": "other.example.net",
+      "id": "moved",
+      "key": "wrong_address",
+      "model": "",
+      "name": "Moved",
+      "preset": "custom",
+      "wire": "openai_chat"
+    }
+  ]
+}

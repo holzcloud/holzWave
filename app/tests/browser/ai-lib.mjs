@@ -134,3 +134,19 @@ export async function watchStatus(page) {
 
 /** The args of every call the page made to `cmd`, oldest first. */
 export const calls = callsOf;
+
+/** Wait for the providers dialog to be on screen with its list read. */
+export async function openDialog(page) {
+  await page.waitForSelector(".dlg.ai-settings");
+  await page.waitForSelector('.dlg.ai-settings .aiset-rows:not([aria-busy="true"])', { state: "attached" });
+}
+
+/** Choose a provider type in the open dialog by clicking the text of its radio. */
+export async function choosePreset(page, label) {
+  await page.locator("fieldset.aiset-presets").getByText(label, { exact: true }).click();
+}
+
+/** Replace the text of a field of the open dialog. */
+export async function fillField(page, selector, text) {
+  await page.locator(selector).fill(text);
+}

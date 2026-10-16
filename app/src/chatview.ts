@@ -250,6 +250,18 @@ export function chipView(
   return { kind: button ? "button" : "text", name, model, host, where, leaves, text, aria: button ? `${aria}. Choose another provider` : aria };
 }
 
+// ---- the way to the providers dialog -----------------------------------------------------------------------------------
+
+/**
+ * The text of the chat bar's button that opens the providers dialog: `Set up…` while the list is known to be empty,
+ * `Providers…` otherwise, and with the number of providers that wait for their review when there are any. A review count
+ * without a profile is an inconsistent call and reads as an empty list.
+ */
+export function setupLabel(profiles: readonly ProfileChoice[] | null, review: number): string {
+  if (profiles !== null && profiles.length === 0) return "Set up…";
+  return review > 0 ? `Providers… (${review} to review)` : "Providers…";
+}
+
 // ---- the words of a turn -----------------------------------------------------------------------------------------------
 
 /** What a running turn is doing: `working` (nothing yet), `thinking` (reasoning only), `writing`; empty when idle. */

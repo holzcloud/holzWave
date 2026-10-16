@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   BYTES_PER_TOKEN, MAX_TEXT_BYTES, chipView, endNote, estimateTokens, faultText, leavesComputer, localityWord, outcomeWord, pickProfile,
-  linkKind, readProfiles, roleWord, statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
+  linkKind, readProfiles, roleWord, setupLabel, statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
 } from "../../dist/chatview.js";
 
 const entry = (id, extra = {}) => ({ id, name: `Name ${id}`, model: "llama3.2", host: "localhost", ...extra });
@@ -241,4 +241,13 @@ test("a link is opened only when its address carries no data", () => {
   }
   assert.equal(linkKind(web(`example.org/${"a".repeat(1900)}`)), "open", "a long address under the limit is still a link");
   assert.equal(linkKind(web("EXAMPLE.org/Docs")), "open");
+});
+
+test("the providers button says set up before there is a provider", () => {
+  assert.equal(setupLabel(null, 0), "Providers…", "the list is not known yet");
+  assert.equal(setupLabel([], 0), "Set up…", "a loaded empty list");
+  assert.equal(setupLabel([entry("a")], 0), "Providers…");
+  assert.equal(setupLabel([entry("a"), entry("b")], 1), "Providers… (1 to review)");
+  assert.equal(setupLabel([entry("a"), entry("b"), entry("c")], 3), "Providers… (3 to review)");
+  assert.equal(setupLabel([], 2), "Set up…", "a review count without a profile is an inconsistent call");
 });

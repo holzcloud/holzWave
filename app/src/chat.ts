@@ -15,13 +15,14 @@
 // imports `blocks.ts`: the opener of a block is handed to `initChat`, and `blocks.ts` mounts a chat pane through
 // `mountChat` and tells `chatClosed` when a chat pane left the core's list.
 import { registerAction } from "./actions.js";
+import { onProfilesChanged, openProviders } from "./aisettings.js";
 import { call, listen } from "./bridge.js";
 import { paneBlocks, setChatTitle } from "./blockstate.js";
 import { ChatFeed, isChatId, messageText, readChatEvent, readChatState } from "./chatstate.js";
 import type { ChatMessage, Route } from "./chatstate.js";
 import {
-  MAX_TEXT_BYTES, chipView, endNote, faultText, linkKind, outcomeWord, pickProfile, readProfiles, roleWord, statusLabel,
-  statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
+  MAX_TEXT_BYTES, chipView, endNote, faultText, linkKind, outcomeWord, pickProfile, readProfiles, roleWord, setupLabel,
+  statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
 } from "./chatview.js";
 import type { ChipView, EndNote, ProfileChoice } from "./chatview.js";
 import { el, loadStyles } from "./dom.js";
@@ -232,13 +233,26 @@ async function fetchSnapshot(s: Session): Promise<void> {
   }
 }
 
+/**
+ * Keep the profiles an answer of `ai_profiles` lists. The session that asked takes them (`all` false); the providers dialog
+ * hands every answer it reads to every session (`all` true), so the chip, the picker and the button follow a saved
+ * provider without a reload.
+ */
+function takeProfiles(raw: unknown, all: boolean, asking: Session | null): void {
+  const list = readProfiles(raw);
+  const targets = all ? [...sessions.values()] : asking === null ? [] : [asking];
+  for (const t of targets) {
+    t.profiles = list;
+    schedule(t);
+  }
+}
+
 /** The profiles the core lists. Called when the user acts, never when a chat is mounted. */
 function loadProfiles(s: Session): Promise<void> {
   if (s.loadingProfiles !== null) return s.loadingProfiles;
   const reading = call("ai_profiles")
     .then((raw: unknown) => {
-      s.profiles = readProfiles(raw);
-      schedule(s);
+      takeProfiles(raw, false, s);
     })
     .finally(() => {
       s.loadingProfiles = null;
@@ -320,6 +334,7 @@ class Mounted implements ChatView {
   private chip: HTMLElement;
   private readonly where: HTMLElement;
   private readonly usage: HTMLElement;
+  private readonly setup: HTMLButtonElement;
   private picker: HTMLElement | null = null;
   private pickerKey = "";
   private readonly log: HTMLElement;
@@ -349,6 +364,16 @@ class Mounted implements ChatView {
     this.where = el("span", "chat-where", this.bar);
     this.where.hidden = true;
     this.usage = el("span", "chat-usage", this.bar);
+    this.setup = el("button", "chat-setup", this.bar);
+    this.setup.type = "button";
+    this.setup.dataset.field = "";
+    this.setup.setAttribute("aria-haspopup", "dialog");
+    this.setup.addEventListener("click", () => {
+      // The dialog gives the keyboard back to this chat's composer when it closes.
+      void openProviders().then(() => {
+        if (this.alive) this.focus();
+      });
+    });
     this.log = el("div", "chat-log", host);
     this.log.setAttribute("role", "log");
     this.log.setAttribute("aria-label", "Conversation");
@@ -509,6 +534,8 @@ class Mounted implements ChatView {
     this.where.dataset.leaves = view.leaves ? "true" : "false";
     const used = usageWords(!st.running && st.ended !== null ? st.ended.usage : st.usage);
     if (this.usage.textContent !== used) this.usage.textContent = used;
+    const way = setupLabel(s.profiles, 0);
+    if (this.setup.textContent !== way) this.setup.textContent = way;
     if (this.picker !== null) this.drawPicker();
   }
 
@@ -1001,6 +1028,8 @@ export async function initChat(open: BlockOpener): Promise<void> {
   registerAction({ id: "ai.open", title: "AI chat", run: () => run(false) });
   registerAction({ id: "ai.new_chat", title: "New AI chat", run: () => run(true) });
   await listen<unknown>("ai", onAi);
+  // Every list the providers dialog reads is the list of every chat of this window.
+  onProfilesChanged((raw) => takeProfiles(raw, true, null));
   // A window that gains the focus may have missed events, and a last event that was lost cannot be seen from the
   // events: every chat on screen asks for a fresh snapshot.
   window.addEventListener("focus", () => {
