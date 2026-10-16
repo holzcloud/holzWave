@@ -1,0 +1,18 @@
+event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_e1","object":"response","status":"in_progress","model":"gpt-5","output":[]}}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":1,"response":{"id":"resp_e1","object":"response","status":"in_progress","model":"gpt-5","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_e1","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":3,"item_id":"msg_e1","output_index":0,"content_index":0,"part":{"type":"output_text","annotations":[],"text":""}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":4,"item_id":"msg_e1","output_index":0,"content_index":0,"delta":"Par"}
+
+event: response.failed
+data: {"type":"response.failed","sequence_number":5,"response":{"id":"resp_e1","object":"response","status":"failed","model":"gpt-5","output":[],"error":{"code":"server_error","message":"FAIL-CANARY-r5e1 The server had an error."}}}
+

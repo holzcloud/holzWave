@@ -38,11 +38,13 @@ use serde::Deserialize;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
 
-use super::{Wire, WireAdapter, WireRequest, WireTurn};
-use crate::ai::http::Frame;
-use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, StreamEvent};
+use super::{Endpoint, Wire, WireAdapter, WireRequest, WireTurn};
+use crate::ai::http::{Frame, Rejection};
+use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, MAX_DETAIL, StreamEvent};
 use crate::ai::sse::{StreamEnd, ToolAssembler};
-use crate::ai::types::{Capabilities, ContextNote, Locality, Message, Opaque, Part, Role, StopReason, ToolSpec, Usage};
+use crate::ai::types::{
+    Capabilities, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolSpec, Usage,
+};
 
 // ---- constants --------------------------------------------------------------------------------------------
 
@@ -52,11 +54,23 @@ pub const PATH: &str = "/responses";
 /// The value of `include` that asks for the encrypted reasoning, so a reasoning item can be sent back with storage off.
 pub const INCLUDE_ENCRYPTED: &str = "reasoning.encrypted_content";
 
-/// The most output items one reply may hold, and the most a stored turn may replay.
+/// The most output items one reply may hold, and the most a stored turn may replay. Pinned by the test that sends one
+/// finished item too many.
 pub const MAX_OUTPUT_ITEMS: usize = 256;
 
-/// The most tools one request may declare.
+/// The most bytes of finished-item event data one reply may hold: 2 MiB. The native turn is kept in the chat file and
+/// sent back with every request, so it is bounded by what the events carried, counted without writing the items again.
+/// Pinned by the test with three items of 700,000 bytes.
+pub const MAX_NATIVE_BYTES: usize = 2_097_152;
+
+/// The most tools one request may declare. A request is written once per turn and sent in full, so the bound keeps a
+/// runaway tool list from growing every request. Pinned by the test that declares 128 and then 129 tools.
 pub const MAX_TOOLS: usize = 128;
+
+/// The longest provider error code that is shown, in bytes. A longer code, or one with a character outside `a-z`,
+/// `0-9`, `_`, `.` and `-`, is left out of the error, because a code is the only provider text a stream error may
+/// carry. Pinned by the failure test with codes of 64 and 65 characters and with hostile characters.
+pub const MAX_CODE_BYTES: usize = 64;
 
 /// The adapter of the Responses dialect. It has no field: everything it needs comes with the request.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,6 +104,16 @@ const PHRASE_SAME_CALL: &str = "two tool calls share an id";
 const PHRASE_ORPHAN: &str = "a tool result does not answer an earlier tool call";
 const PHRASE_TWO_RESULTS: &str = "a tool call has more than one result";
 const PHRASE_UNANSWERED: &str = "a tool call has no result before the next message";
+const PHRASE_ERROR_EVENT: &str = "the provider reported an error while streaming";
+const PHRASE_TOO_MANY_ITEMS: &str = "the response holds more output items than one reply allows";
+const PHRASE_TOO_LARGE: &str = "the response is larger than one reply allows";
+const PHRASE_REPEATED_ITEM: &str = "the response finishes one output item twice";
+const PHRASE_QUOTA: &str = "the account has no quota left";
+const PHRASE_SERVER: &str = "an internal error";
+const PHRASE_STALE_REASONING: &str =
+    "the saved reasoning of this chat is not usable; start a new chat or use another model";
+const PHRASE_NO_MODEL: &str = "the model is not available to this key; choose another model";
+const PHRASE_BAD_VALUE: &str = "a value or parameter of the request is not accepted";
 const PHRASE_FRAME: &str = "the response is not an event stream";
 const PHRASE_UNREADABLE: &str = "the response holds an event that cannot be read";
 const PHRASE_MEMBER: &str = "the response holds an event without a member it needs";
@@ -99,6 +123,97 @@ const PHRASE_DISAGREE: &str = "the response lists other tool calls than the stre
 const PHRASE_NO_TERMINAL: &str = "the response ended without its final event";
 const PHRASE_TRUNCATED: &str = "the response stream ended before the response was complete";
 const PHRASE_FAILED_EARLIER: &str = "the response was refused earlier";
+
+// ---- error codes ------------------------------------------------------------------------------------------
+
+/// The error for a provider error code, or `None` for a code this version does not know. The class comes from the code
+/// alone and every phrase is fixed: the provider's message is never copied, because a stream event has no endpoint to
+/// mask a key with. Pinned row by row by the failure and rejection tests.
+fn class_for_code(code: &str) -> Option<AiError> {
+    Some(match code {
+        "context_length_exceeded" => AiError::ContextLength,
+        "rate_limit_exceeded" => AiError::RateLimited { retry_after: None },
+        // A key that cannot pay is a problem with the credentials from the user's point of view.
+        "insufficient_quota" => AiError::Auth(Detail::new(PHRASE_QUOTA)),
+        "server_error" | "internal_error" => AiError::Server { status: 500, detail: Detail::new(PHRASE_SERVER) },
+        "overloaded" | "server_is_overloaded" | "slow_down" | "service_unavailable" => AiError::Overloaded,
+        "invalid_prompt" | "content_filter" | "content_policy_violation" => AiError::ContentFilter,
+        "invalid_encrypted_content" => invalid(PHRASE_STALE_REASONING),
+        "model_not_found" => invalid(PHRASE_NO_MODEL),
+        "invalid_request_error"
+        | "invalid_value"
+        | "unsupported_parameter"
+        | "unsupported_value"
+        | "missing_required_parameter" => invalid(PHRASE_BAD_VALUE),
+        _ => return None,
+    })
+}
+
+/// Whether a code may be shown: at most [`MAX_CODE_BYTES`] bytes of lower-case letters, digits, `_`, `.` and `-`.
+fn safe_code(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= MAX_CODE_BYTES
+        && code.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+/// The error of a `response.failed` or `error` event: the class of the code, else a protocol error that shows the code
+/// only when it is safe to show.
+fn event_error(code: Option<&str>) -> AiError {
+    match code {
+        Some(code) => class_for_code(code).unwrap_or_else(|| {
+            if safe_code(code) {
+                AiError::Protocol(Detail::new(&format!("{PHRASE_ERROR_EVENT} ({code})")))
+            } else {
+                protocol(PHRASE_ERROR_EVENT)
+            }
+        }),
+        None => protocol(PHRASE_ERROR_EVENT),
+    }
+}
+
+/// Text of an error body, made safe to show: every key of the endpoint is masked, control, direction and zero-width
+/// characters are replaced, and the whole is within the limit of a detail.
+fn shown_text(endpoint: &Endpoint, message: &str) -> Detail {
+    let detail = endpoint.scrub(message);
+    // A detail that was cut ends in an ellipsis after its limit, so it is cut once more to fit the limit as a whole.
+    if detail.as_str().chars().count() > MAX_DETAIL {
+        let kept: String = detail.as_str().chars().take(MAX_DETAIL - 1).collect();
+        return Detail::new(&format!("{}\u{2026}", kept.trim_end()));
+    }
+    detail
+}
+
+/// The error of an answer that was not a success, read from the provider's error body. The status decides when the body
+/// is not an error object, and for 401 and 403 it always decides, so no provider text is shown for a refused key. A
+/// known code gives its class (the wait of a rate limit and the status of a server error come from the answer). The
+/// two codes with their own phrases keep them. For a client error with another or no known code the provider's message
+/// is shown, but only through [`Endpoint::scrub`], which masks the keys of the endpoint.
+fn rejected(rejection: &Rejection, endpoint: &Endpoint) -> Option<AiError> {
+    let status = rejection.status;
+    if matches!(status, 401 | 403) {
+        return None;
+    }
+    let body: Value = serde_json::from_slice(&rejection.body).ok()?;
+    let error = body.get("error").filter(|error| error.is_object())?;
+    let code = text_of(error, "code");
+    let message = text_of(error, "message").filter(|text| !text.trim().is_empty());
+    let client_error = matches!(status, 400 | 404 | 409 | 410 | 422);
+    match code.and_then(class_for_code) {
+        Some(AiError::InvalidRequest(fixed)) => {
+            let own_phrase = matches!(code, Some("invalid_encrypted_content" | "model_not_found"));
+            Some(match message {
+                Some(message) if client_error && !own_phrase => AiError::InvalidRequest(shown_text(endpoint, message)),
+                _ => AiError::InvalidRequest(fixed),
+            })
+        }
+        Some(AiError::RateLimited { .. }) => Some(AiError::RateLimited { retry_after: rejection.retry_after }),
+        Some(AiError::Server { detail, .. }) => {
+            Some(AiError::Server { status: if (500..600).contains(&status) { status } else { 500 }, detail })
+        }
+        Some(known) => Some(known),
+        None => message.filter(|_| client_error).map(|message| AiError::InvalidRequest(shown_text(endpoint, message))),
+    }
+}
 
 // ---- the model family -------------------------------------------------------------------------------------
 
@@ -157,6 +272,10 @@ impl WireAdapter for OpenAiResponsesAdapter {
 
     fn turn(&self) -> Box<dyn WireTurn> {
         Box::new(ResponsesTurn::new())
+    }
+
+    fn rejection(&self, rejection: &Rejection, endpoint: &Endpoint) -> Option<AiError> {
+        rejected(rejection, endpoint)
     }
 }
 
@@ -320,7 +439,8 @@ fn context_text(req: &ChatRequest, note: &ContextNote) -> String {
     format!("[context not sent: {}]", items.join(", "))
 }
 
-/// The longest label in a marker line, in characters.
+/// The longest label in a marker line, in characters. A label is text the user typed or a pane title, so it is cut to a
+/// short length before it goes into a request. Pinned by the context test with a label of 200 characters.
 pub const MARKER_LABEL_CHARS: usize = 80;
 
 /// The stored turn of an assistant message, when it may be replayed.
@@ -494,6 +614,8 @@ struct Envelope<'a> {
     delta: Option<Cow<'a, str>>,
     #[serde(default, borrow, deserialize_with = "lenient_str")]
     arguments: Option<Cow<'a, str>>,
+    #[serde(default, borrow, deserialize_with = "lenient_str")]
+    code: Option<Cow<'a, str>>,
     #[serde(default)]
     item: Option<Value>,
     #[serde(default)]
@@ -511,6 +633,9 @@ enum Kind {
     ArgsDelta,
     ArgsDone,
     Completed,
+    Incomplete,
+    Failed,
+    Error,
     Other,
 }
 
@@ -525,6 +650,9 @@ impl Kind {
             "response.function_call_arguments.delta" => Kind::ArgsDelta,
             "response.function_call_arguments.done" => Kind::ArgsDone,
             "response.completed" => Kind::Completed,
+            "response.incomplete" => Kind::Incomplete,
+            "response.failed" => Kind::Failed,
+            "error" => Kind::Error,
             _ => Kind::Other,
         }
     }
@@ -549,10 +677,22 @@ struct Slot {
     fed: Fed,
 }
 
+/// Why a response ended without completing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reason {
+    /// The output limit was reached.
+    MaxTokens,
+    /// The provider's content filter cut the reply.
+    ContentFilter,
+    /// Any other reason, or none.
+    Other,
+}
+
 /// How the response ended.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Terminal {
     Completed,
+    Incomplete(Reason),
 }
 
 /// The reader of one answer. `Debug` shows counts and flags, never text.
@@ -561,10 +701,13 @@ struct ResponsesTurn {
     slots: Vec<Slot>,
     /// The finished output items with their output index, in arrival order.
     items: Vec<(u32, Value)>,
+    /// The bytes of event data the finished items came in.
+    native_bytes: usize,
     usage: Usage,
     refused: bool,
     terminal: Option<Terminal>,
     failed: bool,
+    stopped: bool,
 }
 
 impl ResponsesTurn {
@@ -573,10 +716,12 @@ impl ResponsesTurn {
             tools: ToolAssembler::new(),
             slots: Vec::new(),
             items: Vec::new(),
+            native_bytes: 0,
             usage: Usage::default(),
             refused: false,
             terminal: None,
             failed: false,
+            stopped: false,
         }
     }
 
@@ -641,6 +786,17 @@ impl ResponsesTurn {
             Kind::ItemDone => {
                 let slot = Self::index(&env)?;
                 let item = env.item.take().filter(Value::is_object).ok_or_else(|| protocol(PHRASE_MEMBER))?;
+                // The kept items are bounded in number and in bytes of event data, and an index finishes once.
+                if self.items.len() >= MAX_OUTPUT_ITEMS {
+                    return Err(protocol(PHRASE_TOO_MANY_ITEMS));
+                }
+                self.native_bytes = self.native_bytes.saturating_add(data.len());
+                if self.native_bytes > MAX_NATIVE_BYTES {
+                    return Err(protocol(PHRASE_TOO_LARGE));
+                }
+                if self.items.iter().any(|(held, _)| *held == slot) {
+                    return Err(protocol(PHRASE_REPEATED_ITEM));
+                }
                 if item_type(&item) == Some("function_call") {
                     let args = text_of(&item, "arguments").unwrap_or("");
                     let taken =
@@ -666,6 +822,25 @@ impl ResponsesTurn {
                 self.terminal = Some(Terminal::Completed);
                 Ok(self.report_usage(&response, out))
             }
+            Kind::Incomplete => {
+                let response = env.response.take().filter(Value::is_object).ok_or_else(|| protocol(PHRASE_MEMBER))?;
+                let reason = match response.get("incomplete_details").and_then(|details| text_of(details, "reason")) {
+                    Some("max_output_tokens") => Reason::MaxTokens,
+                    Some("content_filter") => Reason::ContentFilter,
+                    _ => Reason::Other,
+                };
+                self.terminal = Some(Terminal::Incomplete(reason));
+                Ok(self.report_usage(&response, out))
+            }
+            Kind::Failed => {
+                let code = env
+                    .response
+                    .as_ref()
+                    .and_then(|response| response.get("error"))
+                    .and_then(|error| text_of(error, "code"));
+                Err(event_error(code))
+            }
+            Kind::Error => Err(event_error(env.code.as_deref())),
             Kind::Other => Ok(Flow::Continue),
         }
     }
@@ -725,6 +900,7 @@ impl fmt::Debug for ResponsesTurn {
             .field("tools", &self.tools)
             .field("calls", &self.slots.len())
             .field("items", &self.items.len())
+            .field("native", &Size(self.native_bytes))
             .field("usage", &self.usage)
             .field("refused", &self.refused)
             .field("completed", &self.terminal.is_some())
@@ -735,12 +911,14 @@ impl fmt::Debug for ResponsesTurn {
 
 impl WireTurn for ResponsesTurn {
     fn frame(&mut self, frame: Frame<'_>, out: &mut dyn FnMut(StreamEvent) -> Flow) -> Result<Flow, AiError> {
-        if self.failed {
+        if self.failed || self.stopped {
             return Ok(Flow::Stop);
         }
         let result = self.step(frame, out);
-        if result.is_err() {
-            self.failed = true;
+        match result {
+            Err(_) => self.failed = true,
+            Ok(Flow::Stop) => self.stopped = true,
+            Ok(Flow::Continue) => {}
         }
         result
     }
@@ -757,25 +935,40 @@ impl WireTurn for ResponsesTurn {
         if turn.failed {
             return Err(protocol(PHRASE_FAILED_EARLIER));
         }
-        if turn.terminal.is_none() {
-            return Err(protocol(PHRASE_NO_TERMINAL));
-        }
+        let Some(terminal) = turn.terminal else { return Err(protocol(PHRASE_NO_TERMINAL)) };
         if !end.is_clean() {
             return Err(protocol(PHRASE_TRUNCATED));
         }
+        let reason = match terminal {
+            Terminal::Completed => None,
+            Terminal::Incomplete(reason) => Some(reason),
+        };
+        if reason.is_some() && turn.tools.open_count() + turn.tools.ready_count() > 0 {
+            // The reply was cut while a call was pending: the call may be half of what the model meant, so it is dropped
+            // and the turn fails.
+            return Err(match turn.tools.finish(end, false) {
+                Err(dropped) => AiError::from(dropped),
+                Ok(_) => protocol(PHRASE_TRUNCATED),
+            });
+        }
         // The calls leave only here, after a clean end and the final event; an open call or a fault is an error.
         let calls = turn.tools.finish(end, true).map_err(AiError::from)?;
-        let stop_reason = if !calls.is_empty() {
-            StopReason::ToolUse
-        } else if turn.refused {
-            StopReason::Refusal
-        } else {
-            StopReason::EndTurn
+        let stop_reason = match reason {
+            Some(Reason::ContentFilter) => return Err(AiError::ContentFilter),
+            Some(Reason::MaxTokens) => StopReason::MaxTokens,
+            Some(Reason::Other) => StopReason::Other,
+            None if !calls.is_empty() => StopReason::ToolUse,
+            None if turn.refused => StopReason::Refusal,
+            None => StopReason::EndTurn,
         };
         for call in calls {
             if out(StreamEvent::ToolCall(call)) == Flow::Stop {
                 return Err(AiError::Cancelled);
             }
+        }
+        if reason.is_some() {
+            // An incomplete reply is not replayed: its last item is cut.
+            return Ok(Completion { stop_reason, usage: turn.usage, native: None });
         }
         turn.items.sort_by_key(|(index, _)| *index);
         let native = (!turn.items.is_empty()).then(|| Opaque {
@@ -783,5 +976,46 @@ impl WireTurn for ResponsesTurn {
             json: Value::Array(turn.items.into_iter().map(|(_, item)| item).collect()),
         });
         Ok(Completion { stop_reason, usage: turn.usage, native })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::sse::SseDecoder;
+
+    /// Feeds `stream` to a fresh turn through the decoder, the way the shared driver does it.
+    fn fed(stream: &str) -> ResponsesTurn {
+        let mut turn = ResponsesTurn::new();
+        let mut decoder = SseDecoder::new();
+        let mut sink = |_: StreamEvent| Flow::Continue;
+        decoder
+            .push(stream.as_bytes(), &mut |event| turn.frame(Frame::Event(event), &mut sink).unwrap_or(Flow::Stop))
+            .expect("a framed stream");
+        turn
+    }
+
+    #[test]
+    fn the_turn_debug_shows_counts_never_text() {
+        let stream = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"TEXT-CANARY-7c1\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",",
+            "\"encrypted_content\":\"ENC-CANARY-7c1\",\"summary\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",",
+            "\"call_id\":\"ID-CANARY-7c1\",\"name\":\"NAME-CANARY-7c1\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,",
+            "\"delta\":\"{\\\"path\\\":\\\"ARGS-CANARY-7c1\\\"\"}\n\n",
+        );
+        let turn = fed(stream);
+        assert_eq!(turn.items.len(), 1, "the stream was read");
+        assert_eq!(turn.slots.len(), 1, "the call was started");
+
+        for shown in [format!("{turn:?}"), format!("{turn:#?}")] {
+            assert!(!shown.contains("CANARY"), "{shown}");
+            assert!(shown.contains("ResponsesTurn"), "{shown}");
+            assert!(shown.contains("items: 1"), "{shown}");
+            assert!(shown.contains("calls: 1"), "{shown}");
+        }
+        assert_eq!(format!("{:?}", OpenAiResponsesAdapter::new()), "OpenAiResponsesAdapter");
     }
 }
