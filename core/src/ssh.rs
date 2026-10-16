@@ -591,6 +591,8 @@ pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const EXEC_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Open the channel and write the request (T-07-025).
 const EXEC_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// The shortest time limit; a smaller one is raised to it, so a zero cannot end every command before it starts.
+const MIN_EXEC_TIMEOUT: Duration = Duration::from_millis(10);
 
 /// What a caller of [`SshExec::exec`] bounds a command with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -604,6 +606,18 @@ pub struct ExecLimits {
 impl Default for ExecLimits {
     fn default() -> Self {
         Self { max_output: DEFAULT_EXEC_OUTPUT, timeout: DEFAULT_EXEC_TIMEOUT }
+    }
+}
+
+impl ExecLimits {
+    /// The limits brought into the allowed range: `max_output` from 1 to [`MAX_EXEC_OUTPUT`], `timeout` from 10 ms to
+    /// [`MAX_EXEC_TIMEOUT`]. [`SshExec::exec`] applies it to whatever the caller passes, so every caller is bounded
+    /// (T-07-024, T-07-025).
+    pub fn clamped(self) -> Self {
+        Self {
+            max_output: self.max_output.clamp(1, MAX_EXEC_OUTPUT),
+            timeout: self.timeout.clamp(MIN_EXEC_TIMEOUT, MAX_EXEC_TIMEOUT),
+        }
     }
 }
 
@@ -764,6 +778,21 @@ fn exec_error(text: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("ssh exec: {text}"))
 }
 
+/// Refuse a command that cannot be run, before anything is connected. The texts never include the command: it may hold a
+/// secret (T-07-027). Newlines are allowed (a script is a legitimate command); the approval layer owns what may run.
+fn check_command(command: &str) -> Result<()> {
+    if command.trim().is_empty() {
+        return Err(exec_error("the command is empty"));
+    }
+    if command.contains('\0') {
+        return Err(exec_error("the command contains a NUL byte"));
+    }
+    if command.len() > MAX_EXEC_COMMAND {
+        return Err(exec_error(format!("the command is longer than {MAX_EXEC_COMMAND} bytes")));
+    }
+    Ok(())
+}
+
 /// The POSIX number of a signal the SSH protocol names, for the exit status `128 + n` of a shell. A name this code does
 /// not know counts as 0.
 fn signal_number(signal: &Sig) -> u32 {
@@ -844,7 +873,9 @@ impl SshExec {
     /// A command is written at most once. [`ExecEnd::Lost`] means the connection broke while it ran: it may or may not
     /// have finished, and this code never runs it again (T-07-023).
     pub fn exec(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
-        self.runtime.block_on(self.run(command, limits, cancel))
+        check_command(command)?;
+        let limits = limits.clamped();
+        self.runtime.block_on(self.run(command, &limits, cancel))
     }
 
     /// The cached connection, or a new one. The `bool` says the connection was made by this call.
@@ -917,7 +948,10 @@ async fn pump(mut channel: Channel<client::Msg>, limits: &ExecLimits, cancel: &E
             }
             msg = channel.wait() => match msg {
                 Some(ChannelMsg::Success) => {}
-                Some(ChannelMsg::Failure) => return Err(exec_error("the server refused to run the command")),
+                Some(ChannelMsg::Failure) => {
+                    let _ = channel.close().await;
+                    return Err(exec_error("the server refused to run the command"));
+                }
                 Some(ChannelMsg::Data { data }) => stdout.push(&data),
                 Some(ChannelMsg::ExtendedData { data, ext }) => {
                     if ext == 1 {
@@ -1384,8 +1418,52 @@ mod tests {
             let command = String::from_utf8_lossy(data).to_string();
             self.seen.commands.lock().unwrap().push(command.clone());
             let (verb, arg) = command.split_once(' ').unwrap_or((command.as_str(), ""));
+            if verb == "refuse" {
+                session.channel_failure(channel)?;
+                return Ok(());
+            }
             session.channel_success(channel)?;
             match verb {
+                "exit" => end_command(session, channel, arg.parse().unwrap())?,
+                // Ended by a signal: the exit-signal request, then the close, as a shell reports a killed child.
+                "kill" => {
+                    let signal = match arg {
+                        "HUP" => Sig::HUP,
+                        "KILL" => Sig::KILL,
+                        "TERM" => Sig::TERM,
+                        other => Sig::Custom(other.to_string()),
+                    };
+                    session.exit_signal_request(channel, signal, false, "", "")?;
+                    session.close(channel)?;
+                }
+                // `n` bytes on stdout (byte i is i % 251) and on stderr (byte i is (i + 100) % 251), in 16 KiB chunks.
+                "flood" => {
+                    let total: usize = arg.parse().unwrap();
+                    let mut sent = 0;
+                    while sent < total {
+                        let n = (total - sent).min(16 * 1024);
+                        session.data(channel, (sent..sent + n).map(|i| (i % 251) as u8).collect::<Vec<u8>>())?;
+                        session.extended_data(channel, 1, (sent..sent + n).map(|i| ((i + 100) % 251) as u8).collect::<Vec<u8>>())?;
+                        sent += n;
+                    }
+                    end_command(session, channel, 0)?;
+                }
+                // Prints a line and then never ends.
+                "partial" => session.data(channel, format!("{arg}\n").into_bytes())?,
+                // Closes without an exit status.
+                "quiet" => session.close(channel)?,
+                // The end of output comes first and the exit status 150 ms later.
+                "late" => {
+                    let status: u32 = arg.parse().unwrap();
+                    session.data(channel, b"x".to_vec())?;
+                    session.eof(channel)?;
+                    let handle = session.handle();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let _ = handle.exit_status_request(channel, status).await;
+                        let _ = handle.close(channel).await;
+                    });
+                }
                 "say" => {
                     session.data(channel, format!("{arg}\n").into_bytes())?;
                     end_command(session, channel, 0)?;
@@ -1678,5 +1756,197 @@ mod tests {
         let shown = format!("{result:?}");
         assert!(!shown.contains("secret-marker"), "{shown}");
         assert!(shown.contains("13"), "the byte count of stdout is shown: {shown}");
+    }
+
+    #[test]
+    fn exec_limits_are_clamped() {
+        let low = ExecLimits { max_output: 0, timeout: Duration::ZERO }.clamped();
+        assert_eq!(low, ExecLimits { max_output: 1, timeout: MIN_EXEC_TIMEOUT });
+        let high = ExecLimits { max_output: usize::MAX, timeout: Duration::MAX }.clamped();
+        assert_eq!(high, ExecLimits { max_output: MAX_EXEC_OUTPUT, timeout: MAX_EXEC_TIMEOUT });
+        assert_eq!(MAX_EXEC_OUTPUT, 1024 * 1024);
+        assert_eq!(MAX_EXEC_TIMEOUT, Duration::from_secs(600));
+        let inside = ExecLimits { max_output: 4096, timeout: Duration::from_secs(5) };
+        assert_eq!(inside.clamped(), inside);
+        assert_eq!(ExecLimits::default().clamped(), ExecLimits::default());
+
+        // `exec` applies it to what the caller passes: a cap of 0 keeps one byte.
+        let server = serve_exec();
+        let dir = scratch_dir("clamp");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let limits = ExecLimits { max_output: 0, timeout: Duration::MAX };
+        let result = exec.exec("say hello", &limits, &ExecCancel::new()).unwrap();
+        assert_eq!(result.stdout, b"\n");
+        assert_eq!(result.dropped, 5);
+        assert!(result.truncated);
+        assert_eq!(result.end, ExecEnd::Finished);
+    }
+
+    #[test]
+    fn exec_checks_the_command_before_it_connects() {
+        let server = serve_exec();
+        let dir = scratch_dir("check");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let too_long = "a".repeat(MAX_EXEC_COMMAND + 1);
+        for (command, needle) in
+            [("", "empty"), ("   \t\n ", "empty"), ("say a\0b", "NUL"), (too_long.as_str(), "longer")]
+        {
+            let error = exec.exec(command, &ExecLimits::default(), &ExecCancel::new()).unwrap_err().to_string();
+            assert!(error.contains(needle), "{needle}: {error}");
+            assert!(command.trim().is_empty() || !error.contains(command), "the error repeats the command: {error}");
+        }
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 0, "nothing was connected for a bad command");
+        // The longest command passes the check, and a script with newlines does too.
+        check_command(&"a".repeat(MAX_EXEC_COMMAND)).unwrap();
+        check_command("set -e\necho one\necho two").unwrap();
+    }
+
+    #[test]
+    fn exec_errors_never_contain_the_command_or_the_password() {
+        let server = serve_exec();
+        let dir = scratch_dir("secret");
+        let exec = SshExec::new("Test host", exec_target_untrusted(&server, dir.path())).unwrap();
+        let error = exec
+            .exec("echo SECRET-MARKER-123", &ExecLimits::default(), &ExecCancel::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not known"), "the host key is what was refused: {error}");
+        assert!(!error.contains("SECRET-MARKER-123"), "{error}");
+        assert!(!error.contains("pw"), "{error}");
+    }
+
+    #[test]
+    fn exec_flood_is_cut_to_the_tail_per_stream_and_counted() {
+        let server = serve_exec();
+        let dir = scratch_dir("flood");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        // 2 097 229 bytes per stream is a little more than the 2 MiB window of the connection.
+        let total = 2_097_229usize;
+        let cap = 65_536usize;
+        let limits = ExecLimits { max_output: cap, timeout: Duration::from_secs(60) };
+        let result = exec.exec(&format!("flood {total}"), &limits, &ExecCancel::new()).unwrap();
+        let expected_out: Vec<u8> = (total - cap..total).map(|i| (i % 251) as u8).collect();
+        let expected_err: Vec<u8> = (total - cap..total).map(|i| ((i + 100) % 251) as u8).collect();
+        assert!(result.stdout == expected_out, "stdout is not the last {cap} bytes of the sequence");
+        assert!(result.stderr == expected_err, "stderr is not the last {cap} bytes of its sequence");
+        assert_eq!(result.dropped, 2 * (total - cap) as u64);
+        assert!(result.truncated);
+        assert_eq!(result.status, Some(0));
+        assert_eq!(result.end, ExecEnd::Finished);
+    }
+
+    #[test]
+    fn exec_a_command_that_never_ends_stops_at_the_timeout_and_keeps_its_output() {
+        let server = serve_exec();
+        let dir = scratch_dir("timeout");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let limits = ExecLimits { max_output: DEFAULT_EXEC_OUTPUT, timeout: Duration::from_millis(300) };
+        let started = Instant::now();
+        let result = exec.exec("partial hello", &limits, &ExecCancel::new()).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3), "took {:?}", started.elapsed());
+        assert_eq!(result.end, ExecEnd::TimedOut);
+        assert_eq!(result.stdout, b"hello\n");
+        assert_eq!(result.status, None);
+        wait_until("signal KILL", || server.seen.signals.lock().unwrap().iter().any(|s| s == "KILL"));
+        wait_until("the client's close", || server.seen.closes.load(Ordering::SeqCst) >= 1);
+        // The connection outlives the closed channel.
+        let again = run_default(&exec, "say again");
+        assert_eq!(again.stdout, b"again\n");
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn exec_cancel_stops_a_running_command_and_keeps_its_output() {
+        let server = serve_exec();
+        let dir = scratch_dir("cancel");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let cancel = ExecCancel::new();
+        let raised = Arc::new(Mutex::new(None::<Instant>));
+        let helper = {
+            let (cancel, seen, raised) = (cancel.clone(), server.seen.clone(), raised.clone());
+            thread::spawn(move || {
+                wait_until("the command", || seen.commands().iter().any(|c| c == "partial hello"));
+                // Let the first line cross the loopback before the cancel.
+                thread::sleep(Duration::from_millis(300));
+                *raised.lock().unwrap() = Some(Instant::now());
+                cancel.cancel();
+            })
+        };
+        let limits = ExecLimits { max_output: DEFAULT_EXEC_OUTPUT, timeout: Duration::from_secs(60) };
+        let result = exec.exec("partial hello", &limits, &cancel).unwrap();
+        let returned = Instant::now();
+        helper.join().unwrap();
+        let raised = raised.lock().unwrap().unwrap();
+        assert!(returned.duration_since(raised) < Duration::from_secs(1), "took {:?}", returned.duration_since(raised));
+        assert!(cancel.is_cancelled());
+        assert_eq!(result.end, ExecEnd::Cancelled);
+        assert_eq!(result.stdout, b"hello\n");
+        assert_eq!(result.status, None);
+        wait_until("signal KILL", || server.seen.signals.lock().unwrap().iter().any(|s| s == "KILL"));
+    }
+
+    #[test]
+    fn exec_cancelled_before_it_starts_sends_nothing() {
+        let server = serve_exec();
+        let dir = scratch_dir("precancel");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let cancel = ExecCancel::new();
+        cancel.cancel();
+        cancel.cancel();
+        let result = exec.exec("say hello", &ExecLimits::default(), &cancel).unwrap();
+        assert_eq!(result.end, ExecEnd::Cancelled);
+        assert!(result.stdout.is_empty() && result.stderr.is_empty());
+        assert_eq!(result.status, None);
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(server.seen.connections.load(Ordering::SeqCst), 0, "nothing was connected");
+        assert!(server.seen.commands().is_empty());
+    }
+
+    #[test]
+    fn exec_a_signal_exit_is_128_plus_the_signal_number() {
+        let server = serve_exec();
+        let dir = scratch_dir("signals");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        for (command, status) in [("kill TERM", 143), ("kill KILL", 137), ("kill HUP", 129), ("kill XYZ", 128), ("exit 7", 7)] {
+            let result = run_default(&exec, command);
+            assert_eq!(result.status, Some(status), "{command}");
+            assert_eq!(result.end, ExecEnd::Finished, "{command}");
+        }
+        assert_eq!(signal_number(&Sig::INT), 2);
+        assert_eq!(signal_number(&Sig::QUIT), 3);
+        assert_eq!(signal_number(&Sig::ABRT), 6);
+        assert_eq!(signal_number(&Sig::SEGV), 11);
+        assert_eq!(signal_number(&Sig::PIPE), 13);
+        assert_eq!(signal_number(&Sig::ALRM), 14);
+    }
+
+    #[test]
+    fn exec_reads_the_exit_status_that_follows_the_end_of_output() {
+        let server = serve_exec();
+        let dir = scratch_dir("late");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let result = run_default(&exec, "late 5");
+        assert_eq!(result.stdout, b"x");
+        assert_eq!(result.status, Some(5));
+        assert_eq!(result.end, ExecEnd::Finished);
+    }
+
+    #[test]
+    fn exec_a_close_without_a_status_gives_none() {
+        let server = serve_exec();
+        let dir = scratch_dir("quiet");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let result = run_default(&exec, "quiet");
+        assert_eq!(result.status, None);
+        assert_eq!(result.end, ExecEnd::Finished);
+    }
+
+    #[test]
+    fn exec_a_refused_request_is_an_error() {
+        let server = serve_exec();
+        let dir = scratch_dir("refuse");
+        let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
+        let error = exec.exec("refuse", &ExecLimits::default(), &ExecCancel::new()).unwrap_err().to_string();
+        assert!(error.contains("refused"), "{error}");
     }
 }
