@@ -17,21 +17,27 @@ use std::time::{Duration, Instant};
 
 use common::fake_http::{FakeHttp, Reply};
 use holzwave_core::ai::profiles::{AiConfig, KeySlot, KeyVault, Preset, ProfileInput};
+use holzwave_core::ai::provider::{AiError, CancelToken, ChatRequest, Completion, Flow, Provider, StreamEvent};
+use holzwave_core::ai::scripted::{Script, ScriptedProvider};
+use holzwave_core::ai::service::coalesce::{Batch, Coalescer, DeltaKind};
 use holzwave_core::ai::service::events::{
     AiEvent, AiEventKind, ApplyResult, ChatMessage, ChatPart, ChatState, EndView, ErrorView, Partial, Route, Trimmed,
     title_from,
 };
-use holzwave_core::ai::service::{AiService, AiSink, SYSTEM_PROMPT, SendRequest, ServiceError};
+use holzwave_core::ai::service::{
+    AiService, AiSink, MAX_TURN_THREADS, SYSTEM_PROMPT, SendRequest, ServiceError, TurnTicket,
+};
 use holzwave_core::ai::store::{
     ContextStorage, Conversation, ConversationId, ConversationStore, JsonDirStore, Listing, MemoryStore as ChatMemory,
     Scrub, StoreError,
 };
-use holzwave_core::ai::tools::ToolName;
+use holzwave_core::ai::tools::{Resolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput};
 use holzwave_core::ai::types::{
-    ApiKey, Consent, ContextKind, ContextNote, Locality, Message, MessageStatus, NoteItem, Opaque, Part, Role,
-    ToolCall, Usage,
+    ApiKey, Capabilities, Consent, ContextKind, ContextNote, Locality, Message, MessageStatus, NoteItem, Opaque, Part,
+    Role, StopReason, ToolCall, Usage,
 };
 use holzwave_core::ai::wire::Wire;
+use holzwave_core::layout::PaneId;
 use holzwave_core::secrets::MemoryStore;
 use serde_json::{Value, json};
 
@@ -892,6 +898,593 @@ fn a_failed_first_save_stops_the_turn_before_any_request_and_a_later_failure_onl
     assert!(end.error.is_none());
     let stored = later.store.load(&chat).expect("a readable store").expect("the first save worked");
     assert_eq!(stored.messages.len(), 1, "only the user message reached the store");
+}
+
+// ---- helpers for scripted turns -----------------------------------------------------------------------------------
+
+/// Registers a scripted provider under `id` and keeps a handle to read what it was asked.
+fn register(service: &AiService, id: &str, provider: ScriptedProvider) -> Arc<ScriptedProvider> {
+    let provider = Arc::new(provider);
+    service.register_provider(id, provider.clone() as Arc<dyn Provider>).expect("the provider is registered");
+    provider
+}
+
+/// Sends `text` to the registered provider `id` and returns the ticket.
+fn send_to(service: &AiService, chat: &ConversationId, id: &str, text: &str, pane: PaneId) -> TurnTicket {
+    service.send(SendRequest::new(chat.clone(), text.to_owned(), pane).profile(id)).expect("the send is accepted")
+}
+
+/// The answer text streamed so far in `chat`, from the delta events.
+fn streamed(sink: &CollectSink, chat: &ConversationId) -> String {
+    sink.of(chat)
+        .iter()
+        .filter_map(|event| match &event.kind {
+            AiEventKind::Delta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The message events of `chat`.
+fn messages(sink: &CollectSink, chat: &ConversationId) -> Vec<ChatMessage> {
+    sink.of(chat)
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            AiEventKind::Message { message } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).expect("a short time")
+}
+
+// ---- the coalescer ------------------------------------------------------------------------------------------------
+
+/// Adjacent pieces of one kind, merged, in order.
+fn runs(pieces: &[(DeltaKind, String)]) -> Vec<(DeltaKind, String)> {
+    let mut out: Vec<(DeltaKind, String)> = Vec::new();
+    for (kind, text) in pieces {
+        match out.last_mut() {
+            Some((last, joined)) if last == kind => joined.push_str(text),
+            _ => out.push((*kind, text.clone())),
+        }
+    }
+    out
+}
+
+#[test]
+fn the_coalescer_merges_adjacent_deltas_at_about_sixty_a_second_and_keeps_order() {
+    let base = Instant::now();
+    let at = |ms: u64| base + Duration::from_millis(ms);
+    let batch = |kind: DeltaKind, text: &str| Batch { kind, text: text.to_owned() };
+    let mut merger = Coalescer::new(Duration::from_millis(16), 8192);
+
+    // The first text goes out at once; the rest within the interval is buffered and due one interval after the last
+    // delivery.
+    assert_eq!(merger.push(DeltaKind::Text, "a", at(0)), vec![batch(DeltaKind::Text, "a")]);
+    assert!(merger.is_empty() && merger.due_at().is_none());
+    assert!(merger.push(DeltaKind::Text, "b", at(5)).is_empty());
+    assert!(merger.push(DeltaKind::Text, "c", at(10)).is_empty());
+    assert_eq!(merger.due_at(), Some(at(16)));
+    // Pieces that are delivered together are one batch, and an empty piece changes nothing.
+    assert!(merger.push(DeltaKind::Text, "", at(12)).is_empty());
+    assert_eq!(merger.push(DeltaKind::Text, "d", at(20)), vec![batch(DeltaKind::Text, "bcd")]);
+    // `take` flushes whether it is due or not, and records the time.
+    assert!(merger.push(DeltaKind::Text, "e", at(21)).is_empty());
+    assert_eq!(merger.take(at(22)), Some(batch(DeltaKind::Text, "e")));
+    assert_eq!(merger.take(at(23)), None);
+    assert!(merger.push(DeltaKind::Text, "f", at(23)).is_empty(), "the take counted as a delivery");
+    // A change of kind hands the buffered text out first and keeps the order.
+    assert_eq!(merger.push(DeltaKind::Reasoning, "g", at(24)), vec![batch(DeltaKind::Text, "f")]);
+    assert_eq!(merger.due_at(), Some(at(40)));
+    assert_eq!(merger.take(at(40)), Some(batch(DeltaKind::Reasoning, "g")));
+
+    // A buffer that reaches the byte bound goes out whole, even inside the interval.
+    let mut bounded = Coalescer::new(Duration::from_millis(16), 100);
+    assert_eq!(bounded.push(DeltaKind::Text, &"x".repeat(10), at(0)).len(), 1);
+    assert!(bounded.push(DeltaKind::Text, &"y".repeat(60), at(1)).is_empty());
+    let out = bounded.push(DeltaKind::Text, &"z".repeat(50), at(2));
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].text.len(), 110, "the whole buffer goes out");
+
+    // A seeded run: 20000 pieces of 1 to 40 bytes, up to 3 ms apart (about 30 seconds), with the helper flushing at the
+    // due time. The kind changes every 2500 pieces, the way a stream goes from reasoning to its answer.
+    const SEED: u64 = 0x5eed_c0a1_e5ce;
+    let mut rng = common::Xorshift64::new(SEED);
+    let mut merger = Coalescer::new(Duration::from_millis(16), 8192);
+    let mut input: Vec<(DeltaKind, String)> = Vec::new();
+    let mut delivered: Vec<(u64, Batch)> = Vec::new();
+    let mut now_us = 0u64;
+    for index in 0..20_000usize {
+        now_us += rng.below(3001) as u64;
+        while let Some(due) = merger.due_at() {
+            let due_us = micros(due - base);
+            if due_us > now_us {
+                break;
+            }
+            delivered.extend(merger.take(due).map(|batch| (due_us, batch)));
+        }
+        let kind = if (index / 2500) % 2 == 0 { DeltaKind::Reasoning } else { DeltaKind::Text };
+        let length = 1 + rng.below(40);
+        let text: String = (0..length).map(|_| char::from(b'a' + rng.below(26) as u8)).collect();
+        input.push((kind, text.clone()));
+        delivered
+            .extend(merger.push(kind, &text, base + Duration::from_micros(now_us)).into_iter().map(|b| (now_us, b)));
+    }
+    while let Some(due) = merger.due_at() {
+        delivered.extend(merger.take(due).map(|batch| (micros(due - base), batch)));
+    }
+    let out: Vec<(DeltaKind, String)> = delivered.iter().map(|(_, batch)| (batch.kind, batch.text.clone())).collect();
+    assert!(runs(&out) == runs(&input), "seed {SEED:#x}: the bytes and the order of the stream changed");
+    let longest = delivered.iter().map(|(_, batch)| batch.text.len()).max().unwrap_or(0);
+    assert!(longest <= 8192 + 40, "seed {SEED:#x}: a batch of {longest} bytes");
+    let mut peak = 0;
+    let mut end = 0;
+    for start in 0..delivered.len() {
+        while end < delivered.len() && delivered[end].0 <= delivered[start].0 + 1_000_000 {
+            end += 1;
+        }
+        peak = peak.max(end - start);
+    }
+    println!("coalescer: {} pieces became {} batches, at most {peak} in any second", input.len(), delivered.len());
+    assert!(peak <= 64, "seed {SEED:#x}: {peak} batches in one second");
+    assert!(delivered.len() < 3000, "seed {SEED:#x}: {} batches for 20000 pieces", delivered.len());
+}
+
+// ---- the flush helper ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_delta_buffered_before_a_stall_is_flushed_without_waiting_for_the_next_one() {
+    let rig = Rig::new("svc-flush");
+    let service = rig.service();
+    let mut fast = Script::new();
+    for _ in 0..400 {
+        fast = fast.text("x");
+    }
+    register(
+        &service,
+        "scripted",
+        ScriptedProvider::new("scripted")
+            .with_turn(Script::new().text("a").text("b").stall(Duration::from_millis(600)).text("c"))
+            .with_turn(fast),
+    );
+    let chat = service.new_conversation().expect("a chat id");
+
+    send_to(&service, &chat, "scripted", "stall", 1);
+    assert!(common::wait_until(Duration::from_secs(5), || streamed(&rig.sink, &chat).starts_with('a')));
+    let stalled_at = Instant::now();
+    assert!(
+        common::wait_until(Duration::from_millis(300), || streamed(&rig.sink, &chat) == "ab"),
+        "the buffered piece waited for the next one: {:?}",
+        streamed(&rig.sink, &chat)
+    );
+    assert!(stalled_at.elapsed() < Duration::from_millis(300));
+    assert_eq!(rig.sink.ended(&chat), 0, "the turn is still in its stall");
+    assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(5)));
+    assert_eq!(streamed(&rig.sink, &chat), "abc");
+    let all = messages(&rig.sink, &chat);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].text(), "abc");
+    Fold::of(&chat, &rig.sink.of(&chat));
+
+    // A fast turn of 400 single characters becomes far fewer events, with the same bytes, and the message comes last.
+    send_to(&service, &chat, "scripted", "fast", 1);
+    assert!(rig.sink.wait_ended(&chat, 2, Duration::from_secs(5)));
+    let second: Vec<AiEvent> = rig.sink.of(&chat).into_iter().skip_while(|event| event.turn == 0).collect();
+    let turn = second.last().map(|event| event.turn).expect("events");
+    let second: Vec<AiEvent> = second.into_iter().filter(|event| event.turn == turn).collect();
+    let texts: Vec<&str> = second
+        .iter()
+        .filter_map(|event| match &event.kind {
+            AiEventKind::Delta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts.concat(), "x".repeat(400));
+    assert!(texts.len() < 100, "{} delta events for 400 pieces", texts.len());
+    let last_delta = second.iter().rposition(|event| matches!(event.kind, AiEventKind::Delta { .. })).expect("deltas");
+    let message = second.iter().position(|event| matches!(event.kind, AiEventKind::Message { .. })).expect("a message");
+    assert!(message > last_delta, "the message comes after the last delta");
+}
+
+// ---- the five wires -----------------------------------------------------------------------------------------------
+
+#[test]
+fn each_wire_is_dispatched_to_its_adapter_with_the_key_in_the_header_of_its_wire() {
+    let fake = FakeHttp::start(vec![Reply::status(400)]);
+    let rig = Rig::new("svc-wires");
+    let vault = rig.vault();
+    let mut config = AiConfig::default();
+    let base = fake.base();
+    let wires = [
+        ("Chat", Wire::OpenAiChat, format!("{base}/v1")),
+        ("Responses", Wire::OpenAiResponses, format!("{base}/v1")),
+        ("Messages", Wire::Anthropic, base.clone()),
+        ("Gemini", Wire::Gemini, format!("{base}/v1beta")),
+        ("Ollama", Wire::Ollama, base.clone()),
+    ];
+    for (name, wire, address) in &wires {
+        add_profile(&mut config, &vault, name, *wire, address, "test-model", Some(KEY_CANARY));
+    }
+    config.save(&rig.config_dir).expect("ai.json");
+    let service = rig.service();
+
+    for (index, (name, _, _)) in wires.iter().enumerate() {
+        let chat = service.new_conversation().expect("a chat id");
+        let id = name.to_lowercase();
+        let typed = format!("question {index} {TEXT_CANARY}");
+        send_to(&service, &chat, &id, &typed, 1);
+        assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(5)), "{id}: the turn ends");
+        assert_eq!(rig.sink.last_end(&chat).end, "failed", "{id}: the server answered 400");
+        let seen = fake.seen();
+        assert_eq!(seen.len(), index + 1, "{id}: one request");
+        let request = &seen[index];
+        let text = request.body_text();
+        // The Gemini wire names the model in the address, every other wire in the body.
+        assert!(text.contains("test-model") || request.target.contains("test-model"), "{id}: the model is asked for");
+        assert!(text.contains(&typed), "{id}: the text is in the body");
+        assert!(!text.contains(KEY_CANARY) && !request.target.contains(KEY_CANARY), "{id}: the key is in the body");
+        let key_headers: Vec<&str> = request
+            .headers
+            .iter()
+            .filter(|(_, value)| value.contains(KEY_CANARY))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        match id.as_str() {
+            "chat" => {
+                assert_eq!(request.target, "/v1/chat/completions");
+                assert_eq!(key_headers, ["authorization"]);
+                assert_eq!(request.header("authorization"), Some(format!("Bearer {KEY_CANARY}").as_str()));
+            }
+            "responses" => {
+                assert_eq!(request.target, "/v1/responses");
+                assert_eq!(request.header("authorization"), Some(format!("Bearer {KEY_CANARY}").as_str()));
+                assert_eq!(key_headers, ["authorization"]);
+            }
+            "messages" => {
+                assert_eq!(request.target, "/v1/messages");
+                assert_eq!(request.header("x-api-key"), Some(KEY_CANARY), "no prefix before the key");
+                assert_eq!(request.header("anthropic-version"), Some(holzwave_core::ai::wire::anthropic::API_VERSION));
+                assert!(request.header("authorization").is_none());
+                assert_eq!(key_headers, ["x-api-key"]);
+                // A loopback address gets the gateway form: the beta of the vendor's own service is not asked for.
+                assert!(request.header("anthropic-beta").is_none(), "{:?}", request.headers);
+            }
+            "gemini" => {
+                assert!(request.target.starts_with("/v1beta/models/"), "{}", request.target);
+                assert!(request.target.ends_with(":streamGenerateContent?alt=sse"), "{}", request.target);
+                assert_eq!(request.header("x-goog-api-key"), Some(KEY_CANARY));
+                assert_eq!(key_headers, ["x-goog-api-key"]);
+            }
+            _ => {
+                assert_eq!(request.target, "/api/chat");
+                assert_eq!(request.header("authorization"), Some(format!("Bearer {KEY_CANARY}").as_str()));
+                assert_eq!(key_headers, ["authorization"]);
+            }
+        }
+    }
+}
+
+// ---- the thread cap -----------------------------------------------------------------------------------------------
+
+#[test]
+fn at_most_four_turns_run_at_once() {
+    assert_eq!(MAX_TURN_THREADS, 4);
+    let rig = Rig::new("svc-cap");
+    let service = rig.service();
+    let mut provider = ScriptedProvider::new("scripted");
+    for _ in 0..MAX_TURN_THREADS {
+        provider = provider.with_turn(Script::new().text("x").stall(Duration::from_secs(30)));
+    }
+    let provider = register(&service, "scripted", provider.with_turn(Script::reply("ok")));
+    let chats: Vec<ConversationId> =
+        (0..MAX_TURN_THREADS).map(|_| service.new_conversation().expect("a chat id")).collect();
+    for (index, chat) in chats.iter().enumerate() {
+        send_to(&service, chat, "scripted", "stall", index as PaneId + 1);
+    }
+    assert!(common::wait_until(Duration::from_secs(5), || provider.calls() == MAX_TURN_THREADS));
+    assert_eq!(service.active_turns(), 4);
+
+    let fifth = service.new_conversation().expect("a chat id");
+    let refused = service.send(SendRequest::new(fifth.clone(), "one too many".to_owned(), 9).profile("scripted"));
+    assert!(matches!(refused, Err(ServiceError::TooManyTurns)), "{refused:?}");
+    assert_eq!(ServiceError::TooManyTurns.code(), "too_many_turns");
+    assert_eq!(service.active_turns(), 4);
+    assert!(rig.sink.of(&fifth).is_empty() && rig.store.load(&fifth).expect("a readable store").is_none());
+
+    // A turn that ends frees its slot.
+    assert!(service.cancel(&chats[0]));
+    assert!(rig.sink.wait_ended(&chats[0], 1, Duration::from_secs(5)));
+    send_to(&service, &fifth, "scripted", "now there is room", 9);
+    assert!(rig.sink.wait_ended(&fifth, 1, Duration::from_secs(5)));
+    assert_eq!(rig.sink.last_end(&fifth).end, "done");
+    assert_eq!(service.shutdown(Duration::from_secs(5)), 0, "shutdown ends the three stalled turns");
+    for chat in &chats[1..] {
+        assert_eq!(rig.sink.last_end(chat).end, "cancelled");
+    }
+}
+
+// ---- cancel -------------------------------------------------------------------------------------------------------
+
+#[test]
+fn cancel_ends_a_turn_within_a_quarter_second_and_keeps_the_partial_text_as_cancelled() {
+    let rig = Rig::new("svc-cancel");
+    let service = rig.service();
+    register(
+        &service,
+        "scripted",
+        ScriptedProvider::new("scripted")
+            .with_turn(Script::new().text("partial").stall(Duration::from_secs(30)))
+            .with_turn(Script::new().stall(Duration::from_secs(30)).text("late")),
+    );
+    let chat = service.new_conversation().expect("a chat id");
+
+    send_to(&service, &chat, "scripted", "go on", 1);
+    assert!(common::wait_until(Duration::from_secs(5), || streamed(&rig.sink, &chat) == "partial"));
+    let started = Instant::now();
+    assert!(service.cancel(&chat));
+    assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(1)), "the turn did not end within a second");
+    println!("cancel: the turn ended {:?} after the call", started.elapsed());
+    let end = rig.sink.last_end(&chat);
+    assert_eq!(end.end, "cancelled");
+    assert!(end.error.is_none());
+    let kinds = rig.sink.kinds(&chat);
+    assert!(kinds.iter().position(|kind| *kind == "message") < kinds.iter().position(|kind| *kind == "turn_ended"));
+    let all = messages(&rig.sink, &chat);
+    assert_eq!((all.len(), all[0].status, all[0].text().as_str()), (1, MessageStatus::Cancelled, "partial"));
+    let stored = rig.store.load(&chat).expect("a readable store").expect("the chat is stored");
+    assert_eq!(stored.messages.len(), 2);
+    assert_eq!((stored.messages[1].status, stored.messages[1].text().as_str()), (MessageStatus::Cancelled, "partial"));
+    assert!(!service.cancel(&chat), "a chat with no turn has nothing to cancel");
+
+    // A turn that is cancelled before the provider produced anything ends cancelled with no assistant text.
+    send_to(&service, &chat, "scripted", "and again", 1);
+    assert!(common::wait_until(Duration::from_secs(5), || rig
+        .sink
+        .kinds(&chat)
+        .iter()
+        .filter(|k| **k == "turn_started")
+        .count()
+        == 2));
+    assert!(service.cancel(&chat));
+    assert!(rig.sink.wait_ended(&chat, 2, Duration::from_secs(1)));
+    assert_eq!(rig.sink.last_end(&chat).end, "cancelled");
+    assert_eq!(messages(&rig.sink, &chat).len(), 1, "no assistant message for the second turn");
+}
+
+// ---- delete -------------------------------------------------------------------------------------------------------
+
+#[test]
+fn deleting_a_chat_cancels_its_turn_and_the_turn_cannot_write_it_back() {
+    let rig = Rig::on_disk("svc-delete");
+    let service = rig.service();
+    register(
+        &service,
+        "scripted",
+        ScriptedProvider::new("scripted").with_turn(Script::new().text("partial").stall(Duration::from_secs(30))),
+    );
+    let chat = service.new_conversation().expect("a chat id");
+
+    send_to(&service, &chat, "scripted", "write me a poem", 1);
+    assert!(common::wait_until(Duration::from_secs(5), || streamed(&rig.sink, &chat) == "partial"));
+    assert!(rig.chats_dir().join(format!("{chat}.json")).exists(), "the user message was saved before the request");
+    assert!(matches!(service.delete_conversation(&chat), Ok(true)));
+    assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(1)), "the turn ends after the delete");
+    assert_eq!(rig.sink.last_end(&chat).end, "cancelled");
+    let cancelled = messages(&rig.sink, &chat);
+    assert_eq!((cancelled.len(), cancelled[0].status), (1, MessageStatus::Cancelled), "emitted after the delete");
+
+    assert!(matches!(rig.store.load(&chat), Ok(None)));
+    for suffix in ["json", "json.tmp", "json.bad"] {
+        assert!(!rig.chats_dir().join(format!("{chat}.{suffix}")).exists(), "{chat}.{suffix} exists");
+    }
+    let leftovers: Vec<PathBuf> = files_below(&rig.chats_dir())
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(chat.as_str())))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let state = service.snapshot(&chat).expect("a snapshot");
+    assert!(state.messages.is_empty() && !state.running, "the deleted chat is gone: {state:?}");
+    let unknown = service.new_conversation().expect("a chat id");
+    assert!(matches!(service.delete_conversation(&unknown), Ok(false)));
+}
+
+// ---- pane close ---------------------------------------------------------------------------------------------------
+
+/// A host that offers the file reader and answers with a short text.
+struct ReadHost;
+
+impl ToolHost for ReadHost {
+    fn available(&self, tool: ToolName, _pane: PaneId) -> bool {
+        tool == ToolName::ReadFile
+    }
+
+    fn resolve(&self, scope: &Scope, tool: &Tool) -> Result<Resolved, ToolError> {
+        let mut resolved = Resolved::remote(scope.pane, "build box");
+        if let Some(path) = tool.path() {
+            resolved = resolved.with_path(path);
+        }
+        Ok(resolved)
+    }
+
+    fn run(&self, _ticket: &Ticket, _cancel: &CancelToken) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::new("short text".to_owned()))
+    }
+}
+
+#[test]
+fn closing_a_pane_voids_its_pending_approval_and_the_turn_ends_cancelled() {
+    let rig = Rig::new("svc-pane");
+    let service = AiService::builder(rig.store.clone(), rig.sink.clone() as Arc<dyn AiSink>, &rig.config_dir)
+        .tool_host(Arc::new(ReadHost))
+        .build();
+    register(
+        &service,
+        "scripted",
+        ScriptedProvider::new("scripted").with_turn(
+            Script::new()
+                .tool_call("call_1", "read_file", json!({ "path": "/srv/notes.txt" }))
+                .stop(StopReason::ToolUse),
+        ),
+    );
+    let chat = service.new_conversation().expect("a chat id");
+
+    send_to(&service, &chat, "scripted", "read the notes", 7);
+    assert!(common::wait_until(Duration::from_secs(5), || rig.sink.kinds(&chat).contains(&"tool_proposed")));
+    let waiting = service.approvals().pending(chat.as_str());
+    assert_eq!(waiting.len(), 1);
+    let proposed = rig
+        .sink
+        .of(&chat)
+        .into_iter()
+        .find(|event| matches!(event.kind, AiEventKind::ToolProposed { .. }))
+        .expect("a tool_proposed event");
+    assert_eq!(
+        to_value(&proposed)["pending"],
+        to_value(&waiting[0]),
+        "the event carries the card as the table built it"
+    );
+    let text = to_text(&proposed);
+    assert!(
+        text.starts_with(r#"{"conversation":""#)
+            && text.contains(r#""kind":"tool_proposed","pending":{"conversation":""#),
+        "{text}"
+    );
+
+    // A pane that does not own the card leaves it alone.
+    assert_eq!(service.pane_closed(99), 0);
+    assert_eq!(service.approvals().pending(chat.as_str()).len(), 1);
+    assert_eq!(rig.sink.ended(&chat), 0);
+
+    // The pane that owns it closes: the card is voided and the turn ends cancelled without any decision.
+    assert_eq!(service.pane_closed(7), 1);
+    assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(1)));
+    assert_eq!(rig.sink.last_end(&chat).end, "cancelled");
+    assert!(service.approvals().pending(chat.as_str()).is_empty());
+    let results =
+        rig.sink.of(&chat).into_iter().filter(|event| matches!(event.kind, AiEventKind::ToolResult { .. })).count();
+    assert_eq!(results, 1, "the card gets its result so the page can close it");
+    let end_state = service.snapshot(&chat).expect("a snapshot");
+    assert!(end_state.pending.is_empty() && !end_state.running);
+}
+
+// ---- panic --------------------------------------------------------------------------------------------------------
+
+/// A provider that panics with a message that holds the text canary.
+struct Exploding;
+
+impl Provider for Exploding {
+    fn id(&self) -> &str {
+        "exploding"
+    }
+
+    fn capabilities(&self, _model: &str) -> Capabilities {
+        Capabilities::conservative(Locality::Loopback)
+    }
+
+    fn stream(
+        &self,
+        _req: &ChatRequest,
+        _out: &mut dyn FnMut(StreamEvent) -> Flow,
+        _cancel: &CancelToken,
+    ) -> Result<Completion, AiError> {
+        panic!("the provider exploded: {TEXT_CANARY}");
+    }
+}
+
+#[test]
+fn a_panic_in_a_provider_ends_the_turn_and_frees_its_slot() {
+    let rig = Rig::new("svc-panic");
+    let service = rig.service();
+    service.register_provider("exploding", Arc::new(Exploding)).expect("registered");
+    let chat = service.new_conversation().expect("a chat id");
+
+    send_to(&service, &chat, "exploding", "boom", 1);
+    assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(5)));
+    let end = rig.sink.last_end(&chat);
+    assert_eq!(end.end, "failed");
+    assert_eq!(end.error.as_ref().map(|error| error.text.as_str()), Some("the assistant stopped unexpectedly"));
+    for event in rig.sink.of(&chat) {
+        assert!(!to_text(&event).contains("exploded") && !to_text(&event).contains(TEXT_CANARY));
+    }
+    assert!(common::wait_until(Duration::from_secs(5), || service.active_turns() == 0));
+    // The slot is free: a following send in the same chat is accepted.
+    send_to(&service, &chat, "exploding", "boom again", 1);
+    assert!(rig.sink.wait_ended(&chat, 2, Duration::from_secs(5)));
+    Fold::of(
+        &chat,
+        &rig.sink.of(&chat).into_iter().filter(|event| event.turn == rig.sink.of(&chat)[0].turn).collect::<Vec<_>>(),
+    );
+}
+
+// ---- the registry and the output budget ---------------------------------------------------------------------------
+
+#[test]
+fn a_registered_provider_is_used_before_a_profile_and_the_output_budget_follows_the_model() {
+    let fake = FakeHttp::start(vec![Reply::Close]);
+    let rig = Rig::new("svc-registry");
+    rig.profile(&format!("{}/v1", fake.base()), "test-model", None);
+    let service = rig.service();
+
+    let scripted =
+        register(&service, "scripted", ScriptedProvider::new("scripted").with_turn(Script::reply("registered")));
+    let taken = service.register_provider("scripted", Arc::new(ScriptedProvider::new("scripted")));
+    assert!(matches!(taken, Err(ServiceError::IdTaken)), "registered twice");
+    let taken = service.register_provider("local", Arc::new(ScriptedProvider::new("local")));
+    assert!(matches!(taken, Err(ServiceError::IdTaken)), "the id of a profile");
+    assert_eq!(ServiceError::IdTaken.code(), "id_taken");
+
+    let chat = service.new_conversation().expect("a chat id");
+    send_to(&service, &chat, "scripted", "hello", 1);
+    assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(5)));
+    assert_eq!(rig.sink.last_end(&chat).end, "done");
+    assert_eq!(scripted.calls(), 1);
+    assert_eq!(fake.accepted(), 0, "a registered provider does not reach the network");
+    match &rig.sink.of(&chat)[0].kind {
+        AiEventKind::TurnStarted { route, .. } => {
+            assert_eq!((route.profile.as_str(), route.model.as_str()), ("scripted", "scripted"));
+            assert!(route.host.is_none());
+            assert_eq!(route.locality, Locality::Loopback);
+        }
+        other => panic!("turn_started, not {other:?}"),
+    }
+    let stored = rig.store.load(&chat).expect("a readable store").expect("stored");
+    assert_eq!((stored.profile.as_deref(), stored.model.as_deref()), (Some("scripted"), Some("scripted")));
+
+    // The output budget: 16000 for a model that reasons, the loop's 8192 for any other, both clamped by the model.
+    let caps = |reasoning: bool, max: u32| Capabilities {
+        tools: true,
+        reasoning,
+        vision: false,
+        context_tokens: Some(200_000),
+        max_output_tokens: Some(max),
+        locality: Locality::Loopback,
+    };
+    let budgets = [
+        ("thinker", caps(true, 64_000), Some(16_000)),
+        ("plain", caps(false, 64_000), Some(8192)),
+        ("small", caps(true, 4096), Some(4096)),
+    ];
+    for (id, capabilities, expected) in budgets {
+        let provider = register(
+            &service,
+            id,
+            ScriptedProvider::new(id).with_capabilities(capabilities).with_turn(Script::reply("ok")),
+        );
+        let chat = service.new_conversation().expect("a chat id");
+        send_to(&service, &chat, id, "how long may you write", 1);
+        assert!(rig.sink.wait_ended(&chat, 1, Duration::from_secs(5)), "{id}");
+        assert_eq!(provider.requests()[0].max_output_tokens, expected, "{id}");
+    }
+
+    // A service that is shut down ends its turns and refuses new ones.
+    assert_eq!(service.shutdown(Duration::from_secs(1)), 0);
+    let chat = service.new_conversation().expect("a chat id");
+    let refused = service.send(SendRequest::new(chat, "late".to_owned(), 1).profile("scripted"));
+    assert!(matches!(refused, Err(ServiceError::ShuttingDown)));
+    assert_eq!(ServiceError::ShuttingDown.code(), "shutting_down");
 }
 
 /// The scratch directory of a rig, for tests that read files.

@@ -34,6 +34,7 @@
 //!
 //! [`ApiKey`]: crate::ai::types::ApiKey
 
+pub mod coalesce;
 pub mod dispatch;
 pub mod events;
 
@@ -42,9 +43,9 @@ use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::ai::agent::{Agent, AgentEvent, Limits, TurnEnd, TurnRequest, repair_dangling};
 use crate::ai::gate::Gate;
@@ -63,7 +64,8 @@ pub use events::{
     Partial, Route, Trimmed, title_from,
 };
 
-use dispatch::adapter_for;
+use coalesce::{Batch, Coalescer, DeltaKind};
+use dispatch::{Registry, adapter_for};
 
 /// The most turns that run at the same time. A further `send` is [`ServiceError::TooManyTurns`].
 pub const MAX_TURN_THREADS: usize = 4;
@@ -71,6 +73,13 @@ pub const MAX_TURN_THREADS: usize = 4;
 pub const MAX_USER_TEXT_BYTES: usize = 131_072;
 /// The most contexts one turn carries.
 pub const MAX_CONTEXTS_PER_TURN: usize = 4;
+/// How often streamed text is handed to the sink: about sixty events a second per turn.
+pub const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+/// The most streamed text that waits for the next flush, in bytes.
+pub const FLUSH_BYTES: usize = 8192;
+/// The output budget of a model that reasons, in tokens: it needs room for its thinking and its answer. Any other
+/// model gets the limit of the loop, and both are clamped by the model's own limit.
+pub const REASONING_OUTPUT_TOKENS: u32 = 16_000;
 /// The most chats whose last turn number the service remembers.
 pub const LAST_TURNS: usize = 64;
 /// The longest title, in characters, before the ellipsis.
@@ -356,6 +365,8 @@ struct Inner {
     host: Arc<dyn ToolHost>,
     limits: Limits,
     clock: fn() -> i64,
+    /// Providers registered by id; they are used before any profile.
+    registry: Registry,
     /// The next turn number; seeded from the clock so numbers differ across runs.
     next_turn: AtomicU64,
     /// The running turns by chat. The table lock is never held while another service lock is taken, except that the
@@ -452,6 +463,20 @@ impl Inner {
         self.store.save(conversation, ContextStorage::Marker).is_ok()
     }
 
+    /// Stops a turn: sets its token and voids the calls that wait for a decision.
+    fn stop_turn(&self, turn: &Turn) {
+        turn.cancel.cancel();
+        self.approvals.cancel_turn(&turn.scope());
+    }
+
+    /// Stops every running turn.
+    fn stop_all(&self) {
+        let running: Vec<Arc<Turn>> = lock(&self.turns).values().cloned().collect();
+        for turn in &running {
+            self.stop_turn(turn);
+        }
+    }
+
     /// The current profiles, copied so that no lock is held while the keychain is read.
     fn config_copy(&self) -> AiConfig {
         lock(&self.config).config.clone()
@@ -462,16 +487,31 @@ impl Inner {
 
 struct EmitState {
     chat: ChatState,
+    /// Streamed text that waits for its flush.
+    coalescer: Coalescer,
     finished: bool,
+    /// Set when the helper that flushes buffered text must end.
+    stop: bool,
+}
+
+/// The kind of event a batch of merged text becomes.
+fn batch_kind(batch: Batch) -> AiEventKind {
+    match batch.kind {
+        DeltaKind::Text => AiEventKind::Delta { text: batch.text },
+        DeltaKind::Reasoning => AiEventKind::Reasoning { text: batch.text },
+    }
 }
 
 /// The events of one turn: assigns `seq`, folds the live state with [`ChatState::apply`] and queues the event while it
-/// holds the state lock, then delivers after the lock is released.
+/// holds the state lock, then delivers after the lock is released. Streamed text is merged by a [`Coalescer`] first,
+/// and a flush helper of the turn hands buffered text out when its time has come.
 struct Emitter {
     inner: Arc<Inner>,
     conversation: String,
     number: u64,
     state: Mutex<EmitState>,
+    /// Wakes the flush helper when text is buffered or the turn is over.
+    wake: Condvar,
 }
 
 impl Emitter {
@@ -480,7 +520,13 @@ impl Emitter {
             inner,
             conversation: conversation.to_owned(),
             number,
-            state: Mutex::new(EmitState { chat, finished: false }),
+            state: Mutex::new(EmitState {
+                chat,
+                coalescer: Coalescer::new(FLUSH_INTERVAL, FLUSH_BYTES),
+                finished: false,
+                stop: false,
+            }),
+            wake: Condvar::new(),
         }
     }
 
@@ -504,46 +550,117 @@ impl Emitter {
         }
     }
 
+    /// Assigns and queues the buffered text, if there is some. Every other event calls this first, so a delta can never
+    /// come after the event that supersedes it.
+    fn flush_buffer(&self, state: &mut EmitState, now: Instant) {
+        if let Some(batch) = state.coalescer.take(now) {
+            let event = self.next(state, batch_kind(batch));
+            self.queue(event, false);
+        }
+    }
+
     fn emit(&self, kind: AiEventKind) {
         {
             let mut state = lock(&self.state);
             if state.finished {
                 return;
             }
+            self.flush_buffer(&mut state, Instant::now());
             let event = self.next(&mut state, kind);
             self.queue(event, false);
         }
         self.inner.deliver();
     }
 
-    fn delta(&self, text: String) {
-        self.emit(AiEventKind::Delta { text });
+    /// Takes streamed text. Adjacent text of one kind is merged and goes out about every [`FLUSH_INTERVAL`].
+    fn stream(&self, kind: DeltaKind, text: &str) {
+        {
+            let mut state = lock(&self.state);
+            if state.finished {
+                return;
+            }
+            let was_empty = state.coalescer.is_empty();
+            for batch in state.coalescer.push(kind, text, Instant::now()) {
+                let event = self.next(&mut state, batch_kind(batch));
+                self.queue(event, false);
+            }
+            if was_empty && !state.coalescer.is_empty() {
+                self.wake.notify_all();
+            }
+        }
+        self.inner.deliver();
     }
 
-    fn reasoning(&self, text: String) {
-        self.emit(AiEventKind::Reasoning { text });
+    /// The flush helper: sleeps until buffered text is due and hands it out, so text that arrived before a stall does
+    /// not wait for the next piece. It ends when [`Emitter::stop_flusher`] is called or the turn is over.
+    fn run_flusher(&self) {
+        let mut state = lock(&self.state);
+        loop {
+            if state.stop || state.finished {
+                return;
+            }
+            let Some(due) = state.coalescer.due_at() else {
+                state = self.wake.wait(state).unwrap_or_else(PoisonError::into_inner);
+                continue;
+            };
+            let now = Instant::now();
+            if now < due {
+                let (guard, _) = self.wake.wait_timeout(state, due - now).unwrap_or_else(PoisonError::into_inner);
+                state = guard;
+                continue;
+            }
+            self.flush_buffer(&mut state, now);
+            drop(state);
+            self.inner.deliver();
+            state = lock(&self.state);
+        }
     }
 
-    /// Ends the turn: assigns `turn_ended`, remembers the turn, queues the event and frees the slot in one step, and
-    /// only then delivers. It does nothing the second time.
+    /// Ends the flush helper. Called when the loop returns, however it returns.
+    fn stop_flusher(&self) {
+        lock(&self.state).stop = true;
+        self.wake.notify_all();
+    }
+
+    /// For a turn whose flush helper could not be started: every piece goes out at once, so nothing waits for a helper
+    /// that does not exist.
+    fn without_helper(&self) {
+        lock(&self.state).coalescer = Coalescer::new(Duration::ZERO, FLUSH_BYTES);
+    }
+
+    /// Ends the turn: assigns `turn_ended` after the buffered text, remembers the turn, queues the event and frees the
+    /// slot in one step, and only then delivers. It does nothing the second time.
     fn finish(&self, turn: &Turn, end: EndView) {
         {
             let mut state = lock(&self.state);
             if state.finished {
                 return;
             }
+            self.flush_buffer(&mut state, Instant::now());
             state.finished = true;
+            state.stop = true;
             let event = self.next(&mut state, AiEventKind::TurnEnded(end));
             if !turn.deleted.load(Ordering::SeqCst) {
                 self.inner.remember_last(&self.conversation, state.chat.last_turn());
             }
             self.queue(event, true);
+            self.wake.notify_all();
         }
         self.inner.deliver();
     }
 
     fn snapshot(&self) -> ChatState {
         lock(&self.state).chat.clone()
+    }
+}
+
+/// Stops the flush helper when the scope of the loop ends, by return or by unwinding. Without it a panic in the loop
+/// would leave the scope waiting for a helper that waits for a flag nobody sets.
+struct StopFlusher<'a>(&'a Emitter);
+
+impl Drop for StopFlusher<'_> {
+    fn drop(&mut self) {
+        self.0.stop_flusher();
     }
 }
 
@@ -628,6 +745,7 @@ impl ServiceBuilder {
             host: self.host,
             limits: self.limits,
             clock: self.clock,
+            registry: Registry::new(),
             next_turn: AtomicU64::new(seed),
             turns: Mutex::new(HashMap::new()),
             last_turns: Mutex::new(Vec::new()),
@@ -780,6 +898,76 @@ impl AiService {
         lock(&self.inner.turns).len()
     }
 
+    /// Stops the turn of a chat. The turn keeps the text it had as a `cancelled` message and ends within a quarter of a
+    /// second. Returns whether the chat had a turn.
+    pub fn cancel(&self, conversation: &ConversationId) -> bool {
+        let running = lock(&self.inner.turns).get(conversation.as_str()).cloned();
+        match running {
+            Some(turn) => {
+                self.inner.stop_turn(&turn);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Deletes a chat. A turn that is running for it is stopped and can no longer write the chat back. Returns whether
+    /// a file was removed.
+    pub fn delete_conversation(&self, conversation: &ConversationId) -> Result<bool, ServiceError> {
+        let inner = &self.inner;
+        let running = lock(&inner.turns).get(conversation.as_str()).cloned();
+        if let Some(turn) = &running {
+            // The flag goes up before the delete takes the write lock, so a save that starts later is skipped.
+            turn.deleted.store(true, Ordering::SeqCst);
+            inner.stop_turn(turn);
+        }
+        inner.approvals.cancel_conversation(conversation.as_str());
+        let removed = {
+            let _write = lock(&inner.write_lock);
+            inner.store.delete(conversation)
+        };
+        lock(&inner.last_turns).retain(|(known, _)| known != conversation.as_str());
+        removed.map_err(ServiceError::Store)
+    }
+
+    /// Tells the service that a pane closed: the calls that wait for a decision in turns that act for it are voided
+    /// and those turns end as cancelled. Returns how many calls were voided.
+    pub fn pane_closed(&self, pane: PaneId) -> usize {
+        self.inner.approvals.cancel_pane(pane)
+    }
+
+    /// Stops every turn and waits up to `timeout` for them to end. Returns how many are still running. A send after
+    /// this is refused.
+    pub fn shutdown(&self, timeout: Duration) -> usize {
+        self.inner.closing.store(true, Ordering::SeqCst);
+        self.inner.stop_all();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = self.active_turns();
+            if left == 0 || Instant::now() >= deadline {
+                return left;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Registers a provider that does not come from a profile (the on-device model, a test double) under `id`. A turn
+    /// that names the id uses it as it is, before any profile.
+    pub fn register_provider(&self, id: &str, provider: Arc<dyn Provider>) -> Result<(), ServiceError> {
+        let valid = !id.is_empty()
+            && id.len() <= 40
+            && id.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'));
+        if !valid {
+            return Err(ServiceError::Profile(crate::ai::profiles::ProfileError::Id));
+        }
+        // The config lock is held while the registry is asked, so a profile cannot take the id in between.
+        let config = lock(&self.inner.config);
+        if config.config.get(id).is_some() || !self.inner.registry.register(id, provider) {
+            return Err(ServiceError::IdTaken);
+        }
+        Ok(())
+    }
+
     /// The one consent gate: a context reaches a turn only as an approval made here.
     pub fn gate(&self) -> &Gate {
         &self.inner.gate
@@ -789,6 +977,14 @@ impl AiService {
     /// shell.
     pub fn approvals(&self) -> &ApprovalTable {
         &self.inner.approvals
+    }
+}
+
+impl Drop for AiService {
+    fn drop(&mut self) {
+        // The turns are told to stop; nothing waits for them here.
+        self.inner.closing.store(true, Ordering::SeqCst);
+        self.inner.stop_all();
     }
 }
 
@@ -882,6 +1078,10 @@ impl Inner {
     /// Resolves the profile into a provider. The profile is read from a copy, so the keychain is never read while a
     /// service lock is held.
     fn provider_for(&self, profile: &str) -> Result<Chosen, AiError> {
+        // A registered provider is used as it is, before any profile; its model defaults to its own id.
+        if let Some(provider) = self.registry.get(profile) {
+            return Ok(Chosen { provider, host: None, model: Some(profile.to_owned()) });
+        }
         let config = self.config_copy();
         let resolved = config.resolve(profile, &self.vault, false)?;
         let origin = Origin::from_scope(resolved.scope()).map_err(|_| {
@@ -948,13 +1148,18 @@ fn turn_body(inner: &Arc<Inner>, turn: &Arc<Turn>, emitter: &Emitter, job: Job) 
         context: Vec::new(),
         id_prefix: prefix,
     };
+    // A model that reasons needs room for its thinking and its answer; the loop clamps this by the model's own limit.
+    let mut limits = inner.limits.clone();
+    if capabilities.reasoning {
+        limits.max_output_tokens = limits.max_output_tokens.max(REASONING_OUTPUT_TOKENS);
+    }
     let agent = Agent::new(chosen.provider.as_ref(), inner.host.as_ref(), &inner.approvals)
-        .with_limits(inner.limits.clone())
+        .with_limits(limits)
         .with_clock(inner.clock);
     let mut on_event = |event: AgentEvent| match event {
         AgentEvent::RoundStarted { .. } => {}
-        AgentEvent::TextDelta(text) => emitter.delta(text),
-        AgentEvent::ReasoningDelta(text) => emitter.reasoning(text),
+        AgentEvent::TextDelta(text) => emitter.stream(DeltaKind::Text, &text),
+        AgentEvent::ReasoningDelta(text) => emitter.stream(DeltaKind::Reasoning, &text),
         AgentEvent::Trimmed { results, exchanges } => {
             emitter.emit(AiEventKind::Trimmed(Trimmed { results, exchanges }))
         }
@@ -973,7 +1178,18 @@ fn turn_body(inner: &Arc<Inner>, turn: &Arc<Turn>, emitter: &Emitter, job: Job) 
             emitter.emit(AiEventKind::ToolResult { call_id, tool, content, is_error, redactions });
         }
     };
-    let outcome = agent.run_turn(request, &mut on_event, &turn.cancel);
+    // The flush helper lives exactly as long as the loop: the guard ends it when the loop returns and when it unwinds,
+    // before the scope waits for it.
+    let outcome = thread::scope(|scope| {
+        let helper = thread::Builder::new()
+            .name(format!("ai-flush-{}", turn.number()))
+            .spawn_scoped(scope, || emitter.run_flusher());
+        if helper.is_err() {
+            emitter.without_helper();
+        }
+        let _stop = StopFlusher(emitter);
+        agent.run_turn(request, &mut on_event, &turn.cancel)
+    });
 
     let error = match &outcome.end {
         TurnEnd::Failed(error) => Some(ErrorView { class: error.class().as_str().to_owned(), text: error.to_string() }),
