@@ -73,6 +73,11 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
             ("quick-xml", "parser of the WebDAV multistatus answers (sync/webdav.rs)"),
             ("rand", "dev dependency only: random SSH host keys for the in-process test servers (ssh.rs, files.rs tests)"),
             (
+                "regex",
+                "the secret redactor of ai/redact.rs matches key formats in untrusted terminal output with a linear-time \
+                 engine that has no backreferences; it was already in the lock through the Tauri crates and is now direct",
+            ),
+            (
                 "reqwest",
                 "the HTTP client of the AI chat, built in ai/http.rs and named in that file only (see EXCEPTIONS and \
                  PERMITTED_HITS)",

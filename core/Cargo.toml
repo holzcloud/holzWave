@@ -37,6 +37,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+# Secret redaction of the text that leaves the device (core/src/ai/redact.rs). Matches in time linear in the text and has
+# no backreferences or look-around, so hostile terminal output cannot make a pattern backtrack. Default features only;
+# it was already in the lock through the Tauri crates.
+regex = "1.13.1"
 # The HTTP client of the AI chat, behind one chokepoint file (core/src/ai/http.rs). TLS comes from rustls with the ring
 # provider passed explicitly and the operating system's trust store, so the lock holds one TLS stack and no C toolchain
 # is needed. reqwest's own default features (native TLS, redirects, compression) are off on purpose.

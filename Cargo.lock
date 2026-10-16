@@ -2101,6 +2101,7 @@ dependencies = [
  "pulldown-cmark",
  "quick-xml",
  "rand",
+ "regex",
  "reqwest",
  "rusqlite",
  "russh",
