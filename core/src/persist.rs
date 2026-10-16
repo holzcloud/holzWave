@@ -37,6 +37,24 @@ pub fn bad_path(path: &Path) -> PathBuf {
 /// On Windows a rename over a file that an antivirus scanner or an indexer has open fails for a moment with a
 /// sharing violation: the rename is retried a few times for that error and no other ([`rename_retries`]).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with(path, bytes, false)
+}
+
+/// [`write_atomic`] for a file only its owner may use.
+///
+/// It has the same guarantees: the old or the new content, never a truncated file, parents created, nothing left
+/// behind on failure, the rename retried on a Windows sharing violation.
+///
+/// On Unix the temporary file is created owner-only (mode 0600, and the umask can only make it narrower), so the
+/// bytes are never in a file with a wider mode, not even for a moment. The rename keeps the mode of the new file, so
+/// an older, wider file is replaced by a private one. On Windows a new file inherits the access list of its folder,
+/// which for the per-user data folder is limited to the user; no mode is claimed there.
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with(path, bytes, true)
+}
+
+/// The body of [`write_atomic`] and [`write_atomic_private`]; `private` only changes the mode of the new file.
+fn write_atomic_with(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir)?;
     }
@@ -49,7 +67,16 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        let mut file = options.open(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()
     })();

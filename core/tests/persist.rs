@@ -10,7 +10,9 @@ use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 use common::{scratch_dir, wait_until};
-use holzwave_core::persist::{Debounced, backup_bad, bad_path, read_limited, retry_on_sharing_violation, write_atomic};
+use holzwave_core::persist::{
+    Debounced, backup_bad, bad_path, read_limited, retry_on_sharing_violation, write_atomic, write_atomic_private,
+};
 
 /// Names of everything in `dir`, sorted.
 fn names(dir: &Path) -> Vec<String> {
@@ -67,6 +69,58 @@ fn write_atomic_replaces_a_stale_temporary_file() {
     write_atomic(&path, b"fresh").unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"fresh");
     assert_eq!(names(&dir), vec!["layout.json"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn write_atomic_private_writes_the_content_and_leaves_no_temporary_file() {
+    let dir = scratch_dir("atomic-private-content");
+    let path = dir.join("a").join("chat.json");
+    write_atomic_private(&path, b"{\"v\":1}").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"{\"v\":1}");
+    write_atomic_private(&path, b"short").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"short", "the new content replaces the old completely");
+    assert_eq!(names(path.parent().unwrap()), vec!["chat.json"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_private_creates_a_file_only_the_owner_can_use() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch_dir("atomic-private-mode");
+    let path = dir.join("chat.json");
+    // The test sets no umask: the file must be private whatever the process allows.
+    write_atomic_private(&path, b"secret").unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "mode was {mode:o}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn write_atomic_private_makes_a_world_readable_file_private_when_it_replaces_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch_dir("atomic-private-replace");
+    let path = dir.join("chat.json");
+    std::fs::write(&path, b"old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    write_atomic_private(&path, b"new").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "mode was {mode:o}");
+    assert_eq!(names(&dir), vec!["chat.json"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn write_atomic_private_reports_failure_and_cleans_up_its_temporary_file() {
+    let dir = scratch_dir("atomic-private-fail");
+    // The target is a directory: the final rename cannot succeed.
+    let target = dir.join("chat.json");
+    std::fs::create_dir(&target).unwrap();
+    assert!(write_atomic_private(&target, b"data").is_err());
+    assert_eq!(names(&dir), vec!["chat.json"], "no .tmp left behind");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
