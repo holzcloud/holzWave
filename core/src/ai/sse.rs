@@ -12,12 +12,20 @@
 //! - The decoders do no I/O. They are pure functions of the bytes pushed into them and never read a clock; a caller
 //!   that owns the connection pushes each chunk as it arrives and asks [`SseDecoder::finish`] when the body ends.
 //!
+//! The one rule that must exist exactly once lives here too: **a tool call from a stream that did not end cleanly is
+//! discarded**. [`ToolAssembler`] collects the fragments a dialect sends, parses the arguments only when a call is
+//! complete, and releases the calls only after the stream ended cleanly with its terminal event.
+//!
 //! The only dialect word in the file is the `[DONE]` data line behind [`SseEvent::is_done`].
 
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::{Map, Value};
 
 use super::provider::{AiError, Detail, Flow};
-use super::types::Size;
+use super::types::{Size, ToolCall, json_size};
 
 /// The UTF-8 byte order mark, dropped at the start of an event stream.
 const BYTE_ORDER_MARK: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -26,6 +34,12 @@ const BYTE_ORDER_MARK: [u8; 3] = [0xEF, 0xBB, 0xBF];
 pub const MAX_LINE: usize = 1_048_576;
 /// The most an event may hold while it is pending: 4 MiB.
 pub const MAX_EVENT: usize = 4_194_304;
+/// The most argument text one turn may accumulate for its tool calls: 4 MiB.
+pub const MAX_TOOL_ARGS: usize = 4_194_304;
+/// The most tool calls one turn may make.
+pub const MAX_TOOL_CALLS: usize = 64;
+/// The longest id or name of a tool call, in bytes.
+pub const MAX_TOOL_FIELD: usize = 256;
 
 // ---- limits, errors, the end of a stream ----------------------------------------------------------------
 
@@ -567,4 +581,354 @@ impl fmt::Debug for NdjsonDecoder {
             .field("limit", &self.limit)
             .finish()
     }
+}
+
+// ---- tool fragments -------------------------------------------------------------------------------------
+//
+// Tool calls are assembled here, next to the framing, so that the rule "a call from a stream that did not end cleanly
+// is discarded" exists once and every wire adapter gets it by using this type.
+
+/// Why a tool fragment was refused. Every fault ends the turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolFault {
+    /// More calls than [`MAX_TOOL_CALLS`] (or than the assembler's limit).
+    TooMany,
+    /// An id or name over [`MAX_TOOL_FIELD`] bytes, or more argument text than the limit.
+    TooLarge,
+    /// A missing name, or a control character in an id or a name.
+    BadField,
+    /// A slot changed its id or name, or two calls claim the same id.
+    Conflict,
+    /// A fragment or a completion for a slot that is already complete.
+    ClosedSlot,
+    /// A completion for a slot that was never opened.
+    UnknownSlot,
+    /// The arguments are not one JSON object.
+    InvalidArgs,
+}
+
+impl fmt::Display for ToolFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ToolFault::TooMany => "the model made more tool calls than one turn allows",
+            ToolFault::TooLarge => "a tool call is larger than one turn allows",
+            ToolFault::BadField => "a tool call has a missing name or an id or name that is not allowed",
+            ToolFault::Conflict => "a tool call changed its id or name, or two tool calls share an id",
+            ToolFault::ClosedSlot => "a tool call was changed after it was complete",
+            ToolFault::UnknownSlot => "a tool call was completed that was never started",
+            ToolFault::InvalidArgs => "the arguments of a tool call are not one valid JSON object",
+        })
+    }
+}
+
+impl std::error::Error for ToolFault {}
+
+impl From<ToolFault> for AiError {
+    fn from(fault: ToolFault) -> Self {
+        AiError::Protocol(Detail::new(&fault.to_string()))
+    }
+}
+
+/// Tool calls that were dropped because the stream did not end cleanly. The turn failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Discarded {
+    /// How many calls (open or complete) were dropped.
+    pub dropped: usize,
+}
+
+impl fmt::Display for Discarded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the stream did not end cleanly, so its tool calls were discarded ({})", self.dropped)
+    }
+}
+
+impl std::error::Error for Discarded {}
+
+impl From<Discarded> for AiError {
+    fn from(discarded: Discarded) -> Self {
+        AiError::Protocol(Detail::new(&discarded.to_string()))
+    }
+}
+
+/// A call that has started and is not complete.
+struct OpenCall {
+    slot: u32,
+    id: Option<String>,
+    name: Option<String>,
+    args: String,
+}
+
+/// Collects the tool calls of one turn.
+///
+/// A slot is the dialect's own index (a content block index, a `tool_calls` index, an output index). An adapter feeds
+/// the fragments it reads, completes a slot at the dialect's end-of-call marker, and at the end of the stream calls
+/// [`ToolAssembler::finish`] with the verdict of the decoder and whether the dialect's terminal event was seen.
+///
+/// The rules for adapters:
+///
+/// - An empty id or name counts as absent. A fault is a protocol error and ends the turn.
+/// - Deliver [`StreamEvent::ToolCall`](super::provider::StreamEvent::ToolCall) only from the vector `finish` returns,
+///   after the dialect's terminal event. `Err(Discarded)` is a failed turn, never `Ok`.
+///
+/// Everything here is bounded, because the stream is untrusted: the argument text in total, the number of calls and the
+/// size of an id or a name. Arguments are parsed only when a call is completed, so half a call is never parsed.
+/// `Debug` prints counts and sizes, never ids, names or arguments.
+pub struct ToolAssembler {
+    /// Calls that have started, in the order opened.
+    open: Vec<OpenCall>,
+    /// Calls that are complete, in the order completed.
+    ready: Vec<ToolCall>,
+    /// The slots already completed.
+    closed: Vec<u32>,
+    /// The argument bytes accepted so far.
+    args_total: usize,
+    max_args: usize,
+    max_calls: usize,
+    /// Makes minted ids unique across turns and restarts. It is not a secret.
+    nonce: u64,
+    /// How many ids were minted.
+    minted: u64,
+    /// A fault happened, so nothing is released.
+    faulted: bool,
+}
+
+impl Default for ToolAssembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ToolAssembler {
+    /// An assembler bounded by [`MAX_TOOL_ARGS`] and [`MAX_TOOL_CALLS`].
+    pub fn new() -> Self {
+        Self::with_limits(MAX_TOOL_ARGS, MAX_TOOL_CALLS)
+    }
+
+    /// An assembler that accepts at most `max_args` bytes of argument text and `max_calls` calls.
+    pub fn with_limits(max_args: usize, max_calls: usize) -> Self {
+        Self {
+            open: Vec::new(),
+            ready: Vec::new(),
+            closed: Vec::new(),
+            args_total: 0,
+            max_args,
+            max_calls,
+            nonce: fresh_nonce(),
+            minted: 0,
+            faulted: false,
+        }
+    }
+
+    /// A piece of a call: its id and name when the dialect sends them, and a piece of the argument text. The first
+    /// fragment of a slot opens it.
+    pub fn fragment(
+        &mut self,
+        slot: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        args: &str,
+    ) -> Result<(), ToolFault> {
+        let result = self.add_fragment(slot, id, name, args);
+        self.faulted |= result.is_err();
+        result
+    }
+
+    /// The call in `slot` is complete: its arguments are parsed now.
+    pub fn complete(&mut self, slot: u32) -> Result<(), ToolFault> {
+        let result = match self.open.iter().position(|call| call.slot == slot) {
+            Some(index) => self.complete_at(index),
+            None if self.closed.contains(&slot) => Err(ToolFault::ClosedSlot),
+            None => Err(ToolFault::UnknownSlot),
+        };
+        self.faulted |= result.is_err();
+        result
+    }
+
+    /// Completes every open slot, in the order opened, and stops at the first fault.
+    pub fn complete_all(&mut self) -> Result<(), ToolFault> {
+        while !self.open.is_empty() {
+            let result = self.complete_at(0);
+            if result.is_err() {
+                self.faulted = true;
+                return result;
+            }
+        }
+        Ok(())
+    }
+
+    /// A call that arrives in one piece, with parsed arguments.
+    pub fn whole(&mut self, id: Option<&str>, name: &str, args: Value) -> Result<(), ToolFault> {
+        let result = self.add_whole(id, name, args);
+        self.faulted |= result.is_err();
+        result
+    }
+
+    /// How many calls have started and are not complete.
+    pub fn open_count(&self) -> usize {
+        self.open.len()
+    }
+
+    /// How many calls are complete and held.
+    pub fn ready_count(&self) -> usize {
+        self.ready.len()
+    }
+
+    /// The end of the turn. The calls are released, complete and parsed, in the order completed, only when the decoder
+    /// reported a clean end, the dialect's terminal event was seen, no call is still open and no fault happened. In
+    /// every other case they are dropped and the turn has failed.
+    pub fn finish(self, end: StreamEnd, terminal_seen: bool) -> Result<Vec<ToolCall>, Discarded> {
+        if end.is_clean() && terminal_seen && self.open.is_empty() && !self.faulted {
+            Ok(self.ready)
+        } else {
+            Err(Discarded { dropped: self.open.len() + self.ready.len() })
+        }
+    }
+
+    fn add_fragment(&mut self, slot: u32, id: Option<&str>, name: Option<&str>, args: &str) -> Result<(), ToolFault> {
+        if self.closed.contains(&slot) {
+            return Err(ToolFault::ClosedSlot);
+        }
+        let id = id.filter(|text| !text.is_empty());
+        let name = name.filter(|text| !text.is_empty());
+        check_field(id)?;
+        check_field(name)?;
+        if self.args_total.saturating_add(args.len()) > self.max_args {
+            return Err(ToolFault::TooLarge);
+        }
+        let index = match self.open.iter().position(|call| call.slot == slot) {
+            Some(index) => index,
+            None => {
+                if self.open.len() + self.ready.len() >= self.max_calls {
+                    return Err(ToolFault::TooMany);
+                }
+                self.open.push(OpenCall { slot, id: None, name: None, args: String::new() });
+                self.open.len() - 1
+            }
+        };
+        if let Some(id) = id {
+            let first = match self.open[index].id.as_deref() {
+                Some(known) if known != id => return Err(ToolFault::Conflict),
+                Some(_) => false,
+                None => true,
+            };
+            if first {
+                if self.id_taken(id) {
+                    return Err(ToolFault::Conflict);
+                }
+                self.open[index].id = Some(id.to_owned());
+            }
+        }
+        if let Some(name) = name {
+            match self.open[index].name.as_deref() {
+                Some(known) if known != name => return Err(ToolFault::Conflict),
+                Some(_) => {}
+                None => self.open[index].name = Some(name.to_owned()),
+            }
+        }
+        self.open[index].args.push_str(args);
+        self.args_total += args.len();
+        Ok(())
+    }
+
+    fn complete_at(&mut self, index: usize) -> Result<(), ToolFault> {
+        let call = &self.open[index];
+        if call.name.is_none() {
+            return Err(ToolFault::BadField);
+        }
+        let args = parse_args(&call.args)?;
+        let OpenCall { slot, id, name, .. } = self.open.remove(index);
+        let id = match id {
+            Some(id) => id,
+            None => self.mint(),
+        };
+        self.closed.push(slot);
+        self.ready.push(ToolCall { id, name: name.unwrap_or_default(), args });
+        Ok(())
+    }
+
+    fn add_whole(&mut self, id: Option<&str>, name: &str, args: Value) -> Result<(), ToolFault> {
+        let id = id.filter(|text| !text.is_empty());
+        if name.is_empty() {
+            return Err(ToolFault::BadField);
+        }
+        check_field(id)?;
+        check_field(Some(name))?;
+        if !args.is_object() {
+            return Err(ToolFault::InvalidArgs);
+        }
+        if self.open.len() + self.ready.len() >= self.max_calls {
+            return Err(ToolFault::TooMany);
+        }
+        let size = json_size(&args).0;
+        if self.args_total.saturating_add(size) > self.max_args {
+            return Err(ToolFault::TooLarge);
+        }
+        if id.is_some_and(|id| self.id_taken(id)) {
+            return Err(ToolFault::Conflict);
+        }
+        let id = match id {
+            Some(id) => id.to_owned(),
+            None => self.mint(),
+        };
+        self.args_total += size;
+        self.ready.push(ToolCall { id, name: name.to_owned(), args });
+        Ok(())
+    }
+
+    /// Whether a call of this turn already has the provider id `id`.
+    fn id_taken(&self, id: &str) -> bool {
+        self.open.iter().any(|call| call.id.as_deref() == Some(id)) || self.ready.iter().any(|call| call.id == id)
+    }
+
+    /// An id for a call the provider did not name: `call_`, the nonce in sixteen hex digits, an underscore, a counter.
+    fn mint(&mut self) -> String {
+        let id = format!("call_{:016x}_{}", self.nonce, self.minted);
+        self.minted += 1;
+        id
+    }
+}
+
+impl fmt::Debug for ToolAssembler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToolAssembler")
+            .field("open", &self.open.len())
+            .field("ready", &self.ready.len())
+            .field("args", &Size(self.args_total))
+            .field("faulted", &self.faulted)
+            .finish()
+    }
+}
+
+/// An id or a name must be short and free of control characters, which could rewrite a terminal or split a log line.
+fn check_field(value: Option<&str>) -> Result<(), ToolFault> {
+    match value {
+        Some(text) if text.len() > MAX_TOOL_FIELD => Err(ToolFault::TooLarge),
+        Some(text) if text.chars().any(char::is_control) => Err(ToolFault::BadField),
+        _ => Ok(()),
+    }
+}
+
+/// The arguments of a call: white space around them is dropped, nothing becomes an empty object, and anything else
+/// must be one JSON object.
+fn parse_args(text: &str) -> Result<Value, ToolFault> {
+    let text = text.trim_matches(|c: char| c.is_ascii_whitespace());
+    if text.is_empty() {
+        return Ok(Value::Object(Map::new()));
+    }
+    match serde_json::from_str::<Value>(text) {
+        Ok(value @ Value::Object(_)) => Ok(value),
+        _ => Err(ToolFault::InvalidArgs),
+    }
+}
+
+/// The nonce of an assembler: random, so ids are unique across turns and restarts. If the system has no random numbers
+/// the clock and a process-wide counter stand in; the nonce only has to make ids unique, it is not a secret.
+fn fresh_nonce() -> u64 {
+    let mut raw = [0u8; 8];
+    if getrandom::fill(&mut raw).is_ok() {
+        return u64::from_le_bytes(raw);
+    }
+    static FALLBACK: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos() as u64);
+    nanos.rotate_left(17) ^ FALLBACK.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
 }

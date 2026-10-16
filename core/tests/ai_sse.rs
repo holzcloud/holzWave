@@ -10,10 +10,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use holzwave_core::ai::provider::{Collector, Flow, StreamEvent};
-use holzwave_core::ai::sse::{FrameError, Limits, MAX_EVENT, MAX_LINE, NdjsonDecoder, SseDecoder, StreamEnd};
-use holzwave_core::ai::types::Usage;
-use serde_json::Value;
+use holzwave_core::ai::provider::{AiError, Collector, ErrorClass, Flow, StreamEvent};
+use holzwave_core::ai::sse::{
+    Discarded, FrameError, Limits, MAX_EVENT, MAX_LINE, MAX_TOOL_ARGS, MAX_TOOL_CALLS, MAX_TOOL_FIELD, NdjsonDecoder,
+    SseDecoder, StreamEnd, ToolAssembler, ToolFault,
+};
+use holzwave_core::ai::types::{ToolCall, Usage};
+use serde_json::{Value, json};
 
 const CANARY: &str = "CANARY-7f3a";
 
@@ -960,4 +963,415 @@ fn decoder_throughput_is_measured() {
             EVENTS as f64 / secs
         );
     }
+}
+
+// ---- tool calls -----------------------------------------------------------------------------------------
+
+/// The golden tool stream: one call opened, its arguments in two fragments cut in the middle of a key, completed, and
+/// the terminal event.
+fn golden_tools() -> Vec<u8> {
+    let mut s = String::new();
+    s.push_str("event: open\ndata: {\"slot\":0,\"id\":\"toolu_1\",\"name\":\"read_file\"}\n\n");
+    s.push_str("event: args\ndata: {\"slot\":0,\"json\":\"{\\\"pa\"}\n\n");
+    s.push_str("event: args\ndata: {\"slot\":0,\"json\":\"th\\\":\\\"a b\\\"}\"}\n\n");
+    s.push_str("event: close\ndata: {\"slot\":0}\n\n");
+    s.push_str("event: end\ndata: {}\n\n");
+    s.into_bytes()
+}
+
+/// What the tool adapter made of a stream.
+struct ToolRun {
+    /// What `finish` of the assembler said.
+    outcome: Result<Vec<ToolCall>, Discarded>,
+    /// The collector, filled only from a released vector.
+    collector: Collector,
+    /// `ready_count()` when the terminal event arrived.
+    ready_at_end: Option<usize>,
+    decoder_end: StreamEnd,
+}
+
+/// The mini adapter of the tracer, extended: `open`, `args` and `close` drive the assembler, `end` is the terminal
+/// event, and tool calls reach the collector only from the vector `finish` returns.
+fn adapt_tools(chunks: &[&[u8]]) -> ToolRun {
+    let mut decoder = SseDecoder::new();
+    let mut tools = ToolAssembler::new();
+    let mut terminal = false;
+    let mut ready_at_end = None;
+    for chunk in chunks {
+        let _ = decoder.push(chunk, &mut |event| {
+            let v: Value = serde_json::from_str(event.data()).expect("event data is JSON");
+            let slot = v["slot"].as_u64().unwrap_or(0) as u32;
+            match event.event() {
+                "open" => tools.fragment(slot, v["id"].as_str(), v["name"].as_str(), "").expect("open"),
+                "args" => tools.fragment(slot, None, None, v["json"].as_str().expect("json")).expect("args"),
+                "close" => tools.complete(slot).expect("close"),
+                "end" => {
+                    terminal = true;
+                    ready_at_end = Some(tools.ready_count());
+                }
+                _ => {}
+            }
+            Flow::Continue
+        });
+    }
+    let decoder_end = decoder.finish();
+    let outcome = tools.finish(decoder_end, terminal);
+    let mut collector = Collector::new();
+    if let Ok(calls) = &outcome {
+        for call in calls {
+            collector.push(StreamEvent::ToolCall(call.clone()));
+        }
+    }
+    ToolRun { outcome, collector, ready_at_end, decoder_end }
+}
+
+fn read_file_call() -> ToolCall {
+    ToolCall { id: "toolu_1".into(), name: "read_file".into(), args: json!({"path": "a b"}) }
+}
+
+fn assert_released(run: &ToolRun, how: &str) {
+    assert_eq!(run.decoder_end, StreamEnd::Clean, "{how}");
+    assert_eq!(run.outcome.as_ref().expect("a clean stream releases its call"), &vec![read_file_call()], "{how}");
+    assert_eq!(run.collector.tool_calls(), &[read_file_call()], "{how}");
+    assert_eq!(run.ready_at_end, Some(1), "the call was held, complete, when the terminal event arrived: {how}");
+}
+
+#[test]
+fn fragments_complete_into_a_parsed_call_that_only_a_clean_finish_releases() {
+    let bytes = golden_tools();
+    assert_released(&adapt_tools(&[&bytes]), "unsplit");
+    for at in 0..=bytes.len() {
+        assert_released(&adapt_tools(&[&bytes[..at], &bytes[at..]]), &format!("split at {at}"));
+    }
+    for size in [1usize, 3, 7] {
+        assert_released(&adapt_tools(&chunks_of(&bytes, size)), &format!("chunks of {size} bytes"));
+    }
+
+    // Held, not available: after the completion the call is ready, and the assembler hands it out only at finish.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some("toolu_1"), Some("read_file"), "{\"path\":").unwrap();
+    assert_eq!((tools.open_count(), tools.ready_count()), (1, 0));
+    tools.fragment(0, None, None, "\"a b\"}").unwrap();
+    tools.complete(0).unwrap();
+    assert_eq!((tools.open_count(), tools.ready_count()), (0, 1));
+    let released = tools.finish(StreamEnd::Clean, true).unwrap();
+    assert_eq!(released, vec![read_file_call()]);
+}
+
+#[test]
+fn a_stream_cut_at_any_byte_before_its_end_delivers_no_tool_call() {
+    let bytes = golden_tools();
+    for len in 0..bytes.len() {
+        let prefix = &bytes[..len];
+        for size in [len.max(1), 3] {
+            let run = adapt_tools(&chunks_of(prefix, size));
+            assert!(run.outcome.is_err(), "a call was released from a stream cut at byte {len}, chunks of {size}");
+            assert!(run.collector.tool_calls().is_empty(), "the collector holds a call: cut at byte {len}");
+        }
+    }
+}
+
+#[test]
+fn a_clean_connection_without_the_terminal_event_discards_the_calls() {
+    let bytes = golden_tools();
+    // The connection closes at an event boundary after the call was completed, but before the terminal event.
+    let end = bytes.windows(b"event: end".len()).position(|w| w == b"event: end").expect("the end event");
+    let run = adapt_tools(&[&bytes[..end]]);
+    assert_eq!(run.decoder_end, StreamEnd::Clean, "the framing saw nothing wrong");
+    assert_eq!(run.outcome, Err(Discarded { dropped: 1 }), "the call is discarded without the terminal event");
+    assert!(run.collector.tool_calls().is_empty());
+
+    // The terminal event arrives with a call still open (no close).
+    let close = bytes.windows(b"event: close".len()).position(|w| w == b"event: close").expect("the close event");
+    let mut open_at_end = bytes[..close].to_vec();
+    open_at_end.extend_from_slice(&bytes[end..]);
+    let run = adapt_tools(&[&open_at_end]);
+    assert_eq!(run.decoder_end, StreamEnd::Clean);
+    assert_eq!(run.outcome, Err(Discarded { dropped: 1 }), "an open call is discarded");
+    assert!(run.collector.tool_calls().is_empty());
+
+    // A stopped stream and a failed one are not clean either.
+    let mut tools = ToolAssembler::new();
+    tools.whole(Some("a"), "x", json!({})).unwrap();
+    assert_eq!(tools.finish(StreamEnd::Stopped, true), Err(Discarded { dropped: 1 }));
+    let mut tools = ToolAssembler::new();
+    tools.whole(Some("a"), "x", json!({})).unwrap();
+    assert_eq!(tools.finish(StreamEnd::Truncated { discarded: 4 }, true), Err(Discarded { dropped: 1 }));
+    let mut tools = ToolAssembler::new();
+    tools.whole(Some("a"), "x", json!({})).unwrap();
+    assert_eq!(tools.finish(StreamEnd::Clean, false), Err(Discarded { dropped: 1 }));
+    // A turn without any call and a clean end is simply empty.
+    assert_eq!(ToolAssembler::new().finish(StreamEnd::Clean, true), Ok(Vec::new()));
+}
+
+#[test]
+fn invalid_arguments_and_bad_fields_are_faults() {
+    let complete = |args: &str| {
+        let mut tools = ToolAssembler::new();
+        tools.fragment(0, Some("id"), Some("tool"), args).unwrap();
+        tools.complete(0).map(|()| tools.finish(StreamEnd::Clean, true).unwrap().remove(0).args)
+    };
+    assert_eq!(complete("{\"pa"), Err(ToolFault::InvalidArgs), "cut arguments");
+    for args in ["[1]", "\"x\"", "null", "3", "true", "{\"a\":1} x", "{'a':1}"] {
+        assert_eq!(complete(args), Err(ToolFault::InvalidArgs), "arguments {args}");
+    }
+    assert_eq!(complete(""), Ok(json!({})), "empty arguments");
+    assert_eq!(complete(" \n\t "), Ok(json!({})), "white space only");
+    assert_eq!(complete(" {\"a\":{\"b\":[1,{\"c\":null}]}} "), Ok(json!({"a": {"b": [1, {"c": null}]}})), "nested values");
+
+    // No name at completion.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some("id"), None, "{}").unwrap();
+    assert_eq!(tools.complete(0), Err(ToolFault::BadField));
+    // Control characters in an id or a name.
+    for bad in ["a\nb", "a\u{1b}[31mb", "a\0b", "\u{7f}"] {
+        let mut tools = ToolAssembler::new();
+        assert_eq!(tools.fragment(0, None, Some(bad), ""), Err(ToolFault::BadField), "name {bad:?}");
+        let mut tools = ToolAssembler::new();
+        assert_eq!(tools.fragment(0, Some(bad), Some("tool"), ""), Err(ToolFault::BadField), "id {bad:?}");
+    }
+    // A call that arrives in one piece.
+    let mut tools = ToolAssembler::new();
+    assert_eq!(tools.whole(None, "", json!({})), Err(ToolFault::BadField), "an empty name");
+    assert_eq!(tools.whole(None, "a\nb", json!({})), Err(ToolFault::BadField));
+    assert_eq!(tools.whole(Some("a\nb"), "x", json!({})), Err(ToolFault::BadField));
+    assert_eq!(tools.whole(None, "x", json!([1])), Err(ToolFault::InvalidArgs));
+    assert_eq!(tools.whole(None, "x", Value::Null), Err(ToolFault::InvalidArgs));
+
+    // After any fault a clean finish still discards.
+    let mut tools = ToolAssembler::new();
+    tools.whole(Some("good"), "x", json!({})).unwrap();
+    assert_eq!(tools.whole(None, "", json!({})), Err(ToolFault::BadField));
+    assert!(tools.finish(StreamEnd::Clean, true).is_err(), "a fault poisons the turn");
+}
+
+#[test]
+fn empty_arguments_become_an_object_and_missing_ids_are_minted_uniquely() {
+    // A provider id is kept verbatim, an empty id counts as absent.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some("toolu_Ab-9"), Some("a"), "").unwrap();
+    tools.fragment(1, Some(""), Some("b"), "").unwrap();
+    tools.fragment(2, None, Some("c"), "").unwrap();
+    tools.complete_all().unwrap();
+    let calls = tools.finish(StreamEnd::Clean, true).unwrap();
+    assert_eq!(calls[0].id, "toolu_Ab-9");
+    assert_eq!(calls[0].args, json!({}), "empty arguments become an empty object");
+    for call in &calls[1..] {
+        assert!(call.id.starts_with("call_"), "{}", call.id);
+        assert_eq!(call.id.len(), "call_".len() + 16 + 1 + 1, "the nonce in sixteen hex digits, an underscore, the counter");
+        let nonce = &call.id["call_".len()..];
+        assert!(nonce.chars().take(16).all(|c| c.is_ascii_hexdigit()), "{}", call.id);
+        assert_eq!(nonce.as_bytes()[16], b'_', "{}", call.id);
+    }
+
+    // Four minted ids from two assemblers are pairwise different, also across turns and restarts.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let mut tools = ToolAssembler::new();
+        tools.whole(None, "x", json!({})).unwrap();
+        tools.fragment(7, None, Some("y"), "").unwrap();
+        tools.complete(7).unwrap();
+        ids.extend(tools.finish(StreamEnd::Clean, true).unwrap().into_iter().map(|c| c.id));
+    }
+    assert_eq!(ids.len(), 4);
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 4, "minted ids repeat: {ids:?}");
+}
+
+#[test]
+fn bounds_hold_for_arguments_calls_and_fields() {
+    assert_eq!(MAX_TOOL_ARGS, 4_194_304);
+    assert_eq!(MAX_TOOL_CALLS, 64);
+    assert_eq!(MAX_TOOL_FIELD, 256);
+
+    // Arguments: 16 bytes in total across fragments pass, the 17th fails.
+    let mut tools = ToolAssembler::with_limits(16, 2);
+    tools.fragment(0, Some("a"), Some("n"), "0123456789").unwrap();
+    tools.fragment(0, None, None, "012345").unwrap();
+    assert_eq!(tools.fragment(0, None, None, "0"), Err(ToolFault::TooLarge), "17 bytes");
+    assert!(tools.finish(StreamEnd::Clean, true).is_err());
+    let mut tools = ToolAssembler::with_limits(16, 2);
+    tools.fragment(0, Some("a"), Some("n"), "0123456789").unwrap();
+    assert_eq!(tools.fragment(1, Some("b"), Some("n"), "0123456"), Err(ToolFault::TooLarge), "the total spans calls");
+
+    // Calls: a third call fails, whether the others are open, completed or whole.
+    let mut tools = ToolAssembler::with_limits(MAX_TOOL_ARGS, 2);
+    tools.fragment(0, Some("a"), Some("n"), "").unwrap();
+    tools.fragment(1, Some("b"), Some("n"), "").unwrap();
+    assert_eq!(tools.fragment(2, Some("c"), Some("n"), ""), Err(ToolFault::TooMany));
+    let mut tools = ToolAssembler::with_limits(MAX_TOOL_ARGS, 2);
+    tools.fragment(0, Some("a"), Some("n"), "").unwrap();
+    tools.complete(0).unwrap();
+    tools.whole(Some("b"), "n", json!({})).unwrap();
+    assert_eq!(tools.fragment(2, Some("c"), Some("n"), ""), Err(ToolFault::TooMany), "completed calls count");
+    assert_eq!(tools.whole(Some("d"), "n", json!({})), Err(ToolFault::TooMany), "whole calls count");
+    let mut tools = ToolAssembler::new();
+    for slot in 0..MAX_TOOL_CALLS as u32 {
+        tools.fragment(slot, None, Some("n"), "").unwrap();
+    }
+    assert_eq!(tools.fragment(MAX_TOOL_CALLS as u32, None, Some("n"), ""), Err(ToolFault::TooMany), "the default is 64");
+
+    // Fields: 256 bytes pass, 257 fail.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some(&"i".repeat(256)), Some(&"n".repeat(256)), "").unwrap();
+    let mut tools = ToolAssembler::new();
+    assert_eq!(tools.fragment(0, Some(&"i".repeat(257)), Some("n"), ""), Err(ToolFault::TooLarge));
+    let mut tools = ToolAssembler::new();
+    assert_eq!(tools.fragment(0, None, Some(&"n".repeat(257)), ""), Err(ToolFault::TooLarge));
+    let mut tools = ToolAssembler::new();
+    assert_eq!(tools.whole(None, &"n".repeat(257), json!({})), Err(ToolFault::TooLarge));
+
+    // The size of a call that arrives whole counts toward the arguments too.
+    let mut tools = ToolAssembler::with_limits(16, 4);
+    assert_eq!(tools.whole(None, "n", json!({"key": "0123456789abcdef"})), Err(ToolFault::TooLarge));
+}
+
+#[test]
+fn a_conflicting_name_or_id_a_late_fragment_and_an_unknown_slot_are_faults() {
+    // The same value again is fine, an empty value counts as absent.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some("a"), Some("n"), "").unwrap();
+    tools.fragment(0, Some("a"), Some("n"), "").unwrap();
+    tools.fragment(0, Some(""), Some(""), "").unwrap();
+    tools.complete(0).unwrap();
+    assert!(tools.finish(StreamEnd::Clean, true).is_ok());
+
+    // A different non-empty name or id for an open slot is a conflict.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some("a"), Some("n"), "").unwrap();
+    assert_eq!(tools.fragment(0, None, Some("other"), ""), Err(ToolFault::Conflict));
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some("a"), Some("n"), "").unwrap();
+    assert_eq!(tools.fragment(0, Some("other"), None, ""), Err(ToolFault::Conflict));
+    // Two calls with the same provider id could bind an approval to the wrong call.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some("same"), Some("n"), "").unwrap();
+    assert_eq!(tools.fragment(1, Some("same"), Some("n"), ""), Err(ToolFault::Conflict));
+    let mut tools = ToolAssembler::new();
+    tools.whole(Some("same"), "n", json!({})).unwrap();
+    assert_eq!(tools.whole(Some("same"), "n", json!({})), Err(ToolFault::Conflict));
+
+    // A fragment for a slot that is complete, and a completion of a slot never opened.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some("a"), Some("n"), "{}").unwrap();
+    tools.complete(0).unwrap();
+    assert_eq!(tools.fragment(0, None, None, "x"), Err(ToolFault::ClosedSlot));
+    assert_eq!(tools.complete(0), Err(ToolFault::ClosedSlot), "completed twice");
+    assert_eq!(tools.complete(9), Err(ToolFault::UnknownSlot));
+    assert!(tools.finish(StreamEnd::Clean, true).is_err(), "after a fault even a clean end discards");
+}
+
+#[test]
+fn parallel_calls_keep_the_order_in_which_they_were_completed() {
+    let fill = |tools: &mut ToolAssembler| {
+        tools.fragment(1, Some("b"), Some("second"), "{\"k\"").unwrap();
+        tools.fragment(0, Some("a"), Some("first"), "{\"k\"").unwrap();
+        tools.fragment(1, None, None, ":2}").unwrap();
+        tools.fragment(0, None, None, ":1}").unwrap();
+    };
+    let mut tools = ToolAssembler::new();
+    fill(&mut tools);
+    tools.complete(0).unwrap();
+    tools.complete(1).unwrap();
+    let names: Vec<String> = tools.finish(StreamEnd::Clean, true).unwrap().into_iter().map(|c| c.name).collect();
+    assert_eq!(names, ["first", "second"], "the order of completion");
+
+    let mut tools = ToolAssembler::new();
+    fill(&mut tools);
+    tools.complete_all().unwrap();
+    let calls = tools.finish(StreamEnd::Clean, true).unwrap();
+    let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["second", "first"], "complete_all follows the order opened");
+    assert_eq!(calls[0].args, json!({"k": 2}));
+    assert_eq!(calls[1].args, json!({"k": 1}));
+
+    // Whole calls keep their arrival order, among completed ones too.
+    let mut tools = ToolAssembler::new();
+    tools.whole(Some("w1"), "one", json!({})).unwrap();
+    tools.fragment(5, Some("f"), Some("two"), "").unwrap();
+    tools.complete(5).unwrap();
+    tools.whole(Some("w3"), "three", json!({})).unwrap();
+    let names: Vec<String> = tools.finish(StreamEnd::Clean, true).unwrap().into_iter().map(|c| c.name).collect();
+    assert_eq!(names, ["one", "two", "three"]);
+}
+
+#[test]
+fn frame_errors_faults_and_discards_convert_to_protocol_errors_without_stream_text() {
+    let frame = [FrameError::LineTooLong { limit: 5 }, FrameError::EventTooLarge { limit: 5 }, FrameError::InvalidUtf8];
+    let faults = [
+        ToolFault::TooMany,
+        ToolFault::TooLarge,
+        ToolFault::BadField,
+        ToolFault::Conflict,
+        ToolFault::ClosedSlot,
+        ToolFault::UnknownSlot,
+        ToolFault::InvalidArgs,
+    ];
+    let mut phrases = Vec::new();
+    for error in frame {
+        let converted = AiError::from(error);
+        assert!(matches!(converted, AiError::Protocol(_)), "{error:?}");
+        assert_eq!(converted.class(), ErrorClass::Protocol);
+        assert_eq!(converted.class().as_str(), "protocol");
+        phrases.push(error.to_string());
+    }
+    for fault in faults {
+        let converted = AiError::from(fault);
+        assert!(matches!(converted, AiError::Protocol(_)), "{fault:?}");
+        assert_eq!(converted.class().as_str(), "protocol");
+        phrases.push(fault.to_string());
+    }
+    let discarded = AiError::from(Discarded { dropped: 2 });
+    assert!(matches!(discarded, AiError::Protocol(_)));
+    assert_eq!(discarded.class().as_str(), "protocol");
+    phrases.push(Discarded { dropped: 2 }.to_string());
+    assert!(phrases.iter().all(|p| !p.is_empty()), "{phrases:?}");
+    let mut unique = phrases.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), phrases.len(), "every variant has its own phrase: {phrases:?}");
+    // The std error trait is implemented.
+    let _: &dyn std::error::Error = &FrameError::InvalidUtf8;
+    let _: &dyn std::error::Error = &ToolFault::TooMany;
+    let _: &dyn std::error::Error = &Discarded { dropped: 0 };
+
+    // Stream text sent as id, name and arguments never shows up in an error, a conversion or a Debug line.
+    let id = format!("id-{CANARY}");
+    let name = format!("name-{CANARY}");
+    let args = format!("{{\"k\":\"{CANARY}");
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some(&id), Some(&name), &args).unwrap();
+    let fault = tools.complete(0).expect_err("cut arguments");
+    assert_eq!(fault, ToolFault::InvalidArgs);
+    let mut shown = vec![fault.to_string(), format!("{fault:?}"), AiError::from(fault).to_string(), format!("{:?}", AiError::from(fault))];
+    shown.push(format!("{tools:?}"));
+    shown.push(format!("{tools:#?}"));
+    let discarded = tools.finish(StreamEnd::Clean, true).expect_err("a fault poisons the turn");
+    shown.push(discarded.to_string());
+    shown.push(format!("{discarded:?}"));
+    shown.push(format!("{:?}", AiError::from(discarded)));
+    for text in shown {
+        assert!(!text.contains(CANARY), "stream text reached an error or a Debug line: {text}");
+    }
+    // A conflict names no text either.
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some(&id), Some(&name), "").unwrap();
+    let fault = tools.fragment(0, Some(&format!("other-{CANARY}")), None, "").expect_err("conflict");
+    assert!(!fault.to_string().contains(CANARY) && !AiError::from(fault).to_string().contains(CANARY));
+}
+
+#[test]
+fn assembler_debug_shows_counts_never_text() {
+    let mut tools = ToolAssembler::new();
+    tools.fragment(0, Some(&format!("id-{CANARY}")), Some(&format!("name-{CANARY}")), &format!("{{\"k\":\"{CANARY}\"}}")).unwrap();
+    tools.complete(0).unwrap();
+    tools.whole(Some(&format!("w-{CANARY}")), &format!("n-{CANARY}"), json!({"k": CANARY})).unwrap();
+    tools.fragment(3, Some("open"), Some("open"), &format!("{{\"k\":\"{CANARY}")).unwrap();
+    for shown in [format!("{tools:?}"), format!("{tools:#?}")] {
+        assert!(!shown.contains(CANARY), "the assembler leaks text: {shown}");
+        assert!(shown.contains("open") && shown.contains("ready") && shown.contains("bytes"), "counts and sizes: {shown}");
+    }
+    assert_eq!((tools.open_count(), tools.ready_count()), (1, 2));
 }
