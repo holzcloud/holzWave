@@ -4,7 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  PRESETS, SLOTS, WIRE_LABELS, inputOf, newDraft, draftOf, presetOf, readProfileViews, sameDraft,
+  PRESETS, REASONS, SLOTS, WIRE_LABELS, addressHint, describeFault, draftOf, inputOf, keyAdvice, keyTone, keyWord, newDraft,
+  presetOf, readProfileViews, sameDraft,
 } from "../../dist/aistate.js";
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/ai_profiles.json", import.meta.url), "utf8"));
@@ -164,4 +165,83 @@ test("the input of a save has exactly eight members and never a key", () => {
     for (const name of Object.keys(sample)) assert.ok(eight.includes(name), `${name} is not a member of a save`);
   }
   assert.deepEqual(SLOTS, protocol.ops.key_slot);
+});
+
+test("every reason the core names has words in the field it belongs to", () => {
+  const fields = ["name", "address", "model", "wire", "key", "form"];
+  const refusal = (reason, context = "profile") => describeFault({ code: "profile", reason, text: "x" }, context);
+  for (const reason of [...golden.refusals, ...golden.profile_reasons]) {
+    const fault = refusal(reason);
+    assert.ok(fault.text !== "" && fault.text !== "x", `${reason}: the page has words of its own`);
+    assert.ok(fields.includes(fault.field), `${reason}: field ${fault.field}`);
+    assert.equal(fault.reason, reason);
+  }
+  const elsewhere = { key_scope: "key", key_in_url: "form", header: "form" };
+  for (const reason of golden.refusals) assert.equal(refusal(reason).field, elsewhere[reason] ?? "address", reason);
+  const own = { name: "name", model: "model", wire: "wire", needs_address: "address" };
+  for (const reason of golden.profile_reasons) {
+    if (!golden.refusals.includes(reason)) assert.equal(refusal(reason).field, own[reason] ?? "form", reason);
+  }
+  for (const reason of ["no_secure_store", "store", "invalid", "no_such_slot"]) assert.equal(refusal(reason, "key").field, "key", reason);
+  assert.equal(refusal("unknown_profile", "key").field, "form");
+  assert.equal(refusal("store", "profile").text, "x", "a key reason is no reason of a save: the core's own line shows");
+
+  // A reason that is in no table is shown as the core's own line, in the status line, cleaned and cut.
+  const strange = describeFault({ code: "config_write", reason: "strange", text: `a\u0000b\u202e${"x".repeat(400)}` }, "profile");
+  assert.equal(strange.field, "form");
+  assert.equal(strange.text.length, 300);
+  assert.ok(strange.text.startsWith("abxxx"));
+  assert.deepEqual(describeFault({ code: "x", reason: null, text: "one line" }, "profile"), { field: "form", reason: "", text: "one line" });
+  assert.equal(describeFault({ reason: "constructor", text: "own words" }, "profile").text, "own words", "a name of the prototype is no reason");
+  assert.equal(describeFault({ reason: "__proto__", text: "own words" }, "key").field, "form");
+
+  // Nothing readable is a fixed sentence.
+  for (const raw of [null, undefined, 7, "a string", [], {}, { text: 5 }, { reason: "strange" }]) {
+    assert.equal(describeFault(raw, "profile").text, "the request was refused", JSON.stringify(raw));
+    assert.equal(describeFault(raw, "profile").field, "form");
+  }
+
+  // No text holds an address, and the words that matter are pinned.
+  for (const table of Object.values(REASONS)) {
+    for (const item of Object.values(table)) assert.equal(item.text.includes("://"), false, item.text);
+  }
+  assert.equal(refusal("needs_address").text, "This type needs an address. Enter the address of your gateway or server.");
+  assert.equal(
+    refusal("plain_http").text,
+    "Plain http is only allowed for this computer, or for your local network when you tick the box below.",
+  );
+  assert.equal(refusal("key_scope").text, "The key was saved for another address. Enter the key again.");
+  assert.equal(refusal("invalid", "key").text, "A key is one line of printable characters without spaces, at most 2048 bytes.");
+});
+
+test("keys are told in words, and a warning is more than a colour", () => {
+  const words = ["no key", "key saved", "key missing", "key for another address", "key damaged", "keychain unreadable", "no keychain"];
+  assert.deepEqual(golden.key_states.map(keyWord), words);
+  for (const other of ["set", "", null, undefined, 3, {}, "__proto__"]) assert.equal(keyWord(other), "unknown");
+  const advice = golden.key_states.map(keyAdvice);
+  assert.equal(advice[0], "", "nothing to say about no key");
+  assert.equal(advice[1], "The key is stored in the system keychain. It is never shown again; enter a new one to replace it.");
+  assert.equal(advice[2], "The keychain has no key for this provider. Enter it again.");
+  assert.equal(advice[3], "The address changed after the key was saved, so the key is not used. Enter the key again.");
+  assert.equal(advice[4], "The saved key record is damaged. Enter the key again.");
+  assert.equal(advice[5], "The keychain could not be read. Try again later.");
+  assert.equal(advice[6], "This device has no system keychain, so a key cannot be saved. A server that needs no key still works.");
+  assert.equal(keyAdvice("nope"), "");
+
+  assert.equal(keyTone("present", "optional"), "ok");
+  assert.equal(keyTone("present", "required"), "ok");
+  assert.equal(keyTone("not_set", "required"), "warn");
+  assert.equal(keyTone("not_set", "optional"), "plain");
+  for (const state of golden.key_states.slice(2)) {
+    assert.equal(keyTone(state, "optional"), "warn", state);
+    assert.equal(keyTone(state, "required"), "warn", state);
+  }
+  assert.equal(keyTone("nope", "optional"), "warn", "a state the page does not know is not good news");
+
+  const custom = presetOf("custom");
+  const anthropic = presetOf("anthropic");
+  assert.equal(addressHint(anthropic, "anthropic"), "Leave empty to use the address of this type.");
+  assert.equal(addressHint(custom, "openai_chat"), "Required: the address of your gateway or server.");
+  assert.equal(addressHint(presetOf("cloudflare_gateway"), "gemini"), "Required: the address of your gateway or server.");
+  assert.equal(addressHint(presetOf("vercel_gateway"), "anthropic"), "Leave empty to use the address of this type.");
 });

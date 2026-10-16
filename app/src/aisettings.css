@@ -2,15 +2,13 @@
    dialogs.css, whose backdrop and box it uses. Every colour is a `--hw-*` token (the theme replaces the values) and every
    size is in rem, so the UI scale moves the dialog with the rest of the chrome; a pixel value appears only for 1 px
    hairlines, the 2 px focus ring and the 28 px desktop and 44 px phone minimums of a touch target. Flat and hairline: the
-   one shadow is the one the dialog box already has. Nothing in this dialog moves, so there is no transition. */
+   one shadow is the one the dialog box already has. Nothing in this dialog moves. */
 
 .dlg.ai-settings { width: min(40rem, calc(100vw - 4rem)); font-size: 1rem; line-height: 1.4; }
-.ai-settings [hidden] { display: none; }
 .ai-settings .set-title { margin: 0 0 .667rem; font-size: 1rem; font-weight: 700; line-height: 1.3; }
 .ai-settings .aiset-status { min-height: 1.4em; margin: 0 0 .5rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
 .ai-settings .aiset-status[data-kind="error"] { color: var(--hw-warn); }
 .ai-settings .aiset-notes { margin: 0 0 .667rem; padding: 0 0 0 1.25rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
-.ai-settings .aiset-notes[hidden] { display: none; }
 
 /* Groups: a hairline box under a label. */
 .ai-settings .aiset-group { min-width: 0; margin: 0 0 .833rem; padding: .5rem .833rem .667rem; border: 1px solid var(--hw-line);
@@ -63,3 +61,28 @@
 .ai-settings .aiset-form-actions { display: flex; justify-content: flex-end; gap: .667rem; margin-top: .667rem; }
 .ai-settings button.aiset-save { color: var(--hw-on-accent); background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); }
 .ai-settings button.aiset-save:hover { color: var(--hw-on-accent); background: var(--hw-rose-deep); }
+
+/* A refusal: words under the field in the danger colour, underlined, with a mark; the field gets a danger border. */
+.ai-settings .aiset-error { grid-column: 2; margin: .167rem 0 0; color: var(--hw-danger); text-decoration: underline; overflow-wrap: anywhere; }
+.ai-settings .aiset-error::before { content: "! "; font-weight: 700; }
+.ai-settings .aiset-error[hidden] { display: none; }
+.ai-settings .aiset-presets .aiset-error, .ai-settings .aiset-wires .aiset-error { grid-column: auto; }
+.ai-settings input[aria-invalid="true"] { border-color: var(--hw-danger); }
+
+/* A key: the field, the state in words beside it and the advice below. The word is the first cue, the tone the second. */
+.ai-settings .aiset-keyrow { display: flex; align-items: center; gap: .667rem; min-width: 0; }
+.ai-settings .aiset-keyrow input { flex: 1 1 auto; }
+.ai-settings .aiset-keystate, .ai-settings .aiset-gateway-state { flex: none; color: var(--hw-dim); }
+.ai-settings .aiset-keystate[data-tone="ok"], .ai-settings .aiset-gateway-state[data-tone="ok"] { color: var(--hw-ok); }
+.ai-settings .aiset-keystate[data-tone="warn"], .ai-settings .aiset-gateway-state[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
+.ai-settings .aiset-keyfield > .aiset-hint { grid-column: 2; }
+
+/* The type of a saved provider cannot change: dimmed radios, the sentence beside them. */
+.ai-settings .aiset-presets input:disabled + span { color: var(--hw-dim); }
+.ai-settings .aiset-presets input:disabled { opacity: .6; }
+
+/* Removing a provider asks with a second click: the armed button has a danger border. */
+.ai-settings button.aiset-remove[data-armed="true"] { border-color: var(--hw-danger); color: var(--hw-ink); }
+
+/* A hidden part is hidden, whatever display its class gives it: this rule comes last on purpose. */
+.ai-settings [hidden] { display: none; }

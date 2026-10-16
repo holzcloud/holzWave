@@ -11,9 +11,10 @@ import { call } from "./bridge.js";
 import { el, fitNodes, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
 import {
-  PRESETS, WIRE_LABELS, addressHint, coreText, draftOf, inputOf, keyWord, newDraft, presetOf, readProfileViews, sameDraft,
+  PRESETS, WIRE_LABELS, addressHint, describeFault, draftOf, inputOf, keyAdvice, keyTone, keyWord, newDraft, presetOf,
+  readProfileViews, sameDraft,
 } from "./aistate.js";
-import type { PresetTag, ProfileDraft, ProfileRow, WireTag } from "./aistate.js";
+import type { Fault, KeyState, PresetTag, ProfileDraft, ProfileRow, Slot, WireTag } from "./aistate.js";
 
 /** Called with the raw answer of `ai_profiles` after every successful read the dialog makes. */
 type ProfilesListener = (raw: unknown) => void;
@@ -42,6 +43,37 @@ export function openProviders(focus?: string): Promise<void> {
 const MAX_NAME = 80;
 const MAX_MODEL = 200;
 const MAX_ADDRESS = 2048;
+const MAX_KEY = 2048;
+const REMOVE_TEXT = "Remove provider";
+const REMOVE_ARMED = "Click again to remove";
+
+/** One key of the form: the password field, the word for its state, the advice and the refusal. */
+interface KeyPart {
+  wrap: HTMLElement;
+  input: HTMLInputElement;
+  state: HTMLElement;
+  clear: HTMLButtonElement;
+  advice: HTMLElement;
+  error: HTMLElement;
+  slot: Slot;
+}
+
+/**
+ * Whether a key field holds text, asked of the field's own state (its placeholder is hidden while it holds text) so that
+ * nothing but a save ever reads what was typed.
+ */
+function holdsText(part: KeyPart): boolean {
+  return !part.input.matches(":placeholder-shown");
+}
+
+/** The line under a field where the core's refusal for it is written; empty and hidden until there is one. */
+function errorLine(input: HTMLInputElement, name: string, parent?: Element): HTMLParagraphElement {
+  const line = el("p", "aiset-error", parent ?? input.parentElement ?? undefined);
+  line.id = `aiset-error-${name}`;
+  line.dataset.for = name;
+  line.hidden = true;
+  return line;
+}
 
 async function show(focus: string | undefined): Promise<void> {
   try {
@@ -111,10 +143,13 @@ async function show(focus: string | undefined): Promise<void> {
     nameInput.maxLength = MAX_NAME;
     nameInput.autocomplete = "off";
     nameInput.spellcheck = false;
+    const nameError = errorLine(nameInput, "name");
 
     const presetSet = el("fieldset", "aiset-choice aiset-presets", form);
     el("legend", "", presetSet).textContent = "Type";
     const presetOptions = el("div", "aiset-options", presetSet);
+    const typeNote = el("p", "aiset-hint", presetSet);
+    typeNote.textContent = "The type of a saved provider cannot change. Add a new provider for another type.";
     const presetRadios: HTMLInputElement[] = PRESETS.map((p) => {
       const item = el("label", "aiset-option", presetOptions);
       const radio = el("input", "", item);
@@ -128,6 +163,10 @@ async function show(focus: string | undefined): Promise<void> {
     const wireSet = el("fieldset", "aiset-choice aiset-wires", form);
     el("legend", "", wireSet).textContent = "API shape";
     const wireOptions = el("div", "aiset-options", wireSet);
+    const wireError = el("p", "aiset-error", wireSet);
+    wireError.id = "aiset-error-wire";
+    wireError.dataset.for = "wire";
+    wireError.hidden = true;
     let wireRadios: HTMLInputElement[] = [];
 
     const addressWrap = field("aiset-address", "Address");
@@ -141,6 +180,7 @@ async function show(focus: string | undefined): Promise<void> {
     const addressHintNode = el("p", "aiset-hint", addressWrap);
     addressHintNode.id = "aiset-address-hint";
     addressInput.setAttribute("aria-describedby", "aiset-address-hint");
+    const addressError = errorLine(addressInput, "address");
 
     const lanWrap = el("div", "aiset-field aiset-check", form);
     const lanInput = el("input", "", lanWrap);
@@ -159,8 +199,35 @@ async function show(focus: string | undefined): Promise<void> {
     modelInput.spellcheck = false;
     el("p", "aiset-hint", modelWrap).textContent =
       "Type the model name the provider uses. holzWave does not ask the provider for a list.";
+    const modelError = errorLine(modelInput, "model");
+
+    // The keys: a password field that is never filled in, the state of the key in words, and the advice for that state.
+    const keyPart = (id: string, text: string, slot: Slot): KeyPart => {
+      const wrap = field(id, text);
+      wrap.classList.add("aiset-keyfield");
+      const line = el("div", "aiset-keyrow", wrap);
+      const input = el("input", "", line);
+      input.id = id;
+      input.type = "password";
+      input.autocomplete = "new-password";
+      input.spellcheck = false;
+      input.autocapitalize = "off";
+      input.maxLength = MAX_KEY;
+      const state = el("span", slot === "provider" ? "aiset-keystate" : "aiset-gateway-state", line);
+      const clear = el("button", slot === "provider" ? "aiset-key-clear" : "aiset-gateway-clear", line);
+      clear.type = "button";
+      clear.textContent = "Remove key";
+      const advice = el("p", "aiset-hint", wrap);
+      const error = errorLine(input, slot === "provider" ? "key" : "gateway-key", wrap);
+      return { wrap, input, state, clear, advice, error, slot };
+    };
+    const keyOf = keyPart("aiset-key", "API key", "provider");
+    const gatewayOf = keyPart("aiset-gateway-key", "Gateway token", "gateway");
 
     const formActions = el("div", "aiset-form-actions", form);
+    const removeButton = el("button", "aiset-remove", formActions);
+    removeButton.type = "button";
+    removeButton.textContent = REMOVE_TEXT;
     const saveButton = el("button", "aiset-save", formActions);
     saveButton.type = "button";
     saveButton.textContent = "Save";
@@ -186,7 +253,72 @@ async function show(focus: string | undefined): Promise<void> {
       busy = value;
       saveButton.disabled = value;
       addButton.disabled = value;
+      removeButton.disabled = value;
+      keyOf.clear.disabled = value;
+      gatewayOf.clear.disabled = value;
     };
+
+    const savedRow = (): ProfileRow | undefined => (selected === null ? undefined : list.find((r) => r.id === selected));
+
+    // ---- refusals at their fields --------------------------------------------------------------------------------
+
+    /** Where each part of the form writes its refusal. */
+    const marks: [HTMLElement | null, HTMLElement][] = [
+      [nameInput, nameError], [addressInput, addressError], [modelInput, modelError], [keyOf.input, keyOf.error],
+      [gatewayOf.input, gatewayOf.error], [null, wireError],
+    ];
+
+    const clearMark = (line: HTMLElement): void => {
+      line.hidden = true;
+      line.textContent = "";
+      const mark = marks.find(([, l]) => l === line);
+      const input = mark?.[0];
+      if (input) {
+        input.removeAttribute("aria-invalid");
+        if (input === addressInput) input.setAttribute("aria-describedby", addressHintNode.id);
+        else input.removeAttribute("aria-describedby");
+      }
+    };
+    const clearErrors = (): void => {
+      for (const [, line] of marks) clearMark(line);
+    };
+
+    const markOf = (field: Fault["field"], slot: Slot): [HTMLElement | null, HTMLElement] | null => {
+      switch (field) {
+        case "name": return [nameInput, nameError];
+        case "address": return [addressInput, addressError];
+        case "model": return [modelInput, modelError];
+        case "key": return slot === "gateway" ? [gatewayOf.input, gatewayOf.error] : [keyOf.input, keyOf.error];
+        case "wire": return [null, wireError];
+        default: return null;
+      }
+    };
+
+    /** Say a refusal at its field, with the focus on the field; a refusal that belongs to no field goes to the status line. */
+    const showFault = (fault: Fault, slot: Slot = "provider"): void => {
+      const mark = markOf(fault.field, slot);
+      if (mark === null) {
+        status(fault.text, "error");
+        return;
+      }
+      const [input, line] = mark;
+      clearMark(line);
+      line.textContent = fault.text;
+      line.hidden = false;
+      if (input) {
+        input.setAttribute("aria-invalid", "true");
+        input.setAttribute("aria-describedby", input === addressInput ? `${line.id} ${addressHintNode.id}` : line.id);
+        input.focus();
+      } else {
+        (wireRadios.find((r) => r.checked) ?? wireRadios[0])?.focus();
+      }
+    };
+
+    for (const [input, line] of marks) {
+      // Any edit of a field takes its refusal away.
+      input?.addEventListener("input", () => clearMark(line));
+    }
+    wireOptions.addEventListener("change", () => clearMark(wireError));
 
     // ---- the form: filling and reading ---------------------------------------------------------------------------
 
@@ -221,8 +353,30 @@ async function show(focus: string | undefined): Promise<void> {
       setText(addressHintNode, info === null ? "" : addressHint(info, chosenWire()));
     };
 
+    /** Show the state of one key: the word, its tone, the advice and the button that removes it. */
+    const drawKey = (part: KeyPart, state: KeyState, need: "optional" | "required", known: boolean): void => {
+      part.state.dataset.state = state;
+      part.state.dataset.tone = keyTone(state, need);
+      setText(part.state, keyWord(state));
+      setText(part.advice, keyAdvice(state));
+      part.advice.hidden = part.advice.textContent === "";
+      part.clear.hidden = !known || state === "not_set";
+      part.input.placeholder = state === "present" ? "Enter a new key to replace it" : part.slot === "provider" ? "API key" : "Gateway token";
+    };
+
+    /** The keys of the form for the type chosen now and the row shown (none for a new provider). */
+    const drawKeys = (): void => {
+      const info = presetOf(chosenPreset());
+      const row = savedRow();
+      drawKey(keyOf, row?.key ?? "not_set", info?.key ?? "optional", row !== undefined);
+      const token = info?.gateway_token === true;
+      gatewayOf.wrap.hidden = !token;
+      if (!token) gatewayOf.input.value = "";
+      drawKey(gatewayOf, row?.gateway_key ?? "not_set", "optional", row !== undefined && row.gateway_key !== null);
+    };
+
     /** Put a draft into the form. `saved` is true for a provider that exists: its type cannot change. */
-    const fillForm = (draft: ProfileDraft, saved: boolean): void => {
+    const fillForm = (draft: ProfileDraft, saved: boolean, keepKeys: boolean): void => {
       filled = draft;
       setText(legend, saved ? "Provider" : "New provider");
       nameInput.value = draft.name;
@@ -230,11 +384,20 @@ async function show(focus: string | undefined): Promise<void> {
         r.checked = r.value === draft.preset;
         r.disabled = saved;
       }
+      typeNote.hidden = !saved;
       drawWires(draft.preset, draft.wire);
       addressInput.value = draft.base_url;
       lanInput.checked = draft.allow_lan_http;
       modelInput.value = draft.model;
+      // A key typed is read once, when it is saved; it is never put back into a field, only taken out of it.
+      if (!keepKeys) {
+        keyOf.input.value = "";
+        gatewayOf.input.value = "";
+      }
+      removeButton.hidden = !saved;
+      disarm();
       drawHint();
+      drawKeys();
     };
 
     const readDraft = (): ProfileDraft => ({
@@ -262,10 +425,12 @@ async function show(focus: string | undefined): Promise<void> {
         item.dataset.chosen = r.id === selected ? "true" : "false";
         el("span", "aiset-name", item).textContent = r.name === "" ? r.id : r.name;
         const model = r.model === "" ? "no model" : r.model;
-        el("span", "aiset-meta", item).textContent = `${presetOf(r.preset)?.label ?? r.preset} · ${model}`;
+        const info = presetOf(r.preset);
+        el("span", "aiset-meta", item).textContent = `${info?.label ?? r.preset} · ${model}`;
         el("span", "aiset-host", item).textContent = r.host;
         const word = el("span", "aiset-key", item);
         word.dataset.state = r.key;
+        word.dataset.tone = keyTone(r.key, info?.key ?? "optional");
         word.textContent = keyWord(r.key);
         radio.addEventListener("change", () => {
           if (radio.checked) choose(r.id);
@@ -274,8 +439,8 @@ async function show(focus: string | undefined): Promise<void> {
       empty.hidden = list.length > 0;
     };
 
-    /** Show the provider `id` in the form, or a new provider for null. */
-    const select = (id: string | null): void => {
+    /** Show the provider `id` in the form, or a new provider for null. `keepKeys` leaves what was typed in the key fields. */
+    const select = (id: string | null, keepKeys = false): void => {
       const row = id === null ? undefined : list.find((r) => r.id === id);
       selected = row === undefined ? null : row.id;
       for (const item of rowsBox.querySelectorAll<HTMLElement>(".aiset-row")) {
@@ -284,12 +449,13 @@ async function show(focus: string | undefined): Promise<void> {
         const radio = item.querySelector<HTMLInputElement>('input[type="radio"]');
         if (radio) radio.checked = chosen;
       }
-      fillForm(row === undefined ? newDraft() : draftOf(row), row !== undefined);
+      clearErrors();
+      fillForm(row === undefined ? newDraft() : draftOf(row), row !== undefined, keepKeys);
     };
 
     /** The person picked another row or `Add provider`: an edit that was not saved is lost, and the line says so. */
     const leave = (): void => {
-      if (sameDraft(readDraft(), filled)) status("");
+      if (sameDraft(readDraft(), filled) && !holdsText(keyOf) && !holdsText(gatewayOf)) status("");
       else status("Changes were not saved.");
     };
 
@@ -300,9 +466,10 @@ async function show(focus: string | undefined): Promise<void> {
 
     /**
      * Read the list of providers. Reads are one at a time; a read that a later one replaced neither asks the core nor shows.
-     * `prefer` is the provider to show afterwards (the one just saved), else the one shown now, else the first.
+     * `prefer` is the provider to show afterwards (the one just saved), else the one shown now, else a new one. `keepKeys`
+     * leaves what is typed in the key fields (a key the core refused stays for the next try).
      */
-    const read = (prefer?: string | null): Promise<boolean> => {
+    const read = (prefer?: string | null, keepKeys = false): Promise<boolean> => {
       const mine = ++readNo;
       const run = tail.then(async () => {
         if (done || mine !== readNo) return false;
@@ -329,7 +496,7 @@ async function show(focus: string | undefined): Promise<void> {
         }
         const want = prefer === undefined ? selected : prefer;
         drawList();
-        select(list.some((r) => r.id === want) ? want : null);
+        select(list.some((r) => r.id === want) ? want : null, keepKeys);
         return ok;
       });
       tail = run.then(
@@ -340,6 +507,23 @@ async function show(focus: string | undefined): Promise<void> {
     };
 
     // ---- save ----------------------------------------------------------------------------------------------------
+
+    /**
+     * Send the key typed into `part` in one call: the only place a key text leaves a field, read into a local at this moment.
+     * Null when the core took it (the field is emptied) or nothing was typed; else the core's refusal, with the text left in
+     * the field for the next try.
+     */
+    const sendKey = async (profile: string, part: KeyPart): Promise<Fault | null> => {
+      const text = part.input.value;
+      if (text === "") return null;
+      try {
+        await call("ai_key_set", { profile, slot: part.slot, api_key: text });
+      } catch (e) {
+        return describeFault(e, "key");
+      }
+      part.input.value = "";
+      return null;
+    };
 
     const save = async (): Promise<void> => {
       if (busy || done) return;
@@ -352,15 +536,85 @@ async function show(focus: string | undefined): Promise<void> {
       } catch (e) {
         if (done) return;
         setBusy(false);
-        status(coreText(e), "error");
+        status("");
+        showFault(describeFault(e, "profile"));
         return;
       }
       if (done) return;
+      clearErrors();
       const savedId = typeof id === "string" ? id : draft.id;
-      const ok = await read(savedId);
+      // The profile first, then the keys typed in this visit: the provider key, then the gateway token. A key the core
+      // refuses stays in its field with the words at that field; one it took leaves the field.
+      let refused: { fault: Fault; slot: Slot } | null = null;
+      if (savedId !== null) {
+        const first = await sendKey(savedId, keyOf);
+        if (first !== null) refused = { fault: first, slot: "provider" };
+        if (presetOf(draft.preset)?.gateway_token === true) {
+          const second = await sendKey(savedId, gatewayOf);
+          if (second !== null && refused === null) refused = { fault: second, slot: "gateway" };
+        }
+      }
+      if (done) return;
+      const ok = await read(savedId, true);
       if (done) return;
       setBusy(false);
       if (ok) status("Saved.");
+      if (refused !== null) showFault(refused.fault, refused.slot);
+    };
+
+    // ---- clear a key, remove a provider --------------------------------------------------------------------------
+
+    const clearKey = async (part: KeyPart): Promise<void> => {
+      const row = savedRow();
+      if (busy || done || row === undefined) return;
+      setBusy(true);
+      try {
+        await call("ai_key_clear", { profile: row.id, slot: part.slot });
+      } catch (e) {
+        if (done) return;
+        setBusy(false);
+        showFault(describeFault(e, "key"), part.slot);
+        return;
+      }
+      if (done) return;
+      const ok = await read(row.id, true);
+      if (done) return;
+      setBusy(false);
+      if (ok) status("Removed.");
+    };
+
+    let armed = false;
+    function disarm(): void {
+      armed = false;
+      removeButton.removeAttribute("data-armed");
+      setText(removeButton, REMOVE_TEXT);
+    }
+
+    const remove = async (): Promise<void> => {
+      const row = savedRow();
+      if (busy || done || row === undefined) return;
+      if (!armed) {
+        // The first click only asks; nothing is called.
+        armed = true;
+        removeButton.dataset.armed = "true";
+        setText(removeButton, REMOVE_ARMED);
+        return;
+      }
+      disarm();
+      setBusy(true);
+      try {
+        await call("ai_profile_remove", { profile: row.id });
+      } catch (e) {
+        if (done) return;
+        setBusy(false);
+        showFault(describeFault(e, "profile"));
+        return;
+      }
+      if (done) return;
+      const ok = await read(null);
+      if (done) return;
+      setBusy(false);
+      if (ok) status("Removed.");
     };
 
     // ---- events --------------------------------------------------------------------------------------------------
@@ -370,6 +624,7 @@ async function show(focus: string | undefined): Promise<void> {
       const tag = chosenPreset();
       drawWires(tag, presetOf(tag)?.wires[0] ?? "anthropic");
       drawHint();
+      drawKeys();
     });
     wireOptions.addEventListener("change", drawHint);
     addButton.addEventListener("click", () => {
@@ -377,6 +632,20 @@ async function show(focus: string | undefined): Promise<void> {
       nameInput.focus();
     });
     saveButton.addEventListener("click", () => void save());
+    removeButton.addEventListener("click", () => void remove());
+    keyOf.clear.addEventListener("click", () => void clearKey(keyOf));
+    gatewayOf.clear.addEventListener("click", () => void clearKey(gatewayOf));
+    // The first click on the remove button only asks; any other click or a key in a field takes the question back.
+    box.addEventListener(
+      "click",
+      (e) => {
+        if (e.target !== removeButton) disarm();
+      },
+      true,
+    );
+    box.addEventListener("keydown", (e) => {
+      if (e.target instanceof HTMLInputElement && e.key !== "Tab" && e.key !== "Shift") disarm();
+    });
 
     // ---- closing and keys ----------------------------------------------------------------------------------------
 
@@ -430,7 +699,7 @@ async function show(focus: string | undefined): Promise<void> {
       } else if (e.key === "Tab") {
         e.preventDefault();
         trap(e);
-      } else if (e.key === "Enter" && e.target instanceof HTMLInputElement && e.target.type === "text") {
+      } else if (e.key === "Enter" && e.target instanceof HTMLInputElement && (e.target.type === "text" || e.target.type === "password")) {
         // Enter in a text field saves; a button, a checkbox and a radio keep their own Enter.
         e.preventDefault();
         void save();
@@ -442,7 +711,7 @@ async function show(focus: string | undefined): Promise<void> {
 
     // The keyboard moves into the dialog at once; it goes to the first row, or to the name of a new provider, when the
     // list has been read.
-    fillForm(newDraft(), false);
+    fillForm(newDraft(), false, false);
     box.focus({ preventScroll: true });
     void read(focus ?? null).then(() => {
       if (done) return;

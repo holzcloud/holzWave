@@ -25,6 +25,13 @@
 //                      The answer of `ai_profiles` is `{profiles, notes}` with copies of these entries without the
 //                      mock-only member; `ai_profile_save` changes this list (the profile part is live)
 //       notes          the `notes` member of the answer of `ai_profiles` (default none): the core's lines about its file
+//       keychain       true (default): `ai_key_set` stores; false: there is no keychain and a key write is refused with
+//                      the reason `no_secure_store`
+//       keys           what the keychain holds, by profile id: `{ [id]: { provider?: {scope, length}, gateway?: {...} } }`.
+//                      Only the origin a key was saved for and its length are kept, never the key. The state of a key in
+//                      `ai_profiles` is derived from it on every read (`present`, `wrong_address` once the address of the
+//                      profile has another origin, `no_secure_store` when the keychain went away); a profile with no entry
+//                      shows the `key` it was given
 //       script(turn)   queue the script of the next turn: `reasoning` (text), `chunks` (the text deltas, default
 //                      `["Hello ", "there."]`), `usage` ({input_tokens, output_tokens}, default 11 and 5), `fail`
 //                      ({class, text}: the turn fails before any text), `limit` (an end word such as `limit_steps`: the
@@ -37,10 +44,14 @@
 //       chat(id)       a copy of the state of a chat (the empty state for an unknown chat)
 //       setState(id, partial)  set members of a chat's state, for example an interrupted message or a pinned profile
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
-//     `ai_turn_snapshot`, `ai_profiles` and `ai_profile_save` have defaults; a rejection is the object
-//     `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input with a member outside the eight of
-//     the shell's `ProfileInputMsg`, makes the id of a new profile from its name and answers the id; the address of an
-//     empty `base_url` comes from a small table of the mock's own (not the core's).
+//     `ai_turn_snapshot`, `ai_profiles`, `ai_profile_save`, `ai_profile_remove`, `ai_key_set` and `ai_key_clear` have
+//     defaults; a rejection is the object `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input
+//     with a member outside the eight of the shell's `ProfileInputMsg`, checks it in the order of the core (id, type,
+//     shape, name, model, address, count) with the stable reason names, makes the id of a new profile from its name and
+//     answers the id; the address of an empty `base_url` comes from a small table of the mock's own (not the core's) and
+//     the address rules are the small subset the cases need. `ai_key_set(profile, slot, api_key)` stores the origin and the
+//     length of the key and answers nothing; `ai_key_clear(profile, slot)` forgets them; `ai_profile_remove(profile)`
+//     answers `{removed, key_deleted}`.
 //     `markdown_render` answers the text as one escaped paragraph; a test scripts other HTML with `on("markdown_render", fn)`.
 //
 // Defaults: one workspace, one tab, panes 1 and 2 side by side and one Row divider at ratio 0.5. The layout
@@ -117,6 +128,8 @@
     dropLeft: 0,
     timer: 0,
     notes: [],
+    keychain: true,
+    keys: {},
   };
   const emptyState = (id) => ({
     conversation: id, title: "", profile: null, model: null, turn: 0, seq: 0, running: false, messages: [],
@@ -265,12 +278,66 @@
     for (let n = 2; taken(id); n += 1) id = `${base}-${n}`;
     return id;
   };
-  /** The entries as `ai_profiles` lists them: the mock-only members are left out. */
+  const originOf = (base) => {
+    try {
+      return new URL(base).origin;
+    } catch {
+      return "";
+    }
+  };
+  /** The state of a key slot: derived from what the keychain holds, else the state the entry was given. */
+  const slotState = (entry, slot, given) => {
+    const held = ai.keys[entry.id]?.[slot];
+    if (!held) return given;
+    if (!ai.keychain) return "no_secure_store";
+    return held.scope === originOf(entry.base_url) ? "present" : "wrong_address";
+  };
+  /** The entries as `ai_profiles` lists them: the mock-only members are left out, the key states are derived. */
   const listed = () =>
     stored().map((entry) => {
       const { locality: _locality, ...view } = structuredClone(entry);
+      view.key = slotState(entry, "provider", entry.key);
+      if (entry.gateway_key !== null) view.gateway_key = slotState(entry, "gateway", entry.gateway_key);
       return view;
     });
+  /** The fixed phrase of a refusal; it holds nothing the person typed. */
+  const PHRASES = {
+    id: "the id is not valid", reserved_id: "this id is reserved", name: "the name must be 1 to 80 characters without control characters",
+    model: "the model is not valid", wire: "this kind of provider does not speak that wire",
+    preset_change: "the kind of provider of a profile cannot change", needs_address: "the address is empty or still has a part to fill in",
+    too_many: "there are already 32 profiles", unknown_profile: "there is no profile with this id", syntax: "the text is not an address",
+    too_long: "the address is too long", scheme: "the scheme is not allowed", credentials: "the address carries a user name or a password",
+    host: "the address has no host", port: "the port is not allowed", query: "the address carries a query or a fragment",
+    plain_http: "plain http is not allowed here", link_local: "a link-local address is not allowed", metadata: "a metadata address is not allowed",
+  };
+  const refuse = (reason) => fault("profile", PHRASES[reason] ?? "the request was refused", reason);
+  const KEY_PHRASES = {
+    no_secure_store: "there is no system keychain, so a key cannot be saved", invalid: "the key cannot be used",
+    no_such_slot: "this kind of provider has no such key", unknown_profile: "there is no profile with this id",
+  };
+  const keyFault = (code, reason) => fault(code, KEY_PHRASES[reason], reason);
+  const hasControl = (text) => /[\u0000-\u001f\u007f-\u009f]/.test(text);
+  const isLoopbackHost = (h) => h === "localhost" || h.endsWith(".localhost") || h === "[::1]" || /^127\./.test(h);
+  const isPrivateHost = (h) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
+  /** The small subset of the address rules that the cases need; the core has the real ones. */
+  const checkAddress = (typed, lan) => {
+    if (typed === "" || /[{}]|%7b|%7d/i.test(typed)) throw refuse("needs_address");
+    if (typed.length > 2048) throw refuse("too_long");
+    let url;
+    try {
+      url = new URL(typed);
+    } catch {
+      throw refuse("syntax");
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw refuse("scheme");
+    if (url.username !== "" || url.password !== "") throw refuse("credentials");
+    if (url.hostname === "") throw refuse("host");
+    if (url.search !== "" || url.hash !== "") throw refuse("query");
+    const host = url.hostname;
+    if (host === "169.254.169.254") throw refuse("metadata");
+    if (host.startsWith("169.254.") || host.startsWith("[fe80:")) throw refuse("link_local");
+    if (url.protocol === "http:" && !isLoopbackHost(host) && !(lan && isPrivateHost(host))) throw refuse("plain_http");
+  };
   const aiCommands = {
     ai_conversation_new: () => `chat-mock-${++ai.chatNo}`,
     ai_conversation_list: () => ({ chats: [], notes: [] }),
@@ -281,21 +348,34 @@
         throw fault("profile", "the request was not understood");
       }
       const list = stored();
-      const name = typeof input.name === "string" ? input.name.trim() : "";
-      if (name === "") throw fault("profile", "the name must be 1 to 80 characters without control characters", "name");
+      // The order of the core: the id, the type, the shape, the name, the model, the address, the count.
+      let found;
+      if (input.id !== null && input.id !== undefined) {
+        if (typeof input.id !== "string" || !/^[a-z0-9_-]{1,40}$/.test(input.id)) throw refuse("id");
+        if (input.id === "apple") throw refuse("reserved_id");
+        found = list.find((p) => p.id === input.id);
+        if (!found) throw refuse("unknown_profile");
+      }
       const type = MOCK_TYPES[input.preset];
       if (!type) throw fault("profile", "the request was not understood");
-      const found = input.id === null ? undefined : list.find((p) => p.id === input.id);
-      if (input.id !== null && !found) throw fault("profile", "there is no profile with this id", "unknown_profile");
+      if (found && found.preset !== input.preset) throw refuse("preset_change");
+      const wire = input.wire ?? found?.wire ?? type.wires[0];
+      if (!type.wires.includes(wire)) throw refuse("wire");
+      const name = typeof input.name === "string" ? input.name.trim() : "";
+      if (name === "" || Array.from(name).length > 80 || hasControl(name)) throw refuse("name");
+      const model = typeof input.model === "string" ? input.model.trim() : "";
+      if (Array.from(model).length > 200 || hasControl(model)) throw refuse("model");
       const typed = typeof input.base_url === "string" ? input.base_url.trim() : "";
       const base = typed === "" ? type.base : typed;
+      checkAddress(base, input.allow_lan_http === true);
+      if (!found && list.length >= 32) throw refuse("too_many");
       const entry = {
         id: found ? found.id : idFrom(name, (id) => list.some((p) => p.id === id)),
         name,
         preset: input.preset,
-        wire: input.wire ?? type.wires[0],
+        wire,
         base_url: base,
-        model: typeof input.model === "string" ? input.model.trim() : "",
+        model,
         allow_lan_http: input.allow_lan_http === true,
         host: hostOf(base),
         key: found ? found.key : "not_set",
@@ -306,6 +386,41 @@
       if (found) Object.assign(found, entry);
       else list.push(entry);
       return entry.id;
+    },
+    ai_profile_remove: ({ profile }) => {
+      const list = stored();
+      const at = list.findIndex((p) => p.id === profile);
+      if (at < 0) return { removed: false, key_deleted: false };
+      list.splice(at, 1);
+      delete ai.keys[profile];
+      return { removed: true, key_deleted: true };
+    },
+    ai_key_set: ({ profile, slot, api_key }) => {
+      const entry = stored().find((p) => p.id === profile);
+      if (!entry) throw keyFault("profile", "unknown_profile");
+      if ((slot !== "provider" && slot !== "gateway") || (slot === "gateway" && entry.gateway_key === null)) {
+        throw keyFault("key", "no_such_slot");
+      }
+      if (!ai.keychain) throw keyFault("key", "no_secure_store");
+      const key = typeof api_key === "string" ? api_key.replace(/^[ \t\r\n\f]+|[ \t\r\n\f]+$/g, "") : "";
+      if (key === "" || key.length > 2048 || !/^[\x21-\x7e]+$/.test(key)) throw keyFault("key", "invalid");
+      // Only the origin the key is filed for and its length are kept, never the key.
+      (ai.keys[profile] ??= {})[slot] = { scope: originOf(entry.base_url), length: key.length };
+      return null;
+    },
+    ai_key_clear: ({ profile, slot }) => {
+      const entry = stored().find((p) => p.id === profile);
+      if (!entry) throw keyFault("profile", "unknown_profile");
+      if ((slot !== "provider" && slot !== "gateway") || (slot === "gateway" && entry.gateway_key === null)) {
+        throw keyFault("key", "no_such_slot");
+      }
+      if (ai.keys[profile]) {
+        delete ai.keys[profile][slot];
+        if (Object.keys(ai.keys[profile]).length === 0) delete ai.keys[profile];
+      }
+      if (slot === "provider") entry.key = "not_set";
+      else entry.gateway_key = "not_set";
+      return null;
     },
     ai_turn_snapshot: ({ conversation }) => structuredClone(chatOf(conversation)),
     // The core's renderer of Markdown: here the text as one escaped paragraph, unless a test scripts it with `on`.
@@ -364,6 +479,18 @@
     set notes(value) {
       ai.notes = value;
     },
+    get keychain() {
+      return ai.keychain;
+    },
+    set keychain(value) {
+      ai.keychain = value === true;
+    },
+    get keys() {
+      return ai.keys;
+    },
+    set keys(value) {
+      ai.keys = value;
+    },
     sent: ai.sent,
     script: (turn) => void ai.scripts.push(turn),
     hold: (n) => void (ai.holdLeft = n),
@@ -380,7 +507,7 @@
       clearTimeout(ai.timer);
       Object.assign(ai, {
         profiles: [], scripts: [], chatNo: 0, turnNo: NOW, queue: [], running: null, holdLeft: null, dropLeft: 0, timer: 0,
-        notes: [],
+        notes: [], keychain: true, keys: {},
       });
       ai.chats.clear();
       ai.sent.length = 0;

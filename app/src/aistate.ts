@@ -305,6 +305,116 @@ export function keyWord(state: unknown): string {
   return known === null ? "unknown" : KEY_WORDS[known];
 }
 
+const KEY_ADVICE: Readonly<Record<KeyState, string>> = Object.freeze({
+  not_set: "",
+  present: "The key is stored in the system keychain. It is never shown again; enter a new one to replace it.",
+  missing: "The keychain has no key for this provider. Enter it again.",
+  wrong_address: "The address changed after the key was saved, so the key is not used. Enter the key again.",
+  damaged: "The saved key record is damaged. Enter the key again.",
+  unreadable: "The keychain could not be read. Try again later.",
+  no_secure_store: "This device has no system keychain, so a key cannot be saved. A server that needs no key still works.",
+});
+
+/** What to do about a key in this state, in one or two sentences; empty when nothing needs saying. */
+export function keyAdvice(state: unknown): string {
+  const known = keyStateOf(state);
+  return known === null ? "" : KEY_ADVICE[known];
+}
+
+/**
+ * How loud a key state is: `ok` for a saved key, `warn` for anything that needs attention, `plain` for no key where a key is
+ * optional. The word is the first cue and the colour the second; every warn word is also underlined.
+ */
+export function keyTone(state: unknown, need: "optional" | "required"): "ok" | "warn" | "plain" {
+  if (state === "present") return "ok";
+  if (state === "not_set") return need === "required" ? "warn" : "plain";
+  return "warn";
+}
+
+// ---- the core's refusals, in words at their field ---------------------------------------------------------------------------
+
+/** The part of the form a refusal belongs to; `form` is the status line. */
+export type FaultField = "name" | "address" | "model" | "wire" | "key" | "form";
+
+/** A refusal of the core as the dialog shows it. */
+export interface Fault {
+  field: FaultField;
+  /** The core's stable name of the reason; empty when it sent none. */
+  reason: string;
+  text: string;
+}
+
+/** Which refusal came from which command: a save of a provider, or a key. */
+export type FaultContext = "profile" | "key";
+
+type Entry = { field: FaultField; text: string };
+
+const entry = (field: FaultField, text: string): Entry => ({ field, text });
+
+/**
+ * The words for every reason name the core has (the 18 address refusals and the profile reasons for a save, the key reasons
+ * for a key), each at the field it belongs to. The names are held to the core by the golden; a name the page does not have
+ * falls back to the core's own line.
+ */
+export const REASONS: Readonly<Record<FaultContext, Readonly<Record<string, Entry>>>> = Object.freeze({
+  profile: Object.freeze({
+    // the 18 refusals of an address, in the core's order
+    syntax: entry("address", "This does not look like an address. Check it and try again."),
+    too_long: entry("address", "The address is too long. It can have at most 2048 characters."),
+    scheme: entry("address", "Use an address that starts with https, or with http for a server on this computer or your own network."),
+    credentials: entry("address", "The address must not contain a user name or password."),
+    host: entry("address", "The address has no host name. Enter the address of the server."),
+    port: entry("address", "The port of the address cannot be zero."),
+    query: entry("address", "The address must not contain a query."),
+    path: entry("address", "The path of the address is not allowed: it has a backslash, an encoded slash or dot, or a dot segment."),
+    plain_http: entry("address", "Plain http is only allowed for this computer, or for your local network when you tick the box below."),
+    link_local: entry("address", "This is a link-local address. Requests to it are refused."),
+    metadata: entry("address", "This is a cloud metadata address. Requests to it are refused."),
+    unspecified: entry("address", "This is the unspecified address, which names no server."),
+    multicast: entry("address", "This is a multicast address, which names no single server."),
+    reserved: entry("address", "This is a reserved address. Use the address of a real server."),
+    local_only: entry("address", "Local only is on, and this address is not on this computer."),
+    key_scope: entry("key", "The key was saved for another address. Enter the key again."),
+    key_in_url: entry("form", "A key cannot be part of the address. Enter it in the key field."),
+    header: entry("form", "A header of the request is not allowed."),
+    // the reasons of the profile itself
+    id: entry("form", "The provider id is not valid."),
+    reserved_id: entry("form", "This provider id is reserved."),
+    name: entry("name", "The name must be 1 to 80 characters without control characters."),
+    model: entry("model", "The model must be at most 200 characters without control characters."),
+    wire: entry("wire", "This type of provider does not speak that API shape."),
+    preset_change: entry("form", "The type of a saved provider cannot change. Add a new provider for another type."),
+    needs_address: entry("address", "This type needs an address. Enter the address of your gateway or server."),
+    too_many: entry("form", "There are already 32 providers. Remove one first."),
+    unknown_profile: entry("form", "This provider no longer exists. Close the dialog and open it again."),
+  }),
+  key: Object.freeze({
+    no_secure_store: entry("key", "This device has no system keychain, so a key cannot be saved."),
+    store: entry("key", "The system keychain refused the request. Try again later."),
+    invalid: entry("key", "A key is one line of printable characters without spaces, at most 2048 bytes."),
+    unknown_profile: entry("form", "This provider no longer exists. Close the dialog and open it again."),
+    no_such_slot: entry("key", "This type of provider has no such key."),
+  }),
+});
+
+/** The longest reason name the page keeps, in characters. */
+const MAX_REASON = 40;
+
+/**
+ * A refusal of the core as words at a field. The reason name picks the words from `REASONS`; a name that is in no table is
+ * shown as the core's own line (`text`, cleaned and cut) in the status line; anything that is not an object with a text is
+ * a fixed sentence. Nothing the user typed is in any of these words.
+ */
+export function describeFault(raw: unknown, context: FaultContext): Fault {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { field: "form", reason: "", text: REFUSED };
+  const named = own(raw, "reason");
+  const reason = typeof named === "string" ? clean(named, MAX_REASON) : "";
+  const table = REASONS[context];
+  const known = reason !== "" && Object.hasOwn(table, reason) ? table[reason] : undefined;
+  if (known !== undefined) return { field: known.field, reason, text: known.text };
+  return { field: "form", reason, text: typeof own(raw, "text") === "string" ? coreText(raw) : REFUSED };
+}
+
 /**
  * The core's own one line of a refusal: the `text` of the object the core sent, or a bare string of the shell, cleaned and
  * cut. Anything else is a fixed sentence.
