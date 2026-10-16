@@ -186,8 +186,9 @@ const EXCEPTIONS: &[Exception] = &[
         "ureq",
         &["holzwave-core"],
         "WebDAV and Nextcloud transport of the sync (core/src/sync/webdav.rs): it connects only to the endpoint the user \
-         saved and only once sync is set up (SyncRuntime::background does nothing while sync is off); https is required \
-         except for a loopback address, redirects are not followed and every answer is bounded",
+         entered, when the account is saved or a run is started, and in the background only while sync is set up \
+         (SyncRuntime::background does nothing while sync is off); https is required except for a loopback address, \
+         redirects are not followed and every answer is bounded",
     ),
 ];
 
