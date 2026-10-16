@@ -1,0 +1,16 @@
+: gateway processing
+
+data: {"id":"gen-1760000000-Xk3","provider":"UpstreamHost","service_tier":"default","object":"chat.completion.chunk","created":1760000000,"model":"vendor/test-model","system_fingerprint":"fp_gw_7","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi ","refusal":null,"tool_calls":null},"logprobs":null,"finish_reason":null,"native_finish_reason":null}],"timings":{"queue_ms":3,"prompt_ms":41.5}}
+
+data: {"id":"gen-1760000000-Xk3","provider":"UpstreamHost","service_tier":"default","object":"chat.completion.chunk","created":1760000000,"model":"vendor/test-model","system_fingerprint":"fp_gw_7","choices":[{"index":0,"delta":{"content":null,"reasoning":null},"finish_reason":null}],"timings":{"queue_ms":3,"prompt_ms":41.5}}
+
+data: {"id":"gen-1760000000-Xk3","provider":"UpstreamHost","service_tier":"default","object":"chat.completion.chunk","created":1760000000,"model":"vendor/test-model","system_fingerprint":"fp_gw_7","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}],"timings":{"queue_ms":3,"prompt_ms":41.5}}
+
+: still working
+
+data: {"id":"gen-1760000000-Xk3","provider":"UpstreamHost","service_tier":"default","object":"chat.completion.chunk","created":1760000000,"model":"vendor/test-model","system_fingerprint":"fp_gw_7","choices":[{"index":0,"delta":{"content":"there"},"finish_reason":null}],"timings":{"queue_ms":3,"prompt_ms":41.5}}
+
+data: {"id":"gen-1760000000-Xk3","provider":"UpstreamHost","service_tier":"default","object":"chat.completion.chunk","created":1760000000,"model":"vendor/test-model","system_fingerprint":"fp_gw_7","choices":[{"index":0,"delta":{},"finish_reason":"stop","native_finish_reason":"STOP"}],"timings":{"queue_ms":3,"prompt_ms":41.5},"usage":{"prompt_tokens":20,"completion_tokens":4,"total_tokens":24,"cost":2e-05,"prompt_tokens_details":{"cached_tokens":0}}}
+
+data: [DONE]
+

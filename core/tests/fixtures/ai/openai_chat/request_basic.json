@@ -1,0 +1,18 @@
+{
+  "model": "test-model",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a terminal assistant."
+    },
+    {
+      "role": "user",
+      "content": "hello"
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "max_tokens": 256
+}
