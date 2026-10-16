@@ -424,8 +424,8 @@ impl NetworkPolicy {
     }
 }
 
-/// Metadata endpoints of the large cloud hosts and the addresses that give instance credentials, each with the reason it
-/// is refused. They are checked before the local-network ranges, because one of them (100.100.100.200) lies inside one.
+/// Metadata endpoints of the large cloud hosts and the addresses that give instance credentials, each with the reason
+/// it is refused. They are checked before the local-network ranges, because one of them (100.100.100.200) lies inside one.
 const METADATA_V4: [([u8; 4], &str); 5] = [
     ([169, 254, 169, 254], "the instance metadata service of the large cloud hosts"),
     ([169, 254, 170, 2], "the container credentials endpoint"),
@@ -439,8 +439,8 @@ const METADATA_V6: [u16; 8] = [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254];
 
 /// The class of an address, or the reason it is refused.
 ///
-/// An IPv4-mapped IPv6 address and an address in the well-known NAT64 prefix (`64:ff9b::/96`) are classified by the IPv4
-/// address they carry. Precedence: unspecified, metadata, link-local, multicast, reserved, loopback, local network
+/// An IPv4-mapped IPv6 address and an address in the well-known NAT64 prefix (`64:ff9b::/96`) are classified by the
+/// IPv4 address they carry. Precedence: unspecified, metadata, link-local, multicast, reserved, loopback, local network
 /// (10/8, 172.16/12, 192.168/16, 100.64/10, `fc00::/7`, `fec0::/10`), everything else is the cloud. The answer is
 /// never `OnDevice`.
 pub fn classify_ip(ip: IpAddr) -> Result<Locality, Refusal> {
@@ -563,8 +563,8 @@ impl Target {
     /// network.
     ///
     /// Rules, in order: the text is trimmed; empty is `Syntax`; over [`MAX_URL`] is `TooLong`; a control character or
-    /// white space inside is `Syntax`; a backslash or a percent-encoded slash, backslash or dot is `Path`; a text the URL
-    /// parser rejects is `Syntax`; a scheme other than https and http is `Scheme`; a user name or password is
+    /// white space inside is `Syntax`; a backslash or a percent-encoded slash, backslash or dot is `Path`; a text the
+    /// URL parser rejects is `Syntax`; a scheme other than https and http is `Scheme`; a user name or password is
     /// `Credentials`; no host is `Host`; port 0 is `Port`; a query or fragment is `Query`; an IP literal must be an
     /// allowed class for the scheme; a host name with plain http is allowed only for `localhost` (and `*.localhost`) or
     /// with the opt-in.
