@@ -105,6 +105,35 @@ test("the golden settings view is read as it is", () => {
   assert.deepEqual(view.warnings, ["settings.json: font_size 9999 is outside 8..=40; 40 is used"]);
 });
 
+test("the AI settings are read with their defaults and a wrong type costs only that key", () => {
+  const golden = readSettingsView(sample());
+  assert.equal(golden.settings.ai_local_only, false);
+  assert.equal(golden.settings.ai_local_context, "ask");
+
+  const set = sample();
+  set.settings.ai_local_only = true;
+  set.settings.ai_local_context = "auto";
+  const read = readSettingsView(set);
+  assert.equal(read.settings.ai_local_only, true);
+  assert.equal(read.settings.ai_local_context, "auto");
+
+  // A view that lacks both, or holds a wrong type, is still a view with the defaults; the other settings are kept.
+  const lacking = sample();
+  delete lacking.settings.ai_local_only;
+  delete lacking.settings.ai_local_context;
+  for (const [only, context] of [[undefined, undefined], ["yes", "sometimes"], [null, null], [1, 2], [[], {}], ["true", "AUTO"]]) {
+    const view = structuredClone(lacking);
+    if (only !== undefined) view.settings.ai_local_only = only;
+    if (context !== undefined) view.settings.ai_local_context = context;
+    const got = readSettingsView(view);
+    assert.ok(got, "a wrong AI setting must not refuse the view");
+    assert.equal(got.settings.ai_local_only, false);
+    assert.equal(got.settings.ai_local_context, "ask");
+    assert.equal(got.settings.font_size, 14);
+    assert.equal(got.settings.theme, "aubergine");
+  }
+});
+
 test("a view with a value of the wrong type or kind is refused as a whole", () => {
   const broken = [
     (v) => (v.settings.font_size = "14"),

@@ -24,6 +24,8 @@ export interface SettingsApi {
   watch(fn: () => void): () => void;
   /** The person asked for the key binding editor: called as the dialog closes, which then opens the editor. */
   editBindings(): void;
+  /** The person asked for the AI providers dialog: called as the dialog closes, which then opens that dialog. */
+  editAi(): void;
 }
 
 /** One control: the setting it shows, how to read what was entered and how to show the setting's value. */
@@ -255,6 +257,9 @@ async function show(api: SettingsApi): Promise<void> {
     const bindings = el("button", "", actions);
     bindings.type = "button";
     bindings.textContent = "Key bindings";
+    const providers = el("button", "", actions);
+    providers.type = "button";
+    providers.textContent = "AI providers";
     const close = el("button", "dlg-ok", actions);
     close.type = "button";
     close.textContent = "Close";
@@ -306,6 +311,10 @@ async function show(api: SettingsApi): Promise<void> {
     close.addEventListener("click", finish);
     bindings.addEventListener("click", () => {
       api.editBindings();
+      finish();
+    });
+    providers.addEventListener("click", () => {
+      api.editAi();
       finish();
     });
     reload.addEventListener("click", () => {

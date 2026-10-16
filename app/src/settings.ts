@@ -6,6 +6,7 @@ import { effectiveUiScale, osTextScaleOf, refresh as refreshPreferences, watch a
 import { registerAction, replaceAction, unregisterAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { CURSOR_COLOR, FONT_PX, setFontPx } from "./frame.js";
+import { openProviders } from "./aisettings.js";
 import { openKeybindings } from "./keybindings-ui.js";
 import { focusInput, setBindings, setPasteConfirm } from "./keyboard.js";
 import {
@@ -212,7 +213,7 @@ function reloadOnFocus(): void {
 }
 
 /** Call `fn` after every accepted view; the returned function stops it. */
-function watch(fn: () => void): () => void {
+export function watch(fn: () => void): () => void {
   watchers.add(fn);
   return () => void watchers.delete(fn);
 }
@@ -222,21 +223,30 @@ function openBindings(): void {
   void openKeybindings({ change, watch }).then(focusInput);
 }
 
+/** Open the AI providers dialog and give the keyboard back to the terminal when it closes. */
+function openAiProviders(): void {
+  void openProviders().then(focusInput);
+}
+
 /**
  * Open the dialog and give the keyboard back to the terminal when it closes, unless the person asked for the
- * key binding editor from it: the editor takes over then and returns the keyboard when it closes.
+ * key binding editor or the AI providers from it: that dialog takes over then and returns the keyboard when it closes.
  */
 function openDialog(): void {
-  let next = false;
+  let next: "none" | "bindings" | "ai" = "none";
   void openSettings({
     change,
     reload,
     watch,
     editBindings: () => {
-      next = true;
+      next = "bindings";
+    },
+    editAi: () => {
+      next = "ai";
     },
   }).then(() => {
-    if (next) openBindings();
+    if (next === "bindings") openBindings();
+    else if (next === "ai") openAiProviders();
     else focusInput();
   });
 }

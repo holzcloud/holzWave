@@ -7,20 +7,41 @@
 // goes is told by the chat after a turn. It probes nothing: no test connection, no model list, no scan for local servers.
 // The list of providers is read with `ai_profiles` when the dialog opens and after a write, never anywhere else; every
 // successful read is handed to `onProfilesChanged` listeners (the chat), so a saved provider shows without a reload.
+import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, fitNodes, loadStyles, setText } from "./dom.js";
+import { focusInput } from "./keyboard.js";
 import { pushKeyHandler } from "./keystack.js";
+import { state } from "./state.js";
 import {
-  PRESETS, WIRE_LABELS, addressHint, describeFault, draftOf, inputOf, keyAdvice, keyTone, keyWord, newDraft, presetOf,
-  readProfileViews, sameDraft,
+  LOCAL_CONTEXT_HINT, LOCAL_CONTEXT_OPTIONS, LOCAL_ONLY_HINT, PRESETS, WIRE_LABELS, addressHint, describeFault,
+  disclosureWords, draftOf, inputOf, keyAdvice, keyTone, keyWord, newDraft, presetOf, readProfileViews, sameDraft,
 } from "./aistate.js";
 import type { Fault, KeyState, PresetTag, ProfileDraft, ProfileRow, Slot, WireTag } from "./aistate.js";
 
 /** Called with the raw answer of `ai_profiles` after every successful read the dialog makes. */
 type ProfilesListener = (raw: unknown) => void;
 
+/** What the dialog needs from `settings.ts` (injected: the dialog never imports the module that changes settings). */
+export interface AiSettingsApi {
+  /** Ask the core to set `key` to `value()`; resolves to null on success and to the core's reason on failure. */
+  change(key: string, value: () => unknown): Promise<string | null>;
+  /** Call `fn` whenever a new settings view was accepted; the returned function stops it. */
+  watch(fn: () => void): () => void;
+}
+
 const listeners = new Set<ProfilesListener>();
 let opened: Promise<void> | null = null;
+let api: AiSettingsApi | null = null;
+
+/**
+ * Hand the dialog the settings it changes and register the page action `AI providers…` (no chord and no row in the core's
+ * key table, like `keybindings.open`). Without this call the dialog has no privacy group.
+ */
+export function initAiSettings(settings: AiSettingsApi): void {
+  api = settings;
+  registerAction({ id: "ai.settings", title: "AI providers…", run: () => void openProviders().then(focusInput) });
+}
 
 /** Call `fn` with the raw answer of `ai_profiles` after every successful read the dialog makes; the returned function stops it. */
 export function onProfilesChanged(fn: ProfilesListener): () => void {
@@ -111,6 +132,65 @@ async function show(focus: string | undefined): Promise<void> {
       el("legend", "label", set).textContent = legend;
       return set;
     };
+
+    // ---- privacy: two switches that show only what the core answered ---------------------------------------------
+
+    const settings = api;
+    let drawPrivacy = (): void => {};
+    let stopWatching = (): void => {};
+    if (settings !== null) {
+      const privacy = group("aiset-privacy", "Privacy");
+      const onlyWrap = el("div", "aiset-field aiset-check", privacy);
+      const onlyInput = el("input", "", onlyWrap);
+      onlyInput.id = "aiset-local-only";
+      onlyInput.type = "checkbox";
+      onlyInput.setAttribute("aria-describedby", "aiset-local-only-hint");
+      const onlyLabel = el("label", "", onlyWrap);
+      onlyLabel.htmlFor = "aiset-local-only";
+      onlyLabel.textContent = "Local only";
+      const onlyHint = el("p", "aiset-hint", onlyWrap);
+      onlyHint.id = "aiset-local-only-hint";
+      onlyHint.textContent = LOCAL_ONLY_HINT;
+
+      const contextSet = el("fieldset", "aiset-choice", privacy);
+      contextSet.dataset.choice = "local-context";
+      el("legend", "", contextSet).textContent = "Models on this computer";
+      const contextOptions = el("div", "aiset-options", contextSet);
+      const contextRadios = LOCAL_CONTEXT_OPTIONS.map(([value, text]) => {
+        const item = el("label", "aiset-option", contextOptions);
+        const radio = el("input", "", item);
+        radio.type = "radio";
+        radio.name = "aiset-local-context";
+        radio.value = value;
+        el("span", "", item).textContent = text;
+        return radio;
+      });
+      el("p", "aiset-hint", contextSet).textContent = LOCAL_CONTEXT_HINT;
+
+      // The controls are drawn from the last view the core sent, never from what was asked for.
+      drawPrivacy = (): void => {
+        const view = state.settings;
+        onlyInput.disabled = view === null;
+        for (const r of contextRadios) r.disabled = view === null;
+        onlyInput.checked = view?.settings.ai_local_only === true;
+        for (const r of contextRadios) r.checked = view !== null && r.value === view.settings.ai_local_context;
+        if (view === null) status("The settings are not available.");
+      };
+      const ask = (key: string, wanted: unknown): void => {
+        drawPrivacy(); // back to what the core last said, until it answers
+        void settings.change(key, () => wanted).then((reason) => {
+          if (done) return;
+          if (reason !== null) status(reason, "error");
+          drawPrivacy();
+        });
+      };
+      onlyInput.addEventListener("change", () => ask("ai_local_only", onlyInput.checked));
+      contextOptions.addEventListener("change", () => {
+        const chosen = contextRadios.find((r) => r.checked);
+        if (chosen) ask("ai_local_context", chosen.value);
+      });
+      stopWatching = settings.watch(() => drawPrivacy());
+    }
 
     // ---- the list ------------------------------------------------------------------------------------------------
 
@@ -224,6 +304,16 @@ async function show(focus: string | undefined): Promise<void> {
     const keyOf = keyPart("aiset-key", "API key", "provider");
     const gatewayOf = keyPart("aiset-gateway-key", "Gateway token", "gateway");
 
+    // The notice for a gateway or a server of the user's own: shown only when the core's view of the provider carries one.
+    const card = el("div", "aiset-disclosure", form);
+    card.hidden = true;
+    el("span", "aiset-mark", card).textContent = "!";
+    const cardText = el("div", "aiset-disclosure-text", card);
+    const cardTitle = el("p", "aiset-disclosure-title", cardText);
+    const cardBody = el("p", "aiset-disclosure-body", cardText);
+    const allowButton = el("button", "aiset-allow", cardText);
+    allowButton.type = "button";
+
     const formActions = el("div", "aiset-form-actions", form);
     const removeButton = el("button", "aiset-remove", formActions);
     removeButton.type = "button";
@@ -254,6 +344,7 @@ async function show(focus: string | undefined): Promise<void> {
       saveButton.disabled = value;
       addButton.disabled = value;
       removeButton.disabled = value;
+      allowButton.disabled = value;
       keyOf.clear.disabled = value;
       gatewayOf.clear.disabled = value;
     };
@@ -375,6 +466,19 @@ async function show(focus: string | undefined): Promise<void> {
       drawKey(gatewayOf, row?.gateway_key ?? "not_set", "optional", row !== undefined && row.gateway_key !== null);
     };
 
+    /** The notice of the provider shown, from the core's view of it; nothing for a new provider or one with no notice. */
+    const drawDisclosure = (): void => {
+      const notice = savedRow()?.disclosure ?? null;
+      card.hidden = notice === null;
+      const row = savedRow();
+      if (notice === null || row === undefined) return;
+      const words = disclosureWords(notice.kind, row.preset, notice.host);
+      card.dataset.kind = notice.kind;
+      setText(cardTitle, words.title);
+      setText(cardBody, words.body);
+      setText(allowButton, words.allow);
+    };
+
     /** Put a draft into the form. `saved` is true for a provider that exists: its type cannot change. */
     const fillForm = (draft: ProfileDraft, saved: boolean, keepKeys: boolean): void => {
       filled = draft;
@@ -398,6 +502,7 @@ async function show(focus: string | undefined): Promise<void> {
       disarm();
       drawHint();
       drawKeys();
+      drawDisclosure();
     };
 
     const readDraft = (): ProfileDraft => ({
@@ -432,6 +537,7 @@ async function show(focus: string | undefined): Promise<void> {
         word.dataset.state = r.key;
         word.dataset.tone = keyTone(r.key, info?.key ?? "optional");
         word.textContent = keyWord(r.key);
+        if (r.disclosure !== null) el("span", "aiset-review", item).textContent = "review";
         radio.addEventListener("change", () => {
           if (radio.checked) choose(r.id);
         });
@@ -440,14 +546,22 @@ async function show(focus: string | undefined): Promise<void> {
     };
 
     /** Show the provider `id` in the form, or a new provider for null. `keepKeys` leaves what was typed in the key fields. */
-    const select = (id: string | null, keepKeys = false): void => {
+    const select = (id: string | null, keepKeys = false, keepForm = false): void => {
       const row = id === null ? undefined : list.find((r) => r.id === id);
+      const same = row !== undefined && row.id === selected;
       selected = row === undefined ? null : row.id;
       for (const item of rowsBox.querySelectorAll<HTMLElement>(".aiset-row")) {
         const chosen = item.dataset.id === selected;
         item.dataset.chosen = chosen ? "true" : "false";
         const radio = item.querySelector<HTMLInputElement>('input[type="radio"]');
         if (radio) radio.checked = chosen;
+      }
+      if (keepForm && same) {
+        // The provider shown is the same: what is typed stays, and the states and the notice follow the core's view.
+        filled = draftOf(row);
+        drawKeys();
+        drawDisclosure();
+        return;
       }
       clearErrors();
       fillForm(row === undefined ? newDraft() : draftOf(row), row !== undefined, keepKeys);
@@ -469,7 +583,7 @@ async function show(focus: string | undefined): Promise<void> {
      * `prefer` is the provider to show afterwards (the one just saved), else the one shown now, else a new one. `keepKeys`
      * leaves what is typed in the key fields (a key the core refused stays for the next try).
      */
-    const read = (prefer?: string | null, keepKeys = false): Promise<boolean> => {
+    const read = (prefer?: string | null, keepKeys = false, keepForm = false): Promise<boolean> => {
       const mine = ++readNo;
       const run = tail.then(async () => {
         if (done || mine !== readNo) return false;
@@ -496,7 +610,7 @@ async function show(focus: string | undefined): Promise<void> {
         }
         const want = prefer === undefined ? selected : prefer;
         drawList();
-        select(list.some((r) => r.id === want) ? want : null, keepKeys);
+        select(list.some((r) => r.id === want) ? want : null, keepKeys, keepForm);
         return ok;
       });
       tail = run.then(
@@ -583,6 +697,32 @@ async function show(focus: string | undefined): Promise<void> {
       if (ok) status("Removed.");
     };
 
+    /**
+     * Allow the host of the provider shown. This is the one call that sends `acknowledge_gateway` true, and it sends the
+     * fields of the saved provider, never what is typed in the form; `Save` and every other path send false.
+     */
+    const allow = async (): Promise<void> => {
+      const row = savedRow();
+      if (busy || done || row === undefined || row.disclosure === null) return;
+      const saved = draftOf(row);
+      setBusy(true);
+      status("Saving…");
+      try {
+        await call("ai_profile_save", { input: inputOf(saved, true) });
+      } catch (e) {
+        if (done) return;
+        setBusy(false);
+        status("");
+        showFault(describeFault(e, "profile"));
+        return;
+      }
+      if (done) return;
+      const ok = await read(row.id, true, true);
+      if (done) return;
+      setBusy(false);
+      if (ok) status("Allowed.");
+    };
+
     let armed = false;
     function disarm(): void {
       armed = false;
@@ -633,6 +773,7 @@ async function show(focus: string | undefined): Promise<void> {
     });
     saveButton.addEventListener("click", () => void save());
     removeButton.addEventListener("click", () => void remove());
+    allowButton.addEventListener("click", () => void allow());
     keyOf.clear.addEventListener("click", () => void clearKey(keyOf));
     gatewayOf.clear.addEventListener("click", () => void clearKey(gatewayOf));
     // The first click on the remove button only asks; any other click or a key in a field takes the question back.
@@ -654,6 +795,7 @@ async function show(focus: string | undefined): Promise<void> {
       if (done) return;
       done = true;
       pop();
+      stopWatching();
       backdrop.remove();
       resolve();
     };
@@ -712,10 +854,16 @@ async function show(focus: string | undefined): Promise<void> {
     // The keyboard moves into the dialog at once; it goes to the first row, or to the name of a new provider, when the
     // list has been read.
     fillForm(newDraft(), false, false);
+    drawPrivacy();
     box.focus({ preventScroll: true });
     void read(focus ?? null).then(() => {
       if (done) return;
       if (focus === undefined && selected === null && list.length > 0) select(list[0]?.id ?? null);
+      // A provider that waits for its review is opened on the button that allows it.
+      if (savedRow()?.disclosure && focus !== undefined) {
+        allowButton.focus({ preventScroll: true });
+        return;
+      }
       const row = selected === null ? undefined : rowsBox.querySelector<HTMLInputElement>('input[type="radio"]:checked');
       (row ?? nameInput).focus({ preventScroll: true });
     });

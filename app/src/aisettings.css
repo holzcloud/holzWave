@@ -84,5 +84,18 @@
 /* Removing a provider asks with a second click: the armed button has a danger border. */
 .ai-settings button.aiset-remove[data-armed="true"] { border-color: var(--hw-danger); color: var(--hw-ink); }
 
+/* A provider that waits for its review: the word in the list, and the card in the form. The words are the first cue, the warn
+   colour and the bar the second. */
+.ai-settings .aiset-review { flex: none; color: var(--hw-warn); text-decoration: underline; }
+.ai-settings .aiset-review::before { content: "! "; font-weight: 700; }
+.ai-settings .aiset-disclosure { display: flex; gap: .667rem; box-sizing: border-box; margin: .5rem 0; padding: .5rem .667rem;
+                                 border: 1px solid var(--hw-line); border-left: 2px solid var(--hw-warn); border-radius: .333rem; }
+.ai-settings .aiset-mark { flex: none; width: 1rem; color: var(--hw-warn); font-weight: 700; }
+.ai-settings .aiset-disclosure-text { flex: 1 1 auto; min-width: 0; }
+.ai-settings .aiset-disclosure-title { margin: 0 0 .167rem; color: var(--hw-ink); font-weight: 700; overflow-wrap: anywhere; }
+.ai-settings .aiset-disclosure-body { margin: 0 0 .5rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.ai-settings button.aiset-allow { max-width: 100%; border-color: var(--hw-warn); color: var(--hw-ink); text-transform: none;
+                                  overflow-wrap: anywhere; }
+
 /* A hidden part is hidden, whatever display its class gives it: this rule comes last on purpose. */
 .ai-settings [hidden] { display: none; }

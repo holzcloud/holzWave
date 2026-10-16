@@ -4,8 +4,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  PRESETS, REASONS, SLOTS, WIRE_LABELS, addressHint, describeFault, draftOf, inputOf, keyAdvice, keyTone, keyWord, newDraft,
-  presetOf, readProfileViews, sameDraft,
+  LOCAL_CONTEXT_HINT, LOCAL_CONTEXT_OPTIONS, LOCAL_ONLY_HINT, PRESETS, REASONS, SLOTS, WIRE_LABELS, addressHint,
+  describeFault, disclosureWords, draftOf, inputOf, keyAdvice, keyTone, keyWord, newDraft, presetOf, readProfileViews,
+  reviewIds, sameDraft,
 } from "../../dist/aistate.js";
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/ai_profiles.json", import.meta.url), "utf8"));
@@ -244,4 +245,41 @@ test("keys are told in words, and a warning is more than a colour", () => {
   assert.equal(addressHint(custom, "openai_chat"), "Required: the address of your gateway or server.");
   assert.equal(addressHint(presetOf("cloudflare_gateway"), "gemini"), "Required: the address of your gateway or server.");
   assert.equal(addressHint(presetOf("vercel_gateway"), "anthropic"), "Leave empty to use the address of this type.");
+});
+
+test("a disclosure names the host and the kind", () => {
+  const router = disclosureWords("gateway", "openrouter", "openrouter.ai");
+  assert.equal(router.title, "Gateway: openrouter.ai");
+  assert.ok(router.body.includes("may keep a log"), router.body);
+  assert.ok(router.body.includes("holzWave sends nothing to openrouter.ai until you allow it."));
+  assert.ok(router.body.includes("holzWave asks OpenRouter not to use providers that keep your data."), "what the core asks");
+  assert.ok(router.body.includes("OpenRouter can still log what it receives."), "and that logging stays possible");
+  assert.equal(router.allow, "Allow openrouter.ai");
+
+  const edge = disclosureWords("gateway", "cloudflare_gateway", "gateway.example.net");
+  assert.equal(edge.title, "Gateway: gateway.example.net");
+  assert.equal(edge.body.includes("OpenRouter"), false, "the sentence about OpenRouter is for its type only");
+  assert.ok(edge.body.includes("may keep a log"));
+
+  const own = disclosureWords("third_party", "custom", "example.org");
+  assert.equal(own.title, "Your own server: example.org");
+  assert.ok(own.body.includes("holzWave cannot tell who runs example.org or what it keeps."), own.body);
+  assert.ok(own.body.includes("sees every prompt you send to it"));
+  assert.equal(own.allow, "Allow example.org");
+
+  // A long host is cut at 253 characters and loses control characters; no text holds an address.
+  const long = disclosureWords("gateway", "custom", `${"h".repeat(300)}`);
+  assert.equal(long.title, `Gateway: ${"h".repeat(253)}`);
+  assert.equal(long.allow, `Allow ${"h".repeat(253)}`);
+  assert.equal(disclosureWords("gateway", "x", "a\u0000b").allow, "Allow ab");
+  for (const w of [router, edge, own, long]) assert.equal(`${w.title}${w.body}${w.allow}`.includes("://"), false);
+
+  // The providers that wait for review, in list order; nothing for an answer that is not one.
+  assert.deepEqual(reviewIds({ profiles: golden.views, notes: [] }), ["router", "moved"]);
+  for (const raw of [null, undefined, 3, "x", [], {}, { profiles: "x" }]) assert.deepEqual(reviewIds(raw), []);
+
+  // The words of the two privacy switches.
+  assert.ok(LOCAL_ONLY_HINT.includes("local network"));
+  assert.ok(LOCAL_CONTEXT_HINT.includes("always asks"));
+  assert.deepEqual(LOCAL_CONTEXT_OPTIONS, [["ask", "Ask first"], ["auto", "Do not ask"]]);
 });

@@ -16,6 +16,7 @@
 // `mountChat` and tells `chatClosed` when a chat pane left the core's list.
 import { registerAction } from "./actions.js";
 import { onProfilesChanged, openProviders } from "./aisettings.js";
+import { reviewIds } from "./aistate.js";
 import { call, listen } from "./bridge.js";
 import { paneBlocks, setChatTitle } from "./blockstate.js";
 import { ChatFeed, isChatId, messageText, readChatEvent, readChatState } from "./chatstate.js";
@@ -136,6 +137,8 @@ let opener: BlockOpener | null = null;
 let button: HTMLButtonElement | null = null;
 /** The profile chosen last in this window: a new chat starts with it. */
 let lastChoice: string | null = null;
+/** The providers that wait for the user's review (a gateway or a server of the user's own that was not allowed yet). */
+let review = new Set<string>();
 
 // ---- sessions and the core's events -----------------------------------------------------------------------------------
 
@@ -240,6 +243,8 @@ async function fetchSnapshot(s: Session): Promise<void> {
  */
 function takeProfiles(raw: unknown, all: boolean, asking: Session | null): void {
   const list = readProfiles(raw);
+  // The providers whose address waits for the user's review: replaced by every answer, so the guard and the button follow.
+  review = new Set(reviewIds(raw));
   const targets = all ? [...sessions.values()] : asking === null ? [] : [asking];
   for (const t of targets) {
     t.profiles = list;
@@ -534,7 +539,7 @@ class Mounted implements ChatView {
     this.where.dataset.leaves = view.leaves ? "true" : "false";
     const used = usageWords(!st.running && st.ended !== null ? st.ended.usage : st.usage);
     if (this.usage.textContent !== used) this.usage.textContent = used;
-    const way = setupLabel(s.profiles, 0);
+    const way = setupLabel(s.profiles, review.size);
     if (this.setup.textContent !== way) this.setup.textContent = way;
     if (this.picker !== null) this.drawPicker();
   }
@@ -882,6 +887,15 @@ class Mounted implements ChatView {
       if (pick.via === "ask") {
         this.say("Choose a provider first.", "note");
         await this.openPicker();
+        return;
+      }
+      // A provider that waits for its review is not sent to: the dialog opens on it and the draft stays. The core refuses
+      // such a send itself; this only saves the round trip and says why.
+      if (review.has(pick.id)) {
+        this.say("Review this provider first.", "error");
+        void openProviders(pick.id).then(() => {
+          if (this.alive) this.focus();
+        });
         return;
       }
       try {

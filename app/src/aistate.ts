@@ -433,3 +433,61 @@ export function addressHint(info: PresetInfo, wire: WireTag): string {
     ? "Leave empty to use the address of this type."
     : "Required: the address of your gateway or server.";
 }
+
+// ---- the review of a gateway or a server of the user's own ----------------------------------------------------------------------
+
+/** The longest host the page writes into a card or a button, in characters (the longest name a host can have). */
+const MAX_HOST = 253;
+
+/** The ids of the providers whose address waits for the user's review, in list order. */
+export function reviewIds(raw: unknown): string[] {
+  return readProfileViews(raw)
+    .profiles.filter((r) => r.disclosure !== null)
+    .map((r) => r.id);
+}
+
+/** The card the dialog shows for a provider that waits for review. */
+export interface DisclosureWords {
+  title: string;
+  body: string;
+  /** The text of the button that allows this host. */
+  allow: string;
+}
+
+/**
+ * What a gateway or a server of the user's own can see, and the button that allows it. The sentence about OpenRouter says
+ * only what the core does (it asks the gateway not to use providers that keep data) and that logging stays possible.
+ */
+export function disclosureWords(kind: DisclosureKind, preset: PresetTag | string, host: string): DisclosureWords {
+  const shown = clean(host, MAX_HOST);
+  if (kind === "gateway") {
+    const more =
+      preset === "openrouter"
+        ? " holzWave asks OpenRouter not to use providers that keep your data. OpenRouter can still log what it receives."
+        : "";
+    return {
+      title: `Gateway: ${shown}`,
+      body: `A gateway relays your prompts to other providers and may keep a log of them. holzWave sends nothing to ${shown} until you allow it.${more}`,
+      allow: `Allow ${shown}`,
+    };
+  }
+  return {
+    title: `Your own server: ${shown}`,
+    body: `holzWave cannot tell who runs ${shown} or what it keeps. It sees every prompt you send to it. holzWave sends nothing until you allow it.`,
+    allow: `Allow ${shown}`,
+  };
+}
+
+// ---- the privacy switches --------------------------------------------------------------------------------------------------------
+
+/** The hint of the `Local only` box. */
+export const LOCAL_ONLY_HINT =
+  "Refuse every request whose destination is not this computer. A server on your local network counts as not this computer.";
+/** The choices of `Models on this computer`: the value the core takes and the words. */
+export const LOCAL_CONTEXT_OPTIONS: readonly (readonly [string, string])[] = Object.freeze([
+  ["ask", "Ask first"],
+  ["auto", "Do not ask"],
+] as const);
+/** The hint of `Models on this computer`. */
+export const LOCAL_CONTEXT_HINT =
+  "Whether a model on this computer needs your consent before it sees terminal text. A provider that is not on this computer always asks.";

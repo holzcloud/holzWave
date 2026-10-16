@@ -37,6 +37,10 @@ export interface SettingsValues {
   smooth_scroll: boolean;
   /** A fading trail behind a cursor that jumps (DESK-28); off while motion is reduced whatever this says. */
   cursor_trail: boolean;
+  /** AI providers: refuse every request whose destination is not this computer. Read leniently: anything but `true` is false. */
+  ai_local_only: boolean;
+  /** AI providers: whether a model on this computer asks before it sees terminal text. Anything but `auto` is `ask`. */
+  ai_local_context: "ask" | "auto";
   /** The overrides as the user typed them: action id to chord text, the empty text meaning unbound. */
   keybindings: Record<string, string>;
 }
@@ -211,6 +215,8 @@ export function readSettingsView(raw: unknown): SettingsView | null {
       confirm_multiline_paste: s.confirm_multiline_paste,
       smooth_scroll: s.smooth_scroll,
       cursor_trail: s.cursor_trail,
+      ai_local_only: s.ai_local_only === true,
+      ai_local_context: s.ai_local_context === "auto" ? "auto" : "ask",
       keybindings: overrides,
     },
     themes,

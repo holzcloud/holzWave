@@ -6,6 +6,7 @@
 // state, geometry. This file only starts them.
 // Every window runs this same page; it listens with its own label (bridge) and says `window_ready` when it has drawn.
 import { call, listen } from "./bridge.js";
+import { initAiSettings } from "./aisettings.js";
 import { initBlocks, openBlock } from "./blocks.js";
 import { initChat } from "./chat.js";
 import { initChrome } from "./chrome.js";
@@ -24,6 +25,7 @@ import { initDragDrop, initDragDropEvents } from "./dragdrop.js";
 import { initPointer } from "./pointer.js";
 import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
 import { initSearch } from "./search-ui.js";
+import { change, watch as watchSettings } from "./settings.js";
 import { initSelection } from "./selection.js";
 import { renderStatus } from "./status.js";
 import type { View } from "./types.js";
@@ -60,6 +62,8 @@ async function main() {
   await initSync(() => {});
   // The AI chat: its title-bar button lands between the sync button and the sidebar button.
   await initChat(openBlock);
+  // The providers dialog changes the two privacy settings through the same queue as the Settings dialog.
+  initAiSettings({ change, watch: watchSettings });
   initHistory();
   await initSidebar();
   initCopyMode(renderStatus);

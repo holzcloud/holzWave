@@ -3,7 +3,7 @@
 // the golden that the core writes (`tests/fixtures/ai_profiles.json`).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { boot, calls, choosePreset, fillField, openAi, openDialog, sendText } from "./ai-lib.mjs";
+import { PROFILE, boot, calls, choosePreset, fillField, openAi, openDialog, sendText } from "./ai-lib.mjs";
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
@@ -14,6 +14,10 @@ export default async function ({ page, url, errors }) {
   await shapeCase(page, url);
   await moveCase(page, url);
   await removeCase(page, url);
+  await privacyCase(page, url);
+  await disclosureCase(page, url);
+  await entryCase(page, url);
+  await guardCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -525,4 +529,261 @@ async function removeCase(page, url) {
   await page.waitForSelector(dlg, { state: "detached" });
   await page.waitForFunction(() => document.querySelector(".chat-chip")?.textContent === "no provider set up");
   assert.equal(await page.locator(".chat-setup").textContent(), "Set up…");
+}
+
+// ---- privacy, the disclosure, the ways in and the guard of the chat --------------------------------------------------------
+
+const protocol = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
+
+/** A gateway provider whose key is saved and whose address has not been allowed. */
+const ROUTER = {
+  id: "router", name: "Router", preset: "openrouter", wire: "openai_chat", base_url: "https://openrouter.ai/api/v1", model: "m1",
+  allow_lan_http: false, host: "openrouter.ai", key: "present", gateway_key: null, disclosure: null, locality: "cloud",
+};
+/** A server of the user's own on a public host. */
+const OWN = {
+  id: "own", name: "Own", preset: "custom", wire: "openai_chat", base_url: "https://llm.example.org/v1", model: "o1",
+  allow_lan_http: false, host: "llm.example.org", key: "not_set", gateway_key: null, disclosure: null, locality: "cloud",
+};
+const seedKeys = (page) =>
+  page.evaluate(() => {
+    window.__MOCK__.ai.keys = { router: { provider: { scope: "https://openrouter.ai", length: 20 } } };
+  });
+
+/** The calls of the AI commands (not the settings ones), as command names. */
+const aiCommands = (page) => page.evaluate(() => window.__MOCK__.calls.map(([cmd]) => cmd).filter((cmd) => cmd.startsWith("ai_")));
+
+async function privacyCase(page, url) {
+  await boot(page, url, { profiles: [], settings: true });
+  await openAi(page);
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+  await page.waitForFunction(() => window.__MOCK__.callsOf("get_settings").length >= 1);
+  await page.locator(".chat-setup").click();
+  await openDialog(page);
+  const only = page.locator("#aiset-local-only");
+  const ctx = (value) => page.locator(`input[name="aiset-local-context"][value="${value}"]`);
+  const settingCalls = () => calls(page, "set_setting");
+  const before = (await aiCommands(page)).length;
+
+  assert.equal(await only.isChecked(), false);
+  assert.equal(await ctx("ask").isChecked(), true);
+  assert.equal(await page.locator('fieldset[data-choice="local-context"] label').allTextContents().then((t) => t.join("|")), "Ask first|Do not ask");
+  assert.equal(await page.locator("fieldset.aiset-privacy > legend").textContent(), "Privacy");
+  assert.ok((await page.locator("#aiset-local-only-hint").textContent()).includes("local network"));
+
+  await only.click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("set_setting").length === 1);
+  assert.deepEqual(await settingCalls(), [{ key: "ai_local_only", value: true }]);
+  await page.waitForFunction(() => document.getElementById("aiset-local-only").checked);
+
+  // A refusal of the core: its reason is in the status line and the box goes back to the last good state.
+  await page.evaluate(() => {
+    window.__core.fail = { key: "ai_local_only", message: "the core refused this change" };
+  });
+  await only.click();
+  await page.waitForFunction(() => document.querySelector(".aiset-status")?.textContent === "the core refused this change");
+  assert.equal(await page.locator(".aiset-status").getAttribute("data-kind"), "error");
+  assert.equal(await only.isChecked(), true, "the last good state");
+  await page.evaluate(() => {
+    window.__core.fail = null;
+  });
+
+  // The radio group sends the value of the choice, once.
+  await page.locator('fieldset[data-choice="local-context"]').getByText("Do not ask", { exact: true }).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("set_setting").length === 3);
+  assert.deepEqual((await settingCalls())[2], { key: "ai_local_context", value: "auto" });
+  await page.waitForFunction(() => document.querySelector('input[name="aiset-local-context"][value="auto"]').checked);
+  await ctx("auto").focus();
+  await page.keyboard.press("ArrowUp");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("set_setting").length === 4);
+  assert.deepEqual((await settingCalls())[3], { key: "ai_local_context", value: "ask" });
+  await page.waitForFunction(() => document.querySelector('input[name="aiset-local-context"][value="ask"]').checked);
+
+  // A hand edit that the core saw shows without a request from the dialog.
+  const count = (await settingCalls()).length;
+  await page.evaluate(() => {
+    const view = window.__core.view();
+    view.settings.ai_local_only = false;
+    window.__core.set(view);
+    window.__MOCK__.emit("settings", view);
+  });
+  await page.waitForFunction(() => document.getElementById("aiset-local-only").checked === false);
+  assert.equal((await settingCalls()).length, count, "no request for a change the core announced");
+
+  assert.equal((await aiCommands(page)).length, before, "the controls made no AI call");
+  await page.keyboard.press("Escape");
+
+  // A core that cannot answer: both controls are off and the line says so.
+  await boot(page, url, { profiles: [], settings: { unavailable: true } });
+  await openAi(page);
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+  await page.locator(".chat-setup").click();
+  await openDialog(page);
+  assert.equal(await page.locator("#aiset-local-only").isDisabled(), true);
+  assert.equal(await page.locator('input[name="aiset-local-context"]').first().isDisabled(), true);
+  assert.equal(await page.locator('input[name="aiset-local-context"]').last().isDisabled(), true);
+  assert.equal(await page.locator(".aiset-status").textContent(), "The settings are not available.");
+  await page.keyboard.press("Escape");
+}
+
+async function disclosureCase(page, url) {
+  await boot(page, url, { profiles: [ROUTER, OWN, PROFILE] });
+  await seedKeys(page);
+  await openAi(page);
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+  await page.waitForFunction(() => document.querySelector(".chat-setup")?.textContent === "Providers… (2 to review)");
+  await page.locator(".chat-setup").click();
+  await openDialog(page);
+
+  const card = page.locator(".aiset-disclosure");
+  const router = page.locator('label.aiset-row[data-id="router"]');
+  assert.equal(await router.locator(".aiset-review").textContent(), "review");
+  assert.equal(await page.locator('label.aiset-row[data-id="own"] .aiset-review').count(), 1);
+  assert.equal(await page.locator('label.aiset-row[data-id="local-1"] .aiset-review').count(), 0, "this computer needs no review");
+  assert.equal(await router.locator('input[type="radio"]').isChecked(), true);
+  assert.equal(await card.getAttribute("data-kind"), "gateway");
+  assert.equal(await card.locator(".aiset-disclosure-title").textContent(), "Gateway: openrouter.ai");
+  const body = await card.locator(".aiset-disclosure-body").textContent();
+  assert.ok(body.includes("may keep a log of them"), body);
+  assert.ok(body.includes("OpenRouter can still log what it receives."), body);
+  assert.equal(await page.locator(".aiset-allow").textContent(), "Allow openrouter.ai");
+
+  // An unrelated edit saved with `Save` does not allow anything.
+  await fillField(page, "#aiset-model", "m2");
+  await page.locator(".aiset-save").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profile_save").length === 1);
+  assert.equal((await calls(page, "ai_profile_save"))[0].input.acknowledge_gateway, false);
+  await page.waitForFunction(() => document.querySelector(".aiset-status")?.textContent === "Saved.");
+  assert.equal(await card.isVisible(), true, "still waiting");
+
+  // `Allow` sends the saved fields, not the unsaved edit, with the acknowledgement; nothing else does.
+  await fillField(page, "#aiset-model", "unsaved");
+  await page.locator(".aiset-allow").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profile_save").length === 2);
+  assert.deepEqual((await calls(page, "ai_profile_save"))[1], {
+    input: {
+      id: "router", name: "Router", preset: "openrouter", wire: "openai_chat", base_url: "https://openrouter.ai/api/v1",
+      model: "m2", allow_lan_http: false, acknowledge_gateway: true,
+    },
+  });
+  await page.waitForFunction(() => document.querySelector(".aiset-status")?.textContent === "Allowed.");
+  assert.equal(await card.isHidden(), true);
+  assert.equal(await router.locator(".aiset-review").count(), 0);
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.ai.acknowledged), ["openrouter.ai"]);
+  assert.equal(await page.locator("#aiset-model").inputValue(), "unsaved", "what was typed stays");
+  await page.waitForFunction(() => document.querySelector(".chat-setup")?.textContent === "Providers… (1 to review)");
+
+  // A new host asks again, and a key typed with the save does not allow it either.
+  await fillField(page, "#aiset-address", "https://proxy.example.net/v1");
+  await fillField(page, "#aiset-key", "abc123");
+  await page.locator(".aiset-save").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profile_save").length === 3);
+  assert.equal((await calls(page, "ai_profile_save"))[2].input.acknowledge_gateway, false);
+  await card.waitFor({ state: "visible" });
+  assert.equal(await card.locator(".aiset-disclosure-title").textContent(), "Gateway: proxy.example.net");
+  assert.equal(await page.locator(".aiset-allow").textContent(), "Allow proxy.example.net");
+
+  // A server of the user's own has its own words; this computer has no card.
+  await page.locator('label.aiset-row[data-id="own"] input').check();
+  assert.equal(await card.getAttribute("data-kind"), "third_party");
+  assert.equal(await card.locator(".aiset-disclosure-title").textContent(), "Your own server: llm.example.org");
+  assert.ok((await card.locator(".aiset-disclosure-body").textContent()).includes("holzWave cannot tell who runs llm.example.org"));
+  await page.locator('label.aiset-row[data-id="local-1"] input').check();
+  assert.equal(await card.isHidden(), true);
+  await page.locator('label.aiset-row[data-id="own"] input').check();
+  await page.locator(".aiset-remove").click();
+  await page.locator(".aiset-remove").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profile_remove").length === 1);
+
+  const saves = await calls(page, "ai_profile_save");
+  assert.equal(saves.filter((c) => c.input.acknowledge_gateway === true).length, 1, "only the one click of `Allow`");
+  await page.keyboard.press("Escape");
+}
+
+async function entryCase(page, url) {
+  await boot(page, url, { profiles: [], settings: true });
+  await page.evaluate(async () => {
+    window.__listed = (await import(new URL("actions.js", location.href).href)).listActions().map((a) => [a.id, a.title]);
+  });
+  const listed = await page.evaluate(() => window.__listed);
+  assert.ok(listed.some(([id, title]) => id === "ai.settings" && title === "AI providers…"), "the palette lists the action");
+  assert.equal(protocol.settings_view.keybindings.some((row) => row.action === "ai.settings"), false, "it has no chord");
+
+  const dialogs = () => page.locator(dlg).count();
+  const ime = () => page.evaluate(() => document.activeElement?.id);
+  await page.evaluate(() => window.__registry.runAction("ai.settings"));
+  await openDialog(page);
+  await page.evaluate(() => window.__registry.runAction("ai.settings"));
+  assert.equal(await dialogs(), 1, "a second run leaves one dialog");
+  assert.equal(await page.locator(".dlg-backdrop").count(), 1);
+  const keys = (await calls(page, "key")).length;
+  await page.keyboard.type("hello");
+  await page.keyboard.press("Enter");
+  assert.equal((await calls(page, "key")).length, keys, "nothing typed reaches the terminal");
+  assert.equal((await calls(page, "text")).length, 0);
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(dlg, { state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+  assert.equal(await ime(), "ime");
+
+  // From the Settings dialog: it closes, this one opens, and the keyboard goes back to the terminal at the end.
+  await page.evaluate(() => window.__registry.runAction("settings.open"));
+  await page.getByRole("dialog", { name: "Settings" }).waitFor();
+  await page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "AI providers", exact: true }).click();
+  await page.waitForSelector(dlg);
+  await openDialog(page);
+  assert.equal(await page.locator(".dlg.settings").count(), 0, "the Settings dialog is gone");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(dlg, { state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+
+  // From the chat bar: the keyboard goes back to the composer.
+  await openAi(page);
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+  await page.locator(".chat-setup").click();
+  await openDialog(page);
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(dlg, { state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+}
+
+async function guardCase(page, url) {
+  await boot(page, url, { profiles: [ROUTER] });
+  await seedKeys(page);
+  await openAi(page);
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+  await page.waitForFunction(() => document.querySelector(".chat-setup")?.textContent === "Providers… (1 to review)");
+  await sendText(page, "hello");
+  await page.waitForSelector(dlg);
+  await openDialog(page);
+  assert.equal((await calls(page, "ai_send")).length, 0, "nothing is sent to a provider that waits for review");
+  assert.equal(await page.locator(".chat-status").textContent(), "Review this provider first.");
+  assert.equal(await page.locator(".chat-status").getAttribute("data-kind"), "error");
+  assert.equal(await page.locator(".chat-input").inputValue(), "hello", "the draft stays");
+  await page.waitForFunction(() => document.activeElement?.classList.contains("aiset-allow"));
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), "Allow openrouter.ai");
+  assert.equal((await calls(page, "ai_profiles")).length, 2, "the chat's read and the dialog's, nothing more");
+
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelector(".aiset-status")?.textContent === "Allowed.");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(dlg, { state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+  await page.waitForFunction(() => document.querySelector(".chat-setup")?.textContent === "Providers…");
+  await page.locator(".chat-input").press("Enter");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 1);
+  assert.equal((await calls(page, "ai_send"))[0].profile, "router");
+
+  // Two providers: the one that was chosen is fine, the other waits; the send goes out.
+  await boot(page, url, { profiles: [ROUTER, PROFILE] });
+  await seedKeys(page);
+  await openAi(page);
+  await page.waitForFunction(() => document.activeElement?.matches("textarea.chat-input"));
+  await page.waitForFunction(() => document.querySelector(".chat-chip")?.tagName === "BUTTON");
+  await page.locator(".chat-chip").click();
+  await page.locator(".chat-choice", { hasText: "Local" }).click();
+  await sendText(page, "hi");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 1);
+  assert.equal((await calls(page, "ai_send"))[0].profile, "local-1");
+  assert.equal(await page.locator(dlg).count(), 0, "the guard did not open the dialog");
 }

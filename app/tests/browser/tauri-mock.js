@@ -25,6 +25,10 @@
 //                      The answer of `ai_profiles` is `{profiles, notes}` with copies of these entries without the
 //                      mock-only member; `ai_profile_save` changes this list (the profile part is live)
 //       notes          the `notes` member of the answer of `ai_profiles` (default none): the core's lines about its file
+//       acknowledged   the hosts whose disclosure the person allowed (`ai_profile_save` with `acknowledge_gateway`); the
+//                      answer of `ai_profiles` carries `disclosure: {host, kind}` for a profile of a gateway type (OpenRouter,
+//                      Vercel, Cloudflare, LiteLLM: `gateway`) or of the Custom type (`third_party`) whose host is not this
+//                      computer and is not in this list, else null. A profile saved with another host asks again
 //       keychain       true (default): `ai_key_set` stores; false: there is no keychain and a key write is refused with
 //                      the reason `no_secure_store`
 //       keys           what the keychain holds, by profile id: `{ [id]: { provider?: {scope, length}, gateway?: {...} } }`.
@@ -130,6 +134,7 @@
     notes: [],
     keychain: true,
     keys: {},
+    acknowledged: [],
   };
   const emptyState = (id) => ({
     conversation: id, title: "", profile: null, model: null, turn: 0, seq: 0, running: false, messages: [],
@@ -292,12 +297,23 @@
     if (!ai.keychain) return "no_secure_store";
     return held.scope === originOf(entry.base_url) ? "present" : "wrong_address";
   };
-  /** The entries as `ai_profiles` lists them: the mock-only members are left out, the key states are derived. */
+  /** The kind of notice a type asks for before its first send (mock-only table). */
+  const DISCLOSURE_KINDS = {
+    openrouter: "gateway", vercel_gateway: "gateway", cloudflare_gateway: "gateway", litellm: "gateway", custom: "third_party",
+  };
+  /** The notice of an entry: its host and kind, unless the host is this computer or was allowed. */
+  const disclosureOf = (entry) => {
+    const kind = DISCLOSURE_KINDS[entry.preset];
+    if (!kind || entry.locality === "loopback" || ai.acknowledged.includes(entry.host)) return null;
+    return { host: entry.host, kind };
+  };
+  /** The entries as `ai_profiles` lists them: the mock-only members are left out, the key states and notices are derived. */
   const listed = () =>
     stored().map((entry) => {
       const { locality: _locality, ...view } = structuredClone(entry);
       view.key = slotState(entry, "provider", entry.key);
       if (entry.gateway_key !== null) view.gateway_key = slotState(entry, "gateway", entry.gateway_key);
+      view.disclosure = disclosureOf(entry);
       return view;
     });
   /** The fixed phrase of a refusal; it holds nothing the person typed. */
@@ -385,6 +401,8 @@
       };
       if (found) Object.assign(found, entry);
       else list.push(entry);
+      // The notice is allowed only by a call that says so, and only when one applies to this host.
+      if (input.acknowledge_gateway === true && disclosureOf(entry) !== null) ai.acknowledged.push(entry.host);
       return entry.id;
     },
     ai_profile_remove: ({ profile }) => {
@@ -479,6 +497,12 @@
     set notes(value) {
       ai.notes = value;
     },
+    get acknowledged() {
+      return ai.acknowledged;
+    },
+    set acknowledged(value) {
+      ai.acknowledged = value;
+    },
     get keychain() {
       return ai.keychain;
     },
@@ -507,7 +531,7 @@
       clearTimeout(ai.timer);
       Object.assign(ai, {
         profiles: [], scripts: [], chatNo: 0, turnNo: NOW, queue: [], running: null, holdLeft: null, dropLeft: 0, timer: 0,
-        notes: [], keychain: true, keys: {},
+        notes: [], keychain: true, keys: {}, acknowledged: [],
       });
       ai.chats.clear();
       ai.sent.length = 0;

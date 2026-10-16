@@ -1,6 +1,11 @@
 // Shared helpers of the AI chat browser tests (ai*.test.mjs): a booted page with panes, saved profiles and a block layer
 // that opens chat panes, the profiles of the tests, and the two things a person does most, opening a chat and sending.
-import { callsOf } from "./lib.mjs";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { APP_DIR, callsOf } from "./lib.mjs";
+
+/** The settings view of the protocol golden: the core's answer to `get_settings`. */
+const SETTINGS_VIEW = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/protocol.json"), "utf8")).settings_view;
 
 /** One saved profile as `ai_profiles` lists it, plus the mock-only member `locality` that the route of a turn reports. */
 export const PROFILE = {
@@ -50,7 +55,9 @@ export const VIEW = {
  * mock: `block_open` splits the focused pane to the right, focuses the new pane and lists its block in `pane_blocks`.
  * `blocks` are the blocks that exist at the start.
  */
-export async function boot(page, url, { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2 } = {}) {
+export async function boot(
+  page, url, { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false } = {},
+) {
   await page.addInitScript(
     ([saved, shown, existing, chats]) => {
       window.__MOCK__.reset();
@@ -77,6 +84,8 @@ export async function boot(page, url, { profiles = [PROFILE], view = VIEW, block
     },
     [profiles, view, blocks, states],
   );
+  // The settings of the core are played only when asked for, so the chat cases keep their page exactly as it was.
+  if (settings) await settingsCore(page, typeof settings === "object" ? settings : {});
   await page.goto(`${url}index.html?renderer=canvas${search}`);
   if (view.dividers.length > 0) await page.waitForSelector(".divider");
   await page.waitForFunction((n) => window.__MOCK__.callsOf("start_pane").length >= n, starts);
@@ -149,4 +158,44 @@ export async function choosePreset(page, label) {
 /** Replace the text of a field of the open dialog. */
 export async function fillField(page, selector, text) {
   await page.locator(selector).fill(text);
+}
+
+/**
+ * Install an in-page core for the settings: `get_settings`, `reload_settings` and `set_setting` over a copy of the golden
+ * view, as the settings tests do. `set_setting` checks the type of the two AI keys, changes its copy, announces the
+ * `settings` event and answers the whole view; `window.__core.fail = { key, message }` makes one key fail with a text, and
+ * `window.__core.set(view)` replaces the copy. With `unavailable` the core cannot answer `get_settings`. Call it after the
+ * page's `__MOCK__.reset()` (`boot` does): a reset removes the handlers.
+ */
+export async function settingsCore(page, { unavailable = false } = {}) {
+  await page.addInitScript(
+    ([initial, cannot]) => {
+      let view = structuredClone(initial);
+      window.__core = {
+        fail: null,
+        view: () => structuredClone(view),
+        set(v) {
+          view = structuredClone(v);
+        },
+      };
+      const answer = () => {
+        if (cannot) throw "the settings are not available";
+        return structuredClone(view);
+      };
+      window.__MOCK__.on("get_settings", answer);
+      window.__MOCK__.on("reload_settings", answer);
+      window.__MOCK__.on("set_setting", ({ key, value }) => {
+        const fail = window.__core.fail;
+        if (fail && fail.key === key) throw fail.message;
+        if (!(key in view.settings)) throw `there is no setting called "${key}"`;
+        if (key === "ai_local_only" && typeof value !== "boolean") throw "invalid value for ai_local_only: expected true or false";
+        if (key === "ai_local_context" && value !== "ask" && value !== "auto") throw "invalid value for ai_local_context: expected ask or auto";
+        view.settings[key] = value;
+        const out = structuredClone(view);
+        window.__MOCK__.emit("settings", out);
+        return out;
+      });
+    },
+    [SETTINGS_VIEW, unavailable],
+  );
 }
