@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-Bt71xQ","object":"chat.completion.chunk","created":1760000100,"model":"test-model","system_fingerprint":"fp_a1b2c3","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}
+
+data: {"error":{"code":502,"type":"upstream_error","message":"upstream provider failed: CANARY-SERVER-TEXT"}}
+

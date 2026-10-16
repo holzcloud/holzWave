@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-Bt71xQ","object":"chat.completion.chunk","created":1760000100,"model":"test-model","system_fingerprint":"fp_a1b2c3","choices":[{"index":0,"delta":{"role":"assistant","content":"Let me check."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Bt71xQ","object":"chat.completion.chunk","created":1760000100,"model":"test-model","system_fingerprint":"fp_a1b2c3","choices":[{"index":0,"delta":{"tool_calls":[{"id":"","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-Bt71xQ","object":"chat.completion.chunk","created":1760000100,"model":"test-model","system_fingerprint":"fp_a1b2c3","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
