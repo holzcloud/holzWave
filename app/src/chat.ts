@@ -1,19 +1,27 @@
 // The AI chat as a pane (docs/design.md section 6.12): sessions over the page mirror of the core's chat (`ChatFeed`), the
-// transcript, the composer, the title-bar button `✦ AI` and the actions that open a chat. The core owns the chat; this
-// module draws what the core's events and snapshots say, and sends the typed text with `ai_send`, nothing else.
+// transcript, the composer, the provider chip and picker, the title-bar button `✦ AI` and the actions that open a chat.
+// The core owns the chat; this module draws what the core's events and snapshots say, and sends the typed text with
+// `ai_send`, nothing else.
 //
 // Every string goes onto the screen with `textContent` or a text node: model text and user text are never markup here.
 // Nothing in this module decides, grants or approves anything; the parts of a message that are not text (tool calls,
-// context, pending approvals) draw nothing until the plans that build them. This module never imports `blocks.ts`: the
-// opener of a block is handed to `initChat`, and `blocks.ts` mounts a chat pane through `mountChat`.
+// context, pending approvals) draw nothing until the plans that build them. Where a request goes is told by the core's
+// route and the profile list, never guessed; the profile list is read only when the user acts (the composer gets the
+// keyboard, the picker opens, a send needs it), so a chat restored at start-up reads no keychain. This module never
+// imports `blocks.ts`: the opener of a block is handed to `initChat`, and `blocks.ts` mounts a chat pane through
+// `mountChat` and tells `chatClosed` when a chat pane left the core's list.
 import { registerAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { paneBlocks, setChatTitle } from "./blockstate.js";
 import { ChatFeed, isChatId, messageText, readChatEvent, readChatState } from "./chatstate.js";
 import type { ChatMessage, Route } from "./chatstate.js";
-import { faultText, pickProfile, readProfiles } from "./chatview.js";
-import type { ProfileChoice } from "./chatview.js";
+import {
+  MAX_TEXT_BYTES, chipView, endNote, faultText, outcomeWord, pickProfile, readProfiles, roleWord, statusLabel, statusWord,
+  titleWords, tokenWords, usageWords, utf8Bytes,
+} from "./chatview.js";
+import type { ChipView, EndNote, ProfileChoice } from "./chatview.js";
 import { el, loadStyles } from "./dom.js";
+import { focusInput } from "./keyboard.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
 import { applyView } from "./scene.js";
 import { state } from "./state.js";
@@ -45,6 +53,14 @@ const MAX_SNAPSHOTS = 3;
 const BOTTOM_SLACK = 24;
 /** An Enter this soon after an input method committed text is the commit's, not a send. */
 const ENTER_AFTER_COMPOSITION_MS = 80;
+/** The keys that the composer shows, as the design says. */
+const HINT = "⏎ send · ⇧⏎ new line · Esc stop";
+
+/** One line under the transcript: a refusal or a hint of the page (`error`, `note`). */
+interface Notice {
+  text: string;
+  kind: "error" | "note";
+}
 
 /** One chat of this window: the feed that mirrors the core, what the user has chosen and typed, and the views that show it. */
 interface Session {
@@ -56,6 +72,8 @@ interface Session {
   routeTurn: number;
   /** The profiles the core listed when the user last acted; null until it is read. */
   profiles: ProfileChoice[] | null;
+  /** A read of the profile list is on its way. */
+  loadingProfiles: Promise<void> | null;
   /** The profile the user chose for this chat. */
   choice: string | null;
   draft: string;
@@ -63,8 +81,15 @@ interface Session {
   fetching: boolean;
   /** A send is on its way. */
   sending: boolean;
-  /** The line of the status row: a refusal or a hint; empty for none. */
-  status: string;
+  /** The refusal or hint under the transcript; cleared when the user types. */
+  notice: Notice | null;
+  /** Stop was pressed and the turn has not ended yet. */
+  stopping: boolean;
+  /** The turn Stop was pressed for, so one turn is cancelled once; -1 for none. */
+  cancelled: number;
+  /** A turn started in this window, so its outcome may be said; cleared words stay cleared until the next turn. */
+  sawTurn: boolean;
+  dismissed: boolean;
 }
 
 const sessions = new Map<string, Session>();
@@ -74,6 +99,8 @@ const dirty = new Set<Session>();
 let frame = 0;
 let opener: BlockOpener | null = null;
 let button: HTMLButtonElement | null = null;
+/** The profile chosen last in this window: a new chat starts with it. */
+let lastChoice: string | null = null;
 
 // ---- sessions and the core's events -----------------------------------------------------------------------------------
 
@@ -87,11 +114,16 @@ function sessionFor(conversation: string): Session {
       route: null,
       routeTurn: 0,
       profiles: null,
-      choice: null,
+      loadingProfiles: null,
+      choice: lastChoice,
       draft: "",
       fetching: false,
       sending: false,
-      status: "",
+      notice: null,
+      stopping: false,
+      cancelled: -1,
+      sawTurn: false,
+      dismissed: false,
     };
     sessions.set(conversation, s);
   }
@@ -119,9 +151,15 @@ function onAi(raw: unknown): void {
   if (event === null) return;
   const s = sessions.get(event.conversation);
   if (s === undefined) return;
-  if (event.kind === "turn_started" && event.turn >= s.routeTurn) {
-    s.route = event.route;
-    s.routeTurn = event.turn;
+  if (event.kind === "turn_started") {
+    if (event.turn >= s.routeTurn) {
+      s.route = event.route;
+      s.routeTurn = event.turn;
+    }
+    s.sawTurn = true;
+    s.dismissed = false;
+    s.stopping = false;
+    s.notice = null;
   }
   const result = s.feed.receive(event);
   if (result === "applied") schedule(s);
@@ -161,8 +199,28 @@ async function fetchSnapshot(s: Session): Promise<void> {
 }
 
 /** The profiles the core lists. Called when the user acts, never when a chat is mounted. */
-async function loadProfiles(s: Session): Promise<void> {
-  s.profiles = readProfiles(await call<unknown>("ai_profiles"));
+function loadProfiles(s: Session): Promise<void> {
+  if (s.loadingProfiles !== null) return s.loadingProfiles;
+  const reading = call("ai_profiles")
+    .then((raw: unknown) => {
+      s.profiles = readProfiles(raw);
+      schedule(s);
+    })
+    .finally(() => {
+      s.loadingProfiles = null;
+    });
+  s.loadingProfiles = reading;
+  return reading;
+}
+
+/** The line under the transcript for `s`: the page's own notice, else what the running turn does, else how it ended. */
+function statusFor(s: Session): { text: string; kind: "error" | "note" | "" } {
+  if (s.notice !== null) return s.notice;
+  const st = s.feed.state;
+  if (st.running) return { text: s.stopping ? "stopping" : statusWord(st), kind: "" };
+  s.stopping = false;
+  if (s.sawTurn && !s.dismissed && st.ended !== null) return { text: outcomeWord(st.ended.end), kind: "" };
+  return { text: "", kind: "" };
 }
 
 // ---- the transcript and the composer ----------------------------------------------------------------------------------
@@ -170,9 +228,12 @@ async function loadProfiles(s: Session): Promise<void> {
 /** One message drawn: its node and the plain text it shows. */
 interface Article {
   node: HTMLElement;
+  who: HTMLElement;
   text: HTMLElement;
   /** The plain text drawn now; null before the first draw. */
   plain: string | null;
+  /** The word after the role that is drawn now. */
+  label: string | null;
 }
 
 /** Whether `parent` holds exactly `nodes`, in order. */
@@ -181,22 +242,44 @@ function holds(parent: HTMLElement, nodes: readonly HTMLElement[]): boolean {
   return nodes.every((n, i) => parent.children[i] === n);
 }
 
-function roleWord(role: ChatMessage["role"]): string {
-  return role === "user" ? "you" : "assistant";
+/** Put the label row of a message right: the role, and after it the word of a message that did not complete. */
+function drawWho(a: Article, role: string, label: string): void {
+  if (a.label === label) return;
+  a.label = label;
+  const roleNode = el("span", "chat-role");
+  roleNode.textContent = roleWord(role);
+  a.who.replaceChildren(roleNode);
+  if (label !== "") {
+    const stat = el("span", "chat-stat");
+    stat.textContent = label;
+    a.who.append(document.createTextNode(" · "), stat);
+  }
 }
 
 /** The chat drawn into one host element. */
 class Mounted implements ChatView {
   private session: Session;
+  private readonly bar: HTMLElement;
+  private chip: HTMLElement;
+  private readonly where: HTMLElement;
+  private readonly usage: HTMLElement;
+  private picker: HTMLElement | null = null;
+  private pickerKey = "";
   private readonly log: HTMLElement;
   private readonly statusLine: HTMLElement;
   private readonly input: HTMLTextAreaElement;
+  private readonly count: HTMLElement;
   private readonly sendButton: HTMLButtonElement;
   private readonly articles = new Map<string, Article>();
   private streaming: Article | null = null;
   private streamed: Text | null = null;
+  private endRow: HTMLElement | null = null;
+  private endKey = "";
   private composingEnded = Number.NEGATIVE_INFINITY;
+  /** The text the field's height was measured for. */
+  private sizedFor: string | null = null;
   private alive = true;
+  private readonly onMouseDown: (e: MouseEvent) => void;
 
   constructor(
     private readonly host: HTMLElement,
@@ -204,7 +287,11 @@ class Mounted implements ChatView {
     readonly pane: () => number | null,
   ) {
     this.session = sessionFor(conversation);
-    el("div", "chat-bar", host);
+    this.bar = el("div", "chat-bar", host);
+    this.chip = this.makeChip("span");
+    this.where = el("span", "chat-where", this.bar);
+    this.where.hidden = true;
+    this.usage = el("span", "chat-usage", this.bar);
     this.log = el("div", "chat-log", host);
     this.log.setAttribute("role", "log");
     this.log.setAttribute("aria-label", "Conversation");
@@ -220,31 +307,44 @@ class Mounted implements ChatView {
     this.input.setAttribute("aria-label", "Message");
     this.input.setAttribute("placeholder", "Ask a question");
     this.input.spellcheck = false;
-    this.sendButton = el("button", "chat-send", composer);
+    const foot = el("div", "chat-foot", composer);
+    this.count = el("span", "chat-count", foot);
+    el("span", "chat-hint", foot).textContent = HINT;
+    this.sendButton = el("button", "chat-send", foot);
     this.sendButton.type = "button";
     this.sendButton.dataset.field = "";
     this.sendButton.dataset.mode = "send";
     this.sendButton.textContent = "Send";
 
     this.input.addEventListener("input", () => {
-      this.session.draft = this.input.value;
+      const s = this.session;
+      s.draft = this.input.value;
+      s.notice = null;
+      s.dismissed = true;
+      this.drawStatus();
+      this.drawComposer();
+    });
+    // The profile list is read when the user gets to type, not before.
+    this.input.addEventListener("focus", () => {
+      const s = this.session;
+      if (s.profiles === null) void loadProfiles(s).catch(() => {});
     });
     this.input.addEventListener("compositionend", () => {
       this.composingEnded = performance.now();
     });
-    this.input.addEventListener("keydown", (e) => {
-      if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
-      e.preventDefault();
-      if (performance.now() - this.composingEnded < ENTER_AFTER_COMPOSITION_MS) return;
-      void this.submit();
+    this.input.addEventListener("keydown", (e) => this.onKey(e, true));
+    this.log.addEventListener("keydown", (e) => this.onKey(e, false));
+    this.sendButton.addEventListener("click", () => {
+      if (this.session.feed.state.running) this.stop();
+      else void this.submit();
     });
-    this.sendButton.addEventListener("click", () => void this.submit());
     // A click on the pane's empty parts gives the keyboard to the composer, not to the terminal behind the pane.
-    host.addEventListener("mousedown", (e) => {
+    this.onMouseDown = (e: MouseEvent): void => {
       if (e.target instanceof Element && e.target.closest("[data-field]")) return;
       e.preventDefault();
       this.focus();
-    });
+    };
+    host.addEventListener("mousedown", this.onMouseDown);
 
     this.attach(this.session);
     if (wantFocus.delete(conversation)) this.focus();
@@ -261,9 +361,12 @@ class Mounted implements ChatView {
   show(conversation: string): void {
     if (conversation === this.session.id) return;
     this.session.views.delete(this);
+    this.closePicker(false);
     this.articles.clear();
     this.streaming = null;
     this.streamed = null;
+    this.endRow = null;
+    this.endKey = "";
     this.log.replaceChildren();
     this.session = sessionFor(conversation);
     this.attach(this.session);
@@ -272,6 +375,7 @@ class Mounted implements ChatView {
   dispose(): void {
     this.alive = false;
     this.session.views.delete(this);
+    this.host.removeEventListener("mousedown", this.onMouseDown);
     this.host.replaceChildren();
   }
 
@@ -284,9 +388,62 @@ class Mounted implements ChatView {
     void fetchSnapshot(s);
   }
 
-  /** Bring the transcript in line with the feed's state. */
+  // ---- drawing ----------------------------------------------------------------------------------------------------
+
+  /** Bring everything in line with the feed's state. */
   draw(): void {
     if (!this.alive) return;
+    this.drawBar();
+    this.drawTranscript();
+    this.drawStatus();
+    this.drawComposer();
+  }
+
+  private makeChip(tag: "span" | "button"): HTMLElement {
+    const chip = el(tag, "chat-chip");
+    if (chip instanceof HTMLButtonElement) {
+      chip.type = "button";
+      chip.dataset.field = "";
+      chip.setAttribute("aria-haspopup", "true");
+      chip.addEventListener("click", () => void this.togglePicker());
+    } else {
+      chip.setAttribute("role", "group");
+    }
+    this.bar.prepend(chip);
+    return chip;
+  }
+
+  private drawBar(): void {
+    const s = this.session;
+    const st = s.feed.state;
+    const view: ChipView = chipView(s.route, s.profiles, { profile: st.profile, model: st.model }, s.choice);
+    const tag = view.kind === "button" ? "button" : "span";
+    if (this.chip.localName !== tag) {
+      const next = this.makeChip(tag);
+      const focused = document.activeElement === this.chip;
+      this.chip.remove();
+      this.chip = next;
+      if (focused) next.focus({ preventScroll: true });
+    }
+    if (this.chip.textContent !== view.text) this.chip.textContent = view.text;
+    this.chip.hidden = view.text === "";
+    if (view.aria === "") this.chip.removeAttribute("aria-label");
+    else this.chip.setAttribute("aria-label", view.aria);
+    if (view.kind === "button") {
+      this.chip.setAttribute("aria-expanded", this.picker !== null ? "true" : "false");
+    } else {
+      this.chip.removeAttribute("aria-expanded");
+      this.closePicker(false);
+    }
+    this.where.hidden = view.where === "";
+    if (this.where.textContent !== view.where) this.where.textContent = view.where;
+    this.where.dataset.leaves = view.leaves ? "true" : "false";
+    const used = usageWords(!st.running && st.ended !== null ? st.ended.usage : st.usage);
+    if (this.usage.textContent !== used) this.usage.textContent = used;
+    if (this.picker !== null) this.drawPicker();
+  }
+
+  private drawTranscript(): void {
     const s = this.session;
     const st = s.feed.state;
     const atBottom = this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight <= BOTTOM_SLACK;
@@ -309,18 +466,18 @@ class Mounted implements ChatView {
     }
 
     // The reply that is streaming has no message yet: it is plain text in a node of its own.
-    if (st.running && st.partial.text !== "") {
+    if (st.running && (st.partial.text !== "" || st.partial.reasoning !== "")) {
       if (this.streaming === null || this.streamed === null) {
         const node = el("article", "chat-msg chat-partial");
         node.dataset.role = "assistant";
         node.dataset.status = "streaming";
         const who = el("div", "chat-who label", node);
-        el("span", "chat-role", who).textContent = roleWord("assistant");
         const text = el("div", "chat-text", node);
         this.streamed = document.createTextNode("");
         text.append(this.streamed);
-        this.streaming = { node, text, plain: null };
+        this.streaming = { node, who, text, plain: null, label: null };
       }
+      drawWho(this.streaming, "assistant", statusWord(st));
       if (this.streamed.data !== st.partial.text) this.streamed.data = st.partial.text;
       nodes.push(this.streaming.node);
     } else {
@@ -328,9 +485,23 @@ class Mounted implements ChatView {
       this.streamed = null;
     }
 
+    const note = st.running ? null : endNote(st);
+    if (note === null) {
+      this.endRow = null;
+      this.endKey = "";
+    } else {
+      const key = `${note.kind}|${note.label}|${note.text}`;
+      if (this.endRow === null || this.endKey !== key) {
+        this.endRow = this.makeEnd(note);
+        this.endKey = key;
+      }
+      nodes.push(this.endRow);
+    }
+
     if (!holds(this.log, nodes)) this.log.replaceChildren(...nodes);
+    const title = titleWords(st.title);
+    this.log.setAttribute("aria-label", title === "" ? "Conversation" : `Conversation: ${title}`);
     if (atBottom) this.log.scrollTop = this.log.scrollHeight;
-    if (this.statusLine.textContent !== s.status) this.statusLine.textContent = s.status;
   }
 
   private makeArticle(m: ChatMessage): Article {
@@ -339,27 +510,227 @@ class Mounted implements ChatView {
     node.dataset.id = m.id;
     node.dataset.status = m.status;
     const who = el("div", "chat-who label", node);
-    el("span", "chat-role", who).textContent = roleWord(m.role);
     const text = el("div", "chat-text", node);
-    return { node, text, plain: null };
+    return { node, who, text, plain: null, label: null };
   }
 
   private updateArticle(a: Article, m: ChatMessage): void {
     a.node.dataset.status = m.status;
+    drawWho(a, m.role, statusLabel(m.status));
     const plain = messageText(m);
     if (a.plain === plain) return;
     a.plain = plain;
     a.text.textContent = plain;
   }
 
+  /** The row after the last message when a turn failed or was cut: a mark, the class in words and the core's line. */
+  private makeEnd(note: EndNote): HTMLElement {
+    const row = el("div", "chat-end");
+    row.dataset.kind = note.kind;
+    el("span", "chat-mark", row).textContent = "!";
+    el("span", "chat-end-label label", row).textContent = note.label;
+    if (note.text !== "") el("span", "chat-end-text", row).textContent = note.text;
+    return row;
+  }
+
+  private drawStatus(): void {
+    const line = statusFor(this.session);
+    if (this.statusLine.textContent !== line.text) this.statusLine.textContent = line.text;
+    if (line.kind === "") this.statusLine.removeAttribute("data-kind");
+    else this.statusLine.dataset.kind = line.kind;
+  }
+
+  /** The count, the limit, the mode of the button and the height of the field. */
+  private drawComposer(): void {
+    const st = this.session.feed.state;
+    const text = this.input.value;
+    const bytes = utf8Bytes(text);
+    const over = bytes > MAX_TEXT_BYTES;
+    const words = over ? `too long · ${bytes} of ${MAX_TEXT_BYTES} bytes` : tokenWords(text);
+    if (this.count.textContent !== words) this.count.textContent = words;
+    if (over) this.count.dataset.over = "true";
+    else this.count.removeAttribute("data-over");
+    const mode = st.running ? "stop" : "send";
+    if (this.sendButton.dataset.mode !== mode) {
+      this.sendButton.dataset.mode = mode;
+      this.sendButton.textContent = st.running ? "Stop" : "Send";
+    }
+    this.sendButton.disabled = !st.running && over;
+    // Grow with the text; the style sheet stops it at eight rows. The height is measured again only for new text.
+    if (this.sizedFor !== text) {
+      this.sizedFor = text;
+      this.input.style.height = "auto";
+      const edge = this.input.offsetHeight - this.input.clientHeight;
+      this.input.style.height = `${this.input.scrollHeight + edge}px`;
+    }
+  }
+
+  // ---- the provider picker ----------------------------------------------------------------------------------------
+
+  /** The profile the next send would use, for the checked row. */
+  private chosenId(): string {
+    const s = this.session;
+    return pickProfile(s.profiles, s.choice, s.feed.state.profile).id;
+  }
+
+  private async togglePicker(): Promise<void> {
+    if (this.picker !== null) this.closePicker(true);
+    else await this.openPicker();
+  }
+
+  /** Open the picker under the bar; the list is read again, so a profile saved meanwhile is there. */
+  private async openPicker(): Promise<void> {
+    const s = this.session;
+    if (this.picker !== null) return;
+    try {
+      await loadProfiles(s);
+    } catch (e) {
+      this.say(faultText(e), "error");
+      return;
+    }
+    if (!this.alive || this.picker !== null || s.profiles === null || s.profiles.length < 2) return;
+    const picker = el("div", "chat-picker");
+    picker.setAttribute("role", "radiogroup");
+    picker.setAttribute("aria-label", "Provider");
+    picker.addEventListener("keydown", (e) => this.onPickerKey(e));
+    picker.addEventListener("focusout", (e) => {
+      const to = e.relatedTarget;
+      if (to instanceof Node && (picker.contains(to) || this.chip.contains(to))) return;
+      this.closePicker(false);
+    });
+    this.bar.after(picker);
+    this.picker = picker;
+    this.pickerKey = "";
+    this.drawPicker();
+    this.chip.setAttribute("aria-expanded", "true");
+    const rows = this.rows();
+    (rows.find((r) => r.getAttribute("aria-checked") === "true") ?? rows[0])?.focus({ preventScroll: true });
+  }
+
+  private rows(): HTMLElement[] {
+    return this.picker === null ? [] : Array.from(this.picker.querySelectorAll<HTMLElement>(".chat-choice"));
+  }
+
+  /** Build the rows when the list changed, and mark the chosen one. */
+  private drawPicker(): void {
+    const picker = this.picker;
+    const list = this.session.profiles;
+    if (picker === null || list === null) return;
+    const key = JSON.stringify(list);
+    if (key !== this.pickerKey) {
+      this.pickerKey = key;
+      const focused = this.rows().findIndex((r) => r === document.activeElement);
+      picker.replaceChildren();
+      for (const p of list) {
+        const row = el("button", "chat-choice", picker);
+        row.type = "button";
+        row.dataset.field = "";
+        row.dataset.id = p.id;
+        row.setAttribute("role", "radio");
+        el("span", "chat-mark", row);
+        el("span", "chat-choice-name", row).textContent = p.name === "" ? p.id : p.name;
+        el("span", "chat-choice-model", row).textContent = p.model;
+        el("span", "chat-choice-host", row).textContent = p.host;
+        row.addEventListener("click", () => this.choose(p.id, true));
+      }
+      if (focused >= 0) this.rows()[Math.min(focused, list.length - 1)]?.focus({ preventScroll: true });
+    }
+    const chosen = this.chosenId();
+    const rows = this.rows();
+    const first = rows.find((r) => r.dataset.id === chosen) ?? rows[0];
+    for (const row of rows) {
+      const on = row.dataset.id === chosen;
+      row.setAttribute("aria-checked", on ? "true" : "false");
+      row.tabIndex = row === first ? 0 : -1;
+      const mark = row.firstElementChild;
+      if (mark !== null) mark.textContent = on ? "●" : "○";
+    }
+  }
+
+  private closePicker(refocus: boolean): void {
+    const picker = this.picker;
+    if (picker === null) return;
+    // Forgotten first: removing the focused row fires `focusout`, which must not close it a second time.
+    this.picker = null;
+    this.pickerKey = "";
+    picker.remove();
+    if (this.chip instanceof HTMLButtonElement) {
+      this.chip.setAttribute("aria-expanded", "false");
+      if (refocus) this.chip.focus({ preventScroll: true });
+    }
+  }
+
+  /** The user chose a profile for this chat and for the chats opened next in this window. */
+  private choose(id: string, close: boolean): void {
+    const s = this.session;
+    s.choice = id;
+    lastChoice = id;
+    this.drawBar();
+    for (const view of s.views) if (view !== this) view.drawBar();
+    if (close) this.closePicker(true);
+  }
+
+  private onPickerKey(e: KeyboardEvent): void {
+    const rows = this.rows();
+    const at = rows.findIndex((r) => r === document.activeElement);
+    const step = (by: number): void => {
+      e.preventDefault();
+      const next = rows[(Math.max(at, 0) + by + rows.length) % rows.length];
+      if (next === undefined) return;
+      const id = next.dataset.id;
+      if (id !== undefined) this.choose(id, false);
+      next.focus({ preventScroll: true });
+    };
+    switch (e.key) {
+      case "ArrowDown":
+      case "ArrowRight":
+        step(1);
+        break;
+      case "ArrowUp":
+      case "ArrowLeft":
+        step(-1);
+        break;
+      case "Enter":
+      case " ": {
+        e.preventDefault();
+        const id = rows[at]?.dataset.id;
+        if (id !== undefined) this.choose(id, true);
+        else this.closePicker(true);
+        break;
+      }
+      case "Escape":
+        e.preventDefault();
+        e.stopPropagation();
+        this.closePicker(true);
+        break;
+      default:
+    }
+  }
+
+  // ---- keys, sending and stopping ---------------------------------------------------------------------------------
+
+  private onKey(e: KeyboardEvent, composer: boolean): void {
+    if (e.isComposing) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (this.session.feed.state.running) this.stop();
+      else focusInput();
+      return;
+    }
+    if (!composer || e.key !== "Enter" || e.shiftKey) return;
+    e.preventDefault();
+    if (performance.now() - this.composingEnded < ENTER_AFTER_COMPOSITION_MS) return;
+    void this.submit();
+  }
+
   /** Send the typed text. Nothing but the text, the chat, the pane and the profile leaves. */
   private async submit(): Promise<void> {
     const s = this.session;
     const text = this.input.value.trim();
-    if (text === "" || s.sending) return;
+    if (text === "" || s.sending || utf8Bytes(text) > MAX_TEXT_BYTES) return;
     const pane = this.pane();
     if (pane === null) {
-      this.say("This chat has no pane to act for.");
+      this.say("This chat has no pane to act for.", "error");
       return;
     }
     s.sending = true;
@@ -369,13 +740,14 @@ class Mounted implements ChatView {
         try {
           await loadProfiles(s);
         } catch (e) {
-          this.say(faultText(e));
+          this.say(faultText(e), "error");
           return;
         }
         pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
       }
       if (pick.via === "ask") {
-        this.say("Choose a provider first.");
+        this.say("Choose a provider first.", "note");
+        await this.openPicker();
         return;
       }
       try {
@@ -387,12 +759,15 @@ class Mounted implements ChatView {
           model: null,
         });
       } catch (e) {
-        this.say(faultText(e));
+        this.say(faultText(e), "error");
         return;
       }
       s.draft = "";
-      s.status = "";
-      for (const view of s.views) view.input.value = "";
+      s.notice = null;
+      for (const view of s.views) {
+        view.input.value = "";
+        view.drawComposer();
+      }
       s.feed.awaitSnapshot();
       void fetchSnapshot(s);
       schedule(s);
@@ -401,10 +776,27 @@ class Mounted implements ChatView {
     }
   }
 
-  /** Say one line in the status row of every view of this chat. */
-  private say(text: string): void {
-    this.session.status = text;
-    schedule(this.session);
+  /** Stop the running reply: one call per turn, and the status says `stopping` at once. */
+  private stop(): void {
+    const s = this.session;
+    const st = s.feed.state;
+    if (!st.running || s.cancelled === st.turn) return;
+    s.cancelled = st.turn;
+    s.stopping = true;
+    for (const view of s.views) view.drawStatus();
+    call("ai_cancel", { conversation: s.id }).catch((e: unknown) => {
+      s.cancelled = -1;
+      this.say(faultText(e), "error");
+    });
+    this.focus();
+  }
+
+  /** Say one line under the transcript of every view of this chat, now. */
+  private say(text: string, kind: "error" | "note"): void {
+    const s = this.session;
+    s.notice = { text, kind };
+    s.stopping = false;
+    for (const view of s.views) view.drawStatus();
   }
 }
 
@@ -460,10 +852,20 @@ export async function openChat(newChat: boolean): Promise<string | null> {
   return reason;
 }
 
-/** The pane of a chat is gone: forget its session. */
+/**
+ * The pane of a chat left the core's list: stop its reply when one runs (the core keeps the text so far as a stopped
+ * message) and forget its session and its title. A pane that is only hidden by a tab switch is still in the list and
+ * never comes here.
+ */
 export function chatClosed(conversation: string): void {
+  const s = sessions.get(conversation);
+  if (s !== undefined) {
+    dirty.delete(s);
+    if (s.feed.state.running) void call("ai_cancel", { conversation }).catch(() => {});
+  }
   sessions.delete(conversation);
   wantFocus.delete(conversation);
+  setChatTitle(conversation, "");
 }
 
 /** Make the button, register the two actions and listen to the core's `ai` events. Call once at start-up. */
@@ -492,6 +894,15 @@ export async function initChat(open: BlockOpener): Promise<void> {
   registerAction({ id: "ai.open", title: "AI chat", run: () => run(false) });
   registerAction({ id: "ai.new_chat", title: "New AI chat", run: () => run(true) });
   await listen<unknown>("ai", onAi);
+  // A window that gains the focus may have missed events, and a last event that was lost cannot be seen from the
+  // events: every chat on screen asks for a fresh snapshot.
+  window.addEventListener("focus", () => {
+    for (const s of sessions.values()) {
+      if (s.views.size === 0) continue;
+      s.feed.awaitSnapshot();
+      void fetchSnapshot(s);
+    }
+  });
   // The button is pressed while the shown tab has a chat pane.
   onOverlayRender(() => {
     const pressed = shownChatPane() !== null;

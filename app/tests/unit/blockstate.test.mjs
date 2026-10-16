@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  baseName, blockContext, blockTitle, chatTitles, entryIcon, humanSize, joinPath, paneBlocks, readBlocks, readListing,
+  baseName, blockContext, blockTitle, chatTitles, entryIcon, goneChats, humanSize, joinPath, paneBlocks, readBlocks, readListing,
   setChatTitle, setPaneBlocks, shortDate, visibleEntries,
 } from "../../dist/blockstate.js";
 
@@ -67,6 +67,23 @@ test("a chat block shows the title of its chat", () => {
   const files = { pane: 3, kind: "files", source: "local", path: "/home", source_label: "This computer" };
   assert.equal(blockContext(monitor), "local \u00b7 1 s");
   assert.equal(blockContext(files), "This computer \u00b7 /home");
+});
+
+test("goneChats lists the chats whose pane left the list", () => {
+  const chat = (pane, path) => ({ pane, kind: "chat", source: "local", path, source_label: "This computer" });
+  const files = { pane: 1, kind: "files", source: "local", path: "/home", source_label: "This computer" };
+  assert.deepEqual(goneChats([files, chat(2, "chat-a"), chat(3, "chat-b")], [chat(3, "chat-b")]), ["chat-a"]);
+  assert.deepEqual(goneChats([files, chat(2, "chat-a")], []), ["chat-a"], "an empty list closes every chat");
+  assert.deepEqual(goneChats([files], []), [], "a block of another kind is never listed");
+  assert.deepEqual(goneChats([chat(2, "chat-a")], [chat(2, "chat-a"), files]), [], "equal lists lose nothing");
+  assert.deepEqual(goneChats([], [chat(2, "chat-a")]), [], "a new chat is not gone");
+  assert.deepEqual(goneChats([chat(2, "chat-a"), chat(3, "chat-a")], []), ["chat-a"], "a chat is listed once");
+});
+
+test("a chat that moved to another pane is not gone", () => {
+  const chat = (pane, path) => ({ pane, kind: "chat", source: "local", path, source_label: "This computer" });
+  assert.deepEqual(goneChats([chat(2, "chat-a")], [chat(5, "chat-a")]), []);
+  assert.deepEqual(goneChats([chat(2, "chat-a"), chat(3, "chat-b")], [chat(2, "chat-b"), chat(3, "chat-a")]), []);
 });
 
 test("the same answer twice is no change", () => {

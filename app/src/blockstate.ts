@@ -192,6 +192,19 @@ export function setChatTitle(conversation: string, title: string): boolean {
   return clean !== before;
 }
 
+/**
+ * The conversations whose chat pane left the list: the chats of `previous` that no chat block of `next` names any more.
+ * A chat that moved to another pane is not gone, and a block of another kind is never listed.
+ */
+export function goneChats(previous: readonly BlockInfo[], next: readonly BlockInfo[]): string[] {
+  const kept = new Set(next.filter((b) => b.kind === "chat").map((b) => b.path));
+  const gone = new Set<string>();
+  for (const b of previous) {
+    if (b.kind === "chat" && !kept.has(b.path)) gone.add(b.path);
+  }
+  return [...gone];
+}
+
 /** The context of a block pane's header: where it reads from, and for a browser the folder. */
 export function blockContext(b: BlockInfo): string {
   if (b.kind === "monitor") return "local · 1 s";

@@ -50,11 +50,12 @@ export const VIEW = {
  * mock: `block_open` splits the focused pane to the right, focuses the new pane and lists its block in `pane_blocks`.
  * `blocks` are the blocks that exist at the start.
  */
-export async function boot(page, url, { profiles = [PROFILE], view = VIEW, blocks = [], search = "" } = {}) {
+export async function boot(page, url, { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "" } = {}) {
   await page.addInitScript(
-    ([saved, shown, existing]) => {
+    ([saved, shown, existing, chats]) => {
       window.__MOCK__.reset();
       window.__MOCK__.ai.profiles = saved;
+      for (const [id, partial] of Object.entries(chats)) window.__MOCK__.ai.setState(id, partial);
       window.__MOCK__.setView(shown);
       window.__BLOCKS = existing;
       window.__MOCK__.on("pane_blocks", () => structuredClone(window.__BLOCKS));
@@ -74,7 +75,7 @@ export async function boot(page, url, { profiles = [PROFILE], view = VIEW, block
         return window.__MOCK__.view();
       });
     },
-    [profiles, view, blocks],
+    [profiles, view, blocks, states],
   );
   await page.goto(`${url}index.html?renderer=canvas${search}`);
   await page.waitForSelector(".divider");
@@ -94,6 +95,31 @@ export async function openAi(page) {
 export async function sendText(page, text) {
   await page.locator(".chat-input").fill(text);
   await page.locator(".chat-input").press("Enter");
+}
+
+/** A view with three panes: the two terminals and, as pane 3, a chat that was open when the page loaded. */
+export const VIEW3 = {
+  ...VIEW,
+  tabs: [{ title: "shell", active: true, focus: 2, panes: 3 }],
+  workspaces: [{ name: "main", active: true, panes: 3 }],
+  panes: [[1, { x: 0, y: 0, w: 0.5, h: 1 }], [2, { x: 0.5, y: 0, w: 0.25, h: 1 }], [3, { x: 0.75, y: 0, w: 0.25, h: 1 }]],
+};
+
+/** The chat block of pane 3 as the core lists it. */
+export const chatBlock = (path) => ({ pane: 3, kind: "chat", source: "local", path, source_label: "This computer" });
+
+/** Write down every text the status row of the chat shows, in order, in `window.__STATUS`. */
+export async function watchStatus(page) {
+  await page.evaluate(() => {
+    window.__STATUS = [];
+    const row = document.querySelector(".chat-status");
+    const note = () => {
+      const text = row.textContent;
+      if (window.__STATUS[window.__STATUS.length - 1] !== text) window.__STATUS.push(text);
+    };
+    new MutationObserver(note).observe(row, { childList: true, characterData: true, subtree: true });
+    note();
+  });
 }
 
 /** The args of every call the page made to `cmd`, oldest first. */

@@ -7,7 +7,7 @@
 // modifier stays with the shortcuts.
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
-import { mountChat } from "./chat.js";
+import { chatClosed, mountChat } from "./chat.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { bar, bytes, memory, rate, readSample, uptime } from "./monitorstate.js";
 import type { MonSample } from "./monitorstate.js";
@@ -22,7 +22,8 @@ import { pushKeyHandler } from "./keystack.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
 import { state } from "./state.js";
 import {
-  dirtyPanes, entryIcon, humanSize, joinPath, paneBlocks, readBlocks, readListing, setPaneBlocks, shortDate, visibleEntries,
+  dirtyPanes, entryIcon, goneChats, humanSize, joinPath, paneBlocks, readBlocks, readListing, setPaneBlocks, shortDate,
+  visibleEntries,
 } from "./blockstate.js";
 import type { BlockInfo, FileEntry, Listing, Opened } from "./blockstate.js";
 import type { View } from "./types.js";
@@ -63,8 +64,13 @@ export async function refreshBlocks(): Promise<void> {
     } catch {
       // no answer is no blocks
     }
-    if (setPaneBlocks(readBlocks(raw))) onBlocks();
+    // A chat pane that left the core's list is closed: its reply stops. A list that could not be read stops nothing, and
+    // a pane that a tab switch only hides is still in the list.
+    const list = readBlocks(raw);
+    const gone = Array.isArray(raw) ? goneChats([...paneBlocks.values()], list) : [];
+    if (setPaneBlocks(list)) onBlocks();
     renderOverlay();
+    for (const conversation of gone) chatClosed(conversation);
   } finally {
     refreshing = false;
   }

@@ -2,7 +2,10 @@
 // list and a refusal are read. No DOM is needed.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { faultText, pickProfile, readProfiles } from "../../dist/chatview.js";
+import {
+  BYTES_PER_TOKEN, MAX_TEXT_BYTES, chipView, endNote, estimateTokens, faultText, leavesComputer, localityWord, outcomeWord, pickProfile,
+  readProfiles, roleWord, statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
+} from "../../dist/chatview.js";
 
 const entry = (id, extra = {}) => ({ id, name: `Name ${id}`, model: "llama3.2", host: "localhost", ...extra });
 
@@ -86,4 +89,135 @@ test("a refusal is read as its text and nothing else", () => {
   for (const bad of [null, undefined, 42, true, {}, { text: 5 }, { text: "" }, { text: "\u0000\n" }, [], ""]) {
     assert.equal(faultText(bad), "the request was refused");
   }
+});
+
+test("the token estimate is the core rule and the limit is in bytes", () => {
+  assert.equal(BYTES_PER_TOKEN, 3);
+  assert.equal(MAX_TEXT_BYTES, 131072);
+  assert.equal(estimateTokens(""), 0);
+  assert.equal(estimateTokens("a"), 1);
+  assert.equal(estimateTokens("abc"), 1);
+  assert.equal(estimateTokens("abcd"), 2);
+  assert.equal(estimateTokens("é".repeat(300)), 200, "600 bytes");
+  assert.equal(utf8Bytes("é"), 2);
+  assert.equal(utf8Bytes("\u{1F600}"), 4, "an emoji is a surrogate pair of four bytes");
+  assert.equal(utf8Bytes("€"), 3);
+  assert.equal(utf8Bytes("\ud800"), 3, "a lone surrogate is written as U+FFFD");
+  assert.equal(utf8Bytes("a\ud800b"), 5);
+  for (const text of ["", "abc", "é€\u{1F600}x", "line\nbreak", "\udc00\ud800", "x".repeat(1000)]) {
+    assert.equal(utf8Bytes(text), new TextEncoder().encode(text).length, `the same length as TextEncoder for ${JSON.stringify(text)}`);
+  }
+  assert.equal(tokenWords(""), "");
+  assert.equal(tokenWords("abcd"), "≈ 2 tokens");
+  assert.equal(tokenWords("a"), "≈ 1 token");
+  assert.equal(tokenWords("a".repeat(3000)), "≈ 1k tokens");
+  assert.equal(tokenWords("a".repeat(4500)), "≈ 1.5k tokens");
+  assert.equal(tokenWords("a".repeat(36)), "≈ 12 tokens");
+});
+
+test("places are words from the core's route and unknown stays unknown", () => {
+  assert.equal(localityWord("on_device"), "on device");
+  assert.equal(localityWord("loopback"), "this computer");
+  assert.equal(localityWord("lan"), "local network");
+  assert.equal(localityWord("cloud"), "cloud");
+  for (const other of ["Cloud", "", "localhost", "wan", "__proto__", "constructor", null, undefined, 3]) {
+    assert.equal(localityWord(other), "unknown place", String(other));
+  }
+  assert.equal(leavesComputer("lan"), true);
+  assert.equal(leavesComputer("cloud"), true);
+  for (const stays of ["on_device", "loopback", "other", "", null]) assert.equal(leavesComputer(stays), false);
+});
+
+const route = (over = {}) => ({ profile: "local-1", model: "llama3.2", host: "localhost", locality: "loopback", ...over });
+const local = { id: "local-1", name: "Local", model: "llama3.2", host: "localhost" };
+const cloud = { id: "other-1", name: "Cloud", model: "big-model", host: "api.example.org" };
+const nopin = { profile: null, model: null };
+
+test("the chip says what it sends to and the picker appears only with a choice to make", () => {
+  const one = chipView(route(), [local], { profile: "local-1", model: "llama3.2" }, null);
+  assert.equal(one.kind, "text");
+  assert.deepEqual([one.name, one.model, one.host, one.where, one.leaves], ["Local", "llama3.2", "localhost", "this computer", false]);
+  assert.equal(one.text, "Local · llama3.2 → localhost");
+  for (const piece of ["Local", "llama3.2", "localhost", "this computer"]) assert.ok(one.aria.includes(piece), `the label says ${piece}`);
+  // Two profiles and no route: a button, and nothing is named before the user chooses.
+  const two = chipView(null, [local, cloud], nopin, null);
+  assert.equal(two.kind, "button");
+  assert.equal(two.where, "");
+  assert.equal(two.name, "");
+  assert.equal(chipView(null, [local, cloud], nopin, "other-1").name, "Cloud", "the choice names the profile");
+  assert.equal(chipView(null, [local, cloud], nopin, "other-1").kind, "button");
+  // No profile at all.
+  const none = chipView(null, [], nopin, null);
+  assert.equal(none.kind, "none");
+  assert.equal(none.text, "no provider set up");
+  // A route for a provider that has no address: the place word and no arrow.
+  const registered = chipView(route({ profile: "apple", model: "on-device", host: null, locality: "on_device" }), [local], { profile: "apple", model: "on-device" }, null);
+  assert.equal(registered.where, "on device");
+  assert.equal(registered.text, "apple · on-device");
+  assert.ok(!registered.text.includes("→"));
+  // A pin without a route: its id and model, no place word.
+  const pinned = chipView(null, null, { profile: "local-1", model: "llama3.2" }, null);
+  assert.deepEqual([pinned.name, pinned.model, pinned.where, pinned.kind], ["local-1", "llama3.2", "", "text"]);
+  // The name falls back to the id when the list has no entry.
+  assert.equal(chipView(null, [cloud], { profile: "local-1", model: "m" }, null).name, "local-1");
+  assert.equal(chipView(null, null, nopin, null).where, "", "no route, no place word");
+  // The place comes from a route for the profile that is named, never from another profile's route.
+  const other = chipView(route({ profile: "other-1", locality: "cloud", host: "api.example.org" }), [local, cloud], { profile: "other-1", model: "big-model" }, "local-1");
+  assert.equal(other.name, "Local");
+  assert.equal(other.where, "", "the route was for another profile");
+  // A place that leaves the computer says so.
+  const away = chipView(route({ profile: "other-1", locality: "cloud", host: "api.example.org", model: "big-model" }), [cloud], { profile: "other-1", model: "big-model" }, null);
+  assert.deepEqual([away.where, away.leaves], ["cloud", true]);
+  // The place is never guessed from a name, a preset or an address.
+  const guess = chipView(null, [{ id: "x", name: "Cloud provider", model: "m", host: "api.example.org" }], nopin, null);
+  assert.equal(guess.where, "");
+});
+
+test("the words of a turn: working, thinking, writing, the status of a message and the end row", () => {
+  const state = (over = {}) => ({
+    running: false, partial: { text: "", reasoning: "" }, messages: [], ended: null, ...over,
+  });
+  assert.equal(statusWord(state({ running: true })), "working");
+  assert.equal(statusWord(state({ running: true, partial: { text: "", reasoning: "hm" } })), "thinking");
+  assert.equal(statusWord(state({ running: true, partial: { text: "Hi", reasoning: "hm" } })), "writing");
+  assert.equal(statusWord(state({ partial: { text: "Hi", reasoning: "" } })), "");
+  assert.deepEqual(["complete", "cancelled", "failed", "interrupted", "weird"].map(statusLabel), ["", "stopped", "failed", "interrupted", "unfinished"]);
+  assert.deepEqual([roleWord("user"), roleWord("assistant")], ["you", "assistant"]);
+  assert.deepEqual(["done", "failed", "cancelled", "limit_steps", "x"].map(outcomeWord), ["reply finished", "reply failed", "reply stopped", "reply stopped", "reply stopped"]);
+
+  const ended = (end, error = null) => ({ end, error, rounds: 1, usage: { input_tokens: 0, output_tokens: 0 }, saved: true });
+  const message = (role, status) => ({ id: "m", role, ts: 0, model: null, status, usage: null, parts: [] });
+  assert.equal(endNote(state()), null, "no end");
+  assert.equal(endNote(state({ ended: ended("done") })), null, "finished");
+  // Stopped: the message says so when there is one, else the end row does.
+  assert.equal(endNote(state({ ended: ended("cancelled"), messages: [message("assistant", "cancelled")] })), null);
+  assert.deepEqual(endNote(state({ ended: ended("cancelled"), messages: [message("user", "complete")] })), { kind: "note", label: "stopped", text: "" });
+  assert.deepEqual(endNote(state({ ended: ended("cancelled") })), { kind: "note", label: "stopped", text: "" });
+  // Failed: the class in words and the core's text.
+  assert.deepEqual(endNote(state({ ended: ended("failed", { class: "overload", text: "The provider is overloaded." }) })), {
+    kind: "error", label: "failed · overload", text: "The provider is overloaded.",
+  });
+  assert.equal(endNote(state({ ended: ended("failed", { class: "rate_limit", text: "slow down" }) })).label, "failed · rate limit");
+  assert.deepEqual(endNote(state({ ended: ended("failed") })), { kind: "error", label: "failed", text: "" });
+  // Limits and unknown codes.
+  const limits = ["limit_steps", "limit_tokens", "limit_tool_output", "limit_reply_size", "limit_repeated_call", "limit_tool_errors"];
+  assert.deepEqual(limits.map((l) => endNote(state({ ended: ended(l) })).label), [
+    "stopped · step limit", "stopped · token limit", "stopped · tool output limit", "stopped · reply size limit", "stopped · repeated call", "stopped · tool errors",
+  ]);
+  assert.equal(endNote(state({ ended: ended("brand_new_end") })).label, "stopped · brand new end");
+  assert.equal(endNote(state({ ended: ended("x".repeat(100)) })).label, `stopped · ${"x".repeat(40)}`);
+  assert.equal(endNote(state({ ended: ended("limit_steps"), messages: [message("assistant", "complete")] })).kind, "note", "a limit shows also after a message");
+});
+
+test("usage and counts are written compactly", () => {
+  assert.equal(usageWords({ input_tokens: 11, output_tokens: 5 }), "in 11 · out 5");
+  assert.equal(usageWords({ input_tokens: 1234, output_tokens: 340 }), "in 1.2k · out 340");
+  assert.equal(usageWords({ input_tokens: 12345, output_tokens: 0 }), "in 12k · out 0");
+  assert.equal(usageWords({ input_tokens: 1500000, output_tokens: 999 }), "in 1.5M · out 999");
+  assert.equal(usageWords({ input_tokens: 999999, output_tokens: 1 }), "in 1M · out 1");
+  assert.equal(usageWords(null), "");
+  assert.equal(usageWords({ input_tokens: 0, output_tokens: 0 }), "", "zero means not reported");
+  assert.equal(titleWords("  a\u0000b\u202e  c\n\td "), "a b c d");
+  assert.equal(titleWords("x".repeat(200)).length, 80);
+  assert.equal(titleWords(""), "");
 });

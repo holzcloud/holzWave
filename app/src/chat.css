@@ -1,8 +1,9 @@
-/* The AI chat (chat.ts, docs/design.md section 6.12): the title-bar button, and the chat pane with its transcript and its
-   composer. Every colour is a `--hw-*` token, every size is in rem so the UI scale moves it with the rest of the chrome
-   (a pixel value only for 1 px hairlines, the 2 px focus ring and the 28 px and 44 px touch minimums). Flat and
-   hairline, as the rest of the chrome. Chat text is Manrope 13 px like the preview body; labels are mono. The rules of
-   the buttons are written with a parent class so they win over the `.block button` reset of blocks.css. */
+/* The AI chat (chat.ts, docs/design.md section 6.12): the title-bar button, and the chat pane with its bar, picker,
+   transcript, status line and composer. Every colour is a `--hw-*` token, every size is in rem so the UI scale moves it
+   with the rest of the chrome (a pixel value only for 1 px hairlines, the 2 px focus ring and the 28 px and 44 px touch
+   minimums). Flat and hairline, as the rest of the chrome. Chat text is Manrope 13 px like the preview body; labels and
+   everything a machine wrote are mono. The rules of the buttons are written with a parent class so they win over the
+   `.block button` reset of blocks.css, and their hover rules carry the state so they win over its hover rule. */
 
 /* ---- the title-bar button -------------------------------------------------------------------------------------- */
 
@@ -12,11 +13,38 @@
 .ai-btn[aria-pressed="true"] { color: var(--hw-ink); background: var(--hw-rose-wash); border-color: var(--hw-rose); }
 .ai-btn:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
 
-/* ---- the pane --------------------------------------------------------------------------------------------------- */
+/* ---- the pane: a column of bar, picker, transcript, status line and composer ------------------------------------- */
 
-/* A column: the bar, the transcript, the status line, the composer. */
 .block-chat { min-height: 0; }
-.chat-bar:empty { display: none; }
+
+/* The bar: where the next request goes, the place word once a turn told it, and the tokens of the last turn. */
+.chat-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; box-sizing: border-box;
+            min-height: calc(36rem / 12); padding: .333rem .833rem; border-bottom: 1px solid var(--hw-line); color: var(--hw-ink-2); }
+.chat-bar .chat-chip { display: inline-flex; align-items: center; box-sizing: border-box; max-width: 100%;
+                       min-height: max(28px, calc(28rem / 12)); padding: 0 .667rem; border: 1px solid var(--hw-line);
+                       border-radius: 62.5rem; background: none; color: var(--hw-ink); font-size: 1rem; letter-spacing: normal;
+                       text-transform: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-bar button.chat-chip { cursor: pointer; }
+.chat-bar button.chat-chip:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+.chat-bar button.chat-chip[aria-expanded="true"] { background: var(--hw-rose-wash); border-color: var(--hw-rose); }
+.chat-bar .chat-chip:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.chat-bar .chat-chip[hidden], .chat-where[hidden] { display: none; }
+.chat-where { padding: 0 .5rem; border: 1px solid var(--hw-line); border-radius: 62.5rem; color: var(--hw-dim); font-size: calc(11rem / 12); }
+.chat-where[data-leaves="true"] { border-color: var(--hw-warn); color: var(--hw-warn); }
+.chat-usage { margin-left: auto; color: var(--hw-dim); font-size: calc(11rem / 12); }
+
+/* The picker: a radio group under the bar. The chosen row has the wash and a 2 px bar, and `●` against `○`. */
+.chat-picker { flex: none; max-height: 60%; overflow-y: auto; border-bottom: 1px solid var(--hw-line); background: var(--hw-ground-2); }
+.chat-picker .chat-choice { display: flex; align-items: center; gap: .667rem; box-sizing: border-box; width: 100%;
+                            min-height: max(28px, calc(28rem / 12)); padding: 0 .833rem; border: 0; border-left: 2px solid transparent;
+                            border-radius: 0; background: none; color: var(--hw-ink); cursor: pointer; font-size: 1rem;
+                            letter-spacing: normal; text-align: left; text-transform: none; white-space: nowrap; }
+.chat-picker .chat-choice:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+.chat-picker .chat-choice[aria-checked="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
+.chat-picker .chat-choice:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+.chat-choice .chat-mark { flex: none; width: 1rem; color: var(--hw-ink); }
+.chat-choice-name { flex: none; }
+.chat-choice-model, .chat-choice-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--hw-dim); }
 
 /* The transcript: a text field of the page, it scrolls and can be focused. */
 .chat-log { flex: 1 1 0; min-height: 0; overflow-y: auto; padding: .667rem .833rem; font-family: "Manrope", system-ui, sans-serif;
@@ -25,22 +53,49 @@
 .chat-msg { margin: 0 0 .833rem; }
 .chat-msg[data-role="user"] { padding-left: .667rem; border-left: 2px solid var(--hw-line); }
 .chat-who { margin-bottom: .167rem; color: var(--hw-dim); font-family: "JetBrains Mono", ui-monospace, monospace; }
+/* A message that did not complete says so after the role, in the warn colour and underlined: the word is the cue. A reply
+   that is streaming says what it does, in the dim colour. */
+.chat-stat { color: var(--hw-warn); text-decoration: underline; }
+.chat-partial .chat-stat { color: var(--hw-dim); text-decoration: none; }
 .chat-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* The status line: one line, dim. */
+/* The end row of a turn that failed or was cut: a mark, the class in words, the core's one line. */
+.chat-end { display: flex; flex-wrap: wrap; align-items: baseline; gap: .167rem .5rem; margin: 0 0 .833rem; padding: .333rem .667rem;
+            border: 1px solid var(--hw-line); border-radius: .333rem; font-family: "JetBrains Mono", ui-monospace, monospace;
+            font-size: 1rem; line-height: 1.4; }
+.chat-end .chat-mark { color: var(--hw-warn); font-weight: 700; }
+.chat-end .chat-end-label { color: var(--hw-warn); text-decoration: underline; }
+.chat-end[data-kind="error"] .chat-mark, .chat-end[data-kind="error"] .chat-end-label { color: var(--hw-danger); }
+.chat-end-text { min-width: 0; overflow-wrap: anywhere; color: var(--hw-ink-2); }
+
+/* The status line: one line, dim; a refusal is in the danger colour (and says what was refused in words). */
 .chat-status { flex: none; min-height: 1.5rem; box-sizing: border-box; padding: .167rem .833rem; border-top: 1px solid var(--hw-line);
                color: var(--hw-dim); font-size: calc(11rem / 12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-status[data-kind="error"] { color: var(--hw-danger); }
 
-/* The composer. */
-.chat-composer { flex: none; display: flex; align-items: flex-end; gap: .5rem; box-sizing: border-box; padding: .5rem .833rem;
+/* The composer: the field, then the count, the keys and the button. */
+.chat-composer { flex: none; display: flex; flex-direction: column; gap: .333rem; box-sizing: border-box; padding: .5rem .833rem;
                  border-top: 1px solid var(--hw-line); }
-.chat-input { flex: 1 1 auto; min-width: 0; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); resize: none;
-              padding: .25rem .5rem; font-family: "Manrope", system-ui, sans-serif; font-size: 1.083rem; line-height: 1.4;
-              color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
+.chat-input { box-sizing: border-box; width: 100%; min-height: max(28px, calc(28rem / 12)); max-height: calc(8 * 1.4 * 1.083rem + .5rem + 2px);
+              resize: none; overflow-y: auto; padding: .25rem .5rem; font-family: "Manrope", system-ui, sans-serif; font-size: 1.083rem;
+              line-height: 1.4; color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
 .chat-input:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
+.chat-foot { display: flex; align-items: center; gap: .833rem; color: var(--hw-dim); font-size: calc(11rem / 12); }
+.chat-count { flex: none; }
+.chat-count[data-over="true"] { color: var(--hw-warn); text-decoration: underline; }
+.chat-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-composer .chat-send { display: inline-flex; align-items: center; justify-content: center; flex: none; box-sizing: border-box;
                             min-height: max(28px, calc(28rem / 12)); padding: 0 .833rem; border: 1px solid var(--hw-rose-deep);
                             border-radius: .333rem; background: var(--hw-rose-deep); color: var(--hw-on-accent); cursor: pointer;
                             font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase; }
 .chat-composer .chat-send:hover { background: var(--hw-rose-deep); color: var(--hw-on-accent); }
+.chat-composer .chat-send[data-mode="stop"] { border-color: var(--hw-line); background: none; color: var(--hw-ink); }
+.chat-composer .chat-send[data-mode="stop"]:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.chat-composer .chat-send:disabled { opacity: .5; cursor: default; }
 .chat-composer .chat-send:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+
+/* Motion: 160 ms for hover and focus, unless the setting or the system asks for none. */
+:root:not(.motion-reduce) .chat-bar .chat-chip, :root:not(.motion-reduce) .chat-picker .chat-choice,
+:root:not(.motion-reduce) .chat-composer .chat-send, :root:not(.motion-reduce) .ai-btn {
+  transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), border-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1);
+}
