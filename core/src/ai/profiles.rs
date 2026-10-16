@@ -21,13 +21,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
-use super::http::{Http, NetworkPolicy, Origin, Refusal, Scheme, SecretHeader, Target};
-use super::provider::{AiError, Detail};
-use super::types::ApiKey;
-use super::wire::{Endpoint, HttpProvider, Wire, WireAdapter};
+use super::http::{Http, NetworkPolicy, Origin, Refusal, Rejection, Scheme, SecretHeader, Target};
+use super::provider::{AiError, ChatRequest, Detail};
+use super::types::{ApiKey, Capabilities, Locality};
+use super::wire::{Endpoint, HttpProvider, Wire, WireAdapter, WireRequest, WireTurn};
 use crate::layout::LoadStatus;
 use crate::persist::{backup_bad, bad_path, read_limited, write_atomic_private};
 use crate::secrets::{MAX_LEN, SecretStore};
@@ -153,40 +153,171 @@ pub enum KeyNeed {
     Required,
 }
 
-/// What is known about one kind of provider: the wires it speaks, the first of which is the default, and whether it
-/// needs a key.
+/// Who sees the whole prompt besides the model provider, and so asks for an acknowledgement before the first send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisclosureKind {
+    /// A gateway or router that forwards the request to a model provider and may log it.
+    Gateway,
+    /// A server of a third party that is not one of the named providers.
+    ThirdParty,
+}
+
+/// What is known about one kind of provider: the wires it speaks, the first of which is the default, the default
+/// address of each wire, whether it needs a key, whether it takes a second token for a gateway in front of it, whether
+/// a third party sees the prompt, and a part of the request body that the preset adds to whatever the adapter wrote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PresetSpec {
     /// The preset this row describes.
     pub preset: Preset,
+    /// The name shown to the user.
+    pub label: &'static str,
     /// The wires the provider speaks. The first is the default.
     pub wires: &'static [Wire],
+    /// The default base address of a wire. An address with a part in braces still has to be filled in; a wire with no
+    /// row here has no default.
+    pub bases: &'static [(Wire, &'static str)],
     /// Whether a key is needed.
     pub key: KeyNeed,
+    /// Whether the provider takes a second token, for a gateway in front of it.
+    pub gateway_token: bool,
+    /// The acknowledgement a non-local address asks for, if any.
+    pub disclosure: Option<DisclosureKind>,
+    /// A JSON object merged into the body of every request, with its values winning over the adapter's. Empty for none.
+    pub extra_body: &'static str,
 }
 
-/// The presets, in the order of [`Preset::ALL`].
+// presets-begin
+/// The presets, in the order of [`Preset::ALL`]. The default addresses are data: the application contacts none of them
+/// by itself, only the HTTP chokepoint does, and only for a request the user sent.
 pub static PRESETS: [PresetSpec; 11] = [
-    PresetSpec { preset: Preset::Anthropic, wires: &[Wire::Anthropic], key: KeyNeed::Required },
-    PresetSpec { preset: Preset::OpenAi, wires: &[Wire::OpenAiResponses], key: KeyNeed::Required },
-    PresetSpec { preset: Preset::Gemini, wires: &[Wire::Gemini], key: KeyNeed::Required },
-    PresetSpec { preset: Preset::Ollama, wires: &[Wire::Ollama], key: KeyNeed::Optional },
-    PresetSpec { preset: Preset::LmStudio, wires: &[Wire::OpenAiChat], key: KeyNeed::Optional },
-    PresetSpec { preset: Preset::LlamaCpp, wires: &[Wire::OpenAiChat], key: KeyNeed::Optional },
-    PresetSpec { preset: Preset::OpenRouter, wires: &[Wire::OpenAiChat], key: KeyNeed::Required },
-    PresetSpec { preset: Preset::VercelGateway, wires: &[Wire::OpenAiChat, Wire::Anthropic], key: KeyNeed::Required },
+    PresetSpec {
+        preset: Preset::Anthropic,
+        label: "Anthropic",
+        wires: &[Wire::Anthropic],
+        bases: &[(Wire::Anthropic, "https://api.anthropic.com")],
+        key: KeyNeed::Required,
+        gateway_token: false,
+        disclosure: None,
+        extra_body: "",
+    },
+    PresetSpec {
+        preset: Preset::OpenAi,
+        label: "OpenAI",
+        wires: &[Wire::OpenAiResponses],
+        bases: &[(Wire::OpenAiResponses, "https://api.openai.com/v1")],
+        key: KeyNeed::Required,
+        gateway_token: false,
+        disclosure: None,
+        extra_body: "",
+    },
+    PresetSpec {
+        preset: Preset::Gemini,
+        label: "Google Gemini",
+        wires: &[Wire::Gemini],
+        bases: &[(Wire::Gemini, "https://generativelanguage.googleapis.com/v1beta")],
+        key: KeyNeed::Required,
+        gateway_token: false,
+        disclosure: None,
+        extra_body: "",
+    },
+    PresetSpec {
+        preset: Preset::Ollama,
+        label: "Ollama",
+        wires: &[Wire::Ollama],
+        bases: &[(Wire::Ollama, "http://127.0.0.1:11434")],
+        key: KeyNeed::Optional,
+        gateway_token: false,
+        disclosure: None,
+        extra_body: "",
+    },
+    PresetSpec {
+        preset: Preset::LmStudio,
+        label: "LM Studio",
+        wires: &[Wire::OpenAiChat],
+        bases: &[(Wire::OpenAiChat, "http://127.0.0.1:1234/v1")],
+        key: KeyNeed::Optional,
+        gateway_token: false,
+        disclosure: None,
+        extra_body: "",
+    },
+    PresetSpec {
+        preset: Preset::LlamaCpp,
+        label: "llama.cpp",
+        wires: &[Wire::OpenAiChat],
+        bases: &[(Wire::OpenAiChat, "http://127.0.0.1:9931/v1")],
+        key: KeyNeed::Optional,
+        gateway_token: false,
+        disclosure: None,
+        extra_body: "",
+    },
+    PresetSpec {
+        preset: Preset::OpenRouter,
+        label: "OpenRouter",
+        wires: &[Wire::OpenAiChat],
+        bases: &[(Wire::OpenAiChat, "https://openrouter.ai/api/v1")],
+        key: KeyNeed::Required,
+        gateway_token: false,
+        disclosure: Some(DisclosureKind::Gateway),
+        extra_body: r#"{"provider":{"data_collection":"deny"}}"#,
+    },
+    PresetSpec {
+        preset: Preset::VercelGateway,
+        label: "Vercel AI Gateway",
+        wires: &[Wire::OpenAiChat, Wire::Anthropic],
+        bases: &[
+            (Wire::OpenAiChat, "https://ai-gateway.vercel.sh/v1"),
+            (Wire::Anthropic, "https://ai-gateway.vercel.sh"),
+        ],
+        key: KeyNeed::Required,
+        gateway_token: false,
+        disclosure: Some(DisclosureKind::Gateway),
+        extra_body: "",
+    },
     PresetSpec {
         preset: Preset::CloudflareGateway,
+        label: "Cloudflare AI Gateway",
         wires: &[Wire::Anthropic, Wire::OpenAiResponses, Wire::OpenAiChat, Wire::Gemini],
+        bases: &[
+            (Wire::Anthropic, "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/anthropic"),
+            (Wire::OpenAiResponses, "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai"),
+            (Wire::OpenAiChat, "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai"),
+            (Wire::Gemini, "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/google-ai-studio/v1beta"),
+        ],
         key: KeyNeed::Optional,
+        gateway_token: true,
+        disclosure: Some(DisclosureKind::Gateway),
+        extra_body: "",
     },
-    PresetSpec { preset: Preset::LiteLlm, wires: &[Wire::OpenAiChat], key: KeyNeed::Optional },
+    PresetSpec {
+        preset: Preset::LiteLlm,
+        label: "LiteLLM",
+        wires: &[Wire::OpenAiChat],
+        bases: &[(Wire::OpenAiChat, "http://127.0.0.1:4000/v1")],
+        key: KeyNeed::Optional,
+        gateway_token: false,
+        disclosure: Some(DisclosureKind::Gateway),
+        extra_body: "",
+    },
     PresetSpec {
         preset: Preset::Custom,
+        label: "Custom",
         wires: &[Wire::OpenAiChat, Wire::OpenAiResponses, Wire::Anthropic, Wire::Gemini, Wire::Ollama],
+        bases: &[],
         key: KeyNeed::Optional,
+        gateway_token: false,
+        disclosure: Some(DisclosureKind::ThirdParty),
+        extra_body: "",
     },
 ];
+// presets-end
+
+impl PresetSpec {
+    /// The default base address of a wire, if the preset has one.
+    pub fn base_for(&self, wire: Wire) -> Option<&'static str> {
+        self.bases.iter().find(|(known, _)| *known == wire).map(|(_, base)| *base)
+    }
+}
 
 /// The header that carries a key for a wire, and the text that goes before the key: the name and the prefix.
 pub fn auth_header_for(wire: Wire) -> (&'static str, &'static str) {
@@ -276,6 +407,9 @@ pub struct ProfileInput {
     pub model: String,
     /// Plain http to the local network is allowed.
     pub allow_lan_http: bool,
+    /// The user has read the disclosure for this address and accepts it: the origin is recorded as acknowledged when
+    /// the preset asks for an acknowledgement there.
+    pub acknowledge_gateway: bool,
 }
 
 impl ProfileInput {
@@ -289,6 +423,7 @@ impl ProfileInput {
             base_url: String::new(),
             model: String::new(),
             allow_lan_http: false,
+            acknowledge_gateway: false,
         }
     }
 }
@@ -380,6 +515,21 @@ fn has_template(text: &str) -> bool {
     lower.contains("%7b") || lower.contains("%7d")
 }
 
+/// Whether the host is this computer: a loopback address literal, `localhost` or a name below it.
+fn is_loopback_host(target: &Target) -> bool {
+    let host = target.origin().host();
+    match target.literal_locality() {
+        Some(locality) => locality == Locality::Loopback,
+        None => host == "localhost" || host.ends_with(".localhost"),
+    }
+}
+
+/// The acknowledgement a preset asks for at this address: none for a provider that is named in the table, and none for
+/// any preset when the host is this computer.
+fn disclosure_for(preset: Preset, target: &Target) -> Option<DisclosureKind> {
+    preset.spec().disclosure.filter(|_| !is_loopback_host(target))
+}
+
 /// The one address rule: the template check, then the syntax and literal-address rules of the chokepoint.
 fn parse_address(raw: &str, allow_lan_http: bool) -> Result<Target, ProfileError> {
     let raw = raw.trim_matches(|c: char| c.is_ascii_whitespace());
@@ -430,8 +580,8 @@ pub fn account(profile_id: &str, slot: KeySlot) -> String {
 }
 
 /// Whether a profile of this preset has this slot.
-fn slot_exists(_preset: Preset, slot: KeySlot) -> bool {
-    slot == KeySlot::Provider
+fn slot_exists(preset: Preset, slot: KeySlot) -> bool {
+    slot == KeySlot::Provider || preset.spec().gateway_token
 }
 
 fn marker(profile: &Profile, slot: KeySlot) -> bool {
@@ -896,8 +1046,11 @@ impl AiConfig {
         if !clean_text(model, MAX_MODEL) {
             return Err(ProfileError::Model);
         }
-        let base_url = input.base_url.trim_matches(|c: char| c.is_ascii_whitespace());
-        parse_address(base_url, input.allow_lan_http)?;
+        // An empty address takes the default of the wire; a default that still has a part to fill in is refused like
+        // an empty address.
+        let typed = input.base_url.trim_matches(|c: char| c.is_ascii_whitespace());
+        let base_url = if typed.is_empty() { spec.base_for(wire).unwrap_or("") } else { typed };
+        let target = parse_address(base_url, input.allow_lan_http)?;
         if existing.is_none() && self.profiles.len() >= MAX_PROFILES {
             return Err(ProfileError::TooMany);
         }
@@ -924,6 +1077,9 @@ impl AiConfig {
                 id
             }
         };
+        if input.acknowledge_gateway && disclosure_for(input.preset, &target).is_some() {
+            self.remember(&target.origin().scope());
+        }
         Ok(id)
     }
 
@@ -1045,8 +1201,13 @@ impl Resolved {
         &self.address.host
     }
 
-    /// The provider that sends through the chokepoint, with the adapter of the wire.
+    /// The provider that sends through the chokepoint, with the adapter of the wire. When the preset adds a part to
+    /// every request body (OpenRouter is asked not to let providers collect the data), the adapter is wrapped so that
+    /// the preset's values win over the adapter's.
     pub fn into_provider(self, adapter: Box<dyn WireAdapter>, http: Arc<Http>) -> HttpProvider {
+        let extra = self.preset.spec().extra_body;
+        let adapter: Box<dyn WireAdapter> =
+            if extra.is_empty() { adapter } else { Box::new(WithExtraBody::new(adapter, extra)) };
         HttpProvider::new(self.profile_id, self.endpoint, adapter, http)
     }
 }
@@ -1153,10 +1314,12 @@ impl From<ResolveError> for AiError {
 impl AiConfig {
     /// Makes the profile `id` and its keys into an endpoint, without a lookup and without a socket.
     ///
-    /// In this order: the profile; its address, checked again by the rule of the settings boundary; the key of the
-    /// provider slot, which is read from the keychain only when the profile says one was saved, and which must have
-    /// been saved for exactly this address; the header that carries it, built with the address stored beside the key.
-    /// `local_only` is handed to the chokepoint, which decides on the resolved address at send time.
+    /// In this order: the profile; its address, checked again by the rule of the settings boundary; the
+    /// acknowledgement a gateway or third-party address asks for, once per address; the key of the provider slot,
+    /// which is read from the keychain only when the profile says one was saved, and which must have been saved for
+    /// exactly this address; the header that carries it, built with the address stored beside the key; for a preset
+    /// with a gateway token, the token of the gateway in the same way. `local_only` is handed to the chokepoint, which
+    /// decides on the resolved address at send time.
     pub fn resolve(&self, id: &str, vault: &KeyVault, local_only: bool) -> Result<Resolved, ResolveError> {
         let profile = self.get(id).ok_or(ResolveError::UnknownProfile)?;
         let target = profile.target().map_err(|error| match error {
@@ -1164,9 +1327,17 @@ impl AiConfig {
             _ => ResolveError::NeedsAddress,
         })?;
         let address = address_of(&target);
-        let secret = self.slot_header(profile, KeySlot::Provider, vault, target.origin())?;
+        if disclosure_for(profile.preset, &target).is_some() && !self.is_acknowledged(&address.scope) {
+            return Err(ResolveError::DisclosureNeeded);
+        }
+        let provider_key = self.slot_header(profile, KeySlot::Provider, vault, target.origin())?;
+        let gateway_key = if profile.preset.spec().gateway_token {
+            self.slot_header(profile, KeySlot::Gateway, vault, target.origin())?
+        } else {
+            None
+        };
         let mut endpoint = Endpoint::new(profile.wire, target, NetworkPolicy::new(profile.allow_lan_http, local_only));
-        if let Some(secret) = secret {
+        for secret in [provider_key, gateway_key].into_iter().flatten() {
             endpoint = endpoint.with_secret(secret);
         }
         Ok(Resolved {
@@ -1206,5 +1377,145 @@ impl AiConfig {
             KeySlot::Gateway => ("cf-aig-authorization", "Bearer "),
         };
         SecretHeader::new(name, prefix, stored.key, stored.origin).map(Some).map_err(ResolveError::Header)
+    }
+}
+
+// ---- what the preset adds to the request ----------------------------------------------------------------
+
+/// An adapter wrapped by a preset that adds a part to every request body. Everything is delegated to the adapter; the
+/// request body is parsed as a JSON object, the preset's object is merged into it member by member (nested objects
+/// recursively, the preset's value replacing an equal-named value of the adapter) and the result is written back.
+struct WithExtraBody {
+    inner: Box<dyn WireAdapter>,
+    /// The parsed object, or `None` when the table text is not an object: then no request is built, so a damaged table
+    /// can never send a request without the part it should carry.
+    extra: Option<Map<String, Value>>,
+}
+
+impl WithExtraBody {
+    fn new(inner: Box<dyn WireAdapter>, extra: &str) -> Self {
+        let extra = match serde_json::from_str::<Value>(extra) {
+            Ok(Value::Object(object)) => Some(object),
+            _ => None,
+        };
+        Self { inner, extra }
+    }
+}
+
+/// Merges `extra` into `body`.
+fn merge_object(body: &mut Map<String, Value>, extra: &Map<String, Value>) {
+    for (name, value) in extra {
+        match (body.get_mut(name), value) {
+            (Some(Value::Object(existing)), Value::Object(added)) => merge_object(existing, added),
+            _ => {
+                body.insert(name.clone(), value.clone());
+            }
+        }
+    }
+}
+
+impl WireAdapter for WithExtraBody {
+    fn wire(&self) -> Wire {
+        self.inner.wire()
+    }
+
+    fn capabilities(&self, model: &str, locality: Locality) -> Capabilities {
+        self.inner.capabilities(model, locality)
+    }
+
+    fn request(&self, req: &ChatRequest, caps: &Capabilities) -> Result<WireRequest, AiError> {
+        let mut request = self.inner.request(req, caps)?;
+        let extra = self.extra.as_ref().ok_or_else(|| {
+            AiError::InvalidRequest(Detail::new("the request options of this provider are not valid"))
+        })?;
+        let Ok(Value::Object(mut body)) = serde_json::from_slice::<Value>(&request.body) else {
+            return Err(AiError::InvalidRequest(Detail::new("the request body is not a JSON object")));
+        };
+        merge_object(&mut body, extra);
+        request.body = serde_json::to_vec(&body)
+            .map_err(|_| AiError::InvalidRequest(Detail::new("the request body could not be written")))?;
+        Ok(request)
+    }
+
+    fn turn(&self) -> Box<dyn WireTurn> {
+        self.inner.turn()
+    }
+
+    fn rejection(&self, rejection: &Rejection, endpoint: &Endpoint) -> Option<AiError> {
+        self.inner.rejection(rejection, endpoint)
+    }
+}
+
+// ---- what the page may see ------------------------------------------------------------------------------
+
+/// The first-use notice for an address that sends the prompt through a third party.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Disclosure {
+    /// The host, as it is shown.
+    pub host: String,
+    /// Who the third party is.
+    pub kind: DisclosureKind,
+}
+
+/// A profile as the settings dialog shows it. It is written out and never read back, and it has no field that could hold
+/// a key: a key is a status.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProfileView {
+    /// The id.
+    pub id: String,
+    /// The name.
+    pub name: String,
+    /// The kind of provider.
+    pub preset: Preset,
+    /// The wire.
+    pub wire: Wire,
+    /// The base address as saved.
+    pub base_url: String,
+    /// The model.
+    pub model: String,
+    /// Plain http to the local network is allowed.
+    pub allow_lan_http: bool,
+    /// The host as it is shown.
+    pub host: String,
+    /// The state of the provider key.
+    pub key: KeyStatus,
+    /// The state of the gateway token, for a preset that has one.
+    pub gateway_key: Option<KeyStatus>,
+    /// The notice to show before the first send, while the address is not acknowledged.
+    pub disclosure: Option<Disclosure>,
+}
+
+impl AiConfig {
+    /// The profiles as the dialog shows them, in file order.
+    ///
+    /// This reads the keychain for every profile whose marker says a key was saved, because the keychain has no way to
+    /// ask whether an entry exists. It is meant for the moment the dialog opens and never for startup; a profile
+    /// without a key does not touch the keychain.
+    pub fn views(&self, vault: &KeyVault) -> Vec<ProfileView> {
+        self.profiles
+            .iter()
+            .map(|profile| {
+                let target = profile.target().ok();
+                let host = target.as_ref().map(|target| address_of(target).host).unwrap_or_default();
+                let disclosure = target.as_ref().and_then(|target| {
+                    let kind = disclosure_for(profile.preset, target)?;
+                    let acknowledged = self.is_acknowledged(&target.origin().scope());
+                    (!acknowledged).then(|| Disclosure { host: host.clone(), kind })
+                });
+                ProfileView {
+                    id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    preset: profile.preset,
+                    wire: profile.wire,
+                    base_url: profile.base_url.clone(),
+                    model: profile.model.clone(),
+                    allow_lan_http: profile.allow_lan_http,
+                    host,
+                    key: vault.status(profile, KeySlot::Provider),
+                    gateway_key: profile.preset.spec().gateway_token.then(|| vault.status(profile, KeySlot::Gateway)),
+                    disclosure,
+                }
+            })
+            .collect()
     }
 }

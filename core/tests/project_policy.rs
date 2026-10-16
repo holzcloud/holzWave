@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use holzwave_core::ai::profiles::AiConfig;
 use holzwave_core::keybindings::{Keybindings, actions_for};
 use holzwave_core::layout::{Layout, LoadStatus};
 use holzwave_core::session::Session;
@@ -247,6 +248,18 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
         "std::net",
         "the address types of the standard library: the file classifies a resolved address, pins the checked addresses \
          and asks the system resolver for the addresses of a host name; it opens no socket and listens on none",
+    ),
+    (
+        "core/src/ai/profiles.rs",
+        "https://",
+        "the preset table holds the default addresses of the providers and gateways; the file connects to none of them, \
+         the chokepoint does, and only for a request the user sent",
+    ),
+    (
+        "core/src/ai/profiles.rs",
+        "http://",
+        "the preset table holds the default addresses of the local servers; the file connects to none of them, the \
+         chokepoint does, and only for a request the user sent",
     ),
     (
         "core/src/widgets.rs",
@@ -1664,6 +1677,12 @@ fn the_examples_of_config_md_load_cleanly_through_the_real_loaders() {
     let (layout, status) = Layout::from_json(&documented_example("layout.json"));
     assert_eq!(status, LoadStatus::Clean, "the layout example is not clean");
     assert_eq!(layout.all_panes().len(), 2);
+
+    let (ai, status) = AiConfig::from_json(&documented_example("ai.json"));
+    assert_eq!(status, LoadStatus::Clean, "the ai.json example is not clean");
+    assert_eq!(ai.profiles().len(), 3);
+    assert!(ai.profiles()[0].key_set, "the first example profile says a key was saved");
+    assert!(ai.is_acknowledged("https://openrouter.ai:443"), "the router address is acknowledged");
 }
 
 #[test]

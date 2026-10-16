@@ -18,10 +18,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use common::fake_http::{FakeHttp, Reply};
-use holzwave_core::ai::http::{Frame, Http, HttpConfig, Refusal};
+use holzwave_core::ai::http::{Frame, Http, HttpConfig, Refusal, Target};
 use holzwave_core::ai::profiles::{
-    AiConfig, FILE, FORMAT_VERSION, KeyError, KeySlot, KeyStatus, KeyVault, MAX_BYTES, MAX_ID, MAX_KEY_BYTES,
-    MAX_MODEL, MAX_NAME, MAX_PROFILES, Preset, Profile, ProfileError, ProfileInput, Removal, ResolveError,
+    AiConfig, DisclosureKind, FILE, FORMAT_VERSION, KeyError, KeyNeed, KeySlot, KeyStatus, KeyVault, MAX_ACKNOWLEDGED,
+    MAX_BYTES, MAX_ID, MAX_KEY_BYTES, MAX_MODEL, MAX_NAME, MAX_PROFILES, PRESETS, Preset, Profile, ProfileError,
+    ProfileInput, Removal, ResolveError, account, auth_header_for,
 };
 use holzwave_core::ai::provider::{
     AiError, CancelToken, ChatRequest, Collector, Completion, Detail, Flow, Provider, StreamEvent,
@@ -31,6 +32,7 @@ use holzwave_core::ai::types::{ApiKey, Capabilities, Locality, Message, Role, St
 use holzwave_core::ai::wire::{Wire, WireAdapter, WireRequest, WireTurn};
 use holzwave_core::layout::LoadStatus;
 use holzwave_core::secrets::{MemoryStore, SecretStore};
+use holzwave_core::sync::engine::{ConfigSource, SECRETS, Source, allowed};
 use serde_json::{Value, json};
 
 // ---- the test dialect and the helpers -------------------------------------------------------------------
@@ -41,11 +43,17 @@ const CANARY: &str = "zq-canary-5d1e8a07c3f2b9";
 /// A dialect with one JSON line as the request and one text delta per frame as the answer.
 struct EchoAdapter {
     wire: Wire,
+    /// A body to send as it is, instead of the one made from the request.
+    body: Option<Vec<u8>>,
 }
 
 impl EchoAdapter {
     fn new(wire: Wire) -> Self {
-        Self { wire }
+        Self { wire, body: None }
+    }
+
+    fn with_body(wire: Wire, body: &[u8]) -> Self {
+        Self { wire, body: Some(body.to_vec()) }
     }
 }
 
@@ -63,13 +71,15 @@ impl WireAdapter for EchoAdapter {
     }
 
     fn request(&self, req: &ChatRequest, _caps: &Capabilities) -> Result<WireRequest, AiError> {
-        let text: Vec<String> = req.messages.iter().filter(|m| m.role == Role::User).map(Message::text).collect();
-        let body = json!({ "model": req.model, "text": text.join("\n") });
-        Ok(WireRequest {
-            path: "/v1/lines".to_owned(),
-            headers: Vec::new(),
-            body: serde_json::to_vec(&body).expect("a body"),
-        })
+        let body = match &self.body {
+            Some(fixed) => fixed.clone(),
+            None => {
+                let text: Vec<String> =
+                    req.messages.iter().filter(|m| m.role == Role::User).map(Message::text).collect();
+                serde_json::to_vec(&json!({ "model": req.model, "text": text.join("\n") })).expect("a body")
+            }
+        };
+        Ok(WireRequest { path: "/v1/lines".to_owned(), headers: Vec::new(), body })
     }
 
     fn turn(&self) -> Box<dyn WireTurn> {
@@ -1042,4 +1052,730 @@ fn loading_saving_and_resolving_open_no_socket() {
     assert_eq!(fake.accepted(), 0);
     assert_eq!(store.calls(), 0, "a keyless profile never touches the store");
     fs::remove_dir_all(&dir).expect("remove scratch directory");
+}
+
+// ---- the presets ----------------------------------------------------------------------------------------
+
+/// One row of the table the presets are pinned to: the tag, the label, the wires with the default first, the default
+/// address of each wire, the key rule, whether there is a gateway token, the acknowledgement and the extra body.
+type PinnedRow = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static [(&'static str, &'static str)],
+    KeyNeed,
+    bool,
+    Option<DisclosureKind>,
+    &'static str,
+);
+
+const PINNED: [PinnedRow; 11] = [
+    (
+        "anthropic",
+        "Anthropic",
+        &["anthropic"],
+        &[("anthropic", "https://api.anthropic.com")],
+        KeyNeed::Required,
+        false,
+        None,
+        "",
+    ),
+    (
+        "openai",
+        "OpenAI",
+        &["openai_responses"],
+        &[("openai_responses", "https://api.openai.com/v1")],
+        KeyNeed::Required,
+        false,
+        None,
+        "",
+    ),
+    (
+        "gemini",
+        "Google Gemini",
+        &["gemini"],
+        &[("gemini", "https://generativelanguage.googleapis.com/v1beta")],
+        KeyNeed::Required,
+        false,
+        None,
+        "",
+    ),
+    ("ollama", "Ollama", &["ollama"], &[("ollama", "http://127.0.0.1:11434")], KeyNeed::Optional, false, None, ""),
+    (
+        "lm_studio",
+        "LM Studio",
+        &["openai_chat"],
+        &[("openai_chat", "http://127.0.0.1:1234/v1")],
+        KeyNeed::Optional,
+        false,
+        None,
+        "",
+    ),
+    (
+        "llama_cpp",
+        "llama.cpp",
+        &["openai_chat"],
+        &[("openai_chat", "http://127.0.0.1:9931/v1")],
+        KeyNeed::Optional,
+        false,
+        None,
+        "",
+    ),
+    (
+        "openrouter",
+        "OpenRouter",
+        &["openai_chat"],
+        &[("openai_chat", "https://openrouter.ai/api/v1")],
+        KeyNeed::Required,
+        false,
+        Some(DisclosureKind::Gateway),
+        r#"{"provider":{"data_collection":"deny"}}"#,
+    ),
+    (
+        "vercel_gateway",
+        "Vercel AI Gateway",
+        &["openai_chat", "anthropic"],
+        &[("openai_chat", "https://ai-gateway.vercel.sh/v1"), ("anthropic", "https://ai-gateway.vercel.sh")],
+        KeyNeed::Required,
+        false,
+        Some(DisclosureKind::Gateway),
+        "",
+    ),
+    (
+        "cloudflare_gateway",
+        "Cloudflare AI Gateway",
+        &["anthropic", "openai_responses", "openai_chat", "gemini"],
+        &[
+            ("anthropic", "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/anthropic"),
+            ("openai_responses", "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai"),
+            ("openai_chat", "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai"),
+            ("gemini", "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/google-ai-studio/v1beta"),
+        ],
+        KeyNeed::Optional,
+        true,
+        Some(DisclosureKind::Gateway),
+        "",
+    ),
+    (
+        "litellm",
+        "LiteLLM",
+        &["openai_chat"],
+        &[("openai_chat", "http://127.0.0.1:4000/v1")],
+        KeyNeed::Optional,
+        false,
+        Some(DisclosureKind::Gateway),
+        "",
+    ),
+    (
+        "custom",
+        "Custom",
+        &["openai_chat", "openai_responses", "anthropic", "gemini", "ollama"],
+        &[],
+        KeyNeed::Optional,
+        false,
+        Some(DisclosureKind::ThirdParty),
+        "",
+    ),
+];
+
+#[test]
+fn the_preset_table_is_pinned() {
+    assert_eq!(PRESETS.len(), PINNED.len());
+    assert_eq!(Preset::ALL.len(), PINNED.len());
+    for (index, (tag, label, wires, bases, key, token, disclosure, extra)) in PINNED.iter().enumerate() {
+        let spec = Preset::ALL[index].spec();
+        assert_eq!(spec.preset, Preset::ALL[index], "row {tag}: the table follows the order of Preset::ALL");
+        assert_eq!(spec.preset.tag(), *tag, "row {tag}");
+        assert_eq!(Preset::from_tag(tag), Some(spec.preset), "row {tag}");
+        assert_eq!(serde_json::to_value(spec.preset).expect("a tag"), json!(tag), "row {tag}: the serde tag");
+        assert_eq!(spec.label, *label, "row {tag}");
+        assert_eq!(spec.wires.iter().map(|wire| wire.tag()).collect::<Vec<_>>(), *wires, "row {tag}: wires");
+        let found: Vec<(&str, &str)> = spec.bases.iter().map(|(wire, base)| (wire.tag(), *base)).collect();
+        assert_eq!(found, *bases, "row {tag}: default addresses");
+        assert_eq!(spec.key, *key, "row {tag}: key rule");
+        assert_eq!(spec.gateway_token, *token, "row {tag}: gateway token");
+        assert_eq!(spec.disclosure, *disclosure, "row {tag}: disclosure");
+        assert_eq!(spec.extra_body, *extra, "row {tag}: extra body");
+        assert!(
+            spec.bases.iter().all(|(wire, _)| spec.wires.contains(wire)),
+            "row {tag}: a default for a wire it speaks"
+        );
+        if !extra.is_empty() {
+            let parsed: Value = serde_json::from_str(extra).expect("the extra body of the table is JSON");
+            assert!(parsed.is_object(), "row {tag}: the extra body is an object");
+        }
+    }
+    assert_eq!(Preset::from_tag("apple"), None);
+    assert_eq!(Preset::from_tag("Anthropic"), None, "tags are exact");
+    assert_eq!(
+        serde_json::to_string(&DisclosureKind::ThirdParty).expect("a tag"),
+        "\"third_party\"",
+        "the disclosure kinds are written in snake case"
+    );
+}
+
+#[test]
+fn every_default_address_passes_the_address_policy_and_templates_must_be_filled_in() {
+    let mut loopback = BTreeSet::new();
+    let mut checked = 0;
+    for spec in PRESETS.iter() {
+        for (wire, base) in spec.bases {
+            checked += 1;
+            let mut form = ProfileInput::new(spec.label, spec.preset);
+            form.wire = Some(*wire);
+            let mut config = AiConfig::default();
+            if base.contains('{') {
+                // The template is not an address until the two names are filled in.
+                assert_eq!(
+                    config.upsert(form.clone()),
+                    Err(ProfileError::NeedsAddress),
+                    "{} {}",
+                    spec.label,
+                    wire.tag()
+                );
+                form.base_url = (*base).to_owned();
+                assert_eq!(config.upsert(form.clone()), Err(ProfileError::NeedsAddress), "the template left in");
+                form.base_url = base.replace("{account_id}", "acme").replace("{gateway_id}", "main");
+                let id = config.upsert(form).expect("filled in");
+                let profile = config.get(&id).expect("kept");
+                assert!(!profile.base_url.contains('{'), "{}", profile.base_url);
+                assert_eq!(profile.address().expect("an address").scope, "https://gateway.ai.cloudflare.com:443");
+            } else {
+                let target =
+                    Target::parse(base, false).unwrap_or_else(|e| panic!("{} {}: {e}", spec.label, wire.tag()));
+                if target.literal_locality() == Some(Locality::Loopback) {
+                    loopback.insert(spec.preset.tag());
+                }
+                let id = config.upsert(form).expect("the default address is taken");
+                assert_eq!(config.get(&id).expect("kept").base_url, *base, "an empty address takes the default");
+            }
+        }
+        if spec.bases.is_empty() {
+            let mut form = ProfileInput::new(spec.label, spec.preset);
+            form.wire = spec.wires.first().copied();
+            assert_eq!(
+                AiConfig::default().upsert(form),
+                Err(ProfileError::NeedsAddress),
+                "{} has no default",
+                spec.label
+            );
+        }
+    }
+    assert_eq!(checked, 14, "every default of the table was looked at");
+    assert_eq!(
+        loopback.into_iter().collect::<Vec<_>>(),
+        ["litellm", "llama_cpp", "lm_studio", "ollama"],
+        "the local servers resolve to the loopback class"
+    );
+}
+
+#[test]
+fn a_profile_takes_its_wire_and_address_from_the_preset_and_refuses_a_wire_it_does_not_speak() {
+    for spec in PRESETS.iter() {
+        let mut config = AiConfig::default();
+        // A wire of None takes the first wire of the row.
+        let mut form = ProfileInput::new(spec.label, spec.preset);
+        form.base_url = "https://gw.example.test/x".to_owned();
+        let id = config.upsert(form).expect("a profile");
+        assert_eq!(config.get(&id).expect("kept").wire, spec.wires[0], "{}", spec.label);
+        // A wire outside the row is refused, one inside is accepted.
+        for wire in Wire::ALL {
+            let mut form = ProfileInput::new(spec.label, spec.preset);
+            form.wire = Some(wire);
+            form.base_url = "https://gw.example.test/x".to_owned();
+            let result = AiConfig::default().upsert(form);
+            if spec.wires.contains(&wire) {
+                assert!(result.is_ok(), "{} speaks {}", spec.label, wire.tag());
+            } else {
+                assert_eq!(result, Err(ProfileError::Wire), "{} does not speak {}", spec.label, wire.tag());
+            }
+        }
+        // The preset of a profile does not change.
+        let other = Preset::ALL.into_iter().find(|preset| *preset != spec.preset).expect("another preset");
+        let mut form = ProfileInput::new(spec.label, other);
+        form.id = Some(id.clone());
+        form.base_url = "https://gw.example.test/x".to_owned();
+        assert_eq!(config.upsert(form), Err(ProfileError::PresetChange), "{}", spec.label);
+    }
+
+    // The default address follows the wire, and an update that names no wire keeps the one it has.
+    let mut config = AiConfig::default();
+    let mut form = ProfileInput::new("Vercel", Preset::VercelGateway);
+    form.wire = Some(Wire::Anthropic);
+    let id = config.upsert(form).expect("the anthropic wire");
+    assert_eq!(config.get(&id).expect("kept").base_url, "https://ai-gateway.vercel.sh", "no /v1 on the anthropic wire");
+    let mut form = ProfileInput::new("Vercel", Preset::VercelGateway);
+    form.id = Some(id.clone());
+    form.base_url = "https://ai-gateway.vercel.sh".to_owned();
+    config.upsert(form).expect("an update without a wire");
+    assert_eq!(config.get(&id).expect("kept").wire, Wire::Anthropic);
+    let mut form = ProfileInput::new("Vercel", Preset::VercelGateway);
+    form.wire = Some(Wire::OpenAiChat);
+    let chat = config.upsert(form).expect("the chat wire");
+    assert_eq!(config.get(&chat).expect("kept").base_url, "https://ai-gateway.vercel.sh/v1");
+    assert_eq!(chat, "vercel-2", "a second profile of the same name gets its own id");
+}
+
+#[test]
+fn the_key_header_follows_the_wire() {
+    assert_eq!(auth_header_for(Wire::Anthropic), ("x-api-key", ""));
+    assert_eq!(auth_header_for(Wire::Gemini), ("x-goog-api-key", ""));
+    assert_eq!(auth_header_for(Wire::OpenAiChat), ("authorization", "Bearer "));
+    assert_eq!(auth_header_for(Wire::OpenAiResponses), ("authorization", "Bearer "));
+    assert_eq!(auth_header_for(Wire::Ollama), ("authorization", "Bearer "));
+
+    for wire in [Wire::OpenAiChat, Wire::OpenAiResponses, Wire::Anthropic, Wire::Gemini] {
+        let fake = hello_server();
+        let store = CountingStore::new();
+        let vault = KeyVault::new(store.clone());
+        let mut config = AiConfig::default();
+        let mut form = input(&format!("{}/v1", fake.base()));
+        form.wire = Some(wire);
+        let id = config.upsert(form).expect("a profile");
+        config.set_key(&vault, &id, KeySlot::Provider, key(CANARY)).expect("a key");
+        let resolved = config.resolve(&id, &vault, false).expect("resolves");
+        assert_eq!(resolved.wire(), wire);
+        let provider = resolved.into_provider(Box::new(EchoAdapter::new(wire)), http());
+
+        run(&provider, &request("hi")).result.expect("the turn completes");
+
+        let seen = &fake.seen()[0];
+        let (name, prefix) = auth_header_for(wire);
+        assert_eq!(seen.header(name), Some(format!("{prefix}{CANARY}").as_str()), "{}: header {name}", wire.tag());
+        for (other, value) in &seen.headers {
+            assert!(other == name || !value.contains(CANARY), "{}: the key is also in {other}", wire.tag());
+        }
+        if name != "authorization" {
+            assert_eq!(seen.header("authorization"), None, "{}: no bearer header", wire.tag());
+        }
+    }
+}
+
+#[test]
+fn a_cloudflare_profile_sends_the_provider_key_and_the_gateway_token_each_to_its_own_address() {
+    let fake = hello_server();
+    let other = hello_server();
+    let store = CountingStore::new();
+    let vault = KeyVault::new(store.clone());
+    let provider_key = format!("{CANARY}-provider");
+    let token = format!("{CANARY}-gateway");
+    let mut config = AiConfig::default();
+    let mut form = ProfileInput::new("CF", Preset::CloudflareGateway);
+    form.wire = Some(Wire::OpenAiChat);
+    form.base_url = format!("{}/v1/acme/main/openai", fake.base());
+    let id = config.upsert(form).expect("a profile");
+    assert_eq!(id, "cf");
+
+    // The second slot exists for this preset only.
+    for preset in Preset::ALL.into_iter().filter(|preset| *preset != Preset::CloudflareGateway) {
+        let mut plain = AiConfig::default();
+        let mut form = ProfileInput::new("Plain", preset);
+        form.base_url = "https://gw.example.test/x".to_owned();
+        let plain_id = plain.upsert(form).expect("a profile");
+        assert_eq!(
+            plain.set_key(&vault, &plain_id, KeySlot::Gateway, key(&token)),
+            Err(KeyError::NoSuchSlot),
+            "{preset:?}"
+        );
+    }
+    assert_eq!(store.calls(), 0, "a refused slot never reached the store");
+
+    config.set_key(&vault, &id, KeySlot::Provider, key(&provider_key)).expect("provider key");
+    config.set_key(&vault, &id, KeySlot::Gateway, key(&token)).expect("gateway token");
+    assert_eq!(account(&id, KeySlot::Provider), "ai:cf");
+    assert_eq!(account(&id, KeySlot::Gateway), "ai:cf:gateway");
+    let scope = format!("http://127.0.0.1:{}", fake.port());
+    let entries = store.entries();
+    assert_eq!(entries.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["ai:cf", "ai:cf:gateway"]);
+    let record: Value = serde_json::from_str(&entries[1].1).expect("a record");
+    assert_eq!(record, json!({ "v": 1, "scope": scope, "key": token }));
+    let profile = config.get(&id).expect("kept");
+    assert!(profile.key_set && profile.gateway_key_set);
+    assert_eq!(vault.status(profile, KeySlot::Provider), KeyStatus::Present);
+    assert_eq!(vault.status(profile, KeySlot::Gateway), KeyStatus::Present);
+
+    // Both keys travel, each in its own header.
+    let provider = config
+        .resolve(&id, &vault, false)
+        .expect("resolves")
+        .into_provider(Box::new(EchoAdapter::new(Wire::OpenAiChat)), http());
+    run(&provider, &request("hi")).result.expect("the turn completes");
+    let seen = &fake.seen()[0];
+    assert_eq!(seen.target, "/v1/acme/main/openai/v1/lines");
+    assert_eq!(seen.header("authorization"), Some(format!("Bearer {provider_key}").as_str()));
+    assert_eq!(seen.header("cf-aig-authorization"), Some(format!("Bearer {token}").as_str()));
+    for (name, value) in &seen.headers {
+        let allowed = name == "authorization" || name == "cf-aig-authorization";
+        assert!(allowed || !value.contains(CANARY), "a key is in the header {name}");
+    }
+
+    // A gateway token stored for another address is refused, and the provider key still stands.
+    store.plant(
+        "ai:cf:gateway",
+        &json!({ "v": 1, "scope": format!("http://127.0.0.1:{}", other.port()), "key": token }).to_string(),
+    );
+    let profile = config.get(&id).expect("kept");
+    assert_eq!(vault.status(profile, KeySlot::Provider), KeyStatus::Present, "independent of the other slot");
+    assert_eq!(vault.status(profile, KeySlot::Gateway), KeyStatus::WrongAddress);
+    let error = config.resolve(&id, &vault, false).expect_err("the token belongs to another address");
+    assert_eq!(error, ResolveError::KeyScope(KeySlot::Gateway));
+    assert_eq!(error.slot(), Some(KeySlot::Gateway));
+    assert_eq!(fake.seen().len(), 1, "nothing more was sent");
+    assert_eq!(other.accepted(), 0);
+
+    // Clearing one slot leaves the other; with neither key the request carries neither header.
+    config.clear_key(&vault, &id, KeySlot::Gateway).expect("cleared");
+    assert_eq!(store.entries().iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["ai:cf"]);
+    config.clear_key(&vault, &id, KeySlot::Provider).expect("cleared");
+    assert!(store.entries().is_empty());
+    let provider = config
+        .resolve(&id, &vault, false)
+        .expect("both keys are optional")
+        .into_provider(Box::new(EchoAdapter::new(Wire::OpenAiChat)), http());
+    run(&provider, &request("hi")).result.expect("the turn completes");
+    let seen = &fake.seen()[1];
+    assert_eq!(seen.header("authorization"), None);
+    assert_eq!(seen.header("cf-aig-authorization"), None);
+
+    // Removing the profile removes both entries.
+    config.set_key(&vault, &id, KeySlot::Provider, key(&provider_key)).expect("provider key");
+    config.set_key(&vault, &id, KeySlot::Gateway, key(&token)).expect("gateway token");
+    assert_eq!(store.entries().len(), 2);
+    assert_eq!(config.remove(&id, &vault), Removal { removed: true, key_deleted: true });
+    assert!(store.entries().is_empty(), "{:?}", store.entries());
+}
+
+#[test]
+fn openrouter_asks_for_no_data_collection_and_the_preset_wins_over_the_adapter() {
+    let store = CountingStore::new();
+    let vault = KeyVault::new(store.clone());
+    let router = |fake: &FakeHttp| {
+        let mut config = AiConfig::default();
+        let mut form = ProfileInput::new("Router", Preset::OpenRouter);
+        form.base_url = format!("{}/api/v1", fake.base());
+        let id = config.upsert(form).expect("a profile");
+        config.set_key(&vault, &id, KeySlot::Provider, key(CANARY)).expect("a key");
+        (config, id)
+    };
+    let send_with = |config: &AiConfig, id: &str, adapter: EchoAdapter| {
+        let provider = config.resolve(id, &vault, false).expect("resolves").into_provider(Box::new(adapter), http());
+        run(&provider, &request("hi"))
+    };
+    let body_of = |fake: &FakeHttp| -> Value {
+        let seen = fake.seen();
+        serde_json::from_slice(&seen.last().expect("a request").body).expect("a JSON body")
+    };
+
+    // The adapter's own members are kept and the option is added.
+    let fake = hello_server();
+    let (config, id) = router(&fake);
+    send_with(&config, &id, EchoAdapter::new(Wire::OpenAiChat)).result.expect("the turn completes");
+    let body = body_of(&fake);
+    assert_eq!(body, json!({ "model": "m", "text": "hi", "provider": { "data_collection": "deny" } }));
+
+    // A member of the adapter next to it stays.
+    let adapter = EchoAdapter::with_body(Wire::OpenAiChat, br#"{"model":"m","provider":{"sort":"price"}}"#);
+    send_with(&config, &id, adapter).result.expect("the turn completes");
+    assert_eq!(body_of(&fake), json!({ "model": "m", "provider": { "sort": "price", "data_collection": "deny" } }));
+
+    // The preset wins over the adapter, for an equal member and for one of another type.
+    let adapter =
+        EchoAdapter::with_body(Wire::OpenAiChat, br#"{"provider":{"data_collection":"allow","order":["a"]}}"#);
+    send_with(&config, &id, adapter).result.expect("the turn completes");
+    assert_eq!(body_of(&fake), json!({ "provider": { "data_collection": "deny", "order": ["a"] } }));
+    let adapter = EchoAdapter::with_body(Wire::OpenAiChat, br#"{"provider":"anything"}"#);
+    send_with(&config, &id, adapter).result.expect("the turn completes");
+    assert_eq!(body_of(&fake), json!({ "provider": { "data_collection": "deny" } }));
+
+    // A body that is not an object is refused before any connection.
+    let before = fake.accepted();
+    let outcome = send_with(&config, &id, EchoAdapter::with_body(Wire::OpenAiChat, b"[1,2]"));
+    assert!(matches!(outcome.result, Err(AiError::InvalidRequest(_))), "{:?}", outcome.result);
+    let outcome = send_with(&config, &id, EchoAdapter::with_body(Wire::OpenAiChat, b"not json"));
+    assert!(matches!(outcome.result, Err(AiError::InvalidRequest(_))), "{:?}", outcome.result);
+    assert_eq!(fake.accepted(), before, "nothing was sent for a body the preset cannot extend");
+
+    // Every other preset sends the adapter's body as it is.
+    for preset in Preset::ALL.into_iter().filter(|preset| *preset != Preset::OpenRouter) {
+        let fake = hello_server();
+        let mut config = AiConfig::default();
+        let mut form = ProfileInput::new("Other", preset);
+        form.wire = Some(Wire::OpenAiChat).filter(|wire| preset.spec().wires.contains(wire));
+        form.base_url = format!("{}/v1", fake.base());
+        let id = config.upsert(form).expect("a profile");
+        if preset.spec().key == KeyNeed::Required {
+            config.set_key(&vault, &id, KeySlot::Provider, key(CANARY)).expect("a key");
+        }
+        let wire = config.get(&id).expect("kept").wire;
+        let fixed: &[u8] = br#"{"model":"m","provider":{"sort":"price"},"z":1}"#;
+        let provider = config
+            .resolve(&id, &vault, false)
+            .expect("resolves")
+            .into_provider(Box::new(EchoAdapter::with_body(wire, fixed)), http());
+        // The Ollama dialect answers in lines, which the test dialect does not read; the body is what is looked at.
+        let outcome = run(&provider, &request("hi"));
+        if wire != Wire::Ollama {
+            outcome.result.expect("the turn completes");
+        }
+        assert_eq!(fake.seen()[0].body, fixed, "{preset:?}: the body is the adapter's");
+    }
+}
+
+/// The profile `id` of kind `preset` at `base`, changed or made, with the acknowledgement as given.
+fn edit(config: &mut AiConfig, id: Option<&str>, preset: Preset, base: &str, acknowledge: bool) -> String {
+    let mut form = ProfileInput::new("Gateway", preset);
+    form.id = id.map(str::to_owned);
+    form.base_url = base.to_owned();
+    form.acknowledge_gateway = acknowledge;
+    config.upsert(form).expect("a profile")
+}
+
+#[test]
+fn a_gateway_or_third_party_address_needs_an_acknowledgement_before_the_first_send() {
+    let store = CountingStore::new();
+    let vault = KeyVault::new(store.clone());
+    let cases = [
+        (Preset::OpenRouter, "https://gw.example.test/api/v1", DisclosureKind::Gateway),
+        (Preset::VercelGateway, "https://gw.example.test/v1", DisclosureKind::Gateway),
+        (Preset::CloudflareGateway, "https://gw.example.test/v1/acme/main/openai", DisclosureKind::Gateway),
+        (Preset::LiteLlm, "https://gw.example.test/v1", DisclosureKind::Gateway),
+        (Preset::Custom, "https://gw.example.test/v1", DisclosureKind::ThirdParty),
+    ];
+    for (preset, base, kind) in cases {
+        let mut config = AiConfig::default();
+        let id = edit(&mut config, None, preset, base, false);
+        if preset.spec().key == KeyNeed::Required {
+            config.set_key(&vault, &id, KeySlot::Provider, key(CANARY)).expect("a key");
+        }
+        let error = config.resolve(&id, &vault, false).expect_err("not acknowledged");
+        assert_eq!(error, ResolveError::DisclosureNeeded, "{preset:?}");
+        assert_eq!(error.as_str(), "disclosure_needed");
+        let views = config.views(&vault);
+        let shown = views[0].disclosure.as_ref().expect("the view shows the disclosure");
+        assert_eq!((shown.host.as_str(), shown.kind), ("gw.example.test", kind), "{preset:?}");
+
+        // Acknowledging records the origin once; the send is then allowed and the view is quiet.
+        edit(&mut config, Some(&id), preset, base, true);
+        edit(&mut config, Some(&id), preset, base, true);
+        assert!(config.is_acknowledged("https://gw.example.test:443"), "{preset:?}");
+        let list: Value = serde_json::from_str(&config.to_json()).expect("a document");
+        assert_eq!(list["acknowledged"], json!(["https://gw.example.test:443"]), "no duplicate");
+        config.resolve(&id, &vault, false).unwrap_or_else(|e| panic!("{preset:?}: {e}"));
+        assert!(config.views(&vault)[0].disclosure.is_none(), "{preset:?}");
+
+        // A change of path keeps the acknowledgement; a change of host asks again, with the new host.
+        let other_path = base.replacen("/v1", "/v2", 1).replacen("/api/v1", "/api/v2", 1);
+        edit(&mut config, Some(&id), preset, &other_path, false);
+        assert!(config.get(&id).expect("kept").base_url.contains("/v2"), "{other_path}");
+        if preset.spec().key != KeyNeed::Required {
+            let moved = base.replace("gw.example.test", "other.example.test");
+            edit(&mut config, Some(&id), preset, &moved, false);
+            assert_eq!(config.resolve(&id, &vault, false).expect_err("a new host"), ResolveError::DisclosureNeeded);
+            let shown = config.views(&vault)[0].disclosure.clone().expect("the disclosure");
+            assert_eq!(shown.host, "other.example.test");
+        }
+
+        // Removing the profile keeps the acknowledged address.
+        config.remove(&id, &vault);
+        assert!(config.is_acknowledged("https://gw.example.test:443"), "{preset:?}");
+    }
+
+    // An address on this computer never asks.
+    for base in
+        ["http://127.0.0.1:4000/v1", "http://localhost:4000/v1", "http://api.localhost:4000/v1", "http://[::1]:4000/v1"]
+    {
+        for preset in [Preset::LiteLlm, Preset::Custom] {
+            let mut config = AiConfig::default();
+            let id = edit(&mut config, None, preset, base, false);
+            config.resolve(&id, &vault, false).unwrap_or_else(|e| panic!("{preset:?} {base}: {e}"));
+            assert!(config.views(&vault)[0].disclosure.is_none());
+        }
+    }
+
+    // The named providers and the local servers never ask, wherever they are.
+    for (preset, base) in [
+        (Preset::Anthropic, "https://proxy.example.test"),
+        (Preset::OpenAi, "https://proxy.example.test/v1"),
+        (Preset::Gemini, "https://proxy.example.test/v1beta"),
+        (Preset::Ollama, "http://192.168.1.5:11434"),
+        (Preset::LmStudio, "http://192.168.1.5:1234/v1"),
+        (Preset::LlamaCpp, "http://192.168.1.5:9931/v1"),
+    ] {
+        let mut config = AiConfig::default();
+        let mut form = ProfileInput::new("Named", preset);
+        form.base_url = base.to_owned();
+        form.allow_lan_http = true;
+        let id = config.upsert(form).expect("a profile");
+        if preset.spec().key == KeyNeed::Required {
+            config.set_key(&vault, &id, KeySlot::Provider, key(CANARY)).expect("a key");
+        }
+        config.resolve(&id, &vault, false).unwrap_or_else(|e| panic!("{preset:?}: {e}"));
+        assert!(config.views(&vault)[0].disclosure.is_none(), "{preset:?}");
+    }
+
+    // The list of acknowledged addresses is bounded and the oldest go first.
+    let mut config = AiConfig::default();
+    let id = edit(&mut config, None, Preset::LiteLlm, "https://h0.example.test/v1", true);
+    for number in 1..=MAX_ACKNOWLEDGED {
+        edit(&mut config, Some(&id), Preset::LiteLlm, &format!("https://h{number}.example.test/v1"), true);
+    }
+    let list: Value = serde_json::from_str(&config.to_json()).expect("a document");
+    assert_eq!(list["acknowledged"].as_array().expect("a list").len(), MAX_ACKNOWLEDGED);
+    assert!(!config.is_acknowledged("https://h0.example.test:443"), "the oldest was dropped");
+    assert!(config.is_acknowledged(&format!("https://h{MAX_ACKNOWLEDGED}.example.test:443")));
+}
+
+#[test]
+fn the_profile_view_carries_state_and_never_a_key() {
+    let dir = common::scratch_dir("ai-profiles-view");
+    let store = CountingStore::new();
+    let vault = KeyVault::new(store.clone());
+    let mut config = AiConfig::default();
+    let mut named = |name: &str, preset: Preset, base: &str| {
+        let mut form = ProfileInput::new(name, preset);
+        form.base_url = base.to_owned();
+        form.acknowledge_gateway = true;
+        config.upsert(form).expect(name)
+    };
+    let present = named("Present", Preset::Custom, "http://127.0.0.1:8001/v1");
+    let missing = named("Missing", Preset::Custom, "http://127.0.0.1:8002/v1");
+    let moved = named("Moved", Preset::Custom, "http://127.0.0.1:8003/v1");
+    let damaged = named("Damaged", Preset::Custom, "http://127.0.0.1:8004/v1");
+    let none = named("None", Preset::Custom, "http://127.0.0.1:8005/v1");
+    let cloud = named("Cloud", Preset::CloudflareGateway, "http://127.0.0.1:8006/v1/acme/main/openai");
+    for id in [&present, &missing, &moved, &damaged] {
+        config.set_key(&vault, id, KeySlot::Provider, key(CANARY)).expect("a key");
+    }
+    config.set_key(&vault, &cloud, KeySlot::Provider, key(CANARY)).expect("a key");
+    config.set_key(&vault, &cloud, KeySlot::Gateway, key(CANARY)).expect("a token");
+    store.delete(&account(&missing, KeySlot::Provider)).expect("the entry goes missing");
+    named_move(&mut config, &moved);
+    store.plant(&account(&damaged, KeySlot::Provider), "garbage");
+    config.save(&dir).expect("saved");
+    let (config, _) = AiConfig::load(&dir);
+
+    let gets_before = store.gets.load(Ordering::SeqCst);
+    let views = config.views(&vault);
+    let gets = store.gets.load(Ordering::SeqCst) - gets_before;
+    assert_eq!(gets, 6, "the store is read for the six slots that have a marker and for no other");
+    let keys: Vec<(&str, KeyStatus)> = views.iter().map(|view| (view.id.as_str(), view.key)).collect();
+    assert_eq!(
+        keys,
+        [
+            ("present", KeyStatus::Present),
+            ("missing", KeyStatus::Missing),
+            ("moved", KeyStatus::WrongAddress),
+            ("damaged", KeyStatus::Damaged),
+            ("none", KeyStatus::NotSet),
+            ("cloud", KeyStatus::Present),
+        ],
+        "one view per profile, in file order"
+    );
+    assert_eq!(views[5].gateway_key, Some(KeyStatus::Present));
+    assert!(views[..5].iter().all(|view| view.gateway_key.is_none()), "only Cloudflare has a second key");
+    assert_eq!(views[0].host, "127.0.0.1:8001");
+    assert!(views.iter().all(|view| view.disclosure.is_none()), "loopback needs no acknowledgement");
+
+    // Without a store every marker reads as no secure store, and the profile without a key stays quiet.
+    let views = config.views(&KeyVault::unavailable());
+    assert_eq!(views[0].key, KeyStatus::NoSecureStore);
+    assert_eq!(views[4].key, KeyStatus::NotSet);
+    assert_eq!(views[5].gateway_key, Some(KeyStatus::NoSecureStore));
+
+    // What the page gets holds no key, no header name of the secret family and no account name.
+    let text = serde_json::to_string(&config.views(&vault)).expect("serialise");
+    assert!(text.contains("\"key\":\"present\"") && text.contains("\"key\":\"wrong_address\""), "{text}");
+    for needle in [CANARY, "authorization", "x-api-key", "x-goog-api-key", "cf-aig", "ai:", "secret"] {
+        assert!(!text.contains(needle), "the view holds {needle:?}: {text}");
+    }
+    assert_eq!(none, "none");
+    fs::remove_dir_all(&dir).expect("remove scratch directory");
+
+    fn named_move(config: &mut AiConfig, id: &str) {
+        let mut form = ProfileInput::new("Moved", Preset::Custom);
+        form.id = Some(id.to_owned());
+        form.base_url = "http://127.0.0.1:8099/v1".to_owned();
+        config.upsert(form).expect("the address moves");
+    }
+}
+
+#[test]
+fn ai_json_and_ai_accounts_stay_out_of_the_sync() {
+    let dir = common::scratch_dir("ai-profiles-sync");
+    let secrets = Arc::new(MemoryStore::default());
+    let store = KeyVault::new(secrets.clone());
+    let mut config = AiConfig::default();
+    let id = config.upsert(input("http://127.0.0.1:1234/v1")).expect("a profile");
+    config.set_key(&store, &id, KeySlot::Provider, key(CANARY)).expect("a key");
+    config.save(&dir).expect("saved");
+    secrets.set("ai:x", CANARY).expect("an unrelated account");
+    assert!(dir.join(FILE).is_file());
+
+    let source = ConfigSource::new(&dir, secrets.clone());
+    let names = source.names().expect("names");
+    assert!(!names.iter().any(|name| name == FILE || name == SECRETS), "{names:?}");
+    assert!(!allowed(FILE), "ai.json is not a synced name");
+    for name in [FILE, "ai.json.bad", "ai.json.tmp"] {
+        let error = source.read(name).expect_err(name);
+        assert!(error.to_string().contains("not a synced file"), "{name}: {error}");
+        let error = source.write(name, b"{}").expect_err(name);
+        assert!(error.to_string().contains("not a synced file"), "{name}: {error}");
+    }
+    assert!(!dir.join("sync-incoming").exists(), "nothing was staged");
+
+    // The secrets file never carries an account of this feature, and a payload that names one stores nothing.
+    assert_eq!(source.read(SECRETS).expect("read"), None, "no connection, so no secrets file");
+    for account in ["ai:x", "ai:local", "ai:local:gateway"] {
+        let payload = json!({ account: "stolen" }).to_string();
+        assert!(source.write(SECRETS, payload.as_bytes()).is_err(), "{account}");
+    }
+    assert_eq!(secrets.get("ai:x").expect("get").as_deref(), Some(CANARY), "the account was not overwritten");
+    assert_eq!(secrets.get("ai:new").expect("get"), None);
+    fs::remove_dir_all(&dir).expect("remove scratch directory");
+}
+
+#[test]
+fn the_shipped_app_enables_the_keychain_backend() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("the workspace root");
+    let app = fs::read_to_string(root.join("app/src-tauri/Cargo.toml")).expect("the app manifest");
+    let line =
+        app.lines().find(|line| line.trim_start().starts_with("holzwave-core")).expect("the app depends on the core");
+    assert!(line.contains("keyring"), "the app does not enable the keychain feature: {line}");
+
+    let core = fs::read_to_string(root.join("core/Cargo.toml")).expect("the core manifest");
+    let default = core.lines().find(|line| line.trim_start().starts_with("default")).expect("the default features");
+    assert!(!default.contains("keyring"), "the keychain is not a default of the core: {default}");
+}
+
+#[test]
+fn local_only_reaches_the_chokepoint() {
+    let store = CountingStore::new();
+    let vault = KeyVault::new(store.clone());
+
+    // An address on the internet: refused with a policy error, with no connection and quickly.
+    let mut config = AiConfig::default();
+    let id = edit(&mut config, None, Preset::Custom, "https://203.0.113.7", true);
+    let http = http();
+    let provider = config
+        .resolve(&id, &vault, true)
+        .expect("the profile resolves, the chokepoint decides")
+        .into_provider(Box::new(EchoAdapter::new(Wire::OpenAiChat)), http.clone());
+    let started = std::time::Instant::now();
+    let outcome = run(&provider, &request("hi"));
+    assert!(matches!(outcome.result, Err(AiError::Policy(_))), "{:?}", outcome.result);
+    assert!(started.elapsed() < Duration::from_secs(1), "refused in {:?}", started.elapsed());
+    assert_eq!(http.attempts(), 0, "no connection was attempted");
+    assert!(outcome.events.is_empty());
+
+    // The same profile on this computer streams normally with the switch on.
+    let fake = hello_server();
+    let id = edit(&mut config, Some(&id), Preset::Custom, &format!("{}/v1", fake.base()), false);
+    let provider = config
+        .resolve(&id, &vault, true)
+        .expect("resolves")
+        .into_provider(Box::new(EchoAdapter::new(Wire::OpenAiChat)), http.clone());
+    let outcome = run(&provider, &request("hi"));
+    outcome.result.expect("a loopback server is allowed with local only on");
+    assert_eq!(outcome.text, "Hello");
+    assert_eq!(fake.accepted(), 1);
 }

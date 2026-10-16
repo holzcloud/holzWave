@@ -12,6 +12,7 @@ it are parsed by `core/tests/project_policy.rs`, so a format change that forgets
 - [`layout.json`](#layoutjson)
 - [Accessibility](#accessibility)
 - [Privacy](#privacy)
+- [`ai.json`](#aijson)
 
 ## Where the files live
 
@@ -38,6 +39,7 @@ one.
 | `pane_connections.json` | which pane runs which connection | when it changes | yes |
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
 | `pane_blocks.json` | which pane shows a file browser or a preview, of which source and path | when it changes | yes |
+| `ai.json` | the AI provider profiles, without keys | when a profile is saved or deleted | yes |
 | `<name>.bad` | the bytes of a file that could not be used | when such a file is loaded | |
 
 Rules that hold for every file:
@@ -45,7 +47,7 @@ Rules that hold for every file:
 - **Atomic writes.** The bytes go to `<name>.tmp`, are flushed, and replace the file with one rename. A crash leaves the
   old content or the new one, never half of it.
 - **Bounded reads.** A file larger than its limit is not read: `settings.json`, `session.json` and `layout.json`
-  1 MiB, a theme file 64 KiB. An oversized file is moved to `<name>.bad`.
+  1 MiB, `ai.json` 256 KiB, a theme file 64 KiB. An oversized file is moved to `<name>.bad`.
 - **The app always starts.** A file that cannot be used is replaced by the defaults, and the original bytes are kept
   as `<name>.bad` before the next save can overwrite them. Keep a `.bad` copy if you want it: the next one replaces it.
 - **Hand edits are welcome.** An unknown key is ignored, so a file written by a newer version still loads. Edit while
@@ -512,6 +514,123 @@ convention), holds control characters or is over 4096 bytes, or contains `passwo
 guarantee: a secret typed in another form is kept, so use a leading space for such a line, and `Clear all` or
 `Shift+Delete` in the history dialog forgets. The history is not synced. At most 100,000 uses are kept; the oldest tenth
 goes when it is passed.
+
+## `ai.json`
+
+The AI providers you set up: for each one a name, the kind of provider, the wire it speaks, a base address and a model. The
+file is read when the app starts and written when a profile is saved or deleted. It holds **no secret of any kind**: a key is
+never in this file (see below).
+
+The document is `{"version": 1, "profiles": [...], "acknowledged": [...]}`. A file with another version number, a file that is
+not a JSON object and a file over 256 KiB are not read: the bytes are kept as `ai.json.bad` (an oversized file is moved there
+unread) and the app starts without profiles; the reason names the limit or the version number and never quotes the file. A profile that breaks a
+rule below is left out with a note and costs only itself; the rest are kept.
+
+| Field | Type | Values |
+|---|---|---|
+| `id` | string | 1 to 40 characters of `a` to `z`, `0` to `9`, `-` and `_`; `apple` is reserved |
+| `name` | string | 1 to 80 characters, no control character |
+| `preset` | string | the kind of provider, one of the tags below |
+| `wire` | string | `openai_chat`, `openai_responses`, `anthropic`, `gemini` or `ollama`; one the kind of provider speaks |
+| `base_url` | string | the base address, see the rules below |
+| `model` | string | at most 200 characters, no control character; empty until you choose one |
+| `allow_lan_http` | boolean | allow plain http to a literal address on the local network for this profile; default `false` |
+| `key_set` | boolean | only a marker that a key was saved in the keychain; a profile without a key never touches the keychain |
+| `gateway_key_set` | boolean | the same marker for the gateway token of a Cloudflare AI Gateway profile |
+
+At most 32 profiles are kept. Fields this version does not know are ignored.
+
+**The base address** is checked when you save a profile, again when the file is read and again before every request, by the same
+rule each time. It must be `https`, or plain `http` to this computer (a loopback address, `localhost` or a name below it) or, with
+`allow_lan_http`, to a literal local-network address. It must not hold a user name or password, a query or a fragment, a
+backslash or an encoded slash or dot, and it is at most 2048 characters. Link-local, cloud metadata, multicast, unspecified and
+reserved addresses are refused. An address that still has a part in braces to fill in, such as the account of a gateway, is
+refused as not yet complete. Nothing is looked up when the address is checked.
+
+**Kinds of provider.** An empty address takes the default of the chosen wire. The first wire of a kind is its default.
+
+| Tag | Name | Wires | Default address | Key |
+|---|---|---|---|---|
+| `anthropic` | Anthropic | `anthropic` | `https://api.anthropic.com` | required |
+| `openai` | OpenAI | `openai_responses` | `https://api.openai.com/v1` | required |
+| `gemini` | Google Gemini | `gemini` | `https://generativelanguage.googleapis.com/v1beta` | required |
+| `ollama` | Ollama | `ollama` | `http://127.0.0.1:11434` | optional |
+| `lm_studio` | LM Studio | `openai_chat` | `http://127.0.0.1:1234/v1` | optional |
+| `llama_cpp` | llama.cpp | `openai_chat` | `http://127.0.0.1:9931/v1` | optional |
+| `openrouter` | OpenRouter | `openai_chat` | `https://openrouter.ai/api/v1` | required |
+| `vercel_gateway` | Vercel AI Gateway | `openai_chat`, `anthropic` | `https://ai-gateway.vercel.sh/v1`, for `anthropic` without `/v1` | required |
+| `cloudflare_gateway` | Cloudflare AI Gateway | `anthropic`, `openai_responses`, `openai_chat`, `gemini` | none: `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/` plus `anthropic`, `openai` or `google-ai-studio/v1beta`, with your account and gateway names | optional, plus a gateway token |
+| `litellm` | LiteLLM | `openai_chat` | `http://127.0.0.1:4000/v1` | optional |
+| `custom` | Custom | all five | none | optional |
+
+The header that carries a key follows the wire: `x-api-key` for `anthropic`, `x-goog-api-key` for `gemini`, and
+`authorization` with `Bearer ` for the others. A Cloudflare AI Gateway profile has a second key, the gateway token, which is sent
+as `cf-aig-authorization`; both are optional, because a gateway can be open or can hold the provider key itself. There is no field
+for other headers: a profile cannot send a header of its own, and nothing that identifies you is added.
+
+**Where a key lives.** Only in the operating system keychain, one entry per key: `ai:<id>` for the provider key and
+`ai:<id>:gateway` for the gateway token. The entry holds the key together with the address it was saved for (scheme, host and
+port). A key is never shown, never returned to the page, never written to a file or a log, and never synced. `key_set` is only a
+marker. When the address of a profile changes, whether in the dialog, by editing this file or by importing one, a key saved for
+the old address is not used for the new one; no request is sent until you enter the key again. Without a system keychain (for
+example a system without a running secret service) a key cannot be saved, a profile that needs one is unavailable, and
+nothing is kept in a file or in memory instead. A local server that needs no key works without touching the keychain. A key is
+at most 2048 bytes of printable ASCII without spaces; spaces around it are removed when it is saved. No key is read from an
+environment variable.
+
+**Gateways and third parties.** OpenRouter, the Vercel and Cloudflare gateways, LiteLLM and a Custom address are servers that
+see the whole request, and a gateway may log it. No request goes to such an address until it has been accepted once, because your
+messages and the context you share go through it. The accepted address (scheme, host and port) is added to
+`acknowledged`; a request to another host asks again, a change of path does not, and deleting the profile keeps the entry. An
+address on this computer needs no acknowledgement. At most 64 addresses are kept, the oldest first to go. OpenRouter is also asked
+not to let its providers collect your data (`provider.data_collection` set to `deny` in every request); a gateway can still log
+what it receives, and that setting is not a promise about what it does.
+
+The file and the keychain entries `ai:*` stay out of the sync. Copy the file to another machine and the keys do not come with it:
+enter them again there.
+
+<!-- example: ai.json -->
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "claude",
+      "name": "Claude",
+      "preset": "anthropic",
+      "wire": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "model": "",
+      "allow_lan_http": false,
+      "key_set": true,
+      "gateway_key_set": false
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama on this computer",
+      "preset": "ollama",
+      "wire": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "model": "",
+      "allow_lan_http": false,
+      "key_set": false,
+      "gateway_key_set": false
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter",
+      "preset": "openrouter",
+      "wire": "openai_chat",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "",
+      "allow_lan_http": false,
+      "key_set": false,
+      "gateway_key_set": false
+    }
+  ],
+  "acknowledged": ["https://openrouter.ai:443"]
+}
+```
 
 ## `widgets/*.json` and `widget_notes.json`
 
