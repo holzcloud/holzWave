@@ -7,14 +7,21 @@
 //!
 //! What is pinned:
 //!
-//! * the direct dependency list of every workspace crate and of the app package (a new dependency fails the test with
-//!   its name, which forces a conscious D-03 decision in this file);
-//! * the dependency closure of the app: no telemetry or network client crate, except the named, commented exceptions
-//!   with their exact set of parents;
-//! * the sources: no network API in first-party Rust (non-test code) or in the page;
-//! * the page policy (no remote origin in the CSP, no dev server URL, no updater) and the absence of CI (D-04);
+//! * the direct dependency list of every workspace crate (the members are read from the manifests) and the dev
+//!   dependencies of the app package, each entry with a reason (a new dependency fails the test with its name, which
+//!   forces a conscious D-03 decision in this file);
+//! * the dependency closure of the app: no telemetry or network client crate, except the named exceptions with a
+//!   reason and their exact set of parents;
+//! * the sources: no network API in the production Rust of every workspace member or in the page, except the named
+//!   hits with a reason (a file is skipped only when it is a declared `#[cfg(test)] mod tests;`);
+//! * the page policy (no remote origin in the CSP except the named ones, no dev server URL, no updater) and the
+//!   absence of CI (D-04);
 //! * the examples of `docs/config.md`, which are parsed by the real loaders, so the document cannot drift from the code;
 //! * the owner's Windows and Linux list: every row W1 to W14 and L1 to L11 is in `docs/test-plan.md` exactly once.
+//!
+//! Every exception is data with a reason and an exact scope, and every guard is a small function that returns
+//! sentences, so a test can hand it a wrong input and see it fail. An exception that matches nothing any more fails
+//! too: a list can only shrink by deleting a line, never by being forgotten.
 //!
 //! The capability allow-list and the exact CSP are pinned by `app/src-tauri/tests/acl.rs`; this file does not repeat
 //! them, it only re-checks the properties that DESK-26 depends on.
@@ -33,20 +40,110 @@ use holzwave_core::theme::{ThemeRegistry, blend, contrast};
 
 // ---- the policy -----------------------------------------------------------------------------------------
 
-/// The direct dependencies of the workspace crates, as `Cargo.lock` lists them (normal, build and optional ones).
+/// A direct dependency of a workspace crate and the reason it is there.
+type Dependency = (&'static str, &'static str);
+
+/// The direct dependencies of the workspace crates, as `Cargo.lock` lists them (normal, build, optional and dev ones),
+/// each with its reason. The crates themselves are the members of the workspace, read from the manifests.
 ///
-/// Adding a crate here is the D-03 decision: say in the plan why std and the platform are not enough.
-const WORKSPACE_ALLOWLIST: [(&str, &[&str]); 3] = [
-    ("holzwave-core", &["libghostty-vt", "portable-pty", "serde", "serde_json"]),
-    ("holzwave-app", &["holzwave-core", "serde", "serde_json", "tauri", "tauri-build", "tauri-runtime-wry"]),
-    ("holzwave-spike", &["holzwave-core"]),
+/// Adding a crate here is the D-03 decision: say why std and the platform are not enough, in the reason and in the
+/// plan. A later plan adds one `(name, reason)` line to the list of its crate, and one entry for a new member.
+const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
+    (
+        "holzwave-core",
+        &[
+            ("ammonia", "allow-list sanitiser for the Markdown HTML of previews (preview.rs)"),
+            ("argon2", "Argon2id stretching of the sync passphrase into the file key (sync/crypto.rs)"),
+            ("chacha20poly1305", "XChaCha20-Poly1305 authenticated encryption of every synced file (sync/crypto.rs)"),
+            (
+                "getrandom",
+                "operating-system randomness: the 128-bit tokens of file grants (blocks.rs) and the salts and nonces of \
+                 the sync (sync/crypto.rs)",
+            ),
+            ("infer", "content type of a file by its magic bytes (preview.rs)"),
+            ("keyring", "OS keychain backend of SecretStore, optional through the keyring feature (secrets.rs)"),
+            (
+                "libghostty-vt",
+                "the terminal engine behind TerminalEngine, optional through the ghostty feature, pinned by revision",
+            ),
+            ("nucleo-matcher", "fuzzy matcher of the history search (history.rs)"),
+            ("portable-pty", "PTY and child process of local panes (pty.rs)"),
+            ("pulldown-cmark", "Markdown parser of previews (preview.rs)"),
+            ("quick-xml", "parser of the WebDAV multistatus answers (sync/webdav.rs)"),
+            ("rand", "dev dependency only: random SSH host keys for the in-process test servers (ssh.rs, files.rs tests)"),
+            ("rusqlite", "SQLite store of the command history, bundled (history.rs)"),
+            ("russh", "SSH client for shell and SFTP connections (ssh.rs, files.rs)"),
+            ("russh-sftp", "SFTP file access over an SSH connection (files.rs)"),
+            ("serde", "derive of every file format and wire type the user or the page can send"),
+            ("serde_json", "JSON of every file format the user can edit and of the wire to the page"),
+            ("sha2", "SHA-256 content hashes of the sync engine (sync/engine)"),
+            ("sysinfo", "the numbers of the local system monitor (monitor.rs)"),
+            ("tokio", "runtime of the SSH and SFTP connections (ssh.rs, files.rs)"),
+            ("ureq", "WebDAV transport of the sync, a named exception in EXCEPTIONS (sync/webdav.rs)"),
+            ("zeroize", "wipes the derived sync key and the decrypted content from memory (sync/crypto.rs)"),
+        ],
+    ),
+    (
+        "holzwave-app",
+        &[
+            ("holzwave-core", "everything the shell shows and controls"),
+            ("holzwave-ipc", "server side of the local socket that wsh talks to (lib.rs, state.rs)"),
+            ("serde", "arguments of the commands and the events to the page"),
+            ("serde_json", "JSON of the event payloads and of the small app files (state.rs, sync.rs)"),
+            ("tauri", "the app shell"),
+            ("tauri-build", "build script of the shell: the command manifest and the capabilities (build.rs)"),
+            ("tauri-runtime-wry", "the wry runtime (the system web view) handed to the Tauri builder (lib.rs)"),
+        ],
+    ),
+    (
+        "holzwave-ipc",
+        &[
+            ("getrandom", "the per-run token of the local socket (new_token)"),
+            ("interprocess", "local sockets: a Unix socket or a named pipe, no TCP"),
+            ("serde", "the request and answer lines"),
+            ("serde_json", "the request and answer lines"),
+        ],
+    ),
+    ("holzwave-spike", &[("holzwave-core", "the Phase 1 measurements run the real PTY and engine")]),
+    ("wsh", &[("holzwave-ipc", "the client of the local socket")]),
 ];
 
 /// The only git repository the lock file may fetch from: the terminal engine, pinned by revision.
 const ENGINE_REPOSITORY: &str = "https://github.com/Uzaaft/libghostty-rs";
 
-/// The dev dependencies of the app package. It has no `dependencies` at all: the page ships no third-party code.
-const NPM_DEV_DEPENDENCIES: [&str; 3] = ["@tauri-apps/cli", "playwright-core", "typescript"];
+/// The dev dependencies of the app package, each with the reason it is there, pinned to an exact version. The package
+/// has no `dependencies` at all and `app/src` has no third-party code; `dist/vendor` carries the code editor bundle
+/// (with a collected licence file) and PDF.js, both built from these packages.
+const NPM_DEV_DEPENDENCIES: &[(&str, &str)] = &[
+    ("@codemirror/commands", "editing commands of the code editor block"),
+    ("@codemirror/lang-cpp", "syntax highlighting of C and C++ files in the editor"),
+    ("@codemirror/lang-css", "syntax highlighting of CSS files in the editor"),
+    ("@codemirror/lang-go", "syntax highlighting of Go files in the editor"),
+    ("@codemirror/lang-html", "syntax highlighting of HTML files in the editor"),
+    ("@codemirror/lang-java", "syntax highlighting of Java files in the editor"),
+    ("@codemirror/lang-javascript", "syntax highlighting of JavaScript and TypeScript files in the editor"),
+    ("@codemirror/lang-json", "syntax highlighting of JSON files in the editor"),
+    ("@codemirror/lang-markdown", "syntax highlighting of Markdown files in the editor"),
+    ("@codemirror/lang-python", "syntax highlighting of Python files in the editor"),
+    ("@codemirror/lang-rust", "syntax highlighting of Rust files in the editor"),
+    ("@codemirror/lang-sql", "syntax highlighting of SQL files in the editor"),
+    ("@codemirror/lang-xml", "syntax highlighting of XML files in the editor"),
+    ("@codemirror/lang-yaml", "syntax highlighting of YAML files in the editor"),
+    ("@codemirror/language", "languages, highlighting, folding and bracket matching of the code editor block"),
+    (
+        "@codemirror/legacy-modes",
+        "stream modes for languages without a Lezer grammar (shell, TOML, Swift, Ruby, Kotlin, Zig)",
+    ),
+    ("@codemirror/search", "search and selection matches of the code editor block"),
+    ("@codemirror/state", "editor state of the code editor block"),
+    ("@codemirror/view", "editor view of the code editor block"),
+    ("@lezer/highlight", "highlight tags of the editor theme (vendor-src/editor.mjs)"),
+    ("@tauri-apps/cli", "builds and bundles the app"),
+    ("esbuild", "bundles the editor in scripts/vendor-editor.mjs, the one place the page uses a bundler"),
+    ("pdfjs-dist", "PDF previews, copied to dist/vendor/pdfjs by scripts/copy-static.mjs"),
+    ("playwright-core", "the browser tests"),
+    ("typescript", "compiles the page"),
+];
 
 /// Crates that talk to a network or report somewhere. None of them may be in the dependency closure of the app
 /// unless it is named in [`EXCEPTIONS`].
@@ -94,9 +191,62 @@ const EXCEPTIONS: &[Exception] = &[
     ),
 ];
 
-/// Hits of the network scan that are named and explained. The platform opener starts `open`, `xdg-open` or `explorer`
-/// through `std::process::Command` and holds no URL literal, so nothing is permitted today: `(file, token, reason)`.
-const PERMITTED_HITS: [(&str, &str, &str); 0] = [];
+/// Hits of the network scan that are named and explained: `(file, token, reason)`, one entry per file and token, with
+/// the file relative to the workspace root and written with `/`. Each entry must match a real hit, or the scan names it
+/// as stale. The platform opener starts `open`, `xdg-open` or `explorer` through `std::process::Command` and holds no
+/// URL literal, so it is not here.
+const PERMITTED_HITS: &[(&str, &str, &str)] = &[
+    (
+        "core/src/sync/webdav.rs",
+        "ureq",
+        "the WebDAV transport of the sync, a named exception of the closure guard (see EXCEPTIONS)",
+    ),
+    (
+        "core/src/widgets.rs",
+        "https://",
+        "the scheme check valid_url of a list item: it fetches nothing, the page passes the address to open_url \
+         after a click",
+    ),
+    (
+        "core/src/widgets.rs",
+        "http://",
+        "the scheme check valid_url of a list item: it fetches nothing, the page passes the address to open_url \
+         after a click",
+    ),
+    (
+        "app/src-tauri/src/files_protocol.rs",
+        "http://",
+        "Windows and Android spell the custom scheme holzfile as http://holzfile.localhost; the in-process handler answers \
+         it and no socket is opened",
+    ),
+    (
+        "app/src/sync.ts",
+        "https://",
+        "the example address shown inside the endpoint field of the sync form, not a request",
+    ),
+];
+
+/// Remote origins the CSP may list: `(directive, source, reason)`. Everything else that names an origin fails
+/// `page_policy_has_no_remote_origin`. The exact string is pinned by `app/src-tauri/tests/acl.rs`.
+const REMOTE_ORIGIN_EXCEPTIONS: &[(&str, &str, &str)] = &[
+    (
+        "connect-src",
+        "http://ipc.localhost",
+        "the Tauri IPC bridge, which Windows and Android spell as the origin http://ipc.localhost",
+    ),
+    (
+        "img-src",
+        "http://holzfile.localhost",
+        "Windows and Android spell the holzfile scheme this way (files_protocol.rs url_of); the app's own handler \
+         answers it",
+    ),
+    (
+        "media-src",
+        "http://holzfile.localhost",
+        "Windows and Android spell the holzfile scheme this way (files_protocol.rs url_of); the app's own handler \
+         answers it",
+    ),
+];
 
 /// Network APIs and clients that must not appear in non-test first-party Rust code.
 const RUST_NETWORK_TOKENS: [&str; 10] = [
@@ -160,8 +310,84 @@ fn files_below(dir: &str, extensions: &[&str]) -> Vec<PathBuf> {
     out
 }
 
+/// `path` relative to the workspace root, written with `/` on every OS, so the keys of [`PERMITTED_HITS`] match on
+/// Windows as well.
 fn shown(path: &Path) -> String {
-    path.strip_prefix(root()).unwrap_or(path).display().to_string()
+    match path.strip_prefix(root()) {
+        Ok(relative) => {
+            relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")
+        }
+        Err(_) => path.display().to_string().replace('\\', "/"),
+    }
+}
+
+// ---- the workspace ----------------------------------------------------------------------------------------
+
+/// The quoted strings of the `members` array of the `[workspace]` table of a root manifest, in order; empty if the
+/// manifest has no such array. The array may span lines. A member written as a glob is refused: the policy test cannot
+/// guard a crate it cannot name.
+fn members_of(manifest: &str) -> Vec<String> {
+    let mut in_workspace = false;
+    let mut collecting = false;
+    let mut text = String::new();
+    for line in manifest.lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        if collecting {
+            text.push(' ');
+            text.push_str(line);
+        } else if line.starts_with('[') {
+            in_workspace = line == "[workspace]";
+        } else if in_workspace {
+            let Some(rest) = line.strip_prefix("members").map(str::trim_start).and_then(|r| r.strip_prefix('=')) else {
+                continue;
+            };
+            collecting = true;
+            text.push_str(rest);
+        }
+        if collecting && text.contains(']') {
+            break;
+        }
+    }
+    let members: Vec<String> =
+        text.split('"').skip(1).step_by(2).map(str::to_owned).filter(|member| !member.is_empty()).collect();
+    for member in &members {
+        assert!(
+            !member.contains('*'),
+            "the workspace member {member:?} is a glob: list every crate by name, so that this test can guard it"
+        );
+    }
+    members
+}
+
+/// The name under the `[package]` header of a crate manifest: the first `name = "..."` before the next header, never
+/// the name of a dependency or of a library target.
+fn package_name_of(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+        } else if in_package {
+            let Some(value) = line.strip_prefix("name").map(str::trim_start).and_then(|rest| rest.strip_prefix('=')) else {
+                continue;
+            };
+            return value.trim().strip_prefix('"').and_then(|rest| rest.split('"').next()).map(str::to_owned);
+        }
+    }
+    None
+}
+
+/// The package names of the workspace members, read from the root manifest and the manifest of each member.
+fn workspace_member_names() -> BTreeSet<String> {
+    let members = members_of(&read("Cargo.toml"));
+    assert!(!members.is_empty(), "Cargo.toml lists no workspace members: is the reader broken?");
+    members
+        .iter()
+        .map(|member| {
+            let manifest = format!("{member}/Cargo.toml");
+            package_name_of(&read(&manifest)).unwrap_or_else(|| panic!("{manifest} has no package name"))
+        })
+        .collect()
 }
 
 // ---- Cargo.lock -------------------------------------------------------------------------------------------
@@ -394,39 +620,115 @@ fn page_network_hits(source: &str, is_script: bool) -> Vec<(usize, &'static str)
     token_hits(&code, &PAGE_NETWORK_TOKENS)
 }
 
-fn is_permitted(file: &str, token: &str) -> bool {
-    PERMITTED_HITS.iter().any(|(f, t, _)| *f == file && *t == token)
+/// What is wrong with the hits of a scan against `permitted`, one sentence each: a hit that no entry permits
+/// (`file:line: token`), an entry without a reason, and an entry that matched no hit at all (stale: the code it excused
+/// is gone or changed, so the entry must go too). `hits` are `(file, line, token)` as found.
+fn permitted_hit_problems(hits: &[(String, usize, &str)], permitted: &[(&str, &str, &str)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (file, line, token) in hits {
+        if !permitted.iter().any(|(f, t, _)| f == file && t == token) {
+            problems.push(format!("{file}:{line}: {token}"));
+        }
+    }
+    for (file, token, reason) in permitted {
+        if reason.trim().is_empty() {
+            problems.push(format!("the permitted hit {token} in {file} has no reason: say why it is not a network call"));
+        }
+        if !hits.iter().any(|(f, _, t)| f == file && t == token) {
+            problems.push(format!(
+                "the permitted hit {token} in {file} matches nothing: it is stale, remove it from PERMITTED_HITS"
+            ));
+        }
+    }
+    problems
+}
+
+/// Whether `file` is an out-of-line test module: it is named `tests.rs`, and the module that owns it (`mod.rs` of the
+/// same directory, or the `.rs` file named like the directory next to it) declares it with the line `#[cfg(test)]`
+/// directly followed by the line `mod tests;`. A file is never skipped by its name alone.
+fn is_declared_test_module(file: &Path) -> bool {
+    if file.file_name().and_then(|n| n.to_str()) != Some("tests.rs") {
+        return false;
+    }
+    let Some(dir) = file.parent() else { return false };
+    let mut owners = vec![dir.join("mod.rs")];
+    if let (Some(grandparent), Some(name)) = (dir.parent(), dir.file_name()) {
+        owners.push(grandparent.join(name).with_extension("rs"));
+    }
+    owners.iter().filter_map(|owner| fs::read_to_string(owner).ok()).any(|text| {
+        let text = text.replace("\r\n", "\n");
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        lines.windows(2).any(|pair| pair[0] == "#[cfg(test)]" && pair[1] == "mod tests;")
+    })
+}
+
+/// The Rust files that ship: the `.rs` files below `src` and the `build.rs` of every workspace member, minus the
+/// declared out-of-line test modules.
+fn first_party_rust_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for member in members_of(&read("Cargo.toml")) {
+        files.extend(files_below(&format!("{member}/src"), &["rs"]));
+        let build = root().join(&member).join("build.rs");
+        if build.is_file() {
+            files.push(build);
+        }
+    }
+    files.retain(|file| !is_declared_test_module(file));
+    files.sort();
+    files.dedup();
+    files
 }
 
 // ---- dependencies -----------------------------------------------------------------------------------------
 
-#[test]
-fn workspace_crates_keep_their_dependency_allowlist() {
-    let graph = lock_graph();
+/// What is wrong with the direct dependencies of the workspace crates, one sentence each: a member with no entry in
+/// `allowlist`, an entry for a crate that is no member, a dependency the lock file has and the entry lacks, one the
+/// entry has and the lock file lacks, and a dependency listed without a reason.
+fn allowlist_problems(
+    graph: &Graph,
+    members: &BTreeSet<String>,
+    allowlist: &[(&str, &[(&str, &str)])],
+) -> Vec<String> {
     let mut problems = Vec::new();
-
-    let members: BTreeSet<String> = graph.keys().filter(|name| name.starts_with("holzwave-")).cloned().collect();
-    let expected_members: BTreeSet<String> = WORKSPACE_ALLOWLIST.iter().map(|(name, _)| (*name).to_owned()).collect();
-    if members != expected_members {
-        problems.push(format!("the workspace crates are {members:?}, the allowlist names {expected_members:?}"));
+    let listed: BTreeSet<String> = allowlist.iter().map(|(name, _)| (*name).to_owned()).collect();
+    for member in members.difference(&listed) {
+        problems.push(format!(
+            "the workspace crate {member} has no entry in WORKSPACE_ALLOWLIST: list its direct dependencies, each \
+             with a reason"
+        ));
     }
-
-    for (crate_name, allowed) in WORKSPACE_ALLOWLIST {
-        let Some(actual) = graph.get(crate_name) else {
+    for extra in listed.difference(members) {
+        problems.push(format!("WORKSPACE_ALLOWLIST names {extra}, which is no workspace crate: remove the entry"));
+    }
+    for (crate_name, allowed) in allowlist {
+        let Some(actual) = graph.get(*crate_name) else {
             problems.push(format!("{crate_name} is not in Cargo.lock"));
             continue;
         };
-        let allowed = set(allowed);
-        for added in actual.difference(&allowed) {
+        let names: BTreeSet<String> = allowed.iter().map(|(name, _)| (*name).to_owned()).collect();
+        for added in actual.difference(&names) {
             problems.push(format!(
                 "{crate_name} gained the direct dependency {added}: D-03 asks for as few dependencies as possible; if \
                  it is wanted, name it in WORKSPACE_ALLOWLIST of this test with the reason in the plan"
             ));
         }
-        for gone in allowed.difference(actual) {
+        for gone in names.difference(actual) {
             problems.push(format!("{crate_name} no longer depends on {gone}: remove it from WORKSPACE_ALLOWLIST"));
         }
+        for (dependency, reason) in *allowed {
+            if reason.trim().is_empty() {
+                problems.push(format!(
+                    "{crate_name} lists the dependency {dependency} without a reason: say why it is needed"
+                ));
+            }
+        }
     }
+    problems
+}
+
+#[test]
+fn workspace_crates_keep_their_dependency_allowlist() {
+    let problems = allowlist_problems(&lock_graph(), &workspace_member_names(), WORKSPACE_ALLOWLIST);
     assert!(problems.is_empty(), "the dependency allowlist is out of step:\n  {}", problems.join("\n  "));
 }
 
@@ -498,19 +800,53 @@ fn reqwest_parents_are_the_documented_set() {
     assert_eq!(parents_of(&graph, "hyper-util"), set(&["reqwest"]), "hyper-util has a parent besides reqwest");
 }
 
+/// Whether `version` is an exact pin: it starts with an ASCII digit, holds only ASCII letters, digits, `.`, `-` and
+/// `+`, and the part before any `-` or `+` is dot-separated numbers. A range (`^1.2.3`, `>=1`, `1.x`, `*`), a tag
+/// (`latest`) or an address is not.
+fn is_exact_version(version: &str) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    version.starts_with(|c: char| c.is_ascii_digit())
+        && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        && core.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// What is wrong with the `devDependencies` of a package.json against `expected`, one sentence each: a package that is
+/// not expected, one that is missing, one expected without a reason, and a version that is not an exact pin.
+fn npm_dev_problems(package: &serde_json::Value, expected: &[(&str, &str)]) -> Vec<String> {
+    let Some(dev) = package.get("devDependencies").and_then(|d| d.as_object()) else {
+        return vec!["package.json has no devDependencies object".to_owned()];
+    };
+    let mut problems = Vec::new();
+    let names: BTreeSet<&str> = expected.iter().map(|(name, _)| *name).collect();
+    for added in dev.keys().filter(|name| !names.contains(name.as_str())) {
+        problems.push(format!(
+            "the dev dependency {added} is not in NPM_DEV_DEPENDENCIES: D-03 asks for as few dependencies as possible; \
+             if it is wanted, name it there with a reason"
+        ));
+    }
+    for (name, reason) in expected {
+        match dev.get(*name) {
+            None => problems.push(format!("{name} is no longer a dev dependency: remove it from NPM_DEV_DEPENDENCIES")),
+            Some(version) => match version.as_str() {
+                Some(version) if is_exact_version(version) => {}
+                other => problems.push(format!("{name} is not pinned to an exact version: {other:?}")),
+            },
+        }
+        if reason.trim().is_empty() {
+            problems.push(format!("the dev dependency {name} has no reason in NPM_DEV_DEPENDENCIES"));
+        }
+    }
+    problems
+}
+
 #[test]
 fn npm_package_has_only_the_expected_dev_dependencies() {
     let package: serde_json::Value = serde_json::from_str(&read("app/package.json")).expect("package.json is JSON");
-    let dev: BTreeSet<String> = package
-        .get("devDependencies")
-        .and_then(|d| d.as_object())
-        .expect("package.json has devDependencies")
-        .keys()
-        .cloned()
-        .collect();
-    assert_eq!(dev, set(&NPM_DEV_DEPENDENCIES), "the dev dependencies of the app package changed (D-03)");
+    let problems = npm_dev_problems(&package, NPM_DEV_DEPENDENCIES);
+    assert!(problems.is_empty(), "the dev dependencies of the app package changed (D-03):\n  {}", problems.join("\n  "));
 
-    // The page ships no third-party code: no runtime dependency of any kind.
+    // No runtime dependency of any kind: `app/src` has no third-party code. The editor bundle and PDF.js in
+    // `dist/vendor` are built from the dev dependencies above.
     for key in ["dependencies", "optionalDependencies", "peerDependencies", "bundledDependencies", "bundleDependencies"] {
         let empty = match package.get(key) {
             None => true,
@@ -530,11 +866,10 @@ fn npm_package_has_only_the_expected_dev_dependencies() {
 
 // ---- the page policy and CI -------------------------------------------------------------------------------
 
-#[test]
-fn page_policy_has_no_remote_origin() {
-    let conf: serde_json::Value = serde_json::from_str(&read("app/src-tauri/tauri.conf.json")).expect("conf is JSON");
-    let csp = conf["app"]["security"]["csp"].as_str().expect("tauri.conf.json sets a CSP");
-
+/// What is wrong with a content security policy, one sentence each: a `default-src` that is not `'self'` alone, a
+/// remote origin that no entry of `exceptions` allows in that directive, a forbidden source, an exception the policy
+/// no longer lists, and an exception without a reason. `exceptions` are `(directive, source, reason)`.
+fn csp_origin_problems(csp: &str, exceptions: &[(&str, &str, &str)]) -> Vec<String> {
     let directives: BTreeMap<&str, Vec<&str>> = csp
         .split(';')
         .filter_map(|directive| {
@@ -542,23 +877,46 @@ fn page_policy_has_no_remote_origin() {
             Some((parts.next()?, parts.collect()))
         })
         .collect();
-    assert_eq!(directives.get("default-src"), Some(&vec!["'self'"]), "default-src must be 'self' alone");
-
-    // The IPC host of the Tauri bridge is the one origin that may appear, and only to connect to.
+    let mut problems = Vec::new();
+    if directives.get("default-src") != Some(&vec!["'self'"]) {
+        problems.push("default-src must be 'self' alone".to_owned());
+    }
     for (directive, sources) in &directives {
         for source in sources {
             let remote = source.contains("://") || source.starts_with("http:") || source.starts_with("https:");
-            if remote {
-                assert!(
-                    *directive == "connect-src" && *source == "http://ipc.localhost",
-                    "{directive} lists the remote origin {source}"
-                );
+            if remote && !exceptions.iter().any(|(d, s, _)| d == directive && s == source) {
+                problems.push(format!("{directive} lists the remote origin {source}"));
             }
             for scheme in ["ws:", "wss:", "*", "data:", "blob:", "'unsafe-inline'", "'unsafe-eval'"] {
-                assert_ne!(*source, scheme, "{directive} lists {scheme}");
+                if *source == scheme {
+                    problems.push(format!("{directive} lists {scheme}"));
+                }
             }
         }
     }
+    for (directive, source, reason) in exceptions {
+        if !directives.get(directive).is_some_and(|sources| sources.contains(source)) {
+            problems.push(format!(
+                "the exception for {source} in {directive} matches nothing: the policy no longer lists it, remove it \
+                 from REMOTE_ORIGIN_EXCEPTIONS"
+            ));
+        }
+        if reason.trim().is_empty() {
+            problems.push(format!("the exception for {source} in {directive} has no reason"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn page_policy_has_no_remote_origin() {
+    let conf: serde_json::Value = serde_json::from_str(&read("app/src-tauri/tauri.conf.json")).expect("conf is JSON");
+    let csp = conf["app"]["security"]["csp"].as_str().expect("tauri.conf.json sets a CSP");
+
+    // The IPC host of the Tauri bridge (to connect to) and the holzfile host (images and media) are the only origins
+    // that may appear, each in its own directive.
+    let problems = csp_origin_problems(csp, REMOTE_ORIGIN_EXCEPTIONS);
+    assert!(problems.is_empty(), "the page policy is out of step:\n  {}", problems.join("\n  "));
 
     // The dev-server proxy (and with it the HTTP client of tauri) is only used with a devUrl; there is none, and no
     // window loads a remote page and no updater is configured.
@@ -583,43 +941,35 @@ fn no_ci_workflows_exist() {
 
 #[test]
 fn first_party_sources_use_no_network_apis() {
-    let mut rust_files: Vec<PathBuf> = ["core/src", "app/src-tauri/src", "spike/src"]
-        .iter()
-        .flat_map(|dir| files_below(dir, &["rs"]))
-        .collect();
-    rust_files.push(root().join("app/src-tauri/build.rs"));
+    let rust_files = first_party_rust_files();
     assert!(rust_files.len() >= 15, "only {} Rust files found: is the walk broken?", rust_files.len());
 
     let mut page_files = files_below("app/src", &["ts", "html", "css"]);
     assert!(page_files.len() >= 20, "only {} page files found: is the walk broken?", page_files.len());
     page_files.sort();
 
-    let mut problems = Vec::new();
+    let mut hits: Vec<(String, usize, &str)> = Vec::new();
     for file in &rust_files {
         let relative = shown(file);
         let source = fs::read_to_string(file).unwrap_or_else(|e| panic!("cannot read {relative}: {e}"));
-        for (line, token) in rust_network_hits(&source) {
-            if !is_permitted(&relative, token) {
-                problems.push(format!("{relative}:{line}: {token}"));
-            }
-        }
+        hits.extend(rust_network_hits(&source).into_iter().map(|(line, token)| (relative.clone(), line, token)));
     }
+    let mut relative_url_problems = Vec::new();
     for file in &page_files {
         let relative = shown(file);
         let source = fs::read_to_string(file).unwrap_or_else(|e| panic!("cannot read {relative}: {e}"));
-        for (line, token) in page_network_hits(&source, relative.ends_with(".ts")) {
-            if !is_permitted(&relative, token) {
-                problems.push(format!("{relative}:{line}: {token}"));
-            }
-        }
+        let page_hits = page_network_hits(&source, relative.ends_with(".ts"));
+        hits.extend(page_hits.into_iter().map(|(line, token)| (relative.clone(), line, token)));
         if relative.ends_with(".html") {
             for attribute in ["src", "href", "action"] {
                 if source.contains(&format!("{attribute}=\"//")) {
-                    problems.push(format!("{relative}: a protocol-relative {attribute} URL"));
+                    relative_url_problems.push(format!("{relative}: a protocol-relative {attribute} URL"));
                 }
             }
         }
     }
+    let mut problems = permitted_hit_problems(&hits, PERMITTED_HITS);
+    problems.extend(relative_url_problems);
     assert!(
         problems.is_empty(),
         "a network API or URL appeared in first-party code (DESK-26); name it in PERMITTED_HITS only with a reason:\n  {}",
@@ -792,6 +1142,323 @@ fn closure_guard_reports_a_stale_exception() {
 
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(problems[0].contains("ureq") && problems[0].contains("remove the exception"), "{problems:?}");
+}
+
+// ---- the guards can fail ----------------------------------------------------------------------------------
+
+#[test]
+fn members_of_reads_the_workspace_array() {
+    let one_line =
+        "[workspace]\nresolver = \"2\"\nmembers = [\"core\", \"app/src-tauri\"]\n\n[workspace.package]\nversion = \"1\"\n";
+    assert_eq!(members_of(one_line), ["core", "app/src-tauri"]);
+
+    let several_lines = "[workspace]\nmembers = [\n    \"core\", # the shared core\n    \"ipc\",\n    \"wsh\"\n]\n\n\
+                         [profile.release]\nlto = \"thin\"\n";
+    assert_eq!(members_of(several_lines), ["core", "ipc", "wsh"]);
+
+    // A `members` key in another table is not the workspace array, and a crate manifest has none.
+    assert!(members_of("[package]\nname = \"x\"\nmembers = [\"nope\"]\n").is_empty());
+    assert!(members_of("[workspace]\nresolver = \"2\"\n[other]\nmembers = [\"nope\"]\n").is_empty());
+}
+
+#[test]
+#[should_panic(expected = "is a glob")]
+fn members_of_refuses_a_glob() {
+    members_of("[workspace]\nmembers = [\"core\", \"plugins/*\"]\n");
+}
+
+#[test]
+fn package_name_of_reads_the_package_table_not_a_dependency() {
+    let manifest = "[dependencies]\nfoo = \"1\"\n\n[dependencies.bar]\nname = \"not-this\"\n\n[package]\n\
+                    description = \"d\"\n\nname = \"real\"\nversion = \"1\"\n\n[lib]\nname = \"other\"\n";
+    assert_eq!(package_name_of(manifest).as_deref(), Some("real"));
+    assert_eq!(package_name_of("[dependencies]\nname = \"x\"\n"), None);
+    assert_eq!(package_name_of("[package]\nversion = \"1\"\n\n[lib]\nname = \"other\"\n"), None);
+}
+
+#[test]
+fn workspace_members_include_wsh_and_the_holzwave_crates() {
+    let members = workspace_member_names();
+    for name in ["holzwave-core", "holzwave-app", "holzwave-ipc", "holzwave-spike", "wsh"] {
+        assert!(members.contains(name), "{name} is not a workspace member: {members:?}");
+    }
+}
+
+/// A toy workspace: `app` depends on `a` and `b`.
+fn toy_graph() -> Graph {
+    parse_lock(&toy_lock(&[("app", &["a", "b"]), ("a", &[]), ("b", &[]), ("ghost", &[])]))
+}
+
+#[test]
+fn allowlist_guard_accepts_a_matching_workspace() {
+    let allowlist: &[(&str, &[(&str, &str)])] = &[("app", &[("a", "first"), ("b", "second")])];
+
+    assert_eq!(allowlist_problems(&toy_graph(), &set(&["app"]), allowlist), Vec::<String>::new());
+}
+
+#[test]
+fn allowlist_guard_reports_an_added_dependency() {
+    let allowlist: &[(&str, &[(&str, &str)])] = &[("app", &[("a", "first")])];
+
+    let problems = allowlist_problems(&toy_graph(), &set(&["app"]), allowlist);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].starts_with("app gained the direct dependency b"), "{problems:?}");
+}
+
+#[test]
+fn allowlist_guard_reports_a_removed_dependency() {
+    let allowlist: &[(&str, &[(&str, &str)])] = &[("app", &[("a", "first"), ("b", "second"), ("c", "third")])];
+
+    let problems = allowlist_problems(&toy_graph(), &set(&["app"]), allowlist);
+
+    assert_eq!(problems, ["app no longer depends on c: remove it from WORKSPACE_ALLOWLIST".to_owned()]);
+}
+
+#[test]
+fn allowlist_guard_reports_an_unlisted_member() {
+    let allowlist: &[(&str, &[(&str, &str)])] = &[("app", &[("a", "first"), ("b", "second")])];
+
+    let problems = allowlist_problems(&toy_graph(), &set(&["app", "ghost"]), allowlist);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].starts_with("the workspace crate ghost has no entry in WORKSPACE_ALLOWLIST"), "{problems:?}");
+}
+
+#[test]
+fn allowlist_guard_reports_an_entry_for_a_crate_that_is_no_member() {
+    let allowlist: &[(&str, &[(&str, &str)])] = &[("app", &[("a", "first"), ("b", "second")]), ("ghost", &[])];
+
+    let problems = allowlist_problems(&toy_graph(), &set(&["app"]), allowlist);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("names ghost, which is no workspace crate"), "{problems:?}");
+}
+
+#[test]
+fn allowlist_guard_reports_an_empty_reason() {
+    for reason in ["", "  "] {
+        let allowlist: &[(&str, &[(&str, &str)])] = &[("app", &[("a", reason), ("b", "second")])];
+
+        let problems = allowlist_problems(&toy_graph(), &set(&["app"]), allowlist);
+
+        assert_eq!(problems, ["app lists the dependency a without a reason: say why it is needed".to_owned()]);
+    }
+}
+
+fn toy_package(dev: &[(&str, &str)]) -> serde_json::Value {
+    let dev: serde_json::Map<String, serde_json::Value> =
+        dev.iter().map(|(name, version)| ((*name).to_owned(), serde_json::Value::String((*version).to_owned()))).collect();
+    serde_json::json!({ "devDependencies": dev })
+}
+
+#[test]
+fn npm_guard_accepts_exact_pins() {
+    let versions = ["6.11.1", "3.0.0-alpha.4", "0.28.2", "1.0.0+build.5", "7.0.2"];
+    for version in versions {
+        let package = toy_package(&[("tool", version)]);
+        assert_eq!(npm_dev_problems(&package, &[("tool", "builds")]), Vec::<String>::new(), "version {version}");
+    }
+}
+
+#[test]
+fn npm_guard_reports_an_added_package() {
+    let package = toy_package(&[("tool", "1.0.0"), ("extra", "2.0.0")]);
+
+    let problems = npm_dev_problems(&package, &[("tool", "builds")]);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].starts_with("the dev dependency extra is not in NPM_DEV_DEPENDENCIES"), "{problems:?}");
+}
+
+#[test]
+fn npm_guard_reports_a_removed_package() {
+    let package = toy_package(&[("tool", "1.0.0")]);
+
+    let problems = npm_dev_problems(&package, &[("tool", "builds"), ("gone", "tests")]);
+
+    assert_eq!(problems, ["gone is no longer a dev dependency: remove it from NPM_DEV_DEPENDENCIES".to_owned()]);
+}
+
+#[test]
+fn npm_guard_reports_a_range_version() {
+    for version in ["^1.2.3", "~1.2.3", ">=1", "1.x", "*", "latest", "next", "", "file:../x", "https://example.org/x.tgz"] {
+        let package = toy_package(&[("tool", version)]);
+
+        let problems = npm_dev_problems(&package, &[("tool", "builds")]);
+
+        assert_eq!(problems.len(), 1, "version {version:?}: {problems:?}");
+        assert!(problems[0].starts_with("tool is not pinned to an exact version"), "{problems:?}");
+    }
+}
+
+#[test]
+fn npm_guard_reports_an_empty_reason() {
+    let package = toy_package(&[("tool", "1.0.0")]);
+
+    let problems = npm_dev_problems(&package, &[("tool", " ")]);
+
+    assert_eq!(problems, ["the dev dependency tool has no reason in NPM_DEV_DEPENDENCIES".to_owned()]);
+}
+
+#[test]
+fn shown_uses_forward_slashes() {
+    assert_eq!(shown(&root().join("core").join("src").join("lib.rs")), "core/src/lib.rs");
+    assert_eq!(shown(&root().join("app").join("src-tauri").join("build.rs")), "app/src-tauri/build.rs");
+    // A path outside the workspace keeps its place but loses its backslashes.
+    assert!(!shown(Path::new("elsewhere\\file.rs")).contains('\\'));
+}
+
+#[test]
+fn test_module_skip_applies_only_to_a_declared_cfg_test_module() {
+    let dir = common::scratch_dir("policy-skip");
+    let write = |relative: &str, text: &str| {
+        let path = dir.join(relative);
+        fs::create_dir_all(path.parent().expect("a parent")).expect("directory");
+        fs::write(path, text).expect("file");
+    };
+    // Declared by the mod.rs of its directory.
+    write("declared/mod.rs", "pub fn f() {}\n\n#[cfg(test)]\nmod tests;\n");
+    write("declared/tests.rs", "use std::net::TcpStream;\n");
+    // Declared by the .rs file next to its directory, with Windows line ends.
+    write("sibling.rs", "#[cfg(test)]\r\nmod tests;\r\n");
+    write("sibling/tests.rs", "");
+    // Named tests.rs, but the module declares it without the attribute: production code.
+    write("plain/mod.rs", "mod tests;\n");
+    write("plain/tests.rs", "use std::net::TcpStream;\n");
+    // The attribute is not directly before the declaration.
+    write("gap/mod.rs", "#[cfg(test)]\nfn helper() {}\nmod tests;\n");
+    write("gap/tests.rs", "");
+    // Declared, but this file is not called tests.rs.
+    write("named/mod.rs", "#[cfg(test)]\nmod tests;\n");
+    write("named/helpers.rs", "");
+    // No module owns it.
+    write("orphan/tests.rs", "");
+
+    let skipped: Vec<bool> = [
+        "declared/tests.rs",
+        "sibling/tests.rs",
+        "plain/tests.rs",
+        "gap/tests.rs",
+        "named/helpers.rs",
+        "named/mod.rs",
+        "orphan/tests.rs",
+    ]
+    .iter()
+    .map(|relative| is_declared_test_module(&dir.join(relative)))
+    .collect();
+    fs::remove_dir_all(&dir).expect("remove scratch directory");
+
+    assert_eq!(skipped, [true, true, false, false, false, false, false]);
+}
+
+#[test]
+fn first_party_rust_files_include_ipc_and_wsh() {
+    let files: BTreeSet<String> = first_party_rust_files().iter().map(|file| shown(file)).collect();
+
+    let expected_files =
+        ["core/src/lib.rs", "core/src/sync/engine/mod.rs", "ipc/src/lib.rs", "wsh/src/main.rs", "app/src-tauri/build.rs"];
+    for expected in expected_files {
+        assert!(files.contains(expected), "{expected} is not scanned: {files:?}");
+    }
+    assert!(!files.contains("core/src/sync/engine/tests.rs"), "the declared test module is scanned");
+}
+
+#[test]
+fn permitted_hits_guard_reports_an_unpermitted_hit_a_stale_entry_and_an_empty_reason() {
+    let hits = [("a.rs".to_owned(), 3, "ureq"), ("b.rs".to_owned(), 7, "http://")];
+    let permitted = [("a.rs", "ureq", "the transport"), ("c.rs", "https://", "an example"), ("a.rs", "std::net", " ")];
+
+    let problems = permitted_hit_problems(&hits, &permitted);
+
+    assert_eq!(problems.len(), 4, "{problems:?}");
+    assert!(problems.contains(&"b.rs:7: http://".to_owned()), "{problems:?}");
+    assert!(problems.iter().any(|p| p.starts_with("the permitted hit https:// in c.rs matches nothing")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.starts_with("the permitted hit std::net in a.rs has no reason")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.starts_with("the permitted hit std::net in a.rs matches nothing")), "{problems:?}");
+    // An exact match is quiet.
+    assert!(permitted_hit_problems(&hits[..1], &permitted[..1]).is_empty());
+}
+
+/// The shape of the real policy (`tauri.conf.json`), as text.
+const TOY_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
+    img-src 'self' holzfile: http://holzfile.localhost; media-src 'self' holzfile: http://holzfile.localhost; \
+    font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'";
+
+#[test]
+fn csp_guard_accepts_the_real_shape() {
+    assert_eq!(csp_origin_problems(TOY_CSP, REMOTE_ORIGIN_EXCEPTIONS), Vec::<String>::new());
+}
+
+#[test]
+fn csp_guard_reports_the_holzfile_origin_in_script_src() {
+    let csp = TOY_CSP.replace("script-src 'self'", "script-src 'self' http://holzfile.localhost");
+
+    let problems = csp_origin_problems(&csp, REMOTE_ORIGIN_EXCEPTIONS);
+
+    assert_eq!(problems, ["script-src lists the remote origin http://holzfile.localhost".to_owned()]);
+}
+
+#[test]
+fn csp_guard_reports_a_remote_origin_in_img_src() {
+    let (from, to) = ("img-src 'self' holzfile: http://holzfile.localhost", "img-src 'self' holzfile: https://example.org");
+    let csp = TOY_CSP.replace(from, to);
+
+    let problems = csp_origin_problems(&csp, REMOTE_ORIGIN_EXCEPTIONS);
+
+    assert!(problems.contains(&"img-src lists the remote origin https://example.org".to_owned()), "{problems:?}");
+}
+
+#[test]
+fn csp_guard_reports_a_stale_exception() {
+    let csp = TOY_CSP.replace("media-src 'self' holzfile: http://holzfile.localhost; ", "");
+
+    let problems = csp_origin_problems(&csp, REMOTE_ORIGIN_EXCEPTIONS);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    let said = "the exception for http://holzfile.localhost in media-src matches nothing";
+    assert!(problems[0].starts_with(said), "{problems:?}");
+}
+
+#[test]
+fn csp_guard_reports_an_empty_reason() {
+    let exceptions = [
+        ("connect-src", "http://ipc.localhost", " "),
+        ("img-src", "http://holzfile.localhost", "r"),
+        ("media-src", "http://holzfile.localhost", "r"),
+    ];
+
+    let problems = csp_origin_problems(TOY_CSP, &exceptions);
+
+    assert_eq!(problems, ["the exception for http://ipc.localhost in connect-src has no reason".to_owned()]);
+}
+
+#[test]
+fn csp_guard_reports_an_unsafe_source() {
+    for (from, to, said) in [
+        ("style-src 'self'", "style-src 'self' 'unsafe-inline'", "style-src lists 'unsafe-inline'"),
+        ("script-src 'self'", "script-src 'self' 'unsafe-eval'", "script-src lists 'unsafe-eval'"),
+        ("font-src 'self'", "font-src 'self' data:", "font-src lists data:"),
+        ("object-src 'none'", "object-src blob:", "object-src lists blob:"),
+        ("connect-src 'self' ipc:", "connect-src 'self' ipc: ws: wss:", "connect-src lists ws:"),
+        ("form-action 'none'", "form-action *", "form-action lists *"),
+    ] {
+        let problems = csp_origin_problems(&TOY_CSP.replace(from, to), REMOTE_ORIGIN_EXCEPTIONS);
+
+        assert!(problems.contains(&said.to_owned()), "{to}: {problems:?}");
+    }
+}
+
+#[test]
+fn csp_guard_reports_a_default_src_that_is_not_self_alone() {
+    for default in ["default-src 'self' https:", "default-src *", "default-src 'none'"] {
+        let problems = csp_origin_problems(&TOY_CSP.replace("default-src 'self'", default), REMOTE_ORIGIN_EXCEPTIONS);
+
+        assert!(problems.contains(&"default-src must be 'self' alone".to_owned()), "{default}: {problems:?}");
+    }
+    let without = TOY_CSP.replace("default-src 'self'; ", "");
+    let problems = csp_origin_problems(&without, REMOTE_ORIGIN_EXCEPTIONS);
+    assert!(problems.contains(&"default-src must be 'self' alone".to_owned()), "{problems:?}");
 }
 
 // ---- docs/config.md ---------------------------------------------------------------------------------------
