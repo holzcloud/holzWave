@@ -4,12 +4,24 @@
 //! has agreed to send it to one named provider. That rule is a type here, not a convention: an [`ApprovedContext`]
 //! cannot be built outside this module, so a request can carry context only if the gate produced it.
 //!
-//! This file holds the types. The code that reads the terminal, redacts secrets and asks the user builds a
-//! [`ContextOffer`] and, once the user agrees, turns it into an [`ApprovedContext`] with the private constructor of this
-//! module. An offer is not an approval, so building one is harmless.
+//! The flow is offer, show, pick, approve:
+//!
+//! 1. The shell reads text (a selection, the screen of a pane, a file) and hands it to [`Gate::offer`]. Every text and
+//!    label is cleaned by [`super::redact`] first: hidden spans, escape sequences and invisible characters are removed
+//!    and secrets are replaced with typed placeholders. The gate remembers the resulting [`ContextOffer`], which carries
+//!    no consent, and returns a copy.
+//! 2. The page shows the labels, the sizes and what was removed, and the preview from [`ContextOffer::envelope`], which
+//!    is the exact payload.
+//! 3. The user picks items and agrees. The page sends the offer id and the picked item ids. It never sends text.
+//! 4. [`Gate::approve`] builds the envelope from the offer it remembers and mints an [`ApprovedContext`] bound to the
+//!    provider the offer was made for and to the SHA-256 of those bytes.
+//!
+//! An offer is single use (a success consumes it, a bad pick does not), expires after [`OFFER_TTL`], and cannot be
+//! forged, replayed or moved to another provider. Nothing in this module reads a terminal.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -17,6 +29,9 @@ use sha2::{Digest, Sha256};
 use super::provider::{AiError, Detail};
 use super::redact::{self, SourceText};
 use super::types::{Consent, ContextKind, ContextNote, Locality, NoteItem, Size};
+
+/// How long an offer waits for an answer before the gate forgets it.
+pub const OFFER_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// The most items one offer holds.
 pub const MAX_ITEMS: usize = 8;
@@ -102,7 +117,28 @@ pub struct Destination {
 /// One piece of text offered to a provider.
 ///
 /// The text is private and has no getter: a page-facing view of an offer is built from the label, the size and the
-/// findings, so the text cannot be serialised by accident. `Debug` prints the same.
+/// findings, so the text cannot be serialised by accident. `Debug` prints the same. The only way to see the text is
+/// [`ContextOffer::envelope`], which is also what an approval sends.
+///
+/// An item is read through its getters:
+///
+/// ```
+/// use holzwave_core::ai::gate::OfferItem;
+/// use holzwave_core::ai::types::ContextKind;
+///
+/// let item = OfferItem::new(1, ContextKind::File, "notes.txt", "hello", Vec::new());
+/// assert_eq!((item.id(), item.label(), item.bytes()), (1, "notes.txt", 5));
+/// ```
+///
+/// and it cannot be written as data:
+///
+/// ```compile_fail
+/// use holzwave_core::ai::gate::OfferItem;
+/// use holzwave_core::ai::types::ContextKind;
+///
+/// let item = OfferItem::new(1, ContextKind::File, "notes.txt", "hello", Vec::new());
+/// let _ = serde_json::to_string(&item);
+/// ```
 #[derive(Clone)]
 pub struct OfferItem {
     id: u32,
@@ -268,7 +304,9 @@ fn build_envelope(items: &[&OfferItem]) -> String {
             kind_name(item.kind),
             escape_attribute(&item.label)
         ));
-        out.push_str(&item.text);
+        // The gate neutralises markers when it cleans a text; doing it again here makes the grammar hold for an item that
+        // was built any other way. It changes nothing in cleaned text.
+        out.push_str(&redact::neutralise_markers(&item.text).text);
         out.push_str("\n</holzwave-item>\n");
     }
     out.push_str("</holzwave-context>\n");
@@ -344,32 +382,68 @@ impl fmt::Debug for OfferRequest {
     }
 }
 
+/// An offer the gate remembers, and when it was made.
+struct Pending {
+    offer: ContextOffer,
+    made: Instant,
+}
+
 /// The gate: turns text read by the shell into an offer, remembers it, and mints an [`ApprovedContext`] from it.
 ///
-/// The service holds one gate for all conversations; both calls take `&self`.
+/// The flow is offer, show, pick, approve. The shell reads text and asks for an offer; the gate cleans every text and
+/// label, remembers the offer and returns it. The page shows the labels, the sizes and what was removed, and the
+/// preview from [`ContextOffer::envelope`]. When the user agrees, the page sends the offer id and the ids of the picked
+/// items, never text, and [`Gate::approve`] builds the context from the offer the gate itself remembers.
+///
+/// An offer is single use (a success consumes it, a bad pick does not), lives [`OFFER_TTL`] and is bound to the provider
+/// it was made for. The gate remembers at most [`MAX_PENDING_OFFERS`] offers and drops the oldest. All answers to a
+/// consent check are one fixed phrase, so a caller learns nothing about which check failed.
+///
+/// The service holds one gate for all conversations; both calls take `&self`. Nothing here reads a terminal or a file,
+/// writes anything, or starts a thread: the state is a list behind a `Mutex`.
 pub struct Gate {
-    offers: Mutex<Vec<ContextOffer>>,
+    ttl: Duration,
+    offers: Mutex<Vec<Pending>>,
 }
 
 impl Gate {
-    /// A gate with no offers.
+    /// A gate whose offers live [`OFFER_TTL`].
     pub fn new() -> Self {
-        Self { offers: Mutex::new(Vec::new()) }
+        Self::with_ttl(OFFER_TTL)
     }
 
-    fn lock(&self) -> MutexGuard<'_, Vec<ContextOffer>> {
+    /// A gate whose offers live `ttl`.
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self { ttl, offers: Mutex::new(Vec::new()) }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Vec<Pending>> {
         self.offers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Drops the offers that outlived their time.
+    fn expire(&self, offers: &mut Vec<Pending>) {
+        let now = Instant::now();
+        offers.retain(|pending| now.saturating_duration_since(pending.made) < self.ttl);
     }
 
     /// How many offers wait for an answer.
     pub fn pending(&self) -> usize {
-        self.lock().len()
+        let mut offers = self.lock();
+        self.expire(&mut offers);
+        offers.len()
+    }
+
+    /// Forgets an offer, for example when the user closes the card. An unknown id is ignored.
+    pub fn discard(&self, offer: &OfferId) {
+        self.lock().retain(|pending| pending.offer.id() != offer);
     }
 
     /// Cleans the items of `request` and remembers them as an offer.
     ///
     /// Every text passes the sanitiser and the redactor first, so the offer holds exactly what the user will be shown. An
-    /// item with nothing left after cleaning is left out.
+    /// item with nothing left after cleaning is left out. A request with no provider, no item, more than [`MAX_ITEMS`]
+    /// items or nothing left after cleaning is `AiError::InvalidRequest`.
     pub fn offer(&self, request: OfferRequest) -> Result<ContextOffer, AiError> {
         let invalid = |why: &str| AiError::InvalidRequest(Detail::new(why));
         if request.provider.trim().is_empty() {
@@ -377,6 +451,9 @@ impl Gate {
         }
         if request.items.is_empty() {
             return Err(invalid("an offer needs at least one item"));
+        }
+        if request.items.len() > MAX_ITEMS {
+            return Err(invalid("an offer holds at most eight items"));
         }
         let mut items: Vec<OfferItem> = Vec::with_capacity(request.items.len());
         for source in &request.items {
@@ -396,18 +473,27 @@ impl Gate {
             return Err(invalid("nothing is left to offer after cleaning"));
         }
         let offer = ContextOffer::new(OfferId::random()?, request.provider, request.destination, items);
-        self.lock().push(offer.clone());
+        let mut offers = self.lock();
+        self.expire(&mut offers);
+        while offers.len() >= MAX_PENDING_OFFERS {
+            offers.remove(0);
+        }
+        offers.push(Pending { offer: offer.clone(), made: Instant::now() });
         Ok(offer)
     }
 
     /// Turns the picked items of an offer into an approved context for `provider`.
     ///
-    /// The envelope is built from the offer the gate remembers, never from text the caller passes. A success uses the
-    /// offer up.
+    /// The checks run under one lock, so of any number of racing callers exactly one succeeds: expired offers are
+    /// dropped; the offer must be one this gate issued and has not used up; `provider` must be the one the offer was
+    /// made for (the offer stays); the picks must be non-empty, known and without repeats (the offer stays). Only then is
+    /// the envelope built, in offer order and from the offer the gate remembers, never from text the caller passes, and
+    /// the offer removed. Every refusal is the same [`AiError::Policy`] phrase.
     pub fn approve(&self, offer: &OfferId, picked: &[u32], provider: &str) -> Result<ApprovedContext, AiError> {
         let mut offers = self.lock();
-        let index = offers.iter().position(|stored| stored.id() == offer).ok_or_else(refused)?;
-        let stored = &offers[index];
+        self.expire(&mut offers);
+        let index = offers.iter().position(|pending| pending.offer.id() == offer).ok_or_else(refused)?;
+        let stored = &offers[index].offer;
         if stored.provider != provider {
             return Err(refused());
         }
@@ -431,7 +517,10 @@ impl Default for Gate {
 
 impl fmt::Debug for Gate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Gate").field("pending", &self.pending()).finish()
+        let mut offers = self.lock();
+        self.expire(&mut offers);
+        let bytes: u64 = offers.iter().map(|pending| pending.offer.bytes()).sum();
+        f.debug_struct("Gate").field("pending", &offers.len()).field("bytes", &Size(bytes as usize)).finish()
     }
 }
 
@@ -569,6 +658,23 @@ impl ApprovedContext {
     /// The size of the envelope in bytes.
     pub fn bytes(&self) -> usize {
         self.inner.envelope.len()
+    }
+
+    /// Whether the context holds data an attacker may have written. It is true for every kind: whatever was read from a
+    /// terminal, a file or a preview (a web page's reply, a commit message, a README, a file name) can carry
+    /// instructions for the model. The agent loop treats a turn that holds such a context as tainted: what the model then
+    /// asks for needs the user's approval however the tool is rated.
+    pub fn is_untrusted(&self) -> bool {
+        self.inner.items.iter().any(|item| kind_is_untrusted(item.kind))
+    }
+}
+
+/// Whether text of `kind` is attacker-influenced. The match is exhaustive on purpose: a new kind forces a decision.
+fn kind_is_untrusted(kind: ContextKind) -> bool {
+    match kind {
+        ContextKind::Selection | ContextKind::Screen | ContextKind::LastCommand | ContextKind::File | ContextKind::Preview => {
+            true
+        }
     }
 }
 
