@@ -53,7 +53,8 @@
 .ai-settings .aiset-field > label { color: var(--hw-ink-2); }
 .ai-settings .aiset-field > .aiset-hint { grid-column: 2; margin: .167rem 0 0; }
 .ai-settings .aiset-check { grid-template-columns: 1rem minmax(0, 1fr); min-height: max(28px, calc(28rem / 12)); }
-.ai-settings .aiset-check > label { color: var(--hw-ink); }
+.ai-settings .aiset-check > label { color: var(--hw-ink); display: flex; align-items: center; cursor: pointer;
+                                    min-height: max(28px, calc(28rem / 12)); }
 .ai-settings .aiset-choice { min-width: 0; margin: 0 0 .5rem; padding: 0; border: 0; }
 .ai-settings .aiset-choice > legend { padding: 0; color: var(--hw-ink-2); }
 .ai-settings .aiset-options { display: flex; flex-wrap: wrap; gap: 0 1rem; }
@@ -127,6 +128,7 @@
   .ai-settings .aiset-field { grid-template-columns: minmax(0, 1fr); row-gap: .167rem; }
   .ai-settings .aiset-field > .aiset-hint, .ai-settings .aiset-error { grid-column: 1; }
   .ai-settings .aiset-check { grid-template-columns: 1.25rem minmax(0, 1fr); align-items: center; }
+  .ai-settings .aiset-check > label { min-height: max(44px, calc(44rem / 12)); }
   .ai-settings .aiset-check > .aiset-hint { grid-column: 2; }
   .ai-settings .aiset-row { flex-wrap: wrap; row-gap: 0; padding-top: .333rem; padding-bottom: .333rem; }
   .ai-settings .aiset-host { margin-left: 0; }

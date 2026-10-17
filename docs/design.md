@@ -602,8 +602,9 @@ word never appears in this dialog: where a request goes is told by the chat afte
 | armed removal | danger border | the text `Click again to remove` |
 
 **Narrow screens (640 px and narrower).** The dialog is the screen: full width and height, no radius, no shadow. The
-fields stack, and the rows, options, inputs and buttons are at least 44 px high; input text is at least 16 px. The rules
-of the chat sheet (6.12) apply.
+fields stack, and the rows, options, inputs and buttons are at least 44 px high; input text is at least 16 px. The label of
+a checkbox (`Local only`, `Plain http on my local network`) is its target and is as high as the rows: at least 44 px here and
+at least 28 px on a desktop. The rules of the chat sheet (6.12) apply.
 
 ![AI providers on a phone](design/ai-providers-phone.png)
 
