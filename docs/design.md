@@ -260,6 +260,30 @@ eight-segment bars with their numbers beside them (the level is also said by the
 underlined, above 70 and 90 percent), the network rates, the uptime and the eight busiest processes (PID, name, CPU,
 memory), one sample a second, paused while the window is hidden.
 
+On another computer. Every saved SSH connection also has the palette entry `System monitor: Name (ssh)` (WSL and Docker
+connections have none). The pane is the same pane: header `system`, context `Name · 1 s` where the monitor of this computer
+says `local · 1 s`, the same bars, rates, uptime and eight busiest processes, one sample a second, paused while the window
+is hidden. The numbers are those of the other computer, read from its `/proc`, so only Linux hosts are supported; a host
+that is not Linux says so and shows nothing, and nothing is guessed for it. holzWave runs one fixed, read-only command
+through the saved connection (no terminal, no forwarding, nothing from the page, the pane or the connection put into it) and
+keeps only numbers and process names; command lines and environments are never read. Panes of the same host share one
+sample. holzWave never learns a host key this way: a host whose key has not been seen yet is refused until the connection
+has been opened once. While the pane waits or the host does not answer it says why on a line of its own above the bars, in
+words: `Connecting to Name …` (plain, until the first answer); `! No answer from Name: reason` (warn colour, underlined, with
+the mark `!`; the last numbers stay, dimmed, and come back by themselves when the host answers again);
+`! Not supported: Name does not run Linux (it says Darwin).` (the same three cues; the bars and the table stay empty; the
+host is asked again after half a minute). On a narrow window the line wraps; the pane has no control of its own, so there is
+no phone drawing. Not drawn: a choice of interval, a process kill, history graphs.
+
+The line is a `role="status"` region; its state and tone are `data-state` and `data-tone`, and dimmed numbers are
+`data-stale` on the monitor. Hairlines and dim text use `--hw-line` and `--hw-dim`, so `contrast-high` holds; under forced
+colours the warn line gets a system-colour outline; there is no motion. The words by state are `Connecting to Name …`,
+`No answer from Name: reason` (without a reason: `No answer from Name.`),
+`Not supported: Name does not run Linux (it says System).` and, when the host named no system,
+`Not supported: Name did not answer like a Linux computer.`. Reasons are the core's plain texts, for example
+`The host key is not known yet. Connect to this host once, then try again.`, `the connection was lost` and
+`the host did not answer in time`.
+
 A preview is a pane like any other and uses the same header: image (size and weight as a chip), PDF (page and zoom),
 video (a bar with time, volume and speed), Markdown (Manrope, the one place in the chrome that uses it) and the editor
 (line numbers, syntax colours from the `--hw-*` tokens). Unsaved changes show as `● unsaved` in the preview's status line (amber, with the words as the second cue), and closing the pane asks first. `Cmd/Ctrl+S` saves, `Escape` gives the keyboard back to the terminal; on a Markdown page `e` opens its source. The file browser is a pane too: `Space` on a file opens its preview beside it,

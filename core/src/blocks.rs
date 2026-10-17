@@ -46,7 +46,7 @@ pub enum BlockKind {
     Files,
     /// The preview of one file.
     Preview,
-    /// The system monitor of this computer. It has no path.
+    /// The system monitor of this computer or of a saved SSH connection. It has no path.
     Monitor,
     /// A conversation with an AI model. Its path is the id of the conversation; the messages are kept by the
     /// conversation store, never in `pane_blocks.json`.
@@ -345,8 +345,9 @@ impl Blocks {
 
 fn valid(block: &Block) -> bool {
     match block.kind {
-        // The monitor looks at this computer and has no path.
-        BlockKind::Monitor => block.source == LOCAL && block.path.is_empty(),
+        // The monitor looks at this computer or at a saved SSH connection and has no path. Whether the connection exists
+        // and is SSH is checked when the pane is opened.
+        BlockKind::Monitor => block.path.is_empty() && !block.source.is_empty() && block.source.len() <= 64,
         // A chat lives on this computer and its path is a conversation id: the store's own rule decides (length,
         // characters, device names), so no second copy of it exists.
         BlockKind::Chat => block.source == LOCAL && ConversationId::parse(&block.path).is_ok(),
@@ -398,13 +399,18 @@ mod tests {
     }
 
     #[test]
-    fn a_monitor_block_is_local_and_has_no_path() {
+    fn a_monitor_block_names_this_computer_or_a_saved_connection_and_has_no_path() {
         let (d, blocks, _) = setup("monitor");
         let monitor = |source: &str, path: &str| Block { kind: BlockKind::Monitor, source: source.into(), path: path.into() };
         blocks.assign(1, monitor(LOCAL, "")).unwrap();
-        assert!(blocks.assign(2, monitor("talos", "")).is_err(), "no monitor of another computer yet");
-        assert!(blocks.assign(3, monitor(LOCAL, "/x")).is_err());
-        assert_eq!(Blocks::load(&d, None, &[1]).block_of(1).unwrap().kind, BlockKind::Monitor, "it survives a restart");
+        blocks.assign(2, monitor("talos", "")).unwrap();
+        assert!(blocks.assign(3, monitor(LOCAL, "/x")).is_err(), "no path");
+        assert!(blocks.assign(3, monitor("talos", "/x")).is_err(), "no path on a saved connection either");
+        assert!(blocks.assign(4, monitor("", "")).is_err(), "a source is named");
+        assert!(blocks.assign(5, monitor(&"x".repeat(65), "")).is_err(), "a source of 65 bytes is refused");
+        let again = Blocks::load(&d, None, &[1, 2]);
+        assert_eq!(again.block_of(1).unwrap().kind, BlockKind::Monitor, "it survives a restart");
+        assert_eq!(again.block_of(2).unwrap().source, "talos");
         let _ = fs::remove_dir_all(&d);
     }
 

@@ -11,6 +11,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sysinfo::{MemoryRefreshKind, Networks, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
+mod procfs;
+pub mod remote;
+
+pub use remote::{RemoteMonitor, RemoteMonitors};
+
 /// A sample younger than this is given again.
 pub const MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// How many processes a sample lists.
@@ -41,6 +46,18 @@ pub struct Snapshot {
     /// Seconds since the computer started.
     pub uptime: u64,
     pub procs: Vec<Proc>,
+}
+
+/// The answer of a monitor sample: the numbers of a computer, or the word that it is not one this monitor can read.
+///
+/// `Live` serializes as the members of the snapshot plus `state: "live"`; `Unsupported` as `state: "unsupported"` and
+/// `system`. The `system` is the host's own word for its system, cleaned to letters, digits, dot, dash and underscore
+/// and at most 24 characters, and empty when the host named none.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Reading {
+    Live(Snapshot),
+    Unsupported { system: String },
 }
 
 struct State {

@@ -43,4 +43,8 @@ test("the monitor's header says what it is", () => {
   const b = { pane: 1, kind: "monitor", source: "local", path: "", source_label: "This computer" };
   assert.equal(blockTitle(b), "system");
   assert.equal(blockContext(b), "local · 1 s");
+  const remote = { pane: 2, kind: "monitor", source: "talos", path: "", source_label: "Talos" };
+  assert.equal(blockContext(remote), "Talos · 1 s", "another computer says its name");
+  assert.equal(blockContext({ ...remote, source_label: "" }), "talos · 1 s", "an empty label falls back to the source id");
+  assert.equal(blockTitle(remote), "system");
 });

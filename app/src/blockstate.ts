@@ -207,7 +207,7 @@ export function goneChats(previous: readonly BlockInfo[], next: readonly BlockIn
 
 /** The context of a block pane's header: where it reads from, and for a browser the folder. */
 export function blockContext(b: BlockInfo): string {
-  if (b.kind === "monitor") return "local · 1 s";
+  if (b.kind === "monitor") return `${b.source === "local" ? "local" : b.source_label || b.source} · 1 s`;
   if (b.kind === "chat") return chatTitles.get(b.path) ?? "new chat";
   return b.kind === "files" ? `${b.source_label} · ${b.path}` : `${b.source_label} · preview`;
 }
