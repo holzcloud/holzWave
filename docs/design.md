@@ -239,6 +239,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | wsh ai states | ![](design/ai-wsh-states.png) | the card in four states (6.20): asking for a cloud provider, asking for a model on this computer, after `Send once`, and after a refusal from holzWave with a second request waiting |
 | On-device model | ![](design/ai-device.png) | the chat on a Mac with Apple Intelligence (6.21): the picker with the on-device row chosen, the bar naming `Apple on-device · system` with no arrow and no host, and the place chip `on device` |
 | On-device states | ![](design/ai-device-states.png) | the group `On device` of the providers dialog in three states and a chat whose pinned model is gone (6.21): the reason in words, underlined and marked, the advice, `Check again`, and the sentence that keeps the draft and uses no other provider |
+| Monitor over SSH | ![](design/monitor-ssh.png) | the system monitor of a Linux host beside its shell (6.5): header `system · talos-1 · 1 s`, the same bars, rates, uptime and eight busiest processes, read from the host |
+| Monitor states | ![](design/monitor-ssh-states.png) | the line above the bars in four states (6.5): connecting, no answer with the numbers kept dimmed, not a Linux host, and a host key that is not known yet; each warn line has words, an underline and the mark `!` |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -274,6 +276,10 @@ the mark `!`; the last numbers stay, dimmed, and come back by themselves when th
 `! Not supported: Name does not run Linux (it says Darwin).` (the same three cues; the bars and the table stay empty; the
 host is asked again after half a minute). On a narrow window the line wraps; the pane has no control of its own, so there is
 no phone drawing. Not drawn: a choice of interval, a process kill, history graphs.
+
+![Monitor over SSH](design/monitor-ssh.png)
+
+![Monitor states](design/monitor-ssh-states.png)
 
 The line is a `role="status"` region; its state and tone are `data-state` and `data-tone`, and dimmed numbers are
 `data-stale` on the monitor. Hairlines and dim text use `--hw-line` and `--hw-dim`, so `contrast-high` holds; under forced

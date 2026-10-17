@@ -118,7 +118,7 @@ async function check(file) {
   const failures = [...problems];
   const views = await page.$$eval('#views button', (bs) => bs.map((b) => b.dataset.v));
   if (views.length === 0) failures.push('the view picker has no buttons');
-  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiapprove', 'kiapprovestates', 'kiwrite', 'kiwritestates', 'kicommand', 'kicommandstates', 'kiset', 'kichats', 'kisidecards', 'kiactions', 'kiexplain', 'kidescribe', 'kiwsh', 'kiwshstates', 'kidevice', 'kidevicestates']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
+  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiapprove', 'kiapprovestates', 'kiwrite', 'kiwritestates', 'kicommand', 'kicommandstates', 'kiset', 'kichats', 'kisidecards', 'kiactions', 'kiexplain', 'kidescribe', 'kiwsh', 'kiwshstates', 'kidevice', 'kidevicestates', 'kimon', 'kimonstates']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
   for (const view of views) {
     await show(page, view);
     const stage = await page.$eval('#stage .m', (m) => m.children.length).catch(() => 0);
@@ -142,6 +142,15 @@ async function check(file) {
   if (deviceFrames !== 4) failures.push(`the view kidevicestates holds ${deviceFrames} frames, not 4`);
   const deviceStates = await page.$eval('#stage', (n) => n.textContent);
   for (const words of ['Check again', 'Apple Intelligence is switched off.']) if (!deviceStates.includes(words)) failures.push(`the view kidevicestates does not show ${words}`);
+  // The monitor of another computer: the pane with the host's name in its header, and the four frames of the states view with the words of each state.
+  await show(page, 'kimon');
+  const monText = await page.$eval('#stage', (n) => n.textContent);
+  for (const words of ['talos-1 · 1 s', 'system', 'node server']) if (!monText.includes(words)) failures.push(`the view kimon does not show ${words}`);
+  await show(page, 'kimonstates');
+  const monFrames = await page.$$eval('#stage .mo-frame', (n) => n.length);
+  if (monFrames !== 4) failures.push(`the view kimonstates holds ${monFrames} frames, not 4`);
+  const monStates = await page.$eval('#stage', (n) => n.textContent);
+  for (const words of ['Connecting to talos-1', 'No answer from talos-1', 'Not supported: build-mac does not run Linux']) if (!monStates.includes(words)) failures.push(`the view kimonstates does not show ${words}`);
   // The chords of the AI actions follow the platform switch: the symbols on macOS, the words on Windows and Linux.
   const keysOf = { mac: ['⇧⌘Y', '⇧⌘G'], win: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'], lin: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'] };
   for (const [os, wanted] of Object.entries(keysOf)) {
