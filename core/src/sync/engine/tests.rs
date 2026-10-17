@@ -14,6 +14,7 @@ struct Store {
     dirs: BTreeSet<String>,
     next: u64,
     puts: u32,
+    gets: u32,
 }
 
 struct Server {
@@ -54,10 +55,13 @@ fn serve(stream: TcpStream, store: Arc<Mutex<Store>>) {
                 "MKCOL" => {
                     if s.dirs.insert(rel) { (201, String::new(), vec![]) } else { (405, String::new(), vec![]) }
                 }
-                "GET" => match s.files.get(&rel) {
-                    Some((b, e)) => (200, format!("ETag: \"v{e}\"\r\n"), b.clone()),
-                    None => (404, String::new(), vec![]),
-                },
+                "GET" => {
+                    s.gets += 1;
+                    match s.files.get(&rel) {
+                        Some((b, e)) => (200, format!("ETag: \"v{e}\"\r\n"), b.clone()),
+                        None => (404, String::new(), vec![]),
+                    }
+                }
                 "PUT" => {
                     let current = s.files.get(&rel).map(|(_, e)| format!("\"v{e}\""));
                     let ok = match (headers.get("if-none-match"), headers.get("if-match")) {
@@ -1065,4 +1069,280 @@ fn the_marker_is_not_a_valid_theme_or_widget_file() {
     let (defs, notes) = crate::widgets::load(&d.dir);
     assert!(notes.iter().any(|n| n.contains("widgets/gone.json")), "{notes:?}");
     assert!(defs.iter().any(|w| w.id == "good"), "the valid widget still loads");
+}
+
+/// A file of the device `d` that `name` names, written without going through the staging of a download.
+fn write_live(d: &Device, name: &str, text: &str) {
+    write_atomic(&d.dir.join(name), text.as_bytes()).unwrap();
+}
+
+#[test]
+fn an_edit_beats_a_delete_on_the_other_device() {
+    let (srv, a, b) = with_theme("edit-del");
+    fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+    write_live(&b, "themes/dark.json", "{\"name\":\"edited by b\"}");
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().deleted, vec!["themes/dark.json"]);
+    let tombstone_counter = counter(&a, "themes/dark.json");
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["themes/dark.json"], "{report:?}");
+    assert_eq!(report.conflicts, vec!["themes/dark.json"], "the run that decided it says so: {report:?}");
+    assert!(report.removed.is_empty(), "{report:?}");
+    assert!(counter(&b, "themes/dark.json") > tombstone_counter, "the edit is newer than the tombstone");
+    assert_eq!(fs::read_to_string(b.dir.join("themes/dark.json")).unwrap(), "{\"name\":\"edited by b\"}");
+    // A's next run brings the edited file back; neither side lost it.
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["themes/dark.json"], "{report:?}");
+    assert_eq!(text(&a, "themes/dark.json").as_deref(), Some("{\"name\":\"edited by b\"}"));
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default());
+}
+
+#[test]
+fn an_edit_beats_a_delete_the_other_way() {
+    let (srv, a, b) = with_theme("del-edit");
+    fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+    write_live(&b, "themes/dark.json", "{\"name\":\"edited by b\"}");
+    // B runs first and uploads its edit; A, which deleted, then finds the server changed.
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["themes/dark.json"], "{report:?}");
+    assert_eq!(report.conflicts, vec!["themes/dark.json"], "{report:?}");
+    assert!(report.deleted.is_empty() && report.uploaded.is_empty(), "no tombstone is sent: {report:?}");
+    assert_eq!(text(&a, "themes/dark.json").as_deref(), Some("{\"name\":\"edited by b\"}"));
+    assert_eq!(server_plain(&srv, &a, "themes/dark.json"), b"{\"name\":\"edited by b\"}");
+}
+
+#[test]
+fn a_file_recreated_after_a_deletion_supersedes_the_tombstone() {
+    let (srv, a, b) = with_theme("recreate");
+    fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().removed, vec!["themes/dark.json"]);
+    write_live(&a, "themes/dark.json", "{\"name\":\"again\"}");
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["themes/dark.json"], "{report:?}");
+    assert!(report.deleted.is_empty() && report.errors.is_empty(), "{report:?}");
+    assert_eq!(remembered(&a, "themes/dark.json").0, false);
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["themes/dark.json"], "{report:?}");
+    assert!(report.conflicts.is_empty(), "a recreation is not a conflict: {report:?}");
+    assert_eq!(text(&b, "themes/dark.json").as_deref(), Some("{\"name\":\"again\"}"));
+    // And it can be deleted again.
+    fs::remove_file(b.dir.join("themes/dark.json")).unwrap();
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().deleted, vec!["themes/dark.json"]);
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().removed, vec!["themes/dark.json"]);
+}
+
+#[test]
+fn a_device_that_never_had_the_file_records_the_tombstone_and_creates_nothing() {
+    let (srv, a, _b) = with_theme("never");
+    fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    let c = device("c-never");
+    let report = connect(&srv, &c, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report, Report::default(), "no file, no error");
+    assert!(!c.dir.join("themes").exists() && !c.dir.join("sync-incoming").exists() && !c.dir.join("sync-conflicts").exists());
+    assert_eq!(remembered(&c, "themes/dark.json"), (true, String::new()));
+    // Later runs ask nothing about it: the only read is the sync folder's own meta file.
+    let gets = srv.store.lock().unwrap().gets;
+    assert_eq!(connect(&srv, &c, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(srv.store.lock().unwrap().gets - gets, 1, "meta.json only");
+}
+
+#[test]
+fn a_read_error_is_not_a_deletion() {
+    let (srv, a, _b) = with_theme("readerr");
+    let file = a.dir.join("themes/dark.json");
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap(); // a directory in the file's place cannot be read as a file
+    let puts = srv.store.lock().unwrap().puts;
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert!(report.deleted.is_empty() && report.uploaded.is_empty(), "{report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].0, "themes/dark.json");
+    assert_eq!(srv.store.lock().unwrap().puts, puts);
+    assert_eq!(server_plain(&srv, &a, "themes/dark.json"), b"{\"name\":\"dark\"}");
+    assert_eq!(remembered(&a, "themes/dark.json").0, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_folder_is_not_a_deletion() {
+    use std::os::unix::fs::PermissionsExt;
+    let (srv, a, _b) = with_theme("noperm");
+    let folder = a.dir.join("themes");
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = fs::read_dir(&folder).is_ok(); // a superuser reads it anyway
+    let puts = srv.store.lock().unwrap().puts;
+    let result = connect(&srv, &a, "pw").unwrap().sync_once();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = result.unwrap();
+    if !readable {
+        assert!(report.deleted.is_empty() && report.uploaded.is_empty(), "{report:?}");
+        assert_eq!(report.errors.iter().filter(|e| e.0 == "themes/dark.json").count(), 1, "{report:?}");
+        assert_eq!(srv.store.lock().unwrap().puts, puts);
+    }
+    assert_eq!(remembered(&a, "themes/dark.json").0, false);
+}
+
+#[test]
+fn a_missing_folder_deletes_nothing() {
+    let (srv, a, _b) = with_theme("nofolder");
+    let puts = srv.store.lock().unwrap().puts;
+    fs::remove_dir_all(a.dir.join("themes")).unwrap();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert!(report.deleted.is_empty() && report.uploaded.is_empty(), "{report:?}");
+    assert_eq!(report.errors.len(), 1, "one error for the folder: {report:?}");
+    assert!(report.errors[0].1.contains("themes"), "{report:?}");
+    assert_eq!(srv.store.lock().unwrap().puts, puts, "the server keeps everything");
+    assert_eq!(remembered(&a, "themes/dark.json").0, false);
+    // The folder comes back: the sync is normal again, and a real deletion is a deletion.
+    fs::create_dir_all(a.dir.join("themes")).unwrap();
+    write_live(&a, "themes/dark.json", "{\"name\":\"dark\"}");
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap(), Report::default());
+    fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().deleted, vec!["themes/dark.json"]);
+}
+
+/// A has `count` themes `themes/t01.json`, `t02`, ... synced to the server, B has them too.
+fn with_themes(tag: &str, count: usize) -> (Server, Device, Device) {
+    let srv = server();
+    let (a, b) = (device(&format!("a-{tag}")), device(&format!("b-{tag}")));
+    fs::create_dir_all(a.dir.join("themes")).unwrap();
+    for i in 1..=count {
+        write_live(&a, &format!("themes/t{i:02}.json"), &format!("{{\"name\":\"t{i}\"}}"));
+    }
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    promote_incoming(&b.dir);
+    (srv, a, b)
+}
+
+#[test]
+fn at_most_five_tombstones_are_sent_per_run() {
+    let (srv, a, _b) = with_themes("five", 6);
+    for i in 1..=6 {
+        fs::remove_file(a.dir.join(format!("themes/t{i:02}.json"))).unwrap();
+    }
+    let puts = srv.store.lock().unwrap().puts;
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert!(report.deleted.is_empty() && report.uploaded.is_empty(), "a mass deletion is stopped whole: {report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert!(report.errors[0].1.contains("themes") && report.errors[0].1.contains('5'), "{report:?}");
+    assert_eq!(srv.store.lock().unwrap().puts, puts);
+    // The person puts one back (a smaller batch): the five that remain are sent.
+    write_live(&a, "themes/t06.json", "{\"name\":\"t6\"}");
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.deleted.len(), 5, "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    // The last one goes in a later run.
+    fs::remove_file(a.dir.join("themes/t06.json")).unwrap();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.deleted, vec!["themes/t06.json"], "{report:?}");
+}
+
+#[test]
+fn at_most_twenty_files_are_removed_per_run() {
+    let (srv, a, b) = with_themes("twenty", 21);
+    // A deletes in batches of five, as the cap on sending asks.
+    for batch in [1..=5, 6..=10, 11..=15, 16..=20, 21..=21] {
+        for i in batch {
+            fs::remove_file(a.dir.join(format!("themes/t{i:02}.json"))).unwrap();
+        }
+        let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+        assert!(report.errors.is_empty(), "{report:?}");
+    }
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.removed.len(), MAX_DELETES_APPLIED, "{report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert!(report.errors[0].1.contains("themes") && report.errors[0].1.contains("20"), "{report:?}");
+    let left = fs::read_dir(b.dir.join("themes")).unwrap().count();
+    assert_eq!(left, 1, "the rest waits");
+    // The next run removes more.
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(fs::read_dir(b.dir.join("themes")).unwrap().count(), 0);
+    assert_eq!(kept_copies(&b).len(), 21, "every removed file was copied first");
+}
+
+#[test]
+fn a_failed_copy_stops_the_removal() {
+    let (srv, a, b) = with_theme("copyfail");
+    fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    fs::write(b.dir.join("sync-conflicts"), b"in the way").unwrap(); // a file where the folder of the copies belongs
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.removed.is_empty(), "{report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].0, "themes/dark.json");
+    assert_eq!(fs::read_to_string(b.dir.join("themes/dark.json")).unwrap(), "{\"name\":\"dark\"}", "the live file stays");
+    assert_eq!(remembered(&b, "themes/dark.json").0, false);
+    // The next run tries again.
+    fs::remove_file(b.dir.join("sync-conflicts")).unwrap();
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.removed, vec!["themes/dark.json"], "{report:?}");
+    assert!(!b.dir.join("themes/dark.json").exists());
+}
+
+#[test]
+fn a_fixed_file_is_never_deleted_by_the_sync() {
+    let srv = server();
+    let (a, b) = (device("a-fixed"), device("b-fixed"));
+    write_live(&b, "settings.json", "mine");
+    // A tombstone put under each fixed name by hand (as a hostile or buggy client could).
+    let planter = connect(&srv, &a, "pw").unwrap();
+    for name in ["settings.json", "layout.json", "connections.json", "widget_notes.json"] {
+        planter.upload(name, TOMBSTONE, 1, None).unwrap();
+    }
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    let mut failed: Vec<&str> = report.errors.iter().map(|e| e.0.as_str()).collect();
+    failed.sort_unstable();
+    assert_eq!(failed, vec!["connections.json", "layout.json", "settings.json", "widget_notes.json"], "{report:?}");
+    assert!(report.errors.iter().all(|e| e.1.contains("never deletes")), "{report:?}");
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "mine", "the file stays");
+    assert!(!b.dir.join("layout.json").exists() && !b.dir.join("connections.json").exists() && !b.dir.join("sync-incoming").exists());
+    assert!(report.removed.is_empty() && report.downloaded.is_empty() && report.uploaded.is_empty());
+    // The file itself refuses too.
+    let source = ConfigSource::new(&b.dir, b.secrets.clone());
+    assert!(source.delete("settings.json").is_err() && source.delete("secrets.json").is_err() && source.delete("../x.json").is_err());
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "mine");
+}
+
+#[test]
+fn a_locally_missing_fixed_file_still_takes_the_servers_version() {
+    let srv = server();
+    let (a, b) = (device("a-fixed2"), device("b-fixed2"));
+    write_live(&a, "settings.json", "one");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(text(&b, "settings.json").as_deref(), Some("one"));
+    fs::remove_file(b.dir.join("settings.json")).unwrap();
+    // Deleting it here sends nothing: a fixed file has no tombstone.
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report, Report::default());
+    write_live(&a, "settings.json", "two");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["settings.json"], "{report:?}");
+    assert_eq!(text(&b, "settings.json").as_deref(), Some("two"));
+}
+
+#[test]
+fn a_staged_copy_of_a_deleted_name_goes_too() {
+    let (srv, a, b) = with_theme("staged");
+    write_live(&a, "themes/dark.json", "{\"name\":\"v2\"}");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    // B's download of v2 is staged; the live file is still v1.
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().downloaded, vec!["themes/dark.json"]);
+    assert!(b.dir.join("sync-incoming/themes/dark.json").exists());
+    fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.removed, vec!["themes/dark.json"], "{report:?}");
+    assert!(!b.dir.join("themes/dark.json").exists() && !b.dir.join("sync-incoming/themes/dark.json").exists());
+    assert!(promote_incoming(&b.dir).is_empty(), "nothing is left to apply, so nothing comes back");
+    assert!(!b.dir.join("themes/dark.json").exists());
+    let copies = kept_copies(&b);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(copies[0].1, "{\"name\":\"dark\"}", "the live file was copied");
 }

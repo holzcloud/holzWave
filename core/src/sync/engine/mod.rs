@@ -18,7 +18,7 @@
 //! another computer (see [`Unit`]). Pane ids are small per-device counters, so a layout adopted without the assignments
 //! that belong to it would meet the other device's own pane files; an adoption replaces them as one step.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -788,6 +788,11 @@ pub struct Syncer<B: Backend, S: Source> {
     state: State,
     /// The directory for the copies of local versions that lost (`None`: keep none).
     conflicts_dir: Option<PathBuf>,
+    /// The names whose deletion this run may send (see [`Self::plan_deletions`]).
+    sendable: BTreeSet<String>,
+    /// The files this run removed because another device deleted them, and whether the limit was already reported.
+    removed_now: usize,
+    removal_limit_told: bool,
 }
 
 impl<B: Backend, S: Source> Syncer<B, S> {
@@ -814,7 +819,11 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                 }
             },
         };
-        Ok(Self { backend, source, key, dir: dir.to_path_buf(), state, conflicts_dir: Some(dir.join("sync-conflicts")) })
+        Ok(Self { backend, source, key, dir: dir.to_path_buf(), state, conflicts_dir: Some(dir.join("sync-conflicts")),
+            sendable: BTreeSet::new(),
+            removed_now: 0,
+            removal_limit_told: false,
+        })
     }
 
     fn open_meta(bytes: &[u8], passphrase: &str) -> Result<Key> {
@@ -861,6 +870,7 @@ impl<B: Backend, S: Source> Syncer<B, S> {
         names.dedup();
         let kept = load_kept(&self.dir);
         let mut report = Report::default();
+        self.plan_deletions(&remote, &names, &mut report);
         for name in names {
             if let Err(e) = self.one(&name, remote.get(&name).cloned(), &mut report) {
                 report.errors.push((name, e.to_string()));
@@ -877,6 +887,45 @@ impl<B: Backend, S: Source> Syncer<B, S> {
         Ok(report)
     }
 
+    /// Decide before the run which local deletions may be sent. A deletion is a name that is in agreement with the server
+    /// (the server's file is the one this device last saw), whose local file is not found (any other result of the read
+    /// is an error of that name, found later, and never a deletion). The deletions of a folder that does not exist are
+    /// not sent (a missing folder is a mistake, reported once), and a run that would send more than
+    /// [`MAX_DELETES_SENT`] sends none of them (reported once per folder), so a mass deletion stops whole.
+    fn plan_deletions(&mut self, remote: &BTreeMap<String, String>, names: &[String], report: &mut Report) {
+        self.sendable.clear();
+        self.removed_now = 0;
+        self.removal_limit_told = false;
+        let mut gone: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+        for name in names.iter().filter(|n| deletable(n)) {
+            let agreed = self.state.files.get(name.as_str()).is_some_and(|s| !s.deleted && remote.get(name.as_str()) == Some(&s.etag));
+            if agreed && matches!(self.source.read(name), Ok(None)) {
+                gone.entry(folder_of(name)).or_default().push(name);
+            }
+        }
+        gone.retain(|folder, _| {
+            let there = self.source.folder_exists(folder);
+            if !there {
+                report.errors.push(((*folder).to_owned(), format!("the folder {folder} is missing; no deletion was sent")));
+            }
+            there
+        });
+        let total: usize = gone.values().map(Vec::len).sum();
+        if total > MAX_DELETES_SENT {
+            for (folder, files) in &gone {
+                report.errors.push((
+                    (*folder).to_owned(),
+                    format!(
+                        "{} files of the folder {folder} are gone and {total} deletions in one run are too many: at most {MAX_DELETES_SENT} are sent per run, so none was sent",
+                        files.len()
+                    ),
+                ));
+            }
+            return;
+        }
+        self.sendable = gone.values().flatten().map(|n| (*n).clone()).collect();
+    }
+
     fn one(&mut self, name: &str, mut remote_etag: Option<String>, report: &mut Report) -> Result<()> {
         let seen = self.state.files.get(name).cloned();
         let local = self.source.read(name)?;
@@ -891,6 +940,10 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                     self.state.files.remove(name);
                     return Ok(());
                 };
+                if !self.sendable.contains(name) {
+                    // Held back by the checks of the run (a missing folder, too many at once); already reported.
+                    return Ok(());
+                }
                 let base = seen.as_ref().map_or(0, |s| s.counter);
                 match self.upload(name, TOMBSTONE, base + 1, Some(&etag)) {
                     Ok(new_etag) => {
@@ -928,20 +981,55 @@ impl<B: Backend, S: Source> Syncer<B, S> {
             let base = seen.as_ref().map_or(0, |s| s.counter);
             if let Some((_, etag, stamp, plain)) = &fetched {
                 if is_tombstone(plain) {
-                    // Another device deleted the file. A device that has none records it and creates nothing; one that has
-                    // an unchanged file removes it after a copy.
+                    // Another device deleted the file.
                     if !deletable(name) {
                         return Err(err("a deletion for a file the sync never deletes"));
                     }
-                    if local.is_some() && !local_changed {
-                        self.source.delete(name)?;
-                        report.removed.push(name.to_owned());
-                    } else if local.is_some() {
-                        return Err(err("a deletion met a changed file"));
+                    match &local {
+                        // This device has none: record it and create nothing.
+                        None => {}
+                        // An unchanged file goes, after a copy, within the limit of the run.
+                        Some(_) if !local_changed => {
+                            if self.removed_now >= MAX_DELETES_APPLIED {
+                                if self.removal_limit_told {
+                                    return Ok(());
+                                }
+                                self.removal_limit_told = true;
+                                return Err(err(format!(
+                                    "at most {MAX_DELETES_APPLIED} files are removed per run; the rest of the folder {} waits for the next run",
+                                    folder_of(name)
+                                )));
+                            }
+                            self.source.delete(name)?;
+                            self.removed_now += 1;
+                            report.removed.push(name.to_owned());
+                        }
+                        // A file changed here beats the deletion: it goes back over the tombstone.
+                        Some(bytes) => {
+                            report.conflicts.push(name.to_owned());
+                            let counter = stamp.counter.max(base) + 1;
+                            match self.upload(name, bytes, counter, Some(etag)) {
+                                Ok(new_etag) => {
+                                    self.remember(name, counter, &new_etag, &digest(bytes));
+                                    report.uploaded.push(name.to_owned());
+                                    return Ok(());
+                                }
+                                Err(e) if e.to_string().contains(CONFLICT) => {
+                                    report.conflicts.pop();
+                                    remote_etag = self.fresh_etag(name)?;
+                                    continue;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
                     }
                     self.remember_deleted(name, stamp.counter, etag);
                     return Ok(());
                 }
+            }
+            // A file that is not found here while the server holds a newer version of it: the edit beats the deletion.
+            if local.is_none() && fetched.is_some() && deletable(name) && seen.as_ref().is_some_and(|s| !s.deleted) {
+                report.conflicts.push(name.to_owned());
             }
             match (&local, &fetched, local_changed) {
                 // Only the server changed (or the local file is gone): take its version.
