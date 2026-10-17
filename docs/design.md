@@ -237,6 +237,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | AI chat: command from a description | ![](design/ai-describe.png) | a reply to `Command from description` (6.19): the button `Insert at prompt` under a one-line block, the warn line under a block that holds characters that are not shown, the line at the prompt of pane 1 with the cursor after it, and the status line `Inserted at the prompt of pane 1. It was not run.` |
 | wsh ai request | ![](design/ai-wsh.png) | a program in a terminal asked the model a question (6.20): the card at the top right with the prompt, the piped text by counts and findings, the destination with the place chip and the buttons; nothing has left this computer yet |
 | wsh ai states | ![](design/ai-wsh-states.png) | the card in four states (6.20): asking for a cloud provider, asking for a model on this computer, after `Send once`, and after a refusal from holzWave with a second request waiting |
+| On-device model | ![](design/ai-device.png) | the chat on a Mac with Apple Intelligence (6.21): the picker with the on-device row chosen, the bar naming `Apple on-device · system` with no arrow and no host, and the place chip `on device` |
+| On-device states | ![](design/ai-device-states.png) | the group `On device` of the providers dialog in three states and a chat whose pinned model is gone (6.21): the reason in words, underlined and marked, the advice, `Check again`, and the sentence that keeps the draft and uses no other provider |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -432,8 +434,8 @@ status line and the composer.
 - **Status line.** One line, `role="status"`: `working`, `thinking`, `writing`, `waiting for your decision`, `stopping`, a refused send in the core's
   words, a hint of the page (dim, for example that sharing ended because the provider changed), and after a turn
   `reply finished`, `reply stopped` or `reply failed`. A chat that is pinned to the on-device model while it cannot answer
-  says `Apple on-device is not available. Choose another provider, or see the provider settings for the reason.` in the
-  danger colour with the mark `!` (6.21). It clears when the user types.
+  says `Apple on-device is not available. Choose another provider, or see the provider settings for the reason.` as an error
+  line, like every refusal of a send (6.21). It clears when the user types.
 - **Composer.** A multi-line field (1 to 8 rows, in the chat text face) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
   that becomes `Stop` (hairline) while a turn runs. Below the field, left: the button `Context…` (6.14; it reads
   `Context · 1 item` while an offer is attached), then `≈ 12 tokens` (UTF-8 bytes divided by 3, rounded up, the rule of
@@ -1360,6 +1362,9 @@ There is no phone drawing, because the model exists only on macOS.
 `data-tone`. `Check again` has a visible label and the 2 px focus ring; when the state turns available while the button has
 the focus, the keyboard moves to the row of the group. Hairlines use `--hw-line`, so `contrast-high` holds; under forced
 colours the row gets a system-colour outline. Nothing moves.
+
+![On-device model](design/ai-device.png)
+![On-device model states](design/ai-device-states.png)
 
 **Not drawn.** A model list, a download button, a switch for Apple Intelligence and a link into System Settings: holzWave
 cannot switch the model on, and says where the person can.

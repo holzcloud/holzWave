@@ -132,13 +132,18 @@
   .ai-settings .aiset-host { margin-left: 0; }
   .ai-settings .aiset-keyrow { flex-wrap: wrap; }
   .ai-settings .aiset-form-actions { flex-wrap: wrap; }
+  /* The model of this Mac: the name, the meta, the reason, the advice and the button each on a line of their own. */
+  .ai-settings .aiset-dev-row { flex-direction: column; align-items: flex-start; min-height: max(44px, calc(44rem / 12)); padding: .333rem 0; }
+  .ai-settings .aiset-dev-state { margin-left: 0; text-align: left; }
+  .ai-settings .aiset-dev-advice { flex: none; }
 }
 
-/* ---- forced colours: system colours outline the chosen row, the card and a key that needs attention ---------------------- */
+/* ---- forced colours: system colours outline the chosen row, the card, the row of the model and a key that needs attention -- */
 
 @media (forced-colors: active) {
   :root .ai-settings .aiset-row[data-chosen="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
   :root .ai-settings .aiset-disclosure { outline: 2px solid CanvasText; outline-offset: -2px; }
+  :root .ai-settings .aiset-dev-row { outline: 2px solid CanvasText; outline-offset: -2px; }
   :root .ai-settings .aiset-keystate[data-tone="warn"], :root .ai-settings .aiset-gateway-state[data-tone="warn"],
   :root .ai-settings .aiset-key[data-tone="warn"] { outline: 2px solid Highlight; outline-offset: 2px; }
 }

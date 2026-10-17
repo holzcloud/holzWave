@@ -343,6 +343,20 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ph1 .aw-sheet .aw-row{margin:0 0 4px;padding-top:3px}.ph1 .aw-sheet .aw-nm{font-size:7px}.ph1 .aw-sheet .aw-text,.ph1 .aw-sheet .aw-ct,.ph1 .aw-sheet .aw-route,.ph1 .aw-sheet .aw-host,.ph1 .aw-sheet .aw-place{font-size:8px}
 .ph1 .aw-sheet .aw-text{padding:1px 6px}.ph1 .aw-sheet .aw-fn,.ph1 .aw-sheet .aw-best,.ph1 .aw-sheet .aw-foot{font-size:7px}.ph1 .aw-sheet .aw-foot{margin:0 0 4px}
 .ph1 .aw-sheet .aw-place{padding:0 6px}.ph1 .aw-sheet .aw-acts .btn{min-height:22px;min-width:22px;padding:0 8px;font-size:8px}
+/* The on-device model (docs/design.md 6.21): the group of the providers dialog in three states and a chat whose pinned model is gone */
+.ad-grid{display:grid;grid-template-columns:repeat(2,336px);gap:12px 28px;justify-content:center;align-content:start;padding:12px;flex:1;background:var(--ground)}
+.ad-cell .cap{margin:0 0 4px}
+.ad-frame{box-sizing:border-box;width:336px;padding:2px 10px 6px;border:1px solid var(--edge);border-radius:8px;background:var(--ground2)}
+.ad-frame.chat{height:262px;padding:0;display:flex;flex-direction:column;overflow:hidden}
+.ad-frame .c-status{white-space:normal;line-height:1.35}
+.ad-row{display:flex;flex-wrap:wrap;align-items:center;gap:0 10px;min-height:22px;font:400 12px/1.4 var(--mono)}
+.ad-name{color:var(--ink)}.ad-meta{color:var(--ink3)}
+.ad-state{margin-left:auto;color:var(--ink3);text-align:right}
+.ad-row[data-tone=ok] .ad-state{color:var(--ok)}
+.ad-row[data-tone=warn] .ad-state{color:var(--warn);text-decoration:underline}
+.ad-row[data-tone=warn] .ad-state::before{content:"! ";font-weight:700}
+.ad-adv{flex:1 0 100%;margin:2px 0 4px;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
+.ad-check{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border-radius:5px;font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
 /* Handys */
 .phones{display:flex;gap:16px;flex-wrap:wrap;width:fit-content;max-width:100%}
 .ph1{width:200px;height:400px;border:1px solid var(--edge);border-radius:22px;overflow:hidden;background:var(--ground);display:flex;flex-direction:column;font:400 10px/1.5 var(--mono);position:relative}
@@ -517,9 +531,9 @@ function base(v){
   return `<div class="titlebar row">${wcL}
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span></div><div class="ws">◇ docs <span class="n">1</span></div><div class="ws plus">＋</div>
     <span class="fill"></span>
-    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
+    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
   <div class="tabrow row">${tabs(v==='blocks'?1:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?chatArea(v):`<div class="area">
+  <div class="body">${v==='preview'?previewArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -527,7 +541,7 @@ function base(v){
       ${P('in','◧','notes.md','preview',md)}
       ${P('','◔','system','local · 1 s',sysmon)}
     </div>${searchBar}
-  </div>`}${v==='kiwsh'?side:v==='kiwshstates'?'':v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||status()}${awOver(v)}`;
+  </div>`}${v==='kiwsh'?side:v==='kiwshstates'||v==='kidevicestates'?'':v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||status()}${awOver(v)}`;
 }
 /* The chat pane (docs/design.md 6.12). Two states of one conversation: `kipane` streams a reply, `kistates` shows the picker, a stopped
    reply, a failed turn and a long draft. The words are the ones of the page: the status words, the end row, the count. */
@@ -717,7 +731,7 @@ cBody.kidescribe=`<div class="c-chat"><div class="c-bar"><span class="c-chip">Lo
  <div class="c-status">Inserted at the prompt of pane 1. It was not run.</div>
  <div class="c-comp"><div class="c-in">Ask a question</div>${cFoot('',cSend)}</div></div>`;
 const iaShell=v=>v==='kiexplain'?iaFailed:v==='kidescribe'?iaPrompt:shell('');
-const iaName=v=>v==='kiexplain'?'new chat':v==='kidescribe'?'Write one shell…':'Why is talos-3 NotReady?';
+const iaName=v=>v==='kiexplain'?'new chat':v==='kidescribe'?'Write one shell…':v==='kidevice'?'List files by size':'Why is talos-3 NotReady?';
 function chatArea(v){const wide=v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates';return wide?`<div class="area" style="grid-template-columns:1fr;grid-template-rows:1fr">${P('','✦','chat','Why is talos-3 NotReady?',cBody[v],{f:1,s:'grid-row:1/2'})}</div>`:`<div class="area" style="grid-template-columns:1fr 1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',iaShell(v),{s:'grid-row:1/2'})}${P('','✦','chat',iaName(v),cBody[v==='kiset'?'kipane':v],{f:1,s:'grid-row:1/2'})}</div>`}
 
 /* The AI providers dialog (docs/design.md 6.13): three groups (privacy, providers, the provider shown) and the buttons. The chosen
@@ -731,6 +745,24 @@ const apList=apG('Providers',`${apRow(0,'Local','Ollama · llama3.2','127.0.0.1:
 const apCard=`<div class="ap-card"><span class="mk2">!</span><div class="fill"><b>Gateway: openrouter.ai</b><span class="tx">A gateway relays your prompts to other providers and may keep a log of them. holzWave sends nothing to openrouter.ai until you allow it. holzWave asks OpenRouter not to use providers that keep your data. OpenRouter can still log what it receives.</span><div style="margin-top:4px"><span class="btn" style="border-color:var(--warn);color:var(--ink)">Allow openrouter.ai</span></div></div></div>`;
 const apForm=apG('Provider',`${apF('Name','Router')}${apF('Type','● OpenRouter',{hint:'The type of a saved provider cannot change. Add a new provider for another type.'})}${apF('Address','https://openrouter.ai/api/v1',{hint:'Leave empty to use the address of this type.'})}<div class="ap-f"><span style="grid-column:1/3">☐ Plain http on my local network</span><span class="ap-h" style="grid-column:1/3">Only for a server on your own network. Never for the internet.</span></div>${apF('Model','model-name')}${apF('API key','Enter a new key to replace it',{cls:'hole',hint:'<span class="ok">key saved</span> · The key is stored in the system keychain. It is never shown again; enter a new one to replace it.'})}${apCard}`);
 const apBox=(status)=>`<div class="ap"><div class="ap-t">AI providers</div><div class="ap-s">${status}</div>${apPrivacy}${apList}${apForm}<div class="ap-acts"><span class="btn">Remove provider</span><span class="btn p">Save</span><span class="btn">Close</span></div></div>`;
+
+/* The on-device model (docs/design.md 6.21). `kidevice` is the chat on a Mac with Apple Intelligence: the picker is open with the row of the model chosen, the bar names it
+   with no arrow and no host, and the place chip says on device after a turn. `kidevicestates` is the group On device of the providers dialog in three states and a chat whose
+   pinned model is gone: the reason is in words, underlined and marked, and the draft stays. */
+const adOff='Apple on-device is not available. Choose another provider, or see the provider settings for the reason.';
+cBody.kidevice=`<div class="c-chat"><div class="c-bar"><span class="c-chip btn1">Apple on-device · system</span><span class="c-where">on device</span><span class="c-usage">in 38 · out 61</span><span class="c-setup">Providers…</span></div>
+ <div class="c-pick" role="radiogroup">${cRow(0,'Local','llama3.2','localhost')}${cRow(0,'Claude','claude-sonnet-5-5','api.anthropic.com')}${cRow(1,'Apple on-device','system','')}</div>
+ <div class="c-log">${cMsg('you','How do I list the files by size?',{u:1})}${cMsg('assistant','Use <code>ls -lS</code> to sort by size, largest first.',{md:1})}</div>
+ <div class="c-status">reply finished</div>
+ <div class="c-comp"><div class="c-in">Ask a question<span class="cur"></span></div>${cFoot('≈ 0 tokens',cSend)}</div></div>`;
+const adRow=(tone,state,line,check)=>`<div class="ad-row" data-tone="${tone}"><span class="ad-name">Apple on-device</span><span class="ad-meta">system model</span><span class="ad-state">${state}</span><p class="ad-adv">${line}</p>${check?'<span class="btn ad-check">Check again</span>':''}</div>`;
+const adFrame=row=>`<div class="ad-frame"><div class="ap">${apG('On device',row)}</div></div>`;
+const adChat=`<div class="ad-frame chat"><div class="c-chat"><div class="c-bar"><span class="c-chip btn1">Apple on-device · system</span><span class="c-setup">Providers…</span></div>
+ <div class="c-pick" role="radiogroup">${cRow(0,'Local','llama3.2','localhost')}${cRow(0,'Claude','claude-sonnet-5-5','api.anthropic.com')}</div>
+ <div class="c-log"></div>
+ <div class="c-status er">${adOff}</div>
+ <div class="c-comp"><div class="c-in fo">Explain this error<span class="cur"></span></div><div class="c-foot">${cxBtn()}<span class="keys">⏎ send</span>${cSend}</div></div></div></div>`;
+const adStates=()=>`<div class="ad-grid">${[['On device · available',adFrame(adRow('ok','available','The model runs on this Mac.',0))],['Apple Intelligence switched off',adFrame(adRow('warn','Apple Intelligence is switched off.','Turn it on in System Settings, then choose Check again.',1))],['Needs macOS 26',adFrame(adRow('warn','This needs macOS 26 or later.','Update macOS, then choose Check again.',1))],['Chat pinned to a model that is gone',adChat]].map(([cap,frame])=>`<div class="ad-cell"><div class="cap">${cap}</div>${frame}</div>`).join('')}</div>`;
 
 const ovl={
  history:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:560px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">⌕</span>kgp<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
@@ -801,6 +833,8 @@ const views=[
  ['kicommand','AI chat: run a command','The card in which the assistant asks to run a command: the tool in words, the pane and the target, the effect line (one command, a separate process, your account’s rights), and every field of the request in the core’s order with its size. The payload box has no height limit and no scroll of its own, so the whole command is drawn and its end sits just above the destination line, the banner of a turn that already holds text from a file (with the sentence that a command will run), the hash and the buttons. Allow once is the one solid button and it allows this call only; Deny and Esc refuse it. The row of the command waits above it, and Stop in the composer ends a running command and everything it started.'],
  ['kicommandstates','AI chat: command states','A route that leaves the computer (cloud in the warn colour), the rows of a command that ran (Exit status: 0.), one that failed (a status, its standard error and the note that the start of the output was left out), one that timed out and one that was denied, each with its result as text under Result · untrusted text; a failed row has the mark ! and the word error as well as its colour. Below them the card of a command on a remote host while it runs: the chip says remote host, the destination says the output goes to the cloud, and the line Allowed · running… replaces the buttons. In the app the strip is at most half the pane and scrolls; here it is drawn in full.'],
  ['kiset','AI providers','The dialog that the chat bar button Providers… opens (also the palette entry AI providers… and a button in Settings): the two privacy switches, the list of providers with the key state in words, the form of the chosen provider with its write-only key field, and the card that a gateway or a server of your own shows before its first use. Nothing is probed; the Allow button is the only way to allow an address.'],
+ ['kidevice','On-device model','The chat on a Mac with Apple Intelligence: the provider picker is open with the on-device row chosen. The bar names Apple on-device with no arrow and no host, and the place chip says on device after a turn. There is no key, no address and nothing to set up.'],
+ ['kidevicestates','On-device model states','The group On device of the providers dialog in three states, and a chat whose pinned model is gone. The reason is in words, underlined and marked, never colour alone, and nothing is sent to another provider: the chat keeps the draft, offers the other providers and says why.'],
  ['kiactions','AI actions in the palette','The palette lists the AI actions beside the others, with the chord of the running platform (use the platform switch): Explain error and Command from description prepare a message and never send it. Both can be changed or unbound in the key binding editor.'],
  ['kiexplain','AI chat: explain an error','One chord opens the chat where you are with the message written and the item chosen: here the last command and its output, ticked and read, because the core lists it (else the selection, else the screen). The card is the one of 6.14, so a pane that is not shared yet still asks first. Nothing is sent until you press Send.'],
  ['kidescribe','AI chat: command from a description','A command in a reply reaches the prompt only when you press Insert at prompt, and is never run: the line sits at the prompt of pane 1 with the cursor after it. A block that holds characters that are not shown has no button and says so, with the mark ! and in words.'],
@@ -811,7 +845,7 @@ const views=[
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kiwsh'||cur==='kiwshstates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }
@@ -932,7 +966,7 @@ const rows=[
 ['SSH with reconnect','Pane header, sidebar, connections',pl(3)],['WSL, Docker','Connections, block picker',pl(3)],['Keychain','Connections',pl(3)],
 ['Nextcloud sync, end-to-end','Title bar ☁, sync popover, settings',pl('3b')],
 ['File previews (Markdown, image, video, PDF)','Previews view and Daily',pl(4)],['Editor with SFTP','Editor block',pl(4)],
-['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['Explain error, command from description','Palette and chat, ⇧⌘Y, ⇧⌘G',B],['wsh ai','Terminal, request card in the window',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Sharing a pane with the chat','Chat › Context…',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['Running a command','Chat › approval card',B],['AI chat in the sidebar','Palette, title bar ✦ AI, replaces the sidebar',B],
+['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['Explain error, command from description','Palette and chat, ⇧⌘Y, ⇧⌘G',B],['wsh ai','Terminal, request card in the window',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Apple on-device model','Chat picker, Providers › On device (macOS 26 or later)',B],['Sharing a pane with the chat','Chat › Context…',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['Running a command','Chat › approval card',B],['AI chat in the sidebar','Palette, title bar ✦ AI, replaces the sidebar',B],
 ['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['iOS and Android','One pane per screen, sheet, key row',pl(7)]
 ];
 $('#cov').innerHTML='<tr><th>Feature</th><th>Where</th><th>Status</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');

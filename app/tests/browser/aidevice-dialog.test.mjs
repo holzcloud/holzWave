@@ -11,6 +11,8 @@ export default async function ({ page, url, errors }) {
   await groupCase(page, url);
   await absentCase(page, url);
   await hostileCase(page, url);
+  await narrowCase(page, url);
+  await modesCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -232,4 +234,97 @@ async function hostileCase(page, url) {
   assert.equal(await text(page, ".aiset-dev-state"), "available");
   assert.equal(await page.evaluate(() => ({}).polluted), undefined, "nothing was added to Object.prototype");
   await closeDialog(page);
+}
+
+/** A phone-sized or desktop page with a chat and the saved provider; the model of this Mac says `device`. */
+async function sized(page, url, size, device) {
+  await page.setViewportSize(size);
+  await boot(page, url, { profiles: [PROFILE], view: VIEW_CHAT_ONLY, blocks: [chatBlock("chat-x")], starts: 1, settings: true, device });
+  await page.waitForSelector(".block-chat");
+  await page.locator(".chat-input").focus();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profiles").length >= 1);
+}
+
+const heightOf = (page, selector) => page.locator(selector).first().evaluate((n) => n.getBoundingClientRect().height);
+const topOf = (page, selector) => page.locator(selector).first().evaluate((n) => n.getBoundingClientRect().top);
+
+async function narrowCase(page, url) {
+  await sized(page, url, { width: 390, height: 780 }, { state: "available", advice: "none" });
+
+  // The picker row of the model is a 44 px target on a phone.
+  await page.waitForFunction(() => document.querySelector(".chat-chip")?.tagName === "BUTTON");
+  await page.locator(".chat-chip").click();
+  await page.waitForSelector(".chat-picker");
+  const row = page.locator(".chat-choice", { hasText: "Apple on-device" });
+  assert.equal(await row.count(), 1);
+  assert.ok((await row.evaluate((n) => n.getBoundingClientRect().height)) >= 44 - 0.5, "the picker row is 44 px high");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".chat-picker", { state: "detached" });
+
+  // The dialog is the screen, and the row of the model stacks its parts in targets of at least 44 px.
+  await setDevice(page, "apple_intelligence_not_enabled", "enable_apple_intelligence");
+  await openDialogNow(page);
+  const sheet = await page.locator(dlg).evaluate((n) => {
+    const r = n.getBoundingClientRect();
+    return { w: r.width, h: r.height, vw: innerWidth, vh: innerHeight };
+  });
+  assert.deepEqual([sheet.w, sheet.h], [sheet.vw, sheet.vh], "the dialog is as wide and as high as the screen");
+  assert.ok((await heightOf(page, ".aiset-dev-row")) >= 44 - 0.5, "the row is 44 px high");
+  assert.ok((await heightOf(page, "button.aiset-dev-check")) >= 44 - 0.5, "the button is 44 px high");
+  const tops = [await topOf(page, ".aiset-dev-name"), await topOf(page, ".aiset-dev-meta"), await topOf(page, ".aiset-dev-state"), await topOf(page, ".aiset-dev-advice"), await topOf(page, "button.aiset-dev-check")];
+  for (let i = 1; i < tops.length; i++) assert.ok(tops[i] > tops[i - 1], `the parts stack: ${tops}`);
+  // Nothing is wider than the sheet.
+  assert.ok(await page.locator(".aiset-device").evaluate((n) => n.scrollWidth <= n.clientWidth + 1), "the group fits the sheet");
+
+  // A desktop window: the button is a 28 px target and the box leaves room around it.
+  await page.setViewportSize({ width: 1000, height: 640 });
+  assert.ok((await heightOf(page, "button.aiset-dev-check")) >= 28 - 0.5, "the button is 28 px high on the desktop");
+  const box = await page.locator(dlg).evaluate((n) => ({ w: n.getBoundingClientRect().width, vw: innerWidth }));
+  assert.ok(box.vw - box.w >= 40, `the box leaves ${box.vw - box.w} px of the window`);
+  const parts = [await topOf(page, ".aiset-dev-advice"), await topOf(page, "button.aiset-dev-check")];
+  assert.ok(parts[1] > parts[0], "the button is below the advice on the desktop too");
+  await page.setViewportSize({ width: 1000, height: 640 });
+}
+
+async function modesCase(page, url) {
+  await sized(page, url, { width: 1000, height: 640 }, { state: "model_not_ready", advice: "wait_for_model" });
+  await openDialogNow(page);
+  const edge = () => page.locator("fieldset.aiset-device").evaluate((n) => getComputedStyle(n).borderTopColor);
+  const root = (add, name) => page.evaluate(([a, n]) => document.documentElement.classList[a ? "add" : "remove"](n), [add, name]);
+  const duration = () => page.locator("button.aiset-dev-check").evaluate((n) => getComputedStyle(n).transitionDuration);
+
+  // Higher contrast: the hairline of the group follows `--hw-line`, which that mode swaps.
+  const normal = await edge();
+  await root(true, "contrast-high");
+  assert.notEqual(await edge(), normal, "the hairline of the group follows the token");
+  await root(false, "contrast-high");
+  assert.equal(await edge(), normal);
+
+  // No motion at all, with or without the setting.
+  assert.equal(await duration(), "0s");
+  await root(true, "motion-reduce");
+  assert.equal(await duration(), "0s");
+  await root(false, "motion-reduce");
+
+  // Forced colours: the style sheet outlines the row with a system colour.
+  const css = await (await fetch(`${url}aisettings.css`)).text();
+  const forced = css.slice(css.indexOf("@media (forced-colors: active)"));
+  assert.ok(forced.startsWith("@media"), "aisettings.css has a forced-colors block");
+  assert.match(forced, /\.aiset-dev-row[^{]*\{[^}]*outline[^}]*(Highlight|CanvasText)/);
+
+  // The button focused with the keyboard has a 2 px ring; the group draws no gradient and no filter.
+  await page.locator("button.aiset-dev-check").focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.matches(".aiset-dev-check")), true);
+  assert.equal(await page.locator("button.aiset-dev-check").evaluate((n) => getComputedStyle(n).outlineWidth), "2px");
+  const flat = await page.locator(".aiset-device, .aiset-device *").evaluateAll((nodes) =>
+    nodes.filter((n) => {
+      const css = getComputedStyle(n);
+      return css.backgroundImage.includes("gradient") || css.filter !== "none" || css.boxShadow !== "none";
+    }).length,
+  );
+  assert.equal(flat, 0, "no gradient, filter or shadow in the group");
+  // The mark of a state that needs attention is part of the state word.
+  assert.match(await page.locator(".aiset-dev-state").evaluate((n) => getComputedStyle(n, "::before").content), /!/);
 }
