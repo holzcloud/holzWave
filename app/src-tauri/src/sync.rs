@@ -3,12 +3,12 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use holzwave_core::persist::{read_limited, write_atomic};
 use holzwave_core::secrets::SecretStore;
-use holzwave_core::sync::engine::{ConfigSource, Report, Syncer};
+use holzwave_core::sync::engine::{ConfigSource, Promoted, Report, Syncer, is_unowned};
 use holzwave_core::sync::webdav::WebDav;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,9 @@ struct Account {
     endpoint: String,
     user: String,
 }
+
+/// What the shell does after a run, with the files the running app does not own: moves them into place. Set once.
+pub type Applier = Arc<dyn Fn() -> Promoted + Send + Sync>;
 
 /// What the page shows.
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
@@ -39,7 +42,8 @@ pub struct SyncView {
     /// Conflicts in the last run (a copy of the losing version is kept).
     pub conflicts: usize,
     pub error: Option<String>,
-    /// Something was downloaded since the start; it is applied at the next start.
+    /// A downloaded file still waits for the next start (the files the running app owns, or one that could not be
+    /// applied at once).
     pub restart: bool,
 }
 
@@ -51,11 +55,22 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Clears the flag of a run in progress when it goes out of scope.
+struct Running<'a>(&'a AtomicBool);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 pub struct SyncRuntime {
     dir: PathBuf,
     secrets: Arc<dyn SecretStore>,
     view: Mutex<SyncView>,
     running: AtomicBool,
+    /// Applies the downloads the app does not own right after a run; bound by the core that owns this runtime.
+    applier: OnceLock<Applier>,
 }
 
 impl SyncRuntime {
@@ -69,7 +84,13 @@ impl SyncRuntime {
             ..SyncView::default()
         };
         let view = SyncView { state: if view.configured { "idle" } else { "off" }, ..view };
-        Self { dir, secrets, view: Mutex::new(view), running: AtomicBool::new(false) }
+        Self { dir, secrets, view: Mutex::new(view), running: AtomicBool::new(false), applier: OnceLock::new() }
+    }
+
+    /// Set the step that applies the downloads of the files the app does not own. Once; a second call is ignored. The
+    /// closure should hold a weak reference to the core, so the runtime never keeps the core alive.
+    pub fn bind_applier(&self, applier: Applier) {
+        let _ = self.applier.set(applier);
     }
 
     fn read_account(dir: &std::path::Path) -> Option<Account> {
@@ -155,24 +176,13 @@ impl SyncRuntime {
         if self.running.swap(true, Ordering::AcqRel) {
             return Ok(self.view());
         }
+        // Cleared when this function ends, however it ends.
+        let _running = Running(&self.running);
         self.set(|v| v.state = "syncing");
         let outcome = self.once(&account);
-        self.running.store(false, Ordering::Release);
-        match outcome {
-            Ok(report) => {
-                self.set(|v| {
-                    v.state = "idle";
-                    v.last = Some(now());
-                    v.files = report.uploaded.len() + report.downloaded.len();
-                    v.conflicts = report.conflicts.len();
-                    v.restart |= !report.downloaded.is_empty();
-                    v.error = report.errors.first().map(|(name, why)| format!("{name}: {why}"));
-                    if v.error.is_some() {
-                        v.state = "error";
-                    }
-                });
-                Ok(self.view())
-            }
+        let result = match outcome {
+            // `running` stays set until the apply is done, so no second run stages a file while this one moves them.
+            Ok(report) => Ok(self.complete(&report)),
             Err(e) => {
                 self.set(|v| {
                     v.state = "error";
@@ -180,7 +190,33 @@ impl SyncRuntime {
                 });
                 Err(e)
             }
-        }
+        };
+        result
+    }
+
+    /// After a successful run: what the running app does not own is moved into place now, the rest stays staged for
+    /// the next start; then the view is finished. The applier takes no lock of this runtime.
+    fn complete(&self, report: &Report) -> SyncView {
+        let promoted = self.applier.get().map(|apply| apply()).unwrap_or_default();
+        self.finish(report, &promoted);
+        self.view()
+    }
+
+    /// The view after a successful run: the run's own report plus what was applied at once. A copy kept before a
+    /// download replaced an edit counts as a conflict; a download of a file the app owns, or a staged file that could not
+    /// be applied, asks for a restart.
+    fn finish(&self, report: &Report, promoted: &Promoted) {
+        self.set(|v| {
+            v.state = "idle";
+            v.last = Some(now());
+            v.files = report.uploaded.len() + report.downloaded.len();
+            v.conflicts = report.conflicts.len() + promoted.kept.len();
+            v.restart |= report.downloaded.iter().any(|name| !is_unowned(name)) || !promoted.skipped.is_empty();
+            v.error = report.errors.first().map(|(name, why)| format!("{name}: {why}"));
+            if v.error.is_some() {
+                v.state = "error";
+            }
+        });
     }
 
     fn once(&self, account: &Account) -> Result<Report, String> {
@@ -249,5 +285,86 @@ mod tests {
         let v = again.off();
         assert!(!v.configured && v.state == "off");
         assert!(secrets.get(PASSWORD).unwrap().is_none() && !dir.join(FILE).exists());
+    }
+
+    fn report(uploaded: &[&str], downloaded: &[&str], conflicts: &[&str]) -> Report {
+        let own = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        Report { uploaded: own(uploaded), downloaded: own(downloaded), conflicts: own(conflicts), errors: Vec::new() }
+    }
+
+    fn applied(names: &[&str], kept: &[&str], skipped: &[&str]) -> Promoted {
+        let own = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        Promoted { applied: own(names), kept: own(kept), skipped: own(skipped) }
+    }
+
+    /// A runtime whose applier answers `promoted` and counts its calls.
+    fn applying(tag: &str, promoted: Promoted) -> (SyncRuntime, Arc<std::sync::atomic::AtomicUsize>, PathBuf) {
+        let (rt, _secrets, dir) = runtime(tag);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        let promoted = Arc::new(Mutex::new(promoted));
+        rt.bind_applier(Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            std::mem::take(&mut *lock(&promoted))
+        }));
+        (rt, calls, dir)
+    }
+
+    #[test]
+    fn the_sync_run_applies_what_it_does_not_own() {
+        let (rt, calls, _dir) = applying("d", applied(&["themes/mine.json"], &[], &[]));
+        // A theme alone is applied at once: nothing waits, so the popover does not ask for a restart.
+        let view = rt.complete(&report(&[], &["themes/mine.json"], &[]));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the applier runs once after the run");
+        assert!(!view.restart, "{view:?}");
+        assert_eq!(view.files, 1);
+        // A download of a file the app owns waits for a start.
+        let view = rt.complete(&report(&[], &["themes/mine.json", "settings.json"], &[]));
+        assert!(view.restart, "{view:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // The flag stays set until the process ends, as before.
+        let view = rt.complete(&report(&[], &["themes/mine.json"], &[]));
+        assert!(view.restart);
+    }
+
+    #[test]
+    fn each_file_the_app_owns_asks_for_a_restart_and_each_other_one_does_not() {
+        for owned in ["layout.json", "settings.json", "connections.json"] {
+            let (rt, _calls, _dir) = applying(&format!("o-{}", owned.trim_end_matches(".json")), Promoted::default());
+            assert!(rt.complete(&report(&[], &[owned], &[])).restart, "{owned}");
+        }
+        for free in ["themes/a.json", "widgets/b.json", "widget_notes.json"] {
+            let (rt, _calls, _dir) = applying(&format!("f-{}", free.replace(['/', '.'], "-")), Promoted::default());
+            assert!(!rt.complete(&report(&[], &[free], &[])).restart, "{free}");
+        }
+    }
+
+    #[test]
+    fn a_staged_file_that_cannot_be_applied_asks_for_a_restart() {
+        let (rt, _calls, _dir) = applying("s", applied(&[], &[], &["widgets/deploy.json"]));
+        let view = rt.complete(&report(&[], &["widgets/deploy.json"], &[]));
+        assert!(view.restart, "{view:?}");
+    }
+
+    #[test]
+    fn a_copy_kept_before_a_download_replaced_an_edit_counts_as_a_conflict() {
+        let (rt, _calls, _dir) = applying("k", applied(&["widgets/deploy.json"], &["widgets/deploy.json"], &[]));
+        let view = rt.complete(&report(&["a"], &["widgets/deploy.json", "themes/x.json"], &["layout.json"]));
+        assert_eq!(view.conflicts, 2, "the run's conflict and the kept copy: {view:?}");
+        assert_eq!(view.files, 3, "the apply does not change the count of files");
+        assert!(!view.restart);
+    }
+
+    #[test]
+    fn without_an_applier_a_run_finishes_as_before_and_a_failed_run_calls_none() {
+        let (rt, _secrets, _dir) = runtime("n");
+        let view = rt.complete(&report(&[], &["settings.json"], &[]));
+        assert!(view.restart && view.state == "idle");
+        let (rt, calls, dir) = applying("m", Promoted::default());
+        write_atomic(&dir.join(FILE), br#"{"endpoint":"http://127.0.0.1:1/dav","user":"u"}"#).unwrap();
+        assert!(rt.run().is_err(), "no password in the keychain");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "a failed run applies nothing");
+        assert_eq!(rt.view().state, "error");
+        assert!(!rt.running.load(Ordering::SeqCst), "the flag of a run in progress is cleared");
     }
 }

@@ -689,6 +689,9 @@ pub struct AppCore {
     /// Serialises the commands that write `settings.json` or reload it, so the file, the memory and the events
     /// of two of them never interleave. Held across the file IO; `config` is not.
     settings_io: Mutex<()>,
+    /// Serialises the writers of `widget_notes.json`: a note save and the apply of a download of the file. Held across
+    /// the file IO and nothing else: never across `reload_settings`, a sink call or a window call.
+    notes_io: Mutex<()>,
     /// The last working directory each pane reported (its `Cwd` events).
     last_cwd: Arc<Mutex<HashMap<PaneId, String>>>,
     /// The last title each pane reported. The core sends a title when a program changes it and never again, so a
@@ -850,6 +853,9 @@ impl AppCore {
             // The source of shared content reaches the panes and the files through the core, so it gets a weak
             // reference before the core exists: it keeps the core alive for nothing.
             host.bind(me.clone());
+            // The sync applies what the app does not own right after a run, through the same weak reference.
+            let weak = me.clone();
+            sync.bind_applier(Arc::new(move || weak.upgrade().map(|core| core.apply_synced()).unwrap_or_default()));
             AppCore {
                 dir,
                 windows,
@@ -857,6 +863,7 @@ impl AppCore {
                 panes,
                 config,
                 settings_io: Mutex::new(()),
+                notes_io: Mutex::new(()),
                 last_cwd,
                 last_title: Mutex::new(HashMap::new()),
                 drops: Mutex::new(Drops::default()),
@@ -1073,6 +1080,7 @@ impl AppCore {
 
     /// Save the text of a note widget.
     pub fn widget_note_save(&self, id: &str, text: &str) -> Result<(), String> {
+        let _notes = lock(&self.notes_io);
         holzwave_core::widgets::save_note(&self.dir, id, text).map_err(|e| e.to_string())
     }
 
@@ -1089,6 +1097,27 @@ impl AppCore {
             return Ok(holzwave_core::monitor::Reading::Live(self.monitor.sample()));
         }
         self.remote_monitors.sample(&self.connections, &block.source)
+    }
+
+    /// Move what the last sync run downloaded into place, for the files the running app does not own: the themes, the
+    /// widgets and the texts of the notes. The layout, the settings and the connections stay staged until the next
+    /// start, because the app rewrites them from memory. A live file the person edited after the download was staged is
+    /// copied to `sync-conflicts/` first. The notes lock is held for the move only; when a theme arrived, the registry is
+    /// reloaded after it is released, which announces `settings` to every window. Blocks on small files: not on the main
+    /// thread.
+    pub fn apply_synced(&self) -> holzwave_core::sync::engine::Promoted {
+        use holzwave_core::sync::engine::{is_unowned, promote_where};
+        let promoted = {
+            let _notes = lock(&self.notes_io);
+            promote_where(&self.dir, &is_unowned)
+        };
+        if !promoted.applied.is_empty() {
+            eprintln!("holzwave: applied from sync: {}", promoted.applied.join(", "));
+        }
+        if promoted.applied.iter().any(|name| name.starts_with("themes/")) {
+            self.reload_settings();
+        }
+        promoted
     }
 
     /// The state of the sync, for the page.
@@ -5201,6 +5230,250 @@ mod tests {
         assert_eq!(view.settings.font_size, 22, "a half-written edit does not reset the running app");
         assert!(view.warnings.iter().any(|w| w.contains("settings.json")), "{:?}", view.warnings);
         assert_eq!(rec.settings_events().len(), 2);
+    }
+
+    // ---- what the sync downloaded and the app does not own is applied at once ---------------------------------------
+
+    /// A download as the sync leaves it: `bytes` staged under `name` in `sync-incoming/`.
+    fn staged(dir: &Scratch, name: &str, bytes: &[u8]) {
+        let path = dir.0.join("sync-incoming").join(name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("staging dir");
+        std::fs::write(path, bytes).expect("staged file");
+    }
+
+    fn theme_json(name: &str) -> String {
+        serde_json::to_string(&Theme { name: name.into(), ..Theme::papier() }).expect("theme json")
+    }
+
+    #[test]
+    fn a_downloaded_theme_is_applied_at_once_and_announced() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        staged(&dir, "themes/mine.json", theme_json("mine").as_bytes());
+        staged(&dir, "settings.json", br#"{"font_size": 31}"#);
+
+        let promoted = core.apply_synced();
+
+        assert_eq!(promoted.applied, ["themes/mine.json"]);
+        assert!(dir.0.join("themes").join("mine.json").is_file(), "the theme is live");
+        let events = rec.settings_events();
+        assert_eq!(events.len(), 1, "one announcement");
+        assert!(events[0].themes.iter().any(|t| t.name == "mine" && !t.builtin), "the theme list names it");
+        assert!(core.get_settings().themes.iter().any(|t| t.name == "mine"));
+        assert!(dir.0.join("sync-incoming").join("settings.json").is_file(), "settings.json still waits for a start");
+        assert!(!dir.0.join("settings.json").exists());
+        assert_ne!(core.get_settings().settings.font_size, 31, "the settings in force are not touched");
+    }
+
+    #[test]
+    fn a_downloaded_theme_that_is_not_one_is_left_out_and_the_rest_still_loads() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        staged(&dir, "themes/bad.json", b"{ this is not a theme");
+        staged(&dir, "themes/good.json", theme_json("good").as_bytes());
+
+        core.apply_synced();
+
+        let view = core.get_settings();
+        assert!(view.themes.iter().any(|t| t.name == "good"), "{:?}", view.themes.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert_eq!(view.themes.iter().filter(|t| t.builtin).count(), 3, "the built-in themes survive");
+        assert!(view.warnings.iter().any(|w| w.contains("bad.json")), "{:?}", view.warnings);
+        assert_eq!(rec.settings_events().len(), 1);
+    }
+
+    #[test]
+    fn a_selected_theme_that_a_download_replaced_is_the_new_one_in_force() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        let first = Theme { name: "Mine".into(), ..Theme::papier() };
+        let mut second = Theme { name: "Mine".into(), ..Theme::papier() };
+        second.terminal.background = Rgb::new(first.terminal.background.r ^ 1, first.terminal.background.g, first.terminal.background.b);
+        std::fs::create_dir_all(dir.0.join("themes")).unwrap();
+        std::fs::write(dir.0.join("themes").join("mine.json"), serde_json::to_string(&first).unwrap()).unwrap();
+        core.reload_settings();
+        core.set_setting("theme", json!("Mine")).expect("select");
+        assert_eq!(core.get_settings().theme.terminal.background, first.terminal.background);
+
+        staged(&dir, "themes/mine.json", serde_json::to_string(&second).unwrap().as_bytes());
+        core.apply_synced();
+
+        assert_eq!(core.get_settings().theme.terminal.background, second.terminal.background);
+    }
+
+    #[test]
+    fn settings_layout_and_connections_always_wait() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        let before = std::fs::read(dir.layout_file()).ok();
+        for name in ["layout.json", "settings.json", "connections.json"] {
+            staged(&dir, name, b"{\"from\":\"another device\"}");
+        }
+        for _ in 0..5 {
+            let promoted = core.apply_synced();
+            assert!(promoted.applied.is_empty() && promoted.skipped.is_empty(), "{promoted:?}");
+        }
+        for name in ["layout.json", "settings.json", "connections.json"] {
+            let waiting = dir.0.join("sync-incoming").join(name);
+            assert_eq!(std::fs::read(waiting).unwrap(), b"{\"from\":\"another device\"}", "{name} stays staged");
+            let live = std::fs::read(dir.0.join(name)).ok();
+            assert!(live.as_deref() != Some(&b"{\"from\":\"another device\"}"[..]), "{name} is not applied while the app runs");
+        }
+        assert_eq!(std::fs::read(dir.layout_file()).ok(), before);
+        assert!(rec.settings_events().is_empty(), "nothing was applied, nothing is announced");
+    }
+
+    #[test]
+    fn a_downloaded_note_is_on_the_sidebar_at_once() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        core.widget_note_save("todo", "mine").expect("save");
+        staged(&dir, "widget_notes.json", br#"{"todo":"from the other computer","extra":"second"}"#);
+        staged(&dir, "widgets/todo.json", br#"{"id":"todo","title":"Todo","kind":"note"}"#);
+
+        let promoted = core.apply_synced();
+
+        assert_eq!(promoted.applied, ["widget_notes.json", "widgets/todo.json"]);
+        let view = core.widgets_list();
+        assert_eq!(view.notes.get("todo").map(String::as_str), Some("from the other computer"));
+        assert_eq!(view.notes.get("extra").map(String::as_str), Some("second"));
+        assert!(view.widgets.iter().any(|w| w.id == "todo"), "the widget is listed without a restart");
+    }
+
+    #[test]
+    fn a_hand_edited_widget_file_is_kept_before_a_download_replaces_it() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        std::fs::create_dir_all(dir.0.join("widgets")).unwrap();
+        std::fs::write(dir.0.join("widgets").join("deploy.json"), "my edit").unwrap();
+        staged(&dir, "widgets/deploy.json", br#"{"id":"deploy","title":"Deploy","kind":"note"}"#);
+
+        let promoted = core.apply_synced();
+
+        assert_eq!(promoted.applied, ["widgets/deploy.json"]);
+        assert_eq!(promoted.kept, ["widgets/deploy.json"]);
+        let copies: Vec<_> = std::fs::read_dir(dir.0.join("sync-conflicts")).expect("copies").flatten().collect();
+        assert_eq!(copies.len(), 1);
+        assert!(copies[0].file_name().to_string_lossy().starts_with("widgets.deploy.json."));
+        assert_eq!(std::fs::read_to_string(copies[0].path()).unwrap(), "my edit");
+        assert!(std::fs::read_to_string(dir.0.join("widgets").join("deploy.json")).unwrap().contains("Deploy"));
+    }
+
+    #[test]
+    fn the_apply_and_a_note_save_take_the_same_lock() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        staged(&dir, "widget_notes.json", br#"{"a":"staged"}"#);
+        let held = lock(&core.notes_io);
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<&'static str>();
+        let apply = {
+            let (core, tx) = (core.clone(), done_tx.clone());
+            std::thread::spawn(move || {
+                core.apply_synced();
+                let _ = tx.send("apply");
+            })
+        };
+        let save = {
+            let (core, tx) = (core.clone(), done_tx);
+            std::thread::spawn(move || {
+                core.widget_note_save("b", "typed").expect("save");
+                let _ = tx.send("save");
+            })
+        };
+        assert!(done_rx.recv_timeout(Duration::from_millis(300)).is_err(), "both wait for the lock");
+        drop(held);
+        let mut finished = vec![done_rx.recv_timeout(Duration::from_secs(20)).expect("first"), done_rx.recv_timeout(Duration::from_secs(20)).expect("second")];
+        finished.sort_unstable();
+        assert_eq!(finished, ["apply", "save"]);
+        apply.join().unwrap();
+        save.join().unwrap();
+    }
+
+    #[test]
+    fn a_note_save_and_an_apply_never_interleave() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        let notes = dir.0.join("widget_notes.json");
+        let read_valid = |notes: &std::path::Path| {
+            if let Ok(bytes) = std::fs::read(notes) {
+                let map: std::collections::BTreeMap<String, String> =
+                    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("a torn notes file: {e}: {:?}", String::from_utf8_lossy(&bytes)));
+                map
+            } else {
+                Default::default()
+            }
+        };
+        let saver = {
+            let (core, notes) = (core.clone(), notes.clone());
+            std::thread::spawn(move || {
+                for i in 0..100 {
+                    core.widget_note_save("typed", &format!("typed {i}")).expect("save");
+                    let map = read_valid(&notes);
+                    assert!(map.is_empty() || map.contains_key("typed") || map.contains_key("staged"));
+                }
+            })
+        };
+        let applier = {
+            let (core, dir_path, notes) = (core.clone(), dir.0.clone(), notes.clone());
+            std::thread::spawn(move || {
+                for i in 0..100 {
+                    let path = dir_path.join("sync-incoming").join("widget_notes.json");
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    holzwave_core::persist::write_atomic(&path, format!(r#"{{"staged":"staged {i}"}}"#).as_bytes()).unwrap();
+                    core.apply_synced();
+                    read_valid(&notes);
+                }
+            })
+        };
+        // Neither thread may wait forever: a deadlock shows as a timeout here, not as a hung run.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !(saver.is_finished() && applier.is_finished()) {
+            assert!(Instant::now() < deadline, "the note save and the apply did not finish: a deadlock");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        saver.join().expect("saver");
+        applier.join().expect("applier");
+        let map = read_valid(&notes);
+        for (id, text) in &map {
+            let ok = (id == "typed" && text.starts_with("typed ")) || (id == "staged" && text.starts_with("staged "));
+            assert!(ok, "{id}: {text}");
+        }
+        assert!(!map.is_empty());
+    }
+
+    /// A sink that notes whether the notes lock was free when `settings` was announced.
+    struct NotesProbe {
+        inner: Arc<Recorder>,
+        core: Mutex<Weak<AppCore>>,
+        free: Mutex<Vec<bool>>,
+    }
+
+    impl Sink for NotesProbe {
+        fn send(&self, target: Target, out: Out) {
+            if matches!(out, Out::Settings(_)) {
+                let free = lock(&self.core).upgrade().is_none_or(|core| core.notes_io.try_lock().is_ok());
+                lock(&self.free).push(free);
+            }
+            self.inner.send(target, out);
+        }
+
+        fn close_window(&self, label: &str) {
+            self.inner.close_window(label);
+        }
+
+        fn open_window(&self, label: &str, place: &Place) -> Result<(), String> {
+            self.inner.open_window(label, place)
+        }
+
+        fn cursor_spot(&self, source: &str) -> CursorSpot {
+            self.inner.cursor_spot(source)
+        }
+    }
+
+    #[test]
+    fn the_announcement_of_an_applied_theme_is_made_after_the_notes_lock_is_released() {
+        let dir = Scratch::new("probe");
+        let probe = Arc::new(NotesProbe { inner: Arc::new(Recorder::default()), core: Mutex::new(Weak::new()), free: Mutex::new(Vec::new()) });
+        let core = AppCore::new(dir.0.clone(), probe.clone(), ShellSpec::new("/bin/cat", &[]));
+        dir.attach(&core);
+        *lock(&probe.core) = Arc::downgrade(&core);
+        staged(&dir, "themes/mine.json", theme_json("mine").as_bytes());
+        staged(&dir, "widget_notes.json", b"{}");
+
+        core.apply_synced();
+
+        assert_eq!(*lock(&probe.free), [true], "one announcement, with the notes lock free");
     }
 
     // ---- session, working directories and the window (plan 23, task 2) -------------------------------------------
