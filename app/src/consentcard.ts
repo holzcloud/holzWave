@@ -11,7 +11,7 @@
 
 import type { Consent } from "./consent.js";
 import {
-  BEST_EFFORT, KIND_WORDS, cardTitle, destinationWords, findingWords, persistWords, ruleWords, sizeWords, totalWords, validForWords,
+  BEST_EFFORT, KIND_WORDS, cardTitle, destinationWords, findingWords, persistWords, ruleTag, ruleWords, sizeWords, totalWords, validForWords,
 } from "./consentstate.js";
 import type { CtxKind } from "./consentstate.js";
 import { el } from "./dom.js";
@@ -155,7 +155,7 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
           const findings = el("ul", "consent-findings", row);
           for (const finding of item.findings) {
             const entry = el("li", "consent-finding", findings);
-            entry.dataset.rule = finding.rule;
+            entry.dataset.rule = ruleTag(finding.rule);
             entry.dataset.tone = ruleWords(finding.rule).tone;
             entry.textContent = findingWords(finding);
           }

@@ -515,6 +515,11 @@ export function ruleWords(rule: string): RuleWords {
   return Object.hasOwn(RULE_WORDS, rule) ? (RULE_WORDS[rule] ?? OTHER_CHANGE) : OTHER_CHANGE;
 }
 
+/** The rule as it may be written into an attribute: its own name when the page knows it, else `other`. */
+export function ruleTag(rule: string): string {
+  return Object.hasOwn(RULE_WORDS, rule) ? rule : "other";
+}
+
 /** One finding as words: `hidden text removed (15 characters)`, `Anthropic key hidden ×3`, `cut to fit the size limit`. */
 export function findingWords(finding: Finding): string {
   const rule = ruleWords(finding.rule);

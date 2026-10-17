@@ -7,7 +7,7 @@ import { localityWord } from "../../dist/chatview.js";
 import {
   BEST_EFFORT, KIND_WORDS, NOTES, REASON_WORDS, RULE_WORDS, cardTitle, contextArguments, contextFault, ctxButtonView, decideMode,
   destinationWords, findingWords, heldOf, paneWords, persistWords, pickedOf, readContextState, readOffer, routeChange, sentLine,
-  sizeWords, tokenWordsOfBytes, totalWords, validForWords,
+  ruleTag, sizeWords, tokenWordsOfBytes, totalWords, validForWords,
 } from "../../dist/consentstate.js";
 
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/ai_consent.json", import.meta.url), "utf8"));
@@ -292,4 +292,13 @@ test("a refusal is told by its reason, falls back to the core's own text, and th
     assert.ok(!/never|always safe|guaranteed|no secrets/i.test(text.replace("not a guarantee", "")), text);
   }
   for (const text of [...Object.values(NOTES), ...Object.values(REASON_WORDS)]) assert.ok(!/never sent/i.test(text), text);
+});
+
+test("a rule name reaches an attribute only when the page knows it", () => {
+  // The card writes the rule of a finding into an attribute for the stylesheet and the tests; a name the page does not know
+  // is shown as `other change` and is never copied into an attribute.
+  for (const rule of Object.keys(RULE_WORDS)) assert.equal(ruleTag(rule), rule);
+  for (const rule of ['<img src=x onerror="x">', "__proto__", "constructor", "", "a\u0000b", "javascript:x", "anthropic_key "]) {
+    assert.equal(ruleTag(rule), "other", JSON.stringify(rule));
+  }
 });
