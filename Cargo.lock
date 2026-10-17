@@ -2086,6 +2086,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "holzwave-apple-ai"
+version = "0.0.1-alpha2"
+dependencies = [
+ "swift-rs",
+]
+
+[[package]]
 name = "holzwave-core"
 version = "0.0.1-alpha2"
 dependencies = [

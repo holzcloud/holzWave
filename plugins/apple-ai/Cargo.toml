@@ -1,0 +1,15 @@
+[package]
+name = "holzwave-apple-ai"
+description = "The Foundation Models bridge of holzWave: a Swift package behind a small C ABI, macOS only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+# The build script prints `cargo:weak_framework=...`; `links` makes it visible to the build script of a crate that
+# depends on this one (as DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK).
+links = "holzwave_apple_ai"
+
+# Build dependencies are built for the host, so Linux and Windows hosts never compile this one.
+[target.'cfg(target_os = "macos")'.build-dependencies]
+swift-rs = { version = "1.0.8", features = ["build"] }
