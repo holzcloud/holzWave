@@ -280,7 +280,7 @@
   const digestOf = (text) => {
     let out = "";
     for (let round = 0; round < 8; round++) {
-      let h = (0x811c9dc5 ^ round) >>> 0;
+      let h = (0x811c9dc5 + Math.imul(round + 1, 0x9e3779b1)) >>> 0;
       const part = `${round}|${text}`;
       for (let i = 0; i < part.length; i++) {
         h ^= part.charCodeAt(i);

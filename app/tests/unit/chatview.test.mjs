@@ -175,7 +175,7 @@ test("the chip says what it sends to and the picker appears only with a choice t
 
 test("the words of a turn: working, thinking, writing, the status of a message and the end row", () => {
   const state = (over = {}) => ({
-    running: false, partial: { text: "", reasoning: "" }, messages: [], ended: null, ...over,
+    running: false, partial: { text: "", reasoning: "" }, messages: [], pending: [], ended: null, ...over,
   });
   assert.equal(statusWord(state({ running: true })), "working");
   assert.equal(statusWord(state({ running: true, partial: { text: "", reasoning: "hm" } })), "thinking");
@@ -250,4 +250,16 @@ test("the providers button says set up before there is a provider", () => {
   assert.equal(setupLabel([entry("a"), entry("b")], 1), "Providers… (1 to review)");
   assert.equal(setupLabel([entry("a"), entry("b"), entry("c")], 3), "Providers… (3 to review)");
   assert.equal(setupLabel([], 2), "Set up…", "a review count without a profile is an inconsistent call");
+});
+
+test("a turn that waits for a decision says so", () => {
+  const state = (over = {}) => ({
+    running: false, partial: { text: "", reasoning: "" }, messages: [], pending: [], ended: null, ...over,
+  });
+  const waiting = [{ conversation: "chat-1", call_id: "call_1", tool: "read_file" }];
+  assert.equal(statusWord(state({ running: true, pending: waiting })), "waiting for your decision");
+  assert.equal(statusWord(state({ running: true, pending: waiting, partial: { text: "Hi", reasoning: "hm" } })), "waiting for your decision");
+  assert.equal(statusWord(state({ running: true })), "working");
+  assert.equal(statusWord(state({ running: true, partial: { text: "Hi", reasoning: "" } })), "writing");
+  assert.equal(statusWord(state({ running: false, pending: waiting })), "", "a turn that is not running says nothing");
 });

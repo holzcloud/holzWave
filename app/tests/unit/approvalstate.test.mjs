@@ -132,3 +132,59 @@ test("characters that would hide something are shown as escapes, never dropped",
   assert.equal(seen.approval.rows[4].value, "/tmp/a\\u{202e}gnp.txt");
   assert.ok(!JSON.stringify(seen).includes("\u202e"));
 });
+
+test("a request that cannot be shown in full can only be denied", () => {
+  const rowsOf = (count) => Array.from({ length: count }, (_, i) => (i === 0 ? { name: "tool", value: "read_file", bytes: 9 } : { name: `f${i}`, value: "x", bytes: 1 }));
+  const verdict = (entry, why) => {
+    const seen = readApproval(entry);
+    assert.equal(seen.why, why, JSON.stringify(entry).slice(0, 80));
+    assert.equal(seen.approval, null);
+    assert.equal(canDeny(seen), true, "a valid hash can still be denied");
+    assert.equal(canAllow(seen), false);
+    assert.equal(seen.hash, HASH);
+  };
+
+  // Too large: more than 16 rows, a value over 65536 characters, more than 131072 characters in all.
+  assert.equal(readApproval(card({ payload: rowsOf(16) })).why, "ok");
+  verdict(card({ payload: rowsOf(17) }), "large");
+  const big = card();
+  big.payload[4] = { name: "path", value: "a".repeat(65537), bytes: 65537 };
+  verdict(big, "large");
+  const edge = card();
+  edge.payload[4] = { name: "path", value: "a".repeat(65536), bytes: 65536 };
+  assert.equal(readApproval(edge).why, "ok");
+  const total = card();
+  total.payload = [{ name: "tool", value: "read_file", bytes: 9 }, ...Array.from({ length: 3 }, (_, i) => ({ name: `f${i}`, value: "b".repeat(50000), bytes: 50000 }))];
+  verdict(total, "large");
+
+  // A tool and an effect the page does not know.
+  for (const tool of ["write_file", "x"]) {
+    const entry = card({ tool });
+    entry.payload[0] = { name: "tool", value: tool, bytes: tool.length };
+    verdict(entry, "tool");
+  }
+  for (const effect of ["write", "exec", "x"]) verdict(card({ effect }), "effect");
+
+  // A field of the wrong shape: a bad name, a bad length, a value that is not a string.
+  for (const name of ["Path", "", "a".repeat(41), "a b"]) {
+    const entry = card();
+    entry.payload[4] = { name, value: "v", bytes: 1 };
+    verdict(entry, "shape");
+  }
+  for (const bytes of [-1, 1.5, 4294967296, "3", null]) {
+    const entry = card();
+    entry.payload[4] = { name: "path", value: "v", bytes };
+    verdict(entry, "shape");
+  }
+  const odd = card();
+  odd.payload[4] = { name: "path", value: 12, bytes: 2 };
+  verdict(odd, "shape");
+
+  // With no valid hash there is nothing to repeat: not even a denial.
+  const none = readApproval(card({ payload: rowsOf(17), hash: "nope" }));
+  assert.equal(canDeny(none), false);
+  assert.equal(canAllow(none), false);
+
+  // The same entry made valid again is `ok`.
+  assert.equal(readApproval(card()).why, "ok");
+});

@@ -63,3 +63,13 @@
 .chat-approval button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
 .chat-approval .approval-allow { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep); color: var(--hw-on-accent); }
 .chat-approval .approval-allow:hover { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep); color: var(--hw-on-accent); }
+.chat-approval button:disabled { border-color: var(--hw-line); background: none; color: var(--hw-dim); cursor: default; opacity: 1; }
+.chat-approval button:disabled:hover { border-color: var(--hw-line); background: none; color: var(--hw-dim); }
+
+/* A refusal that keeps the card: the core's own words above the buttons, in the danger colour and underlined. */
+.approval-fault[data-kind="error"] { color: var(--hw-danger); text-decoration: underline; }
+.approval-more { margin: 0; padding: .333rem .833rem; border-top: 1px solid var(--hw-line); color: var(--hw-dim);
+                 font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); }
+
+/* The number of waiting calls on the title-bar button: the warn colour, and the number itself is the cue. */
+.ai-btn .ai-count { color: var(--hw-warn); }

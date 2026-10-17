@@ -17,6 +17,7 @@
 import { registerAction } from "./actions.js";
 import { onProfilesChanged, openProviders } from "./aisettings.js";
 import { Approvals } from "./approval.js";
+import { waitingLabel, waitingName } from "./approvalstate.js";
 import { mountApprovals } from "./approvalcard.js";
 import type { CardView as ApprovalView } from "./approvalcard.js";
 import { reviewIds } from "./aistate.js";
@@ -215,8 +216,31 @@ function sessionFor(conversation: string): Session {
       pendingSeen: null,
     };
     sessions.set(conversation, s);
+    // The number on the title-bar button follows every chat of this window.
+    s.approvals.subscribe(updateBadge);
   }
   return s;
+}
+
+/** The title-bar button says how many calls wait for a decision, over every chat of this window. */
+function updateBadge(): void {
+  if (button === null) return;
+  let n = 0;
+  for (const s of sessions.values()) n += s.approvals.waiting();
+  let count = button.querySelector<HTMLElement>(":scope > .ai-count");
+  if (n > 0) {
+    if (count === null) {
+      count = el("span", "ai-count", button);
+    }
+    const words = waitingLabel(n);
+    if (count.textContent !== words) count.textContent = words;
+    button.dataset.waiting = String(n);
+    button.setAttribute("aria-label", waitingName(n));
+  } else {
+    count?.remove();
+    button.removeAttribute("data-waiting");
+    button.removeAttribute("aria-label");
+  }
 }
 
 /** Hand the list of waiting calls of `s` to its controller; a list that did not change is not read again. */
@@ -1339,6 +1363,7 @@ export function chatClosed(conversation: string): void {
   sessions.delete(conversation);
   wantFocus.delete(conversation);
   setChatTitle(conversation, "");
+  updateBadge();
 }
 
 /** Make the button, register the two actions and listen to the core's `ai` events. Call once at start-up. */

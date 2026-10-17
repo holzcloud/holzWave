@@ -4,10 +4,11 @@
 // `decide` of the controller, which makes the one call.
 //
 // A card never takes the keyboard when it appears or changes. It is added to the strip before the consent card and removed
-// one node at a time, so the consent card is never touched.
+// one node at a time, so the consent card is never touched. Only a person decides: a click or a key press that a script
+// made (`isTrusted` false) is ignored, `Escape` with the focus inside a card denies that call, and nothing else does.
 
 import type { Approvals, CardModel } from "./approval.js";
-import { EFFECT_WORDS, TOOL_WORDS, WORDS, hashWords, showText, targetWords } from "./approvalstate.js";
+import { EFFECT_WORDS, TOOL_WORDS, WORDS, cannotWords, hashWords, moreWords, showText, targetWords } from "./approvalstate.js";
 import type { Destination } from "./approvalstate.js";
 import { sizeWords } from "./consentstate.js";
 import { el } from "./dom.js";
@@ -33,6 +34,12 @@ function button(parent: Element, cls: string, key: string, text: string): HTMLBu
   return b;
 }
 
+/** The title of a card by its mode: the question, or the reason it can only be denied. */
+function titleWords(card: CardModel): string {
+  if (card.mode !== "cannot") return WORDS.title;
+  return card.seen.why === "large" ? WORDS.cannotTitleLarge : WORDS.cannotTitle;
+}
+
 /** The words of a tool: the fixed words of a tool the page knows, else its name as the core sent it, made visible. */
 function toolWords(tool: string): string {
   return Object.hasOwn(TOOL_WORDS, tool) ? (TOOL_WORDS[tool] ?? tool) : showText(tool);
@@ -44,9 +51,18 @@ function toolWords(tool: string): string {
 export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: CardView): () => void {
   let alive = true;
   const drawn = new Map<string, { node: HTMLElement; rec: CardModel; sig: string }>();
+  /** The line that counts the calls beyond the cards that are drawn; made when there are some. */
+  let more: HTMLElement | null = null;
 
   /** The first section of the consent card, which the approval cards stay in front of. */
   const anchor = (): Element | null => strip.querySelector(":scope > section.chat-consent");
+
+  /** A press on a button: only a real one decides, and the keyboard goes back to the message box. */
+  const press = (e: Event, id: string, verdict: "allow" | "deny"): void => {
+    if (!e.isTrusted) return;
+    void approvals.decide(id, verdict);
+    view.focusComposer();
+  };
 
   const build = (card: CardModel): HTMLElement => {
     const seen = card.seen;
@@ -71,7 +87,7 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
     const mark = el("span", "approval-mark", title);
     mark.textContent = "!";
     mark.setAttribute("aria-hidden", "true");
-    title.append(document.createTextNode(` ${WORDS.title}`));
+    title.append(document.createTextNode(` ${titleWords(card)}`));
     el("span", "approval-tool", head).textContent = toolWords(seen.tool);
     if (a !== null) {
       el("span", "approval-where", head).textContent = targetWords(a.pane, a.target);
@@ -115,26 +131,40 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
       }
     }
     if (seen.hash !== null) el("p", "approval-hash", section).textContent = hashWords(seen.hash);
-    if (card.mode === "ask" || card.mode === "sending") {
+    if (card.mode === "cannot") {
+      el("p", "approval-verdict", section).textContent = seen.hash === null ? WORDS.noHash : cannotWords(seen.why);
+    }
+    if (card.fault !== null) {
+      const fault = el("p", "approval-fault", section);
+      fault.dataset.kind = "error";
+      fault.textContent = card.fault.text;
+    }
+    const canAsk = card.mode === "ask" || card.mode === "sending";
+    if (canAsk || (card.mode === "cannot" && seen.hash !== null)) {
       const actions = el("div", "approval-actions", section);
-      const allow = button(actions, "approval-allow", "allow", WORDS.allow);
-      const deny = button(actions, "approval-deny", "deny", WORDS.deny);
-      if (card.mode === "sending") {
-        allow.disabled = true;
-        deny.disabled = true;
+      const busy = card.mode === "sending";
+      if (canAsk) {
+        const allow = button(actions, "approval-allow", "allow", WORDS.allow);
+        allow.disabled = busy;
+        allow.addEventListener("click", (e) => press(e, seen.id, "allow"));
       }
-      allow.addEventListener("click", () => {
-        void approvals.decide(seen.id, "allow");
-        view.focusComposer();
-      });
-      deny.addEventListener("click", () => {
-        void approvals.decide(seen.id, "deny");
-        view.focusComposer();
-      });
+      const deny = button(actions, "approval-deny", "deny", WORDS.deny);
+      deny.disabled = busy;
+      deny.addEventListener("click", (e) => press(e, seen.id, "deny"));
     }
     if (card.mode === "sending") el("p", "approval-verdict", section).textContent = WORDS.sending;
     if (card.mode === "sent") el("p", "approval-verdict", section).textContent = card.verdict === "allow" ? WORDS.allowed : WORDS.denied;
-    el("p", "approval-foot", section).textContent = WORDS.foot;
+    if (card.mode === "ended") el("p", "approval-verdict", section).textContent = WORDS.ended;
+    if (canAsk) el("p", "approval-foot", section).textContent = WORDS.foot;
+    section.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || e.isComposing) return;
+      // The key is the card's own: it never reaches the message box (which would stop the reply) or the consent card.
+      e.preventDefault();
+      e.stopPropagation();
+      if (!e.isTrusted) return;
+      void approvals.decide(seen.id, "deny");
+      view.focusComposer();
+    });
     return section;
   };
 
@@ -145,8 +175,11 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
     const live = new Set(cards.map((c) => c.id));
     for (const [id, one] of drawn) {
       if (live.has(id)) continue;
+      // A card that goes while the focus is in it hands the keyboard to the message box, not to the page body.
+      const held = one.node.contains(document.activeElement);
       one.node.remove();
       drawn.delete(id);
+      if (held) view.focusComposer();
     }
     const ordered: HTMLElement[] = [];
     for (const card of cards) {
@@ -154,12 +187,32 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
       let one = drawn.get(card.id);
       if (one === undefined || one.rec !== card || one.sig !== sig) {
         const node = build(card);
-        if (one === undefined) strip.insertBefore(node, before);
-        else one.node.replaceWith(node);
+        if (one === undefined) {
+          strip.insertBefore(node, before);
+        } else {
+          // The control that had the focus is drawn again in place; a card that has none left hands the focus to the message box.
+          const active = document.activeElement;
+          const held = one.node.contains(active) ? ((active as HTMLElement).dataset.key ?? "") : null;
+          one.node.replaceWith(node);
+          if (held !== null) {
+            const same = node.querySelector<HTMLElement>(`[data-key="${held}"]`);
+            if (same !== null && !(same instanceof HTMLButtonElement && same.disabled)) same.focus({ preventScroll: true });
+            else view.focusComposer();
+          }
+        }
         one = { node, rec: card, sig };
         drawn.set(card.id, one);
       }
       ordered.push(one.node);
+    }
+    if (approvals.hidden > 0) {
+      more ??= el("p", "approval-more");
+      const words = moreWords(approvals.hidden);
+      if (more.textContent !== words) more.textContent = words;
+      ordered.push(more);
+    } else if (more !== null) {
+      more.remove();
+      more = null;
     }
     // In the order of the list, all of them before the consent card.
     let next: Node | null = before;
@@ -179,5 +232,7 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
     stop();
     for (const one of drawn.values()) one.node.remove();
     drawn.clear();
+    more?.remove();
+    more = null;
   };
 }

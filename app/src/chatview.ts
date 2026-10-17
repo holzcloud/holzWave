@@ -264,9 +264,13 @@ export function setupLabel(profiles: readonly ProfileChoice[] | null, review: nu
 
 // ---- the words of a turn -----------------------------------------------------------------------------------------------
 
-/** What a running turn is doing: `working` (nothing yet), `thinking` (reasoning only), `writing`; empty when idle. */
+/**
+ * What a running turn is doing: `waiting for your decision` while a tool call waits for one, else `working` (nothing yet),
+ * `thinking` (reasoning only) or `writing`; empty when idle.
+ */
 export function statusWord(state: ChatState): string {
   if (!state.running) return "";
+  if (state.pending.length > 0) return "waiting for your decision";
   if (state.partial.text !== "") return "writing";
   return state.partial.reasoning !== "" ? "thinking" : "working";
 }

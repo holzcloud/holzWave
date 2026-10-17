@@ -6,9 +6,15 @@
 // call, one of two words and the hash of the card exactly as it was read; it carries no path, no pattern and no text.
 // A card is decided once and for its own hash only: nothing is kept for later.
 
-import { approvalFault, canAllow, canDeny, readApproval } from "./approvalstate.js";
+import { MAX_CARDS, VERDICTS, WORDS, approvalFault, canAllow, canDeny, outcomeOf, readApproval } from "./approvalstate.js";
 import type { Fault, Seen, Verdict } from "./approvalstate.js";
 import type { PendingCall } from "./chatstate.js";
+
+/**
+ * An `Allow once` that comes this soon (in milliseconds) after the card was first seen is ignored: a click aimed at what
+ * stood there before the card moved it cannot allow a call. `Deny` has no such window.
+ */
+export const ARM_MS = 500;
 
 /** What the controller needs of the page around it. */
 export interface ApprovalDeps {
@@ -62,9 +68,23 @@ export class Approvals {
     };
   }
 
-  /** The cards, in the order the assistant asked. */
+  /** The cards drawn, in the order the assistant asked: at most `MAX_CARDS`. */
   get cards(): readonly CardModel[] {
-    return this.records;
+    return this.records.length > MAX_CARDS ? this.records.slice(0, MAX_CARDS) : this.records;
+  }
+
+  /** How many calls wait beyond the cards that are drawn. */
+  get hidden(): number {
+    return Math.max(0, this.records.length - MAX_CARDS);
+  }
+
+  /** How many calls wait for a decision: the cards that wait or travel, and those that can only be denied. */
+  waiting(): number {
+    let n = 0;
+    for (const r of this.records) {
+      if (r.mode === "ask" || r.mode === "sending" || (r.mode === "cannot" && r.seen.hash !== null)) n += 1;
+    }
+    return n;
   }
 
   /** Make the records follow the core's list of waiting calls. Asks nothing. */
@@ -83,19 +103,27 @@ export class Approvals {
   }
 
   private fresh(seen: Seen, key: string): Rec {
-    return { id: seen.id, seen, mode: "ask", verdict: null, fault: null, since: this.deps.now(), key, serial: ++this.serial };
+    const mode: CardMode = seen.approval === null ? "cannot" : "ask";
+    return { id: seen.id, seen, mode, verdict: null, fault: null, since: this.deps.now(), key, serial: ++this.serial };
   }
 
   /**
-   * Decide the card `id` with `verdict`. It acts only on a card that waits, and makes the one decision call with the ids and
-   * the card's own hash. A refusal is kept on the card and never retried.
+   * Decide the card `id` with `verdict`. It acts only on a card that waits: an `Allow once` only on one the page can show in
+   * full and not within `ARM_MS` of its first sight, a `Deny` also on one that can only be denied. It makes the one decision
+   * call with the ids and the card's own hash. A refusal is told and never retried.
    */
   async decide(id: string, verdict: Verdict): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || !VERDICTS.includes(verdict)) return;
     const rec = this.records.find((r) => r.id === id);
-    if (rec === undefined || rec.mode !== "ask") return;
+    if (rec === undefined) return;
     const hash = rec.seen.hash;
-    if (hash === null || (verdict === "allow" ? !canAllow(rec.seen) : !canDeny(rec.seen))) return;
+    if (hash === null) return;
+    if (verdict === "allow") {
+      if (rec.mode !== "ask" || !canAllow(rec.seen) || this.deps.now() - rec.since < ARM_MS) return;
+    } else if ((rec.mode !== "ask" && rec.mode !== "cannot") || !canDeny(rec.seen)) {
+      return;
+    }
+    const before = rec.mode;
     rec.mode = "sending";
     rec.verdict = verdict;
     rec.fault = null;
@@ -104,14 +132,29 @@ export class Approvals {
       await this.deps.invoke("ai_decide", { conversation: this.deps.conversation(), call_id: rec.seen.id, decision: verdict, hash });
     } catch (raw) {
       if (this.disposed || !this.records.includes(rec)) return;
-      rec.mode = "ask";
-      rec.fault = approvalFault(raw);
-      this.notify();
+      this.refused(rec, before, approvalFault(raw));
       return;
     }
     if (this.disposed || !this.records.includes(rec)) return;
     rec.mode = "sent";
     this.notify();
+  }
+
+  /** What a refusal does: an ended call becomes a quiet line, a changed request is read again, any other keeps the card. */
+  private refused(rec: Rec, before: CardMode, fault: Fault): void {
+    const outcome = outcomeOf(fault.reason);
+    if (outcome === "ended") {
+      rec.mode = "ended";
+      rec.fault = null;
+      this.notify();
+      this.deps.say(WORDS.ended, "note");
+      this.deps.refresh();
+      return;
+    }
+    rec.mode = before;
+    rec.fault = outcome === "changed" ? { reason: fault.reason, text: WORDS.changed } : fault;
+    this.notify();
+    if (outcome === "changed") this.deps.refresh();
   }
 
   /** Drop every record and listener; an answer that arrives later changes nothing. */

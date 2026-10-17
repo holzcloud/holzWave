@@ -150,8 +150,8 @@ function readRows(raw: unknown): PayloadRow[] | undefined {
   return rows;
 }
 
-/** The card of a call with a valid hash, or null when a member is of the wrong kind. */
-function readCard(o: Obj, id: string, tool: string, hash: string): Approval | null {
+/** The card of a call with a valid hash, or the first reason it cannot be allowed, in the order shape, tool, effect, large. */
+function readCard(o: Obj, id: string, tool: string, hash: string): Approval | Exclude<Why, "ok"> {
   const conversation = member(o, "conversation");
   const effect = member(o, "effect");
   const pane = member(o, "pane");
@@ -159,12 +159,24 @@ function readCard(o: Obj, id: string, tool: string, hash: string): Approval | nu
   const remote = member(o, "remote");
   const rows = readRows(member(o, "payload"));
   const labels = readLabels(member(o, "taint"));
-  if (typeof conversation !== "string" || typeof effect !== "string") return null;
-  if (typeof pane !== "number" || !Number.isSafeInteger(pane) || pane < 0) return null;
-  if (typeof target !== "string" || typeof remote !== "boolean" || rows === undefined || labels === undefined) return null;
+  if (typeof conversation !== "string" || typeof effect !== "string") return "shape";
+  if (typeof pane !== "number" || !Number.isSafeInteger(pane) || pane < 0) return "shape";
+  if (typeof target !== "string" || typeof remote !== "boolean" || rows === undefined || labels === undefined) return "shape";
   const first = rows[0];
   const raw = member(o, "payload") as Obj[];
-  if (first === undefined || first.name !== "tool" || member(raw[0] as Obj, "value") !== tool) return null;
+  if (first === undefined || first.name !== "tool" || member(raw[0] as Obj, "value") !== tool) return "shape";
+  // The page shows the tools and the effects it knows; every other request can only be denied.
+  if (!Object.hasOwn(TOOL_WORDS, tool)) return "tool";
+  if (!Object.hasOwn(EFFECT_WORDS, effect)) return "effect";
+  // A request is shown in full or not at all: a card that had to be cut could hide the end of what runs.
+  if (rows.length > MAX_ROWS) return "large";
+  let total = 0;
+  for (const item of raw) {
+    const length = (member(item, "value") as string).length;
+    if (length > MAX_VALUE) return "large";
+    total += length;
+  }
+  if (total > MAX_TOTAL) return "large";
   const flag = member(o, "tainted");
   return {
     conversation, call_id: id, tool, effect, pane, target: shown(target, MAX_TARGET), remote, rows, hash,
@@ -186,8 +198,9 @@ export function readApproval(raw: unknown): Seen | null {
   if (typeof id !== "string" || typeof tool !== "string") return null;
   const sent = member(o, "hash");
   const hash = typeof sent === "string" && HASH.test(sent) ? sent : null;
-  const approval = hash === null ? null : readCard(o, id, tool, hash);
-  return { id, tool, hash, approval, why: approval === null ? "shape" : "ok" };
+  const card = hash === null ? "shape" : readCard(o, id, tool, hash);
+  if (typeof card === "string") return { id, tool, hash, approval: null, why: card };
+  return { id, tool, hash, approval: card, why: "ok" };
 }
 
 /** Whether the card can be allowed: the page can show the whole request. */
@@ -211,15 +224,64 @@ const MAX_REASON = 40;
 
 /**
  * A refusal of `ai_decide`. The core answers `{code, reason, text}`: the text is the core's own sentence, cut and cleaned
- * by the chat's rule, and the reason is its stable name. Anything that is not such an object keeps no reason.
+ * by the chat's rule, and the reason is its stable name. Anything that is not such an object is the fixed sentence
+ * `The decision could not be sent.`, with no reason.
  */
 export function approvalFault(raw: unknown): Fault {
-  let reason: string | null = null;
-  if (typeof raw === "object" && raw !== null) {
-    const named = (raw as { reason?: unknown }).reason;
-    if (typeof named === "string" && named !== "") reason = shown(named, MAX_REASON);
+  if (typeof raw !== "object" || raw === null || typeof (raw as { text?: unknown }).text !== "string") {
+    return { reason: null, text: WORDS.couldNot };
   }
-  return { reason, text: faultText(raw) };
+  const named = (raw as { reason?: unknown }).reason;
+  return { reason: typeof named === "string" && named !== "" ? shown(named, MAX_REASON) : null, text: faultText(raw) };
+}
+
+/** What a refusal means for the card: the call is no longer waiting, the request changed, or the person may try again. */
+export type Outcome = "ended" | "changed" | "refused";
+
+/** The reasons that mean the call has been decided already or is over: the card turns into a quiet line. */
+export const ENDED: ReadonlySet<string> = new Set([
+  "unknown_call", "not_pending", "already_used", "cancelled", "duplicate_call", "too_many", "not_approved",
+]);
+
+/** The reasons that mean the request is no longer the one the card showed: the card is read again from the core. */
+export const CHANGED: ReadonlySet<string> = new Set(["hash_mismatch", "payload_changed", "taint_changed", "scope_mismatch"]);
+
+/** The step a refusal moves the card to. An unknown reason, `invalid_decision` and no reason keep the card for another try. */
+export function outcomeOf(reason: string | null): Outcome {
+  if (reason !== null && ENDED.has(reason)) return "ended";
+  if (reason !== null && CHANGED.has(reason)) return "changed";
+  return "refused";
+}
+
+/** The count after `✦ AI`: ` · 2`; empty when no call waits. */
+export function waitingLabel(n: number): string {
+  return n > 0 ? ` · ${n}` : "";
+}
+
+/** The accessible name of the title-bar button while calls wait; empty when none does. */
+export function waitingName(n: number): string {
+  if (n <= 0) return "";
+  return n === 1 ? "AI chat, 1 call waits for your decision" : `AI chat, ${n} calls wait for your decision`;
+}
+
+/** The line that counts the calls that wait beyond the cards that are drawn. */
+export function moreWords(n: number): string {
+  return n === 1 ? "1 more call waits for a decision." : `${n} more calls wait for a decision.`;
+}
+
+/** The sentence under the title of a card that can only be denied, by the reason it cannot be allowed; empty for `ok`. */
+export function cannotWords(why: Why): string {
+  switch (why) {
+    case "large":
+      return "This request is too large to show in full. It can only be denied.";
+    case "tool":
+    case "effect":
+      return "This page does not know this kind of request, so it cannot show it. It can only be denied.";
+    case "shape":
+      return "This request could not be read in full. It can only be denied.";
+    case "ok":
+      return "";
+  }
 }
 
 // ---- the words ------------------------------------------------------------------------------------------------------
