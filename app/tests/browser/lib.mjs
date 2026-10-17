@@ -56,6 +56,19 @@ export async function newPage(browser, { viewport = { width: 1000, height: 640 }
   return { page, errors };
 }
 
+/**
+ * Take the expected policy reports of `safehtml.js` out of `errors` (in place: the runner reads the same array).
+ * The page's policy also applies in the inert document that `safehtml.js` parses markup in, and a test feeds it hostile
+ * markup on purpose, with an inline style and inline handlers. Every engine reports the style, Chromium 156 (the build of
+ * Playwright 1.64) the handlers too; none of it reaches the page, which is what those tests assert. Any other report,
+ * and any from another file, stays an error. The reports are events that arrive a moment after the call that caused them.
+ */
+export async function dropInertReports(page, errors) {
+  await page.waitForTimeout(100);
+  const expected = /(style-src-(elem|attr)|script-src-attr) blocked inline \(.*safehtml\.js\)/;
+  errors.splice(0, errors.length, ...errors.filter((e) => !expected.test(e)));
+}
+
 /** One RGBA pixel of a WebGL canvas as [r, g, b, a]; (x, y) is in canvas pixels from the top-left corner. */
 export async function glPixel(page, selector, x, y) {
   return page.evaluate(

@@ -4,18 +4,18 @@
 // request leaves for an image, and a link that carries data is text followed by its address.
 import assert from "node:assert/strict";
 import { OTHER_PROFILE, PROFILE, VIEW_CHAT_ONLY, boot, calls, chatBlock, openAi, sendText } from "./ai-lib.mjs";
+import { dropInertReports } from "./lib.mjs";
 
-export default async function ({ page, url, errors }) {
+export default async function ({ engine, page, url, errors }) {
   page.setDefaultTimeout(8000);
   await markdownCase(page, url);
   await hostileCase(page, url);
-  // The policy of the page refuses an inline style, also in the inert document the page parses a reply in; the hostile
-  // reply above carries one on purpose, so those reports are expected. Anything else is an error.
-  const refused = /style-src-(elem|attr) blocked inline \(.*safehtml\.js\)/;
-  errors.splice(0, errors.length, ...errors.filter((e) => !refused.test(e)));
+  // The hostile reply above carries an inline style and inline handlers on purpose, and the policy of the page reports them
+  // in the inert document the reply is parsed in; those reports are expected, anything else is an error.
+  await dropInertReports(page, errors);
   await linkCase(page, url);
   await narrowCase(page, url);
-  await modesCase(page, url);
+  await modesCase(page, url, engine);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -131,7 +131,9 @@ async function hostileCase(page, url) {
   assert.deepEqual(found.attrs, [], "no handler and no style attribute");
   assert.equal(found.js, 0, "no javascript: link");
   assert.ok(found.deepest <= 65, `nested no deeper than 64 levels (${found.deepest})`);
-  assert.ok(found.nodes <= 200_100, `the copy is bounded (${found.nodes} nodes)`);
+  // 300 000 spans in one run are cut to the share of one block (5 000 nodes). WebKit took 9 s to lay out 200 000 of them
+  // (its line layout grows with the square of the boxes of a run), which is past the 8 s timeout of this file.
+  assert.ok(found.nodes <= 6_000, `the copy is bounded (${found.nodes} nodes)`);
   assert.equal(found.xss, "undefined", "nothing ran");
   assert.equal(await page.evaluate(() => 1 + 1), 2, "the page stayed responsive");
   assert.deepEqual(requests.filter((u) => u.includes("evil.example")), [], "no request left for another host");
@@ -267,7 +269,11 @@ async function narrowCase(page, url) {
   await page.setViewportSize({ width: 1000, height: 640 });
 }
 
-async function modesCase(page, url) {
+async function modesCase(page, url, engine) {
+  // WebKit on macOS visits buttons with Option+Tab only, as Safari does by default.
+  const option = engine === "webkit" && process.platform === "darwin";
+  const forward = () => page.keyboard.press(option ? "Alt+Tab" : "Tab");
+  const back = () => page.keyboard.press(option ? "Shift+Alt+Tab" : "Shift+Tab");
   await openOnly(page, url, { width: 1000, height: 640 });
   const edge = () => page.locator(".chat-bar").evaluate((n) => getComputedStyle(n).borderBottomColor);
   const duration = (sel) => page.locator(sel).evaluate((n) => getComputedStyle(n).transitionDuration);
@@ -308,18 +314,18 @@ async function modesCase(page, url) {
   const ring = await page.locator(".chat-input").evaluate((n) => ({ width: getComputedStyle(n).outlineWidth, color: getComputedStyle(n).outlineColor }));
   assert.equal(ring.color, rose, "the composer's ring is rose");
   assert.equal(ring.width, "2px");
-  await page.keyboard.press("Tab");
+  await forward();
   assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-ctx", "the context button follows the field");
   assert.equal(await page.locator(".chat-ctx").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "Context: a 2 px ring");
-  await page.keyboard.press("Tab");
+  await forward();
   assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-send");
   assert.equal(await page.locator(".chat-send").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "Send: a 2 px ring");
   await page.locator(".chat-input").focus();
-  await page.keyboard.press("Shift+Tab");
-  await page.keyboard.press("Shift+Tab");
+  await back();
+  await back();
   assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-setup", "the providers button is last in the bar");
   assert.equal(await page.locator(".chat-setup").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "the button: a 2 px ring");
-  await page.keyboard.press("Shift+Tab");
+  await back();
   assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-chip");
   assert.equal(await page.locator(".chat-chip").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "the chip: a 2 px ring");
 

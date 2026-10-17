@@ -18,15 +18,18 @@
    the window, and the host and clock; the tab row (28 px and its top hairline) holds the numbered tabs. The three
    levels keep their own shapes: a workspace is a round pill with a diamond, a tab is square, a pane is a tile. */
 #bar {
+  --bar-pad: calc(8rem / 12); /* the side padding of the bar; exact, so the macOS room below adds up to 80 px */
   box-sizing: border-box; display: grid; grid-template-columns: auto 1fr auto;
   grid-template-rows: calc(32rem / 12) calc(29rem / 12); flex: none; height: calc(62rem / 12);
-  padding: 0 .667rem; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-line);
+  padding: 0 var(--bar-pad); background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-line);
   user-select: none; -webkit-user-select: none; cursor: default;
 }
 /* The overlay title bar exists only on macOS (`titleBarStyle` is a macOS-only option): it puts the traffic lights
    over the page's top left corner, so the pills start after them. Windows and Linux keep the native frame by decision
-   (Phase 2.2; a page-drawn bar is Phase 10), so the page's bar sits below it and needs no room. */
-.os-macos #bar .bar-workspaces { margin-left: calc(80px - .667rem); }
+   (Phase 2.2; a page-drawn bar is Phase 10), so the page's bar sits below it and needs no room. The room is 80 px from
+   the window edge: the bar's padding plus this margin. Both are written from `--bar-pad`, not from the rounded `.667rem`
+   (8.004 px at the base size): WebKit snaps a `calc` margin to 1/64 px and not a padding, so that pair summed to 79.988. */
+.os-macos #bar .bar-workspaces { margin-left: calc(80px - var(--bar-pad)); }
 
 .bar-group { display: flex; align-items: stretch; min-width: 0; }
 .bar-workspaces { grid-row: 1; grid-column: 1; align-items: center; }
@@ -36,7 +39,7 @@
 .bar-info .host { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; }
 .host:not(:empty) + .clock::before { content: "\00b7"; margin: 0 .5em; }
 .bar-tabs {
-  grid-row: 2; grid-column: 1 / -1; overflow: hidden; margin: 0 -.667rem; padding: 0 .667rem;
+  grid-row: 2; grid-column: 1 / -1; overflow: hidden; margin: 0 calc(-1 * var(--bar-pad)); padding: 0 var(--bar-pad);
   background: var(--hw-pane); border-top: 1px solid var(--hw-line);
 }
 .tabs-fill { flex: 1 1 0; min-width: 0; }

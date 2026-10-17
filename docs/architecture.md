@@ -225,7 +225,9 @@ applied step by step by the TypeScript patcher, so both languages are proven aga
   in with `textContent`. A Markdown document is the one piece of HTML: the core cleans it with an allow-list sanitiser
   (`ammonia`), and the page parses it into an inert document and copies it node by node through an allow-list of its own
   (`safehtml.ts`), so a script, a handler, a style, an image or a `javascript:` link cannot arrive even if one of the two
-  lists had a hole.
+  lists had a hole. The copy is bounded in depth (64 levels), in nodes (200 000) and in the nodes of one block (5 000),
+  because the layout is the expensive part: WebKit lays out a long run of inline boxes in time that grows with the square
+  of their number (100 000 spans in one paragraph took nine seconds).
 - `withGlobalTauri` is still on, so the commands are reachable from every script of the page. The page loads only its
   own bundle under the CSP above and the capability is scoped to the one window `main`; dropping the global is still
   the target.

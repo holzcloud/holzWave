@@ -3,6 +3,7 @@
 // as innerHTML, images and video are shown from the granted URL of the `holzfile` scheme and the grant ends with the
 // preview. The browser stub plays the core.
 import assert from "node:assert/strict";
+import { dropInertReports } from "./lib.mjs";
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
@@ -11,6 +12,8 @@ export default async function ({ page, url, errors }) {
   await previewCase(page, url);
   await pdfCase(page, url);
   await safeHtmlCase(page, url);
+  // That case feeds the allow-list hostile markup: the policy reports the style and the handlers it parses, nothing else.
+  await dropInertReports(page, errors);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -158,7 +161,8 @@ async function editorCase(page, url, opened) {
   await page.locator(".cm-content").click();
   await page.keyboard.press("End");
 
-  await page.keyboard.press("Control+s");
+  // The editor's save chord is Mod-s: Cmd on a Mac and Ctrl elsewhere, by the platform of the browser that runs the test.
+  await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 1);
   const sent = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[0]);
   assert.deepEqual(sent, { source: "local", path: "/home/holz/main.rs", text: "abcdef", expected_modified: 1760000000 });
@@ -167,18 +171,18 @@ async function editorCase(page, url, opened) {
 
   // The next save carries the time the last one returned.
   await page.keyboard.type("!");
-  await page.keyboard.press("Control+s");
+  await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 2);
   assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_save")[1])).expected_modified, 1760000099);
 
   // A change on disk is shown; the save after it overwrites on purpose.
   await page.evaluate(() => { window.__SAVE_ERR = "the file changed on disk since it was opened; save again to overwrite it"; });
   await page.keyboard.type("?");
-  await page.keyboard.press("Control+s");
+  await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => document.querySelector('.block[data-pane="2"] .bk-status').dataset.failed === "true");
   assert.match(await status.textContent(), /changed on disk/);
   await page.evaluate(() => { window.__SAVE_ERR = null; });
-  await page.keyboard.press("Control+s");
+  await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 4);
   assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_save")[3])).expected_modified, null);
 
@@ -291,6 +295,26 @@ async function safeHtmlCase(page, url) {
   assert.deepEqual(result.inputs, [["checkbox", false, true, null], ["checkbox", true, true, null]], "an input is only a disabled checkbox");
   assert.deepEqual(result.hrefs, [true, true, true, false, false, false, false, false, false]);
   assert.ok(result.html.includes("bold"), "the text of an unknown element stays");
+
+  // One block takes only so many nodes (WebKit lays out a long run of inline boxes in time that grows with the square of
+  // their number): a span and its text are two. The blocks around a cut one, and the next item of a list, are copied whole.
+  const bounded = await page.evaluate(async () => {
+    const { appendSafe, MAX_BLOCK_NODES } = await import(new URL("safehtml.js", location.href).href);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const run = (tag) => `<${tag}>x</${tag}>`.repeat(MAX_BLOCK_NODES);
+    appendSafe(`<p>before</p><p>${run("span")}</p><p>after</p><ul><li>${run("em")}</li><li>last</li></ul>`, host);
+    return {
+      max: MAX_BLOCK_NODES,
+      paragraphs: [...host.querySelectorAll(":scope > p")].map((p) => (p.textContent.length > 20 ? "long" : p.textContent)),
+      spans: host.querySelectorAll("p span").length,
+      ems: host.querySelectorAll("li em").length,
+      items: [...host.querySelectorAll("li")].map((li) => (li.textContent.length > 20 ? "long" : li.textContent)),
+    };
+  });
+  assert.deepEqual(bounded.paragraphs, ["before", "long", "after"], "a block that is too long is cut, the blocks around it are not");
+  assert.deepEqual(bounded.items, ["long", "last"]);
+  for (const n of [bounded.spans, bounded.ems]) assert.ok(n * 2 <= bounded.max && n * 2 >= bounded.max - 2, `a cut block keeps its share: ${n} elements of ${bounded.max} nodes`);
 }
 
 // A real two page PDF (hand made, 853 bytes) through the real PDF.js: read in ranges through `file_range`, drawn to a
@@ -309,22 +333,17 @@ async function pdfCase(page, url) {
   });
   await page.waitForSelector(".pdf-canvas");
   await page.waitForFunction(() => document.querySelector(".pdf-count")?.textContent === "1 / 2");
-  // The page was drawn: the canvas has dark ink on white, which a blank canvas does not.
-  const ink = () => page.locator(".pdf-canvas").evaluate((c) => {
-    const data = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
-    let dark = 0;
-    for (let i = 0; i < data.length; i += 4) if (data[i] < 100 && data[i + 3] > 0) dark++;
-    return dark;
-  });
-  await page.waitForFunction(() => {
+  // The page was drawn: the canvas has dark ink on white, which a blank canvas does not. It is one measurement that waits
+  // for the ink, because a draw clears the canvas first and a second look could land between two draws.
+  const ink = await page.waitForFunction(() => {
     const c = document.querySelector(".pdf-canvas");
-    if (!c || c.width === 0) return false;
+    if (!c || c.width === 0) return 0;
     const data = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
     let dark = 0;
     for (let i = 0; i < data.length; i += 4) if (data[i] < 100 && data[i + 3] > 0) dark++;
-    return dark > 50;
+    return dark > 50 ? dark : 0;
   });
-  assert.ok((await ink()) > 50, "the page has text on it");
+  assert.ok((await ink.jsonValue()) > 50, "the page has text on it");
   assert.match(await page.locator('.block[data-pane="2"] .bk-status').textContent(), /application\/pdf · 853 B · 1 \/ 2/);
   assert.ok((await page.evaluate(() => window.__MOCK__.callsOf("file_range"))).length >= 1, "the document was read through the core in ranges");
 

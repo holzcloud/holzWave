@@ -114,6 +114,7 @@ export async function showPdf(host: HTMLElement, token: string, size: number, st
 
   let page = 1;
   let zoom = 0; // 0 is "fit the width"
+  let fitted = -1; // the width of the area the page was last fitted to
   let rendering: { cancel(): void } | null = null;
   let gone = false;
 
@@ -124,7 +125,8 @@ export async function showPdf(host: HTMLElement, token: string, size: number, st
     const p = await doc.getPage(page);
     if (gone || mine !== drawn) return;
     const base = p.getViewport({ scale: 1 });
-    const scale = zoom === 0 ? fitScale(base.width, area.clientWidth - 24) : zoom;
+    fitted = area.clientWidth;
+    const scale = zoom === 0 ? fitScale(base.width, fitted - 24) : zoom;
     const viewport = p.getViewport({ scale });
     const ratio = Math.max(1, window.devicePixelRatio || 1);
     canvas.width = Math.floor(viewport.width * ratio);
@@ -170,8 +172,10 @@ export async function showPdf(host: HTMLElement, token: string, size: number, st
     zoom = 0;
     void draw();
   });
+  // The observer reports once as soon as it starts, and a change of height alone changes nothing: a page is drawn
+  // again only for a new width, because drawing clears the canvas and a second draw of the same size is a blink.
   const observer = new ResizeObserver(() => {
-    if (zoom === 0) void draw();
+    if (zoom === 0 && area.clientWidth !== fitted) void draw();
   });
   observer.observe(area);
 
