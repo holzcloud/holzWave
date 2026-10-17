@@ -555,6 +555,8 @@ impl AiHost {
     /// Ends the running turns (they keep the text they had) and waits for them for at most [`SHUTDOWN_BOUND`]. A send
     /// after this is refused. Safe to call more than once.
     pub fn shutdown(&self) {
+        // The requests that wait for a person end first: nobody can answer them any more.
+        self.asks.shutdown();
         let left = self.service.shutdown(SHUTDOWN_BOUND);
         if left > 0 {
             eprintln!("holzwave: {left} assistant turn(s) did not end within the shutdown bound");

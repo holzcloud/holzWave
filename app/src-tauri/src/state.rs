@@ -1801,6 +1801,8 @@ impl AppCore {
         if let Some(chat) = chat {
             self.ai.chat_closed(&chat);
         }
+        // The requests of shells in this pane are withdrawn: their cards go and their turns stop.
+        self.ai().asks().pane_closed(pane);
         // Last, with no guard alive: the calls of the chat turns that act for this pane are voided, and so are the
         // shares of the pane.
         self.ai.pane_closed(pane);
