@@ -15,7 +15,7 @@ repository, never a Flathub package; there is no signing, no repository and no a
 | File | What |
 |---|---|
 | `packaging/flatpak/ch.holzcloud.holzwave.yml` | The manifest: GNOME 51 runtime and SDK (org.freedesktop 26.08), the Rust and Node 26 SDK extensions, Zig 0.16.0 as a build tool, and the build of this repository inside the SDK |
-| `packaging/flatpak/ch.holzcloud.holzwave.metainfo.xml` | AppStream: name, licence `GPL-3.0-only`, the release, and a description that says plainly that the app can run commands on the host |
+| `packaging/flatpak/ch.holzcloud.holzwave.metainfo.xml` | AppStream: name, licence `GPL-3.0-only`, the release, and a description that says plainly that the app can run commands on the host and uses the network |
 | `packaging/flatpak/ch.holzcloud.holzwave.desktop` | The desktop file (`Categories=System;TerminalEmulator;`) |
 | `scripts/build-flatpak.sh` | `--check` (validate the three files), `--container-build` (build in Docker), no argument (build and install on a Linux machine) |
 
@@ -55,6 +55,44 @@ The first build takes a while (a release build of the whole app plus the Ghostty
 
 If the owner does not accept the host-command permission, Flatpak is moved out of 0.0.1 (see the status line).
 
+## What connects, and when
+
+The app has the network (`--share=network`). holzWave has no telemetry, no account, no update check and no crash report,
+in a Flatpak as everywhere else, and `core/tests/project_policy.rs` pins the dependency and source rules behind that.
+The permission only lets the connections below happen. Unverified in a Flatpak, like the rest of this page.
+
+**At launch.** On a fresh install nothing connects when the app starts, and nothing connects while it sits idle. Two
+things can connect early once you have set them up:
+
+- the sync: its first run is about ten seconds after the start, then it runs every five minutes, to the folder address
+  you saved. It does nothing while sync is off;
+- a Files or Monitor block on a saved SSH connection that was open when you quit: a restart opens the same views, and a
+  block connects when it is drawn.
+
+**Afterwards, only what you start.** What connects, when, and to where:
+
+- **A saved SSH connection:** when you open it as a pane, a Files block or a Monitor block, and again after a lost
+  connection, as often as the connection's `reconnect_attempts` says. It goes to the host and port of the connection,
+  and of its `jump` host.
+- **The sync:** after you set it up (see above) and when you press Sync now. It goes to the address you saved.
+- **The AI chat:** only when a message is sent, or when `wsh ai` sends one (after you answer its card). Opening the
+  chat, the providers dialog or the picker connects to nothing. It goes to the address of the provider you set up. With
+  `Local only` on, the app refuses a provider that is not on this computer, before any connection. Terminal text leaves
+  a pane only after you share it.
+- **A link you click:** it is handed to the opener of the desktop; that is not a connection of holzWave.
+- **The shells in the panes:** they run on the host and use the host's network like any terminal; they are not
+  connections of holzWave.
+
+**Who limits it.** The sandbox no longer does: Flatpak has no rule per host. The app's own rules do (saved addresses
+only, `ai_local_only`, consent per pane, the HTTPS rules of the AI client, no socket before a send), and tests of the
+app hold them. The Flatpak does not.
+
+**Taking the permission away.**
+`flatpak override --user --unshare=network ch.holzcloud.holzwave` removes it: then SSH, the sync, the AI chat and a
+model server on this computer cannot connect, and the rest of the app works.
+`flatpak override --user --reset ch.holzcloud.holzwave` undoes it.
+`flatpak info --show-permissions ch.holzcloud.holzwave` shows what the install has.
+
 ## How the shell is started
 
 Inside a Flatpak (`/.flatpak-info` exists or `FLATPAK_ID` is set) a pane runs
@@ -89,6 +127,14 @@ flatpak-spawn --host --watch-bus [--directory=<dir>] --env=TERM=... [--env=...] 
   leader, so that job control (`Ctrl+C`, `Ctrl+Z`, `fg`) and `sudo` work, was not verifiable. If L10 shows no job control, the
   owner decides between `host-spawn` (a small helper binary that creates the terminal on the host: a new dependency question)
   and moving Flatpak out of 0.0.1.
+- **The keychain.** The passwords, passphrases and provider keys of SSH, sync and the AI chat live in the system
+  keychain (the Secret Service on Linux). The manifest does not ask for its D-Bus name, and whether the keychain can be
+  reached from the sandbox is not known here. If it cannot, saving a password, a passphrase or a key fails, and the app
+  does not fall back to a file. Row L10 notes it; asking for the name would be a decision of its own and would change
+  the pinned list. Unverified in a Flatpak.
+- **A model server on this computer.** Flatpak describes the permission as access to the network. That it also reaches a
+  server on this computer's own loopback address (Ollama, LM Studio, llama.cpp) is expected and not verified; row L10
+  checks it.
 - WebKitGTK starts its own helper processes; whether it runs the same inside the sandbox (its own sandbox for them) is shown by
   the first run.
 - x86_64 only for 0.0.1. The manifest also lists the aarch64 Zig archive, which lets the same manifest build on an ARM
@@ -110,12 +156,15 @@ Checked (Docker Desktop, Ubuntu 26.04, arm64):
   documented line, does not set a process directory and takes its directory from OSC 7 only (`core/src/pane.rs`,
   `core/tests/pane.rs`, `core/tests/flatpak_host.rs` with a stand-in for `flatpak-spawn`), and that the flags follow the
   environment (`app/src-tauri/src/state.rs`).
-- The facts of the three files (`app/src-tauri/tests/flatpak.rs`): the id, the permission and its disclosure, the pinned Zig archive, no key, no foreign address.
+- The facts of the three files (`app/src-tauri/tests/flatpak.rs`): the id, the permissions and their disclosure (host
+  commands and network), the pinned Zig archive, no key, no foreign address, and what this page says about the network.
 
-Only the owner's machine shows: that the manifest builds there (the x86_64 Zig archive and checksum, the owner's Flatpak and
-runtime versions), that the app starts under X11 and Wayland, the icon and the name in the menu and on the task bar, that links and
-files open through the portals, and everything about the host shell: its terminal, `sudo`, job control, the host's tools
-and home, and that closing a pane leaves no host process of ours (row L10).
+Only the owner's machine shows: that the manifest builds there (the x86_64 Zig archive and checksum, the owner's Flatpak
+and runtime versions), that the app starts under X11 and Wayland, the icon and the name in the menu and on the task bar,
+that links and files open through the portals, and everything about the host shell: its terminal, `sudo`, job control,
+the host's tools and home, and that closing a pane leaves no host process of ours. It also shows that nothing connects
+when the app starts on a fresh install, that an SSH host and a model server on this computer are reachable, that the
+keychain can keep a secret, and what happens when the network is taken away (all of it row L10).
 
 ## If it does not ship
 

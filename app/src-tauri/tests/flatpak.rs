@@ -73,6 +73,13 @@ fn comment_above(line: usize) -> String {
     squashed(&block.join(" "))
 }
 
+/// The text of `page` from the line that is `heading` up to, not including, the next line that starts with `## `.
+fn a_section(page: &str, heading: &str) -> String {
+    let mut lines = page.lines().skip_while(|line| *line != heading);
+    assert!(lines.next().is_some(), "{heading} is not a heading of docs/flatpak.md");
+    lines.take_while(|line| !line.starts_with("## ")).collect::<Vec<_>>().join("\n")
+}
+
 /// The text of the `<description>` element of the AppStream file.
 fn description() -> &'static str {
     METAINFO.split("<description>").nth(1).and_then(|d| d.split("</description>").next()).expect("a description")
@@ -171,6 +178,23 @@ fn the_network_permission_is_disclosed_next_to_it_in_the_description_and_on_the_
     for claim in ["no network permission", "asks for no network"] {
         assert!(!squashed(MANIFEST).contains(claim) && !text.contains(claim), "the manifest or the AppStream text says {claim:?}");
     }
+}
+
+#[test]
+fn the_page_says_what_connects_and_when() {
+    let section = squashed(&a_section(FLATPAK_PAGE, "## What connects, and when"));
+    for word in ["launch", "ssh", "sync", "ai chat", "local only", "telemetry", "--unshare=network", "--reset"] {
+        assert!(section.contains(word), "the section of docs/flatpak.md on what connects does not say {word:?}");
+    }
+    let limits = squashed(&a_section(FLATPAK_PAGE, "## Known limits"));
+    assert!(limits.contains("keychain"), "the known limits of docs/flatpak.md do not mention the keychain");
+    let headings: Vec<&str> = FLATPAK_PAGE.lines().filter(|l| l.starts_with("## ")).collect();
+    let at = |heading: &str| headings.iter().position(|h| *h == heading).unwrap_or_else(|| panic!("{heading} is missing"));
+    assert!(
+        at("## What it costs in sandboxing") + 1 == at("## What connects, and when")
+            && at("## What connects, and when") + 1 == at("## How the shell is started"),
+        "the section on what connects lies between the cost list and the shell: {headings:?}"
+    );
 }
 
 #[test]
