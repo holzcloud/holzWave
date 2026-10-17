@@ -87,6 +87,7 @@ impl AppCore {
         let hook = token.clone();
         gone.on_gone(move || hook.cancel());
         let request = AskInput { pane, prompt, input };
+        self.ai().device_ready_for_ask();
         self.ai().asks().run(self.ai().service(), request, &mut IpcOut(out), &token).map_err(|fault| fault.to_string())
     }
 

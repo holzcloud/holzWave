@@ -116,6 +116,16 @@
           }
         ]
       },
+      "profiles_on_device": {
+        "notes": [],
+        "on_device": {
+          "advice": "enable_apple_intelligence",
+          "id": "apple",
+          "model": "system",
+          "state": "apple_intelligence_not_enabled"
+        },
+        "profiles": []
+      },
       "removal": {
         "key_deleted": true,
         "removed": true

@@ -151,9 +151,9 @@ test("the chip says what it sends to and the picker appears only with a choice t
   assert.equal(none.kind, "none");
   assert.equal(none.text, "no provider set up");
   // A route for a provider that has no address: the place word and no arrow.
-  const registered = chipView(route({ profile: "apple", model: "on-device", host: null, locality: "on_device" }), [local], { profile: "apple", model: "on-device" }, null);
+  const registered = chipView(route({ profile: "registered", model: "on-device", host: null, locality: "on_device" }), [local], { profile: "registered", model: "on-device" }, null);
   assert.equal(registered.where, "on device");
-  assert.equal(registered.text, "apple · on-device");
+  assert.equal(registered.text, "registered · on-device");
   assert.ok(!registered.text.includes("→"));
   // A pin without a route: its id and model, no place word.
   const pinned = chipView(null, null, { profile: "local-1", model: "llama3.2" }, null);

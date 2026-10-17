@@ -25,6 +25,13 @@
 //                      The answer of `ai_profiles` is `{profiles, notes}` with copies of these entries without the
 //                      mock-only member; `ai_profile_save` changes this list (the profile part is live)
 //       notes          the `notes` member of the answer of `ai_profiles` (default none): the core's lines about its file
+//       device         the on-device model of the Mac, `null` (default: this machine has none) or `{ state, advice }`. The answer of
+//                      `ai_profiles` then also has the member `on_device` with `id` `apple`, `model` `system`, the state and the
+//                      advice; without a device the answer has exactly `profiles` and `notes`. Only the exact state `available`
+//                      makes the provider `apple` exist: a send, a state, a share or a preview for it then runs with the model
+//                      `system` and the route `{ profile: "apple", model: "system", host: null, locality: "on_device" }`; with any
+//                      other state, or none, a call for `apple` rejects with `{ code: "no_profile", reason: null, text }`
+//       setDevice(state, advice)  set `device` to `{ state, advice }`; `setDevice(null)` removes it
 //       acknowledged   the hosts whose disclosure the person allowed (`ai_profile_save` with `acknowledge_gateway`); the
 //                      answer of `ai_profiles` carries `disclosure: {host, kind}` for a profile of a gateway type (OpenRouter,
 //                      Vercel, Cloudflare, LiteLLM: `gateway`) or of the Custom type (`third_party`) whose host is not this
@@ -233,6 +240,7 @@
     dropLeft: 0,
     timer: 0,
     notes: [],
+    device: null,
     keychain: true,
     keys: {},
     acknowledged: [],
@@ -240,6 +248,9 @@
     chatNotes: [],
     deleted: [],
   };
+  /** The provider the Mac's own model makes: fixed id and model, no address; it exists only while the state is `available`. */
+  const DEVICE = { id: "apple", model: "system", host: null, base_url: "", locality: "on_device" };
+  const deviceOn = () => ai.device !== null && ai.device.state === "available";
   const emptyState = (id) => ({
     conversation: id, title: "", profile: null, model: null, turn: 0, seq: 0, running: false, messages: [],
     partial: { text: "", reasoning: "" }, pending: [], usage: { input_tokens: 0, output_tokens: 0 },
@@ -923,7 +934,8 @@
     const list = Array.isArray(ai.profiles) ? ai.profiles : ai.profiles.profiles ?? [];
     const id = profile || chatOf(conversation).profile || (list.length === 1 ? list[0].id : null);
     if (!id) throw fault("no_profile", "no provider is chosen for this chat");
-    const known = list.find((p) => p.id === id);
+    if (id === DEVICE.id && !deviceOn()) throw fault("no_profile", "no provider is chosen for this chat");
+    const known = id === DEVICE.id ? DEVICE : list.find((p) => p.id === id);
     if (!known) throw fault("profile", "there is no such profile", "unknown_profile");
     const route = {
       profile: id, model: model || known.model || "", host: hostOf(known.base_url) || known.host || "", locality: known.locality ?? "loopback",
@@ -1090,7 +1102,11 @@
       }
       return removed;
     },
-    ai_profiles: () => ({ profiles: listed(), notes: structuredClone(noteLines()) }),
+    ai_profiles: () => ({
+      profiles: listed(),
+      notes: structuredClone(noteLines()),
+      ...(ai.device === null ? {} : { on_device: { id: DEVICE.id, model: DEVICE.model, state: ai.device.state, advice: ai.device.advice } }),
+    }),
     ai_profile_save: ({ input }) => {
       if (input === null || typeof input !== "object" || Object.keys(input).some((name) => !SAVE_MEMBERS.includes(name))) {
         throw fault("profile", "the request was not understood");
@@ -1213,7 +1229,9 @@
       const id = profile || chat.profile;
       if (!id) throw fault("no_profile", "no provider is chosen");
       const list = Array.isArray(ai.profiles) ? ai.profiles : ai.profiles.profiles ?? [];
-      const known = list.find((p) => p.id === id);
+      // The model of the Mac exists only while it says `available`; for any other state the core refuses a send for it.
+      if (id === DEVICE.id && !deviceOn()) throw fault("no_profile", "no provider is chosen");
+      const known = id === DEVICE.id ? DEVICE : list.find((p) => p.id === id);
       if (!known) throw fault("profile", "there is no such profile", "unknown_profile");
       const route = { profile: id, model: model || known.model || chat.model || "", host: known.host ?? null, locality: known.locality ?? "loopback" };
       const before = redeem(conversation, pane, contextRoute(conversation, id, model), offer, picked);
@@ -1263,6 +1281,12 @@
     },
     set notes(value) {
       ai.notes = value;
+    },
+    get device() {
+      return ai.device === null ? null : { ...ai.device };
+    },
+    setDevice(state, advice) {
+      ai.device = state === null || state === undefined ? null : { state, advice: advice ?? "none" };
     },
     get acknowledged() {
       return ai.acknowledged;
@@ -1493,7 +1517,7 @@
       clearTimeout(ai.timer);
       Object.assign(ai, {
         profiles: [], scripts: [], chatNo: 0, turnNo: NOW, queue: [], running: null, holdLeft: null, dropLeft: 0, timer: 0,
-        notes: [], keychain: true, keys: {}, acknowledged: [], chatNotes: [], deleted: [],
+        notes: [], device: null, keychain: true, keys: {}, acknowledged: [], chatNotes: [], deleted: [],
       });
       ai.stored.clear();
       ai.chats.clear();

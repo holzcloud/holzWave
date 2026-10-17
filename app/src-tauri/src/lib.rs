@@ -21,6 +21,7 @@
 //! or `deny` and the hash of the card, and answers nothing.
 
 mod ai_ask;
+mod ai_device;
 mod ai_host;
 mod ai_tools;
 mod ai_write;
@@ -362,6 +363,10 @@ pub fn run() {
             protected.extend(ipc_dir(app.handle()));
             let parts = AiParts::system().protecting(protected);
             let core = AppCore::new_with_ai(dir, sink, ShellSpec::default(), parts);
+            // The on-device model (macOS only): the host learns where it comes from and asks nothing of it until a person acts.
+            if let Some(source) = ai_device::system() {
+                core.ai().use_device(source);
+            }
             app.manage(core.clone());
             if let Some(window) = app.get_webview_window("main") {
                 restore_window(&window, &core, "main");

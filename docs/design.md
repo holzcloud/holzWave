@@ -103,6 +103,7 @@ default.
 | Reply action | a hairline mono button under a one-line code block of a finished reply (6.19): its word is its name, it puts the line at the prompt of the pane the chat acts for and never runs it; a block with characters that are not shown gets a warn line instead; no shadow |
 | Diff box | a hairline box in mono inside an approval card (6.16): a head line with the kind, the counts and the sizes, then the changed lines with their line numbers and a `+` or `-` sign as the cue; no fill, wraps and scrolls inside, at most 16 rem high |
 | Shell request card | a floating layer without a backdrop (6.20): the prompt of a `wsh ai` request in full, the piped text by counts and findings, the destination and whether it leaves this computer, `Don't send` and `Send once`; it never takes the keyboard, and only a real press after half a second can send |
+| On-device row | a read-only group row in the providers dialog (6.21): the name `Apple on-device`, a state word, one sentence of advice and, when the model cannot answer, a hairline `Check again`; in the chat picker it is an ordinary row with no host; shown only on a Mac, flat and hairline, no shadow |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
 No motion in the terminal grid itself. `prefers-reduced-motion` removes all transitions.
@@ -330,6 +331,7 @@ and have **not** been run on their own platform: a row here says what was built,
 | **The AppImage's portability and the Flatpak's status are what the owner's run says.** The AppImage was built in a container and never started; the Flatpak is the last plan of the phase and ships only if it builds | no Linux desktop was available (plans 02.2-06, 02.2-08; [build-linux.md](build-linux.md)) | the owner's run of rows L6 and L10 |
 | **In the Flatpak the shell runs on the host and its panes track the directory only when the shell announces it (OSC 7).** The app asks for `--talk-name=org.freedesktop.Flatpak`, which removes the sandbox for it; the process in the sandbox is `flatpak-spawn`, whose own directory means nothing, so it is not looked up. Whether the host shell gets a controlling terminal (job control, `sudo`) is an assumption until row L10. **Unverified; if the Flatpak does not ship it is not part of 0.0.1** | a terminal in a sandbox sees none of the user's tools (plan 02.2-08; [flatpak.md](flatpak.md)) | `host-spawn` if L10 shows no job control; or moving Flatpak out of 0.0.1 |
 | **WebKitGTK may need a graphics workaround** (a blank or flickering window, mostly on NVIDIA). holzWave sets none by default | an unconditional override disables the fast path for everybody; owner decision of 2026-10-12: none until a failure is reproduced on hardware ([build-linux.md](build-linux.md)) | a follow-up plan if row L2 finds one |
+| **The on-device model row and the group `On device` exist only on macOS 26 or later with Apple Intelligence**; nothing of them is drawn on Windows and Linux | Apple's model exists only there and the bridge to it is not compiled elsewhere; the chat picker and the providers dialog look the same on every platform otherwise (6.21) | none planned |
 
 ### 6.9 Sync
 
@@ -410,7 +412,9 @@ status line and the composer.
 - **Picker.** A radio group under the bar, flat and hairline (a bottom sheet at 640 px and narrower). One row per
   profile: `●` or `○`, the name, the model and the host. The chosen row has the rose wash and a 2 px rose bar on its left
   and `aria-checked`. The arrows move and choose; `Enter`, `Space` and `Escape` close it. With two or more profiles and
-  no pin or choice nothing is sent: the first send opens the picker and says `Choose a provider first.`
+  no pin or choice nothing is sent: the first send opens the picker and says `Choose a provider first.` On a Mac whose
+  on-device model can answer, the list ends with one more row, `Apple on-device` and `system`, with no host (6.21); when
+  it cannot answer the row is not drawn and the reason is in the providers dialog.
 - **Transcript.** `role="log"`, not live, focusable, and a text field of the page (it keeps its own keys). Each message
   has a label row (`YOU`, `ASSISTANT`, in the `.label` style) and its text in Manrope 13 px, line height 1.55. A user
   message has a 2 px hairline bar on its left. The assistant text is Markdown once the message is finished and plain
@@ -427,7 +431,9 @@ status line and the composer.
   approval card sits above the context card.
 - **Status line.** One line, `role="status"`: `working`, `thinking`, `writing`, `waiting for your decision`, `stopping`, a refused send in the core's
   words, a hint of the page (dim, for example that sharing ended because the provider changed), and after a turn
-  `reply finished`, `reply stopped` or `reply failed`. It clears when the user types.
+  `reply finished`, `reply stopped` or `reply failed`. A chat that is pinned to the on-device model while it cannot answer
+  says `Apple on-device is not available. Choose another provider, or see the provider settings for the reason.` in the
+  danger colour with the mark `!` (6.21). It clears when the user types.
 - **Composer.** A multi-line field (1 to 8 rows, in the chat text face) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
   that becomes `Stop` (hairline) while a turn runs. Below the field, left: the button `Context…` (6.14; it reads
   `Context · 1 item` while an offer is attached), then `≈ 12 tokens` (UTF-8 bytes divided by 3, rounded up, the rule of
@@ -485,7 +491,10 @@ to where it came from: the composer of the chat, else the terminal.
 **Box.** The box of the Settings dialog (a floating layer: hairline, 8 px radius, the one shadow), 40 rem wide, scrolling
 inside. From the top: the title `AI providers`; the status line (`role="status"`, one line: `Saved.`, `Removed.`,
 `Allowed.`, `Saving…`, or a refusal in words in the warn colour); the notes of the core about its provider file, only
-when it sent any; three groups separated by hairlines, each a fieldset under a `.label` legend; then the button `Close`.
+when it sent any; three groups separated by hairlines, each a fieldset under a `.label` legend, and on a Mac a fourth,
+`On device`, between Privacy and Providers (6.21); then the button `Close`. The order is title, status line, notes,
+Privacy, On device (macOS only), Providers, Provider, buttons. The group `On device` is read-only: it says whether the
+system model can answer and why not, and it has no switch.
 While it is open it takes the keys: nothing reaches the terminal, `Tab` stays inside, the arrows move inside a radio
 group, `Enter` in a text field saves and `Escape` closes.
 
@@ -1295,3 +1304,62 @@ high and the text is at least 16 px.
 **Accessibility.** The card is an `alertdialog` named by its title, the prompt and the findings are text, the place chip says
 where the request goes in words, hairlines are `--hw-line` so `contrast-high` holds (`--hw-ink-3` on the card), nothing moves,
 and under forced colours the card and its focus ring use system colours; the keyboard focus ring is 2 px.
+
+### 6.21 On-device model
+
+On a Mac, the system's on-device language model can answer a chat. It is one provider with the fixed id `apple` and the
+fixed model `system`; there is nothing to set up: no key, no address, no model name and no type. Its name in every place is
+`Apple on-device`. It exists only on macOS 26 or later with Apple Intelligence switched on. Everywhere else it is not
+drawn, and on Windows and Linux neither the row nor the group exists at all (section 7).
+
+**Where it appears.**
+
+1. The provider picker of the chat (6.12) has one more row, last, `Apple on-device` and `system`, with no host. It is there
+   only when the shell reports the model as available; it is absent, not disabled, when it is not.
+2. The providers dialog (6.13) has the group `On device` between Privacy and Providers on a Mac, always, so the reason is
+   visible when the row is absent from the picker.
+3. The bar of the chat names it like any provider, `Apple on-device · system`, with no arrow and no host. After a turn the
+   place chip says `on device`. That word is the core's own and is shown only after a turn, never guessed.
+
+**The group `On device`.** One read-only row. It is not a radio, because there is nothing to choose or edit: the name
+`Apple on-device`, the dim meta `system model`, then the state. When the model is available the state is the word
+`available` in the ok colour and the line below it is `The model runs on this Mac.` When it is not, the state is the reason
+in words in the warn colour, underlined, with the mark `!` before it; one sentence of advice stands below it, and a hairline
+button `Check again` reads the list once more. There is no polling: the button is the only way to look again, and the status
+line of the dialog says `Checked.` when it has. The words come from two tables of the page, one keyed by the state word and
+one by the advice word; the page never shows a word of the shell as it is, and a word that is in no table reads as `other`
+(reason) and `unknown` (advice).
+
+| State word | Reason | Advice word | Advice | Tone and second cue |
+|---|---|---|---|---|
+| `available` | available | `none` | The model runs on this Mac. | ok; the word |
+| `apple_intelligence_not_enabled` | Apple Intelligence is switched off. | `enable_apple_intelligence` | Turn it on in System Settings, then choose Check again. | warn; words, underline, `!` |
+| `device_not_eligible` | This Mac cannot run Apple Intelligence. | `not_supported` | Choose another provider. | warn; words, underline, `!` |
+| `model_not_ready` | The model is not ready yet. | `wait_for_model` | It may still be downloading. Try again in a few minutes. | warn; words, underline, `!` |
+| `os_too_old` | This needs macOS 26 or later. | `update_macos` | Update macOS, then choose Check again. | warn; words, underline, `!` |
+| `sdk_lacks_framework` | This build of holzWave was made without Apple's model framework. | `not_in_this_build` | Use a build made with Xcode 26 or later. | warn; words, underline, `!` |
+| `other` | The on-device model is not available. | `unknown` | The reason is not known. Check again later. | warn; words, underline, `!` |
+
+The shell registers the provider only for the exact state word `available`. A word with another case, a trailing blank or
+a name nobody knows never registers it and never makes the row selectable. The state is asked only when a person acts: when
+the list of providers is read, when a send or a context call names the model, and when a `wsh ai` request needs a provider.
+There is no timer and nothing is asked at launch. A model that was available and then is not refuses the next turn by itself.
+
+**Asks first.** The model runs on this computer, so it is covered by the choice `Models on this computer` of 6.13: it asks
+before it sees terminal text unless the person switched that off. It declares no tools, so a chat with it can only talk.
+
+**No fallback.** When a chat is pinned to the model and the model is not available, a send does nothing but say `Apple
+on-device is not available. Choose another provider, or see the provider settings for the reason.` in the status line,
+open the picker when another provider exists, and keep the draft. No other provider is used and no id is replaced. A send
+that lost the race with a state change is shown as the core's refusal and goes nowhere else.
+
+**Narrow screens (640 px and narrower).** The picker row and the group follow the sheet and 44 px rules of 6.12 and 6.13.
+There is no phone drawing, because the model exists only on macOS.
+
+**Accessibility.** The group is a `role="group"` labelled by its legend. The state word carries `data-state` and
+`data-tone`. `Check again` has a visible label and the 2 px focus ring; when the state turns available while the button has
+the focus, the keyboard moves to the row of the group. Hairlines use `--hw-line`, so `contrast-high` holds; under forced
+colours the row gets a system-colour outline. Nothing moves.
+
+**Not drawn.** A model list, a download button, a switch for Apple Intelligence and a link into System Settings: holzWave
+cannot switch the model on, and says where the person can.

@@ -7123,6 +7123,7 @@ mod protocol {
 
     use serde_json::{Value, json};
 
+    use crate::ai_device::{DeviceState, DeviceView};
     use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
     use crate::commands::{
         CopyMotionMsg, CopyOpMsg, CopyStateMsg, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg, SearchOpMsg,
@@ -7527,6 +7528,15 @@ mod protocol {
                             disclosure: None,
                         }],
                         notes: Vec::new(),
+                        on_device: None,
+                    }),
+                    "profiles_on_device": to_value(&AiProfiles {
+                        profiles: Vec::new(),
+                        notes: Vec::new(),
+                        on_device: Some(DeviceView::of(DeviceState {
+                            state: "apple_intelligence_not_enabled",
+                            advice: "enable_apple_intelligence",
+                        })),
                     }),
                     "removal": to_value(&RemovalView::from(Removal { removed: true, key_deleted: true })),
                     "context_state": to_value(&ContextState {

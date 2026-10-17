@@ -8,6 +8,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ use holzwave_core::textread::TextRegion;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ai_ask::ShellAskNotify;
+use crate::ai_device::{DEVICE_ID, DEVICE_MODEL, DeviceSource, DeviceState, DeviceView, fill_model};
 use crate::ai_tools::{CoreTargets, ShellTools};
 use crate::ai_write::UndoFault;
 use crate::state::{AppCore, Out, Sink, Target};
@@ -241,11 +243,14 @@ pub struct ConversationList {
 }
 
 /// The profiles as the settings dialog shows them: a status for each key and never a key, and what loading `ai.json`
-/// had to say.
+/// had to say. On a Mac the answer also carries `on_device`, what the system model said when it was asked; the member is
+/// left out when the shell has no such model, so the answer of another platform is exactly what it was.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AiProfiles {
     pub profiles: Vec<ProfileView>,
     pub notes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_device: Option<DeviceView>,
 }
 
 /// What removing a profile did: whether the profile is gone, and whether no key of it is left in the keychain. The
@@ -327,6 +332,11 @@ pub struct AiHost {
     asks: Arc<Asks>,
     /// Tells the window of a pane that a request waits; bound to the core once it exists.
     notify: Arc<ShellAskNotify>,
+    /// Where the on-device model comes from; set once at start, never on a platform that has none.
+    device: OnceLock<Arc<dyn DeviceSource>>,
+    /// The provider of the on-device model is registered. It is registered once, the first time a person acts and the model
+    /// answers `available`, because the registry has no way to take a provider out again.
+    device_registered: AtomicBool,
 }
 
 impl AiHost {
@@ -349,7 +359,15 @@ impl AiHost {
         if let Some(clock) = parts.clock {
             builder = builder.clock(clock);
         }
-        AiHost { service: builder.build(), context, tools, asks, notify }
+        AiHost {
+            service: builder.build(),
+            context,
+            tools,
+            asks,
+            notify,
+            device: OnceLock::new(),
+            device_registered: AtomicBool::new(false),
+        }
     }
 
     /// Gives the source of shared content and the host of the tools the core they read panes and files through. Held
@@ -378,7 +396,72 @@ impl AiHost {
     /// Registers a provider that does not come from a profile (the on-device model).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn register_provider(&self, id: &str, provider: Arc<dyn Provider>) -> Result<(), AiFault> {
-        self.service.register_provider(id, provider).map_err(|e| AiFault::from_service(&e))
+        self.service.register_provider(id, provider).map_err(|e| AiFault::from_service(&e))?;
+        if id == DEVICE_ID {
+            self.device_registered.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Gives the host the source of the on-device model. Set once, at start; answers whether it was taken. Nothing is
+    /// asked of the source here: the model is looked at only when a person acts (the list of providers, a send or a
+    /// context call that names it, a request of `wsh ai`).
+    pub(crate) fn use_device(&self, source: Arc<dyn DeviceSource>) -> bool {
+        self.device.set(source).is_ok()
+    }
+
+    /// One look at the on-device model: asks the source, registers the provider when the word is exactly `available`, and
+    /// answers what the source said. None when the host has no source.
+    fn device_view(&self) -> Option<DeviceView> {
+        let source = self.device.get()?;
+        let state = source.probe();
+        self.register_device(source.as_ref(), &state);
+        Some(DeviceView::of(state))
+    }
+
+    /// Registers the provider of the on-device model once, and only for the state `available`. The flag changes from false
+    /// to true in one step, so two threads that look at the same time build the provider once; no lock is held while the
+    /// source builds it or the service takes it. A provider that is registered also becomes the candidate of the ask desk.
+    fn register_device(&self, source: &dyn DeviceSource, state: &DeviceState) {
+        if !state.is_available() {
+            return;
+        }
+        if self.device_registered.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return;
+        }
+        match self.service.register_provider(DEVICE_ID, source.provider()) {
+            Ok(()) => self.asks.add_candidate(DEVICE_ID, DEVICE_MODEL),
+            // Somebody else holds the id: leave the flag set, there is nothing more to do for it.
+            Err(error) if error.code() == "id_taken" => {}
+            // The registration did not happen: the next look may try again.
+            Err(_) => self.device_registered.store(false, Ordering::SeqCst),
+        }
+    }
+
+    /// Looks at the on-device model before a call that names it, unless its provider is already registered (the provider
+    /// asks again on every turn). A call that names another profile, or none, looks at nothing.
+    fn device_ready(&self, profile: Option<&str>) {
+        if profile == Some(DEVICE_ID) && !self.device_registered.load(Ordering::SeqCst) {
+            let _ = self.device_view();
+        }
+    }
+
+    /// The refusal of a send that names the on-device model while no provider is registered under its id. The core would
+    /// accept such a send and end the turn as failed; the shell refuses it before anything is stored, with the core's fixed
+    /// phrase for a send that has no provider. The send goes nowhere else.
+    fn device_gate(&self, profile: Option<&str>) -> Result<(), AiFault> {
+        if profile == Some(DEVICE_ID) && !self.device_registered.load(Ordering::SeqCst) {
+            return Err(AiFault::from_service(&ServiceError::NoProfile));
+        }
+        Ok(())
+    }
+
+    /// Looks at the on-device model before a request of `wsh ai` is routed, so that it counts as a provider that is set up
+    /// when it is the only one. It looks at nothing when the host has no source or the provider is already registered.
+    pub(crate) fn device_ready_for_ask(&self) {
+        if !self.device_registered.load(Ordering::SeqCst) {
+            let _ = self.device_view();
+        }
     }
 
     /// Starts a turn for the typed `text` and returns at once. A blank `profile` or `model` is not given: the chat's
@@ -391,6 +474,9 @@ impl AiHost {
         profile: Option<String>,
         model: Option<String>,
     ) -> Result<TicketView, AiFault> {
+        self.device_ready(profile.as_deref());
+        self.device_gate(profile.as_deref())?;
+        let model = fill_model(profile.as_deref(), model);
         let request = request_of(conversation, text, pane, profile, model)?;
         self.service.send(request).map(TicketView::from).map_err(|e| AiFault::from_service(&e))
     }
@@ -408,6 +494,9 @@ impl AiHost {
         offer: String,
         picked: Vec<u32>,
     ) -> Result<TicketView, AiFault> {
+        self.device_ready(profile.as_deref());
+        self.device_gate(profile.as_deref())?;
+        let model = fill_model(profile.as_deref(), model);
         let offer = OfferId::parse(&offer).ok_or_else(|| context_fault(ContextRefusal::StaleOffer))?;
         let request = request_of(conversation, text, pane, profile, model)?.offer(offer, picked);
         self.service.send(request).map(TicketView::from).map_err(|e| AiFault::from_service(&e))
@@ -422,6 +511,8 @@ impl AiHost {
         profile: Option<String>,
         model: Option<String>,
     ) -> Result<ContextState, AiFault> {
+        self.device_ready(profile.as_deref());
+        let model = fill_model(profile.as_deref(), model);
         let id = parse_conversation(conversation)?;
         let (profile, model) = (given(profile), given(model));
         self.service
@@ -438,6 +529,8 @@ impl AiHost {
         model: Option<String>,
         shared: bool,
     ) -> Result<ContextState, AiFault> {
+        self.device_ready(profile.as_deref());
+        let model = fill_model(profile.as_deref(), model);
         let id = parse_conversation(conversation)?;
         let (profile, model) = (given(profile), given(model));
         self.service
@@ -454,6 +547,8 @@ impl AiHost {
         model: Option<String>,
         kinds: Vec<ContextKind>,
     ) -> Result<OfferView, AiFault> {
+        self.device_ready(profile.as_deref());
+        let model = fill_model(profile.as_deref(), model);
         let id = parse_conversation(conversation)?;
         let (profile, model) = (given(profile), given(model));
         self.service
@@ -503,7 +598,7 @@ impl AiHost {
 
     /// The profiles with the status of their keys. This reads the keychain, so call it when the dialog opens.
     pub fn profiles(&self) -> AiProfiles {
-        AiProfiles { profiles: self.service.profiles(), notes: self.service.config_notes() }
+        AiProfiles { profiles: self.service.profiles(), notes: self.service.config_notes(), on_device: self.device_view() }
     }
 
     /// Makes a profile or changes one. Answers its id.
@@ -3560,5 +3655,346 @@ mod tests {
         core.ai().conversation_delete(&chat).expect("deleted");
         let gone = core.ai_undo(&chat, "call_2").expect_err("forgotten");
         assert_eq!((gone.code, gone.reason), ("undo", Some("unknown_change")));
+    }
+
+    // ---- the on-device model ------------------------------------------------------------------------------------------
+
+    use crate::ai_device::ScriptedDevice;
+
+    /// A core over `dir` with a scripted on-device source in `state`.
+    fn core_with_device(
+        dir: &Path,
+        state: &'static str,
+        advice: &'static str,
+    ) -> (Arc<AppCore>, Arc<AiRecorder>, Arc<ScriptedDevice>) {
+        let (core, rec) = core_with(dir, KeyVault::unavailable());
+        let device = Arc::new(ScriptedDevice::new(state, advice));
+        assert!(core.ai().use_device(device.clone()), "the source is taken");
+        (core, rec, device)
+    }
+
+    /// The `turn_started` event of `chat` as the page receives it.
+    fn started_of(rec: &AiRecorder, chat: &str) -> Value {
+        event_of(rec, chat, "turn_started")
+    }
+
+    #[test]
+    fn the_device_row_follows_the_injected_state_and_the_provider_registers_only_when_available() {
+        let scratch = Scratch::new("device-tracer");
+        let (core, rec, device) = core_with_device(&scratch.0, "apple_intelligence_not_enabled", "enable_apple_intelligence");
+        assert!(!core.ai().use_device(device.clone()), "the source is set once");
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        // A model that cannot answer is reported with its advice, registers nothing and is refused before any provider runs.
+        let answer = json_of(&core.ai().profiles());
+        assert_eq!(
+            answer["on_device"],
+            json!({
+                "advice": "enable_apple_intelligence",
+                "id": "apple",
+                "model": "system",
+                "state": "apple_intelligence_not_enabled"
+            })
+        );
+        assert_eq!(device.provider_calls(), 0);
+        let refused = core.ai_send(&chat, "hi".to_owned(), pane, Some("apple".to_owned()), None).expect_err("refused");
+        assert_eq!(refused.code, "no_profile");
+        assert_eq!(refused.text, "no provider is chosen for this chat");
+        assert_eq!(device.scripted().calls(), 0, "the stand-in saw no request");
+        assert!(rec.ai_events().iter().all(|(_, p)| p.0.conversation != chat), "no event for the chat");
+
+        // The exact word registers the provider once, and the same send now goes through it.
+        device.set("available", "none");
+        let answer = json_of(&core.ai().profiles());
+        assert_eq!(answer["on_device"]["state"], json!("available"));
+        assert_eq!(answer["on_device"]["advice"], json!("none"));
+        assert_eq!(device.provider_calls(), 1);
+        core.ai_send(&chat, "hi".to_owned(), pane, Some("apple".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        let started = started_of(&rec, &chat);
+        assert_eq!(
+            started["route"],
+            json!({"profile": "apple", "model": "system", "host": null, "locality": "on_device"})
+        );
+        let requests = device.scripted().requests();
+        assert_eq!(requests.len(), 1, "the stand-in saw exactly one request");
+        assert_eq!(requests[0].model, "system");
+        let snapshot = json_of(&core.ai().snapshot(&chat).expect("a snapshot"));
+        assert!(snapshot.to_string().contains("Hello from the device"), "the reply is in the chat");
+        assert_eq!(snapshot["messages"].as_array().and_then(|m| m.last()).map(|m| m["role"].clone()), Some(json!("assistant")));
+
+        // A further look does not build the provider again, and the id is taken.
+        core.ai().profiles();
+        assert_eq!(device.provider_calls(), 1);
+        let taken = core
+            .ai()
+            .service()
+            .register_provider("apple", Arc::new(scripted("apple", Locality::OnDevice)))
+            .expect_err("the id is taken");
+        assert_eq!(taken.code(), "id_taken");
+
+        // A model that goes away is reported, and the provider stays: it refuses by itself on its next turn.
+        device.set("model_not_ready", "wait_for_model");
+        let answer = json_of(&core.ai().profiles());
+        assert_eq!(answer["on_device"]["state"], json!("model_not_ready"));
+        assert_eq!(answer["on_device"]["advice"], json!("wait_for_model"));
+        assert_eq!(device.provider_calls(), 1);
+        assert_eq!(
+            core.ai().service().register_provider("apple", Arc::new(scripted("apple", Locality::OnDevice))).expect_err("kept").code(),
+            "id_taken"
+        );
+    }
+
+    #[test]
+    fn building_the_core_and_every_idle_call_never_probe_the_device() {
+        let scratch = Scratch::new("device-idle");
+        let (core, rec, device) = core_with_device(&scratch.0, "available", "none");
+        assert_eq!(device.probes(), 0, "building the core and taking the source probe nothing");
+        let other = register(&core, "other", scripted("other", Locality::OnDevice).with_turn(Script::reply("fine")));
+        let pane = pane_of(&core);
+
+        let chat = core.ai().conversation_new().expect("a chat id");
+        core.ai().conversation_list().expect("a list");
+        let _ = core.ai().snapshot(&chat);
+        core.ai().cancel(&chat).expect("a cancel");
+        core.ai().chat_closed(&chat);
+        core.ai().apply_settings(&Settings::default());
+        core.ai().pane_closed(9999);
+        assert_eq!(core.ai().has_key("unknown", KeySlot::Provider).is_err(), true);
+        core.ai_send(&chat, "hello".to_owned(), pane, Some("other".to_owned()), None).expect("a send for another provider");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        core.ai_context_state(&chat, pane, Some("other".to_owned()), None).expect("a context call for another provider");
+        core.ai_context_state(&chat, pane, None, None).ok();
+        assert_eq!(other.calls(), 1);
+        assert_eq!(device.probes(), 0, "no idle call probes");
+        assert_eq!(device.provider_calls(), 0, "and none builds the provider");
+
+        core.ai().profiles();
+        assert_eq!(device.probes(), 1, "one read of the list is one look");
+    }
+
+    #[test]
+    fn a_state_other_than_the_exact_word_available_never_registers_the_device() {
+        let scratch = Scratch::new("device-words");
+        let (core, _rec, device) = core_with_device(&scratch.0, "other", "unknown");
+        let chat = new_chat();
+        let pane = pane_of(&core);
+        let words: [&'static str; 14] = [
+            "Available",
+            "available ",
+            " available",
+            "availab1e",
+            "",
+            "ready",
+            "unknown_state",
+            "apple_intelligence_not_enabled",
+            "device_not_eligible",
+            "model_not_ready",
+            "other",
+            "os_too_old",
+            "sdk_lacks_framework",
+            "unsupported_platform",
+        ];
+        for word in words {
+            device.set(word, "none");
+            let answer = json_of(&core.ai().profiles());
+            assert_eq!(answer["on_device"]["state"], json!(word), "the word is reported as it was given");
+            assert_eq!(device.provider_calls(), 0, "{word:?} registered the provider");
+            let refused = core.ai_send(&chat, "hi".to_owned(), pane, Some("apple".to_owned()), None).expect_err("refused");
+            assert_eq!(refused.code, "no_profile", "{word:?}");
+        }
+        assert_eq!(device.scripted().calls(), 0);
+        assert_eq!(device.provider_calls(), 0);
+        device.set("available", "none");
+        core.ai().profiles();
+        assert_eq!(device.provider_calls(), 1, "only the exact word registers");
+    }
+
+    #[test]
+    fn every_call_that_names_the_device_looks_at_it_first() {
+        type Call = fn(&AiHost, &str, PaneId, Option<String>);
+        let pane = |core: &AppCore| pane_of(core);
+        let calls: [(&str, Call); 5] = [
+            ("send", |host, chat, pane, profile| {
+                let _ = host.send(chat, "hi".to_owned(), pane, profile, None);
+            }),
+            ("send_with_offer", |host, chat, pane, profile| {
+                let _ = host.send_with_offer(chat, "hi".to_owned(), pane, profile, None, "a".repeat(32), vec![1]);
+            }),
+            ("context_state", |host, chat, pane, profile| {
+                let _ = host.context_state(chat, pane, profile, None);
+            }),
+            ("context_share", |host, chat, pane, profile| {
+                let _ = host.context_share(chat, pane, profile, None, true);
+            }),
+            ("context_preview", |host, chat, pane, profile| {
+                let _ = host.context_preview(chat, pane, profile, None, vec![ContextKind::Screen]);
+            }),
+        ];
+        for (name, call) in calls {
+            let scratch = Scratch::new("device-looks");
+            let (core, _rec, device) = core_with_device(&scratch.0, "model_not_ready", "wait_for_model");
+            let chat = new_chat();
+            let pane = pane(&core);
+            let host = core.ai();
+
+            // A call that names another profile, or none, looks at nothing.
+            call(host, &chat, pane, Some("other".to_owned()));
+            call(host, &chat, pane, None);
+            assert_eq!(device.probes(), 0, "{name}: another profile or none is no look");
+
+            // A call that names the device looks once, and the provider is registered when the word is `available`.
+            call(host, &chat, pane, Some("apple".to_owned()));
+            assert_eq!((device.probes(), device.provider_calls()), (1, 0), "{name}: the first look");
+            device.set("available", "none");
+            call(host, &chat, pane, Some("apple".to_owned()));
+            assert_eq!((device.probes(), device.provider_calls()), (2, 1), "{name}: the second look registers");
+            // Registered: no more looks, the provider asks again by itself.
+            call(host, &chat, pane, Some("apple".to_owned()));
+            assert_eq!(device.probes(), 2, "{name}: a registered provider is not looked at again");
+        }
+
+        // The model that reaches the service for the device is `system` when the caller gave none.
+        let scratch = Scratch::new("device-model");
+        let (core, rec, device) = core_with_device(&scratch.0, "available", "none");
+        let chat = new_chat();
+        let pane = pane_of(&core);
+        let state = core.ai().context_state(&chat, pane, Some("apple".to_owned()), None).expect("a state");
+        assert_eq!((state.profile.as_str(), state.model.as_str()), ("apple", "system"));
+        core.ai().send(&chat, "hi".to_owned(), pane, Some("apple".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)));
+        assert_eq!(device.scripted().requests()[0].model, "system");
+    }
+
+    #[test]
+    fn the_device_route_asks_like_a_local_model_and_declares_no_tools() {
+        let scratch = Scratch::new("device-route");
+        let (core, rec) = core_with_script(&scratch.0, "sleep 30");
+        let device = Arc::new(ScriptedDevice::new("available", "none"));
+        assert!(core.ai().use_device(device.clone()));
+        let control = register(
+            &core,
+            "control",
+            ScriptedProvider::new("control")
+                .with_capabilities(Capabilities { tools: true, ..Capabilities::conservative(Locality::OnDevice) })
+                .with_turn(Script::reply("fine")),
+        );
+        let pane = pane_of(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+        let chat = new_chat();
+
+        // The default of `ai_local_context` asks first for a model on this computer.
+        let state = core.ai_context_state(&chat, pane, Some("apple".to_owned()), None).expect("a state");
+        assert!(state.required, "the device asks first by default");
+        assert_eq!(state.locality, Locality::OnDevice);
+        assert_eq!(json_of(&state)["locality"], json!("on_device"));
+
+        // A chat on a terminal pane gets no tools from the device and gets them from a control model that declares them.
+        core.ai_send(&chat, "hello".to_owned(), pane, Some("apple".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        let first = device.scripted().requests();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].tools.is_empty(), "the device declares no tools: {:?}", first[0].tools);
+        let other = new_chat();
+        core.ai_send(&other, "hello".to_owned(), pane, Some("control".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&other)), "the control turn ends");
+        assert!(!control.requests()[0].tools.is_empty(), "a model that declares tools gets them on the same pane");
+    }
+
+    /// A sink for the stream handler without a socket.
+    #[derive(Default)]
+    struct AskCollect {
+        texts: Vec<String>,
+        notes: Vec<String>,
+    }
+
+    impl holzwave_ipc::Sink for AskCollect {
+        fn text(&mut self, text: &str) -> std::io::Result<()> {
+            self.texts.push(text.to_owned());
+            Ok(())
+        }
+
+        fn note(&mut self, text: &str) -> std::io::Result<()> {
+            self.notes.push(text.to_owned());
+            Ok(())
+        }
+    }
+
+    /// The requests of `wsh ai` the page was told about.
+    fn ask_events(rec: &AiRecorder) -> Vec<holzwave_core::ai::service::AskEvent> {
+        rec.all()
+            .into_iter()
+            .filter_map(|(_, out)| match out {
+                Out::AiAsk(event) => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_ask_finds_the_device_when_it_is_the_only_provider() {
+        use holzwave_core::ai::service::AskEvent;
+
+        // Not available: the ask ends at once with the desk's own sentence, nothing is registered, no card is shown.
+        let scratch = Scratch::new("device-ask-off");
+        let (core, rec, device) = core_with_device(&scratch.0, "apple_intelligence_not_enabled", "enable_apple_intelligence");
+        let pane = pane_of(&core);
+        let (gone, mut out) = (holzwave_ipc::Gone::new(), AskCollect::default());
+        let ended = core.ai_ask(Some(pane), "what is this".to_owned(), String::new(), &gone, &mut out);
+        assert_eq!(ended, Err(AskFault::NoProvider.to_string()));
+        assert_eq!(device.provider_calls(), 0);
+        assert_eq!(device.probes(), 1, "the ask looked once");
+        assert!(ask_events(&rec).is_empty(), "no card was shown");
+        assert!(out.texts.is_empty());
+
+        // Available: the look registers the provider and the candidate, and the ask waits for the person.
+        let scratch = Scratch::new("device-ask-on");
+        let (core, rec, device) = core_with_device(&scratch.0, "available", "none");
+        let pane = pane_of(&core);
+        core.ai().device_ready_for_ask();
+        assert_eq!((device.probes(), device.provider_calls()), (1, 1));
+        core.ai().device_ready_for_ask();
+        assert_eq!(device.probes(), 1, "a registered provider is not looked at again");
+        let asking = core.clone();
+        let worker = std::thread::spawn(move || {
+            let (gone, mut out) = (holzwave_ipc::Gone::new(), AskCollect::default());
+            let ended = asking.ai_ask(Some(pane), "what is this".to_owned(), String::new(), &gone, &mut out);
+            (ended, out.texts.concat())
+        });
+        assert!(wait_for(Duration::from_secs(5), || !ask_events(&rec).is_empty()), "the card is shown");
+        let view = match ask_events(&rec).remove(0) {
+            AskEvent::Waiting { view } => view,
+            other => panic!("the first event is a waiting card, not {other:?}"),
+        };
+        assert_eq!((view.profile.as_str(), view.model.as_str()), ("apple", "system"));
+        assert_eq!(view.pane, pane);
+
+        // Cancelling it ends it, and nothing reached the stand-in.
+        core.ai_ask_answer(&view.ask, "refuse", &view.seal).expect("the refusal is taken");
+        let (ended, text) = worker.join().expect("the ask ends");
+        assert!(ended.is_err(), "a refused ask ends with its sentence: {ended:?}");
+        assert!(text.is_empty());
+        assert_eq!(device.scripted().calls(), 0, "no request reached the stand-in");
+        assert_eq!(device.provider_calls(), 1, "the provider was built once");
+    }
+
+    #[test]
+    fn without_a_device_source_the_answer_has_no_device_member() {
+        let scratch = Scratch::new("device-none");
+        let (core, _rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        let answer = json_of(&core.ai().profiles());
+        let mut members: Vec<&str> = answer.as_object().expect("an object").keys().map(String::as_str).collect();
+        members.sort_unstable();
+        assert_eq!(members, ["notes", "profiles"]);
+        let refused = core.ai_send(&chat, "hi".to_owned(), pane, Some("apple".to_owned()), None).expect_err("refused");
+        assert_eq!(refused.code, "no_profile");
+        // Every look does nothing without a source.
+        core.ai().device_ready_for_ask();
+        assert!(core.ai().context_state(&chat, pane, Some("apple".to_owned()), None).is_err());
+        assert_eq!(json_of(&core.ai().profiles()).as_object().expect("an object").len(), 2);
     }
 }

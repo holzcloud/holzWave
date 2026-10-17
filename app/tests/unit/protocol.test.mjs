@@ -263,7 +263,7 @@ test("the answers and inputs of the ai commands are pinned", () => {
   const answers = golden.answers.ai;
   assert.deepEqual(
     keys(answers),
-    ["ask_fault", "ask_pending", "context_state", "conversations", "fault", "offer", "profiles", "removal", "ticket"],
+    ["ask_fault", "ask_pending", "context_state", "conversations", "fault", "offer", "profiles", "profiles_on_device", "removal", "ticket"],
   );
   // The cards a reloaded page asks for: the view of the event, one for each waiting request.
   assert.equal(answers.ask_pending.length, 1);
@@ -286,6 +286,13 @@ test("the answers and inputs of the ai commands are pinned", () => {
   }
   assert.ok(answers.conversations.notes.every((note) => typeof note === "string"));
   assert.deepEqual(keys(answers.profiles), ["notes", "profiles"]);
+  // The model of this Mac is one optional member of the same answer; an answer without it has exactly the two members above.
+  assert.deepEqual(keys(answers.profiles_on_device), ["notes", "on_device", "profiles"]);
+  assert.deepEqual(keys(answers.profiles_on_device.on_device), ["advice", "id", "model", "state"]);
+  assert.deepEqual(
+    [answers.profiles_on_device.on_device.id, answers.profiles_on_device.on_device.model],
+    ["apple", "system"],
+  );
   for (const profile of answers.profiles.profiles) {
     assert.deepEqual(keys(profile), [
       "allow_lan_http", "base_url", "disclosure", "gateway_key", "host", "id", "key", "model", "name", "preset", "wire",

@@ -5,9 +5,11 @@
 //
 // Nothing here decides where a request goes except `pickProfile`, and that one names only what the user chose, what the
 // chat is pinned to or the one saved profile. A place is told only by the four names the core's route carries
-// (`localityWord`); a name, a preset or an address is never read to guess one.
+// (`localityWord`); a name, a preset or an address is never read to guess one. The module imports types, `chatstate.js` and
+// `ondevice.js` (the fixed names of the on-device model).
 
 import type { ChatState, Route, Usage } from "./chatstate.js";
+import { DEVICE_ID, DEVICE_MODEL, DEVICE_NAME } from "./ondevice.js";
 
 /** The most profiles the page keeps from a list. */
 export const MAX_PROFILES = 64;
@@ -65,7 +67,7 @@ export function readProfiles(raw: unknown): ProfileChoice[] {
 }
 
 /** Why a profile was chosen for a send, or why none was. */
-export type PickVia = "choice" | "pin" | "only" | "ask" | "none" | "unknown";
+export type PickVia = "choice" | "pin" | "only" | "ask" | "none" | "unknown" | "device_off";
 
 /** The profile a send goes with, and how it was found. `id` is empty when no profile can be named. */
 export interface Pick {
@@ -78,13 +80,29 @@ export interface Pick {
  * is loaded yet), then the chat's pin (also when it is no profile: a registered provider is not one), then the only
  * saved profile. Two or more profiles and no choice means `ask`: nothing is sent until the user picks one. A loaded
  * empty list is `none`, no list at all is `unknown` (read it first). A profile is never guessed.
+ *
+ * The on-device model is the one provider that can vanish while a chat is pinned to it, and it is never replaced: its id
+ * counts only when the loaded list holds its row (a pick of it needs a loaded list, `unknown` until then). A pin of it that
+ * the loaded list lacks answers `device_off`, with no id, so the send says why and goes nowhere else; so does a choice of it
+ * that the list lacks, unless the chat is pinned to another provider.
  */
 export function pickProfile(profiles: readonly ProfileChoice[] | null, choice: string | null, pin: string | null): Pick {
-  if (choice !== null && choice !== "" && (profiles === null || profiles.some((p) => p.id === choice))) {
-    return { id: choice, via: "choice" };
+  const listed = (id: string): boolean => profiles !== null && profiles.some((p) => p.id === id);
+  if (choice !== null && choice !== "") {
+    if (choice === DEVICE_ID) {
+      if (listed(choice)) return { id: choice, via: "choice" };
+    } else if (profiles === null || listed(choice)) {
+      return { id: choice, via: "choice" };
+    }
   }
-  if (pin !== null && pin !== "") return { id: pin, via: "pin" };
+  if (pin !== null && pin !== "") {
+    if (pin !== DEVICE_ID) return { id: pin, via: "pin" };
+    if (profiles === null) return { id: "", via: "unknown" };
+    return listed(pin) ? { id: pin, via: "pin" } : { id: "", via: "device_off" };
+  }
   if (profiles === null) return { id: "", via: "unknown" };
+  // The window remembers a choice of the model that is gone: it is not turned into another provider.
+  if (choice === DEVICE_ID) return { id: "", via: "device_off" };
   const first = profiles[0];
   if (profiles.length === 0 || first === undefined) return { id: "", via: "none" };
   if (profiles.length === 1) return { id: first.id, via: "only" };
@@ -210,27 +228,35 @@ export function chipView(
 ): ChipView {
   const pick = pickProfile(profiles, choice, pin.profile);
   const count = profiles === null ? 0 : profiles.length;
-  const listed = pick.id === "" ? undefined : profiles?.find((p) => p.id === pick.id);
+  // A chat that is pinned to (or whose window chose) the on-device model names it while the list is not read yet and while
+  // the model is gone; the send is what says that it cannot go.
+  const named =
+    pick.id === "" && (pick.via === "unknown" || pick.via === "device_off") && (pin.profile === DEVICE_ID || choice === DEVICE_ID)
+      ? DEVICE_ID
+      : pick.id;
+  const gone = pick.via === "device_off" && count > 0;
+  const listed = named === "" ? undefined : profiles?.find((p) => p.id === named);
   let name = "";
   let model = "";
   let host = "";
   let where = "";
   let leaves = false;
-  if (pick.id !== "") {
-    const told = route !== null && route.profile === pick.id ? route : null;
-    name = listed !== undefined && listed.name !== "" ? listed.name : pick.id;
-    model = told !== null ? told.model : (listed?.model ?? (pin.profile === pick.id ? (pin.model ?? "") : ""));
+  if (named !== "") {
+    const told = route !== null && route.profile === named ? route : null;
+    name = listed !== undefined && listed.name !== "" ? listed.name : named === DEVICE_ID ? DEVICE_NAME : named;
+    model = told !== null ? told.model : (listed?.model ?? (pin.profile === named ? (pin.model ?? "") : ""));
+    if (model === "" && named === DEVICE_ID) model = DEVICE_MODEL;
     host = told !== null ? (told.host ?? "") : (listed?.host ?? "");
     if (told !== null) {
       where = localityWord(told.locality);
       leaves = leavesComputer(told.locality);
     }
   }
-  const button = count >= 2;
+  const button = count >= 2 || gone;
   if (pick.id === "" && profiles !== null && count === 0) {
-    return { kind: "none", name, model, host, where, leaves, text: "no provider set up", aria: "No provider is set up" };
+    return { kind: "none", name: "", model: "", host: "", where: "", leaves: false, text: "no provider set up", aria: "No provider is set up" };
   }
-  if (pick.id === "") {
+  if (pick.id === "" && !gone && named === "") {
     // Two or more profiles and none chosen (or the list is not read yet).
     const text = button ? "choose a provider" : "";
     const aria = button ? "Choose a provider. Nothing is sent until you choose one" : "";
@@ -239,6 +265,9 @@ export function chipView(
   const parts = [model === "" ? name : `${name} · ${model}`];
   if (host !== "") parts.push(`→ ${host}`);
   const text = parts.join(" ");
+  if (gone) {
+    return { kind: "button", name, model, host, where, leaves, text, aria: `${name} is not available. Choose another provider` };
+  }
   const aria = [
     `Sends to ${name}`,
     model === "" ? "" : `model ${model}`,

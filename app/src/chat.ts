@@ -42,6 +42,8 @@ import { IntentSlot } from "./inlinestate.js";
 import type { ChatIntent } from "./inlinestate.js";
 import { focusInput } from "./keyboard.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
+import { DEVICE_OFF, readDevice, withDevice } from "./ondevice.js";
+import type { DeviceView } from "./ondevice.js";
 import { paneLabel } from "./panehead.js";
 import { appendSafe } from "./safehtml.js";
 import { applyView } from "./scene.js";
@@ -104,8 +106,13 @@ interface Session {
   /** The route of the latest turn this window has seen start. */
   route: Route | null;
   routeTurn: number;
-  /** The profiles the core listed when the user last acted; null until it is read. */
+  /**
+   * The profiles the core listed when the user last acted; null until it is read. On a Mac whose on-device model can answer
+   * the list ends with its row, added from `device` and never made up.
+   */
   profiles: ProfileChoice[] | null;
+  /** What the core said about the on-device model in the same answer; null when it said nothing (no such model here). */
+  device: DeviceView | null;
   /** A read of the profile list is on its way. */
   loadingProfiles: Promise<void> | null;
   /** The profile the user chose for this chat. */
@@ -233,6 +240,7 @@ function sessionFor(conversation: string): Session {
       route: null,
       routeTurn: 0,
       profiles: null,
+      device: null,
       loadingProfiles: null,
       choice: lastChoice,
       draft: "",
@@ -377,12 +385,14 @@ async function fetchSnapshot(s: Session): Promise<void> {
  * provider without a reload.
  */
 function takeProfiles(raw: unknown, all: boolean, asking: Session | null): void {
-  const list = readProfiles(raw);
+  const device = readDevice(raw);
+  const list = withDevice(readProfiles(raw), device);
   // The providers whose address waits for the user's review: replaced by every answer, so the guard and the button follow.
   review = new Set(reviewIds(raw));
   const targets = all ? [...sessions.values()] : asking === null ? [] : [asking];
   for (const t of targets) {
     t.profiles = list;
+    t.device = device;
     // A saved model or address that changed is another route: the share ends and the next press asks again.
     t.consent?.check();
     schedule(t);
@@ -846,7 +856,7 @@ class Mounted implements ChatView {
       return;
     }
     const sentence = await this.beginContext([]);
-    if (sentence !== null) sayTo(s, sentence, sentence === REVIEW_FIRST ? "error" : "note");
+    if (sentence !== null) sayTo(s, sentence, sentence === REVIEW_FIRST || sentence === DEVICE_OFF ? "error" : "note");
   }
 
   /**
@@ -866,6 +876,10 @@ class Mounted implements ChatView {
         return faultText(e);
       }
       pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
+    }
+    if (pick.via === "device_off") {
+      await this.openPicker();
+      return DEVICE_OFF;
     }
     if (pick.via === "ask") {
       await this.openPicker();
@@ -1174,7 +1188,11 @@ class Mounted implements ChatView {
     else await this.openPicker();
   }
 
-  /** Open the picker under the bar; the list is read again, so a profile saved meanwhile is there. */
+  /**
+   * Open the picker under the bar; the list is read again, so a profile saved meanwhile is there. It opens for two rows or
+   * more, and for one when the chat is pinned to the on-device model that is gone: the one row is then the provider the
+   * person may choose instead.
+   */
   private async openPicker(): Promise<void> {
     const s = this.session;
     if (this.picker !== null) return;
@@ -1184,7 +1202,8 @@ class Mounted implements ChatView {
       this.say(faultText(e), "error");
       return;
     }
-    if (!this.alive || this.picker !== null || s.profiles === null || s.profiles.length < 2) return;
+    const least = pickProfile(s.profiles, s.choice, s.feed.state.profile).via === "device_off" ? 1 : 2;
+    if (!this.alive || this.picker !== null || s.profiles === null || s.profiles.length < least) return;
     const picker = el("div", "chat-picker");
     picker.setAttribute("role", "radiogroup");
     picker.setAttribute("aria-label", "Provider");
@@ -1341,6 +1360,13 @@ class Mounted implements ChatView {
           return;
         }
         pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
+      }
+      // A chat that is pinned to the on-device model while it cannot answer sends nothing: it says why, offers the other
+      // providers and keeps the draft. No other provider is used and no id is replaced.
+      if (pick.via === "device_off") {
+        this.say(DEVICE_OFF, "error");
+        await this.openPicker();
+        return;
       }
       if (pick.via === "ask") {
         this.say(CHOOSE_FIRST, "note");

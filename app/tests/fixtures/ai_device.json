@@ -1,0 +1,37 @@
+{
+  "id": "apple",
+  "model": "system",
+  "states": [
+    {
+      "advice": "none",
+      "state": "available"
+    },
+    {
+      "advice": "enable_apple_intelligence",
+      "state": "apple_intelligence_not_enabled"
+    },
+    {
+      "advice": "not_supported",
+      "state": "device_not_eligible"
+    },
+    {
+      "advice": "wait_for_model",
+      "state": "model_not_ready"
+    },
+    {
+      "advice": "unknown",
+      "state": "other"
+    },
+    {
+      "advice": "update_macos",
+      "state": "os_too_old"
+    },
+    {
+      "advice": "not_in_this_build",
+      "state": "sdk_lacks_framework"
+    }
+  ],
+  "unsent": [
+    "unsupported_platform"
+  ]
+}

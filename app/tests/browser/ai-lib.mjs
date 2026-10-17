@@ -74,14 +74,15 @@ export const VIEW_P1 = { ...VIEW, tabs: [{ title: "shell", active: true, focus: 
  * Open the page with the saved profiles `profiles`, the panes of `view` and the block layer of the core played by the
  * mock: `block_open` splits the focused pane to the right, focuses the new pane and lists its block in `pane_blocks`.
  * `blocks` are the blocks that exist at the start. `context` is members of `__MOCK__.ai.context` to set (`panes`,
- * `localContext`, `localOnly`, `ttl`, `persist`) before the page loads.
+ * `localContext`, `localOnly`, `ttl`, `persist`) before the page loads. `device` is the state of the Mac's on-device model, `{ state,
+ * advice }` (default: no such model, so the answer of `ai_profiles` has no `on_device` member).
  */
 export async function boot(
   page, url,
-  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {}, clock = false, ask = {} } = {},
+  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {}, clock = false, ask = {}, device = null } = {},
 ) {
   await page.addInitScript(
-    ([saved, shown, existing, chats, shared, frozen, asked]) => {
+    ([saved, shown, existing, chats, shared, frozen, asked, onDevice]) => {
       window.__MOCK__.reset();
       // A frozen clock: `Date.now` stands still and only `tickClock` moves it, so a window of the page that is measured in
       // milliseconds is the same on every machine. Off by default, so the other cases keep their page as it was.
@@ -96,6 +97,7 @@ export async function boot(
       Object.assign(window.__MOCK__.ai.context, shared);
       Object.assign(window.__MOCK__.ai.ask, asked);
       window.__MOCK__.ai.profiles = saved;
+      if (onDevice) window.__MOCK__.ai.setDevice(onDevice.state, onDevice.advice);
       for (const [id, partial] of Object.entries(chats)) window.__MOCK__.ai.setState(id, partial);
       window.__MOCK__.setView(shown);
       window.__BLOCKS = existing;
@@ -116,7 +118,7 @@ export async function boot(
         return window.__MOCK__.view();
       });
     },
-    [profiles, view, blocks, states, context, clock, ask],
+    [profiles, view, blocks, states, context, clock, ask, device],
   );
   // The settings of the core are played only when asked for, so the chat cases keep their page exactly as it was.
   if (settings) await settingsCore(page, typeof settings === "object" ? settings : {});
@@ -158,6 +160,11 @@ export async function setPrivacy(page, { localOnly, localContext } = {}) {
     },
     [localOnly, localContext],
   );
+}
+
+/** Change the state of the Mac's on-device model as the core will report it from now on (`null` removes the model). */
+export async function setDevice(page, state, advice) {
+  await page.evaluate(([s, a]) => window.__MOCK__.ai.setDevice(s, a), [state, advice]);
 }
 
 /** Click `✦ AI` and wait for the chat pane. */
