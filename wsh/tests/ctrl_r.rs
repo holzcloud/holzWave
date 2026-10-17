@@ -120,15 +120,23 @@ fn wsh_hist_open_with_an_argument_sends_nothing() {
 
 #[test]
 fn wsh_init_adds_the_binding_only_with_the_flag() {
-    for (shell, hook, binding) in [("bash", include_str!("../hooks/bash.sh"), include_str!("../hooks/bash-ctrl-r.sh"))] {
+    // The hook of each shell (none for PowerShell: holzWave starts its own) and the binding text.
+    let shells = [
+        ("bash", include_str!("../hooks/bash.sh"), include_str!("../hooks/bash-ctrl-r.sh")),
+        ("zsh", include_str!("../hooks/zsh.zsh"), include_str!("../hooks/zsh-ctrl-r.zsh")),
+        ("fish", include_str!("../hooks/fish.fish"), include_str!("../hooks/fish-ctrl-r.fish")),
+        ("powershell", "", include_str!("../hooks/powershell-ctrl-r.ps1")),
+    ];
+    for (shell, hook, binding) in shells {
         let plain = run_with(&["init", shell], None);
         assert_eq!((plain.status, plain.err.as_str()), (0, ""), "{shell}");
-        assert_eq!(plain.out, format!("{hook}\n"), "{shell}: the hook and the newline main prints after every message");
+        let expect_plain = if hook.is_empty() { String::new() } else { format!("{hook}\n") };
+        assert_eq!(plain.out, expect_plain, "{shell}: the hook and the newline main prints after every message (PowerShell: nothing)");
         let with_key = run_with(&["init", shell, "--ctrl-r"], None);
         assert_eq!((with_key.status, with_key.err.as_str()), (0, ""), "{shell}");
         assert!(with_key.out.len() > plain.out.len() && with_key.out.starts_with(hook), "{shell}");
         assert_eq!(with_key.out, format!("{hook}{binding}\n"), "{shell}");
-        assert!(with_key.out.contains("wsh hist open"), "{shell}");
+        assert!(with_key.out.contains("hist open"), "{shell}");
         let twice = run_with(&["init", shell, "--ctrl-r", "--ctrl-r"], None);
         assert_eq!(twice.status, 2, "{shell}");
         assert_eq!(twice.out, "", "{shell}");

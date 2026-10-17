@@ -24,7 +24,7 @@ use holzwave_ipc::{Cmd, Request, Response};
 mod ai;
 mod clean;
 
-const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | ai [--] <prompt>... | init <bash|zsh|fish> [--ctrl-r]";
+const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | ai [--] <prompt>... | init <bash|zsh|fish|powershell> [--ctrl-r]";
 
 /// The hooks that tell holzWave each command a shell ran and mark where its output starts and ends. They are files under
 /// `hooks/` so the shells and the tests can read the very text that `wsh init` prints. They run only inside a holzWave pane
@@ -36,6 +36,9 @@ const FISH: &str = include_str!("../hooks/fish.fish");
 /// The binding of Ctrl+R that `wsh init <shell> --ctrl-r` adds after the hook: a file under `hooks/` for each shell, so the
 /// shells and the tests read the text that `wsh init` prints. Nothing binds a key unless the user asks for it with the flag.
 const BASH_CTRL_R: &str = include_str!("../hooks/bash-ctrl-r.sh");
+const ZSH_CTRL_R: &str = include_str!("../hooks/zsh-ctrl-r.zsh");
+const FISH_CTRL_R: &str = include_str!("../hooks/fish-ctrl-r.fish");
+const POWERSHELL_CTRL_R: &str = include_str!("../hooks/powershell-ctrl-r.ps1");
 
 /// The hook of a shell, or `None`.
 fn hook(shell: &str) -> Option<&'static str> {
@@ -43,6 +46,8 @@ fn hook(shell: &str) -> Option<&'static str> {
         "bash" => Some(BASH),
         "zsh" => Some(ZSH),
         "fish" => Some(FISH),
+        // holzWave starts its own PowerShell hook in its panes, so there is nothing to install without the flag.
+        "powershell" => Some(""),
         _ => None,
     }
 }
@@ -51,6 +56,9 @@ fn hook(shell: &str) -> Option<&'static str> {
 fn ctrl_r(shell: &str) -> Option<&'static str> {
     match shell {
         "bash" => Some(BASH_CTRL_R),
+        "zsh" => Some(ZSH_CTRL_R),
+        "fish" => Some(FISH_CTRL_R),
+        "powershell" => Some(POWERSHELL_CTRL_R),
         _ => None,
     }
 }
@@ -235,7 +243,7 @@ mod tests {
 
     #[test]
     fn init_prints_the_hook_and_with_the_flag_the_binding_after_it() {
-        for shell in ["bash"] {
+        for shell in ["bash", "zsh", "fish", "powershell"] {
             let plain = init_text(&args(&[shell])).unwrap();
             assert_eq!(plain, hook(shell).unwrap(), "{shell}: without the flag nothing changes");
             let with_key = init_text(&args(&[shell, "--ctrl-r"])).unwrap();
@@ -251,7 +259,15 @@ mod tests {
 
     #[test]
     fn init_refuses_unknown_shells_flags_and_repeats() {
-        for bad in [&["tcsh"][..], &["bash", "--nope"], &["bash", "--ctrl-r", "--ctrl-r"], &[], &["tcsh", "--ctrl-r"], &["--ctrl-r"]] {
+        for bad in [
+            &["tcsh"][..],
+            &["bash", "--nope"],
+            &["bash", "--ctrl-r", "--ctrl-r"],
+            &[],
+            &["tcsh", "--ctrl-r"],
+            &["--ctrl-r"],
+            &["powershell", "--ctrl-r", "--ctrl-r"],
+        ] {
             assert_eq!(init_text(&args(bad)), Err(USAGE.to_owned()), "{bad:?}");
         }
     }
@@ -268,30 +284,61 @@ mod tests {
 
     #[test]
     fn every_binding_runs_only_inside_holzwave_and_asks_in_the_background() {
-        for shell in ["bash"] {
+        for shell in ["bash", "zsh", "fish", "powershell"] {
             let b = ctrl_r(shell).unwrap();
-            assert!(b.contains("HOLZWAVE_IPC") && b.contains("wsh hist open"), "{shell}");
-            assert!(b.contains("&"), "{shell}: the key never waits for wsh");
-            assert!(b.contains("__holzwave_ctrl_r") && b.contains("__holzwave_open_history"), "{shell}: a guard and the function");
+            assert!(b.contains("HOLZWAVE_IPC") && b.contains("hist open"), "{shell}");
+            if shell == "powershell" {
+                assert!(b.contains("CreateNoWindow") && b.contains("HolzwaveHistory"), "{shell}: started without a window");
+            } else {
+                assert!(b.contains("wsh hist open") && b.contains("&"), "{shell}: the key never waits for wsh");
+                assert!(b.contains("__holzwave_ctrl_r") && b.contains("__holzwave_open_history"), "{shell}: a guard and the function");
+            }
             assert!(b.ends_with('\n'), "{shell}: text added after it starts on a line of its own");
         }
     }
 
     #[test]
     fn no_binding_ends_the_rc_file_or_binds_another_key() {
-        for shell in ["bash"] {
+        // The one spelling of Ctrl+R in each shell's text; no other spelling of any key may appear.
+        for (shell, own) in [("bash", r"\C-r"), ("zsh", "^R"), ("fish", r"\cr"), ("powershell", "Ctrl+r")] {
             let b = ctrl_r(shell).unwrap();
             for line in b.lines() {
                 let word = line.trim_start();
                 let top = line.len() - word.len() <= 2;
                 assert!(!(top && (word.starts_with("return") || word.starts_with("exit"))), "{shell}: {line}: ends an rc file");
-                for bad in ["|| return", "|| exit", "or return", "or exit", "PS1=", "PROMPT_COMMAND", "PS0", "trap ", "READLINE_LINE"] {
+                for bad in ["|| return", "|| exit", "or return", "or exit", "PS1=", "PROMPT=", "PROMPT_COMMAND", "PS0", "trap ", "READLINE_LINE", "fish_prompt"] {
                     assert!(!line.contains(bad), "{shell}: {line}");
                 }
             }
-            let keys = b.matches(r"\C-").count();
-            assert!(keys > 0 && keys == b.matches(r"\C-r").count(), "{shell}: only Ctrl+R is bound");
+            for other in [r"\C-r", "^R", r"\cr", "Ctrl+r"] {
+                assert_eq!(b.contains(other), other == own, "{shell}: the key is spelled {own} and in no other way ({other})");
+            }
+            let keys = ["\\C-", "bindkey", "bind ", "-Chord"].iter().map(|k| b.matches(k).count()).sum::<usize>();
+            assert!(keys >= 1, "{shell}: a key is bound");
+            for line in b.lines().filter(|l| ["bind ", "bindkey ", "-Chord"].iter().any(|k| l.contains(k)) && !l.trim_start().starts_with('#')) {
+                assert!(line.contains(own), "{shell}: {line}: binds a key other than Ctrl+R");
+            }
         }
+    }
+
+    #[test]
+    fn the_powershell_binding_is_plain_ascii_and_never_evaluates_data() {
+        let b = ctrl_r("powershell").unwrap();
+        assert!(b.is_ascii(), "plain ASCII");
+        for bad in ["Invoke-Expression", "iex ", "http:", "https:"] {
+            assert!(!b.contains(bad), "{bad}");
+        }
+        assert!(!b.split_whitespace().any(|word| word.eq_ignore_ascii_case("-Command")), "no command string is built from data");
+        let handlers = b.lines().filter(|l| !l.trim_start().starts_with('#') && l.trim_start().starts_with("try { Set-PSReadLineKeyHandler -")).count();
+        assert_eq!(handlers, 2, "the plain and the vi insert call, each in its own try");
+        assert_eq!(b.matches("catch {}").count(), 3, "every call that can fail swallows its error");
+        assert!(!b.contains("PSConsoleReadLine") && !b.contains("Replace("), "the line buffer is not touched");
+    }
+
+    #[test]
+    fn init_powershell_without_the_flag_prints_nothing() {
+        assert_eq!(init_text(&args(&["powershell"])), Ok(String::new()));
+        assert_eq!(init_text(&args(&["powershell", "--ctrl-r"])).unwrap(), POWERSHELL_CTRL_R);
     }
 
     #[test]
