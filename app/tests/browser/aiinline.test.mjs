@@ -53,6 +53,7 @@ async function traceCase(page, url) {
   assert.deepEqual(await aiCalls(page), [], "no chat command before the action runs");
 
   assert.deepEqual(await paletteRows(page, "explain"), [{ title: "Explain error", section: "ai", chord: "Cmd+Shift+Y" }]);
+  assert.deepEqual(await paletteRows(page, "command from"), [{ title: "Command from description", section: "ai", chord: "Cmd+Shift+G" }]);
   assert.deepEqual(await aiCalls(page), [], "listing the actions asks nothing");
 
   await page.keyboard.press("Meta+Shift+y");
@@ -185,7 +186,7 @@ function goldenRows() {
 
 async function contractCase(page, url) {
   const rows = goldenRows();
-  const wanted = ["ai.explain_error"].map((id) => rows.find((row) => row.action === id));
+  const wanted = ["ai.explain_error", "ai.command_from_description"].map((id) => rows.find((row) => row.action === id));
   assert.ok(wanted.every((row) => row !== undefined), "the golden has the rows");
   await boot(page, url, { view: VIEW_P1 });
 

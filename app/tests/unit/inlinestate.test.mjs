@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DESCRIBE_ACTION, DESCRIBE_TEXT, DESCRIBE_TITLE, EXPLAIN_ACTION, EXPLAIN_TEXT, EXPLAIN_TITLE, IntentSlot, MAX_BUTTONS, MAX_COMMAND, WORDS,
-  explainPlan, hasSelection,
+  commandVerdict, explainPlan, hasSelection, insertRefusal, insertedWords,
 } from "../../dist/inlinestate.js";
 
 test("an explain plan takes the selection when the pane shows one, else the last command, else the screen", () => {
@@ -93,4 +93,82 @@ test("the words of the actions are fixed sentences", () => {
     assert.ok(!/[\u0000-\u001f\u007f-\u009f]/u.test(word), `no control character: ${word}`);
   }
   for (const text of [EXPLAIN_TEXT, DESCRIBE_TEXT]) assert.ok(new TextEncoder().encode(text).length < 131072);
+});
+
+const CLEAN = "find . -type f -size +1G -exec ls -lh {} +";
+
+test("a code block of a reply is a command only when it is one clean line", () => {
+  assert.deepEqual(commandVerdict(`${CLEAN}\n`), { kind: "command", text: CLEAN });
+  assert.deepEqual(commandVerdict(`${CLEAN}\r\n`), { kind: "command", text: CLEAN });
+  assert.deepEqual(commandVerdict("  git status  "), { kind: "command", text: "git status" });
+  assert.deepEqual(commandVerdict("echo héllo"), { kind: "command", text: "echo héllo" });
+  const edge = "a".repeat(MAX_COMMAND);
+  assert.deepEqual(commandVerdict(edge), { kind: "command", text: edge });
+  const astral = "\u{1f600}".repeat(600);
+  assert.equal(astral.length, 1200, "1200 UTF-16 units");
+  assert.deepEqual(commandVerdict(astral), { kind: "command", text: astral }, "characters are counted as code points");
+  assert.deepEqual(commandVerdict("a".repeat(MAX_COMMAND + 1)), { kind: "none" });
+  assert.deepEqual(commandVerdict("\u{1f600}".repeat(MAX_COMMAND + 1)), { kind: "none" });
+
+  for (const none of ["", "\n", "   ", "ls\npwd", "ls\n\npwd", "a\tb", "ls\n\n", "x".repeat(65537)]) {
+    assert.deepEqual(commandVerdict(none), { kind: "none" }, JSON.stringify(none.slice(0, 20)));
+  }
+
+  const hidden = {
+    "an escape sequence": "echo \u001b[31mred",
+    "an OSC 52 sequence": "printf \u001b]52;c;Zm9v\u0007",
+    "a C1 control": "\u009b2J",
+    DEL: "rm\u007f",
+    "a carriage return inside a line": "ls\rpwd",
+    "a bidirectional override": "echo \u202eevil",
+    "a bidirectional isolate": "\u2066x\u2069",
+    "the Arabic letter mark": "\u061c",
+    "a zero-width space": "ec\u200bho hi",
+    "the word joiner": "\u2060",
+    "a byte order mark": "\ufeff",
+    "a soft hyphen": "ec\u00adho",
+    "a tag character": "\u{e0041}",
+    "a private-use character": "\ue000",
+    "a line separator": "a\u2028b",
+    "a paragraph separator": "a\u2029b",
+    "a no-break space": "a\u00a0b",
+    "an ideographic space": "a\u3000b",
+    "an en space": "a\u2002b",
+    "a lone surrogate": "\ud800",
+    "NEL": "a\u0085b",
+    "a null byte": "a\u0000b",
+  };
+  for (const [what, text] of Object.entries(hidden)) assert.deepEqual(commandVerdict(text), { kind: "hidden" }, what);
+  // The hidden rule comes before the multi-line rule; ordinary multi-line text stays none.
+  assert.deepEqual(commandVerdict("ls\n\u001b[2Jpwd"), { kind: "hidden" });
+  assert.deepEqual(commandVerdict("ls\n\tpwd\nexit"), { kind: "none" });
+
+  // Pure: the same answer twice, and a command has no line break.
+  for (const text of [`${CLEAN}\n`, "a\u202eb", "x\ny"]) assert.deepEqual(commandVerdict(text), commandVerdict(text));
+  const verdict = commandVerdict(`${CLEAN}\n`);
+  assert.ok(verdict.kind === "command" && !/[\r\n]/.test(verdict.text));
+});
+
+test("an insert is refused with a sentence unless the target is a terminal pane at a prompt", () => {
+  const ok = { pane: 1, terminal: true, inView: true, fullScreen: false };
+  assert.equal(insertRefusal(ok), null);
+  assert.equal(insertRefusal({ ...ok, pane: null }), WORDS.noTerminal);
+  assert.equal(insertRefusal({ ...ok, terminal: false }), WORDS.noTerminal);
+  assert.equal(insertRefusal({ ...ok, inView: false }), WORDS.noTerminal);
+  assert.equal(insertRefusal({ ...ok, fullScreen: true }), WORDS.fullScreen);
+  assert.equal(insertRefusal({ pane: 1, terminal: false, inView: true, fullScreen: true }), WORDS.noTerminal, "no terminal comes first");
+  assert.equal(insertedWords(3), "Inserted at the prompt of pane 3. It was not run.");
+  for (const odd of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) assert.equal(insertedWords(odd), "Inserted at the prompt. It was not run.");
+});
+
+test("the insert words are fixed sentences", () => {
+  assert.equal(WORDS.insertLabel, "Insert at prompt");
+  assert.equal(WORDS.notInsertable, "! Not insertable: it holds characters that are not shown.");
+  assert.equal(WORDS.noTerminal, "There is no terminal pane to insert into.");
+  assert.equal(WORDS.fullScreen, "That pane shows a full-screen program, so nothing was inserted.");
+  assert.equal(WORDS.refused, "The terminal did not take the text, so nothing was inserted.");
+  for (const word of [WORDS.insertLabel, WORDS.notInsertable, WORDS.noTerminal, WORDS.fullScreen, WORDS.refused]) {
+    assert.ok(!word.includes("://") && !/[<>]/.test(word) && !/[\u0000-\u001f\u007f-\u009f]/u.test(word), word);
+  }
+  for (const word of [WORDS.noTerminal, WORDS.fullScreen, WORDS.refused]) assert.ok(word.endsWith("."), word);
 });

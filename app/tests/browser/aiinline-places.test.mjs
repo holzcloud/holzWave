@@ -16,6 +16,7 @@ export default async function ({ page, url, errors }) {
   await placeCase(page, url);
   await draftCase(page, url);
   await refuseCase(page, url);
+  await describeCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -152,4 +153,43 @@ async function refuseCase(page, url) {
   await runAction(page, "ai.explain_error");
   await page.waitForFunction((text) => document.querySelector("#status .seg.notice")?.textContent === text, notice);
   assert.deepEqual(await aiCalls(page), []);
+}
+
+const DESCRIBE =
+  "Write one shell command for this task. Reply with the command alone in one code block and, after it, one sentence saying what it does. Task: ";
+
+async function describeCase(page, url) {
+  await open(page, url);
+  await page.keyboard.press("Meta+Shift+g");
+  await page.waitForSelector(".block-chat textarea.chat-input");
+  await page.waitForFunction((text) => document.querySelector("textarea.chat-input")?.value === text, DESCRIBE);
+  assert.equal((await calls(page, "ai_conversation_new")).length, 1);
+  assert.deepEqual(await calls(page, "block_open"), [{ kind: "chat", source: "local", path: "chat-mock-1", placement: "right" }]);
+  const input = page.locator("textarea.chat-input");
+  assert.equal(await page.evaluate(() => document.activeElement === document.querySelector("textarea.chat-input")), true);
+  assert.equal(await input.evaluate((node) => node.selectionStart === node.value.length), true, "the caret is after `Task: `");
+  assert.equal(await page.locator(".chat-consent").count(), 0, "no card");
+  const names = await commandNames(page);
+  assert.equal(names.some((name) => name.startsWith("ai_context_")), false, "no context command");
+  assert.equal(names.includes("ai_send"), false);
+  const status = page.locator(".chat-status");
+  assert.equal(await status.textContent(), 'Describe the task after "Task:", then press Send.');
+  assert.equal(await status.getAttribute("data-kind"), "note");
+
+  await page.keyboard.type("list files bigger than 1 GB");
+  await input.press("Enter");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 1);
+  const sent = (await calls(page, "ai_send"))[0];
+  assert.deepEqual(Object.keys(sent), ["conversation", "text", "pane", "profile", "model"], "no offer and no picked");
+  assert.equal(sent.text, `${DESCRIBE}list files bigger than 1 GB`);
+  assert.equal(sent.pane, 1);
+
+  // A draft that was typed first is kept.
+  await open(page, url, { view: VIEW3, blocks: [chatBlock("chat-saved-a")] });
+  await page.waitForSelector(".block-chat textarea.chat-input");
+  await page.locator("textarea.chat-input").fill("my own words");
+  await runAction(page, "ai.command_from_description");
+  await page.waitForFunction(() => document.querySelector(".chat-status")?.textContent?.startsWith("Describe the task"));
+  assert.equal(await draftOf(page), "my own words");
+  assert.equal((await calls(page, "ai_conversation_new")).length, 0);
 }

@@ -83,6 +83,50 @@ export interface InsertTarget {
   fullScreen: boolean;
 }
 
+/** The longest code block that is looked at, in UTF-16 units: a longer one is not scanned at all. */
+const MAX_SCAN = 65536;
+
+/**
+ * A character that is not shown or that changes what is shown: a control character (the line feed and the tab are looked at
+ * apart), a format character (bidirectional controls, zero-width and tag characters, the soft hyphen), a private-use character,
+ * an unpaired surrogate, a line or paragraph separator, and a space that is not the plain space. Unicode categories, so no list
+ * of code points can fall behind.
+ */
+const HIDDEN = /(?![\n\t ])[\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}\p{Zs}]/u;
+
+/**
+ * What a code block of a reply is for the button under it: `command` when it is one clean line that may go to a prompt (the
+ * text without one trailing line break and without spaces at the ends), `hidden` when it holds a character that is not shown
+ * (the whole block is refused, before any other rule), and `none` when it is empty, has several lines or a tab, or is longer
+ * than `MAX_COMMAND` characters (code points).
+ */
+export function commandVerdict(code: string): Verdict {
+  if (code.length > MAX_SCAN) return { kind: "none" };
+  let text = code;
+  if (text.endsWith("\r\n")) text = text.slice(0, -2);
+  else if (text.endsWith("\n")) text = text.slice(0, -1);
+  if (HIDDEN.test(text)) return { kind: "hidden" };
+  if (text.includes("\n") || text.includes("\t")) return { kind: "none" };
+  const line = text.replace(/^ +| +$/g, "");
+  if (line === "") return { kind: "none" };
+  let characters = 0;
+  for (const _ of line) {
+    characters += 1;
+    if (characters > MAX_COMMAND) return { kind: "none" };
+  }
+  return { kind: "command", text: line };
+}
+
+/**
+ * The sentence that says why nothing may be inserted into the pane the chat acts for, or null when the pane is a terminal pane
+ * of the shown tab that is not showing a full-screen program. A missing terminal comes before a full-screen program.
+ */
+export function insertRefusal(target: InsertTarget): string | null {
+  if (target.pane === null || !target.terminal || !target.inView) return WORDS.noTerminal;
+  if (target.fullScreen) return WORDS.fullScreen;
+  return null;
+}
+
 /** One intent that waits for its chat to be drawn; at most one, and only for the chat it was made for. */
 export class IntentSlot {
   private conversation: string | null = null;

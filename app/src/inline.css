@@ -1,0 +1,35 @@
+/*
+ * The reply action of the chat (inlinecode.ts, docs/design.md section 6.19): the button under a one-line code block of a finished
+ * reply and the warn line under a block that holds characters that are not shown. Every colour is a `--hw-*` token, every size is
+ * in rem so the UI scale moves it with the rest of the chrome (a pixel value only for the 1 px hairline, the 2 px focus ring, the
+ * 28 px and 44 px touch minimums and the 640 px breakpoint). Flat and hairline: nothing here moves, fades or floats.
+ * The rules carry the class of the rendered reply so they win over the `.block button` reset of blocks.css, which removes every
+ * default of a button inside a chat pane; every property the button uses is written out.
+ */
+
+.chat-md pre:has(+ .chat-codebar), .chat-md pre:has(+ .chat-codenote) { margin-bottom: .333rem; }
+.chat-md .chat-codebar { display: flex; flex-wrap: wrap; align-items: center; gap: .333rem; margin: 0 0 .75em; }
+.chat-md .chat-codenote { margin: 0 0 .75em; color: var(--hw-warn); text-decoration: underline;
+                          font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); line-height: 1.45; }
+
+.chat-md .chat-insert { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+                        min-height: max(28px, calc(28rem / 12)); padding: 0 .833rem; border: 1px solid var(--hw-line);
+                        border-radius: .333rem; background: none; color: var(--hw-ink); cursor: pointer;
+                        font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: .1em;
+                        text-transform: uppercase; white-space: nowrap; }
+.chat-md .chat-insert:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.chat-md .chat-insert:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+
+/* ---- narrow screens: the button is a touch target ------------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  .chat-md .chat-insert { min-height: max(44px, calc(44rem / 12)); }
+}
+
+/* ---- forced colours: system colours for the button, its focus ring and the warn line ---------------------------------- */
+
+@media (forced-colors: active) {
+  .chat-md .chat-insert { border-color: ButtonText; color: ButtonText; }
+  .chat-md .chat-insert:focus-visible { outline-color: Highlight; }
+  .chat-md .chat-codenote { color: CanvasText; }
+}

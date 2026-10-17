@@ -4,7 +4,10 @@
 import { registerAction } from "./actions.js";
 import { paneBlocks } from "./blockstate.js";
 import { actingPane, openWithIntent } from "./chat.js";
-import { EXPLAIN_ACTION, EXPLAIN_TEXT, EXPLAIN_TITLE, WORDS, explainPlan } from "./inlinestate.js";
+import { loadStyles } from "./dom.js";
+import {
+  DESCRIBE_ACTION, DESCRIBE_TEXT, DESCRIBE_TITLE, EXPLAIN_ACTION, EXPLAIN_TEXT, EXPLAIN_TITLE, WORDS, explainPlan,
+} from "./inlinestate.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
 
@@ -21,6 +24,14 @@ export async function explainError(): Promise<string | null> {
   return openWithIntent({ text: EXPLAIN_TEXT, kinds: plan.kinds, first: plan.first, ready: WORDS.explainReady });
 }
 
+/**
+ * `Command from description`: open the chat where the person is and write the start of a message that asks for one command, with
+ * the caret after `Task: `. No card opens and nothing from a terminal goes with the message. Answers null, or one sentence.
+ */
+export function describeCommand(): Promise<string | null> {
+  return openWithIntent({ text: DESCRIBE_TEXT, kinds: [], first: false, ready: WORDS.describeReady });
+}
+
 /** Run an action that answers a sentence and show the sentence as the notice of the status line. */
 function say(run: () => Promise<string | null>): () => void {
   return () => {
@@ -30,7 +41,13 @@ function say(run: () => Promise<string | null>): () => void {
   };
 }
 
-/** Register the palette actions. Call once at start-up, after `initChat`. */
+/** Load the style sheet of the reply action and register the palette actions. Call once at start-up, after `initChat`. */
 export async function initInline(): Promise<void> {
+  try {
+    await loadStyles("./inline.css");
+  } catch {
+    // the actions still work without their style sheet
+  }
   registerAction({ id: EXPLAIN_ACTION, title: EXPLAIN_TITLE, run: say(explainError) });
+  registerAction({ id: DESCRIBE_ACTION, title: DESCRIBE_TITLE, run: say(describeCommand) });
 }

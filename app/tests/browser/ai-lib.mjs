@@ -503,3 +503,35 @@ export async function settle(page) {
   }
   await page.evaluate(() => document.getElementById("ime").focus());
 }
+
+/** The recorded paste calls, oldest first. */
+export const pastesOf = (page) => callsOf(page, "paste");
+
+/**
+ * Queue a turn whose text is `text`, script the core's Markdown renderer to answer `html`, send `task` with `send` (the composer
+ * of a chat pane by default) and wait until the finished reply of the assistant has been drawn as Markdown.
+ */
+export async function scriptReply(page, { text, html, task = "go", send = sendText }) {
+  const before = await page.locator('.chat-msg[data-role="assistant"] .chat-text.chat-md').count();
+  await page.evaluate(
+    ([chunk, rendered]) => {
+      window.__MOCK__.ai.script({ chunks: [chunk] });
+      window.__MOCK__.on("markdown_render", () => rendered);
+    },
+    [text, html],
+  );
+  await send(page, task);
+  await page.waitForFunction((n) => document.querySelectorAll('.chat-msg[data-role="assistant"] .chat-text.chat-md').length > n, before);
+}
+
+/** Every bar and note under `scope` (a selector) as `{ kind, text, before }`: what it is, its text and the tag the node before it has. */
+export const codeBars = (page, scope = ".chat-log") =>
+  page.evaluate(
+    (selector) =>
+      [...document.querySelectorAll(`${selector} .chat-codebar, ${selector} .chat-codenote`)].map((node) => ({
+        kind: node.classList.contains("chat-codebar") ? "bar" : "note",
+        text: node.textContent,
+        before: node.previousElementSibling?.localName ?? null,
+      })),
+    scope,
+  );

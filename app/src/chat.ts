@@ -166,6 +166,7 @@ const dirty = new Set<Session>();
 let frame = 0;
 let opener: BlockOpener | null = null;
 let sidebar: SidebarHandle | null = null;
+let decorate: ((node: HTMLElement, reply: ReplyHandle) => void) | null = null;
 /** The chat that the last successful `openChat` brought up or focused; null before one and while one is on its way. */
 let opened: string | null = null;
 /** The intent of an action whose chat was not drawn yet when it was handed over. */
@@ -202,11 +203,22 @@ export interface SidebarHandle {
   conversation(): string | null;
 }
 
-/** What the page offers the chat besides the bridge: the settings watch and the sidebar column. */
+/** What a reply action may do to the chat it sits in: say one line under the transcript. */
+export interface ReplyHandle {
+  readonly conversation: string;
+  say(text: string, kind: "note" | "error"): void;
+}
+
+/** What the page offers the chat besides the bridge: the settings watch, the sidebar column and the reply action. */
 export interface ChatHost {
   /** Call `fn` after every accepted settings view; the answer stops it. */
   watchSettings(fn: () => void): () => void;
   sidebar?: SidebarHandle;
+  /**
+   * Called with the node of a finished reply every time the rendered copy of it was put there, so a redraw is decorated again. The
+   * chat module never imports what the hook does.
+   */
+  decorate?: (node: HTMLElement, reply: ReplyHandle) => void;
 }
 
 // ---- sessions and the core's events -----------------------------------------------------------------------------------
@@ -1098,6 +1110,13 @@ class Mounted implements ChatView {
     appendSafe(html, a.text);
     a.text.classList.add("chat-md");
     fixLinks(a.text);
+    if (decorate === null) return;
+    const session = this.session;
+    try {
+      decorate(a.text, { conversation: session.id, say: (text, kind) => sayTo(session, text, kind) });
+    } catch {
+      // a reply action that fails leaves the message as it is
+    }
   }
 
   /** The row after the last message when a turn failed or was cut: a mark, the class in words and the core's line. */
@@ -1586,6 +1605,7 @@ export function releaseChat(conversation: string): boolean {
 export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void> {
   opener = open;
   sidebar = host?.sidebar ?? null;
+  decorate = host?.decorate ?? null;
   try {
     await loadStyles("./chat.css");
   } catch {
