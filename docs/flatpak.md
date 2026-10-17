@@ -28,8 +28,8 @@ repository, never a Flathub package; there is no signing, no repository and no a
 3. `sh scripts/build-flatpak.sh` builds and installs the Flatpak for your user. It writes only below `target/` and into your
    Flatpak installation. The build downloads: the crates and npm packages of the lock files, the Zig archive (pinned by sha256
    in the manifest) and the Zig packages that the Ghostty engine fetches during its build. That is why it is a local build
-   with the network allowed in the build step only (`--share=network` as a build argument; the running app asks for no
-   network permission).
+   with the network allowed in the build step (`--share=network` as a build argument; the running app has its own
+   network permission, see [What it costs in sandboxing](#what-it-costs-in-sandboxing)).
 4. `flatpak run ch.holzcloud.holzwave`, then work through row L10 of [test-plan.md](test-plan.md).
 
 The first build takes a while (a release build of the whole app plus the Ghostty engine).
@@ -43,7 +43,15 @@ The first build takes a while (a release build of the whole app plus the Ghostty
   not accept this permission without a long justification.
 - **`--filesystem=home`** gives the app your home folder, so `~`, the directories of panes and "reveal in the file manager"
   mean what they mean on the host. The sandbox is already open through the permission above, so this costs nothing more.
-- Wayland, fallback X11, `--device=dri` and `--share=ipc` as every graphical app. No network permission.
+- **`--share=network`** gives the app the network. Flatpak has no narrower permission (its subsystems are `network` and
+  `ipc`, with no rule per host or port), so this is the smallest one. It is the network of the app and not of the
+  shells, which run on the host and have the host's network anyway. The SSH connections you start, the sync you set up
+  and the AI chat when you send a message need it. Nothing connects when the app starts on a fresh install. The sandbox
+  no longer limits what the app contacts; the app's own rules do (saved addresses only, Local only, consent per pane).
+  The permission above already allows any host command with your rights, so the app's process gains no capability that
+  a host command would not have; Flatpak's documentation adds that network access also reaches host services on
+  abstract Unix sockets.
+- Wayland, fallback X11, `--device=dri` and `--share=ipc` as every graphical app.
 
 If the owner does not accept the host-command permission, Flatpak is moved out of 0.0.1 (see the status line).
 

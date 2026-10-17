@@ -1,7 +1,8 @@
 //! The facts of the Flatpak files under `packaging/flatpak/` that a later change must not break by accident: the
 //! application id is the Tauri identifier everywhere, the permission that removes the sandbox is asked for and
-//! disclosed in the manifest and in the AppStream text, the build is pinned, and nothing under `packaging/` holds a
-//! signing key or fetches from anywhere but the Zig archive.
+//! disclosed in the manifest and in the AppStream text, the network permission of the running app is asked for and
+//! disclosed next to the line, in the AppStream text and on the page (and nothing broader is asked for), the build is
+//! pinned, and nothing under `packaging/` holds a signing key or fetches from anywhere but the Zig archive.
 //!
 //! The files themselves are validated by the Flatpak toolchain in a Linux container (`sh scripts/build-flatpak.sh
 //! --check`); that the Flatpak builds and runs is the owner's row L10 (`docs/test-plan.md`). The manifest is YAML
@@ -18,8 +19,10 @@ const METAINFO: &str = include_str!("../../../packaging/flatpak/ch.holzcloud.hol
 const DESKTOP: &str = include_str!("../../../packaging/flatpak/ch.holzcloud.holzwave.desktop");
 const SCRIPT: &str = include_str!("../../../scripts/build-flatpak.sh");
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+const FLATPAK_PAGE: &str = include_str!("../../../docs/flatpak.md");
 
 const HOST_PERMISSION: &str = "--talk-name=org.freedesktop.Flatpak";
+const NETWORK_PERMISSION: &str = "--share=network";
 
 fn identifier() -> String {
     let conf: Value = serde_json::from_str(TAURI_CONF).expect("tauri.conf.json is JSON");
@@ -49,6 +52,30 @@ fn manifest_list(key: &str) -> Vec<String> {
         .take_while(|line| line.starts_with(' ') || line.starts_with('#') || line.is_empty())
         .filter_map(|line| line.trim().strip_prefix("- ").map(|item| item.trim().to_owned()))
         .collect()
+}
+
+/// Lower case, every run of whitespace one space, trimmed: a line wrap cannot hide a phrase.
+fn squashed(text: &str) -> String {
+    text.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The zero-based indexes of the manifest lines that are the item `- --share=network`.
+fn network_items() -> Vec<usize> {
+    MANIFEST.lines().enumerate().filter(|(_, line)| line.trim() == format!("- {NETWORK_PERMISSION}")).map(|(at, _)| at).collect()
+}
+
+/// The comment block directly above manifest line `line`, without the `#`, squashed.
+fn comment_above(line: usize) -> String {
+    let lines: Vec<&str> = MANIFEST.lines().collect();
+    let mut block: Vec<&str> =
+        lines[..line].iter().rev().take_while(|l| l.trim().starts_with('#')).map(|l| l.trim().trim_start_matches('#')).collect();
+    block.reverse();
+    squashed(&block.join(" "))
+}
+
+/// The text of the `<description>` element of the AppStream file.
+fn description() -> &'static str {
+    METAINFO.split("<description>").nth(1).and_then(|d| d.split("</description>").next()).expect("a description")
 }
 
 #[test]
@@ -100,28 +127,50 @@ fn the_manifest_asks_for_the_host_command_permission_and_says_what_it_costs() {
 }
 
 #[test]
-fn the_permissions_are_exactly_the_documented_ones_and_the_app_gets_no_network() {
+fn the_permissions_are_exactly_the_documented_ones_and_the_network_is_one_of_them() {
     assert_eq!(
         manifest_list("finish-args"),
         [
             "--socket=wayland",
             "--socket=fallback-x11",
             "--share=ipc",
+            NETWORK_PERMISSION,
             "--device=dri",
             "--filesystem=home",
             HOST_PERMISSION
         ],
-        "a permission was added or removed: that is a decision, update docs/flatpak.md with it"
+        "a permission was added or removed: that is a decision; update docs/flatpak.md and the AppStream text with it"
     );
-    // The build may use the network (a local build); the running app does not ask for it.
-    let network: Vec<&str> = MANIFEST.lines().filter(|l| l.contains("--share=network")).collect();
-    assert_eq!(network.len(), 1, "the network is named once: {network:?}");
-    let at = MANIFEST.lines().position(|l| l.contains("--share=network")).expect("found above");
-    let before: Vec<&str> = MANIFEST.lines().take(at).collect();
-    assert!(
-        before.iter().rev().take_while(|l| l.trim().starts_with('-') || l.trim().ends_with(':') || l.trim().starts_with('#')).any(|l| l.trim() == "build-args:"),
-        "--share=network is not a build argument"
-    );
+    // The network is named twice as an item: once for the running app and once as an argument of the build.
+    let items = network_items();
+    assert_eq!(items.len(), 2, "the network is named twice as an item (the running app and the build): {items:?}");
+    let lines: Vec<&str> = MANIFEST.lines().collect();
+    let finish = lines.iter().position(|l| *l == "finish-args:").expect("finish-args");
+    let build_options = lines.iter().position(|l| *l == "build-options:").expect("the top-level build-options");
+    assert!(finish < items[0] && items[0] < build_options, "the first network item is not a finish argument");
+    let before = lines[..items[1]].iter().rev().find(|l| !l.trim().starts_with('#')).expect("a line above the item");
+    assert_eq!(before.trim(), "build-args:", "the second network item is not a build argument");
+}
+
+#[test]
+fn the_network_permission_is_disclosed_next_to_it_in_the_description_and_on_the_page() {
+    let first = *network_items().first().expect("the network item of the running app");
+    let comment = comment_above(first);
+    for word in ["network", "ssh", "sync", "ai chat", "nothing connects at launch", "--unshare=network"] {
+        assert!(comment.contains(word), "the comment above the network permission does not say {word:?}: {comment}");
+    }
+    let text = squashed(description());
+    for word in ["network", "ssh", "sync", "ai chat", "telemetry"] {
+        assert!(text.contains(word), "the AppStream description does not say {word:?}: {text}");
+    }
+    let page = squashed(FLATPAK_PAGE);
+    assert!(page.contains(NETWORK_PERMISSION), "docs/flatpak.md does not name {NETWORK_PERMISSION}");
+    for stale in ["the running app asks for no network permission", "as every graphical app. no network permission", "no network permission"] {
+        assert!(!page.contains(stale), "docs/flatpak.md still says {stale:?}");
+    }
+    for claim in ["no network permission", "asks for no network"] {
+        assert!(!squashed(MANIFEST).contains(claim) && !text.contains(claim), "the manifest or the AppStream text says {claim:?}");
+    }
 }
 
 #[test]

@@ -19,6 +19,13 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
+  # The network, for the app itself; the shells of the panes run on the host and have the host's network anyway. The SSH
+  # connections you start, the sync you set up and the AI chat (when you send a message to a provider you set up) need
+  # it, and a model server on this computer is reached through it. Nothing connects at launch on a fresh install.
+  # Flatpak has no narrower network permission (no rule per host or per port), so the sandbox does not limit what is
+  # contacted: the app's own rules do (saved addresses only, Local only, consent per pane). docs/flatpak.md lists when
+  # holzWave connects and how to take this away again: flatpak override --user --unshare=network ch.holzcloud.holzwave
+  - --share=network
   - --device=dri
   # The home folder is open, so that `~`, the directories of panes and "reveal in the file manager" resolve to the real
   # ones. The sandbox is already open through the next permission, so this costs nothing more.

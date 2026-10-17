@@ -12,6 +12,7 @@
   <description>
     <p>holzWave is a terminal emulator written from scratch in Rust, with tiled panes and a layout that is restored on the next start.</p>
     <p>A terminal is only useful when it runs the programs of the user's own system. In this Flatpak the shell therefore runs on the host, outside the sandbox: holzWave asks for permission to run commands on the host (flatpak-spawn --host, the permission org.freedesktop.Flatpak) and the only command it starts that way is your login shell. This removes the sandbox for this application. It also has access to your home folder.</p>
+    <p>holzWave also asks for the network (--share=network). It uses it for the SSH connections you start, for the sync you set up and, for the AI chat, for the messages you send to a provider you set up. It connects to nothing when it starts on a fresh install, and it has no telemetry, no account and no update check. The shells you open run on the host and use the host's network.</p>
     <p>This is a local build, not a Flathub package.</p>
   </description>
   <launchable type="desktop-id">ch.holzcloud.holzwave.desktop</launchable>
