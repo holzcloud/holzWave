@@ -2053,3 +2053,29 @@ fn the_accounts_come_from_the_staged_list_when_it_reads_and_from_the_live_one_wh
         assert_eq!(accounts(&d), vec!["ssh:db", "ssh:web"], "{}", String::from_utf8_lossy(broken));
     }
 }
+
+#[test]
+fn a_local_edit_that_cannot_be_copied_is_never_replaced_by_the_winning_download() {
+    let srv = server();
+    let (a, b) = (device("a99"), device("b99"));
+    put(&a, "settings.json", "v1");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    // A writes two newer versions, so its stamp beats the one B is about to make.
+    for v in ["a2", "a3"] {
+        put(&a, "settings.json", v);
+        connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    }
+    put(&b, "settings.json", "b edit");
+    // A file stands where the folder of kept copies would be.
+    fs::write(b.dir.join("sync-conflicts"), b"in the way").unwrap();
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.downloaded.is_empty() && report.errors.len() == 1, "{report:?}");
+    assert_eq!(text(&b, "settings.json").as_deref(), Some("b edit"), "the local edit stays where it is");
+    assert!(!b.dir.join("sync-incoming").join("settings.json").exists(), "nothing is staged over it");
+    // With the way cleared the next run keeps the copy and applies the download as before.
+    fs::remove_file(b.dir.join("sync-conflicts")).unwrap();
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.conflicts, vec!["settings.json"], "{report:?}");
+    assert!(kept_copies(&b).iter().any(|(_, c)| c == "b edit"), "{:?}", kept_copies(&b));
+}

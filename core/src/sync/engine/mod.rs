@@ -1253,7 +1253,7 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                     let theirs_wins = (f.stamp.counter, f.stamp.time) > (mine.counter, mine.time);
                     report.conflicts.push(name.to_owned());
                     if theirs_wins {
-                        self.keep_local(name, bytes);
+                        self.keep_local(name, bytes)?;
                         self.source.write(name, &f.plain)?;
                         self.remember(name, f.stamp.counter, &f.etag, &f.blob_digest, &digest(&f.plain));
                         report.downloaded.push(name.to_owned());
@@ -1310,13 +1310,16 @@ impl<B: Backend, S: Source> Syncer<B, S> {
     }
 
     /// Keep a local version that lost. Never for the secrets: they must not be written to a file.
-    fn keep_local(&self, name: &str, bytes: &[u8]) {
+    /// A copy that cannot be written is an error: the caller must not replace the local file then.
+    fn keep_local(&self, name: &str, bytes: &[u8]) -> Result<()> {
         if name == SECRETS {
-            return;
+            return Ok(());
         }
         if let Some(dir) = &self.conflicts_dir {
-            let _ = write_atomic(&dir.join(format!("{}.{}", name.replace('/', "."), now())), bytes);
+            write_atomic(&dir.join(format!("{}.{}", name.replace('/', "."), now())), bytes)
+                .map_err(|_| err(&format!("could not keep your copy of {name} before replacing it; nothing was changed")))?;
         }
+        Ok(())
     }
 }
 
