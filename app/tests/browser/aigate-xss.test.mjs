@@ -3,8 +3,9 @@
 // through the real chat page, so the page's own allow-list is held even if the core's sanitiser were to fail.
 import assert from "node:assert/strict";
 import { PROFILE, boot, calls, openAi, sendText } from "./ai-lib.mjs";
-import { dropInertReports } from "./lib.mjs";
-import { armGuards, checkerCase, domProblems, loadCorpus, pageClean, responsive } from "./aigate-lib.mjs";
+import {
+  PAGE_ADDED, armGuards, checkerCase, domProblems, dropRawReports, installMessages, loadCorpus, openCorpusChat, pageClean, responsive,
+} from "./aigate-lib.mjs";
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(8000);
@@ -14,8 +15,10 @@ export default async function ({ page, url, errors }) {
   // The checker builds an inert hostile document in the page; the policy reports the inline style and handlers it holds.
   await checkerCase(page, errors);
   await traceCase(page, guards, corpus);
+  await coreCase(page, url, guards, corpus);
+  await rawCase(page, url, guards, corpus);
   // The raw pass feeds hostile markup to `appendSafe`, which parses it in an inert document: the policy reports its handlers.
-  await dropInertReports(page, errors);
+  await dropRawReports(page, errors);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -62,5 +65,59 @@ async function traceCase(page, guards, corpus) {
     await guards.assertQuiet(field);
     await responsive(page);
   }
-  console.log(`aigate trace: ${corpus.cases.length} case in the corpus, replayed as core_html and raw_html`);
+  console.log(`aigate trace: ${corpus.cases.length} cases in the corpus, replayed as core_html and raw_html`);
+}
+
+/**
+ * Every case of the corpus in one chat: the page copy of `field` (the core's cleaned HTML or the parser's raw HTML) of every
+ * case, one message each. No message has a problem, no text case lost its text, the page is clean and nothing left the page.
+ */
+async function replay(page, url, guards, corpus, field, tag) {
+  await openCorpusChat(page, url);
+  const cases = corpus.cases.filter((c) => c[field] !== null);
+  const skipped = corpus.cases.length - cases.length;
+  const sources = new Set(cases.map((c) => c.source));
+  assert.equal(sources.size, cases.length, "the sources of the corpus are unique");
+  await page.evaluate(
+    (map) => {
+      window.__CORPUS = map;
+      window.__MOCK__.on("markdown_render", (a) => window.__CORPUS[a.text] ?? null);
+    },
+    Object.fromEntries(cases.map((c) => [c.source, c[field]])),
+  );
+  await installMessages(page, "chat-x", cases.map((c) => c.source), tag);
+  const failures = [];
+  let replayed = 0;
+  for (const [i, c] of cases.entries()) {
+    const scope = `.chat-msg[data-id="${tag}-${i + 1}"] .chat-text`;
+    if ((await page.locator(scope).count()) !== 1) {
+      failures.push(`${c.id}: the message is not on the page`);
+      continue;
+    }
+    const found = await domProblems(page, scope, { extra: PAGE_ADDED });
+    for (const line of found) failures.push(`${c.id}: ${line}`);
+    if (c.expect === "text") {
+      const shown = await page.locator(scope).textContent();
+      if (!shown.includes(c.visible)) failures.push(`${c.id}: the text ${JSON.stringify(c.visible)} is not shown: ${JSON.stringify(shown.slice(0, 80))}`);
+    }
+    if (found.length === 0) replayed += 1;
+  }
+  const asked = await page.evaluate(() => window.__MOCK__.callsOf("markdown_render").length);
+  console.log(`aigate corpus: ${field}: ${cases.length} cases, ${replayed} replayed clean, ${skipped} skipped, ${asked} asked of the core`);
+  assert.deepEqual(failures, [], `${field}: the transcript has problems`);
+  assert.equal(replayed, cases.length, "every case was replayed");
+  assert.equal(replayed, corpus.cases.length - skipped, "the count matches the corpus");
+  assert.deepEqual(await pageClean(page), [], `${field}: the page is not clean`);
+  await guards.assertQuiet(field);
+  await responsive(page);
+}
+
+/** The core's cleaned HTML of every case; a case the renderer refused is skipped and counted. */
+async function coreCase(page, url, guards, corpus) {
+  await replay(page, url, guards, corpus, "core_html", "core");
+}
+
+/** The raw HTML of the parser for every case: what a failed sanitiser would deliver. The page's own allow-list is the only guard. */
+export async function rawCase(page, url, guards, corpus) {
+  await replay(page, url, guards, corpus, "raw_html", "raw");
 }

