@@ -5,7 +5,6 @@
 
 mod common;
 
-use holzwave_core::engine::{Screen, Update};
 use holzwave_core::textread::{MAX_HIDDEN_RANGES, MAX_READ_BYTES, MAX_READ_ROWS, TextRead, TextRegion};
 use holzwave_core::TerminalEngine;
 
@@ -14,7 +13,7 @@ mod routing {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use holzwave_core::engine::{KeyEvent, PasteOutcome};
+    use holzwave_core::engine::{KeyEvent, PasteOutcome, Screen, Update};
     use holzwave_core::pane::{PaneHandle, PaneSpec};
     use holzwave_core::{Error, Result};
 
@@ -141,10 +140,9 @@ mod engine_reads {
     use std::time::Duration;
 
     use holzwave_core::engine::{SelectMode, SelectOp};
-    use holzwave_core::pane::{PaneHandle, PaneSpec};
 
     use super::*;
-    use common::{engine, wait_until};
+    use common::engine;
 
     /// The text of a region, panicking when the read fails.
     fn read(e: &mut impl TerminalEngine, region: TextRegion) -> Option<TextRead> {
@@ -154,6 +152,9 @@ mod engine_reads {
     #[cfg(unix)]
     #[test]
     fn a_live_pane_gives_the_text_of_its_screen() {
+        use common::wait_until;
+        use holzwave_core::pane::{PaneHandle, PaneSpec};
+
         let script = "printf 'alpha\\nbeta  \\n\\ngamma'; exec cat";
         let pane = PaneHandle::spawn_ghostty(1, PaneSpec::new("/bin/sh", 80, 24).args(["-c", script]), |_event| {})
             .expect("the pane starts");
