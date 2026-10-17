@@ -96,6 +96,9 @@
     "allow-ai-key-set",
     "allow-ai-key-clear",
     "allow-ai-has-key",
+    "allow-ai-context-state",
+    "allow-ai-context-share",
+    "allow-ai-context-preview",
     "allow-markdown-render"
   ]
 }

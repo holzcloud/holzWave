@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 use holzwave_core::ai::profiles::KeySlot;
 use holzwave_core::ai::service::events::ChatState;
+use holzwave_core::ai::service::{ContextState, OfferView};
+use holzwave_core::ai::types::ContextKind;
 use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
@@ -884,6 +886,11 @@ pub fn widget_note_save(core: State<Arc<AppCore>>, id: String, text: String) -> 
 /// turn. `profile` and `model` may be null or empty: the chat then uses the provider and model it is pinned to. Only
 /// the typed text leaves: the command has no argument that could carry terminal content or a decision. A pane that is
 /// not open is refused as `no_such_pane`.
+///
+/// `offer` and `picked` are both given or both left out. With both, the message carries the items of an offer that
+/// `ai_context_preview` made for this chat, this pane and this route: the page names the offer and the numbers of the
+/// items it picked, never their text. With one of them only, the call is refused as `context` / `bad_pick` and nothing
+/// is stored.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn ai_send(
     core: State<Arc<AppCore>>,
@@ -892,8 +899,59 @@ pub fn ai_send(
     pane: PaneId,
     profile: Option<String>,
     model: Option<String>,
+    offer: Option<String>,
+    picked: Option<Vec<u32>>,
 ) -> Result<TicketView, AiFault> {
-    core.ai_send(&conversation, text, pane, profile, model)
+    core.ai_send_with(&conversation, text, pane, profile, model, offer, picked)
+}
+
+/// What `pane` offers for the chat and where it would go: the profile and model of the call (the chat's own when
+/// they are null or empty), the host and where it is (`on_device`, `loopback`, `lan` or `cloud`), whether the pane
+/// must be shared first (`required`), whether it is (`shared`), the kinds the pane offers now and whether the chat
+/// file keeps the text of a context. Nothing is read from the pane, and there is no text in the answer. This looks up
+/// the name of a host once, so call it for an act of the user and not on a mount. A refusal is the fault object with
+/// the code `context`.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_context_state(
+    core: State<Arc<AppCore>>,
+    conversation: String,
+    pane: PaneId,
+    profile: Option<String>,
+    model: Option<String>,
+) -> Result<ContextState, AiFault> {
+    core.ai_context_state(&conversation, pane, profile, model)
+}
+
+/// Share `pane` for the chat on this route (`shared` true), or end the share (false). A share is the permission to
+/// read the pane into an offer; nothing is read and nothing is attached to a later message. A change of provider,
+/// model or address, and the end of the chat or of the pane, end the share. The answer is the state, as for
+/// `ai_context_state`.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_context_share(
+    core: State<Arc<AppCore>>,
+    conversation: String,
+    pane: PaneId,
+    profile: Option<String>,
+    model: Option<String>,
+    shared: bool,
+) -> Result<ContextState, AiFault> {
+    core.ai_context_share(&conversation, pane, profile, model, shared)
+}
+
+/// Read the `kinds` (`selection`, `screen`, `last_command`, `file`, `preview`) of a shared `pane` into an offer. The
+/// answer carries the id of the offer, where it would go, and for each item its number, kind, label, size and what the
+/// cleaner removed: labels, sizes and findings, never text. The chat holds one offer at a time and it lives five
+/// minutes. A refusal is the fault object with the code `context` and one of its stable reasons.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_context_preview(
+    core: State<Arc<AppCore>>,
+    conversation: String,
+    pane: PaneId,
+    profile: Option<String>,
+    model: Option<String>,
+    kinds: Vec<ContextKind>,
+) -> Result<OfferView, AiFault> {
+    core.ai_context_preview(&conversation, pane, profile, model, kinds)
 }
 
 /// The state of a chat right now: what a page that saw every `ai` event of it holds. The page asks for it when it

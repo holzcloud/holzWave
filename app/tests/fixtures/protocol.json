@@ -1,6 +1,20 @@
 {
   "answers": {
     "ai": {
+      "context_state": {
+        "host": "127.0.0.1:11434",
+        "kinds": [
+          "selection",
+          "screen",
+          "last_command"
+        ],
+        "locality": "loopback",
+        "model": "llama3",
+        "persist": false,
+        "profile": "local",
+        "required": true,
+        "shared": false
+      },
       "conversations": {
         "chats": [
           {
@@ -28,6 +42,33 @@
           "text": "that pane is not open"
         }
       ],
+      "offer": {
+        "bytes": 412,
+        "empty": [
+          "selection"
+        ],
+        "host": "127.0.0.1:11434",
+        "items": [
+          {
+            "bytes": 412,
+            "findings": [
+              {
+                "count": 1,
+                "rule": "anthropic_key"
+              }
+            ],
+            "id": 1,
+            "kind": "screen",
+            "label": "Screen of pane 3"
+          }
+        ],
+        "locality": "loopback",
+        "model": "llama3",
+        "offer": "0123456789abcdef0123456789abcdef",
+        "persist": false,
+        "profile": "local",
+        "ttl_seconds": 300
+      },
       "profiles": {
         "notes": [],
         "profiles": [
@@ -100,6 +141,26 @@
     "ai_cancel": [
       "conversation"
     ],
+    "ai_context_preview": [
+      "conversation",
+      "pane",
+      "profile",
+      "model",
+      "kinds"
+    ],
+    "ai_context_share": [
+      "conversation",
+      "pane",
+      "profile",
+      "model",
+      "shared"
+    ],
+    "ai_context_state": [
+      "conversation",
+      "pane",
+      "profile",
+      "model"
+    ],
     "ai_conversation_delete": [
       "conversation"
     ],
@@ -130,7 +191,9 @@
       "text",
       "pane",
       "profile",
-      "model"
+      "model",
+      "offer",
+      "picked"
     ],
     "ai_turn_snapshot": [
       "conversation"
@@ -908,6 +971,13 @@
         "preset": "ollama",
         "wire": "openai_chat"
       }
+    ],
+    "context_kind": [
+      "selection",
+      "screen",
+      "last_command",
+      "file",
+      "preview"
     ],
     "copy_mode": [
       {

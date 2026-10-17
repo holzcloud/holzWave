@@ -203,18 +203,21 @@ test("the command table has snake_case argument names and no raw input command",
 
 // ---- the AI chat --------------------------------------------------------------------------------------------------
 
-test("the ai event and the twelve ai commands are pinned", () => {
+test("the ai event and the fifteen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
   assert.equal(golden.events.names.at(-1), "ai");
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
   assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
-  // The commands: exactly these and exactly these arguments. A send has no argument that could carry terminal text,
-  // a context offer or a decision; a key command has no way to hand a key back.
+  // The commands: exactly these and exactly these arguments. A send has no argument that could carry terminal text
+  // or a decision, only the ids of an offer; a key command has no way to hand a key back.
   const expected = {
     ai_conversation_new: [],
     ai_conversation_list: [],
     ai_conversation_delete: ["conversation"],
-    ai_send: ["conversation", "text", "pane", "profile", "model"],
+    ai_send: ["conversation", "text", "pane", "profile", "model", "offer", "picked"],
+    ai_context_state: ["conversation", "pane", "profile", "model"],
+    ai_context_share: ["conversation", "pane", "profile", "model", "shared"],
+    ai_context_preview: ["conversation", "pane", "profile", "model", "kinds"],
     ai_cancel: ["conversation"],
     ai_turn_snapshot: ["conversation"],
     ai_profiles: [],
@@ -245,7 +248,7 @@ test("the markdown command takes only the text", () => {
 
 test("the answers and inputs of the ai commands are pinned", () => {
   const answers = golden.answers.ai;
-  assert.deepEqual(keys(answers), ["conversations", "fault", "profiles", "removal", "ticket"]);
+  assert.deepEqual(keys(answers), ["context_state", "conversations", "fault", "offer", "profiles", "removal", "ticket"]);
   assert.deepEqual(keys(answers.ticket), ["conversation", "turn"]);
   // A refusal is an object, never a string: a code, a reason a dialog can act on (or null) and a fixed text.
   assert.equal(answers.fault.length, 2, "one with a reason and one without");
@@ -278,6 +281,41 @@ test("the answers and inputs of the ai commands are pinned", () => {
     assert.ok("name" in input && "preset" in input);
   }
   assert.deepEqual(golden.ops.key_slot, ["provider", "gateway"]);
+});
+
+test("the context commands and their answers are pinned", () => {
+  // The three calls take ids, a flag and kind names. None takes text, and none answers with it.
+  const forbidden = ["text", "content", "context", "body", "envelope"];
+  const context = Object.fromEntries(Object.entries(golden.commands).filter(([name]) => name.startsWith("ai_context_")));
+  assert.deepEqual(keys(context), ["ai_context_preview", "ai_context_share", "ai_context_state"]);
+  assert.deepEqual(golden.commands.ai_context_state, ["conversation", "pane", "profile", "model"]);
+  assert.deepEqual(golden.commands.ai_context_share, ["conversation", "pane", "profile", "model", "shared"]);
+  assert.deepEqual(golden.commands.ai_context_preview, ["conversation", "pane", "profile", "model", "kinds"]);
+  for (const [name, args] of Object.entries(context)) {
+    for (const arg of args) assert.ok(!forbidden.includes(arg), `${name} takes ${arg}`);
+  }
+  // A send names an offer and the numbers of its items, and its only text is what the user typed.
+  assert.deepEqual(golden.commands.ai_send.slice(-2), ["offer", "picked"]);
+  assert.equal(golden.commands.ai_send.filter((arg) => forbidden.includes(arg)).join(), "text");
+
+  // What a state and an offer say: where the text would go, what is asked, labels, sizes and findings.
+  const state = golden.answers.ai.context_state;
+  assert.deepEqual(keys(state), ["host", "kinds", "locality", "model", "persist", "profile", "required", "shared"]);
+  assert.ok(state.kinds.every((kind) => golden.ops.context_kind.includes(kind)));
+  assert.ok(["on_device", "loopback", "lan", "cloud"].includes(state.locality));
+  const offer = golden.answers.ai.offer;
+  assert.deepEqual(keys(offer), [
+    "bytes", "empty", "host", "items", "locality", "model", "offer", "persist", "profile", "ttl_seconds",
+  ]);
+  assert.match(offer.offer, /^[0-9a-f]{32}$/, "an offer id is 32 lower-case hex digits");
+  assert.ok(offer.items.length >= 1);
+  for (const item of offer.items) {
+    assert.deepEqual(keys(item), ["bytes", "findings", "id", "kind", "label"]);
+    for (const finding of item.findings) assert.deepEqual(keys(finding), ["count", "rule"]);
+  }
+  assert.deepEqual(golden.ops.context_kind, ["selection", "screen", "last_command", "file", "preview"]);
+  const members = memberNames([state, offer]);
+  for (const name of forbidden.concat(["excerpt"])) assert.ok(!members.includes(name), `an answer has a member named ${name}`);
 });
 
 /** Every member name of every object in `value`. */

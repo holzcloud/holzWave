@@ -10,6 +10,12 @@
 //! are snake_case. Every event but `settings`, `ai` and `exit` is emitted to one window, the one that holds the pane
 //! (or whose layout changed), with `emit_str_to(label, ..)`; a page has to listen with its own label, because a
 //! listener without a target receives the events of every window.
+//!
+//! Terminal and file content reaches a chat in four calls, and the page never holds the text: `ai_context_state` says
+//! what a pane offers and where it would go, `ai_context_share` shares the pane for the chat, `ai_context_preview`
+//! answers an offer (labels, sizes and what was removed), and `ai_send` names the offer and the numbers of the items it
+//! picked. The three context commands take ids, a flag and kind names; the only text any of them carries is what the
+//! user typed.
 
 mod ai_host;
 mod commands;
@@ -492,6 +498,9 @@ pub fn run() {
             commands::ai_key_set,
             commands::ai_key_clear,
             commands::ai_has_key,
+            commands::ai_context_state,
+            commands::ai_context_share,
+            commands::ai_context_preview,
             commands::markdown_render,
         ])
         .build(tauri::generate_context!())

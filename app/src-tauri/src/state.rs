@@ -6988,9 +6988,10 @@ mod protocol {
         SelectModeMsg, SelectOpMsg,
     };
     use holzwave_core::ai::profiles::{KeyError, KeySlot, KeyStatus, Preset, ProfileView, Removal};
-    use holzwave_core::ai::service::ServiceError;
     use holzwave_core::ai::service::events::{AiEvent, AiEventKind};
+    use holzwave_core::ai::service::{ContextState, FindingView, ItemView, OfferView, ServiceError};
     use holzwave_core::ai::store::{ConversationId, ConversationSummary};
+    use holzwave_core::ai::types::{ContextKind, Locality};
     use holzwave_core::ai::wire::Wire;
     use holzwave_core::layout::Axis;
     use holzwave_core::wire::{ModesMsg, SearchMsg};
@@ -7269,6 +7270,13 @@ mod protocol {
                     },
                 ]),
                 "key_slot": ops(vec![KeySlot::Provider, KeySlot::Gateway]),
+                "context_kind": ops(vec![
+                    ContextKind::Selection,
+                    ContextKind::Screen,
+                    ContextKind::LastCommand,
+                    ContextKind::File,
+                    ContextKind::Preview,
+                ]),
             },
             "paste": [
                 to_value(&PasteOutcomeMsg::from(PasteOutcome::Written)),
@@ -7323,6 +7331,34 @@ mod protocol {
                         notes: Vec::new(),
                     }),
                     "removal": to_value(&RemovalView::from(Removal { removed: true, key_deleted: true })),
+                    "context_state": to_value(&ContextState {
+                        profile: "local".into(),
+                        model: "llama3".into(),
+                        host: "127.0.0.1:11434".into(),
+                        locality: Locality::Loopback,
+                        required: true,
+                        shared: false,
+                        kinds: vec![ContextKind::Selection, ContextKind::Screen, ContextKind::LastCommand],
+                        persist: false,
+                    }),
+                    "offer": to_value(&OfferView {
+                        offer: "0123456789abcdef0123456789abcdef".into(),
+                        profile: "local".into(),
+                        model: "llama3".into(),
+                        host: "127.0.0.1:11434".into(),
+                        locality: Locality::Loopback,
+                        ttl_seconds: 300,
+                        items: vec![ItemView {
+                            id: 1,
+                            kind: ContextKind::Screen,
+                            label: "Screen of pane 3".into(),
+                            bytes: 412,
+                            findings: vec![FindingView { rule: "anthropic_key".into(), count: 1 }],
+                        }],
+                        empty: vec![ContextKind::Selection],
+                        bytes: 412,
+                        persist: false,
+                    }),
                 },
             },
         })

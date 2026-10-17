@@ -357,9 +357,13 @@ fn the_global_tauri_object_stays_and_nothing_points_at_the_network() {
 
 /// The commands of the AI chat the page may call, reviewed one by one and sorted. A command that is added to the
 /// manifest with an `ai_` name fails `the_ai_commands_are_exactly_the_reviewed_list` until someone has asked of it:
-/// can it return a key, accept consent for terminal content, or decide a tool call? If yes, it does not belong here.
-const AI_COMMANDS: [&str; 12] = [
+/// can it return a key, return terminal or file text, accept consent for terminal content, or decide a tool call? If
+/// yes, it does not belong here.
+const AI_COMMANDS: [&str; 15] = [
     "ai_cancel",
+    "ai_context_preview",
+    "ai_context_share",
+    "ai_context_state",
     "ai_conversation_delete",
     "ai_conversation_list",
     "ai_conversation_new",
@@ -388,7 +392,7 @@ fn the_ai_commands_are_exactly_the_reviewed_list() {
         assert!(
             unreviewed.is_empty(),
             "{what} lists ai_ commands that nobody reviewed: {unreviewed:?}. Before adding one to AI_COMMANDS in acl.rs, ask whether it \
-             can return a key, accept consent for terminal content or decide a tool call"
+             can return a key, return terminal or file text, accept context or decide a tool call"
         );
         let missing: Vec<&String> = reviewed.difference(&found).collect();
         assert!(missing.is_empty(), "{what} lost reviewed ai_ commands: {missing:?}");
@@ -504,4 +508,133 @@ pub fn key(core: State<Arc<AppCore>>, pane: PaneId) {\n    todo()\n}\n";
     let fields = host_field_problems("pub struct S {\n    pub api_key: String,\n    pub name: String,\n}\n#[cfg(test)]\nmod tests {\n    pub token: u8,\n}\n");
     assert_eq!(fields.len(), 1, "{fields:?}");
     assert!(fields[0].contains("api_key"));
+}
+
+// ---- what the page may send for shared content ----------------------------------------------------------------------
+
+/// The arguments of the function `name` in `source`, as (name, type) pairs in order. The `State` parameter that Tauri
+/// fills in is left out. `None` when there is no such function.
+fn arguments(source: &str, name: &str) -> Option<Vec<(String, String)>> {
+    let at = source.find(&format!("pub fn {name}("))?;
+    let rest = &source[at..];
+    let open = rest.find('(')?;
+    let (mut depth, mut close) = (0i32, None);
+    for (i, c) in rest[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let list = &rest[open + 1..close?];
+    // Split at the commas outside brackets, parentheses and angle brackets.
+    let (mut parts, mut depth, mut start) = (Vec::new(), 0i32, 0usize);
+    for (i, c) in list.char_indices() {
+        match c {
+            '(' | '[' | '<' | '{' => depth += 1,
+            ')' | ']' | '>' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&list[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&list[start..]);
+    Some(
+        parts
+            .into_iter()
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.split_once(':'))
+            .map(|(arg, ty)| (arg.trim().to_owned(), ty.trim().to_owned()))
+            .filter(|(_, ty)| !ty.starts_with("State<"))
+            .collect(),
+    )
+}
+
+/// What is wrong with the arguments of the commands `names` in `commands_rs`, as sentences: a context command takes
+/// only a chat, a pane, a profile, a model, a flag and kind names; no `ai_` command takes content, a context, a body
+/// or an envelope; `ai_send` takes the typed text and the ids of an offer, in that order and with those types.
+fn context_argument_problems(commands_rs: &str, names: &BTreeSet<String>) -> Vec<String> {
+    const ALLOWED: [&str; 6] = ["conversation", "pane", "profile", "model", "shared", "kinds"];
+    const NEVER: [&str; 5] = ["content", "context", "body", "envelope", "excerpt"];
+    let mut problems = Vec::new();
+    for name in names.iter().filter(|name| name.starts_with("ai_")) {
+        let Some(args) = arguments(commands_rs, name) else {
+            problems.push(format!("{name} is in the manifest but is not a command function of commands.rs"));
+            continue;
+        };
+        for (arg, _) in &args {
+            if NEVER.contains(&arg.as_str()) {
+                problems.push(format!("{name} takes an argument named {arg}: the page sends ids, never content"));
+            }
+            if name.starts_with("ai_context_") && !ALLOWED.contains(&arg.as_str()) {
+                problems.push(format!("{name} takes an argument named {arg}, which is not an id, a flag or a kind"));
+            }
+        }
+        if name == "ai_send" {
+            let shown: Vec<(&str, &str)> = args.iter().map(|(arg, ty)| (arg.as_str(), ty.as_str())).collect();
+            let expected = [
+                ("conversation", "String"),
+                ("text", "String"),
+                ("pane", "PaneId"),
+                ("profile", "Option<String>"),
+                ("model", "Option<String>"),
+                ("offer", "Option<String>"),
+                ("picked", "Option<Vec<u32>>"),
+            ];
+            if shown != expected {
+                problems.push(format!("ai_send takes {shown:?}, not the reviewed list {expected:?}"));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn no_context_command_takes_text_and_ai_send_takes_only_ids_for_context() {
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    let problems = context_argument_problems(COMMANDS_RS, &manifest);
+    assert!(problems.is_empty(), "a command could take shared content from the page:\n  {}", problems.join("\n  "));
+    for name in ["ai_context_state", "ai_context_share", "ai_context_preview"] {
+        assert!(manifest.contains(name), "{name} is not a command");
+        let args = arguments(COMMANDS_RS, name).expect("a command function");
+        assert!(args.iter().all(|(arg, _)| arg != "text"), "{name} takes text");
+    }
+    let preview = arguments(COMMANDS_RS, "ai_context_preview").expect("a command function");
+    assert_eq!(preview.last().map(|(arg, ty)| (arg.as_str(), ty.as_str())), Some(("kinds", "Vec<ContextKind>")));
+}
+
+#[test]
+fn the_argument_scanner_flags_a_command_that_takes_content() {
+    let source = "\
+pub fn ai_context_leak(core: State<Arc<AppCore>>, conversation: String, pane: PaneId, context: String) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_context_text(core: State<Arc<AppCore>>, conversation: String, text: String) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_context_fine(core: State<Arc<AppCore>>, conversation: String, pane: PaneId, kinds: Vec<ContextKind>) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_note(core: State<Arc<AppCore>>, body: String) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_send(core: State<Arc<AppCore>>, conversation: String, text: String, pane: PaneId, envelope: String) -> Result<(), AiFault> {\n    todo()\n}\n";
+    assert_eq!(
+        arguments(source, "ai_context_fine").expect("found"),
+        [
+            ("conversation".to_owned(), "String".to_owned()),
+            ("pane".to_owned(), "PaneId".to_owned()),
+            ("kinds".to_owned(), "Vec<ContextKind>".to_owned())
+        ]
+    );
+    assert_eq!(arguments(source, "nothing"), None);
+    let all = set(&["ai_context_leak", "ai_context_text", "ai_context_fine", "ai_note", "ai_send"]);
+    let problems = context_argument_problems(source, &all);
+    let said = |needle: &str| problems.iter().any(|problem| problem.contains(needle));
+    assert!(said("ai_context_leak takes an argument named context"), "{problems:?}");
+    assert!(said("ai_context_text takes an argument named text, which is not an id"), "{problems:?}");
+    assert!(said("ai_note takes an argument named body"), "{problems:?}");
+    assert!(said("ai_send takes"), "{problems:?}");
+    assert!(!problems.iter().any(|problem| problem.contains("ai_context_fine")), "{problems:?}");
 }
