@@ -6,6 +6,9 @@
 
 /// An in-process HTTP/1.1 server for the AI tests: chunked event streams, stalls, drops, error statuses, request capture.
 pub mod fake_http;
+/// The `wsh` stand-in of the shell tests, started once per test process so that no test waits for its first start.
+#[cfg(unix)]
+pub mod shell_stub;
 /// The one in-process SSH server of the integration tests: logins by password and key, a shell, exec and a jump host.
 pub mod ssh_server;
 

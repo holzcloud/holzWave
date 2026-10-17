@@ -9,17 +9,39 @@
 //! A shell that is not installed (or a bash older than 4.0, where a test needs a newer one) is reported on stdout as
 //! `shell_ctrl_r: skipped {shell}: {reason}` and the test returns; a shell that ran prints
 //! `shell_ctrl_r: ran {shell} {version}`. The file needs no engine, so it builds with `--no-default-features`.
+//!
+//! The tests are written to hold on a machine that is busy with other builds and test runs:
+//!
+//! - Every wait is for something observable (a line of output, the prompt, a call of the stub) and has the generous
+//!   bound [`DEADLINE`]. A wait that is met returns at once, so the bound costs nothing on an idle machine. A failure says
+//!   what was awaited, what the stub had been called with and the last bytes the shell wrote.
+//! - No test treats a quiet period as proof that the shell is done: a shell that is starved for half a second is as quiet
+//!   as one that has finished. [`Rig::drain`] only collects what trails an event that was seen.
+//! - The stub is one script that the tests of this process share and that is started once, blocking, before any shell
+//!   sees it (`common::shell_stub`): the first start of a new executable can take seconds on a busy macOS, where
+//!   `syspolicyd` assesses it, and a script that is new for every test failed the old 3 s wait for the key's call. The
+//!   shell still starts it in the background (zsh even lowers the priority of such jobs, `BG_NICE`), so the key is never
+//!   judged by how soon the stub answers.
+//! - Input is typed ahead: the terminal keeps what is written before a shell has started and the shell runs it in
+//!   order, so the lines are never paced by guesses.
 #![cfg(unix)]
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+use common::shell_stub::{LOG_ENV, ShellStub};
 use holzwave_core::pty::{Pty, SpawnOptions};
+
+/// How long a test waits for something it has seen the shell start: a call of the stub, a line of output, a prompt.
+const DEADLINE: Duration = Duration::from_secs(60);
+
+/// The line a test types to learn that the shell has run everything typed before it; its output is this word.
+const SYNC: &str = "sync-word";
 
 /// The workspace directory that holds the binding files.
 fn hooks_dir() -> PathBuf {
@@ -169,11 +191,6 @@ impl Shell {
             status: "status",
         })
     }
-
-    /// The seconds to wait for the first prompt.
-    fn first_prompt(&self) -> u64 {
-        if self.name == "fish" { 20 } else { 10 }
-    }
 }
 
 /// The first line of what `program flag` prints, for the report.
@@ -191,26 +208,28 @@ struct Rig {
     /// The last bytes seen, so that a query split between two reads is still answered once.
     carry: Vec<u8>,
     dir: PathBuf,
+    /// The prompt the shell shows once it was set up (see [`Shell::prompt`]); it never occurs in a line a test types.
+    prompt: &'static str,
+    /// The directory of the stub, which stays while a shell can still call it.
+    _stub: Arc<ShellStub>,
 }
 
 impl Rig {
     /// Start `program` with `args` in an 80 by 24 PTY. `HOME` and the working directory are a fresh scratch directory;
-    /// `PATH` has the stub directory first; `HOLZWAVE_IPC` is the scratch directory when `ipc` is true and empty when false
-    /// (the parent may itself run in a holzWave pane and carry the variable).
-    fn start(program: &Path, args: &[&str], ipc: bool) -> Rig {
+    /// `PATH` has the stub directory first and `calls.log` of the scratch directory is the stub's log; `HOLZWAVE_IPC` is
+    /// the scratch directory when `ipc` is true and empty when false (the parent may itself run in a holzWave pane and
+    /// carry the variable).
+    fn start(program: &Path, args: &[&str], prompt: &'static str, ipc: bool) -> Rig {
+        // Before the scratch directory: the first start of the stub can take seconds, and is not part of any timed wait.
+        let stub = ShellStub::shared();
         let dir = common::scratch_dir("ctrlr");
-        let stub = dir.join("stub");
-        std::fs::create_dir(&stub).expect("stub dir");
-        let script = stub.join("wsh");
-        let log = dir.join("calls.log");
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display())).expect("stub");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("mode");
-        let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap_or_default());
+        let path = format!("{}:{}", stub.dir().display(), std::env::var("PATH").unwrap_or_default());
         let options = SpawnOptions::new(program.to_string_lossy().into_owned(), 80, 24)
             .args(args.iter().copied())
             .cwd(&dir)
             .env("HOME", dir.to_string_lossy().into_owned())
             .env("PATH", path)
+            .env(LOG_ENV, dir.join("calls.log").to_string_lossy().into_owned())
             .env("TERM", "xterm")
             .env("INPUTRC", "/dev/null")
             .env("HOLZWAVE_IPC", if ipc { dir.to_string_lossy().into_owned() } else { String::new() })
@@ -229,7 +248,7 @@ impl Rig {
                 }
             }
         });
-        Rig { pty: Some(pty), rx, bytes: Vec::new(), carry: Vec::new(), dir }
+        Rig { pty: Some(pty), rx, bytes: Vec::new(), carry: Vec::new(), dir, prompt, _stub: stub }
     }
 
     /// Write bytes to the shell.
@@ -270,8 +289,31 @@ impl Rig {
         }
     }
 
-    /// Read until 400 ms pass without data (the shell has printed everything it will), for at most 10 s.
-    fn settle(&mut self) {
+    /// The escaped tail of the bytes seen, for a failure message.
+    fn tail(&self) -> String {
+        common::ascii(&self.bytes[self.bytes.len().saturating_sub(600)..])
+    }
+
+    /// Read until `done` holds. Panics after [`DEADLINE`], naming `what` was awaited, with the calls the stub had
+    /// received and the escaped tail of the bytes.
+    fn wait_until(&mut self, what: &str, done: impl Fn(&Rig) -> bool) {
+        let end = Instant::now() + DEADLINE;
+        while !done(self) {
+            let Some(left) = end.checked_duration_since(Instant::now()) else {
+                panic!("timed out after {} s waiting for {what}; the stub had been called with {:?}; the last bytes: {}", DEADLINE.as_secs(), self.calls(), self.tail());
+            };
+            match self.rx.recv_timeout(left.min(Duration::from_millis(20))) {
+                Ok(chunk) => self.take(chunk),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the shell ended while the test waited for {what}; the stub had been called with {:?}; the last bytes: {}", self.calls(), self.tail()),
+            }
+        }
+    }
+
+    /// Read what trails an event that was already seen, until 400 ms pass without data, for at most 10 s. This is a
+    /// courtesy for the bytes that follow a prompt (redraws, marks), never the proof that the shell is done: wait for the
+    /// event first.
+    fn drain(&mut self) {
         let end = Instant::now() + Duration::from_secs(10);
         let mut quiet = Instant::now();
         while Instant::now() < end && quiet.elapsed() < Duration::from_millis(400) {
@@ -282,20 +324,37 @@ impl Rig {
         }
     }
 
-    /// Read until the bytes seen contain `needle` `n` times; panics after `secs` with the escaped tail of the bytes.
-    fn wait_for(&mut self, needle: &str, n: usize, secs: u64) {
-        let end = Instant::now() + Duration::from_secs(secs);
-        while count(&self.bytes, needle.as_bytes()) < n {
-            let Some(left) = end.checked_duration_since(Instant::now()) else {
-                let tail = &self.bytes[self.bytes.len().saturating_sub(600)..];
-                panic!("timed out waiting for {needle:?}; the last bytes: {}", common::ascii(tail));
-            };
-            match self.rx.recv_timeout(left.min(Duration::from_millis(20))) {
-                Ok(chunk) => self.take(chunk),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the shell ended; bytes: {}", common::ascii(&self.bytes)),
-            }
-        }
+    /// Read until the bytes seen contain `needle`; `what` names what that shows.
+    fn wait_for(&mut self, needle: &str, what: &str) {
+        self.wait_until(&format!("{what} (the bytes {needle:?})"), |r| find(&r.bytes, needle.as_bytes()).is_some());
+    }
+
+    /// Read until the text `text` was printed alone on a line (as the output of a command, not as the echo of the typed
+    /// line), and return where in the bytes that line ends; `what` names the command.
+    fn wait_output(&mut self, text: &str, what: &str) -> usize {
+        // After a carriage return, a line feed or the end of a mark (the hooks write marks right before the output).
+        let starts = ["\r", "\n", "\x1b\\"].map(|lead| format!("{lead}{text}\r\n"));
+        self.wait_until(&format!("the output {text:?} of {what}"), |r| starts.iter().any(|needle| find(&r.bytes, needle.as_bytes()).is_some()));
+        starts.iter().filter_map(|needle| find(&self.bytes, needle.as_bytes()).map(|at| at + needle.len())).min().expect("the output was seen")
+    }
+
+    /// Read until the shell shows its prompt again after the line that was typed when the bytes were `from` long. The
+    /// shell writes a line feed when it accepts a line, and the prompt text never occurs in a line a test types, so the
+    /// prompt after that line feed is the one that follows the line.
+    fn wait_prompt(&mut self, from: usize, what: &str) {
+        self.wait_until(&format!("the prompt {:?} after {what}", self.prompt), |r| {
+            let rest = &r.bytes[from..];
+            rest.iter().position(|&b| b == b'\n').is_some_and(|lf| find(&rest[lf..], r.prompt.as_bytes()).is_some())
+        });
+    }
+
+    /// Type `text` and Enter, wait until the shell has run it and shows its prompt again, and return where in the bytes
+    /// the line starts.
+    fn enter(&mut self, text: &str) -> usize {
+        let from = self.bytes.len();
+        self.line(text);
+        self.wait_prompt(from, &format!("the line {text:?}"));
+        from
     }
 
     /// The lines the stub wrote so far.
@@ -303,54 +362,39 @@ impl Rig {
         std::fs::read_to_string(self.dir.join("calls.log")).unwrap_or_default().lines().map(str::to_owned).collect()
     }
 
-    /// Wait until the stub has been called `n` times; panics after `secs`.
-    fn wait_calls(&mut self, n: usize, secs: u64) {
-        let end = Instant::now() + Duration::from_secs(secs);
-        while self.calls().len() < n {
-            assert!(Instant::now() < end, "the stub was called {} times, not {n}; the last bytes: {}", self.calls().len(), common::ascii(&self.bytes[self.bytes.len().saturating_sub(600)..]));
-            if let Ok(chunk) = self.rx.recv_timeout(Duration::from_millis(20)) {
-                self.take(chunk);
-            }
-        }
+    /// Wait until the stub was called with a line for which `matches` holds; `what` names that call and its cause.
+    fn wait_call_where(&mut self, what: &str, matches: impl Fn(&str) -> bool) {
+        self.wait_until(&format!("the stub `wsh` to be called with {what}"), |r| r.calls().iter().any(|c| matches(c)));
+    }
+
+    /// Wait until the stub was called with exactly `call`; `cause` names what should have called it.
+    fn wait_call(&mut self, call: &str, cause: &str) {
+        self.wait_call_where(&format!("{call:?} ({cause})"), |c| c == call);
     }
 
     /// Set up the prompt of `shell`.
     fn prepare(&mut self, shell: &Shell) {
         if let Some(ready) = shell.ready {
-            self.wait_for(ready, 1, shell.first_prompt());
+            self.wait_for(ready, &format!("{} to be ready for its first line", shell.name));
         }
-        self.settle();
+        // The setup lines and a line that answers are typed at once: the terminal keeps what is typed before a shell has
+        // started, and the shell runs the lines in order. The answer proves that the setup has run; the prompt after it
+        // proves that the shell is waiting for the next line.
         for line in shell.setup {
             self.line(line);
-            self.settle();
         }
+        self.line(&format!("echo {SYNC}"));
+        let answered = self.wait_output(SYNC, "the setup of the prompt");
+        self.wait_until(&format!("the prompt {:?} after the setup", self.prompt), |r| find(&r.bytes[answered..], r.prompt.as_bytes()).is_some());
+        self.drain();
     }
 
     /// Load a file of the hooks directory the way an rc file does, and wait for the prompt. The file is copied to a short
     /// name in the scratch directory first, so that a line editor that redraws a line wider than the terminal stays out
-    /// of the way.
-    fn load(&mut self, file: &str) {
+    /// of the way. Returns where in the bytes the load line starts. See [`Rig::enter`].
+    fn load(&mut self, file: &str) -> usize {
         std::fs::copy(hooks_dir().join(file), self.dir.join("h")).expect("copy the hook");
-        self.line(LOAD);
-        self.settle();
-    }
-
-    /// Read until the text `text` was printed alone on a line (as the output of a command, not as the echo of the typed line).
-    fn wait_output(&mut self, text: &str, secs: u64) {
-        // After a carriage return, a line feed or the end of a mark (the hooks write marks right before the output).
-        let starts = ["\r", "\n", "\x1b\\"].map(|lead| format!("{lead}{text}\r\n"));
-        let end = Instant::now() + Duration::from_secs(secs);
-        while starts.iter().all(|needle| count(&self.bytes, needle.as_bytes()) == 0) {
-            let Some(left) = end.checked_duration_since(Instant::now()) else {
-                let tail = &self.bytes[self.bytes.len().saturating_sub(600)..];
-                panic!("timed out waiting for the output {text:?}; the last bytes: {}", common::ascii(tail));
-            };
-            match self.rx.recv_timeout(left.min(Duration::from_millis(20))) {
-                Ok(chunk) => self.take(chunk),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the shell ended; bytes: {}", common::ascii(&self.bytes)),
-            }
-        }
+        self.enter(LOAD)
     }
 }
 
@@ -363,14 +407,9 @@ impl Drop for Rig {
     }
 }
 
-/// How many times `needle` occurs in `bytes` (without overlap).
-fn count(bytes: &[u8], needle: &[u8]) -> usize {
-    let (mut n, mut i) = (0, 0);
-    while let Some(at) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
-        n += 1;
-        i += at + needle.len();
-    }
-    n
+/// Where `needle` first occurs in `bytes`.
+fn find(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    bytes.windows(needle.len()).position(|w| w == needle)
 }
 
 /// The text of `bytes` without the escape sequences a shell writes around its prompt.
@@ -397,7 +436,7 @@ fn plain(bytes: &[u8]) -> String {
 
 /// Start `sh` in a holzWave pane (`ipc`) or outside one, with its plain prompt.
 fn start(sh: &Shell, ipc: bool) -> Rig {
-    let mut rig = Rig::start(&sh.program, sh.args, ipc);
+    let mut rig = Rig::start(&sh.program, sh.args, sh.prompt, ipc);
     rig.prepare(sh);
     rig
 }
@@ -411,10 +450,10 @@ fn asks_the_app_and_keeps_the_line(sh: &Shell) {
     rig.load(sh.file);
     rig.send(b"echo kept");
     rig.send(&[0x12]);
-    rig.wait_calls(1, 3);
+    rig.wait_call("hist open", "Ctrl+R pressed over the typed line");
     assert_eq!(rig.calls(), ["hist open"]);
     rig.send(b"\r");
-    rig.wait_output("kept", 5);
+    rig.wait_output("kept", "the typed line `echo kept`, run after the key");
     assert_eq!(rig.calls().len(), 1, "the key asked once and the line did not ask again");
     report(sh);
 }
@@ -422,13 +461,12 @@ fn asks_the_app_and_keeps_the_line(sh: &Shell) {
 fn keeps_the_status_of_the_last_command(sh: &Shell) {
     let mut rig = start(sh, true);
     rig.load(sh.file);
-    rig.line("false");
-    rig.settle();
+    rig.enter("false");
     rig.send(&[0x12]);
-    rig.wait_calls(1, 3);
-    rig.settle();
+    rig.wait_call("hist open", "Ctrl+R pressed after `false`");
+    rig.drain();
     rig.line(&format!("echo status=${}", sh.status));
-    rig.wait_output("status=1", 5);
+    rig.wait_output("status=1", "the status of `false`, read after Ctrl+R");
     assert_eq!(rig.calls(), ["hist open"]);
     report(sh);
 }
@@ -437,40 +475,37 @@ fn stays_with_the_shell_outside_holzwave(sh: &Shell) {
     let mut rig = start(sh, false);
     // What the shell writes to load a file that does nothing (fish writes marks and a title of its own).
     std::fs::write(rig.dir.join("h"), "# nothing\n").expect("control file");
-    let before = rig.bytes.len();
-    rig.line(LOAD);
-    rig.settle();
-    let control = plain(&rig.bytes[before..]);
-    let before = rig.bytes.len();
-    rig.load(sh.file);
-    let loaded = plain(&rig.bytes[before..]);
+    let from = rig.enter(LOAD);
+    rig.drain();
+    let control = plain(&rig.bytes[from..]);
+    let from = rig.load(sh.file);
+    rig.drain();
+    let loaded = plain(&rig.bytes[from..]);
     assert_eq!(loaded, control, "loading the binding wrote something that loading an empty file does not");
     if sh.name != "fish" {
         let rest = loaded.replace(LOAD, "").replace(sh.prompt, "").replace(['\r', '\n'], "");
         assert_eq!(rest, "", "loading wrote something beyond the echo of the line and the prompt");
     }
     rig.line("echo after-hook");
-    rig.wait_output("after-hook", 5);
-    rig.settle();
+    rig.wait_output("after-hook", "the line `echo after-hook`");
+    rig.drain();
     rig.send(&[0x12]);
     if let Some(marker) = sh.search {
-        rig.wait_for(marker, 1, 5);
+        rig.wait_for(marker, &format!("{}'s own reverse search to answer Ctrl+R", sh.name));
     }
-    rig.settle();
+    rig.drain();
     assert!(rig.calls().is_empty(), "nothing was asked outside holzWave: {:?}", rig.calls());
     rig.send(&[0x03]);
-    rig.settle();
     report(sh);
 }
 
 fn is_nounset_safe(sh: &Shell) {
     let mut rig = start(sh, true);
-    rig.line(sh.nounset.expect("a shell with an unset-variable error"));
-    rig.settle();
+    rig.enter(sh.nounset.expect("a shell with an unset-variable error"));
     let before = rig.bytes.len();
     rig.load(sh.file);
     rig.line("echo ok");
-    rig.wait_output("ok", 5);
+    rig.wait_output("ok", "the line `echo ok`, run after loading the binding under nounset");
     let seen = plain(&rig.bytes[before..]);
     for bad in ["unbound variable", "parameter not set"] {
         assert!(!seen.contains(bad), "{bad}: {seen}");
@@ -483,8 +518,8 @@ fn sourced_twice_asks_once(sh: &Shell) {
     rig.load(sh.file);
     rig.load(sh.file);
     rig.send(&[0x12]);
-    rig.wait_calls(1, 3);
-    rig.settle();
+    rig.wait_call("hist open", "Ctrl+R after the binding was loaded twice");
+    rig.drain();
     assert_eq!(rig.calls(), ["hist open"]);
     report(sh);
 }
@@ -493,12 +528,11 @@ fn binds_vi_insert_mode_too(sh: &Shell) {
     let mut rig = start(sh, true);
     rig.load(sh.file);
     for line in sh.vi {
-        rig.line(line);
-        rig.settle();
+        rig.enter(line);
     }
     rig.send(&[0x12]);
-    rig.wait_calls(1, 3);
-    rig.settle();
+    rig.wait_call("hist open", "Ctrl+R in vi insert mode");
+    rig.drain();
     assert_eq!(rig.calls(), ["hist open"]);
     report(sh);
 }
@@ -512,13 +546,15 @@ fn works_beside_the_history_and_mark_hooks(sh: &Shell) {
     rig.load(sh.base);
     rig.load(sh.file);
     rig.send(&[0x12]);
-    rig.wait_calls(rig.calls().len() + 1, 3);
-    rig.settle();
-    let at = rig.calls().iter().position(|c| c == "hist open").expect("the key asked");
+    // The history hook reports its own lines to the stub too, and the stub starts late, so the key's call is awaited by what
+    // it says, not by how many calls there are.
+    rig.wait_call("hist open", "Ctrl+R beside the history hook");
+    rig.drain();
     rig.line("echo beside-the-hook");
-    rig.wait_output("beside-the-hook", 5);
-    rig.settle();
+    rig.wait_output("beside-the-hook", "the line `echo beside-the-hook`");
+    rig.wait_call_where("`hist add 0 <dir> echo beside-the-hook` (the history hook reporting the line)", |c| c.starts_with("hist add 0 ") && c.ends_with("echo beside-the-hook"));
     let after = rig.calls();
+    let at = after.iter().position(|c| c == "hist open").expect("the key asked");
     assert_eq!(after.iter().filter(|c| *c == "hist open").count(), 1, "{after:?}");
     let report_at = after.iter().position(|c| c.starts_with("hist add 0 ") && c.ends_with("echo beside-the-hook")).unwrap_or_else(|| panic!("no history entry for the command: {after:?}"));
     assert!(at < report_at, "the key asked first: {after:?}");
@@ -529,11 +565,10 @@ fn of_an_old_bash_binds_nothing(sh: &Shell) {
     let mut rig = start(sh, true);
     rig.load(sh.file);
     rig.send(&[0x12]);
-    rig.wait_for(sh.search.expect("a search marker"), 1, 5);
-    rig.settle();
+    rig.wait_for(sh.search.expect("a search marker"), "the old bash's own reverse search to answer Ctrl+R");
+    rig.drain();
     assert!(rig.calls().is_empty(), "no binding in a bash older than 4.0: {:?}", rig.calls());
     rig.send(&[0x03]);
-    rig.settle();
     report(sh);
 }
 

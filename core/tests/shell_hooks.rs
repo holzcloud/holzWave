@@ -9,6 +9,17 @@
 //! A shell that is not installed (or a bash older than 4.4 where a test needs one) is reported on stdout as
 //! `shell_hooks: skipped {shell}: {reason}` and the test returns; a shell that ran prints
 //! `shell_hooks: ran {shell} {version}`.
+//!
+//! The tests are written to hold on a machine that is busy with other builds and test runs:
+//!
+//! - Every wait is for something observable (a mark, a line of output, a call of the stub) and has the generous bound
+//!   [`DEADLINE`]. A wait that is met returns at once, so the bound costs nothing on an idle machine. A failure says what
+//!   was awaited and shows the last bytes the shell wrote.
+//! - No test treats a quiet period as proof that a shell is done with a line: a shell that is starved for half a second is as
+//!   quiet as one that has finished. A line that writes no mark is followed by a line that answers ([`Pane::sync`]).
+//! - The stub is a script that every test shares and that is started once before any shell sees it
+//!   (`common::shell_stub`), because the first start of a new executable can take seconds on a busy macOS.
+//! - Input is typed ahead: the terminal keeps what is written before a shell has started and the shell runs it in order.
 #![cfg(unix)]
 #![cfg(feature = "ghostty")]
 
@@ -16,11 +27,20 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+use common::shell_stub::{LOG_ENV, ShellStub};
 use holzwave_core::pty::{Pty, SpawnOptions};
 use holzwave_core::{GhosttyEngine, TerminalEngine};
+
+/// How long a test waits for something it has seen the shell start: a mark, a line of output, a call of the stub.
+const DEADLINE: Duration = Duration::from_secs(60);
+
+/// What a shell writes when it turns on bracketed paste, which fish does once it has probed the terminal and is ready for
+/// its first line.
+const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
 
 /// OSC 133 introducer.
 const OSC_133: &[u8] = b"\x1b]133;";
@@ -149,7 +169,7 @@ struct Pane {
     /// The last bytes seen, so that a query split between two reads is still answered once.
     carry: Vec<u8>,
     dir: PathBuf,
-    /// A stand-in `wsh`, when the test gave none.
+    /// A stand-in `wsh` of its own, when the test gave none.
     _stub: Option<Stub>,
     /// The shell writes OSC 133 marks itself (fish 4): the hook then adds none, and its marks are read loosely.
     native: bool,
@@ -159,22 +179,20 @@ struct Pane {
 
 impl Pane {
     /// Start `program` with `args` in an 80 by 24 PTY. `HOME` and the working directory are a fresh scratch
-    /// directory; `PATH` has the stub directory first; `HOLZWAVE_IPC` is the scratch directory when `ipc` is true
-    /// and empty when false (the parent may itself run in a holzWave pane and carry the variable).
-    fn start(program: &Path, args: &[&str], ipc: bool, stub_dir: Option<&Path>, extra_env: &[(&str, &str)]) -> Self {
+    /// directory; `PATH` has the stub directory first and the log of `stub` (or of a stub of its own, when the test gave
+    /// none) is where the stub writes its calls; `HOLZWAVE_IPC` is the scratch directory when `ipc` is true and empty when
+    /// false (the parent may itself run in a holzWave pane and carry the variable).
+    fn start(program: &Path, args: &[&str], ipc: bool, stub: Option<&Stub>, extra_env: &[(&str, &str)]) -> Self {
+        let own = if stub.is_none() { Some(Stub::new()) } else { None };
+        let stub = stub.or(own.as_ref()).expect("a stub");
         let dir = common::scratch_dir("hooks");
-        let path = std::env::var("PATH").unwrap_or_default();
-        let own = if stub_dir.is_none() { Some(Stub::new()) } else { None };
-        let stub = stub_dir.map(Path::to_path_buf).or_else(|| own.as_ref().map(|s| s.dir.clone()));
-        let path = match stub {
-            Some(stub) => format!("{}:{path}", stub.display()),
-            None => path,
-        };
+        let path = format!("{}:{}", stub.path_dir().display(), std::env::var("PATH").unwrap_or_default());
         let mut options = SpawnOptions::new(program.to_string_lossy().into_owned(), 80, 24)
             .args(args.iter().copied())
             .cwd(&dir)
             .env("HOME", dir.to_string_lossy().into_owned())
             .env("PATH", path)
+            .env(LOG_ENV, stub.log_file().to_string_lossy().into_owned())
             .env("HOLZWAVE_IPC", if ipc { dir.to_string_lossy().into_owned() } else { String::new() })
             .env("PROMPT_COMMAND", "")
             .env("PS0", "")
@@ -259,25 +277,31 @@ impl Pane {
         }
     }
 
-    /// Read until `done` holds for the bytes so far; panics after `bound` with the escaped tail.
-    fn pump_until(&mut self, bound: Duration, what: &str, done: impl Fn(&[u8]) -> bool) {
-        let end = Instant::now() + bound;
+    /// The escaped tail of the bytes seen, for a failure message.
+    fn tail(&self) -> String {
+        common::ascii(&self.bytes[self.bytes.len().saturating_sub(600)..])
+    }
+
+    /// Read until `done` holds for the bytes so far; panics after [`DEADLINE`], naming what was awaited, with the escaped
+    /// tail.
+    fn wait_until(&mut self, what: &str, done: impl Fn(&[u8]) -> bool) {
+        let end = Instant::now() + DEADLINE;
         while !done(&self.bytes) {
             let Some(left) = end.checked_duration_since(Instant::now()) else {
-                let tail = &self.bytes[self.bytes.len().saturating_sub(600)..];
-                panic!("timed out waiting for {what}; the last bytes: {}", common::ascii(tail));
+                panic!("timed out after {} s waiting for {what}; the last bytes: {}", DEADLINE.as_secs(), self.tail());
             };
             match self.rx.recv_timeout(left.min(Duration::from_millis(20))) {
                 Ok(chunk) => self.take(chunk),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the shell ended; bytes: {}", common::ascii(&self.bytes)),
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("the shell ended while the test waited for {what}; bytes: {}", common::ascii(&self.bytes)),
             }
         }
     }
 
-    /// Read until `n` prompts were marked, then a little longer for what follows the mark.
-    fn wait_prompts(&mut self, n: usize, bound: Duration) {
-        self.pump_until(bound, &format!("{n} prompt marks"), |b| count(b, MARK_A) >= n);
+    /// Read until `n` prompts were marked, then a little longer for what follows the mark; `what` names the line that
+    /// should have caused the last one.
+    fn wait_prompts(&mut self, n: usize, what: &str) {
+        self.wait_until(&format!("prompt mark number {n} (OSC 133;A) after {what}"), |b| count(b, MARK_A) >= n);
         self.pump(Duration::from_millis(150));
     }
 
@@ -285,15 +309,13 @@ impl Pane {
     fn run(&mut self, line: &str) {
         let n = self.prompts() + 1;
         self.send(line);
-        self.wait_prompts(n, Duration::from_secs(15));
+        self.wait_prompts(n, &format!("the line {line:?}"));
     }
 
-    /// Read until `needle` occurred `n` times, then a little longer.
-    fn wait_count(&mut self, needle: &str, n: usize) {
+    /// Read until `needle` occurred `n` times, then a little longer; `what` names what should have written it.
+    fn wait_count(&mut self, needle: &str, n: usize, what: &str) {
         let needle = needle.as_bytes().to_vec();
-        self.pump_until(Duration::from_secs(15), &format!("{n} times {:?}", needle.escape_ascii().to_string()), |b| {
-            count(b, &needle) >= n
-        });
+        self.wait_until(&format!("{n} time(s) the bytes {:?} written by {what}", needle.escape_ascii().to_string()), |b| count(b, &needle) >= n);
         self.pump(Duration::from_millis(150));
     }
 
@@ -302,7 +324,7 @@ impl Pane {
         let end = format!(">{tag}\r\n");
         let n = count(&self.bytes, end.as_bytes()) + 1;
         self.send(&format!("printf '{tag}<%s>{tag}\\n' {args}"));
-        self.wait_count(&end, n);
+        self.wait_count(&end, n, &format!("the `printf` {tag}"));
         let text = String::from_utf8_lossy(&self.bytes).into_owned();
         let open = format!("{tag}<");
         let close = format!(">{tag}\r\n");
@@ -311,8 +333,35 @@ impl Pane {
         text[from..to].to_owned()
     }
 
-    /// Read until 400 ms pass without data (the shell has printed everything it will).
-    fn settle(&mut self) {
+    /// Ask a shell that has no hook yet to answer, and read until the answer came: the shell has then run every line that
+    /// was sent before. A line that writes no mark shows nothing else when it is done, and a quiet period proves nothing
+    /// about a shell that is starved.
+    fn sync(&mut self) {
+        let n = self.prompts() + 1;
+        self.capture("SYNC", "''");
+        if self.native {
+            // The shell marks the prompt after the answer by itself, and the next line counts the prompts.
+            self.wait_prompts(n, "the line that asks the shell to answer");
+        }
+    }
+
+    /// Read until a shell has started: fish probes the terminal first and turns on bracketed paste when it is ready for
+    /// its first line, and a shell that marks natively has marked its first prompt by then; any other shell has written
+    /// its first prompt. (Lines sent earlier would be kept by the terminal, but a test that counts marks needs the first.)
+    fn wait_started(&mut self, sh: &Shell) {
+        if sh.kind == Kind::Fish {
+            self.wait_until("fish to be ready for its first line (bracketed paste on)", |b| find(b, BRACKETED_PASTE_ON).is_some());
+        } else {
+            self.wait_until(&format!("the first output of {}", sh.name()), |b| !b.is_empty());
+        }
+        if self.native {
+            self.wait_until("the mark of the first prompt of a shell that marks natively", |b| count(b, MARK_A) >= 1);
+        }
+    }
+
+    /// Read until 400 ms pass without data, for at most 15 s. This is a courtesy for the bytes that trail an event that
+    /// was already seen, never the proof that a shell is done: wait for the event first.
+    fn drain(&mut self) {
         let end = Instant::now() + Duration::from_secs(15);
         let mut quiet = Instant::now();
         while Instant::now() < end && quiet.elapsed() < Duration::from_millis(400) {
@@ -389,6 +438,10 @@ fn count(hay: &[u8], needle: &[u8]) -> usize {
     hay.windows(needle.len()).filter(|w| *w == needle).count()
 }
 
+/// Where `needle` first occurs in `hay`.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
 
 /// The path of a hook file.
 fn hook_path(file: &str) -> PathBuf {
@@ -409,7 +462,7 @@ fn bash_hook_marks_one_command() {
     };
     let mut pane = Pane::start(&bash, &["--norc", "--noprofile", "-i"], true, None, &[]);
     pane.send("PS1='$ '");
-    pane.settle();
+    pane.sync();
     pane.loaded_at = pane.bytes.len();
     pane.run(&format!("source '{}'", hook_path("bash.sh").display()));
     assert_eq!(pane.marks(), [Mark::A]);
@@ -591,29 +644,48 @@ fn marks_natively(sh: &Shell) -> bool {
         return false;
     }
     let mut p = Pane::start(&sh.program, sh.args(), false, None, &sh.env());
-    p.pump_until(Duration::from_secs(20), "the first output", |b| !b.is_empty());
-    p.settle();
+    p.wait_until("a hookless fish to be ready for its first line (bracketed paste on)", |b| find(b, BRACKETED_PASTE_ON).is_some());
+    // The mark of the first prompt is written with the prompt, which may trail the switch to bracketed paste.
+    p.drain();
     count(&p.bytes, MARK_A) > 0
 }
 
-/// A directory with a `wsh` stand-in that logs its arguments, one call per line.
+/// The `wsh` stand-in of one test: the script that all tests share (`common::shell_stub`) and this test's own log of its
+/// calls, one call per line.
 struct Stub {
+    shared: Arc<ShellStub>,
     dir: PathBuf,
 }
 
 impl Stub {
     fn new() -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = common::scratch_dir("hooks-stub");
-        let script = dir.join("wsh");
-        let log = dir.join("wsh.log");
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display())).expect("stub");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        Self { dir }
+        // The shared script first: its first start can take seconds and is not part of any timed wait.
+        let shared = ShellStub::shared();
+        Self { shared, dir: common::scratch_dir("hooks-stub") }
+    }
+
+    /// The directory with the `wsh` script, to put first on the PATH of the shell.
+    fn path_dir(&self) -> &Path {
+        self.shared.dir()
+    }
+
+    /// The file the stub appends its calls to.
+    fn log_file(&self) -> PathBuf {
+        self.dir.join("wsh.log")
     }
 
     fn log(&self) -> Vec<String> {
-        std::fs::read_to_string(self.dir.join("wsh.log")).unwrap_or_default().lines().map(str::to_owned).collect()
+        std::fs::read_to_string(self.log_file()).unwrap_or_default().lines().map(str::to_owned).collect()
+    }
+
+    /// Wait until the log holds a call for which `done` holds; panics after [`DEADLINE`], naming what was awaited.
+    fn wait_log(&self, what: &str, done: impl Fn(&[String]) -> bool) {
+        assert!(
+            common::wait_until(DEADLINE, || done(&self.log())),
+            "timed out after {} s waiting for {what} to reach the stub; the stub had been called with {:?}",
+            DEADLINE.as_secs(),
+            self.log()
+        );
     }
 }
 
@@ -625,14 +697,14 @@ impl Drop for Stub {
 
 /// A shell that has started and is in its known state.
 fn boot(sh: &Shell, ipc: bool, stub: Option<&Stub>) -> Pane {
-    let mut pane = Pane::start(&sh.program, sh.args(), ipc, stub.map(|s| s.dir.as_path()), &sh.env());
+    let mut pane = Pane::start(&sh.program, sh.args(), ipc, stub, &sh.env());
     pane.native = marks_natively_for(sh);
-    let first = if sh.kind == Kind::Fish { 20 } else { 15 };
-    pane.pump_until(Duration::from_secs(first), "the first output", |b| !b.is_empty());
-    pane.settle();
-    for line in sh.setup() {
-        pane.send(line);
-        pane.settle();
+    pane.wait_started(sh);
+    if !sh.setup().is_empty() {
+        for line in sh.setup() {
+            pane.send(line);
+        }
+        pane.sync();
     }
     pane
 }
@@ -691,7 +763,7 @@ fn never_edits_the_prompt_and_survives_a_framework(sh: &Shell) {
 
     let mut p = boot(sh, true, None);
     p.send(sh.framework(false));
-    p.settle();
+    p.sync();
     p.load(sh);
     p.run("printf 'one\\n'");
     p.run("printf 'two\\n'");
@@ -721,19 +793,16 @@ fn still_reports_history(sh: &Shell) {
     p.run("false");
     p.run("echo hist-probe");
     let name = p.dir().file_name().expect("name").to_string_lossy().into_owned();
-    let has = |status: &str, command: &str| {
-        let log = stub.log();
+    let has = |log: &[String], status: &str, command: &str| {
         let hits = log
             .iter()
             .filter(|l| l.starts_with(&format!("hist add {status} ")) && l.contains(&format!("/{name} ")) && l.ends_with(command))
             .count();
         hits == 1
     };
-    assert!(
-        common::wait_until(Duration::from_secs(3), || has("1", " false") && has("0", " echo hist-probe")),
-        "the history calls were: {:?}",
-        stub.log()
-    );
+    stub.wait_log("the history calls `hist add 1 <dir> false` and `hist add 0 <dir> echo hist-probe`", |log| {
+        has(log, "1", " false") && has(log, "0", " echo hist-probe")
+    });
     sh.ran();
 }
 
@@ -742,9 +811,9 @@ fn does_nothing_outside_holzwave(sh: &Shell) {
     let rc = p.dir().join("rc");
     std::fs::write(&rc, format!("{}\necho after-rc-done\n", sh.eval_line())).expect("rc file");
     p.send(&format!("source '{}'", rc.display()));
-    p.wait_count("after-rc-done", 1);
+    p.wait_count("after-rc-done", 1, "the rc file");
     p.send(sh.say_ok());
-    p.wait_count("ok-2", 1);
+    p.wait_count("ok-2", 1, &format!("the line {:?}", sh.say_ok()));
     // A shell may write marks of its own (fish 4, with BEL); the hook writes none, so none ends with the string terminator.
     assert_eq!(string_terminated(&p.bytes), 0, "marks outside holzWave: {}", common::ascii(&p.bytes));
     let left = p.capture("V0", sh.residue_args());
@@ -755,7 +824,7 @@ fn does_nothing_outside_holzwave(sh: &Shell) {
 fn is_nounset_safe(sh: &Shell) {
     let mut p = boot(sh, true, None);
     p.send("set -u");
-    p.settle();
+    p.sync();
     p.load(sh);
     p.run(sh.say_ok());
     let text = String::from_utf8_lossy(&p.bytes).into_owned();
@@ -821,20 +890,14 @@ fn bash_hook_of_an_old_bash_reports_history_only() {
     let stub = Stub::new();
     let mut p = boot(&sh, true, Some(&stub));
     p.send(&sh.load_line());
-    p.settle();
     p.send("echo hist-old-$((1+1))");
-    p.wait_count("hist-old-2", 1);
-    p.settle();
+    p.wait_count("hist-old-2", 1, "the line `echo hist-old-$((1+1))`");
+    p.drain();
     assert_eq!(count(&p.bytes, OSC_133), 0, "an old bash wrote marks: {}", common::ascii(&p.bytes));
     let name = p.dir().file_name().expect("name").to_string_lossy().into_owned();
-    assert!(
-        common::wait_until(Duration::from_secs(3), || stub
-            .log()
-            .iter()
-            .any(|l| l.starts_with("hist add 0 ") && l.contains(&format!("/{name} ")) && l.ends_with(" echo hist-old-$((1+1))"))),
-        "the history calls were: {:?}",
-        stub.log()
-    );
+    stub.wait_log("the history call `hist add 0 <dir> echo hist-old-$((1+1))`", |log| {
+        log.iter().any(|l| l.starts_with("hist add 0 ") && l.contains(&format!("/{name} ")) && l.ends_with(" echo hist-old-$((1+1))"))
+    });
     sh.ran();
 }
 
