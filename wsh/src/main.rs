@@ -141,6 +141,38 @@ mod tests {
     }
 
     #[test]
+    fn no_hook_ends_the_rc_file_or_touches_the_prompt() {
+        for shell in ["bash", "zsh", "fish"] {
+            let h = hook(shell).unwrap();
+            assert!(h.contains("__holzwave_hook"), "{shell}: an idempotence guard");
+            for line in h.lines() {
+                let word = line.trim_start();
+                let top = line.len() - word.len() <= 2;
+                assert!(!(top && (word.starts_with("return") || word.starts_with("exit"))), "{shell}: {line}: ends an rc file");
+                for bad in ["|| return", "|| exit", "or return", "or exit"] {
+                    assert!(!line.contains(bad), "{shell}: {line}");
+                }
+                for bad in ["PS1=", "PS2=", "PROMPT=", "RPROMPT=", "set PS1", "function fish_prompt", "functions -c", "trap "] {
+                    assert!(!line.contains(bad), "{shell}: {line}: touches the prompt or a trap");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_hook_marks_four_points_with_a_string_terminator() {
+        for shell in ["bash", "zsh", "fish"] {
+            let h = hook(shell).unwrap();
+            for mark in [r"133;A\033\\", r"133;B\033\\", r"133;C\033\\", r"133;D;%d\033\\"] {
+                assert!(h.contains(mark), "{shell}: {mark}");
+            }
+            for bel in [r"\007", r"\a", r"\x07"] {
+                assert!(!h.contains(bel), "{shell}: a mark ends with the string terminator, never BEL");
+            }
+        }
+    }
+
+    #[test]
     fn setmeta_joins_the_words_and_everything_else_is_usage() {
         let cwd = Path::new("/");
         assert_eq!(
