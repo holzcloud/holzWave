@@ -30,6 +30,8 @@ export interface Connection {
   reconnect_attempts: number;
   reconnect_delay_secs: number;
   shell: string;
+  /** SSH only: the person allows the `wsh` tunnel on this host. Absent from the core's answer means false. */
+  wsh: boolean;
   has_secret: boolean;
 }
 
@@ -98,6 +100,7 @@ export function readConnections(raw: unknown): Connection[] {
       reconnect_attempts: count(o.reconnect_attempts),
       reconnect_delay_secs: count(o.reconnect_delay_secs),
       shell: text(o.shell),
+      wsh: o.wsh === true,
       has_secret: o.has_secret === true,
     });
   }

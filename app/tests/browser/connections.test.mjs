@@ -9,6 +9,7 @@ export default async function ({ page, url, errors }) {
   await wslCase(page, url);
   await stateCase(page, url);
   await dialogCase(page, url);
+  await wshCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -107,7 +108,7 @@ async function dialogCase(page, url) {
   assert.deepEqual(names, ["Talos", "Web"], "the saved connections are listed");
   assert.equal(await page.locator("#cx-name").inputValue(), "Talos", "the first one is shown");
   assert.equal(await page.locator("#cx-secret").inputValue(), "", "a secret is never filled in again");
-  assert.match(await page.locator(".conns .cx-hint").textContent(), /A secret is saved in the system keychain/);
+  assert.match(await page.locator(".conns .cx-hint:not(#cx-wsh-note)").textContent(), /A secret is saved in the system keychain/);
 
   // A Docker connection hides the SSH fields and names its host a container.
   await page.locator(".conns .cx-list button", { hasText: "Web" }).click();
@@ -174,6 +175,79 @@ async function dialogCase(page, url) {
   // Escape closes the dialog and the terminal gets its keyboard back.
   await page.evaluate(() => window.__registry.runAction("connections.open"));
   await page.waitForSelector(".dlg.conns");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".dlg.conns", { state: "detached" });
+}
+
+const WSH_NOTE =
+  "A program on this host can then open files and rename this pane in holzWave through a private tunnel. It can never use the AI or approve anything. The host must allow Unix socket forwarding.";
+
+async function wshCase(page, url) {
+  await open(page, url);
+  await page.evaluate((l) => { window.__LIST = l; }, [TALOS, WEB]);
+  // The stub plays the core: it keeps what was saved and lists it back, as `connections_list` does.
+  await page.evaluate(() => {
+    window.__MOCK__.on("connection_save", ({ profile }) => {
+      window.__LIST = window.__LIST.map((c) => (c.id === profile.id ? { ...profile, has_secret: c.has_secret } : c));
+      return window.__LIST.find((c) => c.id === profile.id);
+    });
+  });
+  await page.evaluate(() => window.__registry.runAction("connections.open"));
+  await page.waitForSelector(".dlg.conns");
+
+  const box = page.locator("#cx-wsh");
+  const note = page.locator("#cx-wsh-note");
+  assert.equal(await page.locator('label:has(#cx-wsh)').textContent(), "Use wsh on this host");
+  assert.equal(await box.isChecked(), false, "unchecked for a connection that never ticked it");
+  assert.equal(await note.textContent(), WSH_NOTE, "the note says what it allows and never allows");
+  assert.equal(await note.evaluate((n) => n.children.length), 0, "the note is text, no markup");
+  assert.equal(await note.getAttribute("class"), "cx-hint");
+
+  await box.check();
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("connection_save").length === 1);
+  const sent = (await page.evaluate(() => window.__MOCK__.callsOf("connection_save")))[0];
+  assert.equal(sent.profile.wsh, true, "the profile sent to the core carries wsh");
+  assert.equal(sent.profile.id, "talos");
+
+  // Another connection, then back: the saved value is shown again.
+  await page.locator(".conns .cx-list button", { hasText: "Web" }).click();
+  assert.equal(await box.isVisible(), false, "a Docker connection has no wsh row");
+  assert.equal(await note.isVisible(), false, "and no note");
+  await page.locator(".conns .cx-list button", { hasText: "Talos" }).click();
+  assert.equal(await box.isVisible(), true);
+  assert.equal(await box.isChecked(), true, "ticked again when the connection is chosen");
+  assert.equal(await note.isVisible(), true);
+
+  // A new connection starts unchecked, and a ticked box does not leak into it.
+  await page.locator(".conns .cx-new").click();
+  assert.equal(await box.isChecked(), false, "a new connection starts unchecked");
+
+  // A WSL connection hides the row and the note; a box ticked before the type changed is not sent.
+  await page.fill("#cx-name", "Ubuntu");
+  await page.fill("#cx-host", "Ubuntu-24.04");
+  await box.check();
+  await page.check('input[name="cx-kind"][value="wsl"]');
+  assert.equal(await box.isVisible(), false);
+  assert.equal(await note.isVisible(), false);
+  await page.evaluate(() => window.__MOCK__.on("connection_save", ({ profile }) => profile));
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("connection_save").length === 2);
+  const wsl = (await page.evaluate(() => window.__MOCK__.callsOf("connection_save")))[1];
+  assert.equal(wsl.profile.kind, "wsl");
+  assert.equal(wsl.profile.wsh, false, "a connection that is not SSH never sends wsh true");
+
+  // Keyboard: the box is a stop in the dialog's order (after "Seconds between"), Space toggles it, Escape closes.
+  await page.locator(".conns .cx-list button", { hasText: "Talos" }).click();
+  await page.locator("#cx-delay").focus();
+  await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "cx-wsh", "Tab from the last text field lands on the box");
+  const before = await box.isChecked();
+  await page.keyboard.press("Space");
+  assert.equal(await box.isChecked(), !before, "Space toggles it");
+  await page.keyboard.press("Tab");
+  const after = await page.evaluate(() => document.activeElement?.textContent);
+  assert.equal(after, "Delete", "the next stop is the first button");
   await page.keyboard.press("Escape");
   await page.waitForSelector(".dlg.conns", { state: "detached" });
 }

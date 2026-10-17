@@ -69,3 +69,14 @@ test("the saved list is read with defaults for what is missing", () => {
   assert.equal(list[1].has_secret, false);
   assert.equal(list[1].auth, "key");
 });
+
+test("readConnections reads wsh as a strict boolean", () => {
+  const entry = (over = {}) => ({ id: "a", name: "A", kind: "ssh", ...over });
+  const wsh = (over) => readConnections([entry(over)])[0].wsh;
+  assert.equal(wsh({ wsh: true }), true);
+  assert.equal(wsh({}), false, "absent is false");
+  assert.equal(wsh({ wsh: false }), false);
+  assert.equal(wsh({ wsh: 1 }), false, "a number is not true");
+  assert.equal(wsh({ wsh: "true" }), false, "a string is not true");
+  assert.equal(wsh({ wsh: null }), false);
+});

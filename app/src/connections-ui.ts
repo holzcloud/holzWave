@@ -35,9 +35,14 @@ export function blankConnection(): Connection {
     reconnect_attempts: 5,
     reconnect_delay_secs: 3,
     shell: "",
+    wsh: false,
     has_secret: false,
   };
 }
+
+/** The words under the `wsh` checkbox: what ticking it allows and what it never allows. */
+export const WSH_NOTE =
+  "A program on this host can then open files and rename this pane in holzWave through a private tunnel. It can never use the AI or approve anything. The host must allow Unix socket forwarding.";
 
 /** The label of the host field for each kind of connection. */
 export function hostLabel(kind: Connection["kind"]): string {
@@ -129,6 +134,18 @@ async function show(): Promise<void> {
     const attempts = textRow("cx-attempts", "Reconnects", "ssh", "number");
     const delay = textRow("cx-delay", "Seconds between", "ssh", "number");
     const shell = textRow("cx-shell", "Shell", "docker");
+    const wshRow = el("div", "cx-row-choice", form);
+    const wshWrap = el("label", "cx-option", wshRow);
+    const wsh = el("input", "", wshWrap);
+    wsh.type = "checkbox";
+    wsh.id = "cx-wsh";
+    wsh.setAttribute("aria-describedby", "cx-wsh-note");
+    el("span", "", wshWrap).textContent = "Use wsh on this host";
+    rows.push({ row: wshRow, kinds: "ssh" });
+    const wshNote = el("p", "cx-hint", form);
+    wshNote.id = "cx-wsh-note";
+    wshNote.textContent = WSH_NOTE;
+    rows.push({ row: wshNote, kinds: "ssh" });
     const hint = el("p", "cx-hint", form);
 
     // ---- the state of the dialog ----
@@ -177,6 +194,7 @@ async function show(): Promise<void> {
       attempts.input.value = String(c.reconnect_attempts);
       delay.input.value = String(c.reconnect_delay_secs);
       shell.input.value = c.shell;
+      wsh.checked = c.wsh;
       // The jump host choices: every other SSH connection.
       for (const old of Array.from(jump.row.querySelectorAll("label.cx-option")).slice(1)) old.remove();
       jump.radios.splice(1);
@@ -209,6 +227,8 @@ async function show(): Promise<void> {
       reconnect_attempts: Math.max(0, Number.parseInt(attempts.input.value, 10) || 0),
       reconnect_delay_secs: Math.max(0, Number.parseInt(delay.input.value, 10) || 0),
       shell: shell.input.value.trim(),
+      // Only an SSH connection can carry it: a hidden box that was ticked before the type changed sends false.
+      wsh: kindValue() === "ssh" && wsh.checked,
       has_secret: current.has_secret,
     });
 
