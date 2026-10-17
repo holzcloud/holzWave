@@ -10,3 +10,4 @@
 pub mod canaries;
 pub mod hostile;
 pub mod rig;
+pub mod world;

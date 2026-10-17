@@ -5,19 +5,24 @@
 //! capture helpers read what the server received from the outside. Test code only.
 
 use std::fs;
+use std::net::IpAddr;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use holzwave_core::ai::agent::Limits;
+use holzwave_core::ai::http::{Http, HttpConfig, Resolver};
 use holzwave_core::ai::profiles::{KeySlot, KeyVault, Preset, ProfileInput};
 use holzwave_core::ai::redact::SourceText;
+use holzwave_core::ai::scripted::{Script, ScriptedProvider};
 use holzwave_core::ai::service::context::{ContextSource, Fetched, ReadRefusal};
 use holzwave_core::ai::service::events::AiEvent;
-use holzwave_core::ai::service::{AiService, AiSink};
+use holzwave_core::ai::service::{AiService, AiSink, AskEvent, AskLimits, AskNotify, AskOut, Asks};
 use holzwave_core::ai::store::{ConversationId, JsonDirStore};
-use holzwave_core::ai::types::{ApiKey, ContextKind};
+use holzwave_core::ai::tools::{DenyPolicy, ToolHost};
+use holzwave_core::ai::types::{ApiKey, Capabilities, ContextKind, Locality};
 use holzwave_core::ai::wire::Wire;
 use holzwave_core::layout::PaneId;
 use holzwave_core::secrets::MemoryStore;
@@ -26,7 +31,7 @@ use serde_json::{Value, json};
 
 use crate::common::fake_http::{FakeHttp, Reply, Seen};
 use crate::common::{scratch_dir, wait_until};
-use crate::security::canaries::api_key;
+use crate::security::canaries::{api_key, wire_key};
 
 /// The model of the main profile.
 pub const MODEL: &str = "test-model";
@@ -122,6 +127,22 @@ pub fn error_reply(status: u16, body: &str) -> Reply {
     Reply::status(status).body(body.as_bytes().to_vec())
 }
 
+/// A Chat Completions answer that asks for one tool call: a role chunk, one tool call (the arguments as one JSON text),
+/// a finish chunk with the reason `tool_calls`, usage, the marker.
+pub fn tool_call_reply(call_id: &str, name: &str, args: &Value) -> Reply {
+    let call = json!({ "tool_calls": [{
+        "index": 0, "id": call_id, "type": "function",
+        "function": { "name": name, "arguments": args.to_string() }
+    }] });
+    let mut chunks = vec![
+        chunk(&json!({ "role": "assistant", "content": "" }), None),
+        chunk(&call, None),
+        chunk(&json!({}), Some("tool_calls")),
+    ];
+    chunks.extend(closing());
+    Reply::sse_bytes(chunks.into_iter().map(String::into_bytes).collect())
+}
+
 // ---- the context source -------------------------------------------------------------------------------------------
 
 /// One thing a pane gives: the kind, a label, the raw text and the byte ranges the engine drew hidden.
@@ -180,6 +201,96 @@ impl ContextSource for ScriptedSource {
     }
 }
 
+// ---- the resolver and the ask doubles -----------------------------------------------------------------------------
+
+/// A resolver that records every host it is asked to look up and answers one documentation-range address.
+#[derive(Default)]
+pub struct RecordingResolver {
+    hosts: Mutex<Vec<String>>,
+}
+
+impl RecordingResolver {
+    /// The hosts looked up so far, in order.
+    pub fn lookups(&self) -> Vec<String> {
+        lock(&self.hosts).clone()
+    }
+}
+
+impl Resolver for RecordingResolver {
+    fn lookup(&self, host: &str) -> std::io::Result<Vec<IpAddr>> {
+        lock(&self.hosts).push(host.to_owned());
+        Ok(vec!["203.0.113.7".parse::<IpAddr>().expect("an address")])
+    }
+}
+
+/// The window of the desk: keeps every event with the pane it was for.
+#[derive(Default)]
+pub struct Notes {
+    log: Mutex<Vec<(PaneId, AskEvent)>>,
+}
+
+impl AskNotify for Notes {
+    fn notify(&self, pane: PaneId, event: &AskEvent) {
+        lock(&self.log).push((pane, event.clone()));
+    }
+}
+
+impl Notes {
+    /// Every event with its pane.
+    pub fn all(&self) -> Vec<(PaneId, AskEvent)> {
+        lock(&self.log).clone()
+    }
+
+    /// The `waiting` cards shown so far, as JSON.
+    pub fn waiting(&self) -> Vec<Value> {
+        self.all()
+            .into_iter()
+            .filter_map(|(_, event)| match event {
+                AskEvent::Waiting { .. } => serde_json::to_value(&event).ok(),
+                AskEvent::Closed { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The first `waiting` card, waiting up to `timeout` for it.
+    pub fn wait_waiting(&self, timeout: Duration) -> Option<Value> {
+        wait_until(timeout, || !self.waiting().is_empty());
+        self.waiting().into_iter().next()
+    }
+
+    /// The `closed` events as (ask id, reason).
+    pub fn closed(&self) -> Vec<(String, String)> {
+        self.all()
+            .into_iter()
+            .filter_map(|(_, event)| match serde_json::to_value(&event).ok()? {
+                value if value["kind"] == "closed" => {
+                    Some((value["ask"].as_str()?.to_owned(), value["why"].as_str()?.to_owned()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// What the caller of an ask received: the pieces of the answer and the notes of status.
+#[derive(Default)]
+pub struct AskOutput {
+    pub texts: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+impl AskOut for AskOutput {
+    fn text(&mut self, text: &str) -> std::io::Result<()> {
+        self.texts.push(text.to_owned());
+        Ok(())
+    }
+
+    fn note(&mut self, text: &str) -> std::io::Result<()> {
+        self.notes.push(text.to_owned());
+        Ok(())
+    }
+}
+
 // ---- the rig ------------------------------------------------------------------------------------------------------
 
 /// What a rig is built from. Every field has a sensible default.
@@ -192,11 +303,38 @@ pub struct RigOptions {
     pub persist_context: bool,
     /// A destination on this computer is not asked about (the setting `ai_local_context` is `auto`).
     pub local_context_auto: bool,
+    /// One profile for every preset, each with the key its preset needs.
+    pub profile_per_preset: bool,
+    /// The resolver the chokepoint asks for every host name.
+    pub resolver: Option<Arc<dyn Resolver>>,
+    /// The tools the shell would offer.
+    pub tool_host: Option<Arc<dyn ToolHost>>,
+    /// The places the file tools must stay away from.
+    pub deny: Option<DenyPolicy>,
+    /// The limits of a turn.
+    pub limits: Option<Limits>,
+    /// Put the ask desk in front of the sink of the service, with these limits.
+    pub asks: Option<AskLimits>,
+    /// Save the profile `local` on the server (default). The ask tests with a scripted provider switch it off so the
+    /// desk finds exactly one candidate.
+    pub local_profile: bool,
 }
 
 impl Default for RigOptions {
     fn default() -> Self {
-        RigOptions { replies: vec![chat_reply("ok.")], source: Vec::new(), persist_context: false, local_context_auto: false }
+        RigOptions {
+            replies: vec![chat_reply("ok.")],
+            source: Vec::new(),
+            persist_context: false,
+            local_context_auto: false,
+            profile_per_preset: false,
+            resolver: None,
+            tool_host: None,
+            deny: None,
+            limits: None,
+            asks: None,
+            local_profile: true,
+        }
     }
 }
 
@@ -208,6 +346,10 @@ pub struct Rig {
     secrets: Arc<MemoryStore>,
     source: Arc<ScriptedSource>,
     service: Arc<AiService>,
+    asks: Option<Arc<Asks>>,
+    notes: Arc<Notes>,
+    provider: Option<Arc<ScriptedProvider>>,
+    profile_ids: Vec<String>,
 }
 
 impl Rig {
@@ -218,20 +360,84 @@ impl Rig {
         fs::create_dir(&config).expect("a configuration folder");
         let fake = FakeHttp::start(options.replies);
         let sink = Arc::new(CollectSink::default());
+        let notes = Arc::new(Notes::default());
+        let asks = options
+            .asks
+            .map(|limits| Asks::with_limits(sink.clone() as Arc<dyn AiSink>, notes.clone() as Arc<dyn AskNotify>, limits));
+        let service_sink: Arc<dyn AiSink> = match &asks {
+            Some(asks) => asks.clone() as Arc<dyn AiSink>,
+            None => sink.clone() as Arc<dyn AiSink>,
+        };
         let secrets = Arc::new(MemoryStore::default());
         let source = Arc::new(ScriptedSource::new(options.source));
-        let service = AiService::builder(Arc::new(JsonDirStore::new(chats)), sink.clone() as Arc<dyn AiSink>, config)
+        let mut builder = AiService::builder(Arc::new(JsonDirStore::new(chats)), service_sink, config)
             .vault(KeyVault::new(secrets.clone()))
-            .context_source(source.clone() as Arc<dyn ContextSource>)
-            .build();
+            .context_source(source.clone() as Arc<dyn ContextSource>);
+        if let Some(resolver) = options.resolver {
+            builder = builder.http(Arc::new(Http::with_resolver(HttpConfig::standard(), resolver)));
+        }
+        if let Some(host) = options.tool_host {
+            builder = builder.tool_host(host);
+        }
+        if let Some(policy) = options.deny {
+            builder = builder.deny_policy(policy);
+        }
+        if let Some(limits) = options.limits {
+            builder = builder.limits(limits);
+        }
+        let service = builder.build();
         let settings = Settings {
             ai_persist_context: options.persist_context,
             ai_local_context: if options.local_context_auto { AiLocalContext::Auto } else { AiLocalContext::Ask },
             ..Settings::default()
         };
         service.apply_settings(&settings);
-        let rig = Rig { dir, fake, sink, secrets, source, service: Arc::new(service) };
-        rig.save_local_profile();
+        let mut rig = Rig {
+            dir,
+            fake,
+            sink,
+            secrets,
+            source,
+            service: Arc::new(service),
+            asks,
+            notes,
+            provider: None,
+            profile_ids: Vec::new(),
+        };
+        if options.local_profile {
+            rig.save_local_profile();
+        }
+        if options.profile_per_preset {
+            rig.save_preset_profiles();
+        }
+        rig
+    }
+
+    /// A rig whose only provider is a scripted one registered under the id `scripted` with the class `locality`. The
+    /// desk is in front of the sink and knows the provider as a candidate. `turns` are the scripts it plays.
+    pub fn scripted(locality: Locality, turns: Vec<Script>) -> Rig {
+        Rig::scripted_with(locality, turns, RigOptions::default())
+    }
+
+    /// Like [`Rig::scripted`] with the options of the caller (the desk limits, the tool host).
+    pub fn scripted_with(locality: Locality, turns: Vec<Script>, options: RigOptions) -> Rig {
+        let options = RigOptions {
+            local_profile: false,
+            asks: Some(options.asks.unwrap_or_default()),
+            ..options
+        };
+        let mut rig = Rig::new(options);
+        let mut provider = ScriptedProvider::new("scripted").with_capabilities(Capabilities {
+            tools: true,
+            ..Capabilities::conservative(locality)
+        });
+        for turn in turns {
+            provider = provider.with_turn(turn);
+        }
+        let provider = Arc::new(provider);
+        rig.service.register_provider("scripted", provider.clone()).expect("the provider is registered");
+        rig.asks.as_ref().expect("a desk").add_candidate("scripted", "m");
+        rig.provider = Some(provider);
         rig
     }
 
@@ -245,6 +451,29 @@ impl Rig {
         let id = self.service.save_profile(input).expect("the profile is saved");
         assert_eq!(id, PROFILE, "the profile id");
         self.service.set_key(PROFILE, KeySlot::Provider, ApiKey::new(api_key())).expect("the key is saved");
+    }
+
+    /// Saves one profile for every preset and the key each of them needs. The Custom one is on the server of the rig.
+    fn save_preset_profiles(&mut self) {
+        for preset in Preset::ALL {
+            let mut input = ProfileInput::new(preset.tag(), preset);
+            input.model = "m".to_owned();
+            input.acknowledge_gateway = true;
+            if preset == Preset::Custom {
+                input.wire = Some(Wire::OpenAiChat);
+                input.base_url = format!("{}/v1", self.fake.base());
+            }
+            if preset == Preset::CloudflareGateway {
+                input.base_url = "https://gateway.ai.cloudflare.com/v1/account1/gateway1/anthropic".to_owned();
+            }
+            let id = self.service.save_profile(input).expect("the profile is saved");
+            self.service.set_key(&id, KeySlot::Provider, ApiKey::new(wire_key(preset.tag()))).expect("the key is saved");
+            if preset.spec().gateway_token {
+                let token = ApiKey::new(wire_key("gateway"));
+                self.service.set_key(&id, KeySlot::Gateway, token).expect("the gateway token is saved");
+            }
+            self.profile_ids.push(id);
+        }
     }
 
     /// The service.
@@ -270,6 +499,26 @@ impl Rig {
     /// The memory vault the keys live in.
     pub fn vault(&self) -> &Arc<MemoryStore> {
         &self.secrets
+    }
+
+    /// The ask desk, when the rig has one.
+    pub fn asks(&self) -> &Arc<Asks> {
+        self.asks.as_ref().expect("this rig has a desk")
+    }
+
+    /// The window of the desk.
+    pub fn notes(&self) -> &Arc<Notes> {
+        &self.notes
+    }
+
+    /// The scripted provider of a scripted rig.
+    pub fn provider(&self) -> &Arc<ScriptedProvider> {
+        self.provider.as_ref().expect("this rig has a scripted provider")
+    }
+
+    /// The ids of the profiles made for the presets, in the order of the presets.
+    pub fn preset_profiles(&self) -> &[String] {
+        &self.profile_ids
     }
 
     /// The scratch folder, the chat folder and the configuration folder.
