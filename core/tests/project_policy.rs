@@ -2394,10 +2394,12 @@ fn the_row_check_of_the_test_plan_sees_missing_duplicate_and_empty_rows_and_igno
 
 // ---- Part 7 of the test plan ------------------------------------------------------------------------------
 
-/// The rows of Part 7 of `docs/test-plan.md` (the AI chat, the Apple on-device model and the rest of the extras): the
-/// human checks no suite can run. Every id is in the document exactly once, with an area, an instruction and an expected
-/// result; the Result cell is the owner's.
-const AI_TEST_PLAN_ROWS: [&str; 1] = ["AI-A4"];
+/// The rows of Part 7 of `docs/test-plan.md` (the AI chat, the Apple on-device model and the rest of the extras), in the
+/// order of the table: the human checks no suite can run. Every id is in the document exactly once, with an area, an
+/// instruction and an expected result; the Result cell is the owner's.
+const AI_TEST_PLAN_ROWS: [&str; 16] = [
+    "AI1", "AI2", "AI3", "AI4", "AI5", "AI6", "AI7", "AI8", "AI-A1", "AI-A2", "AI-A3", "AI-A4", "M2", "H2", "H3", "H4",
+];
 
 fn ai_test_plan_row_ids() -> Vec<String> {
     AI_TEST_PLAN_ROWS.iter().map(|id| (*id).to_owned()).collect()
