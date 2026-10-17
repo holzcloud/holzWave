@@ -4,8 +4,10 @@
 # (direct-tcpip); one SFTP listing; one strict exec command; and the tunnel of `wsh`: a reverse forward of a Unix socket
 # (the server runs with AllowStreamLocalForwarding yes, set below) through which the real `wsh` binary, typed into the
 # pane of a saved connection, pings, renames the pane and opens a preview and an editor of a file of that host, while
-# `wsh ai`, `wsh hist add` and a wrong token are refused (the ignored test `wsh_tunnel_live` of holzwave-app). The
-# in-process tests of core/tests/ssh_auth.rs and core/tests/tunnel.rs prove the same paths against a fake server; this
+# `wsh ai`, `wsh hist add` and a wrong token are refused (the ignored test `wsh_tunnel_live` of holzwave-app); and a login
+# through a real ssh-agent (a throwaway one on a private socket in the folder below, loaded with two throwaway keys; the
+# user's own agent and their own SSH_AUTH_SOCK are never used or touched). The
+# in-process tests of core/tests/ssh_auth.rs, ssh_agent.rs and tunnel.rs prove the same paths against a fake server; this
 # check proves that the fake and the real server agree.
 #
 #   sh scripts/ssh-loopback-check.sh
@@ -20,14 +22,15 @@
 # they pass, and a run that failed in the middle may leave an empty, owner-only one (the OpenSSH of this Mac leaves the
 # file after a forward ends; nothing listens on it).
 #
-# Needs: ssh-keygen, ssh-keyscan, /usr/sbin/sshd, an sftp-server binary (/usr/libexec/sftp-server, /usr/lib/openssh/
+# Needs: ssh-keygen, ssh-keyscan, ssh-agent, ssh-add, /usr/sbin/sshd, an sftp-server binary (/usr/libexec/sftp-server, /usr/lib/openssh/
 # sftp-server or /usr/lib/ssh/sftp-server) and the Rust toolchain. The tests of the SSH client build without the engine;
 # the test of the tunnel is a test of the app crate and needs Zig 0.16 (scripts/env.sh finds it).
 # Present on macOS and on most Linux hosts. The passphrases of the generated keys are throwaway text and reach the test
 # only through its environment.
 #
 # What it cannot cover: a host that is not OpenSSH, a password login (the server here allows keys only), the network
-# (everything is loopback), the user's own shell start-up beyond what the login shell prints, a Linux host (the `wsh` that
+# (everything is loopback), a hardware-backed key or a keychain-backed agent (the throwaway agent holds plain keys), the
+# Windows agent pipe (compiled, never run here), the user's own shell start-up beyond what the login shell prints, a Linux host (the `wsh` that
 # runs is the build of this computer, by its absolute path in the build folder, so nothing is installed into the user's
 # home), and another processor. The static Linux builds of `wsh` are run in a container by scripts/wsh-linux.sh.
 #
@@ -40,6 +43,7 @@ cd "$here/.." || exit 2
 SSHD=/usr/sbin/sshd
 dir=
 sshd_pid=
+agent_pid=
 pkcs8_pass=
 
 fail() {
@@ -61,6 +65,11 @@ stop() {
         wait "$sshd_pid" 2>/dev/null
         sshd_pid=
     fi
+    if [ -n "$agent_pid" ]; then
+        kill "$agent_pid" 2>/dev/null
+        wait "$agent_pid" 2>/dev/null
+        agent_pid=
+    fi
     if [ -n "$dir" ]; then
         rm -rf "$dir"
         dir=
@@ -81,6 +90,8 @@ trap 'exit 129' HUP
 
 need ssh-keygen
 need ssh-keyscan
+need ssh-agent
+need ssh-add
 [ -x "$SSHD" ] || {
     echo "ssh-loopback-check: $SSHD is missing" >&2
     exit 2
@@ -155,6 +166,30 @@ else
 fi
 cat "$dir"/user_*.pub >"$dir/authorized_keys"
 
+# A throwaway ssh-agent on a private socket of its own, in the 0700 folder. It holds two of the keys above (an Ed25519 and
+# an RSA key without a passphrase) and nothing else. Only the commands below are given its socket: nothing of the user's
+# environment is read or changed, and the user's own agent is never asked.
+agent_sock="$dir/agent.sock"
+[ "${#agent_sock}" -le 100 ] || fail "the agent socket path is too long for a Unix socket: $agent_sock"
+ssh-agent -D -a "$agent_sock" >"$dir/agent.log" 2>&1 &
+agent_pid=$!
+waited=0
+while [ ! -S "$agent_sock" ]; do
+    kill -0 "$agent_pid" 2>/dev/null || {
+        cat "$dir/agent.log" >&2
+        fail "ssh-agent stopped at start"
+    }
+    waited=$((waited + 1))
+    [ "$waited" -le 50 ] || fail "ssh-agent did not make its socket within 10 seconds"
+    sleep 0.2
+done
+for agent_key in user_ed25519 user_rsa_pem; do
+    SSH_AUTH_SOCK="$agent_sock" ssh-add "$dir/$agent_key" >"$dir/ssh-add.log" 2>&1 || {
+        cat "$dir/ssh-add.log" >&2
+        fail "ssh-add could not load $agent_key into the throwaway agent"
+    }
+done
+
 cat >"$dir/sshd_config" <<EOF
 ListenAddress 127.0.0.1
 Port $port
@@ -205,6 +240,11 @@ export HOLZWAVE_TEST_SSH_KEY_RSA_PEM="$dir/user_rsa_pem"
 export HOLZWAVE_TEST_SSH_KEY_RSA_PEM_PASS="$dir/user_rsa_pem_pass"
 export HOLZWAVE_TEST_SSH_KEY_RSA_PKCS8="$dir/user_rsa_pkcs8"
 export HOLZWAVE_TEST_SSH_KEY_RSA_PKCS8_PASS="$pkcs8_pass"
+# The throwaway agent, the public keys of the two keys it holds, and the public key of one it does not hold.
+export HOLZWAVE_TEST_SSH_AGENT_SOCK="$agent_sock"
+export HOLZWAVE_TEST_SSH_AGENT_PUB_ED25519="$dir/user_ed25519.pub"
+export HOLZWAVE_TEST_SSH_AGENT_PUB_RSA="$dir/user_rsa_pem.pub"
+export HOLZWAVE_TEST_SSH_AGENT_PUB_NOT_HELD="$dir/user_ed25519_pass.pub"
 
 # The real `wsh`, built before the tunnel test needs it and named by its absolute path: nothing is installed anywhere.
 if cargo build --locked --offline -p wsh; then

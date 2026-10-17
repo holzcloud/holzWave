@@ -9,6 +9,9 @@
 //! - `HOLZWAVE_TEST_SSH_KEY_RSA_PEM`, `_KEY_RSA_PEM_PASS`: an RSA key in PEM format (PKCS#1)
 //! - `HOLZWAVE_TEST_SSH_KEY_RSA_PKCS8`, `_KEY_RSA_PKCS8_PASS`: an RSA key in PKCS#8 format (the second one may be empty:
 //!   the script could not make it and said so)
+//! - `HOLZWAVE_TEST_SSH_AGENT_SOCK`: the socket of a throwaway `ssh-agent` that holds the Ed25519 and the RSA (PEM) key above,
+//!   and `_AGENT_PUB_ED25519`, `_AGENT_PUB_RSA`, `_AGENT_PUB_NOT_HELD`: the public key files of those two keys and of a key
+//!   the agent does not hold
 //!
 //! A test that cannot find a variable fails and names it. Each proof prints one line, so the output of the script says
 //! what passed.
@@ -78,6 +81,40 @@ fn real_openssh_logins() {
         prove_shell(target(key(name, passphrase)));
         println!("live: {what} logs in to a pane");
     }
+}
+
+fn agent(identity: Option<&str>) -> SshAuth {
+    SshAuth::Agent { socket: Some(var("HOLZWAVE_TEST_SSH_AGENT_SOCK").into()), identity: identity.map(|name| var(name).into()) }
+}
+
+/// A real `ssh-agent` signs for a real `sshd`: no key file is given, the private keys are in the agent only. Without a
+/// selector the agent's own order decides which key is tried first; with a public key file exactly that key is used (an
+/// Ed25519 and an RSA key, so `rsa-sha2` signing through the agent is proven too); a public key the agent does not hold is
+/// refused in words and never reaches the server.
+#[test]
+#[ignore = "needs a real sshd and a real ssh-agent: run scripts/ssh-loopback-check.sh"]
+fn real_openssh_agent() {
+    prove_shell(target(agent(None)));
+    println!("live: a pane logs in through the real ssh-agent with no key file");
+    prove_shell(target(agent(Some("HOLZWAVE_TEST_SSH_AGENT_PUB_ED25519"))));
+    println!("live: the public key file of the Ed25519 key picks it and the agent signs");
+    prove_shell(target(agent(Some("HOLZWAVE_TEST_SSH_AGENT_PUB_RSA"))));
+    println!("live: the public key file of the RSA key picks it and the agent signs with rsa-sha2");
+
+    let mut link = SshLink::connect(target(agent(Some("HOLZWAVE_TEST_SSH_AGENT_PUB_NOT_HELD"))), 100, 30).unwrap();
+    let mut out = Out::new(link.take_reader().unwrap());
+    out.until("the public key is not in the ssh-agent", WAIT);
+    out.until("Press Enter to try again", WAIT);
+    assert_eq!(link.state(), ConnState::Failed);
+    assert!(!out.seen.contains(&var("HOLZWAVE_TEST_SSH_AGENT_SOCK")), "the socket path is in the message");
+    Box::new(link).close().unwrap();
+    println!("live: a public key the agent does not hold is refused in words");
+
+    // The same server, strict exec, through the agent: the command runner logs in the same way.
+    let exec = SshExec::new("Live host", target(agent(None))).unwrap();
+    let result = exec.exec("echo AGENT_$((6*7))", &ExecLimits::default(), &ExecCancel::new()).unwrap();
+    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "AGENT_42");
+    println!("live: one strict exec command ran through the agent and returned AGENT_42");
 }
 
 #[test]
