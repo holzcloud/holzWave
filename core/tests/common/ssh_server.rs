@@ -27,6 +27,11 @@
 //! - **Wrapped shell.** With [`Options::wrapped_shell`] an exec request that starts with `exec sh -c 'HOLZWAVE_` behaves
 //!   like a shell; [`Options::refuse_exec_once`] answers the first exec request with a failure. `Seen::events` holds
 //!   the requests of the channels in order.
+//! - **Scripted exec and the SFTP log.** [`Options::exec_script`] answers one exact command line with a list of replies in
+//!   turn (the last one repeats), each with its own exit status; `Seen::sftp_ops` lists the operations of the SFTP
+//!   subsystem in order (`open`, `mkdir`, `rename`, `remove`, `setstat`) with paths relative to the served root.
+//!   [`Options::sftp_refuse_overwrite`] makes a rename onto an existing file fail, as OpenSSH's does; [`Options::sftp_fail_writes`]
+//!   and [`Options::sftp_deny_upload`] fail a write and refuse to open a file for writing.
 //! - **Cuts and counts.** [`Server::cut`] ends every connection that is open now; `Seen::disconnects` counts the
 //!   connections that ended, whoever ended them.
 //!
@@ -77,6 +82,15 @@ pub struct Options {
     pub wrapped_shell: bool,
     /// The first exec request is answered with a failure.
     pub refuse_exec_once: bool,
+    /// Exec requests whose command line is exactly the first member: the replies in turn (bytes and exit status), the last
+    /// one for every later call.
+    pub exec_script: Vec<(String, Vec<(Vec<u8>, u32)>)>,
+    /// A rename onto an existing file fails (OpenSSH's SFTP server does the same).
+    pub sftp_refuse_overwrite: bool,
+    /// A write to an open file fails.
+    pub sftp_fail_writes: bool,
+    /// Opening a file for writing is refused.
+    pub sftp_deny_upload: bool,
 }
 
 impl Options {
@@ -104,6 +118,10 @@ impl Options {
             forward: false,
             wrapped_shell: false,
             refuse_exec_once: false,
+            exec_script: Vec::new(),
+            sftp_refuse_overwrite: false,
+            sftp_fail_writes: false,
+            sftp_deny_upload: false,
         }
     }
 
@@ -164,6 +182,32 @@ impl Options {
         self
     }
 
+    /// The same server, and the exec request whose command line is exactly `command` answers with `replies` in turn (bytes and
+    /// exit status); the last reply is the answer of every later call. Other commands are answered as before.
+    pub fn exec_script(mut self, command: &str, replies: &[(&str, u32)]) -> Self {
+        let replies = replies.iter().map(|(bytes, status)| (bytes.as_bytes().to_vec(), *status)).collect();
+        self.exec_script.push((command.to_owned(), replies));
+        self
+    }
+
+    /// The same server, and a rename onto an existing file fails.
+    pub fn sftp_refuse_overwrite(mut self) -> Self {
+        self.sftp_refuse_overwrite = true;
+        self
+    }
+
+    /// The same server, and every write to an open file fails.
+    pub fn sftp_fail_writes(mut self) -> Self {
+        self.sftp_fail_writes = true;
+        self
+    }
+
+    /// The same server, and opening a file for writing is refused.
+    pub fn sftp_deny_upload(mut self) -> Self {
+        self.sftp_deny_upload = true;
+        self
+    }
+
     /// The same server, and every exec request prints `bytes` (and nothing else) before it ends with status 0.
     pub fn exec_reply(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         self.exec_reply = Some(bytes.into());
@@ -200,6 +244,10 @@ pub struct Seen {
     pub execs_as_shell: AtomicUsize,
     /// The requests of the session channels in order: `pty`, `shell`, `exec`, `forward PATH`, `cancel PATH`.
     pub events: Mutex<Vec<String>>,
+    /// How often each scripted command ran, for [`Options::exec_script`].
+    script_calls: Mutex<HashMap<String, usize>>,
+    /// The operations of the SFTP subsystem in order, paths relative to the served root.
+    pub sftp_ops: Mutex<Vec<String>>,
     /// Exec requests that were refused by [`Options::refuse_exec_once`].
     refused_execs: AtomicUsize,
     /// The handles of the connections that logged in, for [`Server::cut`].
@@ -225,6 +273,11 @@ impl Seen {
     /// The paths of the forward cancels so far.
     pub fn cancelled_forwards(&self) -> Vec<String> {
         self.cancelled_forwards.lock().unwrap().clone()
+    }
+
+    /// The operations of the SFTP subsystem so far, in order.
+    pub fn sftp_ops(&self) -> Vec<String> {
+        self.sftp_ops.lock().unwrap().clone()
     }
 
     /// The requests of the channels so far, in order.
@@ -577,7 +630,7 @@ impl server::Handler for Handler {
         if let (Some(root), "sftp", Some(channel)) = (&self.options.sftp_root, name, self.channels.remove(&id)) {
             self.seen.sftp_sessions.fetch_add(1, Ordering::SeqCst);
             session.channel_success(id)?;
-            let files = Files { root: root.clone(), handles: HashMap::new(), next: 0 };
+            let files = Files { root: root.clone(), handles: HashMap::new(), next: 0, seen: self.seen.clone(), options: self.options.clone() };
             tokio::spawn(russh_sftp::server::run(channel.into_stream(), files));
             return Ok(());
         }
@@ -706,6 +759,23 @@ impl server::Handler for Handler {
             session.data(channel, format!("welcome {}\r\n", self.index).into_bytes())?;
             return Ok(());
         }
+        if let Some((_, replies)) = self.options.exec_script.iter().find(|(text, _)| *text == command) {
+            let call = {
+                let mut calls = self.seen.script_calls.lock().unwrap();
+                let call = calls.entry(command.clone()).or_insert(0);
+                *call += 1;
+                *call - 1
+            };
+            let (bytes, status) = replies[call.min(replies.len() - 1)].clone();
+            session.channel_success(channel)?;
+            if !bytes.is_empty() {
+                session.data(channel, bytes)?;
+            }
+            session.exit_status_request(channel, status)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
         match &self.options.exec_reply {
             Some(bytes) => session.data(channel, bytes.clone())?,
@@ -725,6 +795,8 @@ struct Files {
     root: PathBuf,
     handles: HashMap<String, Open>,
     next: u32,
+    seen: Arc<Seen>,
+    options: Options,
 }
 
 enum Open {
@@ -753,6 +825,17 @@ impl Files {
             return Err(StatusCode::PermissionDenied);
         }
         Ok(path.to_path_buf())
+    }
+
+    /// The path relative to the root, with a leading slash; a path outside it stays as it is.
+    fn relative(&self, path: &str) -> String {
+        Path::new(path).strip_prefix(&self.root).map_or_else(|_| path.to_owned(), |p| format!("/{}", p.display()))
+    }
+
+    /// Record one operation, the path relative to the root.
+    fn log(&self, what: &str, path: &str) {
+        let line = format!("{what} {}", self.relative(path));
+        self.seen.sftp_ops.lock().unwrap().push(line);
     }
 
     fn handle(&mut self, open: Open) -> String {
@@ -814,6 +897,12 @@ impl russh_sftp::server::Handler for Files {
     }
 
     async fn open(&mut self, id: u32, path: String, flags: OpenFlags, _a: FileAttributes) -> Result<SftpHandle, Self::Error> {
+        if flags.contains(OpenFlags::WRITE) {
+            self.log("open-write", &path);
+            if self.options.sftp_deny_upload {
+                return Err(StatusCode::PermissionDenied);
+            }
+        }
         let path = self.guard(&path)?;
         let mut options = std::fs::OpenOptions::new();
         options
@@ -838,6 +927,9 @@ impl russh_sftp::server::Handler for Files {
     }
 
     async fn write(&mut self, id: u32, handle: String, offset: u64, data: Vec<u8>) -> Result<Status, Self::Error> {
+        if self.options.sftp_fail_writes {
+            return Err(StatusCode::Failure);
+        }
         let Some(Open::File(file)) = self.handles.get_mut(&handle) else { return Err(StatusCode::Failure) };
         file.seek(SeekFrom::Start(offset)).map_err(|e| io_status(&e))?;
         file.write_all(&data).map_err(|e| io_status(&e))?;
@@ -849,7 +941,22 @@ impl russh_sftp::server::Handler for Files {
         Ok(status(id, StatusCode::Ok))
     }
 
+    async fn mkdir(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, Self::Error> {
+        self.log("mkdir", &path);
+        let dir = self.guard(&path)?;
+        std::fs::create_dir(&dir).map_err(|e| io_status(&e))?;
+        #[cfg(unix)]
+        if let Some(mode) = attrs.permissions {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode & 0o7777)).map_err(|e| io_status(&e))?;
+        }
+        #[cfg(not(unix))]
+        let _ = attrs;
+        Ok(status(id, StatusCode::Ok))
+    }
+
     async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, Self::Error> {
+        self.log(&format!("setstat {:o}", attrs.permissions.map_or(0, |m| m & 0o7777)), &path);
         let path = self.guard(&path)?;
         #[cfg(unix)]
         if let Some(mode) = attrs.permissions {
@@ -862,11 +969,17 @@ impl russh_sftp::server::Handler for Files {
     }
 
     async fn rename(&mut self, id: u32, old: String, new: String) -> Result<Status, Self::Error> {
+        let line = format!("rename {} {}", self.relative(&old), self.relative(&new));
+        self.seen.sftp_ops.lock().unwrap().push(line);
+        if self.options.sftp_refuse_overwrite && self.guard(&new)?.exists() {
+            return Err(StatusCode::Failure);
+        }
         std::fs::rename(self.guard(&old)?, self.guard(&new)?).map_err(|e| io_status(&e))?;
         Ok(status(id, StatusCode::Ok))
     }
 
     async fn remove(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        self.log("remove", &path);
         std::fs::remove_file(self.guard(&path)?).map_err(|e| io_status(&e))?;
         Ok(status(id, StatusCode::Ok))
     }

@@ -403,6 +403,28 @@ impl FileSource for SftpSource {
 
     fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
         bad(path)?;
+        self.put(path, bytes, Mode::KeepOld)
+    }
+}
+
+/// The permissions a file that is put on the host gets.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Those of the file it replaces; a new file keeps what the server gives it.
+    KeepOld,
+    /// These, set on the new file before it takes its place.
+    Exact(u32),
+}
+
+/// The mode a file is made with while its bytes are written, when the caller will set another one afterwards: nobody but the
+/// owner reads or runs a half-written file.
+const MODE_WHILE_WRITING: u32 = 0o600;
+
+impl SftpSource {
+    /// Put `bytes` at `path` as one whole file: written aside, renamed over the old file, with the swap of [`write`]
+    /// when the server will not rename over an existing file. The old file is never removed before the new one is in
+    /// place, and a failure leaves no temporary file behind.
+    fn put(&self, path: &str, bytes: &[u8], mode: Mode) -> Result<()> {
         let path = path.to_owned();
         let aside = format!("{path}{TMP_SUFFIX}");
         let old = format!("{path}{OLD_SUFFIX}");
@@ -413,7 +435,15 @@ impl FileSource for SftpSource {
             async move {
                 let existing = c.metadata(path.clone()).await.ok();
                 let wrote = async {
-                    let mut file = c.open_with_flags(aside.clone(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE).await?;
+                    let flags = OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE;
+                    let mut file = match mode {
+                        Mode::KeepOld => c.open_with_flags(aside.clone(), flags).await?,
+                        Mode::Exact(_) => {
+                            let mut attrs = russh_sftp::protocol::FileAttributes::empty();
+                            attrs.permissions = Some(MODE_WHILE_WRITING);
+                            c.open_with_flags_and_attributes(aside.clone(), flags, attrs).await?
+                        }
+                    };
                     file.write_all(bytes).await?;
                     file.flush().await?;
                     file.shutdown().await?;
@@ -425,6 +455,13 @@ impl FileSource for SftpSource {
                     let _ = c.remove_file(aside.clone()).await;
                     return Err(e);
                 }
+                if let Mode::Exact(bits) = mode {
+                    // The mode is set with the attributes after the data is in; a server that ignores it is found by
+                    // the caller's own check, not trusted.
+                    let mut set = russh_sftp::protocol::FileAttributes::empty();
+                    set.permissions = Some(bits);
+                    let _ = c.set_metadata(aside.clone(), set).await;
+                }
                 let Some(meta) = existing else {
                     // A new file: one rename, nothing to swap.
                     return match c.rename(aside.clone(), path).await {
@@ -435,10 +472,12 @@ impl FileSource for SftpSource {
                         }
                     };
                 };
-                // Keep the permissions of the file that is replaced.
-                let mut keep = russh_sftp::protocol::FileAttributes::empty();
-                keep.permissions = meta.permissions;
-                let _ = c.set_metadata(aside.clone(), keep).await;
+                if matches!(mode, Mode::KeepOld) {
+                    // Keep the permissions of the file that is replaced.
+                    let mut keep = russh_sftp::protocol::FileAttributes::empty();
+                    keep.permissions = meta.permissions;
+                    let _ = c.set_metadata(aside.clone(), keep).await;
+                }
                 if c.rename(aside.clone(), path.clone()).await.is_ok() {
                     return Ok(Ok(()));
                 }
@@ -462,6 +501,50 @@ impl FileSource for SftpSource {
             }
         })?
         .map_err(|message| Error::Unsupported(format!("sftp: {message}")))
+    }
+
+    /// Put `bytes` as the executable `name` in the folder `dir_parts` below the home directory of the account (for example
+    /// `[".holzwave", "bin"]`), and return its path. The folders are made when they are missing (a folder that exists is not
+    /// an error and keeps its mode; a new one gets 0700); the file is written aside with 0755, swapped in as [`write`] does
+    /// and given 0755 again once it is in place. Nothing outside the folder is created or changed. The parts are plain
+    /// names: an empty one, `.`, `..` or one with a slash or a NUL is refused.
+    pub fn install_executable(&self, dir_parts: &[&str], name: &str, bytes: &[u8]) -> Result<String> {
+        let plain = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.contains(['/', '\0']);
+        if dir_parts.is_empty() || !dir_parts.iter().all(|part| plain(part)) || !plain(name) {
+            return Err(Error::Unsupported("the install place is not a plain folder and file name".into()));
+        }
+        let mut dir = self.home()?;
+        if !dir.starts_with('/') {
+            return Err(Error::Unsupported("sftp: the home directory is not an absolute path".into()));
+        }
+        for part in dir_parts {
+            dir = format!("{}/{part}", dir.trim_end_matches('/'));
+            let folder = dir.clone();
+            self.run(|c| {
+                let folder = folder.clone();
+                async move {
+                    if c.metadata(folder.clone()).await.is_ok_and(|m| m.is_dir()) {
+                        return Ok(());
+                    }
+                    c.create_dir(folder.clone()).await?;
+                    let mut private = russh_sftp::protocol::FileAttributes::empty();
+                    private.permissions = Some(0o700);
+                    c.set_metadata(folder, private).await
+                }
+            })?;
+        }
+        let path = format!("{dir}/{name}");
+        self.put(&path, bytes, Mode::Exact(0o755))?;
+        let target = path.clone();
+        self.run(|c| {
+            let target = target.clone();
+            async move {
+                let mut exec = russh_sftp::protocol::FileAttributes::empty();
+                exec.permissions = Some(0o755);
+                c.set_metadata(target, exec).await
+            }
+        })?;
+        Ok(path)
     }
 }
 
