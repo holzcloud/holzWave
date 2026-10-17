@@ -6,7 +6,7 @@
 mod common;
 
 use holzwave_core::engine::{Screen, Update};
-use holzwave_core::textread::{MAX_READ_BYTES, TextRead, TextRegion};
+use holzwave_core::textread::{MAX_HIDDEN_RANGES, MAX_READ_BYTES, MAX_READ_ROWS, TextRead, TextRegion};
 use holzwave_core::TerminalEngine;
 
 #[cfg(unix)]
@@ -93,6 +93,17 @@ mod routing {
         let read = pane.read_text(TextRegion::Screen, usize::MAX).expect("answer");
         assert_eq!(read, Some(canned()), "the canned value comes back unchanged");
         assert_eq!(*calls.lock().unwrap(), vec![(TextRegion::Screen, MAX_READ_BYTES)]);
+        pane.close();
+        assert!(pane.join(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn a_row_count_is_clamped_before_it_reaches_the_engine() {
+        let (pane, calls) = reader_pane();
+        pane.read_text(TextRegion::LastRows(u16::MAX), 1000).expect("answer");
+        assert_eq!(*calls.lock().unwrap(), vec![(TextRegion::LastRows(MAX_READ_ROWS), 1000)]);
+        assert_eq!(pane.read_text(TextRegion::LastRows(0), 1000).expect("answer"), None);
+        assert_eq!(calls.lock().unwrap().len(), 1, "a zero row count never reaches the engine");
         pane.close();
         assert!(pane.join(Duration::from_secs(3)));
     }
@@ -193,5 +204,231 @@ mod engine_reads {
         let mut e = engine(20, 5);
         numbered(&mut e, 12);
         assert_eq!(read(&mut e, TextRegion::Screen).expect("text").text, "row08\nrow09\nrow10\nrow11\nrow12");
+    }
+
+    fn text_of(e: &mut impl TerminalEngine, region: TextRegion) -> Option<String> {
+        read(e, region).map(|r| r.text)
+    }
+
+    /// An engine of the given size that was fed `bytes`.
+    fn fed(cols: u16, rows: u16, bytes: &str) -> holzwave_core::GhosttyEngine {
+        let mut e = engine(cols, rows);
+        e.feed(bytes.as_bytes());
+        e
+    }
+
+    #[test]
+    fn the_screen_is_what_the_viewport_shows_when_scrolled_back() {
+        let mut e = engine(20, 5);
+        numbered(&mut e, 12);
+        e.scroll(-2);
+        assert_eq!(text_of(&mut e, TextRegion::Screen).as_deref(), Some("row06\nrow07\nrow08\nrow09\nrow10"));
+        e.scroll_to_bottom();
+        assert_eq!(text_of(&mut e, TextRegion::Screen).as_deref(), Some("row08\nrow09\nrow10\nrow11\nrow12"));
+    }
+
+    #[test]
+    fn last_rows_end_at_the_last_text_and_reach_into_the_scrollback() {
+        let mut e = engine(20, 5);
+        numbered(&mut e, 12);
+        assert_eq!(text_of(&mut e, TextRegion::LastRows(3)).as_deref(), Some("row10\nrow11\nrow12"));
+        let nine = "row04\nrow05\nrow06\nrow07\nrow08\nrow09\nrow10\nrow11\nrow12";
+        assert_eq!(text_of(&mut e, TextRegion::LastRows(9)).as_deref(), Some(nine));
+        e.scroll(-3);
+        assert_eq!(text_of(&mut e, TextRegion::LastRows(9)).as_deref(), Some(nine), "the viewport does not matter");
+
+        let mut e = fed(20, 10, "one\r\ntwo\r\nthree");
+        assert_eq!(text_of(&mut e, TextRegion::LastRows(2)).as_deref(), Some("two\nthree"), "not blank rows");
+
+        let mut e = fed(20, 10, "   \r\n  \r\n");
+        assert_eq!(read(&mut e, TextRegion::LastRows(1)), None, "an engine that holds only blanks");
+    }
+
+    #[test]
+    fn a_selection_is_read_from_its_first_cell_to_its_last_in_either_direction() {
+        let mut e = engine(20, 5);
+        numbered(&mut e, 12);
+        let begin = |x, y| SelectOp::Begin { x, y, mode: SelectMode::Cell };
+        e.select(begin(2, 1)).expect("select");
+        e.select(SelectOp::Extend { x: 3, y: 3 }).expect("extend");
+        let copied = e.selection_text().expect("text").expect("some");
+        assert_eq!(text_of(&mut e, TextRegion::Selection).as_deref(), Some(copied.as_str()));
+        assert_eq!(copied, "w09\nrow10\nrow1");
+
+        e.select(begin(3, 3)).expect("select");
+        e.select(SelectOp::Extend { x: 2, y: 1 }).expect("extend");
+        assert_eq!(text_of(&mut e, TextRegion::Selection).as_deref(), Some(copied.as_str()), "backwards");
+
+        e.select(begin(1, 2)).expect("select");
+        assert_eq!(text_of(&mut e, TextRegion::Selection).as_deref(), Some("o"), "one cell");
+
+        e.select(SelectOp::Begin { x: 3, y: 2, mode: SelectMode::Line }).expect("select");
+        assert_eq!(text_of(&mut e, TextRegion::Selection).as_deref(), Some("row10"), "a whole row, no blanks");
+
+        e.select(SelectOp::Clear).expect("clear");
+        assert_eq!(read(&mut e, TextRegion::Selection), None, "no selection is no text");
+    }
+
+    #[test]
+    fn reading_leaves_the_users_selection_and_the_next_frame_alone() {
+        let build = || {
+            let mut e = engine(20, 5);
+            numbered(&mut e, 12);
+            e.select(SelectOp::Begin { x: 0, y: 1, mode: SelectMode::Cell }).expect("select");
+            e.select(SelectOp::Extend { x: 3, y: 2 }).expect("extend");
+            e.scroll(-2);
+            // A first update makes the next one a partial pass over what changes.
+            e.update().expect("update");
+            e
+        };
+        let (mut read_engine, mut twin) = (build(), build());
+        for region in [TextRegion::Screen, TextRegion::Selection, TextRegion::LastRows(7), TextRegion::LastRows(1)] {
+            assert!(read(&mut read_engine, region).is_some(), "{region:?}");
+        }
+        assert_eq!(read_engine.selection_text().expect("text"), twin.selection_text().expect("text"));
+        assert_eq!(read_engine.screen().expect("screen").scrollbar, twin.screen().expect("screen").scrollbar);
+        for more in ["\r\nrow13", "\r\nrow14"] {
+            read_engine.feed(more.as_bytes());
+            twin.feed(more.as_bytes());
+            assert_eq!(read_engine.update().expect("update"), twin.update().expect("update"));
+        }
+        assert_eq!(read_engine.selection_text().expect("text"), twin.selection_text().expect("text"));
+    }
+
+    #[test]
+    fn nothing_selected_and_nothing_on_the_screen_give_none() {
+        let mut e = engine(20, 5);
+        assert_eq!(read(&mut e, TextRegion::Screen), None);
+        assert_eq!(read(&mut e, TextRegion::LastRows(5)), None);
+        assert_eq!(read(&mut e, TextRegion::Selection), None);
+        numbered(&mut e, 3);
+        assert_eq!(e.read_text(TextRegion::Screen, 0).expect("read"), None, "a zero bound");
+        assert!(read(&mut e, TextRegion::Screen).is_some());
+    }
+
+    const RESET: &str = "\x1b[0m";
+
+    /// A row `pre <sequence>HIDDEN<reset> post` fed to a 40x5 engine and read back: the text and the hidden ranges.
+    fn styled(sequence: &str, reset: &str) -> (String, Vec<std::ops::Range<usize>>) {
+        let mut e = fed(40, 5, &format!("pre {sequence}HIDDEN{reset} post"));
+        let read = read(&mut e, TextRegion::Screen).expect("text");
+        (read.text, read.hidden)
+    }
+
+    #[test]
+    fn concealed_and_low_contrast_text_is_reported_as_hidden_ranges() {
+        let cases: [(&str, &str, &str); 6] = [
+            ("conceal", "\x1b[8m", "\x1b[28m"),
+            ("palette black on black", "\x1b[30;40m", RESET),
+            ("equal palette entries", "\x1b[38;5;21;48;5;21m", RESET),
+            ("equal truecolor", "\x1b[38;2;9;9;9;48;2;9;9;9m", RESET),
+            ("near-equal truecolor", "\x1b[38;2;10;10;10;48;2;10;10;11m", RESET),
+            ("inverse of equal colours", "\x1b[7;30;40m", RESET),
+        ];
+        for (name, sequence, reset) in cases {
+            let (text, hidden) = styled(sequence, reset);
+            assert_eq!(text, "pre HIDDEN post", "{name}");
+            assert_eq!(hidden, vec![4..10], "{name}");
+        }
+        // A palette entry that a program redefined (OSC 4) against the same colour as an explicit background.
+        let (text, hidden) = styled("\x1b]4;5;rgb:12/34/56\x1b\\\x1b[35;48;2;18;52;86m", RESET);
+        assert_eq!(text, "pre HIDDEN post", "osc 4");
+        assert_eq!(hidden, vec![4..10], "a redefined palette entry is resolved against the live palette");
+    }
+
+    #[test]
+    fn normally_styled_text_is_not_hidden() {
+        for (name, sequence) in [
+            ("bold red", "\x1b[1;31m"),
+            ("faint", "\x1b[2m"),
+            ("bright black on black", "\x1b[90;40m"),
+            ("underlined", "\x1b[4m"),
+            ("truecolor on the default background", "\x1b[38;2;200;100;50m"),
+        ] {
+            let (text, hidden) = styled(sequence, RESET);
+            assert_eq!(text, "pre HIDDEN post", "{name}");
+            assert!(hidden.is_empty(), "{name}: {hidden:?}");
+        }
+    }
+
+    #[test]
+    fn hidden_ranges_are_exact_for_wide_characters_and_wrapped_lines() {
+        let mut e = fed(40, 5, "a\x1b[8m\u{65E5}\x1b[28mb");
+        let wide = read(&mut e, TextRegion::Screen).expect("text");
+        assert_eq!(wide.text, "a\u{65E5}b");
+        assert_eq!(wide.hidden, vec![1..4], "the three bytes of the wide character");
+
+        let line = "abcdefghijklmnopqrstuvwxy";
+        let bytes = format!("{}\x1b[8m{}\x1b[28m{}", &line[..19], &line[19..21], &line[21..]);
+        let mut e = fed(20, 5, &bytes);
+        let joined = read(&mut e, TextRegion::Screen).expect("text");
+        assert_eq!(joined.text, line, "the line is still joined");
+        assert_eq!(joined.hidden, vec![19..21], "one merged range across the wrap");
+    }
+
+    #[test]
+    fn the_alternate_screen_is_read_as_shown_and_the_primary_one_is_left_alone() {
+        let mut e = fed(20, 5, "primary\r\n\x1b[?1049h\x1b[HALT1\r\nALT2");
+        assert_eq!(text_of(&mut e, TextRegion::Screen).as_deref(), Some("ALT1\nALT2"));
+        assert_eq!(text_of(&mut e, TextRegion::LastRows(5)).as_deref(), Some("ALT1\nALT2"));
+        e.feed(b"\x1b[?1049l");
+        assert_eq!(text_of(&mut e, TextRegion::Screen).as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn the_text_holds_no_control_characters() {
+        let mut e = fed(
+            40,
+            6,
+            "\x1b[31mred\x1b[0m \x1b]0;title\x07\x1b]52;c;aGVsbG8=\x07bell\x07 x\x08y\ttab\r\nabc\rXY\r\nend",
+        );
+        e.select(SelectOp::All).expect("select all");
+        for region in [TextRegion::Screen, TextRegion::LastRows(6), TextRegion::Selection] {
+            let text = text_of(&mut e, region).expect("text");
+            for c in text.chars() {
+                assert!(c == '\n' || !(c < ' ' || c == '\u{7f}' || ('\u{80}'..='\u{9f}').contains(&c)), "{region:?}: {c:?}");
+            }
+            assert!(text.contains("XYc"), "{region:?}: the overwritten characters are gone: {text:?}");
+            assert!(!text.contains("abc"), "{region:?}: {text:?}");
+            assert!(text.contains("red") && text.contains("bell") && text.contains("end"), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_grapheme_flood_is_bounded_and_does_not_fail() {
+        let flood = format!("e{}after\r\nnext", "\u{301}".repeat(10_000));
+        let mut e = fed(20, 5, &flood);
+        let read = read(&mut e, TextRegion::Screen).expect("text");
+        assert!(read.text.len() < 4096, "{} bytes", read.text.len());
+        assert!(read.text.contains("after\nnext"), "the text after the cell is intact: {:?}", read.text);
+    }
+
+    #[test]
+    fn a_screen_taller_than_the_row_cap_keeps_the_last_rows_and_says_so() {
+        let mut e = engine(20, 2500);
+        let lines: Vec<String> = (0..2400).map(|n| format!("L{n:04}")).collect();
+        e.feed(lines.join("\r\n").as_bytes());
+        let read = read(&mut e, TextRegion::Screen).expect("text");
+        assert!(read.truncated);
+        assert!(read.text.starts_with("L0500"), "{:?}", &read.text[..20]);
+        assert!(read.text.ends_with("L2399"));
+    }
+
+    #[test]
+    fn a_flood_of_alternating_hidden_cells_leaves_no_hidden_character_uncovered() {
+        let row = "\x1b[8mH\x1b[28mv".repeat(100);
+        let rows: Vec<String> = (0..30).map(|_| row.clone()).collect();
+        let mut e = fed(200, 30, &rows.join("\r\n"));
+        let read = read(&mut e, TextRegion::Screen).expect("text");
+        assert!(read.hidden.len() <= MAX_HIDDEN_RANGES, "{} ranges", read.hidden.len());
+        let mut hidden_chars = 0;
+        for (at, _) in read.text.match_indices('H') {
+            hidden_chars += 1;
+            assert!(read.hidden.iter().any(|r| r.contains(&at)), "the hidden H at {at} lies in no range");
+        }
+        assert_eq!(hidden_chars, 3000);
+        for pair in read.hidden.windows(2) {
+            assert!(pair[0].end <= pair[1].start);
+        }
     }
 }

@@ -53,7 +53,7 @@ use crate::conn::{ConnState, Link, SharedState};
 use crate::pty::{Pty, SpawnOptions, process_cwd};
 use crate::ssh::{SshLink, SshTarget};
 use crate::queue::{PaneQueue, Popped};
-use crate::textread::{MAX_READ_BYTES, TextRead, TextRegion};
+use crate::textread::{MAX_READ_BYTES, MAX_READ_ROWS, TextRead, TextRegion};
 use crate::wire::{FrameEncoder, FrameMsg};
 use crate::winshell::announced_path;
 use crate::{Error, Result};
@@ -509,6 +509,11 @@ impl PaneHandle {
             return Ok(None);
         }
         let max_bytes = max_bytes.min(MAX_READ_BYTES);
+        let region = match region {
+            TextRegion::LastRows(0) => return Ok(None),
+            TextRegion::LastRows(n) => TextRegion::LastRows(n.min(MAX_READ_ROWS)),
+            other => other,
+        };
         self.request(|reply| Control::ReadText { region, max_bytes, reply })
     }
 

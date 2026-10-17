@@ -13,6 +13,8 @@
 use std::fmt;
 use std::ops::Range;
 
+use crate::engine::Color;
+
 /// The most bytes a read ever returns, whatever the caller asks for. It is also the size at which a consumer should
 /// cut a raw item before it scans it.
 pub const MAX_READ_BYTES: usize = 512 * 1024;
@@ -28,6 +30,10 @@ pub const MAX_READ_CELLS: usize = 1 << 19;
 /// instead of a hidden character being left uncovered.
 pub const MAX_HIDDEN_RANGES: usize = 1024;
 
+/// Below this contrast ratio a person cannot read text. The floor is deliberately far below any real theme: legitimate
+/// dim text (bright black on black is about 2) is never hidden by it.
+const MIN_VISIBLE_CONTRAST: f64 = 1.05;
+
 /// A region of a terminal's text.
 ///
 /// Every region is read as the grid holds it and the result is untrusted program output.
@@ -35,6 +41,12 @@ pub const MAX_HIDDEN_RANGES: usize = 1024;
 pub enum TextRegion {
     /// The rows the viewport shows now, scrolled back or not: what the user sees.
     Screen,
+    /// Exactly what the user has selected, in either direction (a rectangle selection reads only its columns); during
+    /// copy mode this is the copy selection. `None` without a selection.
+    Selection,
+    /// The last `n` rows of the buffer, scrollback included, ending at the last row that has text. `n` is capped at
+    /// [`MAX_READ_ROWS`]; 0 reads nothing.
+    LastRows(u16),
 }
 
 /// The text of a region, with the parts of it that the user could not see.
@@ -212,6 +224,34 @@ fn shift_ranges(ranges: &mut Vec<Range<usize>>, by: usize) {
         r.end -= by;
         true
     });
+}
+
+/// The WCAG 2 contrast ratio of two colours: `(lighter + 0.05) / (darker + 0.05)` over their relative luminance. It is
+/// 1 for equal colours and 21 for black on white, and it does not depend on the order of the arguments.
+pub fn contrast_ratio(a: Color, b: Color) -> f64 {
+    fn channel(c: u8) -> f64 {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.039_28 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    }
+    fn luminance(c: Color) -> f64 {
+        0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+    }
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// Whether a cell was drawn so that a person cannot read it: with the conceal attribute, or with a foreground and a
+/// background (both known) whose contrast is below 1.05. A model must not read what a person cannot, so the read
+/// reports such text and its consumer removes it. The floor is far below any real theme, so dim text is never hidden.
+/// A colour that is not known (no default configured) never hides by contrast.
+pub fn cell_is_hidden(invisible: bool, fg: Option<Color>, bg: Option<Color>) -> bool {
+    if invisible {
+        return true;
+    }
+    match (fg, bg) {
+        (Some(fg), Some(bg)) => contrast_ratio(fg, bg) < MIN_VISIBLE_CONTRAST,
+        _ => false,
+    }
 }
 
 /// How many of `wanted` rows a read of a grid `cols` wide may walk: at most [`MAX_READ_ROWS`], at most
@@ -442,5 +482,31 @@ mod tests {
         assert_eq!(rows_within_budget(u16::MAX, 1), 1);
         assert!(rows_within_budget(u16::MAX, 50) >= 1);
         assert_eq!(rows_within_budget(80, 0), 0);
+    }
+
+    #[test]
+    fn contrast_of_equal_colours_is_one_and_black_on_white_is_twenty_one() {
+        for c in [Color { r: 0, g: 0, b: 0 }, Color { r: 255, g: 255, b: 255 }, Color { r: 18, g: 52, b: 86 }] {
+            assert!((contrast_ratio(c, c) - 1.0).abs() < 1e-12);
+        }
+        let (black, white) = (Color { r: 0, g: 0, b: 0 }, Color { r: 255, g: 255, b: 255 });
+        assert!((contrast_ratio(black, white) - 21.0).abs() < 1e-9);
+        let grey = Color { r: 100, g: 120, b: 140 };
+        assert!((contrast_ratio(grey, white) - contrast_ratio(white, grey)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_cell_is_hidden_when_concealed_or_when_the_contrast_is_below_the_floor() {
+        let rgb = |v: u8| Some(Color { r: v, g: v, b: v });
+        let at = |r, g, b| Some(Color { r, g, b });
+        assert!(cell_is_hidden(true, rgb(255), rgb(0)), "conceal alone hides");
+        assert!(cell_is_hidden(false, rgb(7), rgb(7)), "equal colours hide");
+        assert!(cell_is_hidden(false, at(16, 16, 16), at(16, 16, 17)), "#101010 on #101011");
+        assert!(cell_is_hidden(false, at(0, 0, 0), at(0, 0, 1)), "#000000 on #000001");
+        assert!(!cell_is_hidden(false, at(192, 192, 192), at(16, 16, 16)), "#c0c0c0 on #101010");
+        assert!(!cell_is_hidden(false, at(85, 85, 85), at(0, 0, 0)), "#555555 on #000000");
+        assert!(!cell_is_hidden(false, None, rgb(0)), "a missing colour never hides");
+        assert!(!cell_is_hidden(false, rgb(5), None));
+        assert!(!cell_is_hidden(false, None, None));
     }
 }

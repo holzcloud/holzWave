@@ -9,8 +9,8 @@ use libghostty_vt::render::{
 };
 use libghostty_vt::screen::{CellWide, GridRef, Screen as VtScreen};
 use libghostty_vt::search::{MatchBuffer, Scroll, Search};
-use libghostty_vt::selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection};
-use libghostty_vt::style::{Palette, PaletteIndex, RgbColor, Underline};
+use libghostty_vt::selection::{FormatOptions, Order, SelectLineOptions, SelectWordOptions, Selection};
+use libghostty_vt::style::{Palette, PaletteIndex, RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{
     ClipboardMime, Mode, Point, PointCoordinate, PointSpace, ScrollViewport, SizeReportSize,
 };
@@ -22,7 +22,9 @@ use crate::engine::{
     Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span, TerminalEngine, Update, WheelEvent, WheelOutcome,
     Width, sanitize_program_text,
 };
-use crate::textread::{Cut, MAX_READ_BYTES, TextBuilder, TextRead, TextRegion, rows_within_budget};
+use crate::textread::{
+    Cut, MAX_READ_BYTES, MAX_READ_ROWS, TextBuilder, TextRead, TextRegion, cell_is_hidden, rows_within_budget,
+};
 use crate::{Error, Result};
 
 /// The most bytes of program-controlled replies that may wait for the PTY at once.
@@ -90,7 +92,8 @@ enum CellText {
     Skip,
     /// Nothing to show.
     Blank,
-    Text(String),
+    /// The text of the cell, and whether the cell has a style (only a styled cell can be hidden).
+    Text { text: String, styled: bool },
 }
 
 /// The text of the cell at `at`.
@@ -119,7 +122,47 @@ fn cell_text(at: &GridRef<'_>) -> Result<CellText> {
         Err(VtError::OutOfSpace { .. }) => primary_char(&cell)?,
         Err(e) => return Err(eng(e)),
     };
-    Ok(if text.is_empty() { CellText::Blank } else { CellText::Text(text) })
+    if text.is_empty() {
+        return Ok(CellText::Blank);
+    }
+    Ok(CellText::Text { text, styled: cell.has_styling().map_err(eng)? })
+}
+
+/// The colours a read judges a cell by: the live palette and the effective default colours, read once per read so
+/// that an override a program set (OSC 4, 10, 11) counts.
+struct Visibility {
+    palette: Palette,
+    fg: Option<Color>,
+    bg: Option<Color>,
+}
+
+impl Visibility {
+    fn new(terminal: &Terminal<'_, '_>) -> Result<Self> {
+        Ok(Self {
+            palette: terminal.color_palette().map_err(eng)?,
+            fg: terminal.fg_color().map_err(eng)?.map(color),
+            bg: terminal.bg_color().map_err(eng)?.map(color),
+        })
+    }
+
+    fn resolve(&self, c: StyleColor, default: Option<Color>) -> Option<Color> {
+        match c {
+            StyleColor::None => default,
+            StyleColor::Palette(i) => Some(color(self.palette.get(i))),
+            StyleColor::Rgb(rgb) => Some(color(rgb)),
+        }
+    }
+
+    /// Whether the (styled) cell at `at` was drawn so that a person could not read it. Inverse video needs no case of
+    /// its own: swapping the two colours does not change their contrast.
+    fn hides(&self, at: &GridRef<'_>) -> Result<bool> {
+        let style = at.style().map_err(eng)?;
+        Ok(cell_is_hidden(
+            style.invisible,
+            self.resolve(style.fg_color, self.fg),
+            self.resolve(style.bg_color, self.bg),
+        ))
+    }
 }
 
 /// The primary code point of a cell as text; empty when it is not a valid character.
@@ -874,6 +917,7 @@ impl GhosttyEngine {
         let wanted = to.1 - from.1 + 1;
         let allowed = rows_within_budget(cols, wanted);
         let mut builder = TextBuilder::new(cut);
+        let visibility = Visibility::new(&self.terminal)?;
         if allowed < wanted {
             builder.mark_truncated();
             match cut {
@@ -894,10 +938,14 @@ impl GhosttyEngine {
                 (if y == first_row { first_col } else { 0 }, if y == last_row { end_col } else { last_col })
             };
             for x in x0..=x1 {
-                match cell_text(&self.screen_ref((x, y))?)? {
+                let at = self.screen_ref((x, y))?;
+                match cell_text(&at)? {
                     CellText::Skip => {}
                     CellText::Blank => builder.blank(),
-                    CellText::Text(text) => builder.cell(&text, false),
+                    CellText::Text { text, styled } => {
+                        let hidden = styled && visibility.hides(&at)?;
+                        builder.cell(&text, hidden);
+                    }
                 }
             }
             // The last row ends the text; a rectangle never joins rows.
@@ -905,6 +953,21 @@ impl GhosttyEngine {
             builder.end_row(wrapped);
         }
         Ok(builder.finish(max_bytes))
+    }
+
+    /// The last row at or above `from` that shows text, looking at most one screenful up; `None` when they are all
+    /// blank.
+    fn last_text_row(&self, from: u32) -> Result<Option<u32>> {
+        let cols = self.terminal.cols().map_err(eng)?;
+        let rows = u32::from(self.terminal.rows().map_err(eng)?);
+        for y in (from.saturating_sub(rows.saturating_sub(1))..=from).rev() {
+            for x in 0..cols {
+                if !self.cell_is_blank((x, y))? {
+                    return Ok(Some(y));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The region as text. `max_bytes` is already clamped by the caller.
@@ -919,6 +982,29 @@ impl GhosttyEngine {
                 let bottom = u32::try_from(bar.offset + bar.len - 1).unwrap_or(u32::MAX);
                 let last_col = self.terminal.cols().map_err(eng)?.saturating_sub(1);
                 self.read_cells((0, top), (last_col, bottom), false, Cut::KeepTail, max_bytes)
+            }
+            TextRegion::Selection => {
+                let Some(selection) = self.terminal.selection().map_err(eng)? else { return Ok(None) };
+                // Only looked at, never replaced: the ordered copy is a snapshot.
+                let ordered = selection.to_ordered(&self.terminal, Order::Forward).map_err(eng)?;
+                let (Some(from), Some(to)) =
+                    (self.screen_point(&ordered.start())?, self.screen_point(&ordered.end())?)
+                else {
+                    return Ok(None);
+                };
+                self.read_cells(from, to, ordered.is_rectangle(), Cut::KeepHead, max_bytes)
+            }
+            TextRegion::LastRows(n) => {
+                let n = u32::from(n.min(MAX_READ_ROWS));
+                if n == 0 {
+                    return Ok(None);
+                }
+                let cols = self.terminal.cols().map_err(eng)?;
+                let last = self.last_screen_row()?;
+                // The last row that has text, looked for upward over at most one screenful.
+                let Some(end) = self.last_text_row(last)? else { return Ok(None) };
+                let start = (end + 1).saturating_sub(n);
+                self.read_cells((0, start), (cols.saturating_sub(1), end), false, Cut::KeepTail, max_bytes)
             }
         }
     }
@@ -1680,6 +1766,30 @@ impl TerminalEngine for GhosttyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rectangle_selection_reads_only_its_columns() {
+        let mut engine = GhosttyEngine::new(20, 5, 100).expect("engine");
+        engine.feed(b"abcdef\r\nghijkl\r\nmnopqr");
+        let selection = Selection::new(
+            engine.screen_ref((1, 0)).expect("start"),
+            engine.screen_ref((3, 2)).expect("end"),
+            true,
+        );
+        engine.terminal.set_selection(Some(&selection)).expect("select");
+        let read = engine.read_text(TextRegion::Selection, 4096).expect("read").expect("text");
+        assert_eq!(read.text, "bcd\nhij\nnop", "three columns of three rows, the last row not run to the end");
+        assert!(read.hidden.is_empty() && !read.truncated);
+        // Dragged the other way round, the same cells.
+        let reversed = Selection::new(
+            engine.screen_ref((3, 2)).expect("start"),
+            engine.screen_ref((1, 0)).expect("end"),
+            true,
+        );
+        engine.terminal.set_selection(Some(&reversed)).expect("select");
+        let read = engine.read_text(TextRegion::Selection, 4096).expect("read").expect("text");
+        assert_eq!(read.text, "bcd\nhij\nnop");
+    }
 
     #[test]
     fn cap_tail_keeps_the_tail_on_a_character_boundary() {
