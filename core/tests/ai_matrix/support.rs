@@ -1115,3 +1115,15 @@ pub fn closed_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
     listener.local_addr().expect("address").port()
 }
+
+/// Saves the profile again under its id, with another address or an acknowledgement.
+pub fn upsert_again(config: &mut AiConfig, id: &str, cell: &Cell, address: &str, acknowledge: bool) {
+    let mut input = ProfileInput::new(cell.name, cell.preset());
+    input.id = Some(id.to_owned());
+    input.wire = Some(cell.wire);
+    input.base_url = address.to_owned();
+    input.model = cell.model.to_owned();
+    input.acknowledge_gateway = acknowledge;
+    config.upsert(input).unwrap_or_else(|error| panic!("{}: the profile was refused: {error}", cell.name));
+}
+

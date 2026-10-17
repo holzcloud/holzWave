@@ -368,3 +368,61 @@ mod tests {
         }
     }
 }
+
+/// The words of the shell for every state of the bridge, held to the bridge's own keys. Only a Mac builds the bridge.
+#[cfg(all(test, target_os = "macos"))]
+mod device_states {
+    use super::*;
+
+    use holzwave_apple_ai::{Availability, BackendScript, ScriptedBackend};
+    use holzwave_core::ai::provider::{CancelToken, ChatRequest};
+    use holzwave_core::ai::types::Message;
+
+    /// The seven states the shell can be given by the bridge on a Mac, and the one it never is (the bridge answers it
+    /// only where it was not built for the platform).
+    const SENT: [Availability; 7] = [
+        Availability::Available,
+        Availability::AppleIntelligenceNotEnabled,
+        Availability::DeviceNotEligible,
+        Availability::ModelNotReady,
+        Availability::Other,
+        Availability::OsTooOld,
+        Availability::SdkLacksFramework,
+    ];
+
+    /// A one-word request for the model of the device.
+    fn request() -> ChatRequest {
+        let mut request = ChatRequest::new(DEVICE_MODEL);
+        request.messages.push(Message::user_text("m1", "hi", 1));
+        request
+    }
+
+    #[test]
+    fn apple_device_reports_the_words_of_every_backend_state() {
+        for state in SENT {
+            let backend = Arc::new(ScriptedBackend::new().with_availability(state).with_turn(BackendScript::reply("ok")));
+            let device = AppleDevice::new(backend.clone());
+            let probed = device.probe();
+            assert_eq!(probed.state, state.as_str(), "{}: the state word", state.as_str());
+            assert_eq!(probed.advice, state.advice().as_str(), "{}: the advice word", state.as_str());
+            assert_eq!(probed.is_available(), probed.state == AVAILABLE, "{}: only the exact word counts", state.as_str());
+            assert_eq!(probed.is_available(), state == Availability::Available, "{}: availability", state.as_str());
+
+            let provider = device.provider();
+            let result = provider.stream(&request(), &mut |_| holzwave_core::ai::provider::Flow::Continue, &CancelToken::new());
+            if state == Availability::Available {
+                assert!(result.is_ok(), "{}: the provider refused: {:?}", state.as_str(), result.err());
+                assert_eq!(backend.calls(), 1, "{}: one backend call", state.as_str());
+            } else {
+                let error = result.expect_err("an unavailable model refuses the turn");
+                assert_eq!(error.class().as_str(), "unavailable", "{}: the class", state.as_str());
+                assert_eq!(backend.calls(), 0, "{}: the backend ran", state.as_str());
+            }
+        }
+
+        // The state the shell never sends is not available.
+        let unsent = ScriptedBackend::new().with_availability(Availability::UnsupportedPlatform);
+        let probed = AppleDevice::new(Arc::new(unsent)).probe();
+        assert!(!probed.is_available(), "the state the shell never sends is not available");
+    }
+}

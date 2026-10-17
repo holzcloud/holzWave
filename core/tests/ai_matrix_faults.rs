@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use common::fake_http::{Ending, Reply};
 use holzwave_core::ai::http::{Http, HttpConfig, Origin};
-use holzwave_core::ai::profiles::{AiConfig, KeySlot, ProfileInput, ResolveError};
+use holzwave_core::ai::profiles::{AiConfig, KeySlot, ResolveError};
 use holzwave_core::ai::provider::{AiError, CancelToken, Flow, Provider, StreamEvent};
 use holzwave_core::ai::service::dispatch::adapter_for;
 use holzwave_core::ai::wire::Wire;
@@ -28,7 +28,7 @@ use support::{
     ARG_CANARY, CANARY_TEXT, Case, Cell, GATEWAY_HEADER, HTTP_ROWS, Keys, Neutral, RigOptions, STREAM_ROWS, Scenario,
     StubResolver, assert_clean, canary_gateway_key, canary_key, catalog_specs, cell, cells, chat_request, closed_port,
     fast_retry, header_names, http_with_stub, json_body, key_header, members, outcome, reply_for, rejection_body, rig,
-    run, save_profile, short_idle, store_keys, test_vault, timing_guard, try_rig_with,
+    run, save_profile, short_idle, store_keys, test_vault, timing_guard, try_rig_with, upsert_again,
 };
 
 /// The five Custom cells, one per wire.
@@ -458,17 +458,6 @@ fn local_only_blocks_lan_and_cloud_destinations_before_any_connection() {
         assert!(result.result.is_ok(), "{name}: local-only cut a loopback server: {:?}", result.result.as_ref().err());
         assert_eq!(outcome(&result).text, Neutral::TEXT, "{name}: the answer");
     }
-}
-
-/// Saves the profile again under its id, with another address or an acknowledgement.
-fn upsert_again(config: &mut AiConfig, id: &str, cell: &Cell, address: &str, acknowledge: bool) {
-    let mut input = ProfileInput::new(cell.name, cell.preset());
-    input.id = Some(id.to_owned());
-    input.wire = Some(cell.wire);
-    input.base_url = address.to_owned();
-    input.model = cell.model.to_owned();
-    input.acknowledge_gateway = acknowledge;
-    config.upsert(input).unwrap_or_else(|error| panic!("{}: the profile was refused: {error}", cell.name));
 }
 
 #[test]
