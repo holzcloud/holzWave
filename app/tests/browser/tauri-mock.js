@@ -50,7 +50,8 @@
 //       context        the context commands of the core, played for the consent card:
 //                      panes      pane number -> `{ kinds, items }`; `kinds` is what the pane offers (in the order to list
 //                                 them) and `items[kind]` the item a read of that kind finds (`{ label, bytes, findings,
-//                                 text }`) or nothing when it reads empty. `text` is mock-only: no answer ever carries it.
+//                                 text }`, or a list of them) or nothing when it reads empty. `text` is mock-only: no answer
+//                                 ever carries it.
 //                                 Panes 1 and 2 are terminals offering `selection`, `screen` and `last_command`
 //                      localContext  `ask` (default) or `auto`: `auto` makes a share unnecessary for a loopback or
 //                                 on-device profile, as the core's `ai_local_context`
@@ -510,11 +511,12 @@
       const texts = [];
       for (const kind of kinds) {
         ctx.reads += 1;
-        const found = pane.items[kind];
-        if (!found) empty.push(kind);
-        else {
-          items.push({ id: items.length + 1, kind, label: found.label, bytes: found.bytes, findings: structuredClone(found.findings) });
-          texts.push(found.text ?? found.label);
+        const read = pane.items[kind];
+        const found = Array.isArray(read) ? read : read ? [read] : [];
+        if (found.length === 0) empty.push(kind);
+        for (const one of found) {
+          items.push({ id: items.length + 1, kind, label: one.label, bytes: one.bytes, findings: structuredClone(one.findings) });
+          texts.push(one.text ?? one.label);
         }
       }
       if (items.length === 0) throw contextFault("nothing_to_share");

@@ -84,6 +84,7 @@
                         padding: 0 .5rem; border: 1px solid var(--hw-ok); border-radius: 62.5rem; background: none;
                         color: var(--hw-ok); cursor: pointer; font-family: "JetBrains Mono", ui-monospace, monospace;
                         font-size: calc(11rem / 12); letter-spacing: normal; text-transform: none; white-space: nowrap; }
+.chat-bar .chat-local[hidden] { display: none; }
 .chat-bar .chat-local:hover { border-color: var(--hw-ok); background: var(--hw-rose-wash); color: var(--hw-ok); }
 .chat-bar .chat-local:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
 .chat-status[data-kind="note"] { color: var(--hw-dim); }

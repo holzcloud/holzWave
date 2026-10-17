@@ -8,7 +8,9 @@
 // button `Context…` when the focus was in the card.
 
 import type { Consent } from "./consent.js";
-import { KIND_WORDS, cardTitle, sizeWords } from "./consentstate.js";
+import {
+  BEST_EFFORT, KIND_WORDS, cardTitle, destinationWords, findingWords, persistWords, ruleWords, sizeWords, totalWords, validForWords,
+} from "./consentstate.js";
 import type { CtxKind } from "./consentstate.js";
 import { el } from "./dom.js";
 
@@ -56,6 +58,12 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
       box.checked = !m.off.includes(Number(box.dataset.item));
     }
     for (const b of host.querySelectorAll<HTMLButtonElement>("button.consent-preview")) b.disabled = m.ticked.length === 0;
+    const total = host.querySelector(".consent-total");
+    if (total !== null && m.offer !== null) {
+      const going = m.offer.items.filter((item) => !m.off.includes(item.id));
+      const words = totalWords(going.length, going.reduce((sum, item) => sum + item.bytes, 0));
+      if (total.textContent !== words) total.textContent = words;
+    }
   };
 
   const build = (): void => {
@@ -71,8 +79,12 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
     const head = el("div", "consent-head", section);
     el("span", "consent-title label", head).textContent = cardTitle(m.mode, state, paneWords, m.busy);
     if (state !== null && m.mode !== "busy") {
+      const where = destinationWords(m.offer !== null && m.mode === "offer" ? m.offer : state);
       const dest = el("span", "consent-dest", head);
-      el("span", "consent-host", dest).textContent = m.offer !== null && m.mode === "offer" ? m.offer.host : state.host;
+      el("span", "consent-host", dest).textContent = where.host;
+      const place = el("span", "consent-place", dest);
+      place.dataset.leaves = where.leaves ? "true" : "false";
+      place.textContent = where.place;
     }
     const actions = document.createElement("div");
     actions.className = "consent-actions";
@@ -82,7 +94,8 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
       el("p", "consent-text", section).textContent = `${what} is only sent when you share it.`;
       const name = view.profileName(state.profile);
       const via = state.model === "" ? name : `${name} · ${state.model}`;
-      el("p", "consent-text", section).textContent = `Share ${paneWords} with ${via}? It goes to ${state.host}.`;
+      const goes = destinationWords(state);
+      el("p", "consent-text", section).textContent = `Share ${paneWords} with ${via}? It goes to ${goes.host} (${goes.place}).`;
       el("p", "consent-text", section).textContent = "You still see every item before a message is sent.";
       button(actions, "consent-share", "share", `Share pane ${pane}`, () => void consent.share());
       button(actions, "consent-no", "no", "No", () => consent.close());
@@ -110,6 +123,10 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
         el("span", "consent-kindword", label).textContent = KIND_WORDS[kind];
       }
       el("p", "consent-empty", section).textContent = "Nothing is attached yet.";
+      if (state.kinds.includes("last_command")) {
+        el("p", "consent-note", section).textContent =
+          "On a pane that has just started, the last command can be the start-up text of the shell. Untick it when in doubt.";
+      }
       button(actions, "consent-preview", "preview", "Preview", () => void consent.preview());
       if (state.shared) button(actions, "consent-unshare", "unshare", "Stop sharing", () => void consent.unshare());
       button(actions, "consent-close", "close", "Close", () => consent.close());
@@ -129,15 +146,32 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
         box.addEventListener("change", () => consent.toggleItem(item.id, box.checked));
         el("span", "consent-label", label).textContent = item.label;
         el("span", "consent-size", label).textContent = sizeWords(item.bytes);
+        if (item.findings.length > 0) {
+          const findings = el("ul", "consent-findings", row);
+          for (const finding of item.findings) {
+            const entry = el("li", "consent-finding", findings);
+            entry.dataset.rule = finding.rule;
+            entry.dataset.tone = ruleWords(finding.rule).tone;
+            entry.textContent = findingWords(finding);
+          }
+        }
       }
-      const count = m.offer.items.length - m.off.length;
-      el("p", "consent-total", section).textContent = `${count} item${count === 1 ? "" : "s"}`;
+      if (m.offer.empty.length > 0) {
+        el("p", "consent-empty", section).textContent = `Nothing there: ${m.offer.empty.map((kind) => KIND_WORDS[kind]).join(", ")}.`;
+      }
+      el("p", "consent-total", section);
+      el("p", "consent-persist", section).textContent = persistWords(m.offer.persist);
+      el("p", "consent-valid", section).textContent = validForWords(m.offer.ttl_seconds);
+      el("p", "consent-best", section).textContent = BEST_EFFORT;
       button(actions, "consent-again", "again", "Read again", () => void consent.preview());
       button(actions, "consent-discard", "discard", "Discard", () => consent.discard());
     } else if (m.mode === "blocked") {
       const text = el("p", "consent-text", section);
       text.dataset.kind = "error";
       text.textContent = m.fault?.text ?? "";
+      if (m.fault?.reason === "local_only" || m.fault?.reason === "destination") {
+        button(actions, "consent-providers", "providers", "Providers…", () => view.providers());
+      }
       button(actions, "consent-close", "close", "Close", () => consent.close());
     }
     if (actions.childElementCount > 0) section.append(actions);

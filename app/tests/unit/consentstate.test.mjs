@@ -2,9 +2,16 @@
 // names, and the words that tell what would go out. No DOM is needed.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { localityWord } from "../../dist/chatview.js";
 import {
-  contextArguments, ctxButtonView, decideMode, heldOf, pickedOf, readContextState, readOffer, routeChange,
+  BEST_EFFORT, KIND_WORDS, NOTES, REASON_WORDS, RULE_WORDS, cardTitle, contextArguments, contextFault, ctxButtonView, decideMode,
+  destinationWords, findingWords, heldOf, paneWords, persistWords, pickedOf, readContextState, readOffer, routeChange, sentLine,
+  sizeWords, tokenWordsOfBytes, totalWords, validForWords,
 } from "../../dist/consentstate.js";
+
+const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/ai_consent.json", import.meta.url), "utf8"));
+const PROTOCOL = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
 
 const STATE = {
   profile: "local-1", model: "llama3.2", host: "localhost:11434", locality: "loopback", required: true, shared: false,
@@ -177,4 +184,112 @@ test("the mode follows the core's answer", () => {
   assert.deepEqual(ctxButtonView("pick", 0, true), { text: "Context…", expanded: true, disabled: false });
   assert.deepEqual(ctxButtonView("ask", 0, true), { text: "Context…", expanded: true, disabled: false });
   assert.deepEqual(ctxButtonView("closed", 0, false), { text: "Context…", expanded: false, disabled: true });
+});
+
+test("the word tables are the core's tables", () => {
+  assert.deepEqual(Object.keys(RULE_WORDS), GOLDEN.rules, "the rule names, in the core's order");
+  assert.deepEqual(Object.keys(REASON_WORDS), GOLDEN.reasons, "the reason names, in the core's order");
+  assert.deepEqual(Object.keys(KIND_WORDS), PROTOCOL.ops.context_kind, "the five kinds");
+  assert.equal(GOLDEN.rules.length, 22);
+  assert.equal(GOLDEN.reasons.length, 13);
+  for (const place of GOLDEN.localities) assert.notEqual(localityWord(place), "unknown place", place);
+  assert.deepEqual(GOLDEN.localities.map(localityWord), ["on device", "this computer", "local network", "cloud"]);
+  for (const other of ["mars", "", "Cloud", null, undefined, 4]) assert.equal(localityWord(other), "unknown place");
+
+  for (const [rule, row] of Object.entries(RULE_WORDS)) {
+    assert.ok(["chars", "times", "none"].includes(row.unit), `${rule} unit`);
+    assert.ok(["warn", "plain"].includes(row.tone), `${rule} tone`);
+    assert.ok(row.words.length >= 3 && !row.words.endsWith("."), `${rule}: ${row.words}`);
+    assert.ok(!/[<>&"`]|:\/\//.test(row.words), `${rule}: no markup and no address`);
+  }
+  for (const rule of ["hidden_text", "bidi_control", "zero_width", "tag_chars"]) assert.equal(RULE_WORDS[rule].tone, "warn", rule);
+  assert.equal(RULE_WORDS.truncated.unit, "none");
+  for (const [reason, sentence] of Object.entries(REASON_WORDS)) {
+    assert.ok(sentence.length >= 10 && sentence.endsWith("."), `${reason}: ${sentence}`);
+    assert.ok(!/[<>&`]|:\/\//.test(sentence), `${reason}: no markup and no address`);
+  }
+  for (const word of Object.values(KIND_WORDS)) assert.ok(word.length >= 3);
+  assert.equal(Object.keys(NOTES).length, 7);
+});
+
+test("a finding, a size, a token count and a destination are told in words", () => {
+  assert.equal(findingWords({ rule: "hidden_text", count: 15 }), "hidden text removed (15 characters)");
+  assert.equal(findingWords({ rule: "anthropic_key", count: 1 }), "Anthropic key hidden");
+  assert.equal(findingWords({ rule: "anthropic_key", count: 3 }), "Anthropic key hidden ×3");
+  assert.equal(findingWords({ rule: "truncated", count: 7 }), "cut to fit the size limit");
+  assert.equal(findingWords({ rule: "control_chars", count: 1 }), "control characters removed (1 character)");
+  assert.equal(findingWords({ rule: "from_a_newer_core", count: 1 }), "other change", "an unknown rule is never dropped");
+  assert.equal(findingWords({ rule: "from_a_newer_core", count: 7 }), "other change ×7");
+  assert.equal(findingWords({ rule: "constructor", count: 2 }), "other change ×2", "a name of the prototype is no rule");
+  for (const rule of GOLDEN.rules) assert.ok(findingWords({ rule, count: 2 }).length >= 3, rule);
+
+  assert.deepEqual([0, 812, 1024, 2457, 131072, 1048576].map(sizeWords), ["0 B", "812 B", "1.0 KiB", "2.4 KiB", "128 KiB", "1.0 MiB"]);
+  assert.deepEqual([-1, 1.5, "7", null, Number.NaN].map(sizeWords), ["0 B", "0 B", "0 B", "0 B", "0 B"]);
+  assert.deepEqual([3, 6, 3000, 4500, 0].map(tokenWordsOfBytes), ["≈ 1 token", "≈ 2 tokens", "≈ 1k tokens", "≈ 1.5k tokens", ""]);
+  assert.equal(tokenWordsOfBytes(2457), "≈ 819 tokens");
+  assert.equal(totalWords(1, 2457), "1 item · 2.4 KiB · ≈ 819 tokens");
+  assert.equal(totalWords(0, 0), "0 items · 0 B");
+  assert.equal(totalWords(2, 3400), "2 items · 3.3 KiB · ≈ 1.1k tokens");
+
+  assert.deepEqual(destinationWords({ host: "localhost:11434", locality: "loopback" }), { host: "localhost:11434", place: "this computer", leaves: false });
+  assert.deepEqual(destinationWords({ host: "api.example.org", locality: "cloud" }), { host: "api.example.org", place: "cloud", leaves: true });
+  assert.deepEqual(destinationWords({ host: "nas.local", locality: "lan" }), { host: "nas.local", place: "local network", leaves: true });
+  assert.deepEqual(destinationWords({ host: "h", locality: "on_device" }), { host: "h", place: "on device", leaves: false });
+  assert.deepEqual(destinationWords({ host: "h", locality: "mars" }), { host: "h", place: "unknown place", leaves: false });
+  assert.equal(persistWords(false), "This chat keeps a note of what was sent (labels and sizes), not the text.");
+  assert.equal(persistWords(true), "This chat keeps the text that was sent, on this computer.");
+  assert.equal(validForWords(300), "Valid for 5 minutes.");
+  assert.equal(validForWords(60), "Valid for 1 minute.");
+  assert.equal(validForWords(90), "Valid for 90 seconds.");
+  assert.equal(validForWords(1), "Valid for 1 second.");
+
+  assert.equal(paneWords(1, "shell"), "pane 1 · shell");
+  assert.equal(paneWords(2, ""), "pane 2");
+  assert.equal(paneWords(2, "  a\u202Eb\n c "), "pane 2 · ab c");
+  assert.equal(Array.from(paneWords(3, "x".repeat(90))).length, "pane 3 · ".length + 40);
+  assert.equal(cardTitle("ask", null, "pane 1"), "Consent needed");
+  assert.equal(cardTitle("offer", null, "pane 1"), "Goes out with your next message");
+  assert.equal(cardTitle("blocked", null, "pane 1"), "Cannot share");
+  assert.equal(cardTitle("busy", null, "pane 1", "preview"), "Reading…");
+  assert.equal(cardTitle("busy", null, "pane 1", "state"), "Asking…");
+  assert.equal(cardTitle("pick", readContextState({ ...STATE, shared: true }), "pane 1 · shell"), "Shared · pane 1 · shell");
+  assert.equal(cardTitle("pick", readContextState({ ...STATE, required: false }), "pane 1 · shell"), "Pane 1 · shell");
+
+  assert.equal(
+    sentLine({ items: [{ label: "Screen of pane 1", bytes: 2457 }], locality: "loopback" }),
+    "Context sent: Screen of pane 1 (2.4 KiB) → this computer",
+  );
+  assert.equal(
+    sentLine({ items: [{ label: "A", bytes: 812 }, { label: "B", bytes: 1048576 }], locality: "cloud" }),
+    "Context sent: A (812 B); B (1.0 MiB) → cloud",
+  );
+  assert.ok(sentLine({ items: [{ label: "A", bytes: 1 }], locality: "mars" }).endsWith("→ unknown place"));
+});
+
+test("a refusal is told by its reason, falls back to the core's own text, and the notes never promise", () => {
+  assert.deepEqual(
+    contextFault({ code: "context", reason: "local_only", text: "x" }),
+    { code: "context", reason: "local_only", text: "Local only is on, and this provider is not on this computer." },
+  );
+  for (const reason of GOLDEN.reasons) {
+    const fault = contextFault({ code: "context", reason, text: "the core's words" });
+    assert.equal(fault.text, REASON_WORDS[reason], reason);
+    assert.equal(fault.reason, reason);
+  }
+  // A reason the table does not know shows the core's text, cleaned and cut at 300 characters.
+  const unknown = contextFault({ code: "context", reason: "from_a_newer_core", text: `a\u0000b${"x".repeat(400)}` });
+  assert.equal(unknown.reason, "from_a_newer_core");
+  assert.ok(unknown.text.startsWith("ab") && Array.from(unknown.text).length === 300);
+  assert.equal(contextFault({ code: "context", reason: "constructor", text: "own words" }).text, "own words");
+  // A code other than `context` is the core's text, whatever the reason.
+  assert.deepEqual(contextFault({ code: "no_such_pane", reason: "denied", text: "no such pane" }), { code: "no_such_pane", reason: null, text: "no such pane" });
+  assert.deepEqual(contextFault("a bare string"), { code: null, reason: null, text: "a bare string" });
+  assert.equal(contextFault(null).text, "the request was refused");
+  assert.match(contextFault({ code: "context_duplicate", reason: null, text: "twice" }).text, /already sent in this chat/);
+
+  assert.ok(BEST_EFFORT.includes("Best effort, not a guarantee"));
+  for (const text of [BEST_EFFORT, ...Object.values(NOTES), ...Object.values(REASON_WORDS)]) {
+    assert.ok(!/never|always safe|guaranteed|no secrets/i.test(text.replace("not a guarantee", "")), text);
+  }
+  for (const text of [...Object.values(NOTES), ...Object.values(REASON_WORDS)]) assert.ok(!/never sent/i.test(text), text);
 });

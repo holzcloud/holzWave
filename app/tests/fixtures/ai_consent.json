@@ -1,0 +1,47 @@
+{
+  "localities": [
+    "on_device",
+    "loopback",
+    "lan",
+    "cloud"
+  ],
+  "reasons": [
+    "not_shared",
+    "stale_offer",
+    "bad_pick",
+    "bad_kinds",
+    "unsupported_kind",
+    "nothing_to_share",
+    "pane_gone",
+    "denied",
+    "not_text",
+    "unreadable",
+    "busy",
+    "destination",
+    "local_only"
+  ],
+  "rules": [
+    "hidden_text",
+    "escape_sequence",
+    "control_chars",
+    "bidi_control",
+    "zero_width",
+    "tag_chars",
+    "private_key",
+    "anthropic_key",
+    "openai_key",
+    "google_api_key",
+    "github_token",
+    "aws_access_key",
+    "slack_token",
+    "jwt",
+    "authorization",
+    "bearer_token",
+    "cookie",
+    "url_credentials",
+    "secret_assignment",
+    "high_entropy",
+    "marker_escaped",
+    "truncated"
+  ]
+}

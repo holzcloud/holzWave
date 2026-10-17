@@ -435,6 +435,8 @@ class Mounted implements ChatView {
   private readonly bar: HTMLElement;
   private chip: HTMLElement;
   private readonly where: HTMLElement;
+  /** `local only`: drawn while the switch is on; it opens the providers dialog. */
+  private readonly local: HTMLButtonElement;
   private readonly usage: HTMLElement;
   private readonly setup: HTMLButtonElement;
   private picker: HTMLElement | null = null;
@@ -471,6 +473,21 @@ class Mounted implements ChatView {
     this.chip = this.makeChip("span");
     this.where = el("span", "chat-where", this.bar);
     this.where.hidden = true;
+    this.local = el("button", "chat-local", this.bar);
+    this.local.type = "button";
+    this.local.dataset.field = "";
+    this.local.hidden = true;
+    this.local.textContent = "local only";
+    this.local.setAttribute(
+      "aria-label",
+      "Local only is on: requests that leave this computer are refused. Opens the provider settings.",
+    );
+    this.local.setAttribute("aria-haspopup", "dialog");
+    this.local.addEventListener("click", () => {
+      void openProviders().then(() => {
+        if (this.alive) this.focus();
+      });
+    });
     this.usage = el("span", "chat-usage", this.bar);
     this.setup = el("button", "chat-setup", this.bar);
     this.setup.type = "button";
@@ -753,6 +770,8 @@ class Mounted implements ChatView {
     this.where.hidden = view.where === "";
     if (this.where.textContent !== view.where) this.where.textContent = view.where;
     this.where.dataset.leaves = view.leaves ? "true" : "false";
+    // The switch as the core last answered it; drawn only then, never from a guess.
+    this.local.hidden = state.settings?.settings.ai_local_only !== true;
     const used = usageWords(!st.running && st.ended !== null ? st.ended.usage : st.usage);
     if (this.usage.textContent !== used) this.usage.textContent = used;
     const way = setupLabel(s.profiles, review.size);

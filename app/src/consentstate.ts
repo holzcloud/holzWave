@@ -8,7 +8,7 @@
 // that a send redeems, or nothing. Nothing here decides whether a share is required, classifies an address or a host, or
 // guesses a place: the core's answer says it, and the four place names of `localityWord` are the only words for it.
 
-import { faultText, localityWord } from "./chatview.js";
+import { BYTES_PER_TOKEN, faultText, leavesComputer, localityWord } from "./chatview.js";
 
 /** What a context item holds, as the core names it. */
 export type CtxKind = "selection" | "screen" | "last_command" | "file" | "preview";
@@ -459,4 +459,121 @@ export function refusalStep(fault: ContextFault, from: "state" | "share" | "prev
     default:
       return "blocked";
   }
+}
+
+/** What a rule's count counts: characters removed, matches, or nothing worth a number. */
+export type RuleUnit = "chars" | "times" | "none";
+
+/** The words of one redaction rule. */
+export interface RuleWords {
+  /** What the redactor did, without a full stop. */
+  words: string;
+  unit: RuleUnit;
+  /** `warn` for what a person could not see in the terminal: the text carried more than it showed. */
+  tone: "warn" | "plain";
+}
+
+/**
+ * The words of the core's twenty-two redaction rules, in the order the core reports them. `hidden_text` counts removed
+ * non-blank characters, the character rules count characters, a secret rule counts matches, and `truncated` is a cut, not a
+ * count. The keys are held to the core by a golden the core's own test writes.
+ */
+export const RULE_WORDS: Readonly<Record<string, RuleWords>> = Object.freeze({
+  hidden_text: { words: "hidden text removed", unit: "chars", tone: "warn" },
+  escape_sequence: { words: "terminal escape sequences removed", unit: "times", tone: "plain" },
+  control_chars: { words: "control characters removed", unit: "chars", tone: "plain" },
+  bidi_control: { words: "text direction controls removed", unit: "chars", tone: "warn" },
+  zero_width: { words: "invisible characters removed", unit: "chars", tone: "warn" },
+  tag_chars: { words: "hidden tag characters removed", unit: "chars", tone: "warn" },
+  private_key: { words: "private key hidden", unit: "times", tone: "plain" },
+  anthropic_key: { words: "Anthropic key hidden", unit: "times", tone: "plain" },
+  openai_key: { words: "OpenAI key hidden", unit: "times", tone: "plain" },
+  google_api_key: { words: "Google API key hidden", unit: "times", tone: "plain" },
+  github_token: { words: "GitHub token hidden", unit: "times", tone: "plain" },
+  aws_access_key: { words: "AWS access key hidden", unit: "times", tone: "plain" },
+  slack_token: { words: "Slack token hidden", unit: "times", tone: "plain" },
+  jwt: { words: "JSON web token hidden", unit: "times", tone: "plain" },
+  authorization: { words: "authorization header hidden", unit: "times", tone: "plain" },
+  bearer_token: { words: "bearer token hidden", unit: "times", tone: "plain" },
+  cookie: { words: "cookie hidden", unit: "times", tone: "plain" },
+  url_credentials: { words: "password in an address hidden", unit: "times", tone: "plain" },
+  secret_assignment: { words: "secret assignment hidden", unit: "times", tone: "plain" },
+  high_entropy: { words: "random-looking string hidden", unit: "times", tone: "plain" },
+  marker_escaped: { words: "look-alike markers defused", unit: "times", tone: "plain" },
+  truncated: { words: "cut to fit the size limit", unit: "none", tone: "plain" },
+});
+
+/** What the page says about a change the redactor made that it has no words for: never dropped. */
+const OTHER_CHANGE: RuleWords = { words: "other change", unit: "times", tone: "plain" };
+
+/** The sentence beside every redaction report. The redactor is a heuristic and the page says so. */
+export const BEST_EFFORT =
+  "Best effort, not a guarantee: holzWave hides the secrets it recognises and cannot promise that none are left.";
+
+/** The words of a rule: its table row, or `other change` for a rule the page does not know. */
+export function ruleWords(rule: string): RuleWords {
+  return Object.hasOwn(RULE_WORDS, rule) ? (RULE_WORDS[rule] ?? OTHER_CHANGE) : OTHER_CHANGE;
+}
+
+/** One finding as words: `hidden text removed (15 characters)`, `Anthropic key hidden ×3`, `cut to fit the size limit`. */
+export function findingWords(finding: Finding): string {
+  const rule = ruleWords(finding.rule);
+  const count = finding.count;
+  switch (rule.unit) {
+    case "chars":
+      return `${rule.words} (${count} character${count === 1 ? "" : "s"})`;
+    case "times":
+      return count === 1 ? rule.words : `${rule.words} ×${count}`;
+    default:
+      return rule.words;
+  }
+}
+
+/** A count written compactly, as the composer writes its tokens: 340, 1.2k, 12k, 1.5M. */
+function compact(count: number): string {
+  const n = Math.max(0, Math.floor(count));
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n < 10_000 ? Math.round(n / 100) / 10 : Math.round(n / 1000);
+    if (k < 1000) return `${k}k`;
+  }
+  const m = n < 10_000_000 ? Math.round(n / 100_000) / 10 : Math.round(n / 1_000_000);
+  return `${m}M`;
+}
+
+/** The core's estimate of the tokens in `bytes` of text (bytes divided by three, rounded up) as words; empty for none. */
+export function tokenWordsOfBytes(bytes: number): string {
+  if (typeof bytes !== "number" || !Number.isInteger(bytes) || bytes <= 0) return "";
+  const tokens = Math.ceil(bytes / BYTES_PER_TOKEN);
+  return `≈ ${compact(tokens)} token${tokens === 1 ? "" : "s"}`;
+}
+
+/** The total line of an offer: `2 items · 3.3 KiB · ≈ 1.1k tokens`. */
+export function totalWords(count: number, bytes: number): string {
+  const parts = [`${count} item${count === 1 ? "" : "s"}`, sizeWords(bytes)];
+  const tokens = tokenWordsOfBytes(bytes);
+  if (tokens !== "") parts.push(tokens);
+  return parts.join(" · ");
+}
+
+/** Where the text would go: the host as the core sent it and the place in words. The place is the core's, never derived. */
+export function destinationWords(where: { host: string; locality: string }): { host: string; place: string; leaves: boolean } {
+  return { host: where.host, place: localityWord(where.locality), leaves: leavesComputer(where.locality) };
+}
+
+/** What the chat keeps of a sent context, as the core's `persist` says. */
+export function persistWords(persist: boolean): string {
+  return persist
+    ? "This chat keeps the text that was sent, on this computer."
+    : "This chat keeps a note of what was sent (labels and sizes), not the text.";
+}
+
+/** How long an offer is good: `Valid for 5 minutes.`, `Valid for 90 seconds.` */
+export function validForWords(seconds: number): string {
+  const n = typeof seconds === "number" && Number.isInteger(seconds) && seconds > 0 ? seconds : 0;
+  if (n > 0 && n % 60 === 0) {
+    const minutes = n / 60;
+    return `Valid for ${minutes} minute${minutes === 1 ? "" : "s"}.`;
+  }
+  return `Valid for ${n} second${n === 1 ? "" : "s"}.`;
 }
