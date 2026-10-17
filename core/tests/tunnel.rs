@@ -688,8 +688,8 @@ fn a_pane_without_a_tunnel_is_unchanged() {
 }
 
 #[test]
-fn the_debug_text_of_a_tunnel_is_its_path_only() {
+fn the_debug_text_of_a_tunnel_holds_neither_the_path_nor_the_token() {
     let text = format!("{:?}", tunnel(Arc::new(Upper)));
-    assert!(text.contains(PATH), "{text}");
+    assert!(!text.contains(PATH) && !text.contains("holzwave-"), "{text}");
     assert!(!text.contains(TOKEN) && !text.contains("HOLZWAVE_TOKEN"), "{text}");
 }

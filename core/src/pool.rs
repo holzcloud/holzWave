@@ -581,6 +581,31 @@ impl Read for ForwardReader {
 impl ForwardedStream {
     /// The two ends of a forwarded connection: the stream the sink gets, the sender of what the remote side sent (a queue
     /// of `limits.queue` chunks) and the receiver of what the sink writes back.
+    /// A stream over `input` that then ends, and the buffer that collects what the sink writes. For the tests of a sink
+    /// outside this crate; nothing in the product calls it. The collector ends when the stream is dropped, so a test
+    /// waits for the bytes it expects instead of for the end of the sink.
+    #[doc(hidden)]
+    pub fn in_memory(input: &[u8]) -> (ForwardedStream, Arc<Mutex<Vec<u8>>>) {
+        let chunks: Vec<&[u8]> = input.chunks(4096).collect();
+        let limits = ForwardLimits { queue: chunks.len().max(1), ..ForwardLimits::default() };
+        let (stream, to_sink, mut from_sink) = ForwardedStream::pair(&limits);
+        for chunk in chunks {
+            // The queue holds every chunk, so this never waits and never fails.
+            let _ = to_sink.try_send(chunk.to_vec());
+        }
+        drop(to_sink);
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let into = collected.clone();
+        std::thread::spawn(move || {
+            while let Some(back) = from_sink.blocking_recv() {
+                if let Back::Data(bytes) = back {
+                    into.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(&bytes);
+                }
+            }
+        });
+        (stream, collected)
+    }
+
     pub(crate) fn pair(limits: &ForwardLimits) -> (ForwardedStream, mpsc::SyncSender<Vec<u8>>, tmpsc::UnboundedReceiver<Back>) {
         let (to_sink, from_channel) = mpsc::sync_channel::<Vec<u8>>(limits.queue.max(1));
         let (to_channel, from_sink) = tmpsc::unbounded_channel::<Back>();

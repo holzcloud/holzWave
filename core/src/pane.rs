@@ -146,7 +146,7 @@ pub struct PaneSpec {
     pub ssh_connection: Option<Arc<Connection>>,
     /// The tunnel of an SSH pane that runs on `ssh_connection`: the socket forwarded back from the host and the
     /// environment its shell gets ([`SshLink::attach_with`]). `None` (the default) starts a plain shell; it is not used
-    /// without `ssh_connection`. Its `Debug` prints the socket path only.
+    /// without `ssh_connection`. Its `Debug` prints neither the socket path nor the token.
     pub tunnel: Option<Tunnel>,
     /// No process at all ([`crate::conn::NullLink`]): the page draws this pane's content itself (a file browser, a
     /// preview). The pane is otherwise a pane like any other: it has a header, can be split, moved and closed.

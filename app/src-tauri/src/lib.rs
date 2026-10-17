@@ -34,6 +34,7 @@ mod state;
 mod sync;
 mod textscale;
 mod windows;
+mod wsh_tunnel;
 
 use std::sync::Arc;
 

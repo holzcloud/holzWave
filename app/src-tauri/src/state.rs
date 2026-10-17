@@ -760,6 +760,18 @@ pub struct AppCore {
 /// What the single-answer path says to `wsh ai`: the request is answered as a stream (see `ai_ask`), never as one line.
 const WSH_AI_STREAM_ONLY: &str = "wsh ai is answered as a stream, not as one line";
 
+/// What a remote `wsh` is told when its pane has gone, and when its connection has gone or was turned off. Fixed
+/// sentences: a request that came through a forward is answered with nothing of this computer in it.
+const WSH_PANE_GONE: &str = "this pane is not open any more";
+const WSH_NO_CONNECTION: &str = "this pane no longer runs a saved connection";
+const WSH_TURNED_OFF: &str = "wsh is not turned on for the connection of this pane";
+const WSH_NOT_ABSOLUTE: &str = "the path must be absolute: it starts with /";
+const WSH_NOT_A_FILE: &str = "not a regular file on this host";
+const WSH_NO_SUCH_FILE: &str = "no such file on this host, or it cannot be read";
+/// What a file browser, a preview or a monitor is told when the layout cannot hold another pane.
+const NO_ROOM_FOR_A_PANE: &str = "there is no room for another pane here";
+const WSH_NO_HOST: &str = "the connection of this pane could not be used";
+
 /// The host of every history entry that comes from a pane without a saved connection.
 const LOCAL_HOST: &str = "local";
 
@@ -1061,6 +1073,58 @@ impl AppCore {
         Ok(String::new())
     }
 
+    /// A weak reference to this core, for the code that answers what comes through a tunnel.
+    pub(crate) fn downgrade(&self) -> Weak<AppCore> {
+        self.me.clone()
+    }
+
+    /// The saved connection `pane` runs, when `wsh` may be answered for it: an SSH connection with `wsh` turned on, in a
+    /// pane that is a terminal. The words say which of the three is not true.
+    pub(crate) fn wsh_profile(&self, pane: PaneId) -> Result<Profile, &'static str> {
+        if self.blocks.block_of(pane).is_some() {
+            return Err(WSH_NO_CONNECTION);
+        }
+        let profile = self.connections.profile_of(pane).ok_or(WSH_NO_CONNECTION)?;
+        if profile.kind != ConnectionKind::Ssh || !profile.wsh {
+            return Err(WSH_TURNED_OFF);
+        }
+        Ok(profile)
+    }
+
+    /// A command that a process on a remote host sent through the forward of `pane`. `pane` is the one the forward was made
+    /// for, never the one the request names, and the answer is the text `wsh` prints.
+    ///
+    /// It can ping, name its own pane and show a regular file of its own host beside the pane; nothing else has a branch
+    /// here (the `match` has no wildcard, so a new command does not compile until it is decided), and the protocol crate
+    /// refuses the others before this is called. In particular nothing here consents, approves, confirms or grants.
+    ///
+    /// A path is resolved by the pane's own saved connection over SFTP and never on this computer. Blocks on the
+    /// network: the sink's thread, never the main one.
+    pub fn wsh_remote(&self, pane: PaneId, cmd: holzwave_ipc::Cmd) -> Result<String, String> {
+        use holzwave_ipc::{Cmd, REMOTE_REFUSED};
+        let label = lock(&self.routes).live.get(&pane).map(|l| l.to_string()).ok_or(WSH_PANE_GONE)?;
+        let profile = self.wsh_profile(pane)?;
+        let view = match cmd {
+            Cmd::Ping => return Ok("holzWave".into()),
+            Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
+            Cmd::View { path } | Cmd::Edit { path } => {
+                if !path.starts_with('/') {
+                    return Err(WSH_NOT_ABSOLUTE.into());
+                }
+                let source = self.blocks.source(&self.connections, &profile.id).map_err(|_| WSH_NO_HOST.to_owned())?;
+                let entry = source.stat(&path).map_err(|_| WSH_NO_SUCH_FILE.to_owned())?;
+                if entry.kind != holzwave_core::files::Kind::File {
+                    return Err(WSH_NOT_A_FILE.into());
+                }
+                self.focus_pane_in(&label, pane)?;
+                self.block_open_in(&label, "right", BlockKind::Preview, &profile.id, &path)?
+            }
+            Cmd::Hist { .. } | Cmd::HistOpen | Cmd::Ai { .. } => return Err(REMOTE_REFUSED.into()),
+        };
+        self.sink.send(Target::window(&label), Out::Layout(view));
+        Ok(String::new())
+    }
+
     /// Tell the window `label` that the shell of `pane` asked for the history search, when `pane` is the one in focus in
     /// the tab that window shows. The window is named by the core and the event carries the pane id only.
     fn history_open(&self, pane: PaneId, label: &str) -> Result<(), String> {
@@ -1224,11 +1288,17 @@ impl AppCore {
         // Checked before the pane is made, so a refused block leaves no empty pane behind.
         self.blocks.assign(0, block.clone()).map_err(|e| e.to_string())?;
         self.blocks.forget(0);
+        let focused = lock(&self.windows).layout(label).map(|layout| layout.tab().focus);
         let view = match placement {
             "right" => self.split_in(label, false)?,
             "down" => self.split_in(label, true)?,
             _ => self.new_tab_in(label)?,
         };
+        // At a limit of the layout (panes, or how deep a split may nest) the view comes back unchanged, and its focus is
+        // still the pane that was asked to make room: it must not become the block.
+        if Some(view.focus) == focused {
+            return Err(NO_ROOM_FOR_A_PANE.into());
+        }
         self.blocks.assign(view.focus, block).map_err(|e| e.to_string())?;
         Ok(view)
     }
@@ -2422,8 +2492,8 @@ impl AppCore {
         spec.blank = self.blocks.block_of(pane).is_some();
         if spec.blank {
             spec.notice = None;
-        } else if let Err(e) = self.connections.apply(pane, &mut spec) {
-            spec.notice = Some(format!("holzWave: cannot open the connection: {e}"));
+        } else {
+            self.apply_connection(pane, &mut spec);
         }
         lock(&self.starts).remove(&pane);
         // What the shell is started with; a settings change while it starts is pushed once it runs.
@@ -2488,6 +2558,18 @@ impl AppCore {
             }
             // The sink was told, and `pane_gone` forgot the slot, before `spawn_ghostty` returned.
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Make `spec` the saved connection `pane` runs, if it runs one. A connection that cannot be made up (a missing jump
+    /// host, an unreadable keychain) is said on the pane's screen and leaves the pane a local shell. Only a connection that
+    /// was made up and has `wsh` turned on gets a tunnel; its variables live in the tunnel and never in `spec.env`, whose
+    /// `Debug` prints its values.
+    fn apply_connection(&self, pane: PaneId, spec: &mut PaneSpec) {
+        match self.connections.apply(pane, spec) {
+            Err(e) => spec.notice = Some(format!("holzWave: cannot open the connection: {e}")),
+            Ok(()) if spec.ssh_connection.is_some() => spec.tunnel = crate::wsh_tunnel::tunnel_for(self, pane),
+            Ok(()) => {}
         }
     }
 
@@ -7768,6 +7850,273 @@ mod tests {
         assert_eq!((placement.size, placement.position), ((700, 500), Some((1200, 60))));
         let set = lock(&again.windows);
         assert_eq!(set.layout(&label).unwrap().pane_name(second), Some("db"));
+    }
+
+    // ---- wsh through a tunnel ---------------------------------------------------------------------------------------
+
+    /// The files of a host, as the pane's saved connection sees them. It remembers every path it was asked about, so a
+    /// test can tell what a request made the core ask and what it never did.
+    #[derive(Default)]
+    struct Host {
+        files: HashMap<String, Vec<u8>>,
+        dirs: Vec<String>,
+        others: Vec<String>,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl Host {
+        fn with_files(files: &[(&str, &str)]) -> Arc<Host> {
+            Arc::new(Host {
+                files: files.iter().map(|(path, text)| ((*path).to_owned(), text.as_bytes().to_vec())).collect(),
+                dirs: vec!["/srv".into()],
+                others: vec!["/dev/null".into()],
+                seen: Mutex::default(),
+            })
+        }
+
+        fn seen(&self) -> Vec<String> {
+            lock(&self.seen).clone()
+        }
+    }
+
+    impl FileSource for Host {
+        fn label(&self) -> String {
+            "Web 1".into()
+        }
+
+        fn home(&self) -> holzwave_core::Result<String> {
+            Ok("/home/holz".into())
+        }
+
+        fn list(&self, _path: &str) -> holzwave_core::Result<Listing> {
+            Err(holzwave_core::Error::Unsupported("no listing in this double".into()))
+        }
+
+        fn stat(&self, path: &str) -> holzwave_core::Result<Entry> {
+            lock(&self.seen).push(path.to_owned());
+            let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+            let entry = |kind, size| Entry { name: name.clone(), kind, link: false, size, modified: Some(1), hidden: false };
+            if let Some(bytes) = self.files.get(path) {
+                Ok(entry(holzwave_core::files::Kind::File, bytes.len() as u64))
+            } else if self.dirs.iter().any(|d| d == path) {
+                Ok(entry(holzwave_core::files::Kind::Dir, 0))
+            } else if self.others.iter().any(|d| d == path) {
+                Ok(entry(holzwave_core::files::Kind::Other, 0))
+            } else {
+                Err(holzwave_core::Error::Unsupported("no such file".into()))
+            }
+        }
+
+        fn read(&self, path: &str, _limit: u64) -> holzwave_core::Result<Vec<u8>> {
+            self.files.get(path).cloned().ok_or_else(|| holzwave_core::Error::Unsupported("no such file".into()))
+        }
+
+        fn read_range(&self, path: &str, offset: u64, len: u64) -> holzwave_core::Result<Vec<u8>> {
+            let bytes = self.read(path, u64::MAX)?;
+            let from = (offset as usize).min(bytes.len());
+            Ok(bytes[from..(from + len as usize).min(bytes.len())].to_vec())
+        }
+
+        fn write(&self, _path: &str, _bytes: &[u8]) -> holzwave_core::Result<()> {
+            Err(holzwave_core::Error::Unsupported("read only".into()))
+        }
+    }
+
+    /// A core with the saved SSH connections `web-1` (with `wsh` on) and `web-2` (with `wsh` off), a local first pane, a
+    /// pane that runs `web-1` and one that runs `web-2`, and the files of `host` standing in for the host of `web-1`.
+    /// Nothing is started: a request is answered against the layout, so no shell and no network is needed.
+    struct Ticked {
+        core: Arc<AppCore>,
+        rec: Arc<Recorder>,
+        _dir: Scratch,
+        local: PaneId,
+        remote: PaneId,
+        unticked: PaneId,
+        host: Arc<Host>,
+    }
+
+    fn ticked(files: &[(&str, &str)]) -> Ticked {
+        let dir = Scratch::new("ticked");
+        let mut profiles = holzwave_core::profiles::Profiles::default();
+        for (id, wsh) in [("web-1", true), ("web-2", false)] {
+            let profile = Profile {
+                user: "holz".into(),
+                key_path: "/nonexistent/holzwave-test-key".into(),
+                wsh,
+                ..Profile::new(id, id, "web.example.invalid")
+            };
+            profiles.upsert(profile).unwrap();
+        }
+        profiles.save(&dir.0).unwrap();
+        let (core, rec) = core_in(&dir, "sh", &[]);
+        let local = only_pane(&core);
+        let remote = core.split(true).focus;
+        let unticked = core.split(true).focus;
+        core.connections.assign(remote, "web-1").unwrap();
+        core.connections.assign(unticked, "web-2").unwrap();
+        let host = Host::with_files(files);
+        core.blocks.inject_source("web-1", core.connections.generation(), host.clone());
+        Ticked { core, rec, _dir: dir, local, remote, unticked, host }
+    }
+
+    /// Send `request` (a JSON object, with `token` filled in from the tunnel unless it names one) through the forwarded
+    /// stream of `tunnel` and give the answer line, parsed. The real `serve_remote` reads it.
+    fn through(tunnel: &holzwave_core::ssh::Tunnel, mut request: Value) -> Value {
+        if request.get("token").is_none() {
+            request["token"] = Value::String(token_of(tunnel));
+        }
+        let mut line = serde_json::to_vec(&request).unwrap();
+        line.push(b'\n');
+        let (stream, answered) = holzwave_core::pool::ForwardedStream::in_memory(&line);
+        tunnel.sink.serve(stream);
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let bytes = lock(&answered).clone();
+            if bytes.ends_with(b"\n") {
+                assert_eq!(bytes.iter().filter(|b| **b == b'\n').count(), 1, "exactly one answer line");
+                return serde_json::from_slice(&bytes).expect("the answer is JSON");
+            }
+            assert!(Instant::now() < deadline, "no answer came back");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn token_of(tunnel: &holzwave_core::ssh::Tunnel) -> String {
+        tunnel.env.iter().find(|(name, _)| name == crate::wsh_tunnel::TOKEN_VAR).map(|(_, value)| value.clone()).expect("the token")
+    }
+
+    /// The last layout event the window `main` was sent.
+    fn last_layout(rec: &Recorder) -> Option<View> {
+        rec.all().into_iter().rev().find_map(|out| if let Out::Layout(view) = out { Some(view) } else { None })
+    }
+
+    #[test]
+    fn a_ticked_ssh_pane_gets_a_tunnel_and_nothing_else_does() {
+        use holzwave_core::pool::valid_forward_path;
+        let t = ticked(&[]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).expect("a ticked SSH pane has a tunnel");
+        assert!(valid_forward_path(&tunnel.path), "{}", tunnel.path);
+        let mut names: Vec<&str> = tunnel.env.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["HOLZWAVE_PANE", "HOLZWAVE_SOCKET", "HOLZWAVE_TOKEN"]);
+        let value = |name: &str| tunnel.env.iter().find(|(n, _)| n == name).unwrap().1.clone();
+        assert_eq!(value("HOLZWAVE_SOCKET"), tunnel.path);
+        assert_eq!(value("HOLZWAVE_PANE"), t.remote.to_string());
+        let token = value("HOLZWAVE_TOKEN");
+        assert!(token.len() == 32 && token.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{token}");
+        assert!(!tunnel.path.contains(&token), "the path and the token are independent values");
+
+        let again = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        assert_ne!(again.path, tunnel.path);
+        assert_ne!(token_of(&again), token);
+
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, t.unticked).is_none(), "an SSH pane that is not ticked");
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, t.local).is_none(), "a local pane");
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, 9999).is_none(), "a pane nobody knows");
+
+        // A Docker connection, even one that was ticked in an older file, gets none.
+        let mut docker = Profile::new("api", "API", "api-1");
+        docker.kind = ConnectionKind::Docker;
+        t.core.connections.save(docker, SecretChange::Keep).unwrap();
+        let pane = t.core.split(true).focus;
+        t.core.connections.assign(pane, "api").unwrap();
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, pane).is_none(), "a Docker pane");
+
+        // A block pane that has a saved connection assigned (a preview of a file of the host) runs nothing.
+        let block = t.core.split(true).focus;
+        t.core.connections.assign(block, "web-1").unwrap();
+        t.core.blocks.assign(block, Block { kind: BlockKind::Preview, source: "web-1".into(), path: "/srv/a".into() }).unwrap();
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, block).is_none(), "a block pane");
+    }
+
+    #[test]
+    fn a_pane_spec_gets_the_tunnel_only_when_the_connection_was_made_up() {
+        let t = ticked(&[]);
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.remote, &mut spec);
+        assert!(spec.ssh_connection.is_some() && spec.notice.is_none(), "{:?}", spec.notice);
+        let tunnel = spec.tunnel.clone().expect("the ticked pane starts with a tunnel");
+        assert!(spec.env.is_empty(), "the variables live in the tunnel, not in the spec's environment");
+        let shown = format!("{spec:?} {tunnel:?}");
+        assert!(!shown.contains(&token_of(&tunnel)) && !shown.contains(&tunnel.path), "{shown}");
+
+        let mut plain = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.unticked, &mut plain);
+        assert!(plain.ssh_connection.is_some() && plain.tunnel.is_none(), "an SSH pane that is not ticked");
+        let mut local = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.local, &mut local);
+        assert!(local.ssh_connection.is_none() && local.tunnel.is_none(), "a local pane");
+    }
+
+    #[test]
+    fn a_view_through_the_forwarded_socket_opens_a_preview_of_the_hosts_file() {
+        let t = ticked(&[("/srv/notes.md", "# notes\n")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = t.core.view().panes.len();
+
+        // The request names pane 99; the sink's pane is the one that is acted on.
+        let answer = through(&tunnel, json!({"pane": 99, "cmd": "view", "path": "/srv/notes.md"}));
+
+        assert_eq!(answer, json!({"ok": true, "message": ""}));
+        let view = last_layout(&t.rec).expect("the window is told the new layout");
+        assert_eq!(view.panes.len(), before + 1, "a pane was added beside the pane");
+        let block = t.core.blocks.block_of(view.focus).expect("the new pane shows a block");
+        assert_eq!(block.kind, BlockKind::Preview);
+        assert_eq!((block.source.as_str(), block.path.as_str()), ("web-1", "/srv/notes.md"));
+        assert_eq!(t.host.seen(), ["/srv/notes.md"], "the host's own source was asked, once");
+        assert!(t.core.blocks.block_of(t.remote).is_none() && t.core.blocks.block_of(99).is_none());
+    }
+
+    #[test]
+    fn setmeta_and_ping_work_and_the_title_is_the_panes_own() {
+        let t = ticked(&[]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        assert_eq!(through(&tunnel, json!({"pane": 99, "cmd": "ping"})), json!({"ok": true, "message": "holzWave"}));
+        let answer = through(&tunnel, json!({"pane": t.local, "cmd": "setmeta", "key": "title", "value": "build"}));
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        let names = t.core.view().pane_names;
+        assert!(names.contains(&(t.remote, "build".to_owned())), "{names:?}");
+        assert!(!names.iter().any(|(pane, _)| *pane == t.local), "the pane the request named keeps its name: {names:?}");
+        assert!(last_layout(&t.rec).is_some(), "the window is told");
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_regular_file_on_the_host_is_refused() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = t.core.view().panes.len();
+        for path in ["/srv", "/missing", "relative/a.txt", "a.txt", "/dev/null"] {
+            let answer = through(&tunnel, json!({"cmd": "view", "path": path}));
+            assert_eq!(answer["ok"], json!(false), "{path}: {answer}");
+            assert!(answer["message"].as_str().is_some_and(|m| m.len() > 8), "{path}: words: {answer}");
+        }
+        assert_eq!(t.core.view().panes.len(), before, "nothing was opened");
+        assert!(t.core.blocks.views(&t.core.connections).is_empty());
+        let asked = t.host.seen();
+        assert!(!asked.iter().any(|p| !p.starts_with('/')), "a relative path was never asked of the host: {asked:?}");
+        assert!(t.core.view().pane_names.is_empty());
+    }
+
+    #[test]
+    fn a_preview_at_the_pane_limit_is_refused_and_no_pane_is_turned_into_it() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        // Splitting the pane in focus again and again ends at a limit of the layout (its depth, before its pane count).
+        loop {
+            let before = core.view().panes.len();
+            if core.split(true).panes.len() == before {
+                break;
+            }
+        }
+        let view = core.view();
+        let panes = view.panes.len();
+        assert!(panes > 8, "some panes were made: {panes}");
+
+        let refused = core.block_open_in(MAIN_WINDOW, "right", BlockKind::Preview, "local", "/tmp/a.txt");
+
+        assert!(refused.is_err(), "there is no room for another pane: {refused:?}");
+        assert!(core.blocks.block_of(view.focus).is_none(), "the pane in focus was not turned into the preview");
+        assert!(core.blocks.views(&core.connections).is_empty());
+        assert_eq!(core.view().panes.len(), panes);
     }
 }
 

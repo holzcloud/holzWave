@@ -247,6 +247,14 @@ impl Blocks {
         Ok(source)
     }
 
+    /// Put `source` in the place of the one of connection `id`, as if it had been made for `generation` of the saved
+    /// connections. For the tests of code outside this crate, which have no server to reach; nothing in the product calls
+    /// it.
+    #[doc(hidden)]
+    pub fn inject_source(&self, id: &str, generation: u64, source: Arc<dyn FileSource>) {
+        self.sources.lock().unwrap_or_else(PoisonError::into_inner).insert(id.to_owned(), (generation, source));
+    }
+
     pub fn list(&self, connections: &Connections, source: &str, path: &str) -> Result<Listing> {
         self.source(connections, source)?.list(path)
     }

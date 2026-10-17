@@ -160,9 +160,10 @@ pub struct Tunnel {
 }
 
 impl std::fmt::Debug for Tunnel {
-    // The environment holds the token: only the path is printed.
+    // The environment holds the token and the path holds 128 random bits of its own: neither is printed, because a
+    // `PaneSpec` derives `Debug` and a debug print must never carry what authorises a request.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tunnel").field("path", &self.path).finish_non_exhaustive()
+        f.debug_struct("Tunnel").finish_non_exhaustive()
     }
 }
 
