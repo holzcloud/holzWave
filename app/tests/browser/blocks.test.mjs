@@ -48,7 +48,7 @@ async function open(page, url, blocks, data = {}) {
       Object.assign(window, extra);
       window.__BLOCKS = b;
       window.__MOCK__.on("file_open", () => { if (window.__OPEN instanceof Object && window.__OPEN.__throw) throw window.__OPEN.__throw; return structuredClone(window.__OPEN ?? null); });
-      window.__MOCK__.on("file_save", () => { if (window.__SAVE_ERR) throw window.__SAVE_ERR; return 1760000099; });
+      window.__MOCK__.on("file_save", () => { if (window.__SAVE_ERR) throw window.__SAVE_ERR; return window.__SAVE_ANSWER ?? { modified: 1760000099, digest: "b".repeat(64) }; });
       window.__MOCK__.on("file_grant", () => structuredClone(window.__GRANT ?? null));
       window.__MOCK__.setView(view);
       window.__MOCK__.on("connections_list", () => [talos]);
@@ -137,9 +137,12 @@ async function browserCase(page, url) {
   assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("files_list"))).length, before);
 }
 
-/** Typing marks the pane unsaved, the save chord writes with the time it was read, a change on disk is said once. */
+const DIGEST_READ = "a".repeat(64);
+const DIGEST_SAVED = "b".repeat(64);
+
+/** Typing marks the pane unsaved, the save chord writes with the time and the digest it was read, a change on disk is said once. */
 async function editorCase(page, url, opened) {
-  const file = opened({ name: "main.rs", size: 3, language: "rust", text: "abc", modified: 1760000000 });
+  const file = opened({ name: "main.rs", size: 3, language: "rust", text: "abc", modified: 1760000000, digest: DIGEST_READ });
   await open(page, url, [PREVIEW("/home/holz/main.rs")], { __OPEN: file });
   await page.waitForSelector(".bk-editor .cm-content");
   const status = page.locator('.block[data-pane="2"] .bk-status');
@@ -165,15 +168,16 @@ async function editorCase(page, url, opened) {
   await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 1);
   const sent = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[0]);
-  assert.deepEqual(sent, { source: "local", path: "/home/holz/main.rs", text: "abcdef", expected_modified: 1760000000 });
+  assert.deepEqual(sent, { source: "local", path: "/home/holz/main.rs", text: "abcdef", expected_modified: 1760000000, expected_digest: DIGEST_READ });
   await page.waitForFunction(() => document.querySelector('.block[data-pane="2"] .bk-status').dataset.dirty === "false");
   assert.match(await status.textContent(), /^saved/);
 
-  // The next save carries the time the last one returned.
+  // The next save carries the time and the digest the last one returned.
   await page.keyboard.type("!");
   await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 2);
-  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_save")[1])).expected_modified, 1760000099);
+  const second = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[1]);
+  assert.deepEqual([second.expected_modified, second.expected_digest], [1760000099, DIGEST_SAVED]);
 
   // A change on disk is shown; the save after it overwrites on purpose.
   await page.evaluate(() => { window.__SAVE_ERR = "the file changed on disk since it was opened; save again to overwrite it"; });
@@ -181,10 +185,18 @@ async function editorCase(page, url, opened) {
   await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => document.querySelector('.block[data-pane="2"] .bk-status').dataset.failed === "true");
   assert.match(await status.textContent(), /changed on disk/);
-  await page.evaluate(() => { window.__SAVE_ERR = null; });
+  await page.evaluate(() => { window.__SAVE_ERR = null; window.__SAVE_ANSWER = 1760000123; });
   await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 4);
-  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_save")[3])).expected_modified, null);
+  const fourth = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[3]);
+  assert.deepEqual([fourth.expected_modified, fourth.expected_digest], [null, null], "after a conflict both are cleared");
+
+  // An answer that is a bare number (a time only) is still understood: the next save sends the time and no digest.
+  await page.keyboard.type("!");
+  await page.keyboard.press("ControlOrMeta+s");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 5);
+  const fifth = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[4]);
+  assert.deepEqual([fifth.expected_modified, fifth.expected_digest], [1760000123, null]);
 
   // Escape gives the keyboard back to the terminal.
   await page.keyboard.press("Escape");

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  baseName, blockContext, blockTitle, chatTitles, entryIcon, goneChats, humanSize, joinPath, paneBlocks, readBlocks, readListing,
+  baseName, blockContext, blockTitle, chatTitles, entryIcon, goneChats, humanSize, joinPath, paneBlocks, readBlocks, readDigest, readListing, readSaved,
   setChatTitle, setPaneBlocks, shortDate, visibleEntries,
 } from "../../dist/blockstate.js";
 
@@ -160,4 +160,20 @@ test("hidden entries are shown only when asked", () => {
   const list = [{ name: ".git", hidden: true }, { name: "src", hidden: false }];
   assert.deepEqual(visibleEntries(list, false).map((e) => e.name), ["src"]);
   assert.deepEqual(visibleEntries(list, true).map((e) => e.name), [".git", "src"]);
+});
+
+test("readSaved accepts the old and the new answer of a save", () => {
+  const digest = "0123456789abcdef".repeat(4);
+  assert.deepEqual(readSaved({ modified: 1760000099, digest }), { modified: 1760000099, digest });
+  assert.deepEqual(readSaved(1760000099), { modified: 1760000099, digest: null }, "a bare number is the older answer");
+  assert.deepEqual(readSaved({ modified: null, digest }), { modified: null, digest }, "a file whose time is unknown");
+  assert.deepEqual(readSaved(null), { modified: null, digest: null });
+  assert.deepEqual(readSaved({ modified: "x", digest: "XYZ" }), { modified: null, digest: null }, "anything else is dropped");
+  assert.deepEqual(readSaved(Number.NaN), { modified: null, digest: null });
+});
+
+test("a digest is 64 lowercase hex characters and nothing else", () => {
+  const ok = "ab".repeat(32);
+  assert.equal(readDigest(ok), ok);
+  for (const bad of [null, undefined, 5, "", "ab", ok.toUpperCase(), `${ok}0`, "g".repeat(64)]) assert.equal(readDigest(bad), null);
 });

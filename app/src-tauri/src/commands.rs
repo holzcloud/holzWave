@@ -23,7 +23,7 @@ use holzwave_core::ai::profiles::KeySlot;
 use holzwave_core::ai::service::events::ChatState;
 use holzwave_core::ai::service::{AskView, ContextState, OfferView};
 use holzwave_core::ai::types::ContextKind;
-use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened};
+use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened, Saved};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
 use holzwave_core::engine::{
@@ -797,8 +797,9 @@ pub struct GrantAnswer {
 }
 
 /// Save the editor's text over a file (written aside and renamed over it). `expected_modified` is the change time the
-/// file was opened with: a file that changed meanwhile is not overwritten (`null` overwrites). The answer is the new
-/// change time.
+/// file was opened with and `expected_digest` the SHA-256 of the bytes that were read: with a digest the check is exact
+/// (the file is read again), without one the change time is compared; a file that changed meanwhile is not overwritten
+/// (`null` for both overwrites). The answer is the new change time and the digest of what was written.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn file_save(
     core: State<Arc<AppCore>>,
@@ -806,8 +807,9 @@ pub fn file_save(
     path: String,
     text: String,
     expected_modified: Option<i64>,
-) -> Result<Option<i64>, String> {
-    core.file_save(&source, &path, &text, expected_modified)
+    expected_digest: Option<String>,
+) -> Result<Saved, String> {
+    core.file_save(&source, &path, &text, expected_modified, expected_digest.as_deref())
 }
 
 /// The state of the sync.

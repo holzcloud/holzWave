@@ -47,6 +47,22 @@ export interface Opened {
   text: string | null;
   /** The file's modification time (seconds), sent back with a save to notice a change on disk. */
   modified: number | null;
+  /** The SHA-256 of the bytes the core read (64 lowercase hex characters), sent back with a save for an exact check. */
+  digest: string | null;
+}
+
+/** A digest as the core writes it: 64 lowercase hex characters. Anything else is no digest. */
+export function readDigest(raw: unknown): string | null {
+  return typeof raw === "string" && /^[0-9a-f]{64}$/.test(raw) ? raw : null;
+}
+
+/** The answer of `file_save`: the new change time and digest. A bare number is the older answer (a time only). */
+export function readSaved(raw: unknown): { modified: number | null; digest: string | null } {
+  if (typeof raw === "number") return { modified: Number.isFinite(raw) ? raw : null, digest: null };
+  if (typeof raw !== "object" || raw === null) return { modified: null, digest: null };
+  const o = raw as { modified?: unknown; digest?: unknown };
+  const modified = typeof o.modified === "number" && Number.isFinite(o.modified) ? o.modified : null;
+  return { modified, digest: readDigest(o.digest) };
 }
 
 /** The block of each pane that has one. Replaced as a whole by every answer of `pane_blocks`. */

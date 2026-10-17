@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use holzwave_core::ai::service::AskEvent;
-use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened};
+use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened, Saved};
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
 use holzwave_core::files::{Entry, FileSource, Listing};
 use holzwave_core::engine::{
@@ -1220,8 +1220,10 @@ impl AppCore {
         self.blocks.read_granted(&self.connections, token, offset, len).map(|r| r.map_err(|e| e.to_string()))
     }
 
-    pub fn file_save(&self, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>, String> {
-        self.blocks.save_file(&self.connections, source, path, text, expected).map_err(|e| e.to_string())
+    /// Save the editor's text. With `expected_digest` the conflict check compares the bytes (see `Blocks::save_file`);
+    /// the answer carries the new change time and the digest of what was written.
+    pub fn file_save(&self, source: &str, path: &str, text: &str, expected: Option<i64>, expected_digest: Option<&str>) -> Result<Saved, String> {
+        self.blocks.save_file(&self.connections, source, path, text, expected, expected_digest).map_err(|e| e.to_string())
     }
 
     /// The connection state of every running pane that has a connection. The webview asks about once a second while it
@@ -2278,7 +2280,7 @@ impl AppCore {
     /// Saves `text` over a file for the agent's write tools: the same `Blocks::save_file` the editor uses, with the change
     /// time the card showed as `expected`. No lock of this struct is held across the call.
     pub(crate) fn tool_save_text(&self, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>, String> {
-        self.file_save(source, path, text, expected)
+        self.file_save(source, path, text, expected, None).map(|saved| saved.modified)
     }
 
     /// The files of `source` (`local` or a saved connection), made if need be; none when they cannot be made. Undo reads

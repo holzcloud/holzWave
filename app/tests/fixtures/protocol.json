@@ -350,7 +350,8 @@
       "source",
       "path",
       "text",
-      "expected_modified"
+      "expected_modified",
+      "expected_digest"
     ],
     "file_stat": [
       "source",

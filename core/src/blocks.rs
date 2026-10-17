@@ -86,6 +86,23 @@ pub struct Opened {
     pub text: Option<String>,
     /// When the file was last changed (seconds since the epoch): what a save is checked against.
     pub modified: Option<i64>,
+    /// For text and Markdown the editor can open: the SHA-256 of the bytes that were read, as lowercase hex. What a
+    /// save is checked against exactly, because `modified` has a resolution of one second. `None` for everything else.
+    pub digest: Option<String>,
+}
+
+/// What a save answers: when the file was changed now and the digest of the bytes that were written, so the next save
+/// is checked against what this one wrote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Saved {
+    pub modified: Option<i64>,
+    pub digest: String,
+}
+
+/// The SHA-256 of `bytes` as 64 lowercase hex characters.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Permission to read one file through the `holzfile` scheme, which images, video, audio and PDFs are shown from.
@@ -251,7 +268,7 @@ impl Blocks {
         let entry = src.stat(path)?;
         let head = src.read_range(path, 0, SNIFF as u64)?;
         let class = classify(&entry.name, &head);
-        let mut opened = Opened { name: entry.name.clone(), size: entry.size, class: class.clone(), html: None, text: None, modified: entry.modified };
+        let mut opened = Opened { name: entry.name.clone(), size: entry.size, class: class.clone(), html: None, text: None, modified: entry.modified, digest: None };
         use crate::preview::Content;
         match class.content {
             Content::Markdown if entry.size <= crate::preview::MAX_MARKDOWN as u64 => {
@@ -259,11 +276,13 @@ impl Blocks {
                 let text = String::from_utf8_lossy(&bytes).into_owned();
                 opened.html = render_markdown(&text);
                 if entry.size <= EDIT_LIMIT {
+                    opened.digest = Some(sha256_hex(&bytes));
                     opened.text = Some(text);
                 }
             }
             Content::Markdown | Content::Text if entry.size <= EDIT_LIMIT => {
                 let bytes = src.read(path, EDIT_LIMIT)?;
+                opened.digest = Some(sha256_hex(&bytes));
                 opened.text = Some(String::from_utf8_lossy(&bytes).into_owned());
             }
             _ => {}
@@ -320,24 +339,51 @@ impl Blocks {
         Some(self.source(connections, &g.source).and_then(|s| s.read_range(&g.path, offset, len.min(PREVIEW_LIMIT))))
     }
 
-    /// Save the editor's text over the file and answer when it was changed now. `expected` is the change time the editor
-    /// opened the file with: a file that was changed meanwhile (by another program, or on another machine) is not
-    /// overwritten and the error says so; `None` overwrites whatever is there.
-    pub fn save_file(&self, connections: &Connections, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>> {
+    /// Save the editor's text over the file. A file that was changed since the editor opened it (by another program, or
+    /// on another machine) is not overwritten and the error says so.
+    ///
+    /// With `expected_digest` (the digest [`Opened`] or the last [`Saved`] carried) the check is exact: the file is read
+    /// again and refused when its bytes differ, whatever the modification time says, so two edits within one second are
+    /// caught and a touch without a change is not a conflict. Without one, `expected` (the change time) is compared as
+    /// before; `None` for both overwrites whatever is there. A file that does not exist yet has nothing to conflict with.
+    pub fn save_file(
+        &self,
+        connections: &Connections,
+        source: &str,
+        path: &str,
+        text: &str,
+        expected: Option<i64>,
+        expected_digest: Option<&str>,
+    ) -> Result<Saved> {
         if text.len() as u64 > EDIT_LIMIT {
             return Err(Error::Unsupported(format!("the text is larger than {EDIT_LIMIT} bytes")));
         }
+        if let Some(digest) = expected_digest {
+            if digest.len() != 64 || !digest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                return Err(Error::Unsupported("the expected digest is not valid".into()));
+            }
+        }
         let src = self.source(connections, source)?;
-        if let Some(expected) = expected {
-            // A file that does not exist yet has nothing to conflict with.
+        let conflict = || Error::Unsupported("the file changed on disk since it was opened; save again to overwrite it".into());
+        if let Some(digest) = expected_digest {
+            if let Ok(now) = src.stat(path) {
+                // The editor opened a file of at most EDIT_LIMIT bytes: a larger one has changed, and is not read.
+                if now.size > EDIT_LIMIT {
+                    return Err(conflict());
+                }
+                if sha256_hex(&src.read(path, EDIT_LIMIT)?) != digest {
+                    return Err(conflict());
+                }
+            }
+        } else if let Some(expected) = expected {
             if let Ok(now) = src.stat(path) {
                 if now.modified.is_some_and(|m| m != expected) {
-                    return Err(Error::Unsupported("the file changed on disk since it was opened; save again to overwrite it".into()));
+                    return Err(conflict());
                 }
             }
         }
         src.write(path, text.as_bytes())?;
-        Ok(src.stat(path).ok().and_then(|e| e.modified))
+        Ok(Saved { modified: src.stat(path).ok().and_then(|e| e.modified), digest: sha256_hex(text.as_bytes()) })
     }
 
     fn save(&self) {
@@ -602,22 +648,149 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    const CONFLICT: &str = "the file changed on disk since it was opened; save again to overwrite it";
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn set_modified_secs(path: &Path, secs: i64) {
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::try_from(secs).unwrap())).unwrap();
+    }
+
+    #[test]
+    fn an_open_file_carries_its_digest() {
+        let (d, blocks, conns) = setup("digest-open");
+        fs::write(d.join("a.md"), "# Hi\n").unwrap();
+        fs::write(d.join("b.rs"), "fn main() {}").unwrap();
+        fs::write(d.join("c.bin"), [0u8, 1, 2, 255]).unwrap();
+        fs::write(d.join("d.txt"), vec![b'x'; usize::try_from(EDIT_LIMIT).unwrap() + 1]).unwrap();
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R', 1, 2, 3, 4];
+        fs::write(d.join("e.png"), png).unwrap();
+        let open = |name: &str| blocks.open(&conns, LOCAL, d.join(name).to_str().unwrap()).unwrap();
+        assert_eq!(open("a.md").digest, Some(sha256_hex(b"# Hi\n")));
+        assert_eq!(open("b.rs").digest, Some(sha256_hex(b"fn main() {}")));
+        assert_eq!(open("c.bin").digest, None);
+        let big = open("d.txt");
+        assert_eq!((big.text, big.digest), (None, None), "a file over the editor's limit has neither");
+        assert_eq!(open("e.png").digest, None);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_save_is_refused_when_the_bytes_changed_even_in_the_same_second() {
+        let (d, blocks, conns) = setup("digest-same-second");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "aaaa").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        // Someone else changes the bytes (same length) and the time is put back to the opened value.
+        fs::write(&p, "bbbb").unwrap();
+        set_modified_secs(&p, opened.modified.unwrap());
+        assert_eq!(blocks.stat(&conns, LOCAL, path).unwrap().modified, opened.modified, "the time did not move");
+        let err = blocks.save_file(&conns, LOCAL, path, "mine", opened.modified, opened.digest.as_deref()).unwrap_err().to_string();
+        assert!(err.contains(CONFLICT), "{err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "bbbb", "the file is untouched");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_touch_without_a_change_is_not_a_conflict() {
+        let (d, blocks, conns) = setup("digest-touch");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "same").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        set_modified_secs(&p, opened.modified.unwrap() + 3600);
+        blocks.save_file(&conns, LOCAL, path, "mine", opened.modified, opened.digest.as_deref()).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_save_without_a_digest_keeps_the_time_check() {
+        let (d, blocks, conns) = setup("digest-none");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "old").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        let stale = opened.modified.map(|m| m - 100);
+        let err = blocks.save_file(&conns, LOCAL, path, "mine", stale, None).unwrap_err().to_string();
+        assert!(err.contains(CONFLICT), "{err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        blocks.save_file(&conns, LOCAL, path, "mine", None, None).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_save_answers_with_the_digest_of_what_it_wrote() {
+        let (d, blocks, conns) = setup("digest-saved");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "old").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        let first = blocks.save_file(&conns, LOCAL, path, "one", opened.modified, opened.digest.as_deref()).unwrap();
+        assert_eq!(first.digest, sha256_hex(b"one"));
+        assert!(first.modified.is_some());
+        // The next save is checked against what was just written.
+        let second = blocks.save_file(&conns, LOCAL, path, "two", first.modified, Some(&first.digest)).unwrap();
+        assert_eq!(second.digest, sha256_hex(b"two"));
+        let err = blocks.save_file(&conns, LOCAL, path, "three", first.modified, Some(&first.digest)).unwrap_err().to_string();
+        assert!(err.contains(CONFLICT), "the old digest is stale now: {err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "two");
+        // A file that does not exist yet saves without a conflict.
+        let fresh = d.join("new.txt");
+        let made = blocks.save_file(&conns, LOCAL, fresh.to_str().unwrap(), "hello", None, Some(&sha256_hex(b"whatever"))).unwrap();
+        assert_eq!(made.digest, sha256_hex(b"hello"));
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "hello");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_digest_that_is_not_a_digest_is_refused_before_anything_is_read() {
+        let (d, blocks, conns) = setup("digest-bad");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        for bad in ["", "abc", &"A".repeat(64), &"g".repeat(64), &"a".repeat(65)] {
+            let err = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", None, Some(bad)).unwrap_err().to_string();
+            assert!(err.contains("the expected digest is not valid"), "{bad:?}: {err}");
+        }
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_file_that_grew_past_the_editors_limit_is_a_conflict() {
+        let (d, blocks, conns) = setup("digest-grew");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "old").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        fs::write(&p, vec![b'x'; usize::try_from(EDIT_LIMIT).unwrap() + 1]).unwrap();
+        let err = blocks.save_file(&conns, LOCAL, path, "mine", opened.modified, opened.digest.as_deref()).unwrap_err().to_string();
+        assert!(err.contains(CONFLICT), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn the_editor_saves_over_the_file_and_an_unknown_source_is_an_error() {
         let (d, blocks, conns) = setup("save");
         let p = d.join("f.txt");
         fs::write(&p, "old").unwrap();
         let opened = blocks.open(&conns, LOCAL, p.to_str().unwrap()).unwrap();
-        let saved = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "new", opened.modified).unwrap();
+        let saved = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "new", opened.modified, None).unwrap().modified;
         assert_eq!(fs::read_to_string(&p).unwrap(), "new");
         assert!(saved.is_some(), "the new change time comes back");
         // The file is changed by someone else after it was opened: the save is refused, and an overwrite is explicit.
         fs::write(&p, "theirs").unwrap();
         let stale = opened.modified.map(|m| m - 100);
-        let err = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", stale).unwrap_err().to_string();
+        let err = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", stale, None).unwrap_err().to_string();
         assert!(err.contains("changed on disk"), "{err}");
         assert_eq!(fs::read_to_string(&p).unwrap(), "theirs", "nothing was overwritten");
-        blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", None).unwrap();
+        blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", None, None).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
         let err = blocks.list(&conns, "nope", "/").unwrap_err().to_string();
         assert!(err.contains("nope"), "{err}");
