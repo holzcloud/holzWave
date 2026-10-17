@@ -2680,6 +2680,270 @@ fn architecture_md_names_every_ai_command_and_event_as_the_golden_has_them() {
     assert!(missing.is_empty(), "section 6 of docs/architecture.md does not name, as the golden has them: {missing:?}");
 }
 
+// ---- the integrations: no shell, the protocol names, the wording of the design ------------------------------------
+
+/// The words that no integration source may hold in code: a shell named to run a string, and the Windows call that
+/// passes a raw command line. Compared on the lower-cased line; every one is a way for a name from a profile or a
+/// cluster to be parsed by something other than the tool.
+const INTEGRATION_SHELL_TOKENS: [&str; 6] = ["sh -c", "/bin/sh", "cmd /c", "cmd.exe", "powershell", "raw_arg"];
+
+/// A spawn that names its program as a literal: the program of an integration comes from the detector, never from a
+/// string in the source (a bare name would be looked up on a `PATH` that anything can put a file on).
+const INTEGRATION_LITERAL_SPAWNS: [&str; 2] = ["Command::new(", "CommandBuilder::new("];
+
+/// The label of a literal spawn in a report.
+const INTEGRATION_LITERAL_LABEL: &str = "a literal program name";
+
+/// A hit that is allowed in an integration source, as `(file, token, reason)`. It is empty: an entry needs a file, a
+/// token, a reason and a real hit, and a stale entry fails the guard.
+const INTEGRATION_SPAWN_ALLOWED: [(&str, &str, &str); 0] = [];
+
+/// `(line, token)` for every spawn by a literal program name and every shell word in the code of `source`: comments and
+/// the test module are not code that ships. A spawn is a literal when a quote (also `r"`, `r#"` and `b"`) follows the
+/// opening parenthesis, even on the next line.
+fn integration_spawn_hits(source: &str) -> Vec<(usize, &'static str)> {
+    let code = without_comments(production_part(source), Syntax::Rust);
+    let mut hits = Vec::new();
+    for (index, line) in code.lines().enumerate() {
+        let lower = line.to_lowercase();
+        for token in INTEGRATION_SHELL_TOKENS {
+            if contains_token(&lower, token) {
+                hits.push((index + 1, token));
+            }
+        }
+    }
+    for spawn in INTEGRATION_LITERAL_SPAWNS {
+        let mut from = 0;
+        while let Some(found) = code[from..].find(spawn) {
+            let start = from + found;
+            let after = &code[start + spawn.len()..];
+            let argument = after.trim_start();
+            let literal = argument.starts_with('"')
+                || argument.starts_with("r\"")
+                || argument.starts_with("r#")
+                || argument.starts_with("b\"");
+            let word_start = code[..start].chars().next_back().is_none_or(|c| !(is_word(c) || c == '_'));
+            if literal && word_start {
+                hits.push((code[..start].matches('\n').count() + 1, INTEGRATION_LITERAL_LABEL));
+            }
+            from = start + spawn.len();
+        }
+    }
+    hits.sort();
+    hits
+}
+
+/// What is wrong with the integration sources, one sentence each: a hit that no entry of `allowed` names, an entry
+/// without a reason, and an entry that no real hit matches (stale). `files` are `(shown path, source text)`.
+fn integration_spawn_problems(files: &[(String, String)], allowed: &[(&str, &str, &str)]) -> Vec<String> {
+    let mut hits: Vec<(String, usize, &str)> = Vec::new();
+    for (file, source) in files {
+        hits.extend(integration_spawn_hits(source).into_iter().map(|(line, token)| (file.clone(), line, token)));
+    }
+    let mut problems = Vec::new();
+    for (file, line, token) in &hits {
+        if !allowed.iter().any(|(f, t, _)| f == file && t == token) {
+            problems.push(format!("{file}:{line}: {token}"));
+        }
+    }
+    for (file, token, reason) in allowed {
+        if reason.trim().is_empty() {
+            problems.push(format!("the allowed hit {token} in {file} has no reason: say why it is no shell or name"));
+        }
+        if !hits.iter().any(|(f, _, t)| f == file && t == token) {
+            problems.push(format!(
+                "the allowed hit {token} in {file} matches nothing: it is stale, remove it from \
+                 INTEGRATION_SPAWN_ALLOWED"
+            ));
+        }
+    }
+    problems
+}
+
+/// The Rust files of the integrations that ship: every `.rs` file below `core/src/integrate` and the shell side file,
+/// minus the declared out-of-line test modules. There may be none yet.
+fn integration_source_files() -> Vec<PathBuf> {
+    let mut files = files_below("core/src/integrate", &["rs"]);
+    let host = root().join("app/src-tauri/src/integrate_host.rs");
+    if host.is_file() {
+        files.push(host);
+    }
+    files.retain(|file| !is_declared_test_module(file));
+    files.sort();
+    files
+}
+
+#[test]
+fn integration_sources_spawn_nothing_through_a_shell() {
+    let files: Vec<(String, String)> = integration_source_files()
+        .iter()
+        .map(|file| {
+            let relative = shown(file);
+            let source = fs::read_to_string(file).unwrap_or_else(|e| panic!("cannot read {relative}: {e}"));
+            (relative, source)
+        })
+        .collect();
+    let problems = integration_spawn_problems(&files, &INTEGRATION_SPAWN_ALLOWED);
+    assert!(
+        problems.is_empty(),
+        "an integration source starts a program through a shell or by a bare name: build the argument list from the \
+         detected binary; name a hit in INTEGRATION_SPAWN_ALLOWED only with a reason:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn the_integration_source_guard_reports_a_literal_spawn_a_shell_word_and_a_raw_argument() {
+    let toy = |source: &str| vec![(String::from("core/src/integrate/toy.rs"), source.to_owned())];
+    let problems = |source: &str| integration_spawn_problems(&toy(source), &[]);
+    assert_eq!(
+        problems("fn run() { Command::new(\"kubectl\"); }"),
+        ["core/src/integrate/toy.rs:1: a literal program name"],
+        "a literal program name"
+    );
+    assert_eq!(
+        problems("fn run() {\n    let mut c = Command::new(\n        \"git\",\n    );\n}"),
+        ["core/src/integrate/toy.rs:2: a literal program name"],
+        "a literal on the next line is found, and the line is that of the call"
+    );
+    assert_eq!(problems("let c = Command::new(r#\"az\"#);").len(), 1, "a raw string literal");
+    assert!(problems("let c = Command::new(program);").is_empty(), "a program from the detector is fine");
+    assert!(problems("let c = MyCommand::new(\"x\");").is_empty(), "a longer name is no spawn");
+    assert_eq!(problems("let args = [\"sh -c\", script];"), ["core/src/integrate/toy.rs:1: sh -c"], "a shell string");
+    assert_eq!(problems("let p = \"/bin/sh\";").len(), 1, "the path of a shell");
+    assert_eq!(problems("let p = \"cmd /c\";").len(), 1, "the Windows shell with its switch");
+    assert_eq!(problems("let p = \"CMD.EXE\";").len(), 1, "the Windows shell, any case");
+    assert_eq!(problems("let p = \"PowerShell\";").len(), 1, "the other Windows shell, any case");
+    assert_eq!(problems("use std::os::windows::process::CommandExt; c.raw_arg(x);").len(), 1, "a raw command line");
+    assert!(problems("let p = \"/bin/shell\"; let q = \"ssh -cipher\";").is_empty(), "a longer word is no shell");
+    // A pod's own shell is separate elements of one argument list, never one string: no hit.
+    assert!(problems("let tail = [\"--\", \"sh\", \"-c\", POD_SCRIPT];").is_empty(), "separate elements");
+    // A comment and the test module are not code that ships.
+    assert!(problems("// never Command::new(\"x\") or sh -c\n/* raw_arg */ fn f() {}").is_empty(), "comments");
+    assert!(
+        problems("fn f() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() { Command::new(\"sh\"); }\n}").is_empty(),
+        "the test module"
+    );
+}
+
+#[test]
+fn the_integration_source_guard_accepts_an_entry_with_a_real_hit_and_reports_a_stale_one_and_an_empty_reason() {
+    let files = vec![(String::from("core/src/integrate/toy.rs"), String::from("let p = \"/bin/sh\";"))];
+    let allowed = [("core/src/integrate/toy.rs", "/bin/sh", "a test rig constant, unreachable from a profile")];
+    let accepted = integration_spawn_problems(&files, &allowed);
+    assert!(accepted.is_empty(), "an entry with a file, a token, a reason and a hit: {accepted:?}");
+    let stale = [("core/src/integrate/other.rs", "cmd.exe", "a reason")];
+    let problems = integration_spawn_problems(&files, &stale);
+    assert_eq!(problems.len(), 2, "the hit is unlisted and the entry is stale: {problems:?}");
+    assert!(problems.iter().any(|p| p.contains("stale")), "{problems:?}");
+    let bare = [("core/src/integrate/toy.rs", "/bin/sh", "  ")];
+    let problems = integration_spawn_problems(&files, &bare);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("no reason"), "{problems:?}");
+    assert!(INTEGRATION_SPAWN_ALLOWED.is_empty(), "the allow-list is empty until a real hit needs an entry");
+}
+
+/// The commands that start with `integration_` and the event `integration` that the golden has, as section 6 of the
+/// architecture must write them (the command with its argument names, the event in backticks): the ones it does not.
+fn integration_names_missing(golden: &serde_json::Value, section: &str) -> Vec<String> {
+    let mut missing = Vec::new();
+    if let Some(commands) = golden["commands"].as_object() {
+        for (name, arguments) in commands.iter().filter(|(name, _)| name.starts_with("integration_")) {
+            let arguments: Vec<String> = arguments
+                .as_array()
+                .expect("a command lists its argument names")
+                .iter()
+                .map(|a| a.as_str().expect("an argument name").to_owned())
+                .collect();
+            let written = documented_command(name, &arguments);
+            if !section.contains(&written) {
+                missing.push(written);
+            }
+        }
+    }
+    let events = golden["events"]["names"].as_array();
+    let has_event = events.is_some_and(|names| names.iter().any(|n| n.as_str() == Some("integration")));
+    if has_event && !section.contains("`integration`") {
+        missing.push(String::from("`integration`"));
+    }
+    missing
+}
+
+#[test]
+fn architecture_md_names_every_integration_command_and_the_integration_event_as_the_golden_has_them() {
+    let section = markdown_section(&read("docs/architecture.md"), "## 6.");
+    assert!(!section.is_empty(), "docs/architecture.md has no section 6");
+    let missing = integration_names_missing(&protocol_golden(), &section);
+    assert!(missing.is_empty(), "section 6 of docs/architecture.md does not name, as the golden has them: {missing:?}");
+}
+
+#[test]
+fn the_integration_names_guard_lists_a_command_and_an_event_the_section_lacks() {
+    let golden = serde_json::json!({
+        "commands": { "integration_run": ["tool", "verb"], "integration_cancel": ["ticket"], "paste": ["pane"] },
+        "events": { "names": ["frame", "integration"] }
+    });
+    let bare = "## 6. The app protocol\n\n`paste(pane)` and `frame` only.\n";
+    assert_eq!(
+        integration_names_missing(&golden, bare),
+        ["`integration_cancel(ticket)`", "`integration_run(tool, verb)`", "`integration`"],
+        "all three are listed"
+    );
+    let full = "`integration_run(tool, verb)`, `integration_cancel(ticket)` and the event `integration`.";
+    assert!(integration_names_missing(&golden, full).is_empty(), "as the golden has them");
+    let wrong = "`integration_run(verb, tool)`, `integration_cancel(ticket)` and `integration`.";
+    let order = integration_names_missing(&golden, wrong);
+    assert_eq!(order, ["`integration_run(tool, verb)`"], "the argument order counts");
+    let none = serde_json::json!({ "commands": { "paste": ["pane"] }, "events": { "names": ["frame"] } });
+    assert!(integration_names_missing(&none, bare).is_empty(), "a golden without integration names asks for none");
+}
+
+/// What is wrong with a section 9 text: it says the tools run on the active connection, or that they work on remote
+/// hosts too. That was the first sketch; the integrations run on this computer only, and a document that says otherwise
+/// misleads the next change. Whitespace is folded, so a line break inside a phrase does not hide it.
+fn integration_wording_problems(section: &str) -> Vec<String> {
+    let text = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut problems = Vec::new();
+    if text.contains("work on remote hosts too") {
+        problems.push(String::from("it says the integrations work on remote hosts too"));
+    }
+    let mut from = 0;
+    while let Some(found) = text[from..].find("on the active") {
+        let start = from + found + "on the active".len();
+        let rest = text[start..].trim_start_matches([' ', '`']);
+        if rest.starts_with("Connection") {
+            problems.push(String::from("it says the tools run on the active connection"));
+            break;
+        }
+        from = start;
+    }
+    problems
+}
+
+#[test]
+fn architecture_md_section_9_does_not_say_the_tools_run_on_the_active_connection() {
+    let section = markdown_section(&read("docs/architecture.md"), "## 9.");
+    assert!(!section.is_empty(), "docs/architecture.md has no section 9");
+    let problems = integration_wording_problems(&section);
+    assert!(
+        problems.is_empty(),
+        "section 9 of docs/architecture.md describes the first sketch, not the design: {problems:?}"
+    );
+}
+
+#[test]
+fn the_integration_wording_guard_sees_the_old_sentence_and_its_key_phrases() {
+    let old = "## 9. Integrations\n\nThey run the tool as a child process\non the active `Connection`, so they \
+               work on\nremote hosts too, and their credentials come from `SecretStore`.\n";
+    let problems = integration_wording_problems(old);
+    assert_eq!(problems.len(), 2, "both key phrases, even across line breaks: {problems:?}");
+    assert_eq!(integration_wording_problems("They run on the active Connection.").len(), 1, "without backticks");
+    assert_eq!(integration_wording_problems("They work on remote hosts too.").len(), 1, "the second phrase alone");
+    let new = "The tools run on this computer only; the active pane picks the context, and a connection is never used.";
+    assert!(integration_wording_problems(new).is_empty(), "the decided design reads clean");
+    assert!(integration_wording_problems("on the active pane, on the active tab").is_empty(), "another noun");
+}
+
 // ---- the test targets the documents name ----------------------------------------------------------------------
 
 /// The words that follow `--test ` (with the space) in `doc`: letters, digits and underscores. `--test-threads` has no
