@@ -32,19 +32,30 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   (`If-Match` / `If-None-Match: *`); a refused write is looked at again, up to three times.
 - **Conflicts:** when both sides changed, the higher stamp wins and the loser is kept: a replaced server version in
   `backups/` on the server, a replaced local version in `sync-conflicts/` next to the files (never the secrets).
-  A download is staged and applied at the next start; a local file the person changed after the download was staged is
-  copied to `sync-conflicts/` first (the file name with `/` as `.`, then the time), and the first run after that start
-  lists it as a conflict. The copy is the whole file; nothing is merged.
+  A download is staged first. A local file the person changed after the download was staged is copied to
+  `sync-conflicts/` first (the file name with `/` as `.`, then the time), and the run after that lists it as a conflict.
+  The copy is the whole file; nothing is merged. The same rule covers both ways a staged file reaches its place (below).
+- **What is applied at once:** after every run the app moves into place what it does not own: the themes, the widgets
+  and the texts of the note widgets (`themes/*.json`, `widgets/*.json`, `widget_notes.json`). A theme is announced to
+  every window, so the theme list shows it and a selected theme that was replaced is drawn again in the panes; a widget
+  or a note shows on the sidebar at its next refresh (every 10 seconds while the sidebar is open). A note save and the
+  replacement of `widget_notes.json` never run together, so a note typed during a download is not lost to a
+  half-replaced file. Connection secrets also apply at once.
+- **What waits for a start:** `layout.json`, `settings.json` and `connections.json` stay in `sync-incoming/` and are
+  moved into place when the app starts again, because the running app rewrites them from memory and would overwrite a
+  file replaced under it. The popover asks for a restart only while such a download waits (or a staged file could not
+  be applied).
 - **Adding a device:** enter the endpoint, user, app password and the same passphrase. A QR code comes with mobile.
 - **Local state:** `sync_state.json` (device id; per file the counter, ETag and SHA-256 of what the last run left
-  behind), `sync.json` (endpoint, user, on/off), `sync-incoming/` (the downloads that wait for the next start, with a
-  record of the live file's hash at the time each was staged) and `sync-kept.json` (the names kept at the last start,
+  behind), `sync.json` (endpoint, user, on/off), `sync-incoming/` (the downloads of the files the running app owns, which wait for the next start, with a
+  record of the live file's hash at the time each was staged) and `sync-kept.json` (the names kept when a download replaced an edit,
   removed by the next run). The app password and the passphrase are in the OS keychain.
 
 ## Not yet
 
 - Deletions are not synced; a deleted file comes back on the next run.
-- Downloaded files are still staged in `sync-incoming/` and moved into place at the next start (the running app owns
-  its files); the popover says so. A local edit made in between is kept as a copy in `sync-conflicts/`. Connection
-  secrets apply at once.
+- A downloaded `layout.json`, `settings.json` or `connections.json` is still staged in `sync-incoming/` and moved into
+  place at the next start (the running app owns these files); the popover says so. A local edit made in between is kept
+  as a copy in `sync-conflicts/`. Applying them while the app runs would need the settings, the layout and the
+  connection list to be reloaded from their files, which nothing asks for yet.
 - A run happens 10 s after the start and every five minutes, and with `Sync now`; not yet on exit.

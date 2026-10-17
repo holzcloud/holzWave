@@ -558,7 +558,9 @@ own card. holzWave asks OpenAI not to store a request (`store: false`) and OpenR
 `sync.json` is `{"endpoint": "...", "user": "..."}`: the folder address and the account of the encrypted sync. The app
 password and the passphrase are in the keychain (`sync:password`, `sync:passphrase`), never here. `sync_state.json` is
 the device's random id and, per synced file, what the last run left behind (counter, ETag, SHA-256). `sync-incoming/`
-holds downloads until the next start, `sync-conflicts/` the local versions that lost a conflict. See [sync.md](sync.md).
+holds the downloads of the files the running app owns (`layout.json`, `settings.json`, `connections.json`) until the next
+start; themes, widgets and notes are moved into place right after the run, and `sync-conflicts/` holds the local versions
+that lost a conflict or were replaced by a download. See [sync.md](sync.md).
 
 ## `history.db`
 
@@ -814,7 +816,8 @@ are accepted): `version` (1), `id` (default: the file name; lowercase letters, d
 An item has either a one-line `command` (put on the prompt, never run) or an `http`/`https` `url`. A list has 1 to 50 items,
 at most 24 widgets are shown, a file is at most 64 KiB. A file that is not valid is left out and the sidebar shows why.
 `widget_notes.json` holds the texts of the note widgets (at most 64 KiB each). Both are synced; a downloaded one is
-applied at the next start.
+applied right after the run that downloaded it, and the sidebar shows it at its next refresh (every 10 seconds while it is
+open).
 
 The files are described by [widget.schema.json](widget.schema.json), a JSON Schema (draft 2020-12) that an editor with a JSON
 Schema setting can map to `widgets/*.json` for completion and checks (in Visual Studio Code, add an entry with the file
