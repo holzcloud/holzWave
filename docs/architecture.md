@@ -409,6 +409,10 @@ hosts are covered; another system is shown as not supported.
 tool calls you allowed: nothing else, and nothing before you press Send. A key is sent only to the address it was saved for,
 in one header.
 
+**Stored chats.** A chat is one file in `chats/`, readable by the owner only and written atomically at message boundaries.
+Terminal context is stored as a marker unless `ai_persist_context` says text, and turning that setting off rewrites the
+existing files without it. Deleting a chat is an unlink, not a secure overwrite, and a damaged file is moved aside as `.bad`.
+
 **Consent.** A send that carries terminal content goes through four steps: the state of the pane (what it can offer), the
 share, the preview and the send by ids. The share is per pane and per route: it ends when the provider, the model or the
 address changes, and when the pane or the chat closes. `ai_local_context` set to `auto` removes the share step for a
