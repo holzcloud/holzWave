@@ -218,7 +218,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history |
 | Search | ![](design/search.png) | scrollback search bar in the pane, hits marked, the current hit solid |
 | Copy mode | ![](design/copy-mode.png) | keyboard selection, hint letters on hashes and paths, a solid status line with the keys |
-| Connections | ![](design/connections.png) | list and form: host, user, key from the OS keychain, jump host, reconnect policy, startup command, use wsh on this host |
+| Connections | ![](design/connections.png) | list and form: host, user, login (`Key file`, `Password` or `Agent`), secret from the OS keychain, jump host, reconnect policy, startup command, use wsh on this host |
 | Settings | ![](design/settings.png) | themes (built-in and custom), font, UI scale, accessibility as `System / On / Off` |
 | Shortcuts | ![](design/shortcuts.png) | the key binding editor, see 6.4 |
 | Previews | ![](design/previews.png) | file browser (local and SFTP) with image, PDF and video panes, see 6.5 |
@@ -331,6 +331,13 @@ While a connection is down the pane screen says why on a line of its own, in the
 (up to 64 KiB) and sent after the connection is back. A failure that retrying cannot cure (a refused login, a changed host
 key) leaves the pane open with the reason; Enter tries again. Every connection has an entry in the palette
 (`Connect: Name (ssh)`) and in the connection manager (`Connections…`), which is the Connections view of 6.3.
+
+The Login choice of an SSH connection has three radio options, in this order: `Key file`, `Password` and `Agent`. `Agent`
+means that the person's ssh-agent signs the login: the form shows no passphrase field and no removal row, the key row is
+labelled `Public key (optional)` and names a public key file that picks one of the agent's keys, and the hint under the
+form says "The ssh-agent signs the login. Nothing is stored. The public key file picks one of its keys." The choice is
+always explicit, never a fallback from a key file or a password. The selected option has a filled mark and the others a
+hollow one, so the choice does not rest on colour.
 
 The Connections form of an SSH connection ends with one checkbox row, `Use wsh on this host`, unchecked by default, and
 under it a dim note in the form's hint style: "A program on this host can then open files and rename this pane in

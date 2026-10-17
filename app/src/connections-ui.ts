@@ -29,7 +29,7 @@ export function blankConnection(): Connection {
     port: 22,
     user: "",
     auth: "key",
-    key_path: "~/.ssh/id_ed25519",
+    key_path: DEFAULT_KEY_FILE,
     jump: null,
     startup: "",
     reconnect_attempts: 5,
@@ -43,6 +43,12 @@ export function blankConnection(): Connection {
 /** The words under the `wsh` checkbox: what ticking it allows and what it never allows. */
 export const WSH_NOTE =
   "A program on this host can then open files and rename this pane in holzWave through a private tunnel. It can never use the AI or approve anything. The host must allow Unix socket forwarding.";
+
+/** The words under the form of a connection that logs in through the ssh-agent. */
+export const AGENT_HINT = "The ssh-agent signs the login. Nothing is stored. The public key file picks one of its keys.";
+
+/** The key file a new key login starts with. */
+const DEFAULT_KEY_FILE = "~/.ssh/id_ed25519";
 
 /** The label of the host field for each kind of connection. */
 export function hostLabel(kind: Connection["kind"]): string {
@@ -119,7 +125,7 @@ async function show(): Promise<void> {
     const host = textRow("cx-host", "Host", "ssh wsl docker");
     const port = textRow("cx-port", "Port", "ssh", "number");
     const user = textRow("cx-user", "User", "ssh");
-    const auth = choiceRow("cx-auth", "Login", "ssh", [["key", "Key file"], ["password", "Password"]]);
+    const auth = choiceRow("cx-auth", "Login", "ssh", [["key", "Key file"], ["password", "Password"], ["agent", "Agent"]]);
     const keyPath = textRow("cx-key", "Key file", "ssh");
     const secret = textRow("cx-secret", "Passphrase", "ssh", "password");
     const clearRow = el("div", "cx-row-choice", form);
@@ -155,23 +161,48 @@ async function show(): Promise<void> {
     let armed = false;
 
     const kindValue = (): Connection["kind"] => (kind.radios.find((r) => r.checked)?.value ?? "ssh") as Connection["kind"];
-    const authValue = (): Connection["auth"] => (auth.radios.find((r) => r.checked)?.value === "password" ? "password" : "key");
+    const authValue = (): Connection["auth"] => {
+      const value = auth.radios.find((r) => r.checked)?.value;
+      return value === "password" ? "password" : value === "agent" ? "agent" : "key";
+    };
+
+    // The row below the login holds a private key file for a key or a password login and an optional public key file for
+    // the agent; each keeps what was typed while the other is chosen.
+    let keyFile = DEFAULT_KEY_FILE;
+    let publicFile = "";
+    let shownAuth: Connection["auth"] = "key";
+    const swapKeyRow = (): void => {
+      const next = authValue();
+      if (next === shownAuth) return;
+      if (shownAuth === "agent") publicFile = keyPath.input.value;
+      else keyFile = keyPath.input.value;
+      if (next === "agent") keyPath.input.value = publicFile;
+      else if (shownAuth === "agent") keyPath.input.value = keyFile;
+      shownAuth = next;
+    };
 
     const syncRows = (): void => {
       const k = kindValue();
       for (const { row, kinds } of rows) row.hidden = !kinds.split(" ").includes(k);
       setText(host.label, hostLabel(k));
-      const password = authValue() === "password";
+      const login = authValue();
+      const password = login === "password";
+      const agent = login === "agent";
       keyPath.input.parentElement!.hidden = k !== "ssh" || password;
+      setText(keyPath.label, agent ? "Public key (optional)" : "Key file");
+      // The agent holds the key and nothing is stored, so there is no secret row and nothing to remove.
+      secret.input.parentElement!.hidden = k !== "ssh" || agent;
       setText(secret.label, password ? "Password" : "Passphrase");
       setText(clearText, password ? "Remove the saved password" : "Remove the saved passphrase");
-      clearRow.hidden = k !== "ssh" || !current.has_secret;
+      clearRow.hidden = k !== "ssh" || !current.has_secret || agent;
       setText(
         hint,
         k === "ssh"
-          ? current.has_secret
-            ? "A secret is saved in the system keychain. Type a new one to replace it, or leave the field empty."
-            : "The password or passphrase goes to the system keychain, never to a file."
+          ? agent
+            ? AGENT_HINT
+            : current.has_secret
+              ? "A secret is saved in the system keychain. Type a new one to replace it, or leave the field empty."
+              : "The password or passphrase goes to the system keychain, never to a file."
           : k === "wsl"
             ? "Opens a shell in this WSL distribution. Windows only."
             : "Opens a shell in this running container with docker exec.",
@@ -187,6 +218,9 @@ async function show(): Promise<void> {
       host.input.value = c.host;
       port.input.value = String(c.port);
       user.input.value = c.user;
+      shownAuth = c.auth;
+      keyFile = c.auth === "agent" ? DEFAULT_KEY_FILE : c.key_path;
+      publicFile = c.auth === "agent" ? c.key_path : "";
       keyPath.input.value = c.key_path;
       secret.input.value = "";
       clear.checked = false;
@@ -276,8 +310,15 @@ async function show(): Promise<void> {
       del.textContent = armed ? "Click again to delete" : "Delete";
     };
 
+    // An agent login has no secret: whatever was typed before the login was chosen is not sent.
     const secretChange = (): { kind: string; value?: string } =>
-      secret.input.value !== "" ? { kind: "set", value: secret.input.value } : clear.checked ? { kind: "clear" } : { kind: "keep" };
+      authValue() === "agent"
+        ? { kind: "keep" }
+        : secret.input.value !== ""
+          ? { kind: "set", value: secret.input.value }
+          : clear.checked
+            ? { kind: "clear" }
+            : { kind: "keep" };
 
     /** Save the form; resolves to the saved connection, or null after showing why not. */
     const doSave = async (): Promise<Connection | null> => {
@@ -335,7 +376,13 @@ async function show(): Promise<void> {
     backdrop.addEventListener("pointerdown", (e) => {
       if (e.target === backdrop) finish();
     });
-    for (const r of [...kind.radios, ...auth.radios]) r.addEventListener("change", syncRows);
+    for (const r of kind.radios) r.addEventListener("change", syncRows);
+    for (const r of auth.radios) {
+      r.addEventListener("change", () => {
+        swapKeyRow();
+        syncRows();
+      });
+    }
 
     const stops = (): HTMLElement[] =>
       Array.from(box.querySelectorAll<HTMLElement>("input, button")).filter(

@@ -402,7 +402,7 @@ operating system's keychain under the service `ch.holzcloud.holzwave` and the ac
 | `id` | 1 to 64 characters of `a-z`, `0-9`, `-`, `_`; the key of the keychain entry |
 | `kind` | `ssh`, `wsl` (a distribution, Windows) or `docker` (a running container) |
 | `host` | SSH host or address; WSL distribution; Docker container. No blanks, no leading dash |
-| `auth` | `key` (file at `key_path`, `~/` is the home directory; the passphrase, if any, is in the keychain) or `password` |
+| `auth` | `key` (file at `key_path`, `~/` is the home directory; the passphrase, if any, is in the keychain), `password`, or `agent`: the person's ssh-agent signs the login (`SSH_AUTH_SOCK` on Linux and macOS, the OpenSSH agent pipe on Windows). The private key never enters holzWave, nothing is stored in the keychain, and agent forwarding is never offered to the host. `key_path` may then name a public key file that picks one of the agent's keys; with it empty the agent's keys are offered in the order the agent lists them, at most five, certificates skipped. It is never a fallback: a connection uses the login it names |
 | `jump` | the `id` of another SSH connection to go through first (at most 3 deep, no loops) |
 | `startup` | a line typed into the shell once it runs |
 | `reconnect_attempts`, `reconnect_delay_secs` | how often and how fast a lost connection is made again; 0 attempts does not reconnect |

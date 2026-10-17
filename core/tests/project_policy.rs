@@ -65,6 +65,12 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
                 "operating-system randomness: the 128-bit tokens of file grants (blocks.rs) and the salts and nonces of \
                  the sync (sync/crypto.rs)",
             ),
+            (
+                "futures-core",
+                "dev dependency only: russh's in-process agent server takes a futures_core::Stream of accepted \
+                 connections, which the ssh-agent tests of tests/ssh_agent.rs cannot name without a direct entry; the \
+                 crate is already in the lock through russh and reaches no shipped build",
+            ),
             ("infer", "content type of a file by its magic bytes (preview.rs)"),
             ("keyring", "OS keychain backend of SecretStore, optional through the keyring feature (secrets.rs)"),
             (

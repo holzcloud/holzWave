@@ -10,6 +10,7 @@ export default async function ({ page, url, errors }) {
   await stateCase(page, url);
   await dialogCase(page, url);
   await wshCase(page, url);
+  await agentCase(page, url);
   await installCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -182,6 +183,83 @@ async function dialogCase(page, url) {
 
 const WSH_NOTE =
   "A program on this host can then open files and rename this pane in holzWave through a private tunnel. It can never use the AI or approve anything. The host must allow Unix socket forwarding.";
+
+const AGENT_HINT = "The ssh-agent signs the login. Nothing is stored. The public key file picks one of its keys.";
+
+/** The Agent login: a third radio after Key file and Password, with its own rows and words. */
+async function agentCase(page, url) {
+  await open(page, url);
+  const AGENT = { ...TALOS, id: "ag", name: "Agent host", auth: "agent", key_path: "", has_secret: false };
+  await page.evaluate((l) => { window.__LIST = l; }, [TALOS, WEB, AGENT]);
+  await page.evaluate(() => {
+    window.__MOCK__.on("connection_save", ({ profile }) => ({ ...profile, has_secret: false }));
+  });
+  await page.evaluate(() => window.__registry.runAction("connections.open"));
+  await page.waitForSelector(".dlg.conns");
+
+  const login = page.locator('.conns [role="radiogroup"][aria-label="Login"]');
+  assert.deepEqual(await login.locator("label.cx-option").allTextContents(), ["Key file", "Password", "Agent"], "three logins in this order");
+  const keyLabel = page.locator("label[for=cx-key]");
+  const hint = page.locator(".conns .cx-hint:not(#cx-wsh-note)");
+  assert.equal(await keyLabel.textContent(), "Key file");
+  assert.equal(await page.locator("#cx-key").inputValue(), "~/.ssh/id_ed25519");
+
+  // A secret typed for the key file is not sent once the login is the agent.
+  await page.fill("#cx-secret", "typed-before-the-switch");
+  await page.check('input[name="cx-auth"][value="agent"]');
+  assert.equal(await page.locator("#cx-secret").isVisible(), false, "no passphrase row for the agent");
+  assert.equal(await page.locator("#cx-clear").isVisible(), false, "no removal row for the agent");
+  assert.equal(await keyLabel.textContent(), "Public key (optional)");
+  assert.equal(await page.locator("#cx-key").isVisible(), true, "the row stays, as the optional public key");
+  assert.equal(await page.locator("#cx-key").inputValue(), "", "the private key path is not shown as a public key");
+  assert.equal(await hint.textContent(), AGENT_HINT);
+  assert.doesNotMatch(await hint.textContent(), /password|passphrase|keychain/i, "no word about a secret that is not stored");
+
+  await page.fill("#cx-key", "~/.ssh/id_work.pub");
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("connection_save").length === 1);
+  const sent = (await page.evaluate(() => window.__MOCK__.callsOf("connection_save")))[0];
+  assert.equal(sent.profile.auth, "agent");
+  assert.equal(sent.profile.key_path, "~/.ssh/id_work.pub");
+  assert.deepEqual(sent.secret, { kind: "keep" }, "an agent login never sends a secret");
+
+  // Choosing the key file again restores its words, its row and its path.
+  await page.check('input[name="cx-auth"][value="key"]');
+  assert.equal(await keyLabel.textContent(), "Key file");
+  assert.equal(await page.locator("#cx-key").inputValue(), "~/.ssh/id_ed25519");
+  assert.equal(await page.locator("#cx-secret").isVisible(), true);
+  assert.equal(await page.locator("label[for=cx-secret]").textContent(), "Passphrase");
+  // And the password login has no key row at all, as before.
+  await page.check('input[name="cx-auth"][value="password"]');
+  assert.equal(await page.locator("#cx-key").isVisible(), false);
+  assert.equal(await page.locator("label[for=cx-secret]").textContent(), "Password");
+
+  // A saved agent connection shows the Agent radio, its label and its (empty) public key.
+  await page.locator(".conns .cx-list button", { hasText: "Agent host" }).click();
+  assert.equal(await page.locator('input[name="cx-auth"][value="agent"]').isChecked(), true);
+  assert.equal(await keyLabel.textContent(), "Public key (optional)");
+  assert.equal(await page.locator("#cx-key").inputValue(), "");
+  assert.equal(await page.locator("#cx-secret").isVisible(), false);
+  assert.equal(await hint.textContent(), AGENT_HINT);
+
+  // The group is a radio group: the arrow keys walk Key file, Password, Agent.
+  await page.focus('input[name="cx-auth"][value="key"]');
+  await page.keyboard.press("ArrowRight");
+  assert.equal(await page.locator('input[name="cx-auth"][value="password"]').isChecked(), true, "right from Key file is Password");
+  await page.keyboard.press("ArrowRight");
+  assert.equal(await page.locator('input[name="cx-auth"][value="agent"]').isChecked(), true, "right from Password is Agent");
+  assert.equal(await keyLabel.textContent(), "Public key (optional)");
+  await page.keyboard.press("ArrowLeft");
+  assert.equal(await page.locator('input[name="cx-auth"][value="password"]').isChecked(), true);
+
+  // Not an SSH connection: the login rows are gone, whatever login was chosen.
+  await page.locator(".conns .cx-list button", { hasText: "Agent host" }).click();
+  await page.check('input[name="cx-kind"][value="docker"]');
+  assert.equal(await page.locator("#cx-key").isVisible(), false);
+  assert.equal(await login.isVisible(), false);
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".dlg.conns", { state: "detached" });
+}
 
 /** The palette action that installs `wsh` on the host of the focused pane: one call with the pane and nothing else. */
 async function installCase(page, url) {

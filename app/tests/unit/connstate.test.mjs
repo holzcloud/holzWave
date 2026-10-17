@@ -80,3 +80,12 @@ test("readConnections reads wsh as a strict boolean", () => {
   assert.equal(wsh({ wsh: "true" }), false, "a string is not true");
   assert.equal(wsh({ wsh: null }), false);
 });
+
+test("readConnections reads agent as a login", () => {
+  const login = (auth) => readConnections([{ id: "a", name: "A", kind: "ssh", ...(auth === undefined ? {} : { auth }) }])[0].auth;
+  assert.equal(login("agent"), "agent");
+  assert.equal(login("password"), "password");
+  assert.equal(login("key"), "key");
+  assert.equal(login(undefined), "key", "absent is the key file, as before");
+  for (const odd of ["Agent", "interactive", "", 1, null, true, {}]) assert.equal(login(odd), "key", `${JSON.stringify(odd)} falls back to key`);
+});
