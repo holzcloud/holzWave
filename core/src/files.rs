@@ -473,7 +473,8 @@ mod tests {
         assert!(l.entries.iter().find(|e| e.name == ".hidden").unwrap().hidden);
         assert_eq!(l.entries.iter().find(|e| e.name == "Apple.md").unwrap().size, 2);
         assert!(!l.truncated);
-        assert_eq!(l.parent.as_deref(), d.parent().and_then(|p| p.to_str()));
+        let real = fs::canonicalize(&d).unwrap();
+        assert_eq!(l.parent.as_deref(), real.parent().and_then(|p| p.to_str()));
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -786,7 +787,8 @@ mod sftp_tests {
         let names: Vec<_> = l.entries.iter().map(|e| (e.name.as_str(), e.kind)).collect();
         assert_eq!(names, [("sub", Kind::Dir), ("A.md", Kind::File), ("b.txt", Kind::File)]);
         assert_eq!(l.entries[2].size, 2);
-        assert_eq!(l.parent.as_deref(), d.parent().and_then(|p| p.to_str()));
+        let real = fs::canonicalize(&d).unwrap();
+        assert_eq!(l.parent.as_deref(), real.parent().and_then(|p| p.to_str()));
         assert!(src.list("/definitely/not/here").is_err());
         let _ = fs::remove_dir_all(&d);
     }

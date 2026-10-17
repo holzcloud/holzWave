@@ -421,6 +421,12 @@ fn write_stream(stream: &TcpStream, reply: &SseReply, conn: usize, shared: &Shar
         frame.extend_from_slice(chunk);
         frame.extend_from_slice(b"\r\n");
         if writer.write_all(&frame).and_then(|()| writer.flush()).is_err() {
+            // The client closed while the server was still writing (macOS reports it as a write error).
+            if reply.ending == Ending::Hold {
+                if let Some(info) = lock(&shared.connections).get_mut(conn) {
+                    info.peer_closed.get_or_insert_with(Instant::now);
+                }
+            }
             return;
         }
     }
