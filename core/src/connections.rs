@@ -23,6 +23,7 @@ use crate::pool::{Connection, SessionPool};
 use crate::persist::{read_limited, write_atomic};
 use crate::profiles::{Auth, Kind, Profile, Profiles};
 use crate::secrets::SecretStore;
+use crate::ssh::{PromptAnswer, PromptRound, Prompter, SshAuth, SshTarget};
 use crate::sync::webdav::safe_segment;
 use crate::{Error, Result};
 
@@ -94,6 +95,24 @@ pub const WSL_ONLY_ON_WINDOWS: &str = "WSL connections open on Windows only.";
 /// Said when a password or passphrase is saved for a connection that logs in through the ssh-agent.
 pub const AGENT_HAS_NO_SECRET: &str = "an agent login has no password or passphrase";
 
+/// Said when a password or code is saved for a connection whose login is answered by the person each time.
+pub const INTERACTIVE_HAS_NO_SECRET: &str = "an interactive login has no saved password or code";
+
+/// The prompter of one saved connection: it puts the connection's id into every round before it goes on to the program's
+/// prompter, so the dialog names the connection from the person's own list and never by what the server calls itself. A
+/// jump host's login has its own, with the jump host's id.
+struct ProfilePrompter {
+    profile: String,
+    inner: Arc<dyn Prompter>,
+}
+
+impl Prompter for ProfilePrompter {
+    fn ask(&self, mut round: PromptRound) -> PromptAnswer {
+        round.connection.clone_from(&self.profile);
+        self.inner.ask(round)
+    }
+}
+
 pub struct Connections {
     dir: PathBuf,
     /// The OS the connections open on: a WSL connection is refused unless it is Windows. A field so a test can say it.
@@ -106,6 +125,8 @@ pub struct Connections {
     generation: AtomicU64,
     /// The SSH connection of each saved profile, shared by the file browser, the monitor and the agent's commands.
     pool: Arc<SessionPool>,
+    /// Who asks the person when a login of an interactive connection has questions. Set once by the program.
+    prompter: Mutex<Option<Arc<dyn Prompter>>>,
 }
 
 impl Connections {
@@ -120,7 +141,7 @@ impl Connections {
             _ => HashMap::new(),
         };
         panes.retain(|pane, id| live_panes.contains(pane) && profiles.get(id).is_some());
-        let me = Self { dir: dir.to_path_buf(), os: Os::current(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0), pool: SessionPool::new() };
+        let me = Self { dir: dir.to_path_buf(), os: Os::current(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0), pool: SessionPool::new(), prompter: Mutex::new(None) };
         (me, status)
     }
 
@@ -156,9 +177,37 @@ impl Connections {
         self.panes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Who asks the person the questions of a keyboard-interactive login (a one-time code, a PAM prompt). Takes effect for the
+    /// targets made after it; the program sets it once, before any connection is used. With none set such a login fails
+    /// with a sentence instead of asking.
+    pub fn set_prompter(&self, prompter: Arc<dyn Prompter>) {
+        *self.prompter.lock().unwrap_or_else(PoisonError::into_inner) = Some(prompter);
+    }
+
+    /// Put a prompter that stamps its profile's id into every interactive login of `target` and of its jump chain. `id` is
+    /// the profile `target` was made from.
+    fn stamp_prompters(&self, profiles: &Profiles, id: &str, target: &mut SshTarget) {
+        let Some(inner) = self.prompter.lock().unwrap_or_else(PoisonError::into_inner).clone() else { return };
+        let (mut id, mut target) = (id, target);
+        loop {
+            if let SshAuth::Interactive { prompter } = &mut target.auth {
+                *prompter = Some(Arc::new(ProfilePrompter { profile: id.to_owned(), inner: inner.clone() }));
+            }
+            let Some(next) = profiles.get(id).and_then(|p| p.jump.as_deref()) else { return };
+            let Some(jump) = target.jump.as_deref_mut() else { return };
+            (id, target) = (next, jump);
+        }
+    }
+
+    /// What the connection `id` is called and where it goes, as the person saved it: the name and the host for the title
+    /// of a login dialog. Never from a server.
+    pub fn identity_of(&self, id: &str) -> Option<(String, String)> {
+        self.profiles().get(id).filter(|p| p.kind == Kind::Ssh).map(|p| (p.name.clone(), p.host.clone()))
+    }
+
     fn view(&self, profile: &Profile) -> ProfileView {
-        // An agent login has no secret and the keychain is not asked.
-        if profile.kind == Kind::Ssh && profile.auth == Auth::Agent {
+        // An agent or interactive login has no secret and the keychain is not asked.
+        if profile.kind == Kind::Ssh && matches!(profile.auth, Auth::Agent | Auth::Interactive) {
             return ProfileView { profile: profile.clone(), has_secret: false };
         }
         // A keychain that cannot be read counts as no secret: the list must still show.
@@ -189,7 +238,9 @@ impl Connections {
     /// The SSH target of connection `id`, with its login from the keychain and its jump hosts. For the file sources.
     pub fn ssh_target(&self, id: &str) -> Result<crate::ssh::SshTarget> {
         let profiles = self.profiles().clone();
-        profiles.ssh_target(id, self.secrets.as_ref(), self.home.as_deref(), &self.dir.join(KNOWN_HOSTS_FILE))
+        let mut target = profiles.ssh_target(id, self.secrets.as_ref(), self.home.as_deref(), &self.dir.join(KNOWN_HOSTS_FILE))?;
+        self.stamp_prompters(&profiles, id, &mut target);
+        Ok(target)
     }
 
     /// The shared SSH connection of profile `id` for the current version of the connection list: the one login that the
@@ -220,9 +271,11 @@ impl Connections {
             profile.id = profiles.fresh_id(&profile.name);
         }
         let account = profile.secret_account();
-        let agent = profile.auth == Auth::Agent && profile.kind == Kind::Ssh;
+        // An agent or an interactive login has no secret to keep.
+        let agent = matches!(profile.auth, Auth::Agent | Auth::Interactive) && profile.kind == Kind::Ssh;
         if agent && matches!(secret, SecretChange::Set { .. }) {
-            return Err(Error::Unsupported(AGENT_HAS_NO_SECRET.into()));
+            let why = if profile.auth == Auth::Agent { AGENT_HAS_NO_SECRET } else { INTERACTIVE_HAS_NO_SECRET };
+            return Err(Error::Unsupported(why.into()));
         }
         let mut next = profiles.clone();
         next.upsert(profile.clone())?;
@@ -315,7 +368,9 @@ impl Connections {
         match profile.kind {
             Kind::Ssh => {
                 let known = self.dir.join(KNOWN_HOSTS_FILE);
-                spec.ssh = Some(profiles.ssh_target(&profile.id, self.secrets.as_ref(), self.home.as_deref(), &known)?);
+                let mut target = profiles.ssh_target(&profile.id, self.secrets.as_ref(), self.home.as_deref(), &known)?;
+                self.stamp_prompters(&profiles, &profile.id, &mut target);
+                spec.ssh = Some(target);
                 // The pane's shell takes a channel of the profile's one login, shared with its files and commands.
                 spec.ssh_connection = Some(self.session(&profile.id)?);
             }

@@ -35,7 +35,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,7 +45,7 @@ use russh::Disconnect;
 use russh_sftp::client::SftpSession;
 use tokio::sync::mpsc as tmpsc;
 
-use crate::ssh::{Client, Outcome, SshTarget, channel_text, open, pin_hosts};
+use crate::ssh::{Client, Outcome, PROMPT_BACKGROUND, PROMPT_ROUNDS, PROMPT_WAIT, SshTarget, channel_text, open, pin_hosts};
 use crate::{Error, Result};
 
 /// A session with no lease and no use for this long is closed by the reaper.
@@ -56,7 +56,8 @@ pub const MAX_CONNECTIONS: usize = 16;
 pub const COOLDOWN_FATAL: Duration = Duration::from_secs(15);
 /// How long a background opener waits after a lost or timed-out connection.
 pub const COOLDOWN_LOST: Duration = Duration::from_secs(3);
-/// How long one login (connect, host key, authentication, jump hosts) may take.
+/// How long one login (connect, host key, authentication, jump hosts) may take, when no person has to answer a question.
+/// A login that does (see [`crate::ssh::SshTarget::asks_a_person`]) gets this and the time of every round of questions.
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
 /// How often the reaper looks for idle sessions.
 const REAP_EVERY: Duration = Duration::from_secs(30);
@@ -206,6 +207,8 @@ pub struct Connection {
     slot: tokio::sync::Mutex<Option<Arc<Session>>>,
     failure: Mutex<Option<Failure>>,
     usage: Mutex<Usage>,
+    /// The base of [`Connection::login_bound`], in milliseconds. [`OPEN_TIMEOUT`] except in a test.
+    login_base_ms: AtomicU64,
 }
 
 impl std::fmt::Debug for Connection {
@@ -226,7 +229,22 @@ impl Connection {
             slot: tokio::sync::Mutex::new(None),
             failure: Mutex::new(None),
             usage: Mutex::new(Usage { leases: 0, last_used: Instant::now() }),
+            login_base_ms: AtomicU64::new(OPEN_TIMEOUT.as_millis() as u64),
         })
+    }
+
+    /// How long one login to `target` may take: the base for every login, and for one that a person answers (itself or any
+    /// host of its jump chain) the time of every round of questions on top, so a person typing a one-time code is not cut
+    /// off by the bound of a login that nobody types into.
+    fn login_bound(&self, target: &SshTarget) -> Duration {
+        let base = Duration::from_millis(self.login_base_ms.load(Ordering::Relaxed));
+        if target.asks_a_person() { base + PROMPT_WAIT * PROMPT_ROUNDS as u32 } else { base }
+    }
+
+    /// Lower the base of the login bound, so a test of a slow person does not take [`OPEN_TIMEOUT`].
+    #[doc(hidden)]
+    pub fn set_login_bound(&self, base: Duration) {
+        self.login_base_ms.store(base.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// A connection with a runtime of its own (one worker thread drives keepalives and replies between calls), made
@@ -307,12 +325,26 @@ impl Connection {
     }
 
     async fn session_here(&self, open: Open, now: Instant) -> std::result::Result<Arc<Session>, OpenError> {
-        let mut slot = self.slot.lock().await;
+        // A background opener never raises a prompt and never waits behind a person: with a login in progress (the slot is
+        // held across it, a pane waits for its answer) it is told so at once, and so it is with no session at all.
+        let background_and_asks = open == Open::Pinned && self.target.asks_a_person();
+        let mut slot = if background_and_asks {
+            match self.slot.try_lock() {
+                Ok(slot) => slot,
+                Err(_) => return Err(OpenError::lost(PROMPT_BACKGROUND)),
+            }
+        } else {
+            self.slot.lock().await
+        };
         if let Some(session) = slot.as_ref().filter(|session| !session.is_closed()) {
             self.touch(now);
             return Ok(session.clone());
         }
         *slot = None;
+        // No failure is recorded: the sentence says nothing about the login, and a person's own open must not wait for it.
+        if background_and_asks {
+            return Err(OpenError::lost(PROMPT_BACKGROUND));
+        }
         // Asked after the lock: a waiter behind a login that just failed gets that failure and makes no attempt.
         if open == Open::Pinned {
             if let Some(error) = self.cooling(now) {
@@ -324,7 +356,7 @@ impl Connection {
             Open::Pinned => pin_hosts(&self.target).map_err(OpenError::fatal)?,
         };
         let forwards = Arc::new(Forwards::default());
-        let outcome = match tokio::time::timeout(OPEN_TIMEOUT, open_target(&target, &forwards)).await {
+        let outcome = match tokio::time::timeout(self.login_bound(&target), open_target(&target, &forwards)).await {
             Ok(outcome) => outcome,
             Err(_) => Err(OpenError::lost("the connection timed out")),
         };
@@ -966,6 +998,23 @@ mod tests {
 
     fn pooled(pool: &SessionPool, id: &str, generation: u64) -> Result<Arc<Connection>> {
         pool.connection(id, generation, || Ok((id.to_owned(), target("127.0.0.1"))))
+    }
+
+    #[test]
+    fn a_login_that_a_person_answers_gets_the_time_of_the_questions_on_top() {
+        let plain = target("alpha.example");
+        let asks = SshTarget::new("beta.example", "holz", SshAuth::Interactive { prompter: None });
+        let connection = Connection::standalone("x", plain.clone()).unwrap();
+        let extra = PROMPT_WAIT * PROMPT_ROUNDS as u32;
+        assert_eq!(connection.login_bound(&plain), OPEN_TIMEOUT, "no person types into a password or key login");
+        assert_eq!(connection.login_bound(&asks), OPEN_TIMEOUT + extra);
+        // A jump host that asks counts as well: its questions come in the same login.
+        let mut through = plain.clone();
+        through.jump = Some(Box::new(asks));
+        assert_eq!(connection.login_bound(&through), OPEN_TIMEOUT + extra);
+        connection.set_login_bound(Duration::from_secs(1));
+        assert_eq!(connection.login_bound(&plain), Duration::from_secs(1));
+        assert_eq!(connection.login_bound(&through), Duration::from_secs(1) + extra);
     }
 
     #[test]

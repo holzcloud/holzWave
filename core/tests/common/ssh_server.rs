@@ -36,6 +36,10 @@
 //!   path is freed by its cancel only: a login that is cut leaves its paths bound, as a real `sshd` does until it notices.
 //! - **Agent forwarding.** A request for it is refused and counted (`Seen::agent_requests`), so a test can say that a
 //!   login through an agent never asked for it.
+//! - **Keyboard-interactive.** With [`Options::keyboard_interactive`] the server logs a person in through rounds of questions:
+//!   each round is a name, instructions, prompts with their echo flags and the answers it expects. A right answer goes to
+//!   the next round (or accepts after the last one), a wrong one is a refusal; `Seen::kbd_rounds` counts the rounds
+//!   asked and `Seen::kbd_refused` the answer rounds that were wrong. A round with no prompts expects no answer.
 //! - **Cuts and counts.** [`Server::cut`] ends every connection that is open now; `Seen::disconnects` counts the
 //!   connections that ended, whoever ended them.
 //!
@@ -98,6 +102,22 @@ pub struct Options {
     /// A forward request for a socket path that is still bound is refused, as `sshd` does without `StreamLocalBindUnlink`:
     /// a path stays bound until its forward is cancelled, also after a login that ended without a goodbye.
     pub stale_sockets: bool,
+    /// The rounds of the keyboard-interactive login; empty refuses that method.
+    pub kbd: Vec<KbdRound>,
+}
+
+/// One round of a keyboard-interactive login: the name, the instructions, the prompts with their echo flag, and the answers
+/// that let the login go on.
+pub type KbdRound = (String, String, Vec<(String, bool)>, Vec<String>);
+
+/// A round of a keyboard-interactive login, for [`Options::keyboard_interactive`].
+pub fn round(name: &str, instructions: &str, prompts: &[(&str, bool)], answers: &[&str]) -> KbdRound {
+    (
+        name.to_owned(),
+        instructions.to_owned(),
+        prompts.iter().map(|(text, echo)| ((*text).to_owned(), *echo)).collect(),
+        answers.iter().map(|a| (*a).to_owned()).collect(),
+    )
 }
 
 impl Options {
@@ -130,7 +150,15 @@ impl Options {
             sftp_fail_writes: false,
             sftp_deny_upload: false,
             stale_sockets: false,
+            kbd: Vec::new(),
         }
+    }
+
+    /// User `holz` who logs in only by answering these rounds (no password, no key).
+    pub fn keyboard_interactive(rounds: Vec<KbdRound>) -> Self {
+        let mut options = Self::new(None, Vec::new());
+        options.kbd = rounds;
+        options
     }
 
     /// The same server, and it also answers `direct-tcpip`.
@@ -259,6 +287,10 @@ pub struct Seen {
     pub execs_as_shell: AtomicUsize,
     /// `auth-agent-req@openssh.com` requests: a client that asks for agent forwarding. The server refuses every one.
     pub agent_requests: AtomicUsize,
+    /// Rounds of questions the server sent in a keyboard-interactive login.
+    pub kbd_rounds: AtomicUsize,
+    /// Answer rounds of a keyboard-interactive login that were wrong (each also counts as a refused login).
+    pub kbd_refused: AtomicUsize,
     /// The requests of the session channels in order: `pty`, `shell`, `exec`, `agent`, `forward PATH`, `cancel PATH`.
     pub events: Mutex<Vec<String>>,
     /// How often each scripted command ran, for [`Options::exec_script`].
@@ -565,6 +597,7 @@ impl server::Server for Factory {
             shells: HashSet::new(),
             channels: HashMap::new(),
             open: HashSet::new(),
+            kbd_at: 0,
         }
     }
 }
@@ -581,6 +614,8 @@ struct Handler {
     channels: HashMap<ChannelId, Channel<Msg>>,
     /// The session channels that are open now, for [`Options::max_channels`].
     open: HashSet<ChannelId>,
+    /// The round of the keyboard-interactive login this connection is at.
+    kbd_at: usize,
 }
 
 impl Drop for Handler {
@@ -613,6 +648,43 @@ impl server::Handler for Handler {
     async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         let accepted = user == self.options.user && self.options.authorized.iter().any(|known| known == key);
         Ok(self.judge(accepted))
+    }
+
+    // The rounds of `Options::keyboard_interactive`: the first call has no response and asks round 0, each later call
+    // carries the answers to the round asked last.
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        user: &str,
+        _submethods: &str,
+        response: Option<server::Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        if user != self.options.user || self.options.kbd.is_empty() {
+            return Ok(self.judge(false));
+        }
+        match response {
+            None => self.kbd_at = 0,
+            Some(answers) => {
+                let given: Vec<String> = answers.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).collect();
+                if given != self.options.kbd[self.kbd_at].3 {
+                    self.seen.kbd_refused.fetch_add(1, Ordering::SeqCst);
+                    return Ok(self.judge(false));
+                }
+                self.kbd_at += 1;
+            }
+        }
+        match self.options.kbd.get(self.kbd_at) {
+            None => Ok(self.judge(true)),
+            Some((name, instructions, prompts, _)) => {
+                self.seen.kbd_rounds.fetch_add(1, Ordering::SeqCst);
+                let prompts: Vec<(std::borrow::Cow<'static, str>, bool)> =
+                    prompts.iter().map(|(text, echo)| (std::borrow::Cow::Owned(text.clone()), *echo)).collect();
+                Ok(Auth::Partial {
+                    name: std::borrow::Cow::Owned(name.clone()),
+                    instructions: std::borrow::Cow::Owned(instructions.clone()),
+                    prompts: std::borrow::Cow::Owned(prompts),
+                })
+            }
+        }
     }
 
     // A client that forwards its agent asks here. It is refused and counted, so a test can say that nobody asked.

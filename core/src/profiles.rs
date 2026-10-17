@@ -52,6 +52,9 @@ pub enum Auth {
     /// The user's ssh-agent signs the login. Nothing is stored for the connection; `key_path` may name a public key file
     /// that picks one of the agent's keys. Never a fallback: a connection uses the login it names.
     Agent,
+    /// The server asks the questions (a password prompt of PAM, a one-time code, a token's challenge) and the person answers
+    /// each time they connect. Nothing is stored for the connection.
+    Interactive,
 }
 
 fn default_port() -> u16 {
@@ -313,6 +316,9 @@ impl Profiles {
                 socket: None,
                 identity: (!profile.key_path.trim().is_empty()).then(|| expand_home(&profile.key_path, home)),
             },
+            // The person answers every time: nothing is stored, the keychain is not asked, and the program that owns the
+            // profiles puts the prompter in (`Connections::set_prompter`).
+            Auth::Interactive => SshAuth::Interactive { prompter: None },
             Auth::Password => SshAuth::Password(
                 secrets
                     .get(&profile.secret_account())?

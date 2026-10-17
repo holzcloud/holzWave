@@ -85,6 +85,13 @@ pub enum SshAuth {
         /// them, at most [`AGENT_MAX_TRIES`].
         identity: Option<PathBuf>,
     },
+    /// The server asks the questions (a password prompt of PAM, a one-time code, a token's challenge) and a person answers
+    /// them through the [`Prompter`]. Nothing is kept: the answers go to this one login and are gone.
+    Interactive {
+        /// Who asks the person. `None` fails the login with a sentence ([`PROMPT_NO_WINDOW`]); a profile's target has none
+        /// until [`crate::connections::Connections::set_prompter`] put one in.
+        prompter: Option<Arc<dyn Prompter>>,
+    },
 }
 
 impl std::fmt::Debug for SshAuth {
@@ -102,8 +109,147 @@ impl std::fmt::Debug for SshAuth {
                 .field("passphrase", &passphrase.as_ref().map(|_| "<set>"))
                 .finish(),
             SshAuth::Password(_) => f.write_str("Password(<set>)"),
+            SshAuth::Interactive { .. } => f.write_str("Interactive"),
         }
     }
+}
+
+/// How many rounds of questions a server may ask in one login. A round with no prompts does not count (it is answered
+/// without asking), but a server that sends [`PROMPT_EMPTY_ROUNDS`] of them in a row is cut off all the same.
+pub const PROMPT_ROUNDS: usize = 3;
+/// How many questions one round may hold.
+pub const PROMPT_LINES: usize = 5;
+/// The most characters of one question's text that the person sees.
+pub const PROMPT_TEXT: usize = 200;
+/// The most characters of a round's instructions that the person sees.
+pub const PROMPT_INSTRUCTIONS: usize = 300;
+/// The most characters of a round's name that the person sees.
+pub const PROMPT_NAME: usize = 60;
+/// How long the person has to answer one round.
+pub const PROMPT_WAIT: Duration = Duration::from_secs(120);
+/// How many rounds with no questions in them a server may send in a row.
+const PROMPT_EMPTY_ROUNDS: usize = 8;
+/// What a question with no text becomes.
+const PROMPT_BLANK: &str = "Answer";
+
+/// The sentences of an interactive login. Each is a constant: no answer and no text of the server can be in one.
+pub const PROMPT_CANCELLED: &str = "the login was cancelled";
+pub const PROMPT_TIMED_OUT: &str = "no answer was given in time";
+pub const PROMPT_TOO_MANY: &str = "the server asked too many questions";
+/// What a background opener (a monitor, a command) says when the connection needs a person's answer first.
+pub const PROMPT_BACKGROUND: &str = "this connection asks for a login code; open a pane on it first";
+pub const PROMPT_NO_WINDOW: &str = "this connection needs a window to ask in";
+const PROMPT_WRONG_COUNT: &str = "the answers do not match the questions";
+
+/// One question of the server, as the person sees it: cleaned and bounded by [`clean_server_text`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptLine {
+    pub text: String,
+    /// True when what the person types may be shown; false for a password or a code that must stay hidden.
+    pub echo: bool,
+}
+
+/// One round of questions of the server, for the person. Every text is already cleaned and bounded; none of it is a
+/// holzWave sentence. `connection` is the id of the saved connection (stamped by the program that owns the profiles, never
+/// by the server), so the dialog can say whose login it is from the person's own list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptRound {
+    pub connection: String,
+    /// The host the login goes to, as the person saved it.
+    pub host: String,
+    pub name: String,
+    pub instructions: String,
+    pub prompts: Vec<PromptLine>,
+}
+
+/// What the person did with a round.
+pub enum PromptAnswer {
+    /// One answer per question, in the order of the questions.
+    Answers(Vec<String>),
+    /// The person gave up, or the window that asks is gone.
+    Cancelled,
+}
+
+impl std::fmt::Debug for PromptAnswer {
+    // An answer is a password or a code: only how many there are can be printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromptAnswer::Answers(answers) => write!(f, "Answers(<{} hidden>)", answers.len()),
+            PromptAnswer::Cancelled => f.write_str("Cancelled"),
+        }
+    }
+}
+
+/// Who asks the person. Called from a blocking task and never from a runtime worker, so it may block until the person
+/// answers (the caller stops waiting after [`PROMPT_WAIT`]).
+pub trait Prompter: Send + Sync {
+    fn ask(&self, round: PromptRound) -> PromptAnswer;
+}
+
+/// Text the server wrote, made safe to show: control characters become spaces, the characters that change the direction or
+/// the look of text without a mark of their own (bidirectional controls, zero-width and invisible format characters, tag
+/// characters) are removed, runs of spaces become one, and at most four line breaks are kept (a longer run or a fifth break
+/// becomes a space). The result has at most `max_chars` characters, cut at a character boundary, and no space at either end.
+/// It is text for the person to read and never markup, a title or a holzWave sentence.
+pub fn clean_server_text(text: &str, max_chars: usize) -> String {
+    const MAX_BREAKS: usize = 4;
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut breaks = 0usize;
+    // `true` while the last thing written was a space or a break (or nothing yet), so no space is doubled or leads.
+    let mut gap = true;
+    let mut pending = text.chars().peekable();
+    while let Some(c) = pending.next() {
+        if chars >= max_chars {
+            break;
+        }
+        let c = match c {
+            '\r' if pending.peek() == Some(&'\n') => continue,
+            '\r' | '\n' | '\u{2028}' | '\u{2029}' | '\u{85}' => '\n',
+            c if c.is_control() => ' ',
+            // Bidi controls, zero-width and invisible format characters, soft hyphen, tag characters: nothing to show.
+            '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}'
+            | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e007f}' => continue,
+            c if c.is_whitespace() => ' ',
+            c => c,
+        };
+        if c == '\n' {
+            // No break leads, and a run of them is one. A break after a space takes the space's place.
+            if out.is_empty() || out.ends_with('\n') {
+                continue;
+            }
+            if out.ends_with(' ') {
+                out.pop();
+                chars -= 1;
+            }
+            if breaks < MAX_BREAKS {
+                breaks += 1;
+                out.push('\n');
+            } else {
+                out.push(' ');
+            }
+            chars += 1;
+            gap = true;
+            continue;
+        }
+        if c == ' ' {
+            if gap {
+                continue;
+            }
+            gap = true;
+        } else {
+            gap = false;
+        }
+        out.push(c);
+        chars += 1;
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
+/// A name or a question: one line.
+fn clean_line(text: &str, max_chars: usize) -> String {
+    clean_server_text(text, max_chars).replace('\n', " ")
 }
 
 /// What to do with a host key the `known_hosts` file does not know.
@@ -153,6 +299,19 @@ pub struct SshTarget {
 }
 
 impl SshTarget {
+    /// Whether a person has to answer questions to log in to this target: its own login or the login of any host of its
+    /// jump chain is [`SshAuth::Interactive`].
+    pub fn asks_a_person(&self) -> bool {
+        let mut at = Some(self);
+        while let Some(target) = at {
+            if matches!(target.auth, SshAuth::Interactive { .. }) {
+                return true;
+            }
+            at = target.jump.as_deref();
+        }
+        false
+    }
+
     pub fn new(host: impl Into<String>, user: impl Into<String>, auth: SshAuth) -> Self {
         Self {
             host: host.into(),
@@ -849,11 +1008,86 @@ pub(crate) async fn open(target: &SshTarget, forwards: &Arc<Forwards>) -> std::r
             agent_login(&mut session, &target.user, socket.as_deref(), identity.as_deref()).await?;
             true
         }
+        // The same: a sentence for every way it can fail, and no answer in any of them.
+        SshAuth::Interactive { prompter } => {
+            interactive_login(&mut session, &target.user, &target.host, prompter.as_ref(), PROMPT_WAIT).await?;
+            true
+        }
     };
     if !authenticated {
         return Err(Outcome::Fatal(format!("{}@{} refused the login", target.user, target.host)));
     }
     Ok(session)
+}
+
+/// Log in by answering the server's questions: each round with questions is shown to the person through `prompter` and
+/// answered once; a round with none is answered with nothing. At most [`PROMPT_ROUNDS`] rounds with questions, [`PROMPT_LINES`]
+/// questions in a round and `wait` for each answer. The texts are cleaned and bounded here, so whoever draws them shows
+/// text only. The answers are moved into the protocol and never copied, stored or printed.
+async fn interactive_login(
+    session: &mut Handle<Client>,
+    user: &str,
+    host: &str,
+    prompter: Option<&Arc<dyn Prompter>>,
+    wait: Duration,
+) -> std::result::Result<(), Outcome> {
+    use russh::client::KeyboardInteractiveAuthResponse as Reply;
+    let fatal = |why: &str| Outcome::Fatal(why.to_owned());
+    let Some(prompter) = prompter else { return Err(fatal(PROMPT_NO_WINDOW)) };
+    let lost = |e: russh::Error| Outcome::Lost(e.to_string());
+    let mut reply = session.authenticate_keyboard_interactive_start(user, None::<String>).await.map_err(lost)?;
+    let (mut asked, mut empty) = (0usize, 0usize);
+    loop {
+        let (name, instructions, prompts) = match reply {
+            Reply::Success => return Ok(()),
+            Reply::Failure { .. } => return Err(Outcome::Fatal(format!("{user}@{host} refused the login"))),
+            Reply::InfoRequest { name, instructions, prompts } => (name, instructions, prompts),
+        };
+        if prompts.is_empty() {
+            empty += 1;
+            if empty > PROMPT_EMPTY_ROUNDS {
+                return Err(fatal(PROMPT_TOO_MANY));
+            }
+            reply = session.authenticate_keyboard_interactive_respond(Vec::new()).await.map_err(lost)?;
+            continue;
+        }
+        asked += 1;
+        if asked > PROMPT_ROUNDS || prompts.len() > PROMPT_LINES {
+            return Err(fatal(PROMPT_TOO_MANY));
+        }
+        let lines: Vec<PromptLine> = prompts
+            .into_iter()
+            .map(|p| {
+                let text = clean_line(&p.prompt, PROMPT_TEXT);
+                PromptLine { text: if text.is_empty() { PROMPT_BLANK.to_owned() } else { text }, echo: p.echo }
+            })
+            .collect();
+        let round = PromptRound {
+            // The program that owns the profiles stamps the connection's id (see `Connections::set_prompter`).
+            connection: String::new(),
+            host: host.to_owned(),
+            name: clean_line(&name, PROMPT_NAME),
+            instructions: clean_server_text(&instructions, PROMPT_INSTRUCTIONS),
+            prompts: lines,
+        };
+        let questions = round.prompts.len();
+        let who = prompter.clone();
+        // A blocking task: the prompter may wait for a person. On a timeout the task is let go of and ends by itself.
+        let asking = tokio::task::spawn_blocking(move || who.ask(round));
+        let answers = match tokio::time::timeout(wait, asking).await {
+            Ok(Ok(PromptAnswer::Answers(answers))) => answers,
+            Ok(Ok(PromptAnswer::Cancelled) | Err(_)) => return Err(fatal(PROMPT_CANCELLED)),
+            Err(_) => return Err(fatal(PROMPT_TIMED_OUT)),
+        };
+        if answers.len() != questions {
+            let mut answers = answers;
+            for answer in &mut answers {
+                zeroize::Zeroize::zeroize(answer);
+            }
+            return Err(fatal(PROMPT_WRONG_COUNT));
+        }
+        reply = session.authenticate_keyboard_interactive_respond(answers).await.map_err(lost)?;
+    }
 }
 
 /// At most this many of the agent's keys are offered to a server, in the order the agent lists them. A server allows six
@@ -1077,10 +1311,23 @@ async fn session(
 ) -> Outcome {
     // The shell counts as a use of the connection, so the idle reaper never closes the login under it.
     let _lease = connection.lease();
-    let session = match connection.session(Open::Interactive).await {
-        Ok(session) => session,
-        Err(e) if e.fatal => return Outcome::Fatal(e.why),
-        Err(e) => return Outcome::Lost(e.why),
+    // While the login runs the pane listens: closing it must not wait for a person who is typing a code (the login goes on
+    // for the others), what is typed is kept for the shell, and a resize is remembered.
+    let login = connection.session(Open::Interactive);
+    tokio::pin!(login);
+    let session = loop {
+        tokio::select! {
+            result = &mut login => match result {
+                Ok(session) => break session,
+                Err(e) if e.fatal => return Outcome::Fatal(e.why),
+                Err(e) => return Outcome::Lost(e.why),
+            },
+            msg = cmd.recv() => match msg {
+                None | Some(Cmd::Close) => return Outcome::Closed,
+                Some(Cmd::Data(bytes)) => keep(buffered, &bytes),
+                Some(Cmd::Resize { cols, rows, px_w, px_h }) => *size = (cols, rows, px_w, px_h),
+            },
+        }
     };
     let outcome = shell(connection, &session, size, cmd, out, state, buffered, attempt, tunnel, retry).await;
     // A login that ended under the shell is replaced by the next attempt, once for every user of the connection.
