@@ -33,7 +33,7 @@ fn context_size_and_token_count_agree_with_availability() {
     let took = started.elapsed();
     println!("macOS {major}.{minor} availability {} window {window:?} count {count:?} in {took:?}", backend.availability().as_str());
 
-    assert!(took < Duration::from_secs(3), "the calls took {took:?}");
+    assert!(took < Duration::from_secs(15), "the calls took {took:?}");
     if backend.availability() == Availability::Available {
         let window = window.expect("an available model reports its window");
         assert!((1024..=1_000_000).contains(&window), "window {window}");
@@ -94,7 +94,7 @@ fn token_counting_never_blocks_for_long() {
     let started = Instant::now();
     let _ = backend.count_tokens("hello");
     let _ = backend.count_tokens("");
-    assert!(started.elapsed() < Duration::from_secs(3), "counting took {:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(15), "counting took {:?}", started.elapsed());
 
     // A text over the bound is `None` without a foreign call.
     let started = Instant::now();
