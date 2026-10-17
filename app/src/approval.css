@@ -42,6 +42,9 @@
                     border: 1px solid var(--hw-line); border-radius: .333rem; color: var(--hw-ink);
                     font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; line-height: 1.4; }
 .approval-payload:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
+/* A command card (section 6.17) is the one place where the box has no height limit and no scroll of its own: the card grows and the
+   strip scrolls, so the end of a long command is never hidden above the destination line, the banner, the hash and the buttons. */
+section.chat-approval[data-effect="exec"] .approval-payload { max-height: none; overflow: visible; }
 .approval-rows { margin: 0; padding: 0; list-style: none; }
 .approval-row { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; gap: .5rem; align-items: baseline;
                 padding: .167rem 0; border-top: 1px solid var(--hw-line); }

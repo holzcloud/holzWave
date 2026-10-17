@@ -4,7 +4,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  COMMAND_GOLDEN, COMMAND_TEXT, VIEW_P1, boot, calls, commandRuns, decisionCalls, openAi, openCard, scriptCommand, sendText, tickClock,
+  COMMAND_GOLDEN, COMMAND_TEXT, OTHER_PROFILE, PROFILE, TOOL_FILE, TOOL_PATH, VIEW_P1, boot, calls, commandRuns, decisionCalls, holdCommand,
+  openAi, openCard, releaseCommand, reloadKeeping, scriptCommand, sendText, tickClock,
 } from "./ai-lib.mjs";
 
 const PROTOCOL = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
@@ -12,7 +13,7 @@ const PROTOCOL = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", im
 export default async function ({ engine, page, url, errors }) {
   page.setDefaultTimeout(5000);
   // A failing case names itself.
-  const cases = { traceCase, contractCase, idsCase };
+  const cases = { traceCase, contractCase, idsCase, commandCase, resultCase, runningCase, remoteCase, bannerCase };
   for (const [name, run] of Object.entries(cases)) {
     try {
       await run(page, url, engine);
@@ -181,4 +182,270 @@ async function idsCase(page, url) {
     if (keys.length > 0) assert.ok(cmd === "ai_send" || cmd === "markdown_render", `${cmd} carries ${keys}`);
   }
   assert.equal((await calls(page, "ai_send")).length, 1);
+}
+
+const HOSTILE_COMMAND = "zq-cmd-<img src=x onerror=alert(1)> [x](javascript:alert(1)) zqcm-7a31";
+const HOSTILE_OUTPUT = "<b>zq-out</b> javascript:alert(1)";
+const LAST_SEGMENT = "zq-last-segment-91c4";
+
+/** The computed `max-height` of the payload box of a card. */
+const maxHeight = (card) => card.locator("div.approval-payload").evaluate((n) => getComputedStyle(n).maxHeight);
+
+async function commandCase(page, url, engine) {
+  // A hostile command is the exact text in the `command` row: no element, no link, no handler.
+  await chatBesidePane1(page, url);
+  let card = await askForCommand(page, { command: HOSTILE_COMMAND });
+  assert.equal(await card.locator('li.approval-row[data-name="command"] .approval-value').textContent(), HOSTILE_COMMAND);
+  assert.equal(await card.locator("img, a").count(), 0);
+  assert.equal(await card.evaluate((c) => c.querySelector("[onerror]") === null && c.querySelector("[href]") === null), true);
+
+  // A command with a bidirectional override shows it as an escape and never raw.
+  await chatBesidePane1(page, url);
+  const bidi = `echo a${String.fromCharCode(0x202e)}b`;
+  card = await askForCommand(page, { command: bidi });
+  const shownBidi = await card.locator('li.approval-row[data-name="command"] .approval-value').textContent();
+  assert.equal(shownBidi, "echo a\\u{202e}b");
+  assert.ok(!(await card.textContent()).includes(String.fromCharCode(0x202e)), "a raw bidi character is in the card");
+
+  // A very long command is in the DOM whole, and its box has no height limit and no scroll of its own, as the box of a read
+  // card and of a write card is limited. The three cards are in one strip, so the comparison is on one page.
+  await chatBesidePane1(page, url);
+  const long = `echo ok${"\n".repeat(2000)}${LAST_SEGMENT}`;
+  await scriptCommand(page, {
+    calls: [
+      { id: "call_1", command: long },
+      { id: "call_2", tool: "read_file", path: TOOL_PATH, result: "x" },
+      { id: "call_3", tool: "write_file", path: TOOL_FILE, content: "one\ntwo\n" },
+    ],
+    answer: "Done.",
+  });
+  await sendText(page, "run it");
+  await openCard(page, "call_3");
+  card = page.locator('section.chat-approval[data-call="call_1"]');
+  const shown = await card.locator('li.approval-row[data-name="command"] .approval-value').textContent();
+  assert.equal(shown.length, "echo ok".length + 4000 + LAST_SEGMENT.length, "the command is whole");
+  assert.ok(shown.endsWith(LAST_SEGMENT));
+  assert.equal(await maxHeight(card), "none", "a command card has no height limit");
+  const room = await card.locator("div.approval-payload").evaluate((n) => [n.scrollHeight, n.clientHeight]);
+  assert.ok(room[0] <= room[1] + 1, `the box scrolls by itself: ${room}`);
+  for (const id of ["call_2", "call_3"]) {
+    const other = await maxHeight(page.locator(`section.chat-approval[data-call="${id}"]`));
+    assert.match(other, /^\d+(\.\d+)?px$/, `${id} keeps its limit`);
+  }
+
+  // The strip scrolls, and is at most half the pane.
+  const strip = await page.evaluate(() => {
+    const el = document.querySelector("div.chat-cards");
+    return { scroll: el.scrollHeight, client: el.clientHeight, pane: el.closest(".block-chat").getBoundingClientRect().height };
+  });
+  assert.ok(strip.scroll > strip.client, `the strip does not scroll: ${JSON.stringify(strip)}`);
+  assert.ok(strip.client <= strip.pane / 2 + 1, `the strip is more than half the pane: ${JSON.stringify(strip)}`);
+
+  // With one long command, scrolled to the end of the strip, the buttons are inside the strip and come after the end of the command.
+  await chatBesidePane1(page, url);
+  card = await askForCommand(page, { command: long });
+  const layout = await page.evaluate(() => {
+    const strip = document.querySelector("div.chat-cards");
+    strip.scrollTop = strip.scrollHeight;
+    const box = (selector) => document.querySelector(selector).getBoundingClientRect();
+    return {
+      strip: box("div.chat-cards"), command: box('li.approval-row[data-name="command"]'), dest: box("p.approval-dest"),
+      allow: box("button.approval-allow"), hash: box("p.approval-hash"),
+    };
+  });
+  assert.ok(layout.allow.top >= layout.strip.top - 1 && layout.allow.bottom <= layout.strip.bottom + 1, `the button is outside the strip: ${JSON.stringify(layout)}`);
+  assert.ok(layout.command.bottom <= layout.dest.top + 1, "the command is above the destination line");
+  assert.ok(layout.dest.top < layout.hash.top && layout.hash.top < layout.allow.top, "the destination, the hash and the buttons follow in order");
+
+  // The keys of the card: from the message box `Shift+Tab` reaches Deny, then Allow once, then the payload box.
+  const back = () => page.keyboard.press(engine === "webkit" && process.platform === "darwin" ? "Shift+Alt+Tab" : "Shift+Tab");
+  const active = () => page.evaluate(() => document.activeElement?.className);
+  await page.locator(".chat-input").focus();
+  await back();
+  assert.equal(await active(), "approval-deny");
+  await back();
+  assert.equal(await active(), "approval-allow");
+  await back();
+  assert.equal(await active(), "approval-payload");
+  // `Escape` inside the card denies that call and does not stop the reply.
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_decide").length === 1);
+  assert.equal((await decisionCalls(page))[0].decision, "deny");
+  assert.equal((await calls(page, "ai_cancel")).length, 0, "the reply was not stopped");
+  assert.deepEqual(await commandRuns(page), [], "a denied command did not run");
+}
+
+/** The row of a call in the transcript. */
+const rowOf = (page, id) => page.locator(`.chat-msg[data-role="assistant"] .chat-tool[data-call="${id}"]`);
+
+/** Press the toggle of a row and wait for its result to be drawn. */
+async function opened(row) {
+  await row.locator("button.tool-toggle").click();
+  await row.locator("pre.tool-result").waitFor();
+}
+
+/** Ask for a command, allow it once the window has passed, and wait for the end of the turn. */
+async function allowed(page, spec, text = "run it") {
+  await scriptCommand(page, { answer: "Done.", ...spec });
+  await sendText(page, text);
+  const card = await openCard(page, spec.id);
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await page.waitForFunction(() => !window.__MOCK__.ai.chat("chat-mock-1").running);
+  await page.waitForSelector(`.chat-tool[data-call="${spec.id}"]:not([data-state="waiting"])`);
+}
+
+async function resultCase(page, url) {
+  await chatBesidePane1(page, url);
+  const report = COMMAND_GOLDEN.texts.report;
+  const outcomes = [
+    ["a non-zero status", { output: report.failed, failed: true }, "error", "!", report.failed],
+    ["a time out", { output: report.timed_out, failed: true }, "error", "!", report.timed_out],
+    ["a lost connection", { output: report.lost, failed: true }, "error", "!", report.lost],
+    ["no output", { output: report.no_output }, "ran", "\u2713", report.no_output],
+    ["a status 0", { output: report.ok }, "ran", "\u2713", report.ok],
+  ];
+  let decided = 0;
+  for (const [n, [what, spec, state, mark, text]] of outcomes.entries()) {
+    const id = `call_${n + 1}`;
+    await allowed(page, { id, ...spec });
+    decided += 1;
+    const row = rowOf(page, id);
+    assert.equal(await row.getAttribute("data-state"), state, what);
+    assert.equal(await row.locator(".tool-mark").textContent(), mark, `${what}: the mark`);
+    assert.equal(await row.locator(".tool-state").textContent(), state, `${what}: the word`);
+    assert.equal(await row.locator(".tool-words").textContent(), "Run a command");
+    const toggles = row.locator("button.tool-toggle");
+    assert.equal(await toggles.count(), 1, `${what}: one toggle`);
+    assert.equal(await toggles.getAttribute("aria-expanded"), "false");
+    assert.ok((await toggles.getAttribute("data-field")) !== null, `${what}: the toggle carries data-field`);
+    await opened(row);
+    assert.equal(await row.locator(".tool-untrusted").textContent(), "Result \u00b7 untrusted text");
+    assert.equal(await row.locator("pre.tool-result").textContent(), text, what);
+    assert.equal((await decisionCalls(page)).length, decided, `${what}: no second decision call`);
+  }
+
+  // A denial is an error with the core's sentence.
+  await scriptCommand(page, { id: "call_6", answer: "Done." });
+  await sendText(page, "run it too");
+  await (await openCard(page, "call_6")).locator("button.approval-deny").click();
+  await page.waitForSelector('.chat-tool[data-call="call_6"][data-state="error"]');
+  const denied = rowOf(page, "call_6");
+  assert.equal(await denied.locator(".tool-state").textContent(), "error");
+  await opened(denied);
+  assert.equal(await denied.locator("pre.tool-result").textContent(), "The user denied this action.");
+  await page.waitForFunction(() => !window.__MOCK__.ai.chat("chat-mock-1").running);
+
+  // A long output is cut at 20000 characters, and a hostile one is text.
+  await allowed(page, { id: "call_7", output: "y".repeat(30000) });
+  await opened(rowOf(page, "call_7"));
+  const long = await rowOf(page, "call_7").locator("pre.tool-result").textContent();
+  assert.ok(long.startsWith("y".repeat(20000)) && !long.startsWith("y".repeat(20001)));
+  assert.ok(long.endsWith("[cut for display]"));
+  await allowed(page, { id: "call_8", output: HOSTILE_OUTPUT });
+  await opened(rowOf(page, "call_8"));
+  assert.equal(await rowOf(page, "call_8").locator("pre.tool-result").textContent(), HOSTILE_OUTPUT);
+  const markup = await page.evaluate(() => ({
+    elements: document.querySelectorAll(".chat-tool b, .chat-tool a, .chat-tool img").length,
+    handlers: [...document.querySelectorAll(".chat-tool *")].filter((n) => n.getAttributeNames().some((a) => a.startsWith("on"))).length,
+  }));
+  assert.deepEqual(markup, { elements: 0, handlers: 0 });
+  assert.equal((await decisionCalls(page)).length, 8, "one decision for each card");
+}
+
+async function runningCase(page, url) {
+  const stopped = COMMAND_GOLDEN.texts.stopped;
+  for (const how of ["button", "escape"]) {
+    await chatBesidePane1(page, url);
+    await holdCommand(page);
+    const card = await askForCommand(page);
+    await tickClock(page, 1000);
+    await card.locator("button.approval-allow").click();
+    // The card says the command is running, has no buttons, and the chat is still at work.
+    await page.waitForSelector('section.chat-approval[data-mode="sent"]');
+    assert.ok((await card.textContent()).includes("Allowed \u00b7 running\u2026"), how);
+    assert.equal(await card.locator("button").count(), 0, `${how}: no button while it runs`);
+    assert.match(await page.locator(".chat-status").textContent(), /waiting for your decision|working/);
+    assert.deepEqual(await commandRuns(page), [COMMAND_TEXT]);
+
+    if (how === "button") await page.locator('.chat-send[data-mode="stop"]').click();
+    else await page.locator(".chat-input").press("Escape");
+    await page.waitForFunction(() => window.__MOCK__.ai.chat("chat-mock-1").ended?.end === "cancelled");
+    await page.waitForFunction(() => document.querySelector("section.chat-approval") === null);
+    assert.deepEqual(await calls(page, "ai_cancel"), [{ conversation: "chat-mock-1" }], how);
+    const result = (await page.evaluate(() => structuredClone(window.__MOCK__.ai.sent))).find((e) => e.kind === "tool_result");
+    assert.equal(result.content, stopped, how);
+    assert.equal(result.is_error, true);
+    const row = rowOf(page, "call_1");
+    assert.equal(await row.getAttribute("data-state"), "error", how);
+    await opened(row);
+    assert.equal(await row.locator(".tool-untrusted").textContent(), "Result \u00b7 untrusted text");
+    assert.equal(await row.locator("pre.tool-result").textContent(), stopped, how);
+    assert.equal((await decisionCalls(page)).length, 1, `${how}: no second decision call`);
+  }
+
+  // Without a stop the result arrives when the command ends, and the row says it ran.
+  await chatBesidePane1(page, url);
+  await holdCommand(page);
+  const card = await askForCommand(page);
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await page.waitForSelector('section.chat-approval[data-mode="sent"]');
+  await releaseCommand(page);
+  await finished(page);
+  assert.equal(await rowOf(page, "call_1").getAttribute("data-state"), "ran");
+  assert.equal((await calls(page, "ai_cancel")).length, 0);
+}
+
+async function remoteCase(page, url) {
+  await chatBesidePane1(page, url);
+  let card = await askForCommand(page, { remote: true, target: "talos-1", cwd: "/srv/app", timeout_secs: 120 });
+  assert.equal(await card.getAttribute("data-remote"), "true");
+  assert.equal(await card.locator(".approval-remote").textContent(), "remote host");
+  assert.equal(await card.locator(".approval-where").textContent(), "pane 1 \u00b7 talos-1");
+  const fields = await card.locator("li.approval-row").evaluateAll((r) => r.map((n) => n.dataset.name));
+  assert.deepEqual(fields, ["tool", "pane", "target", "remote", "command", "cwd", "timeout_secs", "resolved_cwd"]);
+  assert.equal(await card.locator("p.approval-dest").textContent(), `The command's output is sent to ${PROFILE.model} at ${PROFILE.host} (this computer).`);
+
+  // A cloud route leaves the computer and says so; after a reload the route is not known and the card does not guess.
+  await chatBesidePane1(page, url, { profiles: [PROFILE, OTHER_PROFILE] });
+  await page.locator(".chat-chip").click();
+  await page.locator('.chat-choice[data-id="other-1"]').click();
+  card = await askForCommand(page, { remote: true, target: "talos-1" });
+  assert.equal(await card.locator("p.approval-dest").textContent(), `The command's output is sent to ${OTHER_PROFILE.model} at ${OTHER_PROFILE.host} (cloud).`);
+  assert.equal(await card.locator(".approval-place").getAttribute("data-leaves"), "true");
+  await reloadKeeping(page);
+  card = await openCard(page, "call_1");
+  assert.equal(await card.locator("p.approval-dest").textContent(), "The command's output is sent to the model of this chat.");
+  assert.equal(await card.locator(".approval-place").count(), 0);
+}
+
+async function bannerCase(page, url) {
+  await chatBesidePane1(page, url);
+  // A tainted command: the banner holds the title, the core's label and the sentence of a command.
+  let card = await askForCommand(page, { tainted: true, taint: ["output of read_file"] });
+  assert.equal(await card.getAttribute("data-tainted"), "true");
+  const banner = card.locator('div.approval-taint[data-tone="warn"]');
+  const text = await banner.textContent();
+  for (const words of ["Untrusted text in this turn", "output of read_file", "A command will run. Read all of it before you allow it."]) {
+    assert.ok(text.includes(words), `${words} in ${text}`);
+  }
+  assert.ok((await card.textContent()).includes("Runs one command in a separate process with your account's rights. Check the command below."));
+
+  // A click at the moment the card appears decides nothing; after the window one real click decides once, with the card's hash.
+  await card.locator("button.approval-allow").click({ force: true });
+  assert.deepEqual(await decisionCalls(page), [], "a click at once is ignored");
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").evaluate((button) => button.click());
+  assert.deepEqual(await decisionCalls(page), [], "a click made by a script is ignored");
+  const hash = await storedHash(page);
+  await card.locator("button.approval-allow").click();
+  await finished(page);
+  assert.deepEqual(await decisionCalls(page), [{ conversation: "chat-mock-1", call_id: "call_1", decision: "allow", hash }]);
+
+  // A command that follows no untrusted text has no banner.
+  await chatBesidePane1(page, url);
+  card = await askForCommand(page, { tainted: false, taint: [] });
+  assert.equal(await card.getAttribute("data-tainted"), "false");
+  assert.equal(await card.locator(".approval-taint").count(), 0);
 }
