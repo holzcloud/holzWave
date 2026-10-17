@@ -1,0 +1,34 @@
+{
+    "node": "192.0.2.11",
+    "metadata": {
+        "namespace": "runtime",
+        "type": "MachineStatuses.runtime.talos.dev",
+        "id": "machine",
+        "version": 3,
+        "owner": "runtime.MachineStatusController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "stage": "running",
+        "status": {
+            "ready": true,
+            "unmetConditions": []
+        }
+    }
+}
+{
+    "node": "192.0.2.12",
+    "metadata": {
+        "namespace": "runtime",
+        "type": "MachineStatuses.runtime.talos.dev",
+        "id": "machine",
+        "version": 3,
+        "owner": "runtime.MachineStatusController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "stage": "boo

@@ -37,6 +37,7 @@ EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 LONG_WORD = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
 HEX_DIGEST = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+IPV6 = re.compile(r"[0-9a-fA-F:.]+")
 NAME_KEYS = {"name", "displayName", "tenantDisplayName", "domain"}
 HOST_KEYS = {"hostname", "nodename", "fqdn"}
 KEEP_VALUES = {"AzureCloud", "AzureUSGovernment", "AzureChinaCloud", "AzureGermanCloud", "Enabled", "Succeeded"}
@@ -53,7 +54,9 @@ class Sanitiser:
         self.guids = {}
         self.items = {}
         self.addresses = {}
+        self.addresses6 = {}
         self.hosts = {}
+        self.host_aliases = {}
         self.homes = self._homes()
 
     @staticmethod
@@ -88,7 +91,37 @@ class Sanitiser:
     def host(self, value):
         if value not in self.hosts:
             self.hosts[value] = "node-%d" % (len(self.hosts) + 1)
+            # The short name (first label) of a host name stands for the same node when a whole string is exactly it.
+            self.host_aliases.setdefault(value.split(".")[0], self.hosts[value])
         return self.hosts[value]
+
+    def ipv6(self, value):
+        """A whole string that is an IPv6 address becomes a documentation address (2001:db8::N)."""
+        if value.count(":") >= 3 or "::" in value:
+            if IPV6.fullmatch(value):
+                if value not in self.addresses6:
+                    self.addresses6[value] = "2001:db8::%d" % (len(self.addresses6) + 1)
+                return self.addresses6[value]
+        return None
+
+    def collect_hosts(self, value, key=None):
+        """Talos: learn the host names before any string is rewritten (a member's id is its host name)."""
+        if isinstance(value, dict):
+            metadata = value.get("metadata")
+            spec = value.get("spec")
+            if isinstance(metadata, dict) and str(metadata.get("type", "")).startswith("Members") and isinstance(spec, dict):
+                if isinstance(spec.get("hostname"), str):
+                    self.host(spec["hostname"])
+                known = self.hosts.keys() | self.host_aliases.keys()
+                if isinstance(metadata.get("id"), str) and metadata["id"] not in known:
+                    self.host(metadata["id"])
+            for k, v in value.items():
+                self.collect_hosts(v, k)
+        elif isinstance(value, list):
+            for v in value:
+                self.collect_hosts(v, key)
+        elif isinstance(value, str) and key in HOST_KEYS and value:
+            self.host(value)
 
     def text(self, value):
         """Replace the home directory, e-mail addresses and GUIDs in free text."""
@@ -119,8 +152,14 @@ class Sanitiser:
             return self.strict_string(value, key)
         if value in KEEP_VALUES:
             return value
-        if self.talos and key in HOST_KEYS and value:
-            return self.host(value)
+        if self.talos and value:
+            if key in HOST_KEYS or value in self.hosts:
+                return self.host(value)
+            if value in self.host_aliases:
+                return self.host_aliases[value]
+            address = self.ipv6(value)
+            if address:
+                return address
         if "@" in value and EMAIL.search(value):
             return SYNTHETIC_EMAIL if EMAIL.fullmatch(value) else self.text(value)
         if key in NAME_KEYS and not self.keep_names and value and not GUID.fullmatch(value):
@@ -199,6 +238,8 @@ def main(argv):
         for document in documents:
             if redact_exec_env:
                 document = sanitiser.exec_env(document)
+            if talos:
+                sanitiser.collect_hosts(document)
             out.append(json.dumps(sanitiser.walk(document), indent=indent, ensure_ascii=False))
         sys.stdout.write("\n".join(out) + "\n")
     else:

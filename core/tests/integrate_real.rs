@@ -109,6 +109,7 @@ struct Row {
     file: String,
     source: String,
     tool: String,
+    notes: String,
 }
 
 /// The rows of `MANIFEST.md`: table lines whose first cell is a path in backticks and whose second cell is the source.
@@ -126,7 +127,12 @@ fn manifest_rows() -> Vec<Row> {
         }
         let first = cells[0];
         if first.len() > 2 && first.starts_with('`') && first.ends_with('`') {
-            rows.push(Row { file: first[1..first.len() - 1].to_owned(), source: cells[1].to_owned(), tool: cells[2].to_owned() });
+            rows.push(Row {
+                file: first[1..first.len() - 1].to_owned(),
+                source: cells[1].to_owned(),
+                tool: cells[2].to_owned(),
+                notes: cells[4].to_owned(),
+            });
         }
     }
     rows
@@ -751,4 +757,113 @@ fn gam_version_and_showsections_run_against_an_empty_scratch_directory_and_leave
     assert!(config.join("gam.cfg").is_file(), "GAM wrote its configuration into the scratch directory");
     assert_eq!(modified(&real_dir), before, "the modification time of the real ~/.gam directory changed");
     fs::remove_dir_all(&scratch).ok();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Provenance and drift variants (run everywhere).
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A hand-made fixture is never called recorded: a recorded row names the version of the tool that produced it.
+#[test]
+fn no_fixture_is_called_recorded_without_a_tool_version() {
+    let mut problems = Vec::new();
+    for row in manifest_rows() {
+        if row.source == "recorded" && !row.tool.chars().any(|c| c.is_ascii_digit()) {
+            problems.push(format!("{} is recorded and its tool cell {:?} has no version", row.file, row.tool));
+        }
+        if row.source == "written" && row.tool.is_empty() {
+            problems.push(format!("{} is written and names no tool", row.file));
+        }
+    }
+    assert!(problems.is_empty(), "provenance problems:\n{}", problems.join("\n"));
+}
+
+/// The marks of a drift variant in a file stem. The text before the mark is the stem of the base fixture.
+const DRIFT_MARKS: &[&str] = &["_truncated", "_unknown_member", "_missing_", "_wrong_type", "_second_not_json"];
+
+/// The directory and the stem of a fixture path: `kubectl/config_view.json` is `("kubectl", "config_view")`.
+fn dir_and_stem(file: &str) -> (&str, &str) {
+    let (dir, name) = file.rsplit_once('/').unwrap_or(("", file));
+    (dir, name.rsplit_once('.').map_or(name, |(stem, _)| stem))
+}
+
+/// The stem of the fixture that a drift variant varies, or `None` when the file is no variant.
+fn drift_base(file: &str) -> Option<(String, String)> {
+    let (dir, stem) = dir_and_stem(file);
+    DRIFT_MARKS.iter().filter_map(|mark| stem.find(mark)).min().map(|at| (dir.to_owned(), stem[..at].to_owned()))
+}
+
+#[test]
+fn every_drift_variant_is_next_to_the_fixture_it_varies() {
+    let files = fixture_files();
+    let mut problems = Vec::new();
+    let mut variants = 0;
+    for file in &files {
+        let Some((dir, base)) = drift_base(file) else { continue };
+        variants += 1;
+        let has_base = files.iter().any(|other| other != file && drift_base(other).is_none() && dir_and_stem(other) == (dir.as_str(), base.as_str()));
+        if !has_base {
+            problems.push(format!("{file} varies {dir}/{base}, which is not a fixture next to it"));
+        }
+    }
+    assert!(problems.is_empty(), "drift problems:\n{}", problems.join("\n"));
+    assert!(variants >= 10, "only {variants} drift variants: every tool has its truncated copy and kubectl has three shape variants");
+    for tool in ["kubectl", "az", "gam", "talosctl"] {
+        assert!(files.iter().any(|f| f.starts_with(&format!("{tool}/")) && drift_base(f).is_some()), "{tool} has no drift variant");
+    }
+}
+
+#[test]
+fn every_drift_variant_is_listed_as_written_and_says_drift() {
+    let rows = manifest_rows();
+    let mut problems = Vec::new();
+    for file in fixture_files().iter().filter(|f| drift_base(f).is_some()) {
+        match rows.iter().find(|row| &row.file == file) {
+            Some(row) if row.source == "written" && row.notes.starts_with("drift") => {}
+            Some(row) => problems.push(format!("{file}: source {:?}, notes {:?}: a variant is written and its note starts with drift", row.source, row.notes)),
+            None => problems.push(format!("{file} is not in the manifest")),
+        }
+    }
+    assert!(problems.is_empty(), "drift rows:\n{}", problems.join("\n"));
+}
+
+#[test]
+fn the_drift_variants_drift_the_way_their_names_say() {
+    let base = fixture_json("kubectl/config_view.json");
+    let unknown = fixture_json("kubectl/config_view_unknown_member.json");
+    assert!(unknown.get("futureMember").is_some() && base.get("futureMember").is_none(), "an unknown member at the top");
+    let missing = fixture_json("kubectl/config_view_missing_contexts.json");
+    assert!(missing.get("contexts").is_none() && base.get("contexts").is_some(), "the contexts member is missing");
+    let wrong = fixture_json("kubectl/config_view_wrong_type.json");
+    assert!(wrong["current-context"].is_number() && base["current-context"].is_string(), "a number where a string belongs");
+    for file in ["kubectl/pods_truncated.json", "az/account_list_truncated.json", "az/group_list_truncated.json", "gam/info_domain_truncated.json", "talosctl/get_members_truncated.json", "talosctl/get_services_truncated.json", "talosctl/get_machinestatus_truncated.json"] {
+        let text = read_fixture(file);
+        let stream: Vec<_> = serde_json::Deserializer::from_str(&text).into_iter::<Value>().collect();
+        assert!(stream.iter().any(Result::is_err), "{file} is cut in the middle of a value and must fail to parse");
+    }
+    // The CSV is cut inside a quoted cell: an odd number of quote characters in all.
+    assert_eq!(read_fixture("gam/print_users_truncated.csv").matches('"').count() % 2, 1, "the CSV copy ends inside a quoted cell");
+}
+
+#[test]
+fn the_talos_fixtures_follow_the_object_stream_the_json_writer_prints() {
+    for file in ["talosctl/get_members.json", "talosctl/get_services.json", "talosctl/get_machinestatus.json"] {
+        let text = read_fixture(file);
+        let objects: Vec<Value> = serde_json::Deserializer::from_str(&text).into_iter::<Value>().map(|v| v.expect("a JSON object")).collect();
+        assert!(objects.len() >= 3, "{file}: back-to-back objects, not an array");
+        for object in &objects {
+            assert!(object["node"].is_string() && object["metadata"]["id"].is_string() && object["spec"].is_object(), "{file}: node, metadata and spec");
+        }
+    }
+    let members = read_fixture("talosctl/get_members.json");
+    let second_broken = read_fixture("talosctl/get_members_second_not_json.json");
+    let mut stream = serde_json::Deserializer::from_str(&second_broken).into_iter::<Value>();
+    assert!(stream.next().is_some_and(|first| first.is_ok()), "the first object of the broken stream is fine");
+    assert!(stream.next().is_some_and(|second| second.is_err()), "the second object of the broken stream is not JSON");
+    assert!(members.starts_with(second_broken.split("\n}\n").next().unwrap_or("")), "the broken stream starts like the base");
+    let contexts = read_fixture("talosctl/config_contexts.txt");
+    assert!(contexts.starts_with("CURRENT") && contexts.lines().filter(|l| l.starts_with('*')).count() == 1, "one marked current row");
+    assert!(read_fixture("talosctl/version.txt").starts_with("Client:"));
+    let info = fixture_json("talosctl/config_info.json");
+    assert!(info["context"].is_string() && info["nodes"].is_array() && info["endpoints"].is_array(), "config info members");
 }

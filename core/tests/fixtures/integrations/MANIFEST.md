@@ -34,3 +34,21 @@ The real-tool tests in the same file run with `HW_INTEGRATION_REAL=1`.
 | `gam/showsections.txt` | recorded | GAM 7.46.02 | 2026-10-18 | `gam showsections` in an empty directory: a `Config File:` header line, then `  DEFAULT *` (two spaces, the name, the mark of the selected section) |
 | `gam/print_users.csv` | written | GAM 7.46.02 documents | 2026-10-18 | `print users` needs a signed-in domain: five rows with a multi-line cell holding a comma and doubled quotes, a blank cell and a suspended user; replace by a real capture (owner row) |
 | `gam/info_domain.json` | written | GAM 7.46.02 documents | 2026-10-18 | `info domain formatjson` needs a signed-in domain: the members `customerDomain`, `creationTime`, `isVerified` and two `domainAliases` are an assumption from the documents; replace by a real capture (owner row) |
+| `talosctl/get_members.json` | written | talosctl 1.12 documents | 2026-10-18 | from the Talos documents and the JSON writer: replace by a real capture (owner row); three indented objects back to back, not an array, each with `node`, `metadata` and `spec` (`hostname`, `machineType`, `addresses`) |
+| `talosctl/get_services.json` | written | talosctl 1.12 documents | 2026-10-18 | from the Talos documents and the JSON writer: replace by a real capture (owner row); `metadata.id`, `spec.running`, `spec.healthy`, one unhealthy service |
+| `talosctl/get_machinestatus.json` | written | talosctl 1.12 documents | 2026-10-18 | from the Talos documents and the JSON writer: replace by a real capture (owner row); `spec.stage` and `spec.status.ready`, one booting node with an unmet condition |
+| `talosctl/config_contexts.txt` | written | talosctl 1.12 documents | 2026-10-18 | from the Talos documents and the JSON writer: replace by a real capture (owner row); the plain table `CURRENT NAME ENDPOINTS NODES` with one marked row; the parser reads it leniently |
+| `talosctl/config_info.json` | written | talosctl 1.12 documents | 2026-10-18 | from the Talos documents and the JSON writer: replace by a real capture (owner row); the `roles` member and the whole `-o json` form are an assumption |
+| `talosctl/version.txt` | written | talosctl 1.12 documents | 2026-10-18 | from the Talos documents and the JSON writer: replace by a real capture (owner row); the `Client:` block with `Tag`, `SHA`, `Built`, `Go version` and `OS/Arch` lines, plausible values |
+| `kubectl/config_view_unknown_member.json` | written | kubectl 1.36.1 shape | 2026-10-18 | drift of `config_view.json`: an unknown member at the top and in a context |
+| `kubectl/config_view_missing_contexts.json` | written | kubectl 1.36.1 shape | 2026-10-18 | drift of `config_view.json`: the `contexts` member is missing |
+| `kubectl/config_view_wrong_type.json` | written | kubectl 1.36.1 shape | 2026-10-18 | drift of `config_view.json`: numbers where strings belong (`current-context`, a namespace) |
+| `kubectl/pods_truncated.json` | written | kubectl 1.36.1 shape | 2026-10-18 | drift of `pods.json`: cut in the middle of a value |
+| `az/account_list_truncated.json` | written | az 2.90.0 shape | 2026-10-18 | drift of `account_list.json`: cut in the middle of a value |
+| `az/group_list_truncated.json` | written | az 2.90.0 shape | 2026-10-18 | drift of `group_list.json`: cut in the middle of a value |
+| `gam/print_users_truncated.csv` | written | GAM 7.46.02 shape | 2026-10-18 | drift of `print_users.csv`: cut inside a quoted multi-line cell |
+| `gam/info_domain_truncated.json` | written | GAM 7.46.02 shape | 2026-10-18 | drift of `info_domain.json`: cut in the middle of a value |
+| `talosctl/get_members_truncated.json` | written | talosctl 1.12 documents | 2026-10-18 | drift of `get_members.json`: cut in the middle of a value of the second object |
+| `talosctl/get_services_truncated.json` | written | talosctl 1.12 documents | 2026-10-18 | drift of `get_services.json`: cut in the middle of a value |
+| `talosctl/get_machinestatus_truncated.json` | written | talosctl 1.12 documents | 2026-10-18 | drift of `get_machinestatus.json`: cut in the middle of a value |
+| `talosctl/get_members_second_not_json.json` | written | talosctl 1.12 documents | 2026-10-18 | drift of `get_members.json`: the first object is fine, the second is not JSON |

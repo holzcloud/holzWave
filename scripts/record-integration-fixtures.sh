@@ -4,8 +4,9 @@
 # Usage: sh scripts/record-integration-fixtures.sh <kubectl|az|gam|talosctl|all>
 #
 # The fixtures land in core/tests/fixtures/integrations/<tool>/ and every file is listed in MANIFEST.md there, with its
-# source (recorded from a real run, or written by hand). Exit status: 0 on success, 2 for an unknown tool or a tool that
-# is not installed.
+# source (recorded from a real run, or written by hand). HW_FIXTURE_DIR=/absolute/path writes elsewhere (a trial run).
+# Exit status: 0 on success, 2 for an unknown tool or a tool that is not installed (talosctl: it prints how to capture and
+# exits 0; it needs HW_TALOSCONFIG=/absolute/path of a talosconfig and, for the resources, HW_TALOS_NODE=<address>).
 #
 # Safety rules of this script:
 #   * Every run points the tool at scratch locations (KUBECONFIG, AZURE_CONFIG_DIR, GAMCFGDIR, TALOSCONFIG, HOME) and
@@ -20,7 +21,7 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
-OUT="$ROOT/core/tests/fixtures/integrations"
+OUT="${HW_FIXTURE_DIR:-$ROOT/core/tests/fixtures/integrations}"
 SANITISE="$HERE/sanitise-integration-fixture.py"
 
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/holzwave-record.XXXXXX") || {
@@ -434,22 +435,91 @@ record_gam() {
     # print_users.csv and info_domain.json are written by hand: they need a signed-in Workspace domain.
 }
 
+# ---------------------------------------------------------------------------------------------------------------------
+# talosctl
+# ---------------------------------------------------------------------------------------------------------------------
+
+# Run talosctl with a closed environment. TALOSCONFIG is a scratch copy of the configuration the owner named, so the
+# owner's file is never the one the tool opens.
+talos_in() {
+    env -i PATH=/usr/bin:/bin HOME="$SCRATCH/taloshome" TALOSCONFIG="$SCRATCH/talosconfig" "$TALOSCTL" "$@"
+}
+
+# One read verb through the Talos sanitiser into a fixture. Arguments: fixture file, then the verb and its arguments.
+talos_capture() {
+    fixture=$1
+    shift
+    if limited 20 talos_in "$@" >"$SCRATCH/talos.out" 2>"$SCRATCH/talos.err" && [ -s "$SCRATCH/talos.out" ]; then
+        python3 -I "$SANITISE" --talos --indent 4 <"$SCRATCH/talos.out" >"$OUT/talosctl/$fixture" || return 1
+        say "recorded talosctl/$fixture"
+    else
+        say "talosctl $* failed or printed nothing: $(head -c 200 "$SCRATCH/talos.err"): talosctl/$fixture stays as it was"
+    fi
+}
+
+record_talosctl() {
+    TALOSCTL=$(tool_path talosctl) || {
+        say "talosctl is not installed: the fixtures stay written; capture them with HW_TALOSCONFIG=... on a machine that has it"
+        return 0
+    }
+    if [ -z "${HW_TALOSCONFIG:-}" ] || [ ! -f "$HW_TALOSCONFIG" ]; then
+        say "HW_TALOSCONFIG=/absolute/path is not set to a file: this script never guesses a talosconfig"
+        return 2
+    fi
+    mkdir -p "$OUT/talosctl" "$SCRATCH/taloshome" || return 2
+    cp "$HW_TALOSCONFIG" "$SCRATCH/talosconfig" || return 2
+    say "talosctl: $TALOSCTL"
+    nodes=""
+    [ -n "${HW_TALOS_NODE:-}" ] && nodes="--nodes=$HW_TALOS_NODE"
+    talos_capture version.txt version --client
+    talos_capture config_info.json config info -o json
+    # The table of contexts: the names are replaced by context-N, the rest goes through the same sanitiser.
+    if limited 20 talos_in config contexts >"$SCRATCH/talos.out" 2>"$SCRATCH/talos.err" && [ -s "$SCRATCH/talos.out" ]; then
+        awk 'NR == 1 { print; next } { name = ($1 == "*") ? $2 : $1; n++; sub(name, "context-" n); print }' "$SCRATCH/talos.out" |
+            python3 -I "$SANITISE" --talos >"$OUT/talosctl/config_contexts.txt" || return 2
+        say "recorded talosctl/config_contexts.txt"
+    else
+        say "talosctl config contexts failed: talosctl/config_contexts.txt stays as it was"
+    fi
+    if [ -z "$nodes" ]; then
+        say "HW_TALOS_NODE is not set: the resource fixtures (members, services, machine status) are not recorded"
+        return 0
+    fi
+    talos_capture get_members.json "$nodes" get members -o json
+    talos_capture get_services.json "$nodes" get services -o json
+    talos_capture get_machinestatus.json "$nodes" get machinestatus -o json
+}
+
 [ "$#" -eq 1 ] || usage
 
 status=0
 case "$1" in
     kubectl)
-        record_kubectl || status=$?
+        record_kubectl
+        status=$?
         ;;
     az)
-        record_az || status=$?
+        record_az
+        status=$?
         ;;
     gam)
-        record_gam || status=$?
+        record_gam
+        status=$?
+        ;;
+    talosctl)
+        record_talosctl
+        status=$?
         ;;
     all)
-        for tool in kubectl az gam; do
-            "$0" "$tool" || status=$?
+        # A tool that is not installed is skipped here; naming it alone is an error.
+        for tool in kubectl az gam talosctl; do
+            sh "$0" "$tool"
+            code=$?
+            if [ "$code" -eq 2 ]; then
+                say "$tool: skipped or failed (see above)"
+            elif [ "$code" -ne 0 ]; then
+                status=$code
+            fi
         done
         ;;
     *)
