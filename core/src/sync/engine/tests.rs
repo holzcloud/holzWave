@@ -548,3 +548,79 @@ fn a_file_swapped_on_the_server_for_another_names_blob_is_not_applied() {
     assert!(text(&b, "settings.json").is_none());
     assert_eq!(text(&b, "layout.json").as_deref(), Some("l"), "the other files still sync");
 }
+
+/// Stage `name` with `text` in the staging folder of `d`, the way a download does (no record of a live hash).
+fn stage(d: &Device, name: &str, text: &str) {
+    write_atomic(&d.dir.join("sync-incoming").join(name), text.as_bytes()).unwrap();
+}
+
+#[test]
+fn promote_where_moves_only_what_is_wanted() {
+    let d = device("w1");
+    stage(&d, "themes/dark.json", "{\"name\":\"dark\"}");
+    stage(&d, "settings.json", "{\"font_size\":20}");
+    stage(&d, "widget_notes.json", "{}");
+    let promoted = promote_where(&d.dir, &is_unowned);
+    assert_eq!(promoted, Promoted { applied: vec!["themes/dark.json".into(), "widget_notes.json".into()], kept: vec![], skipped: vec![] });
+    assert!(d.dir.join("themes").join("dark.json").is_file() && d.dir.join("widget_notes.json").is_file());
+    assert!(!d.dir.join("settings.json").exists(), "an owned file is not applied");
+    let incoming = d.dir.join("sync-incoming");
+    assert!(incoming.join("settings.json").is_file(), "it stays staged");
+    assert!(!incoming.join("themes").join("dark.json").exists());
+    assert!(incoming.is_dir(), "the staging folder stays while a staged name is left");
+    // The rest follows with everything wanted, and the folder goes.
+    let promoted = promote_where(&d.dir, &|_| true);
+    assert_eq!(promoted.applied, vec!["settings.json"]);
+    assert_eq!(fs::read_to_string(d.dir.join("settings.json")).unwrap(), "{\"font_size\":20}");
+    assert!(!incoming.exists());
+}
+
+#[test]
+fn the_record_of_a_name_that_waits_waits_with_it() {
+    let srv = server();
+    let (a, b) = (device("wa2"), device("wb2"));
+    put(&a, "settings.json", "first");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(text(&b, "settings.json").as_deref(), Some("first"));
+    put(&a, "settings.json", "from a");
+    put(&a, "themes/dark.json", "{\"name\":\"dark\"}");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    let incoming = b.dir.join("sync-incoming");
+    assert!(incoming.join("settings.json").is_file() && incoming.join("themes").join("dark.json").is_file());
+    let promoted = promote_where(&b.dir, &is_unowned);
+    assert_eq!(promoted.applied, vec!["themes/dark.json"]);
+    let record: BTreeMap<String, Option<String>> = serde_json::from_slice(&fs::read(incoming.join(STAGE_BASE)).unwrap()).unwrap();
+    assert_eq!(record.keys().cloned().collect::<Vec<_>>(), vec!["settings.json"], "{record:?}");
+    // The start-up promote then still sees that the live settings.json was not touched since staging: no copy.
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "from a");
+    assert!(!incoming.exists());
+}
+
+#[test]
+fn promote_incoming_is_promote_where_with_everything() {
+    let d = device("w3");
+    stage(&d, "layout.json", "{}");
+    stage(&d, "themes/a.json", "{}");
+    stage(&d, "settings.json", "{}");
+    let via_wrapper = promote_incoming_with_report(&d.dir);
+    let d2 = device("w4");
+    stage(&d2, "layout.json", "{}");
+    stage(&d2, "themes/a.json", "{}");
+    stage(&d2, "settings.json", "{}");
+    assert_eq!(via_wrapper, promote_where(&d2.dir, &|_| true));
+    assert_eq!(via_wrapper.applied, vec!["layout.json", "settings.json", "themes/a.json"]);
+}
+
+#[test]
+fn the_unowned_names_are_themes_widgets_and_the_notes_and_nothing_the_app_rewrites() {
+    for yes in ["themes/dark.json", "widgets/deploy.json", "widget_notes.json"] {
+        assert!(is_unowned(yes), "{yes}");
+    }
+    for no in ["layout.json", "settings.json", "connections.json", "secrets.json", "themes/a.b.json", "themes/../settings.json", "evil.json", "widgets/x.txt", ""] {
+        assert!(!is_unowned(no), "{no}");
+    }
+}

@@ -131,12 +131,25 @@ pub fn promote_incoming(dir: &Path) -> Vec<String> {
     promote_incoming_with_report(dir).applied
 }
 
-/// [`promote_incoming`] with what else happened. For each staged name the live file is compared with the hash recorded
-/// when the download was staged: a live file that changed since (or that did not exist then) is written to
-/// `sync-conflicts/<name with / as .>.<time>` before the download replaces it. When that copy cannot be written the name
-/// is skipped: the staged file and the live file stay as they are. The kept names are noted in `sync-kept.json` for the
-/// first run after the start. The staging folder is removed last, and only when nothing was skipped.
+/// [`promote_incoming`] with what else happened: every staged name, see [`promote_where`].
 pub fn promote_incoming_with_report(dir: &Path) -> Promoted {
+    promote_where(dir, &|_| true)
+}
+
+/// Whether the running app leaves `name` alone: the themes and the widgets (it only reads them) and the note texts (one
+/// writer, which shares a lock with the promote). The layout, the settings and the connections are rewritten from memory
+/// by the running app, so they wait for the next start.
+pub fn is_unowned(name: &str) -> bool {
+    allowed(name) && (name == "widget_notes.json" || name.split_once('/').is_some_and(|(dir, _)| dir == "themes" || dir == "widgets"))
+}
+
+/// Move the staged files `wanted` accepts into place; every other staged file stays staged, with its record. For each
+/// staged name the live file is compared with the hash recorded when the download was staged: a live file that changed
+/// since (or that did not exist then) is written to `sync-conflicts/<name with / as .>.<time>` before the download
+/// replaces it. When that copy cannot be written the name is skipped: the staged file and the live file stay as they
+/// are. The kept names are noted in `sync-kept.json` for the next run. The staging folder is removed last, and only when
+/// no staged name is left and nothing was skipped. `wanted` only ever sees synced names other than the secrets.
+pub fn promote_where(dir: &Path, wanted: &dyn Fn(&str) -> bool) -> Promoted {
     let root = dir.join(INCOMING);
     let mut staged = Vec::new();
     let mut stack = vec![(root.clone(), String::new())];
@@ -156,7 +169,12 @@ pub fn promote_incoming_with_report(dir: &Path) -> Promoted {
     staged.sort();
     let bases = load_bases(&root);
     let mut out = Promoted::default();
+    let mut waiting = Vec::new();
     for (name, path) in staged {
+        if !wanted(&name) {
+            waiting.push(name);
+            continue;
+        }
         let live_path = dir.join(&name);
         let incoming = read_limited(&path, MAX_FILE).ok().flatten().map(|b| digest(&b));
         let edited = match read_limited(&live_path, MAX_FILE) {
@@ -198,12 +216,12 @@ pub fn promote_incoming_with_report(dir: &Path) -> Promoted {
         let note = serde_json::json!({ "kept": names });
         let _ = write_atomic(&dir.join(KEPT), &serde_json::to_vec_pretty(&note).unwrap_or_default());
     }
-    if out.skipped.is_empty() {
+    if out.skipped.is_empty() && waiting.is_empty() {
         let _ = fs::remove_dir_all(&root);
     } else {
         // The staged files that wait keep their own base; the entries of what was applied go.
         let mut left = bases;
-        left.retain(|name, _| out.skipped.contains(name));
+        left.retain(|name, _| out.skipped.contains(name) || waiting.contains(name));
         save_bases(&root, &left);
     }
     out
