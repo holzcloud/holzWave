@@ -50,3 +50,4 @@ rustls-platform-verifier = "0.7.1"
 
 [dev-dependencies]
 rand = { version = "0.10", features = ["thread_rng"] }
+futures-core = "0.3"

@@ -21,7 +21,7 @@ use crate::pane::PaneSpec;
 use crate::platform::Os;
 use crate::pool::{Connection, SessionPool};
 use crate::persist::{read_limited, write_atomic};
-use crate::profiles::{Kind, Profile, Profiles};
+use crate::profiles::{Auth, Kind, Profile, Profiles};
 use crate::secrets::SecretStore;
 use crate::sync::webdav::safe_segment;
 use crate::{Error, Result};
@@ -91,6 +91,9 @@ impl ConnView {
 /// Said when a WSL connection is assigned or started anywhere but on Windows: `wsl.exe` exists there only.
 pub const WSL_ONLY_ON_WINDOWS: &str = "WSL connections open on Windows only.";
 
+/// Said when a password or passphrase is saved for a connection that logs in through the ssh-agent.
+pub const AGENT_HAS_NO_SECRET: &str = "an agent login has no password or passphrase";
+
 pub struct Connections {
     dir: PathBuf,
     /// The OS the connections open on: a WSL connection is refused unless it is Windows. A field so a test can say it.
@@ -154,6 +157,10 @@ impl Connections {
     }
 
     fn view(&self, profile: &Profile) -> ProfileView {
+        // An agent login has no secret and the keychain is not asked.
+        if profile.kind == Kind::Ssh && profile.auth == Auth::Agent {
+            return ProfileView { profile: profile.clone(), has_secret: false };
+        }
         // A keychain that cannot be read counts as no secret: the list must still show.
         let has_secret = self.secrets.get(&profile.secret_account()).ok().flatten().is_some();
         ProfileView { profile: profile.clone(), has_secret }
@@ -204,15 +211,31 @@ impl Connections {
     /// Add or change a connection and its secret. An id that is empty is made from the name. Validated as a whole;
     /// nothing is written when it does not validate. The keychain is written before the file, and rolled back when the
     /// file cannot be written.
+    ///
+    /// An agent login has no secret: a password or passphrase for it is refused before anything is written, and the
+    /// keychain entry an earlier login of the connection left is removed once the file is saved (the keychain is not read).
     pub fn save(&self, mut profile: Profile, secret: SecretChange) -> Result<ProfileView> {
         let mut profiles = self.profiles();
         if profile.id.trim().is_empty() {
             profile.id = profiles.fresh_id(&profile.name);
         }
         let account = profile.secret_account();
-        let previous_secret = self.secrets.get(&account).ok().flatten();
+        let agent = profile.auth == Auth::Agent && profile.kind == Kind::Ssh;
+        if agent && matches!(secret, SecretChange::Set { .. }) {
+            return Err(Error::Unsupported(AGENT_HAS_NO_SECRET.into()));
+        }
         let mut next = profiles.clone();
         next.upsert(profile.clone())?;
+        if agent {
+            next.save(&self.dir).map_err(Error::Io)?;
+            // Not an error when it cannot be removed: the entry is unused and the person can clear it from the keychain.
+            let _ = self.secrets.delete(&account);
+            *profiles = next;
+            drop(profiles);
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            return Ok(ProfileView { profile, has_secret: false });
+        }
+        let previous_secret = self.secrets.get(&account).ok().flatten();
         match &secret {
             SecretChange::Keep => {}
             SecretChange::Set { value } if !value.is_empty() => self.secrets.set(&account, value)?,

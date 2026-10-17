@@ -21,6 +21,10 @@
 //! Secrets (a key's passphrase, a password) are given by the caller in [`SshAuth`] and are never written to disk or
 //! to the screen here. Host keys are checked against a `known_hosts` file ([`HostKeyPolicy`]).
 //!
+//! A third way to log in is the user's ssh-agent ([`SshAuth::Agent`]): the agent signs the server's challenge, so the
+//! private key never enters this program and agent forwarding is never offered to the host. It is an explicit choice
+//! of the connection, never a fallback from a key file or a password.
+//!
 //! [`SshExec`] is the other way in: it runs one command at a time per call on the host of a saved connection, on a
 //! channel that asks for no terminal, no environment and no agent forwarding, and never types into a pane. It never
 //! learns a host key (an unknown or changed key is refused), keeps only the last bytes of each output stream up to a
@@ -30,7 +34,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -38,6 +42,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use russh::client::{self, Handle};
+use russh::keys::agent::AgentIdentity;
+use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, known_hosts, load_secret_key};
 use russh::{Channel, ChannelMsg, ChannelOpenFailure, ChannelReadHalf, ChannelWriteHalf, Sig};
 use tokio::sync::{mpsc as tmpsc, watch};
@@ -69,12 +75,27 @@ pub enum SshAuth {
     Key { path: PathBuf, passphrase: Option<String> },
     /// A password.
     Password(String),
+    /// The user's ssh-agent signs the login. The private key never enters this program: only the server's challenge goes
+    /// to the agent and a signature comes back. Agent forwarding is never offered to the host.
+    Agent {
+        /// Where the agent listens. `None` finds it the way `ssh` does (`SSH_AUTH_SOCK` on Unix, the OpenSSH agent pipe on
+        /// Windows) when the connection is made; `Some` is for tests and tools.
+        socket: Option<PathBuf>,
+        /// A public key file that picks one of the agent's keys; `None` offers the agent's keys in the order it lists
+        /// them, at most [`AGENT_MAX_TRIES`].
+        identity: Option<PathBuf>,
+    },
 }
 
 impl std::fmt::Debug for SshAuth {
-    // A secret never reaches a log line through `{:?}`.
+    // A secret never reaches a log line through `{:?}`. The agent's socket is not a secret but names a folder, so only the
+    // name of the identity file is shown.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SshAuth::Agent { identity, .. } => {
+                let name = identity.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+                write!(f, "Agent({})", name.as_deref().unwrap_or("none"))
+            }
             SshAuth::Key { path, passphrase } => f
                 .debug_struct("Key")
                 .field("path", path)
@@ -808,7 +829,8 @@ pub(crate) async fn open(target: &SshTarget, forwards: &Arc<Forwards>) -> std::r
         SshAuth::Password(password) => session
             .authenticate_password(target.user.clone(), password.clone())
             .await
-            .map_err(|e| lost(&e))?,
+            .map_err(|e| lost(&e))?
+            .success(),
         SshAuth::Key { path, passphrase } => {
             let key = load_secret_key(path, passphrase.as_deref())
                 .map_err(|e| {
@@ -820,12 +842,168 @@ pub(crate) async fn open(target: &SshTarget, forwards: &Arc<Forwards>) -> std::r
                 .authenticate_publickey(target.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                 .await
                 .map_err(|e| lost(&e))?
+                .success()
+        }
+        // The agent says why it failed in its own words; success is the only way out of it without an error.
+        SshAuth::Agent { socket, identity } => {
+            agent_login(&mut session, &target.user, socket.as_deref(), identity.as_deref()).await?;
+            true
         }
     };
-    if !authenticated.success() {
+    if !authenticated {
         return Err(Outcome::Fatal(format!("{}@{} refused the login", target.user, target.host)));
     }
     Ok(session)
+}
+
+/// At most this many of the agent's keys are offered to a server, in the order the agent lists them. A server allows six
+/// attempts by default (`MaxAuthTries`), so more would lock a person with many keys out; such a person names the key to
+/// use by its public key file.
+pub const AGENT_MAX_TRIES: usize = 5;
+
+/// The sentences of an agent login. Each is a constant, so no key, no signature and no path of a socket can be in one.
+#[cfg(not(windows))]
+const AGENT_NOT_RUNNING: &str = "no ssh-agent is running (SSH_AUTH_SOCK is not set)";
+const AGENT_UNREACHABLE: &str = "the ssh-agent cannot be reached";
+const AGENT_NO_KEYS: &str = "the ssh-agent holds no keys";
+const AGENT_NO_ACCEPTED_KEY: &str = "the ssh-agent has no key that this host accepts";
+const AGENT_REFUSED: &str = "the ssh-agent refused to sign";
+const AGENT_BAD_IDENTITY: &str = "the public key file cannot be used";
+const AGENT_KEY_NOT_HELD: &str = "the public key is not in the ssh-agent";
+
+/// The OpenSSH agent of Windows listens on this named pipe.
+#[cfg(windows)]
+const AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+/// How long the agent may take to connect and to list its keys. Signing is not bound here (a key that waits for a touch
+/// may take a while); the login as a whole is bound by the pool.
+const AGENT_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most a public key file may hold; a real one is a few hundred bytes.
+const MAX_IDENTITY_FILE: u64 = 16 * 1024;
+
+/// A connection to an agent, whatever carries it (a Unix socket or a Windows pipe).
+type AgentConnection = AgentClient<Box<dyn AgentStream + Send + Unpin>>;
+
+/// Where the agent listens: `explicit` (a test or a tool), else `SSH_AUTH_SOCK` on Unix, else the OpenSSH pipe on
+/// Windows. The environment is an argument so that no test has to change the environment of the process.
+fn agent_endpoint(explicit: Option<&Path>, env: Option<std::ffi::OsString>) -> std::result::Result<PathBuf, &'static str> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let _ = env;
+        Ok(PathBuf::from(AGENT_PIPE))
+    }
+    #[cfg(not(windows))]
+    match env {
+        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+        _ => Err(AGENT_NOT_RUNNING),
+    }
+}
+
+/// The keys of the agent's identities in the order it listed them. A certificate is skipped: its signature would be made
+/// for the certificate, which this login does not offer.
+fn plain_keys(identities: Vec<AgentIdentity>) -> Vec<PublicKey> {
+    identities
+        .into_iter()
+        .filter_map(|identity| match identity {
+            AgentIdentity::PublicKey { key, .. } => Some(key),
+            AgentIdentity::Certificate { .. } => None,
+        })
+        .collect()
+}
+
+/// The public key in `path`, or `None` when it is not a readable public key file. A private key is never read: the first
+/// bytes of one say what it is, and the file is left unread then.
+fn read_identity(path: &Path) -> Option<PublicKey> {
+    use std::io::Read;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut text = vec![0u8; 10];
+    file.read_exact(&mut text).ok()?;
+    if text.starts_with(b"-----BEGIN") {
+        return None;
+    }
+    file.take(MAX_IDENTITY_FILE).read_to_end(&mut text).ok()?;
+    PublicKey::from_openssh(std::str::from_utf8(&text).ok()?).ok()
+}
+
+/// Connect to the agent at `path`.
+async fn connect_agent(path: &Path) -> Option<AgentConnection> {
+    #[cfg(unix)]
+    {
+        Some(AgentClient::connect_uds(path).await.ok()?.dynamic())
+    }
+    #[cfg(windows)]
+    {
+        Some(AgentClient::connect_named_pipe(path).await.ok()?.dynamic())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Why a signature could not be made: the connection to the host went (the login may be tried again) or the agent said no.
+fn agent_sign_error(error: &russh::AgentAuthError) -> Outcome {
+    use russh::keys::Error as KeyError;
+    match error {
+        russh::AgentAuthError::Send(e) => Outcome::Lost(e.to_string()),
+        russh::AgentAuthError::Key(KeyError::IO(_)) => Outcome::Fatal(AGENT_UNREACHABLE.into()),
+        russh::AgentAuthError::Key(_) => Outcome::Fatal(AGENT_REFUSED.into()),
+    }
+}
+
+/// Log in with the user's agent: the agent's keys are offered in turn (at most [`AGENT_MAX_TRIES`]) and the agent signs
+/// the server's challenge for the one the server wants. Nothing here sees a private key; nothing is stored; the agent is
+/// never forwarded.
+async fn agent_login(
+    session: &mut Handle<Client>,
+    user: &str,
+    socket: Option<&Path>,
+    identity: Option<&Path>,
+) -> std::result::Result<(), Outcome> {
+    let fatal = |why: &str| Outcome::Fatal(why.to_owned());
+    // The file the person named comes first: it is local and its fault is theirs to fix.
+    let wanted = match identity {
+        Some(file) => Some(read_identity(file).ok_or_else(|| fatal(AGENT_BAD_IDENTITY))?),
+        None => None,
+    };
+    let endpoint = agent_endpoint(socket, std::env::var_os("SSH_AUTH_SOCK")).map_err(fatal)?;
+    let listing = async {
+        let mut agent = connect_agent(&endpoint).await?;
+        let identities = agent.request_identities().await.ok()?;
+        Some((agent, identities))
+    };
+    let Ok(Some((mut agent, identities))) = tokio::time::timeout(AGENT_LIST_TIMEOUT, listing).await else {
+        return Err(fatal(AGENT_UNREACHABLE));
+    };
+    let keys = plain_keys(identities);
+    if keys.is_empty() {
+        return Err(fatal(AGENT_NO_KEYS));
+    }
+    let offered: Vec<PublicKey> = match wanted {
+        Some(wanted) => vec![keys.into_iter().find(|key| key.key_data() == wanted.key_data()).ok_or_else(|| fatal(AGENT_KEY_NOT_HELD))?],
+        None => keys.into_iter().take(AGENT_MAX_TRIES).collect(),
+    };
+    for key in offered {
+        let hash = if matches!(key.algorithm(), russh::keys::Algorithm::Rsa { .. }) {
+            session.best_supported_rsa_hash().await.map_err(|e| Outcome::Lost(e.to_string()))?.flatten()
+        } else {
+            None
+        };
+        match session.authenticate_publickey_with(user, key, hash, &mut agent).await {
+            Ok(result) if result.success() => return Ok(()),
+            Ok(_) => {}
+            Err(e) => return Err(agent_sign_error(&e)),
+        }
+    }
+    Err(fatal(AGENT_NO_ACCEPTED_KEY))
 }
 
 /// What the pane says when a key file cannot be used, in words that tell the person what to do.

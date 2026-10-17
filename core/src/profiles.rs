@@ -49,6 +49,9 @@ pub enum Auth {
     Key,
     /// A password from the keychain.
     Password,
+    /// The user's ssh-agent signs the login. Nothing is stored for the connection; `key_path` may name a public key file
+    /// that picks one of the agent's keys. Never a fallback: a connection uses the login it names.
+    Agent,
 }
 
 fn default_port() -> u16 {
@@ -81,7 +84,8 @@ pub struct Profile {
     pub user: String,
     #[serde(default)]
     pub auth: Auth,
-    /// The private key file (SSH with a key). A `~/` start is the home directory.
+    /// The private key file (SSH with a key). A `~/` start is the home directory. With the agent login it may name a public
+    /// key file that picks one of the agent's keys.
     #[serde(default)]
     pub key_path: String,
     /// The id of the profile to go through first.
@@ -303,12 +307,18 @@ impl Profiles {
         if profile.kind != Kind::Ssh {
             return Err(Error::Unsupported(format!("{} is not an SSH connection", profile.name)));
         }
-        let secret = secrets.get(&profile.secret_account())?;
         let auth = match profile.auth {
+            // The agent signs: nothing is stored for the connection, so the keychain is not asked.
+            Auth::Agent => SshAuth::Agent {
+                socket: None,
+                identity: (!profile.key_path.trim().is_empty()).then(|| expand_home(&profile.key_path, home)),
+            },
             Auth::Password => SshAuth::Password(
-                secret.ok_or_else(|| Error::Unsupported(format!("no password is saved for {}", profile.name)))?,
+                secrets
+                    .get(&profile.secret_account())?
+                    .ok_or_else(|| Error::Unsupported(format!("no password is saved for {}", profile.name)))?,
             ),
-            Auth::Key => SshAuth::Key { path: expand_home(&profile.key_path, home), passphrase: secret },
+            Auth::Key => SshAuth::Key { path: expand_home(&profile.key_path, home), passphrase: secrets.get(&profile.secret_account())? },
         };
         let mut target = SshTarget::new(profile.host.clone(), profile.user.clone(), auth);
         target.port = profile.port;

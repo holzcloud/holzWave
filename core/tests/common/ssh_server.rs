@@ -34,6 +34,8 @@
 //!   and [`Options::sftp_deny_upload`] fail a write and refuse to open a file for writing.
 //! - **Stale sockets.** With [`Options::stale_sockets`] a forward request for a path that is still bound is refused, and a
 //!   path is freed by its cancel only: a login that is cut leaves its paths bound, as a real `sshd` does until it notices.
+//! - **Agent forwarding.** A request for it is refused and counted (`Seen::agent_requests`), so a test can say that a
+//!   login through an agent never asked for it.
 //! - **Cuts and counts.** [`Server::cut`] ends every connection that is open now; `Seen::disconnects` counts the
 //!   connections that ended, whoever ended them.
 //!
@@ -255,7 +257,9 @@ pub struct Seen {
     pub cancelled_forwards: Mutex<Vec<String>>,
     /// Exec requests that started the wrapped shell.
     pub execs_as_shell: AtomicUsize,
-    /// The requests of the session channels in order: `pty`, `shell`, `exec`, `forward PATH`, `cancel PATH`.
+    /// `auth-agent-req@openssh.com` requests: a client that asks for agent forwarding. The server refuses every one.
+    pub agent_requests: AtomicUsize,
+    /// The requests of the session channels in order: `pty`, `shell`, `exec`, `agent`, `forward PATH`, `cancel PATH`.
     pub events: Mutex<Vec<String>>,
     /// How often each scripted command ran, for [`Options::exec_script`].
     script_calls: Mutex<HashMap<String, usize>>,
@@ -609,6 +613,13 @@ impl server::Handler for Handler {
     async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         let accepted = user == self.options.user && self.options.authorized.iter().any(|known| known == key);
         Ok(self.judge(accepted))
+    }
+
+    // A client that forwards its agent asks here. It is refused and counted, so a test can say that nobody asked.
+    async fn agent_request(&mut self, _channel: ChannelId, _session: &mut Session) -> Result<bool, Self::Error> {
+        self.seen.agent_requests.fetch_add(1, Ordering::SeqCst);
+        self.seen.event("agent");
+        Ok(false)
     }
 
     async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
