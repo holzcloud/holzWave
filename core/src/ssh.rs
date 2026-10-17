@@ -584,19 +584,19 @@ pub fn learn_host_key(host: &str, port: u16, key: &PublicKey, path: &std::path::
 
 // ---- exec: one command on a saved connection, without a terminal -------------------------------------------------
 
-/// The longest command [`SshExec::exec`] accepts, in bytes (T-07-024).
+/// The longest command [`SshExec::exec`] accepts, in bytes.
 pub const MAX_EXEC_COMMAND: usize = 16 * 1024;
-/// The output kept per stream when the caller does not say (T-07-024).
+/// The output kept per stream when the caller does not say.
 pub const DEFAULT_EXEC_OUTPUT: usize = 64 * 1024;
-/// The most output kept per stream, whatever the caller asks for (T-07-024).
+/// The most output kept per stream, whatever the caller asks for.
 pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
-/// How long a command may run when the caller does not say (T-07-025).
+/// How long a command may run when the caller does not say.
 pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
-/// The longest a command may run, whatever the caller asks for (T-07-025).
+/// The longest a command may run, whatever the caller asks for.
 pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// Connect and log in: the bound [`crate::files::SftpSource`] uses too (T-07-025).
+/// Connect and log in: the bound [`crate::files::SftpSource`] uses too.
 const EXEC_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// Open the channel and write the request (T-07-025).
+/// Open the channel and write the request.
 const EXEC_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// The shortest time limit; a smaller one is raised to it, so a zero cannot end every command before it starts.
 const MIN_EXEC_TIMEOUT: Duration = Duration::from_millis(10);
@@ -618,8 +618,7 @@ impl Default for ExecLimits {
 
 impl ExecLimits {
     /// The limits brought into the allowed range: `max_output` from 1 to [`MAX_EXEC_OUTPUT`], `timeout` from 10 ms to
-    /// [`MAX_EXEC_TIMEOUT`]. [`SshExec::exec`] applies it to whatever the caller passes, so every caller is bounded
-    /// (T-07-024, T-07-025).
+    /// [`MAX_EXEC_TIMEOUT`]. [`SshExec::exec`] applies it to whatever the caller passes, so every caller is bounded.
     pub fn clamped(self) -> Self {
         Self {
             max_output: self.max_output.clamp(1, MAX_EXEC_OUTPUT),
@@ -670,19 +669,19 @@ impl ExecCancel {
 pub enum ExecEnd {
     /// The server closed the channel: the command ended (or closed its output, see [`ExecResult::status`]).
     Finished,
-    /// The time limit passed. The client sent signal KILL and closed the channel; the command may still run (T-07-026).
+    /// The time limit passed. The client sent signal KILL and closed the channel; the command may still run.
     TimedOut,
-    /// The caller cancelled. The same stop as for a time-out (T-07-026).
+    /// The caller cancelled. The same stop as for a time-out.
     Cancelled,
     /// The connection broke while the command ran, so whether it finished is unknown. This code never runs the
-    /// command again (T-07-023): the caller treats the result as an error with partial output.
+    /// command again: the caller treats the result as an error with partial output.
     Lost,
 }
 
 /// What a command printed and how it ended.
 ///
 /// The output fields are bytes, not text: a cut can split a UTF-8 sequence, so callers decode lossily. They are raw and
-/// not sanitised: the consumer redacts secrets and removes escape sequences before it shows or sends them (T-07-029).
+/// not sanitised: the consumer redacts secrets and removes escape sequences before it shows or sends them.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ExecResult {
     /// The last [`ExecLimits::max_output`] bytes of standard output.
@@ -700,7 +699,7 @@ pub struct ExecResult {
 }
 
 impl std::fmt::Debug for ExecResult {
-    // The output may hold a secret; only its size is shown (T-07-027).
+    // The output may hold a secret; only its size is shown.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExecResult")
             .field("stdout_bytes", &self.stdout.len())
@@ -713,7 +712,7 @@ impl std::fmt::Debug for ExecResult {
     }
 }
 
-/// The last `cap` bytes of everything pushed, and the count of the bytes that fell off the front (T-07-024). A deque,
+/// The last `cap` bytes of everything pushed, and the count of the bytes that fell off the front. A deque,
 /// so a chunk is appended and the excess is taken off the front without moving what stays.
 struct Tail {
     cap: usize,
@@ -760,7 +759,7 @@ impl Tail {
 ///
 /// Why: [`Client::check_server_key`] learns an unknown key under [`HostKeyPolicy::AcceptNew`] and accepts every key when
 /// there is no file. For a shell the user types into that is trust on first use; an action an agent takes must never be
-/// the first contact with a host (T-07-021). A host can therefore be used by exec only after the user's own pane or file
+/// the first contact with a host. A host can therefore be used by exec only after the user's own pane or file
 /// browser learned its key.
 fn require_pinned_hosts(target: &SshTarget) -> Result<SshTarget> {
     fn pin(target: &mut SshTarget) -> Result<()> {
@@ -781,14 +780,13 @@ fn require_pinned_hosts(target: &SshTarget) -> Result<SshTarget> {
     Ok(pinned)
 }
 
-/// A refusal or failure of an exec: a fixed phrase or the reason `open_session` gave, never the command or a credential
-/// (T-07-027).
+/// A refusal or failure of an exec: a fixed phrase or the reason `open_session` gave, never the command or a credential.
 fn exec_error(text: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("ssh exec: {text}"))
 }
 
 /// Refuse a command that cannot be run, before anything is connected. The texts never include the command: it may hold a
-/// secret (T-07-027). Newlines are allowed (a script is a legitimate command); the approval layer owns what may run.
+/// secret. Newlines are allowed (a script is a legitimate command); the approval layer owns what may run.
 fn check_command(command: &str) -> Result<()> {
     if command.trim().is_empty() {
         return Err(exec_error("the command is empty"));
@@ -826,7 +824,7 @@ fn signal_number(signal: &Sig) -> u32 {
 /// connection cannot hold the caller.
 ///
 /// A server may ignore the signal and a shell may leave child processes running; the channel is closed either way. A
-/// caller who needs a hard stop wraps the command with `timeout` itself (T-07-026).
+/// caller who needs a hard stop wraps the command with `timeout` itself.
 async fn stop(channel: &Channel<client::Msg>) {
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
         let _ = channel.signal(Sig::KILL).await;
@@ -854,7 +852,7 @@ impl SshExec {
     /// [`SshExec::exec`].
     ///
     /// Fails for a host (or jump host) without a known hosts file and for one set to accept any key: the host key of an
-    /// exec connection is always checked and never learned (T-07-021).
+    /// exec connection is always checked and never learned.
     pub fn new(label: impl Into<String>, target: SshTarget) -> Result<Self> {
         let target = require_pinned_hosts(&target)?;
         // One worker thread drives keepalives and replies between calls (as in `SftpSource`); callers only wait.
@@ -877,11 +875,11 @@ impl SshExec {
     /// This blocks: never call it from an async task or from the UI thread, and never drop an `SshExec` inside an async
     /// context (the rules of `SftpSource`). `reconnect` and `startup` of the target are ignored. The command runs in the
     /// account's login shell exactly as given: nothing is quoted or interpreted here, and a caller that builds a command
-    /// from data quotes it for a POSIX shell itself (T-07-028). The run is bounded by `limits.timeout`, measured from the
+    /// from data quotes it for a POSIX shell itself. The run is bounded by `limits.timeout`, measured from the
     /// moment the request was written; connecting and opening the channel have their own bounds.
     ///
     /// A command is written at most once. [`ExecEnd::Lost`] means the connection broke while it ran: it may or may not
-    /// have finished, and this code never runs it again (T-07-023).
+    /// have finished, and this code never runs it again.
     pub fn exec(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
         check_command(command)?;
         let limits = limits.clamped();
@@ -914,7 +912,7 @@ impl SshExec {
 
     /// The whole run of one command.
     ///
-    /// A command is written at most once (T-07-023). A cached connection that cannot open a channel, or cannot take the
+    /// A command is written at most once. A cached connection that cannot open a channel, or cannot take the
     /// request, is replaced once; the same failure on a connection this call just made, a refused request, and every
     /// failure after the request was written are final. A connection lost while the command runs gives
     /// [`ExecEnd::Lost`], and nothing is ever tried again after that.
@@ -938,8 +936,8 @@ impl SshExec {
                 () = cancel.cancelled() => return Ok(nothing(ExecEnd::Cancelled)),
                 opening = opening => opening?,
             };
-            // Nothing but the command is requested: no terminal, no environment, no agent forwarding, no X11
-            // (T-07-022). The end of input follows at once, so a command that reads it does not wait for the time-out.
+            // Nothing but the command is requested: no terminal, no environment, no agent forwarding, no X11.
+            // The end of input follows at once, so a command that reads it does not wait for the time-out.
             let why = match channel {
                 Ok(channel) => match tokio::time::timeout(EXEC_OPEN_TIMEOUT, channel.exec(true, command)).await {
                     Ok(Ok(())) => {
