@@ -77,7 +77,7 @@ audio.bk-media { margin: .833rem; width: calc(100% - 1.667rem); }
 .mon-value[data-level="warn"] { color: var(--hw-warn); }
 .mon-value[data-level="danger"] { color: var(--hw-danger); text-decoration: underline; }
 .mon-down { color: var(--hw-info); }
-.mon-up { color: var(--hw-rose); }
+.mon-up { color: var(--hw-ink-2); }
 .mon-dim { color: var(--hw-dim); }
 .mon-proc { display: grid; grid-template-columns: 5rem minmax(0, 1fr) 4rem 4rem; gap: .667rem; white-space: nowrap; }
 .mon-proc > span:nth-child(n+3) { text-align: right; }

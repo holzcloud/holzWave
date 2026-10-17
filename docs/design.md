@@ -259,7 +259,8 @@ reuses that preview.
 
 The system monitor is a pane too (`System monitor` in the palette; header `system`, context `local · 1 s`): CPU and memory as
 eight-segment bars with their numbers beside them (the level is also said by the number turning amber, or red and
-underlined, above 70 and 90 percent), the network rates, the uptime and the eight busiest processes (PID, name, CPU,
+underlined, above 70 and 90 percent), the network rates (the download rate in blue, the upload rate in the secondary ink,
+each with its arrow `↓` or `↑`; rose marks focus and action only), the uptime and the eight busiest processes (PID, name, CPU,
 memory), one sample a second, paused while the window is hidden.
 
 On another computer. Every saved SSH connection also has the palette entry `System monitor: Name (ssh)` (WSL and Docker
