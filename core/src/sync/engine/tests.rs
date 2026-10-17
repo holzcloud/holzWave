@@ -1673,3 +1673,118 @@ fn a_change_in_a_later_second_is_seen_by_its_etag_alone() {
     assert_eq!(report.downloaded, vec!["settings.json"], "{report:?}");
     assert_eq!(text(&a, "settings.json").as_deref(), Some("v2"));
 }
+
+// ---- read before write -------------------------------------------------------------------------------------------------
+
+#[test]
+fn a_write_in_the_same_second_is_a_conflict_on_a_server_without_checksums() {
+    let srv = server_coarse(false);
+    same_second_overwrite(&srv, "ss4");
+}
+
+#[test]
+fn on_a_server_without_checksums_the_stale_device_is_stopped_at_its_next_edit() {
+    let srv = server_coarse(false);
+    let (a, _b) = same_second_second_writer(&srv, "ss5");
+    // The limit of a plain server, asserted so that a test documents it: nothing tells A that B wrote in its second.
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(text(&a, "settings.json").as_deref(), Some("v1"));
+    // A's next edit reads the server's file before it writes, finds B's version and takes the conflict path.
+    put(&a, "settings.json", "later");
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.conflicts, vec!["settings.json"], "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    let kept: Vec<String> = kept_copies(&a).into_iter().map(|(_, text)| text).chain(backed_up(&srv, &a, "settings.json")).collect();
+    assert!(kept.contains(&"v2".to_owned()), "B's version is kept where a person can reach it: {kept:?}");
+    assert_eq!(server_plain(&srv, &a, "settings.json"), b"later");
+}
+
+#[test]
+fn an_upload_over_an_existing_file_reads_it_once_and_writes_once() {
+    for (tag, srv) in [("rw1", server_coarse(false)), ("rw2", server_coarse(true)), ("rw3", server())] {
+        let (a, _b) = level_pair(&srv, tag);
+        let before = srv.counts();
+        put(&a, "settings.json", "edited");
+        assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["settings.json"]);
+        let after = srv.counts();
+        assert_eq!((after.blob_gets - before.blob_gets, after.puts - before.puts), (1, 1), "{tag}: one read, one write");
+        // A brand new name is written with `If-None-Match: *` and costs no read.
+        put(&a, "widget_notes.json", "{}");
+        assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["widget_notes.json"]);
+        let last = srv.counts();
+        assert_eq!((last.blob_gets - after.blob_gets, last.puts - after.puts), (0, 1), "{tag}: a new name costs no read");
+    }
+}
+
+#[test]
+fn a_legacy_record_is_verified_by_the_counter() {
+    let srv = server_coarse(false);
+    let (a, b) = level_pair(&srv, "lg");
+    blank_blob_records(&a);
+    blank_blob_records(&b);
+    put(&a, "settings.json", "from a");
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["settings.json"]);
+    put(&b, "settings.json", "from b");
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.conflicts, vec!["settings.json"], "the blob's counter is not the one the record has: {report:?}");
+    assert_eq!(backed_up(&srv, &b, "settings.json"), vec!["from a"]);
+    assert_eq!(server_plain(&srv, &b, "settings.json"), b"from b");
+}
+
+/// Two devices that hold `themes/dark.json`, all inside one second of `srv`.
+fn theme_pair(srv: &Server, tag: &str) -> (Device, Device) {
+    let (a, b) = (device(&format!("a-{tag}")), device(&format!("b-{tag}")));
+    fs::create_dir_all(a.dir.join("themes")).unwrap();
+    put(&a, "themes/dark.json", "{\"name\":\"dark\"}");
+    connect(srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(text(&b, "themes/dark.json").as_deref(), Some("{\"name\":\"dark\"}"));
+    (a, b)
+}
+
+#[test]
+fn a_deletion_does_not_delete_a_version_written_in_the_same_second() {
+    for (tag, srv) in [("dl1", server_coarse(false)), ("dl2", server_coarse(true))] {
+        let (a, b) = theme_pair(&srv, tag);
+        write_live(&b, "themes/dark.json", "{\"name\":\"edited by b\"}");
+        assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().uploaded, vec!["themes/dark.json"]);
+        fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+        let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+        assert_eq!(report.conflicts, vec!["themes/dark.json"], "{tag}: {report:?}");
+        assert!(report.deleted.is_empty() && report.errors.is_empty(), "{tag}: no tombstone is sent: {report:?}");
+        assert_eq!(server_plain(&srv, &a, "themes/dark.json"), b"{\"name\":\"edited by b\"}", "{tag}: the server still holds B's text");
+        assert_eq!(text(&a, "themes/dark.json").as_deref(), Some("{\"name\":\"edited by b\"}"), "{tag}: the file is back");
+    }
+}
+
+#[test]
+fn a_read_that_fails_stops_the_write() {
+    let srv = server();
+    let (a, _b) = level_pair(&srv, "rf");
+    put(&a, "settings.json", "edited");
+    put(&a, "widget_notes.json", "{}");
+    srv.store.lock().unwrap().fail_get = Some("settings.json.hwx".into());
+    let before = srv.counts();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["widget_notes.json"], "the other name syncs: {report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].0, "settings.json");
+    assert_eq!(srv.counts().puts - before.puts, 1, "no write for the name whose read failed");
+    assert_eq!(server_plain(&srv, &a, "settings.json"), b"base");
+    // The next run reads again and writes.
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["settings.json"], "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+}
+
+#[test]
+fn a_file_that_vanishes_between_the_listing_and_the_read_is_written_as_new() {
+    let srv = server();
+    let (a, _b) = level_pair(&srv, "vn");
+    put(&a, "settings.json", "edited");
+    srv.store.lock().unwrap().vanish = Some("settings.json.hwx".into());
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["settings.json"], "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(server_plain(&srv, &a, "settings.json"), b"edited");
+}
