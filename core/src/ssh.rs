@@ -1687,7 +1687,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_round_trip_carries_stdout_stderr_and_exit_status_spike_s5() {
+    fn exec_round_trip_carries_stdout_stderr_and_exit_status() {
         let server = serve_exec();
         let dir = scratch_dir("s5");
         let exec = SshExec::new("Test host", exec_target(&server, dir.path())).unwrap();
