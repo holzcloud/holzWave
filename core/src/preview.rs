@@ -138,17 +138,25 @@ fn sanitize(raw: &str) -> String {
         .url_schemes(["http", "https", "mailto"].into_iter().collect())
         .link_rel(Some("noopener noreferrer"))
         // `class` is kept on code (the language of a fenced block) and nowhere else. An input is a task list's checkbox and
-        // nothing else: every input comes out as a disabled checkbox, so one written by hand (no type, another type) is
-        // never a field the person could fill or press.
+        // nothing else: the sanitiser keeps at most a `checked` flag of an input, and `canonical_inputs` writes every input as
+        // a disabled checkbox, so one written by hand (no type, another type, a handler) is never a field the person could
+        // fill or press, and the order of its attributes is the same on every run.
         .add_tag_attributes("code", ["class"])
-        .add_tag_attributes("input", ["type", "checked", "disabled"])
-        .set_tag_attribute_value("input", "type", "checkbox")
-        .set_tag_attribute_value("input", "disabled", "")
+        .add_tag_attributes("input", ["checked"])
         .attribute_filter(|element, attribute, value| match (element, attribute) {
             ("code", "class") => value.starts_with("language-").then_some(value.into()),
+            ("input", "checked") => Some("".into()),
             _ => Some(value.into()),
         });
-    builder.clean(raw).to_string()
+    canonical_inputs(&builder.clean(raw).to_string())
+}
+
+/// Every input of the sanitised HTML as a disabled checkbox, in one fixed form. The sanitiser leaves an input with no
+/// attribute or with `checked` only, and the serializer escapes `<` in text, so these two exact strings are inputs and
+/// nothing else.
+fn canonical_inputs(html: &str) -> String {
+    html.replace("<input checked=\"\">", "<input type=\"checkbox\" checked=\"\" disabled=\"\">")
+        .replace("<input>", "<input type=\"checkbox\" disabled=\"\">")
 }
 
 #[cfg(test)]
@@ -268,7 +276,17 @@ mod tests {
             for bad in ["value=", "name=", "src=", "autofocus", "onfocus", "type=\"text\"", "type=\"image\""] {
                 assert!(!html.contains(bad), "{source}: {bad} survived: {html}");
             }
+            // The same text on every run: no order of attributes that depends on the process.
+            for _ in 0..20 {
+                assert_eq!(render_markdown(source).unwrap(), html, "{source}");
+            }
         }
+        assert!(render_markdown("- [x] done\n").unwrap().contains("<input type=\"checkbox\" checked=\"\" disabled=\"\">"));
+        assert!(render_markdown("<input checked=\"no\" type=\"radio\">").unwrap().contains("<input type=\"checkbox\" checked=\"\" disabled=\"\">"));
+        // Text that spells an input stays text, and an attribute that holds the same letters is not rewritten.
+        let text = render_markdown("`<input>` and <p title=\"a<input>b\">x</p>").unwrap();
+        assert!(text.contains("&lt;input&gt;"), "{text}");
+        assert!(!text.contains("type=\"checkbox\""), "{text}");
     }
 
     #[test]
