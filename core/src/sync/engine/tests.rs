@@ -297,6 +297,41 @@ fn a_staged_download_counts_as_the_local_version_and_is_not_sent_back() {
     assert_eq!(text(&b, "settings.json").as_deref(), Some("from a"));
 }
 
+/// The files in `sync-conflicts/` of a device: name and content.
+fn kept_copies(d: &Device) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = fs::read_dir(d.dir.join("sync-conflicts"))
+        .map(|r| r.flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), fs::read_to_string(e.path()).unwrap_or_default())).collect())
+        .unwrap_or_default();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_local_edit_made_after_a_download_is_kept_before_the_download_is_applied() {
+    let srv = server();
+    let (a, b) = (device("a12"), device("b12"));
+    put(&a, "settings.json", "from a");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    // B stages the download and has no live file; then the person writes one, and B starts again.
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    write_atomic(&b.dir.join("settings.json"), b"local edit").unwrap();
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec!["settings.json".into()], skipped: vec![] });
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "from a");
+    let copies = kept_copies(&b);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert!(copies[0].0.starts_with("settings.json."), "{copies:?}");
+    assert_eq!(copies[0].1, "local edit");
+    let notice: serde_json::Value = serde_json::from_slice(&fs::read(b.dir.join("sync-kept.json")).unwrap()).unwrap();
+    assert_eq!(notice, serde_json::json!({"kept": ["settings.json"]}));
+    // The first run after the start says so through the conflicts, and removes the notice.
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.conflicts, vec!["settings.json"], "{report:?}");
+    assert!(!b.dir.join("sync-kept.json").exists());
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.conflicts.is_empty(), "{report:?}");
+}
+
 #[test]
 fn promoting_ignores_names_that_are_not_synced() {
     let d = device("a11");

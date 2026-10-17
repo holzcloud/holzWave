@@ -4,7 +4,9 @@
 //! content by its SHA-256, the server file by its ETag). Only one side changed: it is copied to the other. Both changed:
 //! the higher version stamp wins (counter first, the writer's clock only to break a tie), and the version that lost is
 //! kept: a lost server version in `backups/` on the server, a lost local version in `sync-conflicts/` next to the files
-//! (never for the secrets, which are never written to a file). Deletions are not synced yet; a deleted file comes back.
+//! (never for the secrets, which are never written to a file). A download is staged and applied at the next start; a
+//! live file the person changed after the download was staged is copied to `sync-conflicts/` first, and the first run
+//! after that start lists it among the conflicts. Deletions are not synced yet; a deleted file comes back.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -103,11 +105,40 @@ pub trait Source: Send {
 /// before anything is read.
 const INCOMING: &str = "sync-incoming";
 
+/// The live hashes recorded when a download was first staged (inside `sync-incoming/`), and the names kept at the last
+/// start (inside the data folder). Both are local state of the sync, read bounded; damaged content counts as empty.
+const STAGE_BASE: &str = ".live-at-stage.json";
+const KEPT: &str = "sync-kept.json";
+const NOTE_LIMIT: u64 = 256 * 1024;
+const NOTE_NAMES: usize = 256;
+
+/// What [`promote_incoming_with_report`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Promoted {
+    /// The names moved into place, sorted.
+    pub applied: Vec<String>,
+    /// The applied names whose live file had been changed since the download was staged and was copied first.
+    pub kept: Vec<String>,
+    /// The names left staged because the copy of the live file could not be written; the next start tries again.
+    pub skipped: Vec<String>,
+}
+
 /// Move what the sync downloaded into place. Called once at start, before the configuration is read. Returns the names
-/// that were applied. A file that is not a synced name is removed, not applied.
+/// that were applied. A file that is not a synced name is removed, not applied. A live file the person changed after
+/// the download was staged is copied to `sync-conflicts/` first and comes back as a conflict of the next run; see
+/// [`promote_incoming_with_report`].
 pub fn promote_incoming(dir: &Path) -> Vec<String> {
+    promote_incoming_with_report(dir).applied
+}
+
+/// [`promote_incoming`] with what else happened. For each staged name the live file is compared with the hash recorded
+/// when the download was staged: a live file that changed since (or that did not exist then) is written to
+/// `sync-conflicts/<name with / as .>.<time>` before the download replaces it. When that copy cannot be written the name
+/// is skipped: the staged file and the live file stay as they are. The kept names are noted in `sync-kept.json` for the
+/// first run after the start. The staging folder is removed last, and only when nothing was skipped.
+pub fn promote_incoming_with_report(dir: &Path) -> Promoted {
     let root = dir.join(INCOMING);
-    let mut names = Vec::new();
+    let mut staged = Vec::new();
     let mut stack = vec![(root.clone(), String::new())];
     while let Some((path, prefix)) = stack.pop() {
         let Ok(read) = fs::read_dir(&path) else { continue };
@@ -118,17 +149,98 @@ pub fn promote_incoming(dir: &Path) -> Vec<String> {
             if kind.is_dir() && prefix.is_empty() && DIRS.contains(&file.as_str()) {
                 stack.push((entry.path(), format!("{file}/")));
             } else if kind.is_file() && allowed(&name) && name != SECRETS {
-                if let Some(parent) = dir.join(&name).parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                if fs::rename(entry.path(), dir.join(&name)).is_ok() {
-                    names.push(name);
-                }
+                staged.push((name, entry.path()));
             }
         }
     }
-    let _ = fs::remove_dir_all(&root);
+    staged.sort();
+    let bases = load_bases(&root);
+    let mut out = Promoted::default();
+    for (name, path) in staged {
+        let live_path = dir.join(&name);
+        let incoming = read_limited(&path, MAX_FILE).ok().flatten().map(|b| digest(&b));
+        let edited = match read_limited(&live_path, MAX_FILE) {
+            Ok(None) => false,
+            Ok(Some(live)) => {
+                let hash = digest(&live);
+                let changed = incoming.as_deref() != Some(hash.as_str())
+                    && !matches!(bases.get(&name), Some(Some(base)) if *base == hash);
+                if changed && !copy_edit(dir, &name, &live) {
+                    out.skipped.push(name);
+                    continue;
+                }
+                changed
+            }
+            // Present but unreadable (too large, not a file): it cannot be copied, so it is not replaced.
+            Err(_) => {
+                out.skipped.push(name);
+                continue;
+            }
+        };
+        if let Some(parent) = live_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::rename(&path, &live_path).is_ok() {
+            if edited {
+                out.kept.push(name.clone());
+            }
+            out.applied.push(name);
+        } else {
+            out.skipped.push(name);
+        }
+    }
+    if !out.kept.is_empty() {
+        let mut names = load_kept(dir);
+        names.extend(out.kept.iter().cloned());
+        names.sort();
+        names.dedup();
+        names.truncate(NOTE_NAMES);
+        let note = serde_json::json!({ "kept": names });
+        let _ = write_atomic(&dir.join(KEPT), &serde_json::to_vec_pretty(&note).unwrap_or_default());
+    }
+    if out.skipped.is_empty() {
+        let _ = fs::remove_dir_all(&root);
+    } else {
+        // The staged files that wait keep their own base; the entries of what was applied go.
+        let mut left = bases;
+        left.retain(|name, _| out.skipped.contains(name));
+        save_bases(&root, &left);
+    }
+    out
+}
+
+/// Write the live file `bytes` of `name` to `sync-conflicts/` before it is replaced. Whether that worked.
+fn copy_edit(dir: &Path, name: &str, bytes: &[u8]) -> bool {
+    let copy = dir.join("sync-conflicts").join(format!("{}.{}", name.replace('/', "."), now()));
+    write_atomic(&copy, bytes).is_ok()
+}
+
+fn load_bases(root: &Path) -> BTreeMap<String, Option<String>> {
+    let read = read_limited(&root.join(STAGE_BASE), NOTE_LIMIT).ok().flatten();
+    let mut bases: BTreeMap<String, Option<String>> = read.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    bases.retain(|name, _| allowed(name) && name != SECRETS);
+    while bases.len() > NOTE_NAMES {
+        bases.pop_last();
+    }
+    bases
+}
+
+fn save_bases(root: &Path, bases: &BTreeMap<String, Option<String>>) {
+    let _ = write_atomic(&root.join(STAGE_BASE), &serde_json::to_vec(bases).unwrap_or_default());
+}
+
+/// The names `sync-kept.json` holds: only allowed names, no duplicates, at most [`NOTE_NAMES`].
+fn load_kept(dir: &Path) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Note {
+        kept: Vec<String>,
+    }
+    let read = read_limited(&dir.join(KEPT), NOTE_LIMIT).ok().flatten();
+    let mut names = read.and_then(|b| serde_json::from_slice::<Note>(&b).ok()).map(|n| n.kept).unwrap_or_default();
+    names.retain(|n| allowed(n) && n != SECRETS);
     names.sort();
+    names.dedup();
+    names.truncate(NOTE_NAMES);
     names
 }
 
@@ -154,7 +266,7 @@ fn promote_names(root: &Path) -> Vec<String> {
 }
 
 /// The configuration folder, plus the connection secrets as the virtual file [`SECRETS`]. Downloads are staged, see
-/// [`promote_incoming`]; what is staged counts as the local version.
+/// [`promote_incoming`]; what is staged counts as the local version, and the live hash at staging is recorded.
 pub struct ConfigSource {
     dir: PathBuf,
     secrets: Arc<dyn SecretStore>,
@@ -163,6 +275,20 @@ pub struct ConfigSource {
 impl ConfigSource {
     pub fn new(dir: impl Into<PathBuf>, secrets: Arc<dyn SecretStore>) -> Self {
         Self { dir: dir.into(), secrets }
+    }
+
+    /// Note the live hash of `name` the first time a download is staged for it (a second download before the start
+    /// keeps the first value). No entry, or no room for one, means the next promote treats a differing live file as
+    /// changed, which only ever costs a copy.
+    fn record_live(&self, name: &str) {
+        let root = self.dir.join(INCOMING);
+        let mut bases = load_bases(&root);
+        if bases.contains_key(name) || bases.len() >= NOTE_NAMES {
+            return;
+        }
+        let live = read_limited(&self.dir.join(name), MAX_FILE).ok().flatten();
+        bases.insert(name.to_owned(), live.as_deref().map(digest));
+        save_bases(&root, &bases);
     }
 
     fn accounts(&self) -> Vec<String> {
@@ -236,6 +362,7 @@ impl Source for ConfigSource {
             }
             return Ok(());
         }
+        self.record_live(name);
         Ok(write_atomic(&self.dir.join(INCOMING).join(name), bytes)?)
     }
 }
@@ -386,6 +513,7 @@ impl<B: Backend, S: Source> Syncer<B, S> {
         names.extend(remote.keys().cloned());
         names.sort();
         names.dedup();
+        let kept = load_kept(&self.dir);
         let mut report = Report::default();
         for name in names {
             if let Err(e) = self.one(&name, remote.get(&name).cloned(), &mut report) {
@@ -393,6 +521,13 @@ impl<B: Backend, S: Source> Syncer<B, S> {
             }
         }
         self.state.save(&self.dir)?;
+        // The names a start kept before replacing them come back as conflicts, once.
+        for name in kept {
+            if !report.conflicts.contains(&name) {
+                report.conflicts.push(name);
+            }
+        }
+        let _ = fs::remove_file(self.dir.join(KEPT));
         Ok(report)
     }
 
