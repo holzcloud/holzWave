@@ -166,6 +166,12 @@
     ],
     "ai_conversation_list": [],
     "ai_conversation_new": [],
+    "ai_decide": [
+      "conversation",
+      "call_id",
+      "decision",
+      "hash"
+    ],
     "ai_has_key": [
       "profile",
       "slot"
@@ -950,6 +956,10 @@
     ]
   },
   "ops": {
+    "ai_decision": [
+      "allow",
+      "deny"
+    ],
     "ai_profile_input": [
       {
         "acknowledge_gateway": false,

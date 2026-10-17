@@ -203,13 +203,13 @@ test("the command table has snake_case argument names and no raw input command",
 
 // ---- the AI chat --------------------------------------------------------------------------------------------------
 
-test("the ai event and the fifteen ai commands are pinned", () => {
+test("the ai event and the sixteen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
   assert.equal(golden.events.names.at(-1), "ai");
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
   assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
   // The commands: exactly these and exactly these arguments. A send has no argument that could carry terminal text
-  // or a decision, only the ids of an offer; a key command has no way to hand a key back.
+  // or a decision, only the ids of an offer; the one command that decides a call is ai_decide; a key command has no way to hand a key back.
   const expected = {
     ai_conversation_new: [],
     ai_conversation_list: [],
@@ -218,6 +218,7 @@ test("the ai event and the fifteen ai commands are pinned", () => {
     ai_context_state: ["conversation", "pane", "profile", "model"],
     ai_context_share: ["conversation", "pane", "profile", "model", "shared"],
     ai_context_preview: ["conversation", "pane", "profile", "model", "kinds"],
+    ai_decide: ["conversation", "call_id", "decision", "hash"],
     ai_cancel: ["conversation"],
     ai_turn_snapshot: ["conversation"],
     ai_profiles: [],
@@ -610,4 +611,23 @@ test("a camelCase spelling of a snake_case argument is reported", () => {
   const bad = violations("x.ts", 'call("paste", { pane: 1, text: "a", allowUnsafe: true });', golden.commands);
   assert.equal(bad.length, 1);
   assert.match(bad[0], /"allowUnsafe"/);
+});
+
+test("the ai_decide command and its verdict values are pinned", () => {
+  // The page decides a card with the chat, the call, one of two words and the hash of the card it showed. Nothing else
+  // names a call, a verdict or a hash, and the command takes no text, path or command line.
+  assert.deepEqual(golden.commands.ai_decide, ["conversation", "call_id", "decision", "hash"]);
+  assert.deepEqual(golden.ops.ai_decision, ["allow", "deny"]);
+  for (const arg of ["text", "path", "content", "command"]) assert.ok(!golden.commands.ai_decide.includes(arg), arg);
+  const others = Object.entries(golden.commands).filter(([name]) => name.startsWith("ai_") && name !== "ai_decide");
+  for (const [name, args] of others) {
+    for (const arg of ["call_id", "decision", "hash"]) assert.ok(!args.includes(arg), `${name} takes ${arg}`);
+  }
+  // A call site in the page, when there is one, sends exactly those four names.
+  const sites = sources(srcDir).flatMap((file) =>
+    callSites(readFileSync(file, "utf8")).map((site) => ({ ...site, file: file.slice(srcDir.length + 1) })),
+  );
+  for (const site of sites.filter((s) => s.command === "ai_decide")) {
+    assert.deepEqual([...site.keys].sort(), ["call_id", "conversation", "decision", "hash"], `${site.file}:${site.line}`);
+  }
 });

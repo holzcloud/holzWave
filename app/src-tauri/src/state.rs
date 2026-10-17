@@ -7058,6 +7058,7 @@ mod protocol {
     use holzwave_core::ai::service::events::{AiEvent, AiEventKind};
     use holzwave_core::ai::service::{ContextState, FindingView, ItemView, OfferView, ServiceError};
     use holzwave_core::ai::store::{ConversationId, ConversationSummary};
+    use holzwave_core::ai::tools::Decision;
     use holzwave_core::ai::types::{ContextKind, Locality};
     use holzwave_core::ai::wire::Wire;
     use holzwave_core::layout::Axis;
@@ -7344,6 +7345,7 @@ mod protocol {
                     ContextKind::File,
                     ContextKind::Preview,
                 ]),
+                "ai_decision": ops(vec![Decision::Allow, Decision::Deny]),
             },
             "paste": [
                 to_value(&PasteOutcomeMsg::from(PasteOutcome::Written)),

@@ -15,7 +15,8 @@
 //! what a pane offers and where it would go, `ai_context_share` shares the pane for the chat, `ai_context_preview`
 //! answers an offer (labels, sizes and what was removed), and `ai_send` names the offer and the numbers of the items it
 //! picked. The three context commands take ids, a flag and kind names; the only text any of them carries is what the
-//! user typed.
+//! user typed. A tool call that waits for the person is decided by `ai_decide`, which takes the chat, the call, `allow`
+//! or `deny` and the hash of the card, and answers nothing.
 
 mod ai_host;
 mod ai_tools;
@@ -502,6 +503,7 @@ pub fn run() {
             commands::ai_context_state,
             commands::ai_context_share,
             commands::ai_context_preview,
+            commands::ai_decide,
             commands::markdown_render,
         ])
         .build(tauri::generate_context!())

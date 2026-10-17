@@ -985,6 +985,25 @@ pub fn ai_cancel(core: State<Arc<AppCore>>, conversation: String) -> Result<bool
     core.ai().cancel(&conversation)
 }
 
+/// The person's verdict on one approval card: the chat, the call, `allow` or `deny`, and the hash of the card they were
+/// shown. It answers nothing; what follows arrives as `ai` events (the result of the call, or the end of the turn). A
+/// refusal is the fault object with the code `tool` and the stable code of the error as the reason (`hash_mismatch`,
+/// `unknown_call`, `not_pending`, ...), or `invalid_decision` for a verdict that is neither word. A hash that does not
+/// match leaves the card waiting.
+///
+/// This is the one command that decides a call. It exists for the webview only: the local socket of `wsh` has no
+/// counterpart, and nothing else reaches the approval table.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_decide(
+    core: State<Arc<AppCore>>,
+    conversation: String,
+    call_id: String,
+    decision: String,
+    hash: String,
+) -> Result<(), AiFault> {
+    core.ai_decide(&conversation, &call_id, &decision, &hash)
+}
+
 /// The profiles with the state of each key (never a key). This reads the keychain, so the settings dialog calls it
 /// when it opens and not before.
 #[tauri::command(async, rename_all = "snake_case")]

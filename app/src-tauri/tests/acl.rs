@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 const LIB_RS: &str = include_str!("../src/lib.rs");
 const COMMANDS_RS: &str = include_str!("../src/commands.rs");
 const HOST_RS: &str = include_str!("../src/ai_host.rs");
+const IPC_RS: &str = include_str!("../../../ipc/src/lib.rs");
 const BUILD_RS: &str = include_str!("../build.rs");
 const MENU_RS: &str = include_str!("../src/menu.rs");
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
@@ -359,7 +360,7 @@ fn the_global_tauri_object_stays_and_nothing_points_at_the_network() {
 /// manifest with an `ai_` name fails `the_ai_commands_are_exactly_the_reviewed_list` until someone has asked of it:
 /// can it return a key, return terminal or file text, accept consent for terminal content, or decide a tool call? If
 /// yes, it does not belong here.
-const AI_COMMANDS: [&str; 15] = [
+const AI_COMMANDS: [&str; 16] = [
     "ai_cancel",
     "ai_context_preview",
     "ai_context_share",
@@ -367,6 +368,7 @@ const AI_COMMANDS: [&str; 15] = [
     "ai_conversation_delete",
     "ai_conversation_list",
     "ai_conversation_new",
+    "ai_decide",
     "ai_has_key",
     "ai_key_clear",
     "ai_key_set",
@@ -392,7 +394,8 @@ fn the_ai_commands_are_exactly_the_reviewed_list() {
         assert!(
             unreviewed.is_empty(),
             "{what} lists ai_ commands that nobody reviewed: {unreviewed:?}. Before adding one to AI_COMMANDS in acl.rs, ask whether it \
-             can return a key, return terminal or file text, accept context or decide a tool call"
+             can return a key, return terminal or file text, accept context or decide a tool call (the only command that \
+             decides one is ai_decide)"
         );
         let missing: Vec<&String> = reviewed.difference(&found).collect();
         assert!(missing.is_empty(), "{what} lost reviewed ai_ commands: {missing:?}");
@@ -637,4 +640,150 @@ pub fn ai_send(core: State<Arc<AppCore>>, conversation: String, text: String, pa
     assert!(said("ai_note takes an argument named body"), "{problems:?}");
     assert!(said("ai_send takes"), "{problems:?}");
     assert!(!problems.iter().any(|problem| problem.contains("ai_context_fine")), "{problems:?}");
+}
+
+// ---- the one command that decides a tool call -----------------------------------------------------------------------
+
+/// What is wrong with the way the commands in `names` could decide a tool call, as sentences: `ai_decide` takes the chat,
+/// the call, the verdict and the hash, as strings and in that order, and answers nothing; no other `ai_` command takes a
+/// call, a verdict or a hash.
+fn decision_problems(commands_rs: &str, names: &BTreeSet<String>) -> Vec<String> {
+    const OWN: [&str; 3] = ["call_id", "decision", "hash"];
+    let mut problems = Vec::new();
+    for name in names.iter().filter(|name| name.starts_with("ai_")) {
+        let Some(args) = arguments(commands_rs, name) else {
+            problems.push(format!("{name} is in the manifest but is not a command function of commands.rs"));
+            continue;
+        };
+        if name == "ai_decide" {
+            let shown: Vec<(&str, &str)> = args.iter().map(|(arg, ty)| (arg.as_str(), ty.as_str())).collect();
+            let expected = [("conversation", "String"), ("call_id", "String"), ("decision", "String"), ("hash", "String")];
+            if shown != expected {
+                problems.push(format!("ai_decide takes {shown:?}, not the reviewed list {expected:?}"));
+            }
+            let answer = return_type(commands_rs, name).unwrap_or_default();
+            if answer != "Result<(), AiFault>" {
+                problems.push(format!("ai_decide answers `{answer}`: it answers nothing"));
+            }
+            continue;
+        }
+        for (arg, _) in &args {
+            if OWN.contains(&arg.as_str()) {
+                problems.push(format!("{name} takes an argument named {arg}: only ai_decide names a call, a verdict or a hash"));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn ai_decide_takes_ids_and_a_verdict_and_answers_nothing() {
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    assert!(manifest.contains("ai_decide"), "ai_decide is not a command");
+    let problems = decision_problems(COMMANDS_RS, &manifest);
+    assert!(problems.is_empty(), "a command could decide a tool call in a way nobody reviewed:\n  {}", problems.join("\n  "));
+    assert_eq!(return_type(COMMANDS_RS, "ai_decide").as_deref(), Some("Result<(), AiFault>"));
+    let args = arguments(COMMANDS_RS, "ai_decide").expect("a command function");
+    let names: Vec<&str> = args.iter().map(|(arg, _)| arg.as_str()).collect();
+    assert_eq!(names, ["conversation", "call_id", "decision", "hash"]);
+    for forbidden in ["text", "path", "content", "command"] {
+        assert!(!names.contains(&forbidden), "ai_decide takes {forbidden}");
+    }
+    for name in manifest.iter().filter(|name| name.starts_with("ai_") && *name != "ai_decide") {
+        let others = arguments(COMMANDS_RS, name).expect("a command function");
+        assert!(
+            others.iter().all(|(arg, _)| !["call_id", "decision", "hash"].contains(&arg.as_str())),
+            "{name} names a call, a verdict or a hash"
+        );
+    }
+
+    // The scanner flags a decision that answers data and a second command that names a call, and accepts the real one.
+    let source = "\
+pub fn ai_decide(core: State<Arc<AppCore>>, conversation: String, call_id: String, decision: String, hash: String) -> Result<String, AiFault> {\n    todo()\n}\n\
+pub fn ai_approve(core: State<Arc<AppCore>>, conversation: String, call_id: String) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_note(core: State<Arc<AppCore>>, conversation: String) -> Result<(), AiFault> {\n    todo()\n}\n";
+    let flagged = decision_problems(source, &set(&["ai_decide", "ai_approve", "ai_note"]));
+    let said = |needle: &str| flagged.iter().any(|problem| problem.contains(needle));
+    assert!(said("ai_decide answers `Result<String, AiFault>`"), "{flagged:?}");
+    assert!(said("ai_approve takes an argument named call_id"), "{flagged:?}");
+    assert!(!flagged.iter().any(|problem| problem.contains("ai_note")), "{flagged:?}");
+    let real = "pub fn ai_decide(core: State<Arc<AppCore>>, conversation: String, call_id: String, decision: String, hash: String) -> Result<(), AiFault> {\n    todo()\n}\n";
+    assert_eq!(decision_problems(real, &set(&["ai_decide"])), Vec::<String>::new());
+}
+
+/// The part of `source` that ships: up to the test module, without comment lines.
+fn shipped_code(source: &str) -> String {
+    let shipped = source.split("\n#[cfg(test)]\nmod ").next().unwrap_or(source);
+    code_lines(shipped).join("\n")
+}
+
+/// How many times each file of `files` calls the approval table's decide method in the part that ships.
+fn decide_calls(files: &[(String, String)]) -> Vec<(String, usize)> {
+    files
+        .iter()
+        .map(|(name, source)| (name.clone(), shipped_code(source).matches(".decide(").count()))
+        .filter(|(_, count)| *count > 0)
+        .collect()
+}
+
+#[test]
+fn the_approval_table_is_decided_from_one_place_only() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the source directory") {
+        let path = entry.expect("an entry").path();
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            let name = path.file_name().expect("a name").to_string_lossy().into_owned();
+            files.push((name, std::fs::read_to_string(&path).expect("a source file")));
+        }
+    }
+    assert!(files.len() >= 8, "the scan found {} files", files.len());
+    let calls = decide_calls(&files);
+    assert_eq!(calls, [("ai_tools.rs".to_owned(), 1)], "the table is decided from one place and one call only");
+
+    // A second call in another file, or a second one in the same file, is counted.
+    let mut more = files.clone();
+    more.push(("rogue.rs".to_owned(), "fn go(t: &T) {\n    t.approvals().decide(a, b, c, d);\n}\n".to_owned()));
+    assert_eq!(decide_calls(&more).len(), 2);
+    let twice = vec![("x.rs".to_owned(), "fn a() { t.decide(1) }\nfn b() { t.decide(2) }\n".to_owned())];
+    assert_eq!(decide_calls(&twice), [("x.rs".to_owned(), 2)]);
+    // A call in a comment or in a test module is not one.
+    let quiet = vec![("y.rs".to_owned(), "// t.decide(1)\nfn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() { x.decide(1) }\n}\n".to_owned())];
+    assert_eq!(decide_calls(&quiet), Vec::<(String, usize)>::new());
+}
+
+/// The variant names of the enum `Cmd` in `source`.
+fn command_variants(source: &str) -> Vec<String> {
+    let Some(start) = source.find("pub enum Cmd {") else { return Vec::new() };
+    let mut names = Vec::new();
+    for line in source[start..].lines().skip(1) {
+        if line.starts_with('}') {
+            break;
+        }
+        let Some(rest) = line.strip_prefix("    ") else { continue };
+        let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        if name.chars().next().is_some_and(char::is_uppercase) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The variants among `names` whose name says they decide, approve, consent to, grant, allow or deny something.
+fn deciding_variants(names: &[String]) -> Vec<String> {
+    const WORDS: [&str; 8] = ["decide", "decision", "approve", "approval", "consent", "grant", "allow", "deny"];
+    names.iter().filter(|name| WORDS.iter().any(|word| name.to_lowercase().contains(word))).cloned().collect()
+}
+
+#[test]
+fn the_local_socket_has_no_command_that_decides() {
+    let variants = command_variants(IPC_RS);
+    assert!(variants.len() >= 4, "the scan found {variants:?}");
+    assert_eq!(deciding_variants(&variants), Vec::<String>::new(), "the socket of wsh must not decide, approve or grant");
+
+    let synthetic = "pub enum Cmd {\n    /// Show a file.\n    View { path: String },\n    AiDecide { call: String },\n    Ping,\n}\n";
+    let found = command_variants(synthetic);
+    assert_eq!(found, ["View", "AiDecide", "Ping"]);
+    assert_eq!(deciding_variants(&found), ["AiDecide"]);
+    assert_eq!(deciding_variants(&["AllowAlways".to_owned(), "Deny".to_owned(), "Consent".to_owned()]).len(), 3);
 }
