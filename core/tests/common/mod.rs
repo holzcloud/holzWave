@@ -6,6 +6,8 @@
 
 /// An in-process HTTP/1.1 server for the AI tests: chunked event streams, stalls, drops, error statuses, request capture.
 pub mod fake_http;
+/// The one in-process SSH server of the integration tests: logins by password and key, a shell, exec and a jump host.
+pub mod ssh_server;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
