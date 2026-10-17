@@ -84,3 +84,16 @@ audio.bk-media { margin: .833rem; width: calc(100% - 1.667rem); }
 .mon-name { overflow: hidden; text-overflow: ellipsis; }
 .mon > .mon-proc.mon-dim { margin-top: .667rem; }
 .mon > .mon-row.mon-dim { margin-top: .167rem; }
+
+/* The monitor of another computer says what is going on on a line of its own above the bars (docs/design.md 6.5). The
+   plain line is dim text; a warn line has three cues besides colour: its words, an underline and the mark `!`. The line
+   wraps, so a long reason stays inside a narrow pane. While the host is silent the last numbers stay, dimmed, and come
+   back by themselves. There is no motion. */
+.mon-note { margin: 0 0 .667rem; white-space: normal; overflow-wrap: anywhere; color: var(--hw-dim); }
+.mon-note[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
+.mon-note[data-tone="warn"]::before { content: "! "; }
+.mon[data-stale="true"] .mon-value, .mon[data-stale="true"] .mon-down, .mon[data-stale="true"] .mon-up { color: var(--hw-dim); }
+.mon[data-stale="true"] .mon-bar i[data-on] { background: var(--hw-dim); }
+@media (forced-colors: active) {
+  .mon-note[data-tone="warn"] { outline: 2px solid Highlight; outline-offset: 2px; }
+}

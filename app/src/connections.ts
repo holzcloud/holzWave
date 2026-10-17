@@ -46,6 +46,10 @@ export async function refreshConnections(): Promise<readonly Connection[]> {
       const filesId = `files.${c.id}`;
       registerAction({ id: filesId, title: `Files: ${c.name} (sftp)`, run: () => void openBlock("files", c.id, "", "tab") });
       dynamicIds.add(filesId);
+      // The system monitor of a host: its numbers come from the host's own counters (Linux only).
+      const monitorId = `monitor.on.${c.id}`;
+      registerAction({ id: monitorId, title: `System monitor: ${c.name} (ssh)`, run: () => void openBlock("monitor", c.id, "", "tab") });
+      dynamicIds.add(monitorId);
     }
   }
   onChange();

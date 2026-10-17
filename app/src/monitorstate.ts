@@ -1,5 +1,7 @@
 // The system monitor block's data: the shape of the core's `monitor_sample` answer, read defensively, and the words and
-// bars that show it. Pure functions, so node tests them.
+// bars that show it. Pure functions, so node tests them. The monitor of another computer says what is going on in
+// words (`noteWords`); every word that comes from the core or from a host is cleaned and cut here and is only ever put
+// on the screen as text.
 
 export interface MonProc {
   pid: number;
@@ -47,6 +49,68 @@ export function readSample(raw: unknown): MonSample | null {
     net_tx: num(o["net_tx"]),
     uptime: num(o["uptime"]),
     procs,
+  };
+}
+
+/** What the core answers for a monitor pane: the numbers of a computer, or the word that it is not a Linux computer. */
+export interface MonReading {
+  state: "live" | "unsupported";
+  /** The numbers of a `live` reading, else null. */
+  sample: MonSample | null;
+  /** The host's own word for its system (`Darwin`), cleaned; empty for a `live` reading or when the host named none. */
+  system: string;
+}
+
+const SYSTEM_MAX = 24;
+
+/** The system word of a host as the page shows it: letters, digits, dot, dash and underscore, at most 24 characters. */
+function cleanSystem(raw: unknown): string {
+  return typeof raw === "string" ? raw.replace(/[^A-Za-z0-9._-]/g, "").slice(0, SYSTEM_MAX) : "";
+}
+
+/**
+ * Read the answer of `monitor_sample` by its state word. Only `live` and `unsupported` are readings; anything else (a
+ * state that is not exactly one of those, a missing state, a value that is not an object) is no reading, never a guess.
+ */
+export function readReading(raw: unknown): MonReading | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  if (o["state"] === "live") return { state: "live", sample: readSample(raw), system: "" };
+  if (o["state"] === "unsupported") return { state: "unsupported", sample: null, system: cleanSystem(o["system"]) };
+  return null;
+}
+
+/** What a monitor pane of another computer says on its own line. */
+export type MonNoteKind = "connecting" | "no_answer" | "unsupported";
+
+const LABEL_MAX = 64;
+const DETAIL_MAX = 200;
+
+/** `text` without control characters and cut to `max` characters, with an ellipsis when it was cut. */
+function plain(text: string, max: number): string {
+  const chars = Array.from(text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ""));
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : chars.join("");
+}
+
+/**
+ * The words of the line above the bars. `label` is the connection's name and `detail` the reason (for `no_answer`) or the
+ * host's system word (for `unsupported`); both are bounded and stripped of control characters, and neither is ever
+ * markup: the caller sets the text with `textContent`. The tone is the second cue's partner: a `warn` line is also
+ * underlined and marked with `!` by the stylesheet.
+ */
+export function noteWords(kind: MonNoteKind, label: string, detail: string): { text: string; tone: "plain" | "warn" } {
+  const name = plain(label, LABEL_MAX);
+  if (kind === "connecting") return { text: `Connecting to ${name} …`, tone: "plain" };
+  if (kind === "no_answer") {
+    const reason = plain(detail, DETAIL_MAX);
+    return { text: reason ? `No answer from ${name}: ${reason}` : `No answer from ${name}.`, tone: "warn" };
+  }
+  const system = cleanSystem(detail);
+  return {
+    text: system
+      ? `Not supported: ${name} does not run Linux (it says ${system}).`
+      : `Not supported: ${name} did not answer like a Linux computer.`,
+    tone: "warn",
   };
 }
 

@@ -18,7 +18,7 @@ export default async function ({ page, url, errors }) {
     window.__SAMPLE = s;
     window.__MOCK__.setView(v);
     window.__MOCK__.on("pane_blocks", () => [{ pane: 2, kind: "monitor", source: "local", path: "", source_label: "This computer" }]);
-    window.__MOCK__.on("monitor_sample", () => structuredClone(window.__SAMPLE));
+    window.__MOCK__.on("monitor_sample", () => ({ state: "live", ...structuredClone(window.__SAMPLE) }));
     window.__MOCK__.on("block_open", () => window.__MOCK__.view());
   }, [view, sample]);
   await page.goto(`${url}index.html?renderer=canvas`);
@@ -33,6 +33,10 @@ export default async function ({ page, url, errors }) {
   assert.equal(await page.locator(".block-monitor .mon-bar").first().getAttribute("aria-label"), "38 percent");
   assert.equal(await page.locator('.panehead[data-pane="2"] .ph-title').textContent(), "system");
   assert.equal(await page.locator('.panehead[data-pane="2"] .ph-ctx').textContent(), "local · 1 s");
+  // The local monitor says nothing on a line of its own, and asks for the sample of its pane.
+  assert.equal(await page.locator(".block-monitor .mon-note").isHidden(), true, "no note for this computer");
+  assert.equal(await page.locator(".block-monitor .mon-note").textContent(), "");
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("monitor_sample")[0]), { pane: 2 });
 
   // Process names are text, never markup.
   const names = await page.locator(".block-monitor .mon-name").allTextContents();

@@ -9,8 +9,8 @@ import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { chatClosed, mountChat } from "./chat.js";
 import { el, loadStyles, setText } from "./dom.js";
-import { bar, bytes, memory, rate, readSample, uptime } from "./monitorstate.js";
-import type { MonSample } from "./monitorstate.js";
+import { bar, bytes, memory, noteWords, rate, readReading, uptime } from "./monitorstate.js";
+import type { MonNoteKind, MonReading, MonSample } from "./monitorstate.js";
 import { showEditor } from "./editorview.js";
 import type { EditorHandle } from "./editorview.js";
 import { showPdf } from "./pdfview.js";
@@ -535,12 +535,21 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
 const MON_ROWS = 8;
 const MON_SEGMENTS = 8;
 
-/** CPU and memory as bars with their numbers, the network rates, and the busiest processes; sampled every second. */
+/**
+ * CPU and memory as bars with their numbers, the network rates, and the busiest processes; sampled every second. The
+ * monitor of another computer also has one line above the bars that says in words whether it is connecting, has no
+ * answer or the host is not Linux; its numbers stay, dimmed, while the host is silent.
+ */
 function monitorBlock(info: BlockInfo, root: HTMLElement): Instance {
   root.classList.add("block-monitor");
+  let current = info;
   const body = el("div", "mon bk-body", root);
   body.setAttribute("role", "group");
   body.setAttribute("aria-label", "System monitor");
+  // The line of words. Every word in it is set as text, never as markup.
+  const note = el("p", "mon-note", body);
+  note.setAttribute("role", "status");
+  note.hidden = true;
   const meter = (label: string) => {
     const row = el("div", "mon-row", body);
     el("span", "mon-label", row).textContent = label;
@@ -589,6 +598,59 @@ function monitorBlock(info: BlockInfo, root: HTMLElement): Instance {
       setText(cells[3]!, p ? bytes(p.mem) : "");
     });
   };
+  /** Empty every number: the host is not one this monitor can read. */
+  const clear = (): void => {
+    for (const m of [cpu, mem]) {
+      m.cells.forEach((c) => {
+        c.dataset.on = "";
+      });
+      m.b.removeAttribute("aria-label");
+      delete m.value.dataset.level;
+      setText(m.value, "");
+    }
+    for (const node of [down, up, upValue, ...procs.flat()]) setText(node, "");
+  };
+  const remote = (): boolean => current.source !== "local";
+  const label = (): string => current.source_label || current.source;
+  const showNote = (kind: MonNoteKind, detail: string): void => {
+    const words = noteWords(kind, label(), detail);
+    setText(note, words.text);
+    note.dataset.state = kind;
+    note.dataset.tone = words.tone;
+    note.hidden = false;
+  };
+  const hideNote = (): void => {
+    note.hidden = true;
+    setText(note, "");
+    delete note.dataset.state;
+    delete note.dataset.tone;
+  };
+  /** Whether numbers are on show, which a silent host dims instead of removing. */
+  let numbers = false;
+  const stale = (on: boolean): void => {
+    if (on) body.dataset.stale = "true";
+    else delete body.dataset.stale;
+  };
+  const show = (reading: MonReading | null): void => {
+    if (reading?.state === "live" && reading.sample) {
+      draw(reading.sample);
+      numbers = true;
+      stale(false);
+      hideNote();
+    } else if (reading?.state === "unsupported") {
+      clear();
+      numbers = false;
+      stale(false);
+      showNote("unsupported", reading.system);
+    } else if (remote()) {
+      failed("unknown reason");
+    }
+  };
+  const failed = (reason: string): void => {
+    stale(numbers);
+    showNote("no_answer", reason);
+  };
+  const reasonOf = (e: unknown): string => (typeof e === "string" ? e : e instanceof Error ? e.message : "unknown reason");
   let alive = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const tick = async (): Promise<void> => {
@@ -596,20 +658,26 @@ function monitorBlock(info: BlockInfo, root: HTMLElement): Instance {
     // A hidden window (or a tab that is not shown) costs nothing: the sample waits.
     if (!document.hidden && root.offsetParent !== null) {
       try {
-        const s = readSample(await call<unknown>("monitor_sample", { pane: info.pane }));
-        if (s && alive) draw(s);
-      } catch {
-        // the next second asks again
+        const reading = readReading(await call<unknown>("monitor_sample", { pane: info.pane }));
+        if (alive) show(reading);
+      } catch (e) {
+        // The monitor of this computer asks again next second without a word; another computer says why it is silent.
+        if (alive && remote()) failed(reasonOf(e));
       }
     }
     if (alive) timer = setTimeout(() => void tick(), 1000);
   };
+  if (remote()) showNote("connecting", "");
   void tick();
   return {
     pane: info.pane,
     root,
-    info,
-    update() {},
+    get info() {
+      return current;
+    },
+    update(next) {
+      current = next;
+    },
     key() {
       return false;
     },
