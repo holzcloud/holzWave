@@ -47,6 +47,28 @@
 //       sent           every event the mock produced, in order, dropped ones included
 //       chat(id)       a copy of the state of a chat (the empty state for an unknown chat)
 //       setState(id, partial)  set members of a chat's state, for example an interrupted message or a pinned profile
+//       context        the context commands of the core, played for the consent card:
+//                      panes      pane number -> `{ kinds, items }`; `kinds` is what the pane offers (in the order to list
+//                                 them) and `items[kind]` the item a read of that kind finds (`{ label, bytes, findings,
+//                                 text }`) or nothing when it reads empty. `text` is mock-only: no answer ever carries it.
+//                                 Panes 1 and 2 are terminals offering `selection`, `screen` and `last_command`
+//                      localContext  `ask` (default) or `auto`: `auto` makes a share unnecessary for a loopback or
+//                                 on-device profile, as the core's `ai_local_context`
+//                      localOnly  true refuses every request whose profile is not on this computer, with `local_only`
+//                      ttl        the seconds an offer lives (default 300); an older one is `stale_offer`
+//                      persist    the `persist` member of the answers (default false)
+//                      shares     the records of shared panes: `[{ conversation, pane, route }]`
+//                      offers     the live offers: `[{ id, conversation, pane, route, picked: [...], at }]`
+//                      lookups    how many times a state, share or preview call classified a destination
+//                      reads      how many kinds a preview read
+//                      answers    every answer of the three commands, as `[command, answer]`, oldest first
+//                      closePane(n)  the pane closes: its shares and offers end and it leaves the view
+//                      expire()   every live offer is out of date
+//                      fail(cmd, reason, text, code)  the command refuses with `{ code, reason, text }` (`code` defaults to
+//                                 `context`) until `fail(cmd, null)`
+//                      hold(cmd), release()  the answer of `cmd` waits until `release()`; the call is recorded at once
+//                      A send with `offer` and `picked` redeems a live offer of this chat, pane and route and puts one
+//                      `context` part before the text part of the user message; the refusals are the core's reasons.
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
 //     `ai_turn_snapshot`, `ai_profiles`, `ai_profile_save`, `ai_profile_remove`, `ai_key_set` and `ai_key_clear` have
 //     defaults; a rejection is the object `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input
@@ -157,7 +179,7 @@
     state.seq = e.seq;
     switch (e.kind) {
       case "turn_started":
-        if (state.title === "") state.title = titleOf(e.message.parts[0].text);
+        if (state.title === "") state.title = titleOf(e.message.parts.find((part) => part.type === "text").text);
         state.messages.push(e.message);
         state.running = true;
         state.partial = { text: "", reasoning: "" };
@@ -210,15 +232,15 @@
       pump();
     }, 0);
   };
-  const userMessage = (turn, text) => ({
-    id: `m${turn}-user`, role: "user", ts: NOW, model: null, status: "complete", usage: null, parts: [{ type: "text", text }],
+  const userMessage = (turn, text, before = []) => ({
+    id: `m${turn}-user`, role: "user", ts: NOW, model: null, status: "complete", usage: null, parts: [...before, { type: "text", text }],
   });
   const assistantMessage = (turn, model, text, status, usage) => ({
     id: `m${turn}-1`, role: "assistant", ts: NOW, model, status, usage, parts: [{ type: "text", text }],
   });
   /** The events of one turn from its script, with the head (`conversation`, `turn`) but not the `seq` yet. */
-  const turnEvents = (conversation, turn, text, route, script) => {
-    const out = [{ kind: "turn_started", message: userMessage(turn, text), route }];
+  const turnEvents = (conversation, turn, text, route, script, before = []) => {
+    const out = [{ kind: "turn_started", message: userMessage(turn, text, before), route }];
     if (script.reasoning) out.push({ kind: "reasoning", text: script.reasoning });
     const usage = script.usage ?? { input_tokens: 11, output_tokens: 5 };
     if (script.fail) {
@@ -354,7 +376,186 @@
     if (host.startsWith("169.254.") || host.startsWith("[fe80:")) throw refuse("link_local");
     if (url.protocol === "http:" && !isLoopbackHost(host) && !(lan && isPrivateHost(host))) throw refuse("plain_http");
   };
+  // ---- the context: the share, the preview and the send with ids, played from the shapes of the shell's golden --------------
+  // The mock models the rules the page relies on: a pane is read only after a share (unless the core says none is needed), a
+  // call on another route removes the share, one offer lives per chat and is spent by one send, and every refusal is the
+  // object `{ code: "context", reason, text }`. The texts of the items are mock-only and no answer ever carries them.
+  const CANARY_TEXT = "zq-consent-text-71b9e4";
+  const CANARY_KEY = "sk-ant-api03-zqconsent5e90b3aXYZ0123456789";
+  const CONTEXT_KINDS = ["selection", "screen", "last_command", "file", "preview"];
+  const REASON_TEXT = {
+    not_shared: "This pane is not shared with the chat yet. Share it first.",
+    stale_offer: "The attached context is no longer valid. Read it again.",
+    bad_pick: "The chosen items do not match what was read. Read the context again.",
+    bad_kinds: "That choice of content cannot be read. Tick one to five kinds.",
+    unsupported_kind: "This pane cannot offer that kind of content.",
+    nothing_to_share: "There is nothing in this pane that can be shared.",
+    pane_gone: "The pane is closed or no longer shows what was shared.",
+    denied: "This place may not be shared.",
+    not_text: "This file is not text, so it cannot be shared.",
+    unreadable: "The pane or file could not be read. Try again.",
+    busy: "The pane did not answer within two seconds. Try again.",
+    destination: "The address of this provider cannot be checked or is not allowed. Nothing was sent.",
+    local_only: "Local only is on, and this provider is not on this computer.",
+  };
+  const ctx = {
+    panes: {},
+    localContext: "ask",
+    localOnly: false,
+    ttl: 300,
+    persist: false,
+    shares: [],
+    offers: [],
+    sentHashes: new Map(), // conversation -> hashes already sent
+    lookups: 0,
+    reads: 0,
+    failures: new Map(), // command -> { reason, text, code }
+    holdCommand: null,
+    waiting: [],
+    offerNo: 0,
+    answers: [],
+  };
+  /** A terminal pane as the mock offers it: the kinds and the item each kind reads. */
+  const terminalPane = (n) => ({
+    kinds: ["selection", "screen", "last_command"],
+    items: {
+      screen: { label: `Screen of pane ${n}`, bytes: 2457, findings: [], text: `${CANARY_TEXT} ${CANARY_KEY}` },
+      last_command: { label: `Last command output of pane ${n}`, bytes: 918, findings: [], text: `${CANARY_TEXT} last` },
+    },
+  });
+  const resetContext = () => {
+    Object.assign(ctx, {
+      panes: { 1: terminalPane(1), 2: terminalPane(2) }, localContext: "ask", localOnly: false, ttl: 300, persist: false, shares: [],
+      offers: [], sentHashes: new Map(), lookups: 0, reads: 0, holdCommand: null, offerNo: 0, answers: [],
+    });
+    ctx.failures.clear();
+    ctx.waiting.length = 0;
+  };
+  resetContext();
+  const paneOf = (n) => ctx.panes[n] ?? { kinds: [], items: {} };
+  const contextFault = (reason, text, code = "context") => fault(code, text ?? REASON_TEXT[reason] ?? "the request was refused", reason);
+  const LOCAL = ["on_device", "loopback"];
+  /** The route a context call names: the profile (given, the chat's pin or the only one), the model and the address. */
+  const contextRoute = (conversation, profile, model) => {
+    const list = Array.isArray(ai.profiles) ? ai.profiles : ai.profiles.profiles ?? [];
+    const id = profile || chatOf(conversation).profile || (list.length === 1 ? list[0].id : null);
+    if (!id) throw fault("no_profile", "no provider is chosen for this chat");
+    const known = list.find((p) => p.id === id);
+    if (!known) throw fault("profile", "there is no such profile", "unknown_profile");
+    const route = {
+      profile: id, model: model || known.model || "", host: hostOf(known.base_url) || known.host || "", locality: known.locality ?? "loopback",
+    };
+    route.key = `${route.profile}|${route.model}|${known.base_url}`;
+    return route;
+  };
+  const paneOpen = (n) => view().panes.some(([id]) => id === n);
+  /** The checks every context call makes first; a call on another route removes the shares of the chat. */
+  const contextCall = (command, { conversation, pane, profile, model }) => {
+    const failure = ctx.failures.get(command);
+    if (failure) throw contextFault(failure.reason, failure.text, failure.code);
+    ctx.lookups += 1;
+    if (typeof conversation !== "string" || !Number.isInteger(pane)) throw fault("invalid_conversation", "the request was not understood");
+    const route = contextRoute(conversation, profile, model);
+    ctx.shares = ctx.shares.filter((s) => s.conversation !== conversation || s.route === route.key);
+    if (!paneOpen(pane)) throw fault("no_such_pane", "this pane is not open");
+    if (ctx.localOnly && !LOCAL.includes(route.locality)) throw contextFault("local_only");
+    return route;
+  };
+  const required = (route) => !(LOCAL.includes(route.locality) && ctx.localContext === "auto");
+  const isShared = (conversation, pane, route) =>
+    ctx.shares.some((s) => s.conversation === conversation && s.pane === pane && s.route === route.key);
+  const contextState = (conversation, pane, route) => ({
+    profile: route.profile, model: route.model, host: route.host, locality: route.locality, required: required(route),
+    shared: isShared(conversation, pane, route), kinds: [...paneOf(pane).kinds], persist: ctx.persist,
+  });
+  /** An answer that waits for `release()` when the command is held; the call is recorded and acted on at once. */
+  const answered = (command, value) => {
+    ctx.answers.push([command, structuredClone(value)]);
+    if (ctx.holdCommand !== command) return value;
+    return new Promise((resolve) => ctx.waiting.push(() => resolve(value)));
+  };
+  const hex = (n) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  const hashOf = (text) => {
+    let out = "";
+    for (let seed = 0; seed < 8; seed += 1) {
+      let h = 0x811c9dc5 ^ (seed * 0x9e3779b1);
+      for (let i = 0; i < text.length; i += 1) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+      out += (h >>> 0).toString(16).padStart(8, "0");
+    }
+    return out;
+  };
+  const contextCommands = {
+    ai_context_state: (args) => {
+      const route = contextCall("ai_context_state", args);
+      return answered("ai_context_state", contextState(args.conversation, args.pane, route));
+    },
+    ai_context_share: (args) => {
+      const route = contextCall("ai_context_share", args);
+      if (paneOf(args.pane).kinds.length === 0) throw contextFault("nothing_to_share");
+      ctx.shares = ctx.shares.filter((s) => !(s.conversation === args.conversation && s.pane === args.pane));
+      if (args.shared === true) ctx.shares.push({ conversation: args.conversation, pane: args.pane, route: route.key });
+      else ctx.offers = ctx.offers.filter((o) => !(o.conversation === args.conversation && o.pane === args.pane));
+      return answered("ai_context_share", contextState(args.conversation, args.pane, route));
+    },
+    ai_context_preview: (args) => {
+      const route = contextCall("ai_context_preview", args);
+      if (required(route) && !isShared(args.conversation, args.pane, route)) throw contextFault("not_shared");
+      const kinds = args.kinds;
+      if (!Array.isArray(kinds) || kinds.length === 0 || kinds.length > 5 || new Set(kinds).size !== kinds.length
+        || kinds.some((k) => !CONTEXT_KINDS.includes(k))) throw contextFault("bad_kinds");
+      const pane = paneOf(args.pane);
+      if (kinds.some((k) => !pane.kinds.includes(k))) throw contextFault("unsupported_kind");
+      const items = [];
+      const empty = [];
+      const texts = [];
+      for (const kind of kinds) {
+        ctx.reads += 1;
+        const found = pane.items[kind];
+        if (!found) empty.push(kind);
+        else {
+          items.push({ id: items.length + 1, kind, label: found.label, bytes: found.bytes, findings: structuredClone(found.findings) });
+          texts.push(found.text ?? found.label);
+        }
+      }
+      if (items.length === 0) throw contextFault("nothing_to_share");
+      ctx.offers = ctx.offers.filter((o) => o.conversation !== args.conversation);
+      const id = hex(32);
+      ctx.offers.push({
+        id, conversation: args.conversation, pane: args.pane, route: route.key, items: structuredClone(items), texts, at: Date.now(),
+        profile: route.profile, locality: route.locality, expired: false,
+      });
+      ctx.offerNo += 1;
+      return answered("ai_context_preview", {
+        offer: id, profile: route.profile, model: route.model, host: route.host, locality: route.locality, ttl_seconds: ctx.ttl, items,
+        empty, bytes: items.reduce((sum, item) => sum + item.bytes, 0), persist: ctx.persist,
+      });
+    },
+  };
+  /** The `context` part that a send with an offer puts before its text, or `[]` for a send without one. */
+  const redeem = (conversation, pane, route, offer, picked) => {
+    if (offer === undefined && picked === undefined) return [];
+    if (offer === undefined || picked === undefined || offer === null || picked === null) throw contextFault("bad_pick");
+    const at = ctx.offers.findIndex((o) => o.id === offer && o.conversation === conversation);
+    const live = at < 0 ? null : ctx.offers[at];
+    if (live === null || live.expired || Date.now() - live.at > ctx.ttl * 1000 || live.pane !== pane || live.route !== route.key) {
+      throw contextFault("stale_offer");
+    }
+    if (!Array.isArray(picked) || picked.length === 0 || picked.length > 8 || new Set(picked).size !== picked.length
+      || picked.some((n) => !live.items.some((item) => item.id === n))) throw contextFault("bad_pick");
+    ctx.offers.splice(at, 1);
+    const chosen = live.items.filter((item) => picked.includes(item.id));
+    const hash = hashOf(chosen.map((item) => `${item.kind}|${item.label}|${live.texts[live.items.indexOf(item)]}`).join("\n"));
+    const sent = ctx.sentHashes.get(conversation) ?? new Set();
+    if (sent.has(hash)) throw fault("context_duplicate", "the same context is attached twice");
+    sent.add(hash);
+    ctx.sentHashes.set(conversation, sent);
+    return [{
+      type: "context", hash, items: chosen.map((item) => ({ kind: item.kind, label: item.label, bytes: item.bytes })),
+      provider: live.profile, locality: live.locality,
+    }];
+  };
   const aiCommands = {
+    ...contextCommands,
     ai_conversation_new: () => `chat-mock-${++ai.chatNo}`,
     ai_conversation_list: () => ({ chats: [], notes: [] }),
     ai_conversation_delete: ({ conversation }) => ai.chats.delete(conversation),
@@ -444,7 +645,7 @@
     // The core's renderer of Markdown: here the text as one escaped paragraph, unless a test scripts it with `on`.
     markdown_render: ({ text }) =>
       `<p>${String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</p>`,
-    ai_send: ({ conversation, text, profile, model }) => {
+    ai_send: ({ conversation, text, pane, profile, model, offer, picked }) => {
       if (typeof text !== "string" || text.trim() === "") throw fault("empty_text", "the message is empty");
       if (ai.running !== null) throw fault("busy", "a reply is already running");
       const chat = chatOf(conversation);
@@ -453,9 +654,10 @@
       const list = Array.isArray(ai.profiles) ? ai.profiles : ai.profiles.profiles ?? [];
       const known = list.find((p) => p.id === id);
       if (!known) throw fault("profile", "there is no such profile", "unknown_profile");
-      const turn = ++ai.turnNo;
       const route = { profile: id, model: model || known.model || chat.model || "", host: known.host ?? null, locality: known.locality ?? "loopback" };
-      ai.queue = turnEvents(conversation, turn, text, route, ai.scripts.shift() ?? {});
+      const before = redeem(conversation, pane, contextRoute(conversation, id, model), offer, picked);
+      const turn = ++ai.turnNo;
+      ai.queue = turnEvents(conversation, turn, text, route, ai.scripts.shift() ?? {}, before);
       ai.running = conversation;
       pump();
       return { conversation, turn };
@@ -516,6 +718,75 @@
       ai.keys = value;
     },
     sent: ai.sent,
+    context: {
+      get panes() {
+        return ctx.panes;
+      },
+      set panes(value) {
+        ctx.panes = value;
+      },
+      get localContext() {
+        return ctx.localContext;
+      },
+      set localContext(value) {
+        ctx.localContext = value;
+      },
+      get localOnly() {
+        return ctx.localOnly;
+      },
+      set localOnly(value) {
+        ctx.localOnly = value === true;
+      },
+      get ttl() {
+        return ctx.ttl;
+      },
+      set ttl(value) {
+        ctx.ttl = value;
+      },
+      get persist() {
+        return ctx.persist;
+      },
+      set persist(value) {
+        ctx.persist = value === true;
+      },
+      get shares() {
+        return ctx.shares;
+      },
+      get offers() {
+        return ctx.offers;
+      },
+      get lookups() {
+        return ctx.lookups;
+      },
+      get reads() {
+        return ctx.reads;
+      },
+      get answers() {
+        return ctx.answers;
+      },
+      closePane(n) {
+        ctx.shares = ctx.shares.filter((s) => s.pane !== n);
+        ctx.offers = ctx.offers.filter((o) => o.pane !== n);
+        delete ctx.panes[n];
+        const v = view();
+        v.panes = v.panes.filter(([id]) => id !== n);
+        mock.setView(v);
+      },
+      expire() {
+        for (const o of ctx.offers) o.expired = true;
+      },
+      fail(cmd, reason, text, code) {
+        if (reason === null || reason === undefined) ctx.failures.delete(cmd);
+        else ctx.failures.set(cmd, { reason, text, code });
+      },
+      hold(cmd) {
+        ctx.holdCommand = cmd;
+      },
+      release() {
+        ctx.holdCommand = null;
+        for (const go of ctx.waiting.splice(0)) go();
+      },
+    },
     script: (turn) => void ai.scripts.push(turn),
     hold: (n) => void (ai.holdLeft = n),
     release() {
@@ -535,6 +806,7 @@
       });
       ai.chats.clear();
       ai.sent.length = 0;
+      resetContext();
     },
   };
 

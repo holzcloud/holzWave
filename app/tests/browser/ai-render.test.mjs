@@ -309,6 +309,9 @@ async function modesCase(page, url) {
   assert.equal(ring.color, rose, "the composer's ring is rose");
   assert.equal(ring.width, "2px");
   await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-ctx", "the context button follows the field");
+  assert.equal(await page.locator(".chat-ctx").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "Context: a 2 px ring");
+  await page.keyboard.press("Tab");
   assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-send");
   assert.equal(await page.locator(".chat-send").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "Send: a 2 px ring");
   await page.locator(".chat-input").focus();

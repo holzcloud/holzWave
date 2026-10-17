@@ -461,6 +461,8 @@ function objectKeys(text, open) {
   const flush = (to) => {
     const entry = stripComments(text.slice(entryStart, to)).trim();
     if (entry === "") return;
+    // The one spread the page makes is the optional pair of a send with an offer; its keys are the two the helper can add.
+    if (/^\.\.\.contextArguments\(/.test(entry)) return void found.push("offer", "picked");
     if (entry.startsWith("...")) return void found.push("...spread");
     if (entry.startsWith("[")) return void found.push("[computed]");
     const m = /^(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*(?::|$|\()/.exec(entry);
@@ -540,15 +542,17 @@ test("the scanner reads nested braces, strings, templates and generics", () => {
     'call<Record<string, number>>("b", { pane, "cols": 1, \'rows\': 2 });',
     'void invoke("c");',
     'call("d", { ...rest, [k]: 1, // trailing, comment\n  last: 1 });',
+    'call("e", { text, ...contextArguments(held) });',
   ].join("\n");
 
   const sites = callSites(text);
 
-  assert.deepEqual(sites.map((s) => s.command), ["a", "b", "c", "d"]);
+  assert.deepEqual(sites.map((s) => s.command), ["a", "b", "c", "d", "e"]);
   assert.deepEqual(sites[0].keys, ["pane", "text", "allow_unsafe"]);
   assert.deepEqual(sites[1].keys, ["pane", "cols", "rows"]);
   assert.deepEqual(sites[2].keys, []);
   assert.deepEqual(sites[3].keys, ["...spread", "[computed]", "last"]);
+  assert.deepEqual(sites[4].keys, ["text", "offer", "picked"]);
 });
 
 test("every call site in src/ names a command of the golden and uses only its argument names", () => {

@@ -26,9 +26,15 @@ import {
   statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
 } from "./chatview.js";
 import type { ChipView, EndNote, ProfileChoice } from "./chatview.js";
+import { Consent } from "./consent.js";
+import { mountCard } from "./consentcard.js";
+import type { CardView } from "./consentcard.js";
+import { NOTES, contextArguments, ctxButtonView, paneWords, sentLine } from "./consentstate.js";
+import type { Route as ConsentRoute } from "./consentstate.js";
 import { el, loadStyles } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
+import { paneLabel } from "./panehead.js";
 import { appendSafe } from "./safehtml.js";
 import { applyView } from "./scene.js";
 import { state } from "./state.js";
@@ -105,11 +111,15 @@ interface Session {
   /** A turn started in this window, so its outcome may be said; cleared words stay cleared until the next turn. */
   sawTurn: boolean;
   dismissed: boolean;
+  /** The sharing of this chat (`consent.ts`); made at the first user act that needs it, never at mount. */
+  consent: Consent | null;
 }
 
 /** The rendered HTML of finished replies by message id, with the text it was made from; the oldest goes first. */
 const rendered = new Map<string, { text: string; html: string }>();
 let renderedChars = 0;
+/** Numbers the strips of the chats, so each button names its own. */
+let stripNumber = 0;
 
 /** Keep the rendered `html` of the reply `id` made from `text`, within the count and the budget of the cache. */
 function keepRendered(id: string, text: string, html: string): void {
@@ -139,6 +149,19 @@ let button: HTMLButtonElement | null = null;
 let lastChoice: string | null = null;
 /** The providers that wait for the user's review (a gateway or a server of the user's own that was not allowed yet). */
 let review = new Set<string>();
+/**
+ * The pane the chats act for: the last pane the user focused that shows a terminal or a preview, in the shown tab. Every
+ * message names it, with context or without; a chat, a file browser or a monitor never counts.
+ */
+let acting: number | null = null;
+/** The panes an earlier render has shown, so a pane whose block the core has not listed yet is not taken for a terminal. */
+let shownPanes = new Set<number>();
+
+/** What the page offers the chat besides the bridge: the settings watch. */
+export interface ChatHost {
+  /** Call `fn` after every accepted settings view; the answer stops it. */
+  watchSettings(fn: () => void): () => void;
+}
 
 // ---- sessions and the core's events -----------------------------------------------------------------------------------
 
@@ -162,6 +185,7 @@ function sessionFor(conversation: string): Session {
       cancelled: -1,
       sawTurn: false,
       dismissed: false,
+      consent: null,
     };
     sessions.set(conversation, s);
   }
@@ -276,6 +300,69 @@ function statusFor(s: Session): { text: string; kind: "error" | "note" | "" } {
   return { text: "", kind: "" };
 }
 
+/** Say one line under the transcript of every view of `s`, now. */
+function sayTo(s: Session, text: string, kind: "error" | "note"): void {
+  s.notice = { text, kind };
+  s.stopping = false;
+  for (const view of s.views) view.drawStatus();
+}
+
+/** The two privacy settings as one string for the route; empty while the settings are unknown. */
+function privacyKey(): string {
+  const view = state.settings;
+  return view === null ? "" : `${view.settings.ai_local_context}|${view.settings.ai_local_only ? "only" : "open"}`;
+}
+
+/** Where the next message of `s` would go, as the controller of its sharing compares it. */
+function routeOf(s: Session): ConsentRoute {
+  const pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
+  const row = pick.id === "" ? undefined : s.profiles?.find((p) => p.id === pick.id);
+  return {
+    ask: pick.via === "ask",
+    pane: acting,
+    profile: pick.id === "" ? null : pick.id,
+    model: null,
+    entry: row === undefined ? null : `${row.id}|${row.model}|${row.host}`,
+    settings: privacyKey(),
+  };
+}
+
+/** The controller of the sharing of `s`, made at the first user act that needs it; making it asks the core nothing. */
+function consentFor(s: Session): Consent {
+  if (s.consent === null) {
+    s.consent = new Consent({
+      invoke: (cmd, args) => call(cmd, args),
+      conversation: () => s.id,
+      route: () => routeOf(s),
+      now: () => Date.now(),
+      say: (text, kind) => sayTo(s, text, kind),
+    });
+    for (const view of s.views) view.drawConsent();
+  }
+  return s.consent;
+}
+
+/**
+ * Follow the focus: the pane the chats act for is the focused pane when it shows a terminal or a preview, else the pane
+ * it was while that is still in the tab, else none. A pane whose block the core has not listed yet is not taken for a
+ * terminal: the render that the list brings decides.
+ */
+function followActing(): void {
+  const view = state.view;
+  if (!view) return;
+  const live = new Set(view.panes.map(([id]) => id));
+  if (acting !== null && !live.has(acting)) acting = null;
+  const focus = view.focus;
+  if (live.has(focus) && (paneBlocks.has(focus) || shownPanes.has(focus))) {
+    const kind = paneBlocks.get(focus)?.kind;
+    if (kind === undefined || kind === "preview") acting = focus;
+  }
+  shownPanes = live;
+  for (const s of sessions.values()) {
+    for (const v of s.views) v.drawContextButton();
+  }
+}
+
 // ---- the transcript and the composer ----------------------------------------------------------------------------------
 
 /** One message drawn: its node and the plain text it shows. */
@@ -289,6 +376,8 @@ interface Article {
   label: string | null;
   /** `none`: plain text, not asked yet; `asked`: the core renders it; `done`: nothing more to do (rendered or kept plain). */
   markdown: "none" | "asked" | "done";
+  /** The lines of context sent that are drawn under the text, joined; empty for none. */
+  notes: string;
 }
 
 /** Whether `parent` holds exactly `nodes`, in order. */
@@ -347,6 +436,12 @@ class Mounted implements ChatView {
   private readonly input: HTMLTextAreaElement;
   private readonly count: HTMLElement;
   private readonly sendButton: HTMLButtonElement;
+  /** The strip between the transcript and the status line that holds the consent card. */
+  private readonly cards: HTMLElement;
+  private readonly ctx: HTMLButtonElement;
+  private cardFor: Consent | null = null;
+  private cardOff: (() => void) | null = null;
+  private cardWatch: (() => void) | null = null;
   private readonly articles = new Map<string, Article>();
   private streaming: Article | null = null;
   private streamed: Text | null = null;
@@ -385,6 +480,8 @@ class Mounted implements ChatView {
     this.log.setAttribute("aria-live", "off");
     this.log.tabIndex = 0;
     this.log.dataset.field = "";
+    this.cards = el("div", "chat-cards", host);
+    this.cards.id = `chat-cards-${++stripNumber}`;
     this.statusLine = el("div", "chat-status", host);
     this.statusLine.setAttribute("role", "status");
     const composer = el("div", "chat-composer", host);
@@ -395,6 +492,11 @@ class Mounted implements ChatView {
     this.input.setAttribute("placeholder", "Ask a question");
     this.input.spellcheck = false;
     const foot = el("div", "chat-foot", composer);
+    this.ctx = el("button", "chat-ctx", foot);
+    this.ctx.type = "button";
+    this.ctx.dataset.field = "";
+    this.ctx.setAttribute("aria-controls", this.cards.id);
+    this.ctx.addEventListener("click", () => void this.pressContext());
     this.count = el("span", "chat-count", foot);
     el("span", "chat-hint", foot).textContent = HINT;
     this.sendButton = el("button", "chat-send", foot);
@@ -461,6 +563,7 @@ class Mounted implements ChatView {
     if (conversation === this.session.id) return;
     this.session.views.delete(this);
     this.closePicker(false);
+    this.unmountCard();
     this.articles.clear();
     this.streaming = null;
     this.streamed = null;
@@ -473,6 +576,7 @@ class Mounted implements ChatView {
 
   dispose(): void {
     this.alive = false;
+    this.unmountCard();
     this.session.views.delete(this);
     this.host.removeEventListener("mousedown", this.onMouseDown);
     this.host.replaceChildren();
@@ -496,6 +600,103 @@ class Mounted implements ChatView {
     this.drawTranscript();
     this.drawStatus();
     this.drawComposer();
+    this.drawConsent();
+  }
+
+  /** Mount the card of the session's controller when it has one and draw the button that opens it. */
+  drawConsent(): void {
+    if (!this.alive) return;
+    const c = this.session.consent;
+    if (c !== this.cardFor) {
+      this.unmountCard();
+      if (c !== null) {
+        this.cardOff = mountCard(this.cards, c, this.cardView());
+        this.cardWatch = c.subscribe(() => this.drawContextButton());
+      }
+      this.cardFor = c;
+    }
+    this.drawContextButton();
+  }
+
+  /** The text, the open state and the availability of `Context…`. */
+  drawContextButton(): void {
+    if (!this.alive) return;
+    const m = this.session.consent?.model;
+    const picks = m !== undefined && m.offer !== null ? m.offer.items.length - m.off.length : 0;
+    const view = ctxButtonView(m?.mode ?? "closed", picks, acting !== null);
+    if (this.ctx.textContent !== view.text) this.ctx.textContent = view.text;
+    this.ctx.setAttribute("aria-expanded", view.expanded ? "true" : "false");
+    if (view.disabled) this.ctx.setAttribute("aria-disabled", "true");
+    else this.ctx.removeAttribute("aria-disabled");
+  }
+
+  private unmountCard(): void {
+    this.cardOff?.();
+    this.cardWatch?.();
+    this.cardOff = null;
+    this.cardWatch = null;
+    this.cardFor = null;
+  }
+
+  /** What the card needs to know of the page: pane words, provider names and the way back to the composer. */
+  private cardView(): CardView {
+    return {
+      paneTitle: (pane) => paneWords(pane, paneLabel(pane)),
+      profileName: (id) => {
+        const row = this.session.profiles?.find((p) => p.id === id);
+        return row === undefined || row.name === "" ? id : row.name;
+      },
+      paneKind: (pane) => {
+        const kind = paneBlocks.get(pane)?.kind;
+        return kind === undefined ? "terminal" : kind === "preview" ? "preview" : "other";
+      },
+      providers: () => {
+        void openProviders().then(() => {
+          if (this.alive) this.focus();
+        });
+      },
+      focusButton: () => this.ctx.focus({ preventScroll: true }),
+    };
+  }
+
+  /**
+   * The button `Context…`: closes an open card, else asks the core about the pane the chat acts for. The profile list is
+   * read first when it is not known (a user act, like a send), and two providers with no choice open the picker.
+   */
+  private async pressContext(): Promise<void> {
+    const s = this.session;
+    const consent = consentFor(s);
+    if (consent.model.mode !== "closed") {
+      consent.close();
+      return;
+    }
+    if (acting === null) {
+      sayTo(s, NOTES.noPane, "note");
+      return;
+    }
+    let pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
+    if (pick.via === "unknown") {
+      try {
+        await loadProfiles(s);
+      } catch (e) {
+        sayTo(s, faultText(e), "error");
+        return;
+      }
+      pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
+    }
+    if (pick.via === "ask") {
+      sayTo(s, "Choose a provider first.", "note");
+      await this.openPicker();
+      return;
+    }
+    if (review.has(pick.id)) {
+      sayTo(s, "Review this provider first.", "error");
+      void openProviders(pick.id).then(() => {
+        if (this.alive) this.focus();
+      });
+      return;
+    }
+    await consent.open();
   }
 
   private makeChip(tag: "span" | "button"): HTMLElement {
@@ -576,7 +777,7 @@ class Mounted implements ChatView {
         const text = el("div", "chat-text", node);
         this.streamed = document.createTextNode("");
         text.append(this.streamed);
-        this.streaming = { node, who, text, plain: null, label: null, markdown: "done" };
+        this.streaming = { node, who, text, plain: null, label: null, markdown: "done", notes: "" };
       }
       drawWho(this.streaming, "assistant", statusWord(st));
       if (this.streamed.data !== st.partial.text) this.streamed.data = st.partial.text;
@@ -612,7 +813,7 @@ class Mounted implements ChatView {
     node.dataset.status = m.status;
     const who = el("div", "chat-who label", node);
     const text = el("div", "chat-text", node);
-    return { node, who, text, plain: null, label: null, markdown: "none" };
+    return { node, who, text, plain: null, label: null, markdown: "none", notes: "" };
   }
 
   private updateArticle(a: Article, m: ChatMessage): void {
@@ -628,6 +829,20 @@ class Mounted implements ChatView {
     // Only a finished reply of the assistant is Markdown: not a user's message, not one that is streaming, and not one
     // that stopped, failed or was cut.
     if (m.role === "assistant" && m.status === "complete" && plain !== "" && a.markdown === "none") this.render(a, m.id, plain);
+    this.drawNotes(a, m);
+  }
+
+  /** Under the text of a user message that carried context: one quiet line per approval, from the message's own parts. */
+  private drawNotes(a: Article, m: ChatMessage): void {
+    const lines: string[] = [];
+    if (m.role === "user") {
+      for (const part of m.parts) if (part.type === "context") lines.push(sentLine(part));
+    }
+    const key = lines.join("\n");
+    if (a.notes === key) return;
+    a.notes = key;
+    for (const old of Array.from(a.node.querySelectorAll(":scope > .chat-ctxnote"))) old.remove();
+    for (const line of lines) el("p", "chat-ctxnote", a.node).textContent = line;
   }
 
   /** Make the finished reply `text` Markdown: from the cache, or by asking the core once. */
@@ -672,7 +887,7 @@ class Mounted implements ChatView {
     return row;
   }
 
-  private drawStatus(): void {
+  drawStatus(): void {
     const line = statusFor(this.session);
     if (this.statusLine.textContent !== line.text) this.statusLine.textContent = line.text;
     if (line.kind === "") this.statusLine.removeAttribute("data-kind");
@@ -867,7 +1082,7 @@ class Mounted implements ChatView {
     const s = this.session;
     const text = this.input.value.trim();
     if (text === "" || s.sending || utf8Bytes(text) > MAX_TEXT_BYTES) return;
-    const pane = this.pane();
+    const pane = acting ?? this.pane();
     if (pane === null) {
       this.say("This chat has no pane to act for.", "error");
       return;
@@ -898,6 +1113,7 @@ class Mounted implements ChatView {
         });
         return;
       }
+      const held = s.consent?.held() ?? null;
       try {
         await call("ai_send", {
           conversation: s.id,
@@ -905,11 +1121,13 @@ class Mounted implements ChatView {
           pane,
           profile: pick.id === "" ? null : pick.id,
           model: null,
+          ...contextArguments(held),
         });
       } catch (e) {
         this.say(faultText(e), "error");
         return;
       }
+      s.consent?.sent();
       s.draft = "";
       s.notice = null;
       for (const view of s.views) {
@@ -941,10 +1159,7 @@ class Mounted implements ChatView {
 
   /** Say one line under the transcript of every view of this chat, now. */
   private say(text: string, kind: "error" | "note"): void {
-    const s = this.session;
-    s.notice = { text, kind };
-    s.stopping = false;
-    for (const view of s.views) view.drawStatus();
+    sayTo(this.session, text, kind);
   }
 }
 
@@ -1009,6 +1224,7 @@ export function chatClosed(conversation: string): void {
   const s = sessions.get(conversation);
   if (s !== undefined) {
     dirty.delete(s);
+    s.consent?.dispose();
     if (s.feed.state.running) void call("ai_cancel", { conversation }).catch(() => {});
   }
   sessions.delete(conversation);
@@ -1017,12 +1233,17 @@ export function chatClosed(conversation: string): void {
 }
 
 /** Make the button, register the two actions and listen to the core's `ai` events. Call once at start-up. */
-export async function initChat(open: BlockOpener): Promise<void> {
+export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void> {
   opener = open;
   try {
     await loadStyles("./chat.css");
   } catch {
     // the chat still works without its style sheet
+  }
+  try {
+    await loadStyles("./consent.css");
+  } catch {
+    // the chat still works without the style sheet of the card
   }
   const run = (newChat: boolean): void => {
     void openChat(newChat).then((reason) => {
@@ -1057,5 +1278,7 @@ export async function initChat(open: BlockOpener): Promise<void> {
   onOverlayRender(() => {
     const pressed = shownChatPane() !== null;
     button?.setAttribute("aria-pressed", pressed ? "true" : "false");
+    followActing();
   });
+  void host;
 }

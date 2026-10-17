@@ -39,6 +39,10 @@ export const OTHER_PROFILE = {
   locality: "cloud",
 };
 
+/** The text the mock's panes hold and the key drawn on a screen. Neither may occur in any call, node, attribute or store. */
+export const PANE_TEXT = "zq-consent-text-71b9e4";
+export const PANE_KEY = "sk-ant-api03-zqconsent5e90b3aXYZ0123456789";
+
 /** Two terminal panes side by side. */
 export const VIEW = {
   workspaces: [{ name: "main", active: true, panes: 2 }],
@@ -50,17 +54,23 @@ export const VIEW = {
   windows: 1,
 };
 
+/** The same two panes with the focus on pane 1, so a chat opens beside it. */
+export const VIEW_P1 = { ...VIEW, tabs: [{ title: "shell", active: true, focus: 1, panes: 2 }], focus: 1 };
+
 /**
  * Open the page with the saved profiles `profiles`, the panes of `view` and the block layer of the core played by the
  * mock: `block_open` splits the focused pane to the right, focuses the new pane and lists its block in `pane_blocks`.
- * `blocks` are the blocks that exist at the start.
+ * `blocks` are the blocks that exist at the start. `context` is members of `__MOCK__.ai.context` to set (`panes`,
+ * `localContext`, `localOnly`, `ttl`, `persist`) before the page loads.
  */
 export async function boot(
-  page, url, { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false } = {},
+  page, url,
+  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {} } = {},
 ) {
   await page.addInitScript(
-    ([saved, shown, existing, chats]) => {
+    ([saved, shown, existing, chats, shared]) => {
       window.__MOCK__.reset();
+      Object.assign(window.__MOCK__.ai.context, shared);
       window.__MOCK__.ai.profiles = saved;
       for (const [id, partial] of Object.entries(chats)) window.__MOCK__.ai.setState(id, partial);
       window.__MOCK__.setView(shown);
@@ -82,7 +92,7 @@ export async function boot(
         return window.__MOCK__.view();
       });
     },
-    [profiles, view, blocks, states],
+    [profiles, view, blocks, states, context],
   );
   // The settings of the core are played only when asked for, so the chat cases keep their page exactly as it was.
   if (settings) await settingsCore(page, typeof settings === "object" ? settings : {});
@@ -92,6 +102,38 @@ export async function boot(
   await page.evaluate(async () => {
     window.__registry = await import(new URL("actions.js", location.href).href);
   });
+}
+
+/** Press `Context…` and wait for the card. */
+export async function openContext(page) {
+  await page.locator("button.chat-ctx").click();
+  await page.waitForSelector(".chat-consent:not([aria-busy])");
+}
+
+/** The calls of the three context commands, oldest first, as `[command, args]`. */
+export const ctxCalls = (page) =>
+  page.evaluate(() => window.__MOCK__.calls.filter((c) => c[0].startsWith("ai_context_")).map((c) => [c[0], structuredClone(c[1])]));
+
+/**
+ * Change the two privacy settings: the knobs of the mock and, when the in-page settings core is installed, the same keys
+ * of its view, announced the way `set_setting` does. A key left out is unchanged.
+ */
+export async function setPrivacy(page, { localOnly, localContext } = {}) {
+  await page.evaluate(
+    ([only, mode]) => {
+      const context = window.__MOCK__.ai.context;
+      if (only !== undefined) context.localOnly = only;
+      if (mode !== undefined) context.localContext = mode;
+      if (window.__core) {
+        const view = window.__core.view();
+        if (only !== undefined) view.settings.ai_local_only = only;
+        if (mode !== undefined) view.settings.ai_local_context = mode;
+        window.__core.set(view);
+        window.__MOCK__.emit("settings", view);
+      }
+    },
+    [localOnly, localContext],
+  );
 }
 
 /** Click `✦ AI` and wait for the chat pane. */

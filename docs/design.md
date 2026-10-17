@@ -97,6 +97,7 @@ default.
 | Empty state | the logo's plank with one line of text; no illustrations |
 | Chat pane | a pane of its own kind (6.12): header `chat`, a bar with the provider chip, a transcript, a status line and a composer; flat and hairline, the only shadow is the provider sheet on a phone |
 | AI providers dialog | the box of the Settings dialog (6.13): groups under `.label` legends, a list of providers as a radio group, a form with a write-only key field, a disclosure card for a gateway or a server of the user's own; on a phone it is the screen |
+| Context card | a flat strip in the chat pane (6.14): a 2 px bar on its left, native checkboxes, one solid action, hairlines above and below, no shadow; it names the pane, the destination and every item that would go out |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
 No motion in the terminal grid itself. `prefers-reduced-motion` removes all transitions.
@@ -382,6 +383,8 @@ status line and the composer.
   is a button (`aria-haspopup`, `aria-expanded`); with none it reads `no provider set up` and is not a button. After the
   usage comes a button, `Providers…`, whose text is `Set up…` while the list of providers is known to be empty; it opens
   the dialog of 6.13. While a provider waits for its review (6.13) the text carries the count: `Providers… (1 to review)`.
+  While `Local only` is on (6.13) the chip `local only` follows the place word: a button in the ok colour with a hairline
+  that opens the dialog; it is not drawn while the switch is off.
 - **Picker.** A radio group under the bar, flat and hairline (a bottom sheet at 640 px and narrower). One row per
   profile: `●` or `○`, the name, the model and the host. The chosen row has the rose wash and a 2 px rose bar on its left
   and `aria-checked`. The arrows move and choose; `Enter`, `Space` and `Escape` close it. With two or more profiles and
@@ -391,15 +394,20 @@ status line and the composer.
   message has a 2 px hairline bar on its left. The assistant text is Markdown once the message is finished and plain
   text while it streams. A message that did not complete says `stopped`, `failed` or `interrupted` after the role (warn
   colour, underlined). While a reply streams the label says `ASSISTANT · thinking` (only reasoning so far) or
-  `ASSISTANT · writing`. Reasoning text is not shown. Tool, context and approval parts draw nothing.
+  `ASSISTANT · writing`. Reasoning text is not shown. A user message that carried context ends with one quiet line in
+  mono, `Context sent: Screen of pane 1 (2.4 KiB) → this computer`, from the labels, sizes and place of the message
+  itself, also after a reload; it never shows text. Tool and approval parts draw nothing.
 - **End row.** A turn that failed or was cut by a limit has one row with the mark `!`, the class in words and the core's
   one-line text (`! FAILED · overload  The provider is overloaded.`); a limit reads `! STOPPED · step limit`. The danger
   colour and the words are two cues.
+- **Context strip.** Between the transcript and the status line, only while the card of 6.14 is open.
 - **Status line.** One line, `role="status"`: `working`, `thinking`, `writing`, `stopping`, a refused send in the core's
-  words, and after a turn `reply finished`, `reply stopped` or `reply failed`. It clears when the user types.
+  words, a hint of the page (dim, for example that sharing ended because the provider changed), and after a turn
+  `reply finished`, `reply stopped` or `reply failed`. It clears when the user types.
 - **Composer.** A multi-line field (1 to 8 rows, in the chat text face) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
-  that becomes `Stop` (hairline) while a turn runs. Below the field, left: `≈ 12 tokens` (UTF-8 bytes divided by 3,
-  rounded up, the rule of the core) and the keys `⏎ send · ⇧⏎ new line · Esc stop`; right: the button. Over 131072 bytes
+  that becomes `Stop` (hairline) while a turn runs. Below the field, left: the button `Context…` (6.14; it reads
+  `Context · 1 item` while an offer is attached), then `≈ 12 tokens` (UTF-8 bytes divided by 3, rounded up, the rule of
+  the core) and the keys `⏎ send · ⇧⏎ new line · Esc stop`; right: the button. Over 131072 bytes
   the count reads `too long · 131074 of 131072 bytes` (warn, underlined) and `Send` is disabled.
 
 ![AI chat pane](design/ai-chat-pane.png)
@@ -424,7 +432,8 @@ a user name is not a link: it is text followed by the address in brackets.
 **Keys and focus.** Opening a chat focuses the composer, and so does the pane gaining the focus. `Enter` sends (not while
 an input method composes), `Shift+Enter` makes a new line, and `Escape` stops a running reply and otherwise gives the
 keyboard back to the terminal. The transcript can be focused; the arrows scroll it and `Cmd+C` copies the selected text.
-Closing the pane stops a running reply.
+`Escape` inside the context card closes the card and does nothing else. Closing the pane stops a running reply. Every
+message names the pane the chat acts for (6.14), with context or without.
 
 **Narrow screens (640 px and narrower).** The pane is the screen. `Send`, the chip, the picker rows and the composer are at
 least 44 px high, and the composer text is at least 16 px. The picker is a sheet from the bottom edge (24 px radius on
@@ -531,3 +540,67 @@ of the chat sheet (6.12) apply.
 error; the status line is `role="status"`; the list and the option groups are radio groups. Nothing moves, so
 `motion-reduce` has nothing to remove. Every hairline is `--hw-line`, so `contrast-high` holds. Under forced colours the
 chosen row and the card get a system-colour outline.
+
+### 6.14 Sharing context
+
+The card in which the user shares a pane with the chat, sees what would go out and sends it. Terminal and file text
+reaches a provider only through this card: the user presses `Context…`, shares the pane, ticks what to attach, sees every
+item as a label, a size and a list of what was hidden, and sends. The page never holds the text; it sends ids and the core
+sends the text it approved.
+
+**The pane.** The card is about the pane the chat acts for: the last pane the user focused that shows a terminal or a
+preview (a chat, a file browser or a monitor does not count). Its number and name are in the card title (`PANE 1 · shell`,
+the name cut at 40 characters). With none, `Context…` is `aria-disabled` and a press says `Focus a terminal or preview
+pane first.` in the status line. When the user focuses another such pane the card closes and an attached offer is dropped
+(the first pane stays shared). Every message the chat sends names this pane, with context or without.
+
+**Opening.** `Context…` is a hairline mono button at the left of the composer foot, the size of `Providers…`: 28 px high
+on desktop, 44 px at 640 px and narrower, with `aria-expanded` and `aria-controls` the card. A press opens the card and
+only then is the core asked (it looks up a host name when it classifies a destination), so a mount, a focus or a redraw
+asks nothing. While an offer is attached the button reads `Context · 1 item` (`Context · 2 items`, `Context · none` when
+every item is unticked), so what will go out is visible next to `Send`.
+
+**Modes.** Each mode has words, so colour is never the only cue.
+
+| Mode | Title | Bar | Second cue and content |
+|---|---|---|---|
+| `ask` | `Consent needed` | warn | the mark `!`; "Terminal content is only sent when you share it." (for a preview pane: "The file this pane shows is only sent when you share it."), the question "Share pane 1 with Local · llama3.2? It goes to localhost:11434 (this computer).", "You still see every item before a message is sent."; buttons `Share pane 1` (solid) and `No` |
+| `pick` | `Shared · pane 1 · shell`, or `Pane 1 · shell` when asking is off | hairline | one checkbox per kind the core lists (`Selection`, `Visible screen`, `Last command and its output`, `File as saved`, `Preview as saved`), "Nothing is attached yet.", buttons `Preview` (solid, disabled until a kind is ticked), `Stop sharing` (only when shared) and `Close`; with asking off the line "Asking is off for models on this computer. You still see every item." |
+| `offer` | `Goes out with your next message` | hairline | the destination at the right (host in mono and the place chip), one row per item with a ticked checkbox, the label, the size and under it the findings in words; "Nothing there: Selection." for kinds that read empty; the total, the persistence line, the validity line, the best-effort sentence; buttons `Read again` and `Discard` |
+| `blocked` | `Cannot share` | danger | the mark `!`, the reason in words (underlined), `Providers…` for `local_only` and `destination`, `Close` |
+| `busy` | `Asking…` or `Reading…` | hairline | `aria-busy`, no buttons |
+
+**Card.** A flat strip between the transcript and the status line, a hairline above and below, a 2 px bar on its left
+(warn while consent is needed, danger when it cannot go on, hairline otherwise), a `.label` title, body text like the chat
+text (Manrope 13 px), labels and numbers in mono, no shadow, at most half the height of the pane and scrolling inside.
+
+**What the user sees.** Every item is a label, a size and findings, never its text: an excerpt would need a way to read the
+text, and the page has none. The last command of a pane that has just started can be the shell's start-up text, and
+nothing on the card can tell; untick it when in doubt. The last command appears in the pick list only when the engine can
+bound command output; the card offers exactly the kinds the core lists. The redaction report is shown per item, next to
+the sentence "Best effort, not a guarantee: holzWave hides the secrets it recognises and cannot promise that none are
+left.", and no text of the page says that secrets are never sent. The same content cannot be sent twice in one chat; the
+page says so when the core refuses it.
+
+**After a send.** The offer is spent and the card closes; the sent message ends with the quiet line `Context sent:` and the
+labels, sizes and place. The share stays in the core, so the next `Context…` opens the pick list at once.
+
+**When sharing ends.** The page drops what it knows of the share, and any attached offer, when the provider, the model or
+the saved address changes (the picker, or the providers dialog), when the shared pane or the chat closes, with `Stop
+sharing`, and when a privacy setting changes. The status line says so (`Sharing ended because the provider changed. Share
+again to attach context.`) and the next `Context…` asks the core again. An offer lives five minutes; an older one is never
+sent and the status line says `The attached context expired. Add it again.` The page never reads the pane again by itself.
+
+**Local only.** While the switch is on, the place chip of the destination in the card and the chip `local only` in the chat
+bar say so; a destination that leaves the computer is refused and the card says why, with `Providers…`.
+
+**Keys and focus.** Opening moves the focus to the first control of the card and closing returns it to `Context…`. `Escape`
+inside the card closes it and is not passed on; `Space` ticks; `Enter` in the composer sends with the attached offer; every
+control carries `data-field`, so a typed character reaches no terminal.
+
+**Narrow screens (640 px and narrower).** `Context…`, every button, every checkbox row and every item row are at least
+44 px high, the card is at most 60 % of the viewport height and scrolls inside, and the composer text stays at least 16 px.
+
+**Accessibility.** The card is a `group` named `Share context`, each checkbox has its visible label, the mode word is text,
+the status line is the live region, every hairline is `--hw-line` so `contrast-high` holds, and nothing moves. Under forced
+colours the card and the place chip get a system-colour outline.

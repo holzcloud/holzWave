@@ -57,7 +57,7 @@ async function sendCase(page, url) {
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 1);
   const sent = (await calls(page, "ai_send"))[0];
   assert.deepEqual(Object.keys(sent).sort(), ["conversation", "model", "pane", "profile", "text"], "exactly five arguments");
-  assert.deepEqual(sent, { conversation: "chat-mock-1", text: "hello there", pane: 3, profile: "local-1", model: null });
+  assert.deepEqual(sent, { conversation: "chat-mock-1", text: "hello there", pane: 2, profile: "local-1", model: null }, "the pane the chat acts for");
 
   // While the reply streams it is text: no element inside, no finished assistant message yet.
   await page.waitForFunction(() => document.querySelector(".chat-partial .chat-text")?.textContent === "Hello ");
@@ -188,7 +188,7 @@ async function faultCase(page, url) {
   assert.equal(await page.locator(".chat-status").getAttribute("data-kind"), "error");
   assert.equal(await page.locator(".chat-input").inputValue(), "hello", "the draft stays");
   assert.equal(await page.locator(".chat-msg").count(), 0, "no message was added");
-  assert.equal(await page.locator(".chat-chip").textContent(), "no provider set up");
+  await page.waitForFunction(() => document.querySelector(".chat-chip")?.textContent === "no provider set up");
   assert.equal(await page.locator("button.chat-chip").count(), 0, "no button: there is nothing to choose");
   // Typing clears the status.
   await page.locator(".chat-input").press("x");
@@ -256,7 +256,7 @@ async function pickerCase(page, url) {
   await page.locator('.block[data-pane="4"] .chat-input').fill("again");
   await page.locator('.block[data-pane="4"] .chat-input').press("Enter");
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 2);
-  assert.deepEqual((await calls(page, "ai_send"))[1], { conversation: "chat-mock-2", text: "again", pane: 4, profile: "other-1", model: null });
+  assert.deepEqual((await calls(page, "ai_send"))[1], { conversation: "chat-mock-2", text: "again", pane: 2, profile: "other-1", model: null });
   assert.equal(await page.locator(".chat-picker").count(), 0);
 
   // With one saved profile the chip is plain text and the picker never exists.

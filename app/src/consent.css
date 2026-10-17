@@ -1,0 +1,112 @@
+/*
+ * The consent card of the chat (consentcard.ts, chat.ts, docs/design.md section 6.14): the strip between the transcript and
+ * the status line, the button `Context…` in the composer, the chip `local only` in the bar and the line under a sent message.
+ * Every colour is a `--hw-*` token, every size is in rem so the UI scale moves it with the rest of the chrome (a pixel value
+ * only for 1 px hairlines, the 2 px bar and focus ring, the 28 px and 44 px touch minimums, the 16 px composer text and the
+ * 640 px breakpoint). Flat and hairline: nothing here moves, fades or floats, so the motion setting has nothing to remove.
+ * The rules of the buttons carry a parent class so they win over the `.block button` reset of blocks.css, and the hover
+ * rules carry the state so they win over its hover rule.
+ */
+
+/* ---- the strip --------------------------------------------------------------------------------------------------- */
+
+.chat-cards { flex: none; box-sizing: border-box; min-height: 0; max-height: 50%; overflow-y: auto; }
+.chat-cards:empty { display: none; }
+
+.chat-consent { box-sizing: border-box; padding: .5rem .833rem .667rem; border-top: 1px solid var(--hw-line);
+                border-bottom: 1px solid var(--hw-line); border-left: 2px solid var(--hw-line); color: var(--hw-ink); }
+.chat-consent[data-mode="ask"] { border-left-color: var(--hw-warn); }
+.chat-consent[data-mode="blocked"] { border-left-color: var(--hw-danger); }
+.consent-head { display: flex; flex-wrap: wrap; align-items: center; gap: .167rem .667rem; margin-bottom: .333rem; }
+.consent-title { color: var(--hw-ink); }
+.chat-consent[data-mode="ask"] .consent-title::before, .chat-consent[data-mode="blocked"] .consent-title::before { content: "! "; }
+.chat-consent[data-mode="ask"] .consent-title { color: var(--hw-warn); text-decoration: underline; }
+.chat-consent[data-mode="blocked"] .consent-title { color: var(--hw-danger); text-decoration: underline; }
+.consent-dest { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .333rem .5rem; min-width: 0; margin-left: auto;
+                color: var(--hw-dim); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); }
+.consent-host { min-width: 0; overflow-wrap: anywhere; }
+.consent-place { padding: 0 .5rem; border: 1px solid var(--hw-line); border-radius: 62.5rem; color: var(--hw-dim); }
+.consent-place[data-leaves="true"] { border-color: var(--hw-warn); color: var(--hw-warn); text-decoration: underline; }
+
+.consent-text, .consent-empty, .consent-total, .consent-persist, .consent-valid, .consent-best, .consent-note {
+  margin: 0 0 .333rem; font-family: "Manrope", system-ui, sans-serif; font-size: 1.083rem; line-height: 1.45; overflow-wrap: anywhere;
+}
+.consent-text { color: var(--hw-ink); }
+.consent-text[data-kind="error"] { color: var(--hw-danger); text-decoration: underline; }
+.consent-empty, .consent-persist, .consent-valid, .consent-best, .consent-note { color: var(--hw-dim); font-size: calc(11rem / 12); }
+.consent-total { color: var(--hw-ink); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; }
+
+/* The kinds to attach and the items that would go out: native checkboxes, the rose only as their accent. */
+.consent-kinds { display: flex; flex-direction: column; min-width: 0; margin: 0 0 .333rem; padding: 0; border: 0; }
+.consent-kind, .consent-row { display: flex; align-items: center; gap: .5rem; box-sizing: border-box; min-height: max(28px, calc(28rem / 12));
+                              cursor: pointer; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; }
+.consent-kind input, .consent-row input { flex: none; margin: 0; accent-color: var(--hw-rose); }
+.consent-kind input:focus-visible, .consent-row input:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
+.consent-items { margin: 0 0 .333rem; padding: 0; list-style: none; }
+.consent-item { margin: 0; padding: 0; border-top: 1px solid var(--hw-line); }
+.consent-item:first-child { border-top: 0; }
+.consent-label { min-width: 0; flex: 1 1 0; overflow-wrap: anywhere; }
+.consent-size { flex: none; color: var(--hw-dim); }
+.consent-findings { margin: 0 0 .333rem 1.5rem; padding: 0; list-style: none; font-family: "JetBrains Mono", ui-monospace, monospace;
+                    font-size: calc(11rem / 12); color: var(--hw-dim); }
+.consent-finding[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
+.consent-finding[data-tone="warn"]::before { content: "! "; }
+
+/* The buttons: hairline, mono, uppercase; the two actions that go on are solid. */
+.consent-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .333rem; }
+.chat-consent button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+                       min-height: max(28px, calc(28rem / 12)); padding: 0 .833rem; border: 1px solid var(--hw-line);
+                       border-radius: .333rem; background: none; color: var(--hw-ink); cursor: pointer;
+                       font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: .1em;
+                       text-transform: uppercase; }
+.chat-consent button:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.chat-consent button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.chat-consent .consent-share, .chat-consent .consent-preview { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep);
+                                                               color: var(--hw-on-accent); }
+.chat-consent .consent-share:hover, .chat-consent .consent-preview:hover { border-color: var(--hw-rose-deep);
+                                                                           background: var(--hw-rose-deep); color: var(--hw-on-accent); }
+.chat-consent .consent-preview:disabled { border-color: var(--hw-line); background: none; color: var(--hw-dim); cursor: default;
+                                          opacity: 1; }
+.chat-consent[aria-busy="true"] .consent-title { color: var(--hw-dim); }
+
+/* The button of the composer and the chip of the bar, in the style of `Providers…`. */
+.chat-composer .chat-ctx { display: inline-flex; align-items: center; flex: none; box-sizing: border-box;
+                           min-height: max(28px, calc(28rem / 12)); padding: 0 .667rem; border: 1px solid var(--hw-line);
+                           border-radius: 62.5rem; background: none; color: var(--hw-ink); cursor: pointer;
+                           font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; letter-spacing: normal;
+                           text-transform: none; white-space: nowrap; }
+.chat-composer .chat-ctx:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.chat-composer .chat-ctx[aria-expanded="true"] { background: var(--hw-rose-wash); border-color: var(--hw-rose); }
+.chat-composer .chat-ctx[aria-disabled="true"] { color: var(--hw-dim); cursor: default; }
+.chat-composer .chat-ctx[aria-disabled="true"]:hover { border-color: var(--hw-line); }
+.chat-composer .chat-ctx:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.chat-bar .chat-local { display: inline-flex; align-items: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12));
+                        padding: 0 .5rem; border: 1px solid var(--hw-ok); border-radius: 62.5rem; background: none;
+                        color: var(--hw-ok); cursor: pointer; font-family: "JetBrains Mono", ui-monospace, monospace;
+                        font-size: calc(11rem / 12); letter-spacing: normal; text-transform: none; white-space: nowrap; }
+.chat-bar .chat-local:hover { border-color: var(--hw-ok); background: var(--hw-rose-wash); color: var(--hw-ok); }
+.chat-bar .chat-local:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.chat-status[data-kind="note"] { color: var(--hw-dim); }
+
+/* What went out with a message: one quiet line under its text. */
+.chat-ctxnote { margin: .167rem 0 0; color: var(--hw-dim); font-family: "JetBrains Mono", ui-monospace, monospace;
+                font-size: calc(11rem / 12); line-height: 1.4; overflow-wrap: anywhere; }
+
+/* ---- narrow screens: 640 px and narrower ------------------------------------------------------------------------- */
+
+/* The card is part of the screen: every target is at least 44 px, the strip is at most 60 % of the height and scrolls. */
+@media (max-width: 640px) {
+  .chat-composer .chat-ctx, .chat-bar .chat-local, .chat-consent button, .consent-kind, .consent-row, .consent-item {
+    min-height: max(44px, calc(44rem / 12));
+  }
+  .chat-cards { max-height: 60%; }
+  .consent-kind, .consent-row { padding: 0 .167rem; }
+  .consent-actions { gap: .667rem; }
+}
+
+/* ---- forced colours: system colours outline the card, the place chip and the local-only chip ----------------------- */
+
+@media (forced-colors: active) {
+  :root .chat-consent { outline: 2px solid CanvasText; outline-offset: -2px; }
+  :root .consent-place, :root .chat-bar .chat-local { outline: 2px solid Highlight; outline-offset: -2px; }
+}
