@@ -41,9 +41,15 @@ export function decorateReply(node: HTMLElement, reply: ReplyHandle): void {
     button.dataset.field = "";
     button.textContent = WORDS.insertLabel;
     const text = verdict.text;
-    // An event that a script made is not a press: only the person's own click or key reaches the terminal.
+    // An event that a script made is not a press: only the person's own click or key reaches the terminal. One press inserts the
+    // line once: the second click of a double click (`detail` above 1) and any click while an insert is on its way do nothing.
+    let sending = false;
     button.addEventListener("click", (e) => {
-      if (e.isTrusted) void insertCommand(text, reply);
+      if (!e.isTrusted || e.detail > 1 || sending) return;
+      sending = true;
+      void insertCommand(text, reply).finally(() => {
+        sending = false;
+      });
     });
     pre.after(bar);
   }
