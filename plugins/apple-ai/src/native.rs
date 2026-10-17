@@ -1,8 +1,8 @@
 //! The system backend: the Rust side of the stream ABI to the Swift package (macOS only).
 //!
 //! This is the second and last home of foreign calls in the crate, next to the module of `lib.rs` that asks for the
-//! availability. Functions of the Swift package cross the ABI here (`hw_afm_generate` and `hw_afm_cancel`; see the
-//! module documentation of the backend for the others as they are added). Only reply text and an ASCII case label come back: no framework error text, no payload and no
+//! availability. Four functions cross the ABI (`hw_afm_generate`, `hw_afm_cancel`, `hw_afm_context_size` and
+//! `hw_afm_token_count`). Only reply text and an ASCII case label come back: no framework error text, no payload and no
 //! prompt.
 //!
 //! Ownership of a call's state follows one pattern. The state sits behind an `Arc`; one strong reference is handed to
@@ -11,9 +11,9 @@
 //! must not come), and **leaks** it when the call is abandoned, so that a late callback still finds live memory.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use holzwave_core::ai::provider::{CancelToken, Flow};
@@ -33,6 +33,8 @@ unsafe extern "C" {
         user_data: *mut c_void,
     ) -> i64;
     fn hw_afm_cancel(handle: i64);
+    fn hw_afm_context_size() -> i32;
+    fn hw_afm_token_count(text: *const u8, len: usize, done: extern "C" fn(*mut c_void, i32), user_data: *mut c_void);
 }
 
 /// Event kinds of the stream ABI.
@@ -46,6 +48,8 @@ const POLL: Duration = Duration::from_millis(20);
 const GRACE: Duration = Duration::from_millis(20);
 /// How long the waiter gives a callback that has delivered its last event to return.
 const RETURN_WAIT: Duration = Duration::from_millis(200);
+/// The longest a token count may take.
+const COUNT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Events that arrived after a terminal one, over all calls of the process.
 static LATE_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -150,6 +154,45 @@ impl Backend for SystemBackend {
         crate::probe()
     }
 
+    fn context_size(&self) -> Option<u32> {
+        // SAFETY: the function takes no arguments, passes no pointers and returns a plain integer.
+        let size = unsafe { hw_afm_context_size() };
+        u32::try_from(size).ok().filter(|size| *size > 0)
+    }
+
+    fn count_tokens(&self, text: &str) -> Option<u32> {
+        if text.len() > MAX_INPUT_BYTES {
+            return None;
+        }
+        let state = Arc::new(CountState::default());
+        let raw = Arc::into_raw(Arc::clone(&state)) as *mut c_void;
+        // SAFETY: `text` is valid for `text.len()` bytes for the duration of the call and Swift copies it before the
+        // call returns; `count_done` has the C signature the Swift side expects; `raw` stays valid until the reference
+        // it stands for is released below or leaked.
+        unsafe { hw_afm_token_count(text.as_ptr(), text.len(), count_done, raw) };
+
+        let guard = state.value.lock().unwrap_or_else(PoisonError::into_inner);
+        let (guard, result) =
+            state.signal.wait_timeout_while(guard, COUNT_TIMEOUT, |value| value.is_none()).unwrap_or_else(PoisonError::into_inner);
+        let value = *guard;
+        drop(guard);
+        if result.timed_out() {
+            return None; // the callback's reference is leaked on purpose
+        }
+        let deadline = Instant::now() + RETURN_WAIT;
+        while !state.returned.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(GRACE);
+        if state.calls.load(Ordering::SeqCst) != 1 || !state.returned.load(Ordering::Acquire) {
+            return None; // leaked too: a further call must still find live memory
+        }
+        // SAFETY: `raw` came from `Arc::into_raw` above and has not been released; exactly one callback was seen and it
+        // has returned, so nothing reads the state any more.
+        drop(unsafe { Arc::from_raw(raw as *const CountState) });
+        value.and_then(|count| u32::try_from(count).ok())
+    }
+
     fn generate(
         &self,
         req: &GenerateRequest,
@@ -250,4 +293,27 @@ fn release(shared: &Arc<Shared>, raw: *mut c_void) {
     // SAFETY: `raw` came from `Arc::into_raw` in `generate` and has not been released; the terminal callback has
     // returned and the Swift side sends nothing after a terminal event.
     drop(unsafe { Arc::from_raw(raw as *const Shared) });
+}
+
+/// Shared between the waiter and the callback of one token count.
+#[derive(Default)]
+struct CountState {
+    value: Mutex<Option<i32>>,
+    signal: Condvar,
+    calls: AtomicU32,
+    returned: AtomicBool,
+}
+
+/// Called by Swift exactly once per count. It only borrows `user_data`.
+extern "C" fn count_done(user_data: *mut c_void, count: i32) {
+    // SAFETY: `user_data` is the pointer `count_tokens` got from `Arc::into_raw`; that reference is released only after
+    // this call was seen and returned (or leaked), so the state is alive. The callback never frees it.
+    let state = unsafe { &*(user_data as *const CountState) };
+    state.calls.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut slot) = state.value.lock() {
+        *slot = Some(count);
+    }
+    state.signal.notify_all();
+    // Nothing touches the state after this store.
+    state.returned.store(true, Ordering::Release);
 }

@@ -27,7 +27,9 @@ mod pump;
 mod scripted;
 
 pub use backend::{AppleError, Backend, GenerateRequest, MAX_INPUT_BYTES};
-pub use prompt::{FALLBACK_CONTEXT_TOKENS, FRAME_MARGIN_TOKENS, Rendered, SYSTEM_BUDGET_TOKENS, estimate_tokens, render};
+pub use prompt::{
+    Budget, Estimator, FALLBACK_CONTEXT_TOKENS, FRAME_MARGIN_TOKENS, Rendered, SYSTEM_BUDGET_TOKENS, estimate_tokens, render,
+};
 pub use provider::{AppleProvider, MODEL_ID, PROVIDER_ID};
 pub use scripted::{BackendScript, ScriptedBackend};
 #[cfg(target_os = "macos")]
@@ -88,6 +90,56 @@ impl Availability {
             Availability::OsTooOld => "os_too_old",
             Availability::SdkLacksFramework => "sdk_lacks_framework",
             Availability::UnsupportedPlatform => "unsupported_platform",
+        }
+    }
+}
+
+/// What a person can do about an availability state, as a key. The wording is the shell's: this crate gives the keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Advice {
+    /// Nothing: the model is available.
+    None,
+    /// Turn Apple Intelligence on in the system settings.
+    EnableAppleIntelligence,
+    /// Wait: the model is still being prepared.
+    WaitForModel,
+    /// This device or platform cannot run the model.
+    NotSupported,
+    /// Update macOS.
+    UpdateMacos,
+    /// This build of the app was made without the framework.
+    NotInThisBuild,
+    /// The reason is not known.
+    Unknown,
+}
+
+impl Advice {
+    /// A stable snake_case key.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Advice::None => "none",
+            Advice::EnableAppleIntelligence => "enable_apple_intelligence",
+            Advice::WaitForModel => "wait_for_model",
+            Advice::NotSupported => "not_supported",
+            Advice::UpdateMacos => "update_macos",
+            Advice::NotInThisBuild => "not_in_this_build",
+            Advice::Unknown => "unknown",
+        }
+    }
+}
+
+impl Availability {
+    /// The action that fits this state. The match is exhaustive on purpose, so a new state forces the mapping to be
+    /// revisited.
+    pub fn advice(self) -> Advice {
+        match self {
+            Availability::Available => Advice::None,
+            Availability::AppleIntelligenceNotEnabled => Advice::EnableAppleIntelligence,
+            Availability::ModelNotReady => Advice::WaitForModel,
+            Availability::DeviceNotEligible | Availability::UnsupportedPlatform => Advice::NotSupported,
+            Availability::OsTooOld => Advice::UpdateMacos,
+            Availability::SdkLacksFramework => Advice::NotInThisBuild,
+            Availability::Other => Advice::Unknown,
         }
     }
 }

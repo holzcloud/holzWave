@@ -13,7 +13,7 @@ use holzwave_core::ai::types::{Capabilities, Locality, StopReason, Usage};
 
 use crate::backend::{AppleError, Backend, GenerateRequest};
 use crate::Availability;
-use crate::prompt::{Estimator, FALLBACK_CONTEXT_TOKENS, render};
+use crate::prompt::{Budget, Estimator, FALLBACK_CONTEXT_TOKENS, render};
 
 /// The id the provider has in the registry and the one a context is approved for.
 pub const PROVIDER_ID: &str = "apple";
@@ -49,6 +49,17 @@ impl AppleProvider {
         Self::new(Arc::new(crate::native::SystemBackend::new()))
     }
 
+    /// The budget of the model's window, read from the backend now (the fallback size when it cannot say).
+    fn budget(&self) -> Budget {
+        Budget::for_context(self.backend.context_size().unwrap_or(FALLBACK_CONTEXT_TOKENS))
+    }
+
+    /// What the instructions and the prompt of one request may take together, in tokens, for the window the model
+    /// reports now. A consent card can compare the size of a selection with it.
+    pub fn input_budget_tokens(&self) -> u32 {
+        self.budget().input
+    }
+
     /// Whether the model can be used now. Asked from the backend on every call, never cached.
     pub fn availability(&self) -> Availability {
         self.backend.availability()
@@ -77,12 +88,13 @@ impl Provider for AppleProvider {
     }
 
     fn capabilities(&self, _model: &str) -> Capabilities {
+        let budget = self.budget();
         Capabilities {
             tools: false,
             reasoning: false,
             vision: false,
-            context_tokens: Some(FALLBACK_CONTEXT_TOKENS),
-            max_output_tokens: Some(1024),
+            context_tokens: Some(budget.context),
+            max_output_tokens: Some(budget.reply),
             locality: Locality::OnDevice,
         }
     }
@@ -108,7 +120,8 @@ impl Provider for AppleProvider {
             return Err(AiError::Unavailable(Detail::new(state.as_str())));
         }
         let _turn = self.take_turn(cancel)?;
-        let rendered = render(req)?;
+        let backend = &self.backend;
+        let rendered = render(req, &self.budget(), &|text| backend.count_tokens(text))?;
 
         let request = GenerateRequest {
             instructions: rendered.instructions.clone(),
