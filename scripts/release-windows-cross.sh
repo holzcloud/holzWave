@@ -28,7 +28,12 @@
 #
 # Inspected here, any mismatch fails the script: the executable is a 64-bit GUI PE and imports no mingw runtime DLL,
 # the installer is an NSIS installer that holds holzwave-app.exe (the built one, with the bundle type marker the
-# bundler writes) and WebView2Loader.dll (the built one).
+# bundler writes), WebView2Loader.dll (the built one), wsh.exe beside the executable (the built one: the folder of the
+# executable is the folder a pane's PATH gets) and the two static Linux wsh builds as resources.
+#
+# wsh: scripts/wsh-sidecar.sh builds wsh.exe for the target and scripts/wsh-linux.sh the two Linux builds before the
+# bundle is made, and app/src-tauri/tauri.wsh.conf.json (the overlay that only release scripts pass, so cargo test needs
+# no binary) names them for the bundler.
 #
 # Needs: this Mac (Darwin), Docker running, `brew install mingw-w64`, `rustup target add x86_64-pc-windows-gnu`, npm,
 # a clean working tree, and the environment of docs/building.md (scripts/env.sh puts Rust and Zig 0.16 on the PATH).
@@ -121,9 +126,13 @@ chmod +x "$shim/makensis" || exit 2
 echo "+ npm --prefix app ci && npm --prefix app run build"
 npm --prefix app ci >/dev/null && npm --prefix app run build >/dev/null || fail "npm ci or the page build"
 
-echo "+ tauri build --target $TARGET --bundles nsis (mingw-w64 link, makensis in Docker)"
+echo "+ wsh for $TARGET (the sidecar) and the two static Linux builds (the resources)"
+wsh_exe=$(sh "$here/wsh-sidecar.sh" "$TARGET" | tail -n 1) && [ -f "$wsh_exe" ] || fail "building the wsh sidecar for $TARGET"
+sh "$here/wsh-linux.sh" all || fail "building the static Linux wsh"
+
+echo "+ tauri build --target $TARGET --bundles nsis --config src-tauri/tauri.wsh.conf.json (mingw-w64 link, makensis in Docker)"
 PATH="$shim:$PATH" CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="-C link-arg=-Wl,--no-gc-sections" \
-    npm --prefix app run tauri -- build --target "$TARGET" --bundles nsis || fail "tauri build"
+    npm --prefix app run tauri -- build --target "$TARGET" --bundles nsis --config src-tauri/tauri.wsh.conf.json || fail "tauri build"
 
 rel="target/$TARGET/release"
 exe="$rel/holzwave-app.exe"
@@ -156,22 +165,32 @@ case "$itype" in
 esac
 bdir=$(cd "$(dirname "$built")" && pwd)
 listing=$(docker run --rm -v "$bdir":/in:ro "$IMAGE" sh -c '7z l "/in/$1"' sh "$(basename "$built")") || fail "7z could not read the installer"
-printf '%s\n' "$listing" | grep -E '(holzwave-app|WebView2Loader)\.dll|holzwave-app\.exe|Type = |SubType'
+printf '%s\n' "$listing" | grep -E '(holzwave-app|WebView2Loader)\.dll|holzwave-app\.exe|wsh|Type = |SubType'
 printf '%s\n' "$listing" | grep -q ' holzwave-app\.exe$' || fail "the installer does not hold holzwave-app.exe"
 printf '%s\n' "$listing" | grep -q ' WebView2Loader\.dll$' || fail "the installer does not hold WebView2Loader.dll"
+# wsh.exe beside holzwave-app.exe (the folder of the executable is the folder a pane's PATH gets) and the two static
+# Linux builds as resources, whichever way 7z spells the separator.
+printf '%s\n' "$listing" | grep -q ' wsh\.exe$' || fail "the installer does not hold wsh.exe: a pane would find no wsh"
+for arch in x86_64 aarch64; do
+    printf '%s\n' "$listing" | grep -Eq " wsh[/\\\\]linux-$arch\$" || fail "the installer does not hold the wsh resource linux-$arch"
+done
 # Take both files out of the installer (into a scratch directory under target/) and compare them with the built ones. The
 # bundler writes the bundle type into a copy of the executable (the 3 letters of __TAURI_BUNDLE_TYPE_VAR_UNK become NSS),
 # so the executable may differ in exactly those 3 bytes and must carry the NSS marker; the loader must be identical.
 scratch="$root/target/release-cross-inspect"
 rm -rf "$scratch"
 mkdir -p "$scratch" || exit 1
-docker run --rm -v "$bdir":/in:ro -v "$scratch":/out "$IMAGE" sh -c '7z e -bso0 -bsp0 -o/out "/in/$1" holzwave-app.exe WebView2Loader.dll' sh "$(basename "$built")" ||
+docker run --rm -v "$bdir":/in:ro -v "$scratch":/out "$IMAGE" sh -c '7z e -bso0 -bsp0 -o/out "/in/$1" holzwave-app.exe WebView2Loader.dll wsh.exe wsh/linux-x86_64 wsh/linux-aarch64' sh "$(basename "$built")" ||
     fail "7z could not take the files out of the installer"
 [ "$(cmp -l "$scratch/holzwave-app.exe" "$exe" | wc -l | tr -d ' ')" -le 3 ] || fail "holzwave-app.exe in the installer differs from the built one by more than the bundle type marker"
 grep -aq '__TAURI_BUNDLE_TYPE_VAR_NSS' "$scratch/holzwave-app.exe" || fail "holzwave-app.exe in the installer does not carry the NSS bundle type marker"
 cmp -s "$scratch/WebView2Loader.dll" "$loader" || fail "WebView2Loader.dll in the installer is not the built one"
+# wsh.exe and the two Linux builds are copied by the bundler as they are: byte-identical to what the two scripts built.
+cmp -s "$scratch/wsh.exe" "$wsh_exe" || fail "wsh.exe in the installer is not the sidecar that was built ($wsh_exe)"
+cmp -s "$scratch/linux-x86_64" app/src-tauri/binaries/wsh-linux-x86_64 || fail "the wsh resource linux-x86_64 in the installer is not the file that was built"
+cmp -s "$scratch/linux-aarch64" app/src-tauri/binaries/wsh-linux-aarch64 || fail "the wsh resource linux-aarch64 in the installer is not the file that was built"
 rm -rf "$scratch"
-echo "installer content: holzwave-app.exe (up to the bundle type marker) and WebView2Loader.dll are the built files"
+echo "installer content: holzwave-app.exe (up to the bundle type marker), WebView2Loader.dll, wsh.exe and the two Linux wsh builds are the built files"
 
 # ---- the artifact: one name, one checksum ------------------------------------------------------------------------
 name="holzWave_${version}_x64-setup.exe"

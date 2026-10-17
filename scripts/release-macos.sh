@@ -49,8 +49,16 @@ out=target/release/bundle
 tag="v$version"
 
 npm --prefix app ci >/dev/null && npm --prefix app run build >/dev/null || exit 1
-npm --prefix app run tauri -- build --bundles app || exit 1
+# wsh goes into the app: the sidecar beside the app executable (where a pane's PATH finds it) and the two static Linux
+# builds as resources, named by the overlay that only this script and its siblings pass (the default configuration
+# names no sidecar, so cargo test and cargo run need no binary). Both are built here, from this commit.
+sh "$here/wsh-sidecar.sh" aarch64-apple-darwin >/dev/null || exit 1
+sh "$here/wsh-linux.sh" all || exit 1
+npm --prefix app run tauri -- build --bundles app --config src-tauri/tauri.wsh.conf.json || exit 1
 git checkout -- app/src-tauri/Cargo.toml 2>/dev/null # the Tauri CLI rewrites feature lists there; the commit stays as it is
+
+# The package must hold the wsh that was just built, beside the app executable, with the Linux builds as resources.
+sh "$here/bundle-check-macos.sh" "$out/macos/holzWave.app" app/src-tauri/binaries/wsh-aarch64-apple-darwin || exit 1
 
 # The Tauri DMG step scripts the Finder and times out without the Automation permission, so the DMG is made directly.
 stage=$(mktemp -d) || exit 1
