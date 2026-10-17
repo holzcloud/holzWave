@@ -16,15 +16,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use holzwave_core::ai::http::{Http, HttpConfig, Origin, Resolver, RetryPolicy};
+use holzwave_core::ai::http::{Frame, Framing, Http, HttpConfig, Origin, Resolver, RetryPolicy};
 use holzwave_core::ai::profiles::{AiConfig, KeySlot, KeyVault, Preset, ProfileInput, ResolveError};
-use holzwave_core::ai::provider::{AiError, CancelToken, ChatRequest, Completion, Flow, Provider, StreamEvent};
+use holzwave_core::ai::provider::{AiError, CancelToken, ChatRequest, Collector, Completion, Flow, Provider, StreamEvent};
 use holzwave_core::ai::service::dispatch::adapter_for;
-use holzwave_core::ai::types::{ApiKey, Message, StopReason, ToolCall, Usage};
+use holzwave_core::ai::sse::{NdjsonDecoder, SseDecoder};
+use holzwave_core::ai::tools::ToolName;
+use holzwave_core::ai::types::{
+    ApiKey, Message, MessageStatus, Part, Role, StopReason, ToolCall, ToolResult, ToolSpec, Usage,
+};
 use holzwave_core::ai::wire::{HttpProvider, Wire};
 use holzwave_core::secrets::MemoryStore;
 use serde_json::Value;
 
+use crate::common::Xorshift64;
 use crate::common::fake_http::{FakeHttp, Reply, Seen};
 
 // ---- canaries ---------------------------------------------------------------------------------------------
@@ -391,6 +396,10 @@ pub fn default_keys(_cell: &Cell) -> Keys {
 pub enum Scenario {
     /// An answer in two pieces.
     Text,
+    /// A line of text and one tool call whose arguments arrive in three pieces.
+    Tool,
+    /// The tool turn preceded by signed reasoning.
+    Signed,
 }
 
 /// The constants of the scenarios.
@@ -403,6 +412,32 @@ impl Neutral {
     pub const TEXT: &'static str = "Hello \u{e9} \u{65e5}\u{672c} \u{1f600}";
     /// The usage of the text scenario.
     pub const TEXT_USAGE: Usage = Usage { input_tokens: 11, output_tokens: 5 };
+    /// The usage of the tool and signed scenarios.
+    pub const TOOL_USAGE: Usage = Usage { input_tokens: 20, output_tokens: 7 };
+    /// The text that comes before the call.
+    pub const LEAD: &'static str = "Reading.";
+    /// The id of the call on the wires that have ids.
+    pub const CALL_ID: &'static str = "call_matrix_1";
+    /// The tool that is called.
+    pub const CALL_NAME: &'static str = "read_file";
+    /// The arguments in three pieces, cut inside a key and inside a string value.
+    pub const ARG_FRAGMENTS: [&'static str; 3] = ["{\"pa", "th\":\"a b.t", "xt\",\"limit\":20}"];
+    /// The reasoning text of the signed scenario.
+    pub const REASON: &'static str = "PLAN-CANARY-REASON";
+    /// The signature of Anthropic and Gemini.
+    pub const SIG: &'static str = "SIG-MATRIX-1==";
+    /// The encrypted content of Responses.
+    pub const ENC: &'static str = "ENC-MATRIX-1==";
+
+    /// The arguments of the call as a JSON value.
+    pub fn call_args() -> Value {
+        serde_json::json!({ "path": "a b.txt", "limit": 20 })
+    }
+
+    /// Whether the wire gives the call the id of the stream (the others mint one that starts with `call_`).
+    pub fn id_is_exact(wire: Wire) -> bool {
+        matches!(wire, Wire::OpenAiChat | Wire::Anthropic | Wire::OpenAiResponses)
+    }
 }
 
 // ---- requests and runs ------------------------------------------------------------------------------------
@@ -654,4 +689,278 @@ pub fn fast_retry() -> HttpConfig {
 /// The standard settings with this idle limit in milliseconds and a short retry.
 pub fn short_idle(milliseconds: u64) -> HttpConfig {
     HttpConfig { idle_timeout: Duration::from_millis(milliseconds), ..fast_retry() }
+}
+
+// ---- the member sets --------------------------------------------------------------------------------------
+
+/// The top-level body members a cell sends for a request with no tools.
+pub fn pinned_members(cell: &Cell) -> BTreeSet<String> {
+    let mut expected: Vec<&str> = match cell.wire {
+        Wire::OpenAiChat => vec!["model", "messages", "stream", "stream_options", "max_tokens"],
+        Wire::Ollama => vec!["model", "messages", "stream", "options"],
+        Wire::Anthropic => vec!["model", "max_tokens", "stream", "system", "messages"],
+        Wire::OpenAiResponses => vec!["model", "instructions", "input", "store", "stream", "max_output_tokens"],
+        Wire::Gemini => vec!["contents", "systemInstruction", "generationConfig"],
+    };
+    if cell.preset_tag == "openrouter" {
+        expected.push("provider");
+    }
+    expected.into_iter().map(str::to_owned).collect()
+}
+
+// ---- events, fingerprints and the in-memory driver --------------------------------------------------------
+
+/// One event as plain values, so two runs can be compared.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Ev {
+    /// A piece of text.
+    Text(String),
+    /// A piece of reasoning.
+    Reasoning(String),
+    /// A tool call: id, name and arguments.
+    Tool(String, String, Value),
+    /// Token totals.
+    Usage(u32, u32),
+}
+
+/// The plain value of an event.
+pub fn ev_of(event: &StreamEvent) -> Ev {
+    match event {
+        StreamEvent::TextDelta(text) => Ev::Text(text.clone()),
+        StreamEvent::ReasoningDelta(text) => Ev::Reasoning(text.clone()),
+        StreamEvent::ToolCall(call) => Ev::Tool(call.id.clone(), call.name.clone(), call.args.clone()),
+        StreamEvent::Usage(usage) => Ev::Usage(usage.input_tokens, usage.output_tokens),
+    }
+}
+
+/// How a turn ended, as plain values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Done {
+    /// Why the turn stopped.
+    pub stop: StopReason,
+    /// The final totals.
+    pub usage: Usage,
+    /// The native turn: its wire tag and its JSON.
+    pub native: Option<(String, Value)>,
+}
+
+/// The events of a run and how it ended: the plain values or the class name. A wire that mints the id of a call gives
+/// every run a fresh one, so the minted id is replaced by its shape.
+pub fn fingerprint(wire: Wire, run: &Run) -> (Vec<Ev>, Result<Done, String>) {
+    let events = run
+        .events
+        .iter()
+        .map(|event| match ev_of(event) {
+            Ev::Tool(id, name, args) if !Neutral::id_is_exact(wire) => {
+                Ev::Tool(if id.starts_with("call_") { "call_minted".to_owned() } else { id }, name, args)
+            }
+            other => other,
+        })
+        .collect();
+    let end = match &run.result {
+        Ok(done) => Ok(Done {
+            stop: done.stop_reason,
+            usage: done.usage,
+            native: done.native.as_ref().map(|native| (native.wire.clone(), native.json.clone())),
+        }),
+        Err(error) => Err(error.class().as_str().to_owned()),
+    };
+    (events, end)
+}
+
+/// Feeds `chunks` to the decoder and the turn of the adapter of `wire`, the way the shared driver does: an error of the
+/// turn is kept and answered with a stop, an error of the decoder becomes a protocol error, and a kept error wins over
+/// the verdict of the end.
+pub fn drive<T: AsRef<[u8]>>(wire: Wire, chunks: &[T]) -> Run {
+    let origin = Origin::from_scope("http://127.0.0.1:1").expect("a loopback origin");
+    let adapter = adapter_for(wire, &origin);
+    let mut turn = adapter.turn();
+    let mut events: Vec<StreamEvent> = Vec::new();
+    let mut failure: Option<AiError> = None;
+    let result = {
+        let mut out = |event: StreamEvent| {
+            events.push(event);
+            Flow::Continue
+        };
+        let end = match wire.framing() {
+            Framing::Sse => {
+                let mut decoder = SseDecoder::new();
+                for chunk in chunks {
+                    let pushed = decoder.push(chunk.as_ref(), &mut |event| {
+                        if failure.is_some() {
+                            return Flow::Stop;
+                        }
+                        match turn.frame(Frame::Event(event), &mut out) {
+                            Ok(flow) => flow,
+                            Err(error) => {
+                                failure = Some(error);
+                                Flow::Stop
+                            }
+                        }
+                    });
+                    match pushed {
+                        Err(error) => {
+                            failure.get_or_insert(AiError::from(error));
+                            break;
+                        }
+                        Ok(Flow::Stop) => break,
+                        Ok(Flow::Continue) => {}
+                    }
+                }
+                decoder.finish()
+            }
+            Framing::Ndjson => {
+                let mut decoder = NdjsonDecoder::new();
+                for chunk in chunks {
+                    let pushed = decoder.push(chunk.as_ref(), &mut |line| {
+                        if failure.is_some() {
+                            return Flow::Stop;
+                        }
+                        match turn.frame(Frame::Line(line), &mut out) {
+                            Ok(flow) => flow,
+                            Err(error) => {
+                                failure = Some(error);
+                                Flow::Stop
+                            }
+                        }
+                    });
+                    match pushed {
+                        Err(error) => {
+                            failure.get_or_insert(AiError::from(error));
+                            break;
+                        }
+                        Ok(Flow::Stop) => break,
+                        Ok(Flow::Continue) => {}
+                    }
+                }
+                decoder.finish()
+            }
+        };
+        match failure {
+            Some(error) => Err(error),
+            None => turn.finish(end, &mut out),
+        }
+    };
+    Run { events, result }
+}
+
+/// Every single cut of a stream of `len` bytes: the offsets 1 to `len` minus 1.
+pub fn cuts(len: usize) -> std::ops::Range<usize> {
+    1..len
+}
+
+/// The stream as chunks of one byte.
+pub fn one_byte(bytes: &[u8]) -> Vec<Vec<u8>> {
+    bytes.chunks(1).map(<[u8]>::to_vec).collect()
+}
+
+/// The stream as chunks of random sizes (1 to 40 bytes) from a seed.
+pub fn seeded(bytes: &[u8], seed: u64) -> Vec<Vec<u8>> {
+    let mut random = Xorshift64::new(seed);
+    let mut chunks = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let end = (at + 1 + random.below(40)).min(bytes.len());
+        chunks.push(bytes[at..end].to_vec());
+        at = end;
+    }
+    chunks
+}
+
+// ---- tools and conversations ------------------------------------------------------------------------------
+
+/// The seven tools of the catalog, in the order they are declared to a model.
+pub fn catalog_specs() -> Vec<ToolSpec> {
+    ToolName::ALL.into_iter().map(ToolName::spec).collect()
+}
+
+/// A tool declaration for the rows that need only one.
+pub fn tool_spec() -> ToolSpec {
+    ToolName::ReadFile.spec()
+}
+
+/// The assistant message of a finished run: its text and calls, the model, the usage and the native turn.
+pub fn assistant_of(model: &str, run: &Run) -> Message {
+    let mut collector = Collector::new();
+    for event in &run.events {
+        let _ = collector.push(event.clone());
+    }
+    collector.into_message("a1", 2, model, MessageStatus::Complete, run.result.as_ref().ok().cloned())
+}
+
+/// A tool message with one result.
+pub fn result_message(id: &str, call_id: &str, content: &str, is_error: bool) -> Message {
+    Message::new(
+        id,
+        Role::Tool,
+        vec![Part::ToolResult(ToolResult { call_id: call_id.to_owned(), content: content.to_owned(), is_error })],
+        3,
+    )
+}
+
+/// The first request, the assistant message of its run and the result of its call: the next request of a tool exchange.
+pub fn follow_up(first: &ChatRequest, assistant: Message, call: &ToolCall, result_text: &str) -> ChatRequest {
+    let mut next = first.clone();
+    next.messages.push(assistant);
+    next.messages.push(result_message("t1", &call.id, result_text, false));
+    next
+}
+
+/// A message of the assistant with text and calls.
+pub fn assistant_calls(id: &str, text: &str, calls: &[(&str, &str, Value)]) -> Message {
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(Part::Text { text: text.to_owned() });
+    }
+    for (call_id, name, args) in calls {
+        parts.push(Part::ToolCall(ToolCall { id: (*call_id).to_owned(), name: (*name).to_owned(), args: args.clone() }));
+    }
+    Message::new(id, Role::Assistant, parts, 2)
+}
+
+/// A tool message with several results: id, content and failure flag of each.
+pub fn results_message(id: &str, results: &[(&str, &str, bool)]) -> Message {
+    let parts = results
+        .iter()
+        .map(|(call_id, content, is_error)| {
+            Part::ToolResult(ToolResult {
+                call_id: (*call_id).to_owned(),
+                content: (*content).to_owned(),
+                is_error: *is_error,
+            })
+        })
+        .collect();
+    Message::new(id, Role::Tool, parts, 3)
+}
+
+/// The conversation of the pairing rows: a user line, an assistant message with two calls, one tool message with both
+/// results (the second a failure) and a last user line.
+pub fn pairing_request(model: &str, first: &str, second: &str) -> ChatRequest {
+    let mut request = ChatRequest::new(model);
+    request.messages.push(Message::user_text("u1", "list", 1));
+    request.messages.push(assistant_calls(
+        "a1",
+        "Let me look.",
+        &[("c1", "read_file", serde_json::json!({ "path": "a" })), ("c2", "list_dir", serde_json::json!({ "path": "." }))],
+    ));
+    request.messages.push(results_message("t1", &[("c1", first, false), ("c2", second, true)]));
+    request.messages.push(Message::user_text("u2", "thanks", 4));
+    request
+}
+
+/// The conversation of the repeated-id rows: two calls with the same id in two different turns.
+pub fn repeated_ids_request(model: &str) -> ChatRequest {
+    let mut request = ChatRequest::new(model);
+    request.messages.push(Message::user_text("u1", "one", 1));
+    request.messages.push(assistant_calls("a1", "", &[("call_1", "read_file", serde_json::json!({ "path": "first-file" }))]));
+    request.messages.push(result_message("t1", "call_1", "alpha-result", false));
+    request.messages.push(assistant_calls("a2", "ok", &[("call_1", "read_file", serde_json::json!({ "path": "second-file" }))]));
+    request.messages.push(result_message("t2", "call_1", "beta-result", false));
+    request.messages.push(Message::user_text("u2", "thanks", 5));
+    request
+}
+
+/// How often `needle` occurs in `text`.
+pub fn count_in(text: &str, needle: &str) -> usize {
+    text.matches(needle).count()
 }

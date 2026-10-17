@@ -16,17 +16,21 @@ mod support;
 use std::collections::BTreeSet;
 
 use common::fake_http::Reply;
-use holzwave_core::ai::http::{HttpConfig, Target};
+use holzwave_core::ai::agent::TRIMMED_RESULT;
+use holzwave_core::ai::http::{HttpConfig, Origin, Target};
 use holzwave_core::ai::profiles::{KeyNeed, PRESETS, Preset, ResolveError, auth_header_for};
 use holzwave_core::ai::provider::{AiError, Provider, StreamEvent};
-use holzwave_core::ai::types::{Locality, StopReason, Usage};
+use holzwave_core::ai::service::dispatch::adapter_for;
+use holzwave_core::ai::store::NOT_STORED;
+use holzwave_core::ai::types::{Locality, Opaque, StopReason, ToolCall, Usage};
 use holzwave_core::ai::wire::Wire;
 use serde_json::json;
 use streams::stream;
 use support::{
-    ANTHROPIC_VERSION, BASELINE, Cell, GATEWAY_HEADER, KEY_HEADERS, KeyRule, Keys, Neutral, Scenario, Side, canary_gateway_key,
-    canary_key, cell, cells, chat_request, header_names, json_body, key_header, members, outcome, reply_for, rig, run,
-    split_inside_characters, texts_of, try_rig,
+    ANTHROPIC_VERSION, BASELINE, Cell, GATEWAY_HEADER, KEY_HEADERS, KeyRule, Keys, Neutral, Scenario, Side,
+    assistant_of, canary_gateway_key, canary_key, catalog_specs, cell, cells, chat_request, count_in, cuts, drive,
+    fingerprint, follow_up, header_names, json_body, key_header, members, one_byte, outcome, pairing_request, pinned_members,
+    repeated_ids_request, reply_for, rig, run, seeded, split_inside_characters, texts_of, try_rig,
 };
 
 /// The reply of one cell for a scenario: the whole stream as one chunk.
@@ -349,5 +353,429 @@ fn every_cell_sends_only_the_pinned_body_members() {
         }
         assert_eq!(texts_of(cell.wire, &body, Side::System), vec![support::SYSTEM_TEXT.to_owned()], "{}: system", cell.name);
         assert_eq!(texts_of(cell.wire, &body, Side::User), vec!["hello".to_owned()], "{}: user", cell.name);
+    }
+}
+
+// ---- the tool turn ----------------------------------------------------------------------------------------
+
+/// A request that declares the seven tools of the catalog and asks `list`.
+fn tool_request(cell: &Cell) -> holzwave_core::ai::provider::ChatRequest {
+    let mut request = chat_request(cell, "list");
+    request.tools = catalog_specs();
+    request
+}
+
+#[test]
+fn every_cell_releases_one_tool_call_after_its_text_and_ends_with_tool_use() {
+    for cell in cells() {
+        let built = rig(&cell, vec![whole(cell.wire, Scenario::Tool)], Keys::Provider, HttpConfig::standard());
+        let result = run(&built.provider, &tool_request(&cell));
+        let done = result.result.as_ref().unwrap_or_else(|error| panic!("{} tool: the turn failed: {error}", cell.name));
+        assert_eq!(done.stop_reason, StopReason::ToolUse, "{} tool: the stop reason", cell.name);
+        let last = result.events.last().unwrap_or_else(|| panic!("{} tool: no event", cell.name));
+        assert!(matches!(last, StreamEvent::ToolCall(_)), "{} tool: the call is not the last event: {:?}", cell.name, result.events);
+        let calls: Vec<&ToolCall> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 1, "{} tool: exactly one call", cell.name);
+        let call = calls[0];
+        assert_eq!(call.name, Neutral::CALL_NAME, "{} tool: the name", cell.name);
+        assert_eq!(call.args, Neutral::call_args(), "{} tool: the arguments", cell.name);
+        if Neutral::id_is_exact(cell.wire) {
+            assert_eq!(call.id, Neutral::CALL_ID, "{} tool: the id", cell.name);
+        } else {
+            assert!(call.id.starts_with("call_"), "{} tool: a minted id starts with call_: {}", cell.name, call.id);
+        }
+        let said = outcome(&result);
+        assert_eq!(said.text, Neutral::LEAD, "{} tool: the text before the call", cell.name);
+        assert_eq!(said.usage, Neutral::TOOL_USAGE, "{} tool: the usage", cell.name);
+        let call_at = result.events.len() - 1;
+        let usage_at = result.events.iter().position(|event| matches!(event, StreamEvent::Usage(_)));
+        assert!(usage_at.is_some_and(|at| at < call_at), "{} tool: usage arrives before the call", cell.name);
+        let text_at = result.events.iter().position(|event| matches!(event, StreamEvent::TextDelta(_)));
+        assert!(text_at.is_some_and(|at| at < call_at), "{} tool: the text arrives before the call", cell.name);
+
+        assert_eq!(built.fake.accepted(), 1, "{} tool: one connection", cell.name);
+        let seen = built.fake.seen();
+        let body = json_body(cell.name, &seen[0]);
+        let mut expected = pinned_members(&cell);
+        expected.insert("tools".to_owned());
+        assert_eq!(members(&body), expected, "{} tool: the body members", cell.name);
+        let declared = body["tools"].to_string();
+        for tool in holzwave_core::ai::tools::ToolName::ALL {
+            assert!(declared.contains(tool.as_str()), "{} tool: {} is not declared", cell.name, tool.as_str());
+        }
+    }
+}
+
+// ---- splits and cuts --------------------------------------------------------------------------------------
+
+#[test]
+fn every_wire_decodes_the_neutral_streams_identically_at_every_split() {
+    for wire in Wire::ALL {
+        for scenario in [Scenario::Text, Scenario::Tool, Scenario::Signed] {
+            let label = format!("{} {scenario:?}", wire.tag());
+            let bytes = stream(wire, scenario).bytes;
+            let whole_run = drive(wire, &[bytes.as_slice()]);
+            let expected = fingerprint(wire, &whole_run);
+            assert!(expected.1.is_ok(), "{label}: the whole stream fails: {:?}", expected.1);
+            for at in cuts(bytes.len()) {
+                let got = fingerprint(wire, &drive(wire, &[&bytes[..at], &bytes[at..]]));
+                assert_eq!(got, expected, "{label}: cut once at {at}");
+            }
+            assert_eq!(fingerprint(wire, &drive(wire, &one_byte(&bytes))), expected, "{label}: one byte at a time");
+            for seed in 1..=20 {
+                assert_eq!(fingerprint(wire, &drive(wire, &seeded(&bytes, seed))), expected, "{label}: seed {seed}");
+            }
+        }
+    }
+}
+
+#[test]
+fn no_wire_releases_a_tool_call_from_a_stream_cut_before_its_end_marker() {
+    for wire in Wire::ALL {
+        for scenario in [Scenario::Text, Scenario::Tool, Scenario::Signed] {
+            let label = format!("{} {scenario:?}", wire.tag());
+            let streamed = stream(wire, scenario);
+            let full = drive(wire, &[streamed.bytes.as_slice()]);
+            let full_outcome = outcome(&full);
+            for at in 0..streamed.terminal_end {
+                let cut = drive(wire, &[&streamed.bytes[..at]]);
+                assert!(
+                    !cut.events.iter().any(|event| matches!(event, StreamEvent::ToolCall(_))),
+                    "{label}: a call was delivered from a stream cut at {at} of {}",
+                    streamed.terminal_end
+                );
+                match &cut.result {
+                    Ok(_) => panic!("{label}: a stream cut at {at} before its end marker ended Ok"),
+                    Err(error) => assert!(
+                        matches!(error.class().as_str(), "network" | "protocol"),
+                        "{label}: cut at {at}: class {}",
+                        error.class().as_str()
+                    ),
+                }
+            }
+            // After the end marker the answer is complete. A cut that falls between two events still ends the stream
+            // unclean, so it may be an error (never Ok with another answer); a cut at the end marker or at the end of
+            // the stream is Ok.
+            for at in streamed.terminal_end..=streamed.bytes.len() {
+                let cut = drive(wire, &[&streamed.bytes[..at]]);
+                match &cut.result {
+                    Ok(_) => {
+                        let got = outcome(&cut);
+                        assert_eq!(got.text, full_outcome.text, "{label}: text of a cut at {at}");
+                        assert_eq!(got.calls.len(), full_outcome.calls.len(), "{label}: calls of a cut at {at}");
+                        for (call, whole_call) in got.calls.iter().zip(&full_outcome.calls) {
+                            assert_eq!((&call.name, &call.args), (&whole_call.name, &whole_call.args), "{label}: call of a cut at {at}");
+                        }
+                    }
+                    Err(error) => {
+                        assert!(
+                            at != streamed.terminal_end && at != streamed.bytes.len(),
+                            "{label}: a stream cut at {at}, at an event boundary after its end marker, failed: {error}"
+                        );
+                        assert!(
+                            matches!(error.class().as_str(), "network" | "protocol"),
+                            "{label}: cut at {at}: class {}",
+                            error.class().as_str()
+                        );
+                        assert!(
+                            !cut.events.iter().any(|event| matches!(event, StreamEvent::ToolCall(_))),
+                            "{label}: a call was delivered with the error of a cut at {at}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- the signed round trip --------------------------------------------------------------------------------
+
+/// The two requests of a tool exchange on one cell: the second is built from the first completion.
+struct Exchange {
+    built: support::Rig,
+    first: support::Run,
+    call: ToolCall,
+    second: support::Run,
+    first_request: holzwave_core::ai::provider::ChatRequest,
+    second_request: holzwave_core::ai::provider::ChatRequest,
+}
+
+fn exchange(cell: &Cell, scenario: Scenario) -> Exchange {
+    let built = rig(
+        cell,
+        vec![whole(cell.wire, scenario), whole(cell.wire, Scenario::Text)],
+        Keys::Provider,
+        HttpConfig::standard(),
+    );
+    let first_request = tool_request(cell);
+    let first = run(&built.provider, &first_request);
+    assert!(first.result.is_ok(), "{} {scenario:?}: the first turn failed: {:?}", cell.name, first.result.as_ref().err());
+    let said = outcome(&first);
+    assert_eq!(said.calls.len(), 1, "{} {scenario:?}: one call", cell.name);
+    let call = said.calls[0].clone();
+    let second_request = follow_up(&first_request, assistant_of(cell.model, &first), &call, "alpha");
+    let second = run(&built.provider, &second_request);
+    assert!(second.result.is_ok(), "{} {scenario:?}: the second turn failed: {:?}", cell.name, second.result.as_ref().err());
+    assert_eq!(outcome(&second).text, Neutral::TEXT, "{} {scenario:?}: the second answer", cell.name);
+    Exchange { built, first, call, second, first_request, second_request }
+}
+
+#[test]
+fn signed_thinking_round_trips_verbatim_on_the_wires_that_sign() {
+    for cell in cells().into_iter().filter(|cell| cell.signs) {
+        let ex = exchange(&cell, Scenario::Signed);
+        let said = outcome(&ex.first);
+        assert_eq!(said.reasoning, Neutral::REASON, "{} signed: the reasoning text", cell.name);
+        assert_eq!(said.stop, Some(StopReason::ToolUse), "{} signed: the stop reason", cell.name);
+        let native: &Opaque = ex.first.result.as_ref().expect("ok").native.as_ref().unwrap_or_else(|| panic!("{} signed: no native turn", cell.name));
+        assert_eq!(native.wire, cell.wire.tag(), "{} signed: the wire of the native turn", cell.name);
+
+        let seen = ex.built.fake.seen();
+        assert_eq!(seen.len(), 2, "{} signed: two requests", cell.name);
+        let text = seen[1].body_text();
+        let body = json_body(cell.name, &seen[1]);
+        let signature = if cell.wire == Wire::OpenAiResponses { Neutral::ENC } else { Neutral::SIG };
+        assert_eq!(count_in(&text, signature), 1, "{} signed: the signature occurs once in the second request", cell.name);
+        match cell.wire {
+            Wire::Anthropic => {
+                let messages = body["messages"].as_array().expect("messages");
+                assert_eq!(messages.len(), 3, "{} signed: three messages", cell.name);
+                assert_eq!(messages[1]["role"], json!("assistant"), "{}", cell.name);
+                assert_eq!(messages[1]["content"], native.json, "{} signed: the assistant content is the native turn", cell.name);
+                assert_eq!(messages[2]["role"], json!("user"), "{}", cell.name);
+                let block = &messages[2]["content"][0];
+                assert_eq!(block["type"], json!("tool_result"), "{}", cell.name);
+                assert_eq!(block["tool_use_id"], json!(ex.call.id), "{}", cell.name);
+                assert_eq!(block["content"], json!("alpha"), "{}", cell.name);
+            }
+            Wire::OpenAiResponses => {
+                assert_eq!(body["store"], json!(false), "{} signed: store", cell.name);
+                let input = body["input"].as_array().expect("input");
+                let items = native.json.as_array().expect("the native turn is the array of output items");
+                let start = input
+                    .iter()
+                    .position(|item| item == &items[0])
+                    .unwrap_or_else(|| panic!("{} signed: the first native item is not replayed", cell.name));
+                assert_eq!(&input[start..start + items.len()], items.as_slice(), "{} signed: the native items are a contiguous run", cell.name);
+                let output = &input[start + items.len()];
+                assert_eq!(output["type"], json!("function_call_output"), "{}", cell.name);
+                assert_eq!(output["call_id"], json!(ex.call.id), "{}", cell.name);
+                assert_eq!(output["output"], json!("alpha"), "{}", cell.name);
+            }
+            Wire::Gemini => {
+                let contents = body["contents"].as_array().expect("contents");
+                let at = contents
+                    .iter()
+                    .position(|content| content["role"] == json!("model"))
+                    .unwrap_or_else(|| panic!("{} signed: no model entry", cell.name));
+                assert_eq!(contents[at]["parts"], native.json["parts"], "{} signed: the model parts are the native parts", cell.name);
+                assert_eq!(contents[at + 1]["role"], json!("user"), "{}", cell.name);
+                let reply = contents[at + 1]["parts"].as_array().expect("parts");
+                assert!(
+                    reply.iter().any(|part| part["functionResponse"]["name"] == json!("read_file")),
+                    "{} signed: no function response for read_file: {reply:?}",
+                    cell.name
+                );
+            }
+            other => panic!("{}: {} does not sign", cell.name, other.tag()),
+        }
+    }
+}
+
+#[test]
+fn reasoning_text_is_display_only_on_the_wires_that_do_not_sign() {
+    for cell in cells().into_iter().filter(|cell| !cell.signs) {
+        let ex = exchange(&cell, Scenario::Signed);
+        let said = outcome(&ex.first);
+        assert_eq!(said.reasoning, Neutral::REASON, "{} display only: the reasoning text is shown", cell.name);
+        assert_eq!(said.stop, Some(StopReason::ToolUse), "{} display only: the stop reason", cell.name);
+        assert!(ex.first.result.as_ref().expect("ok").native.is_none(), "{} display only: a native turn was kept", cell.name);
+        let seen = ex.built.fake.seen();
+        let text = seen[1].body_text();
+        assert!(!text.contains(Neutral::REASON), "{} display only: the reasoning text was sent back", cell.name);
+        assert!(text.contains("alpha"), "{} display only: the result is missing", cell.name);
+        assert!(
+            text.contains(&ex.call.id) || text.contains(&ex.call.name),
+            "{} display only: neither the call id nor the name is in the request",
+            cell.name
+        );
+        let _ = (&ex.second, &ex.first_request, &ex.second_request);
+    }
+}
+
+// ---- replay and pairing -----------------------------------------------------------------------------------
+
+#[test]
+fn a_native_turn_is_replayed_only_to_its_own_wire() {
+    let producers = ["custom_anthropic", "custom_responses", "custom_gemini"];
+    for name in producers {
+        let producer = cell(name);
+        let ex = exchange(&producer, Scenario::Signed);
+        let assistant = assistant_of(producer.model, &ex.first);
+        assert!(assistant.native.is_some(), "{name}: the producer kept a native turn");
+        let signature = if producer.wire == Wire::OpenAiResponses { Neutral::ENC } else { Neutral::SIG };
+        let mut request = ex.first_request.clone();
+        request.messages.push(assistant);
+        request.messages.push(support::result_message("t1", &ex.call.id, "alpha", false));
+        for consumer in Wire::ALL {
+            let origin = Origin::from_scope("http://127.0.0.1:1").expect("origin");
+            let adapter = adapter_for(consumer, &origin);
+            let caps = adapter.capabilities(&request.model, Locality::Loopback);
+            let built = adapter
+                .request(&request, &caps)
+                .unwrap_or_else(|error| panic!("{name} to {}: the request was refused: {error}", consumer.tag()));
+            let body = String::from_utf8_lossy(&built.body).into_owned();
+            if consumer == producer.wire {
+                assert_eq!(count_in(&body, signature), 1, "{name} to {}: its own wire gets the signature once", consumer.tag());
+            } else {
+                assert!(
+                    !body.contains(Neutral::SIG) && !body.contains(Neutral::ENC),
+                    "{name} to {}: a signature crossed to another wire",
+                    consumer.tag()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tool_results_pair_with_their_calls_in_the_next_request_on_every_wire() {
+    for wire in Wire::ALL {
+        let origin = Origin::from_scope("http://127.0.0.1:1").expect("origin");
+        let adapter = adapter_for(wire, &origin);
+        let request = pairing_request("local-model", "alpha", "beta");
+        let caps = adapter.capabilities(&request.model, Locality::Loopback);
+        let body = adapter.request(&request, &caps).unwrap_or_else(|error| panic!("{}: refused: {error}", wire.tag()));
+        let text = String::from_utf8_lossy(&body.body).into_owned();
+        assert_eq!(count_in(&text, "alpha"), 1, "{}: alpha occurs once", wire.tag());
+        assert_eq!(count_in(&text, "beta"), 1, "{}: beta occurs once", wire.tag());
+        assert!(text.find("alpha") < text.find("beta"), "{}: alpha comes before beta", wire.tag());
+        match wire {
+            Wire::OpenAiChat | Wire::Anthropic | Wire::OpenAiResponses => {
+                for id in ["\"c1\"", "\"c2\""] {
+                    assert_eq!(count_in(&text, id), 2, "{}: the call id {id} occurs in the call and in its result", wire.tag());
+                }
+            }
+            Wire::Ollama | Wire::Gemini => {
+                assert!(text.contains("read_file") && text.contains("list_dir"), "{}: both tool names", wire.tag());
+            }
+        }
+        if wire == Wire::Anthropic {
+            assert_eq!(count_in(&text, "is_error"), 1, "anthropic: the failure flag occurs once");
+        }
+
+        let kept = pairing_request("local-model", NOT_STORED, TRIMMED_RESULT);
+        let body = adapter.request(&kept, &caps).unwrap_or_else(|error| panic!("{}: refused: {error}", wire.tag()));
+        let text = String::from_utf8_lossy(&body.body).into_owned();
+        assert_eq!(count_in(&text, NOT_STORED), 1, "{}: the stored-output text is an ordinary result", wire.tag());
+        assert_eq!(count_in(&text, TRIMMED_RESULT), 1, "{}: the trimmed-output text is an ordinary result", wire.tag());
+    }
+}
+
+#[test]
+fn repeated_tool_call_ids_across_turns_never_lose_or_cross_a_result() {
+    for wire in Wire::ALL {
+        let origin = Origin::from_scope("http://127.0.0.1:1").expect("origin");
+        let adapter = adapter_for(wire, &origin);
+        let request = repeated_ids_request("local-model");
+        let caps = adapter.capabilities(&request.model, Locality::Loopback);
+        match adapter.request(&request, &caps) {
+            Err(error) => {
+                assert_eq!(error.class().as_str(), "invalid_request", "{}: the refusal class", wire.tag());
+                let shown = format!("{error} {error:?}");
+                for word in ["first-file", "second-file", "alpha-result", "beta-result"] {
+                    assert!(!shown.contains(word), "{}: the refusal shows {word}", wire.tag());
+                }
+                println!("repeated ids: {}: refused", wire.tag());
+            }
+            Ok(built) => {
+                let text = String::from_utf8_lossy(&built.body).into_owned();
+                for word in ["first-file", "second-file", "alpha-result", "beta-result"] {
+                    assert_eq!(count_in(&text, word), 1, "{}: {word} occurs once", wire.tag());
+                }
+                assert!(text.find("first-file") < text.find("second-file"), "{}: the calls are in order", wire.tag());
+                assert!(text.find("alpha-result") < text.find("beta-result"), "{}: the results are in order", wire.tag());
+                println!("repeated ids: {}: accepted", wire.tag());
+            }
+        }
+    }
+}
+
+// ---- dispatch ---------------------------------------------------------------------------------------------
+
+#[test]
+fn the_dispatch_fixes_the_flavor_the_window_and_the_capabilities_of_each_origin() {
+    // Ollama: the window of the capabilities is the one the request asks for.
+    let ollama = cell("ollama");
+    let built = rig(&ollama, vec![whole(Wire::Ollama, Scenario::Text)], Keys::None, HttpConfig::standard());
+    let caps = holzwave_core::ai::provider::Provider::capabilities(&built.provider, ollama.model);
+    assert_eq!(caps.context_tokens, Some(16384), "ollama: the window of the capabilities");
+    let _ = run(&built.provider, &chat_request(&ollama, "hello"));
+    let body = json_body("ollama", &built.fake.seen()[0]);
+    assert_eq!(body["options"]["num_ctx"], json!(16384), "ollama: num_ctx of the captured body");
+
+    // Every adapter can use tools for the model of its cell and echoes the locality it is given.
+    let origin = Origin::from_scope("http://127.0.0.1:1").expect("origin");
+    for cell in cells() {
+        let adapter = adapter_for(cell.wire, &origin);
+        for locality in [Locality::Loopback, Locality::Lan, Locality::Cloud] {
+            let caps = adapter.capabilities(cell.model, locality);
+            assert!(caps.tools, "{}: the model of the cell can use tools", cell.name);
+            assert_eq!(caps.locality, locality, "{}: the locality is echoed", cell.name);
+        }
+    }
+
+    // The first-party controls of Anthropic go to the first-party host only.
+    let adaptive = "claude-opus-5-5";
+    let thinking = |origin: &str| {
+        let origin = Origin::from_scope(origin).expect("origin");
+        let adapter = adapter_for(Wire::Anthropic, &origin);
+        let mut request = chat_request(&cell("anthropic"), "hello");
+        request.model = adaptive.to_owned();
+        let caps = adapter.capabilities(adaptive, Locality::Cloud);
+        let built = adapter.request(&request, &caps).expect("a request");
+        let body: serde_json::Value = serde_json::from_slice(&built.body).expect("json");
+        body.get("thinking").is_some()
+    };
+    assert!(thinking("https://api.anthropic.com:443"), "the vendor host gets the thinking member");
+    for other in [
+        "http://127.0.0.1:8080",
+        "https://ai-gateway.vercel.sh:443",
+        "https://api.anthropic.com:8443",
+        "https://api.anthropic.com.example:443",
+    ] {
+        assert!(!thinking(other), "{other}: no thinking member away from the vendor host");
+    }
+
+    // The capabilities the service reads, one line per wire.
+    for (wire, model) in [
+        (Wire::Anthropic, adaptive),
+        (Wire::OpenAiResponses, "gpt-5"),
+        (Wire::Gemini, "gemini-test-1"),
+        (Wire::OpenAiChat, "local-model"),
+        (Wire::Ollama, "llama-test"),
+    ] {
+        let origin = if wire == Wire::Anthropic {
+            Origin::from_scope("https://api.anthropic.com:443").expect("origin")
+        } else {
+            Origin::from_scope("http://127.0.0.1:1").expect("origin")
+        };
+        let caps = adapter_for(wire, &origin).capabilities(model, Locality::Cloud);
+        let size = |value: Option<u32>| value.map_or("none".to_owned(), |number| number.to_string());
+        println!(
+            "capabilities {}: tools {} reasoning {} context {} output {}",
+            wire.tag(),
+            caps.tools,
+            caps.reasoning,
+            size(caps.context_tokens),
+            size(caps.max_output_tokens)
+        );
     }
 }
