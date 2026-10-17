@@ -509,6 +509,11 @@ fn key_error_text(passphrase_given: bool, error: &russh::keys::Error) -> String 
         KeyError::KeyIsEncrypted => "the key is protected by a passphrase; save the passphrase in the connection".into(),
         KeyError::IO(e) => format!("the key file cannot be read: {e}"),
         KeyError::UnsupportedKeyType { .. } | KeyError::UnknownAlgorithm(_) => "the key type is not supported".into(),
+        // A PKCS#8 file whose encryption the library cannot read (PBKDF2 with HMAC-SHA-1, as LibreSSL and OpenSSL 1 write
+        // it) is not a wrong passphrase: saying so would send the person to retype one that is right.
+        KeyError::Pkcs8(e) if e.to_string().ends_with("is unsupported") => {
+            "the key is encrypted in a way that is not supported; save it again in the OpenSSH format".into()
+        }
         KeyError::SshKey(_)
         | KeyError::SshEncoding(_)
         | KeyError::Pkcs8(_)
@@ -1383,6 +1388,7 @@ mod tests {
         const WRONG_OR_DAMAGED: &str = "the passphrase is wrong or the key file is damaged";
         const DAMAGED: &str = "the key file is damaged";
         const UNSUPPORTED: &str = "the key type is not supported";
+        const UNREADABLE: &str = "the key is encrypted in a way that is not supported; save it again in the OpenSSH format";
         // What the old text for a wrong passphrase of an OpenSSH key was; it must never come back.
         assert_eq!(KeyError::SshKey(ssh_key::Error::Crypto).to_string(), "SshKey: cryptographic error");
 
@@ -1393,6 +1399,15 @@ mod tests {
         let sealed = decode_error("-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n", Some(PASSPHRASE));
         let no_block = decode_error("this is not a key", None);
         let rsa = decode_error("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n", None);
+        // An encrypted PKCS#8 file whose key derivation the library does not read (PBKDF2 with HMAC-SHA-1, which LibreSSL
+        // and OpenSSL 1 write). The bytes are a bare algorithm description and a short filler, not key material.
+        let old_pbkdf2 = decode_error(
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\n\
+             MF0wSQYJKoZIhvcNAQUNMDwwGwYJKoZIhvcNAQUMMA4ECAABAgMEBQYHAgIIADAdBglghkgBZQMEAQIEEAABAgMEBQYH\n\
+             CAkKCwwNDg8EEAABAgMEBQYHCAkKCwwNDg8=\n\
+             -----END ENCRYPTED PRIVATE KEY-----\n",
+            Some(PASSPHRASE),
+        );
 
         let table: Vec<(&str, bool, KeyError, String)> = vec![
             ("KeyIsEncrypted", false, KeyError::KeyIsEncrypted, PROTECTED.into()),
@@ -1409,6 +1424,7 @@ mod tests {
             ("a garbage encrypted PKCS#8 block", true, sealed, WRONG_OR_DAMAGED.into()),
             ("a text with no key block", false, no_block, DAMAGED.into()),
             ("a garbage PKCS#1 block", true, rsa, WRONG_OR_DAMAGED.into()),
+            ("an encrypted PKCS#8 key with an unsupported key derivation", true, old_pbkdf2, UNREADABLE.into()),
         ];
         for (name, given, error, sentence) in &table {
             let text = key_error_text(*given, error);
