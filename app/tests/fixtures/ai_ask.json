@@ -1,0 +1,95 @@
+{
+  "closed": [
+    "sent",
+    "refused",
+    "gone",
+    "timed_out",
+    "pane_closed",
+    "shutting_down"
+  ],
+  "events": {
+    "closed": {
+      "ask": "0123456789abcdef0123456789abcdef",
+      "kind": "closed",
+      "why": "timed_out"
+    },
+    "waiting": {
+      "kind": "waiting",
+      "view": {
+        "ask": "0123456789abcdef0123456789abcdef",
+        "host": "api.example.org",
+        "input": {
+          "bytes": 6254,
+          "findings": [
+            {
+              "count": 1,
+              "rule": "anthropic_key"
+            }
+          ],
+          "lines": 142,
+          "sent_bytes": 5939
+        },
+        "locality": "cloud",
+        "model": "example-model",
+        "pane": 3,
+        "profile": "anthropic",
+        "prompt": "why does this fail",
+        "prompt_findings": [
+          {
+            "count": 2,
+            "rule": "tag_chars"
+          }
+        ],
+        "seal": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    }
+  },
+  "faults": {
+    "bad_verdict": "the answer must be send or refuse",
+    "seal_mismatch": "this request changed since it was shown; look at it again",
+    "unknown_ask": "this request is not waiting any more"
+  },
+  "verdicts": [
+    "send",
+    "refuse"
+  ],
+  "view": {
+    "ask": "0123456789abcdef0123456789abcdef",
+    "host": "api.example.org",
+    "input": {
+      "bytes": 6254,
+      "findings": [
+        {
+          "count": 1,
+          "rule": "anthropic_key"
+        }
+      ],
+      "lines": 142,
+      "sent_bytes": 5939
+    },
+    "locality": "cloud",
+    "model": "example-model",
+    "pane": 3,
+    "profile": "anthropic",
+    "prompt": "why does this fail",
+    "prompt_findings": [
+      {
+        "count": 2,
+        "rule": "tag_chars"
+      }
+    ],
+    "seal": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+  },
+  "view_prompt_only": {
+    "ask": "00112233445566778899aabbccddeeff",
+    "host": "localhost",
+    "input": null,
+    "locality": "loopback",
+    "model": "llama3.2",
+    "pane": 1,
+    "profile": "ollama",
+    "prompt": "explain the last error",
+    "prompt_findings": [],
+    "seal": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+  }
+}

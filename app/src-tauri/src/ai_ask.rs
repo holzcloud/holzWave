@@ -13,7 +13,7 @@ use std::io;
 use std::sync::{Arc, OnceLock, Weak};
 
 use holzwave_core::ai::provider::CancelToken;
-use holzwave_core::ai::service::{AskEvent, AskFault, AskInput, AskNotify, AskOut, AskVerdict};
+use holzwave_core::ai::service::{AskEvent, AskFault, AskInput, AskNotify, AskOut, AskVerdict, AskView};
 use holzwave_core::layout::PaneId;
 
 use crate::ai_host::AiFault;
@@ -88,6 +88,12 @@ impl AppCore {
         gone.on_gone(move || hook.cancel());
         let request = AskInput { pane, prompt, input };
         self.ai().asks().run(self.ai().service(), request, &mut IpcOut(out), &token).map_err(|fault| fault.to_string())
+    }
+
+    /// The cards of requests that wait for an answer in the window `label`, oldest first. A page that loaded after the
+    /// request was made asks for them. It reads the desk's table and nothing else.
+    pub fn ai_ask_pending(&self, label: &str) -> Vec<AskView> {
+        self.ai().asks().pending(&|pane| self.pane_window(pane).as_deref() == Some(label))
     }
 
     /// The person's press on a card: the ask, `send` or `refuse`, and the seal the card carried. Only the webview
@@ -313,7 +319,7 @@ mod tests {
     }
 
     /// The first card the window was told about, waited for.
-    fn waiting_card(rec: &Recorder) -> holzwave_core::ai::service::AskView {
+    fn waiting_card(rec: &Recorder) -> AskView {
         assert!(wait_for(Duration::from_secs(5), || !rec.asks().is_empty()), "the window is told");
         match rec.asks().remove(0).1 {
             AskEvent::Waiting { view } => view,

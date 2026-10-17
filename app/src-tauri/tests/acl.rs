@@ -360,7 +360,9 @@ fn the_global_tauri_object_stays_and_nothing_points_at_the_network() {
 /// manifest with an `ai_` name fails `the_ai_commands_are_exactly_the_reviewed_list` until someone has asked of it:
 /// can it return a key, return terminal or file text, accept consent for terminal content, or decide a tool call? If
 /// yes, it does not belong here.
-const AI_COMMANDS: [&str; 17] = [
+const AI_COMMANDS: [&str; 19] = [
+    "ai_ask_answer",
+    "ai_ask_pending",
     "ai_cancel",
     "ai_context_preview",
     "ai_context_share",
@@ -395,8 +397,9 @@ fn the_ai_commands_are_exactly_the_reviewed_list() {
         assert!(
             unreviewed.is_empty(),
             "{what} lists ai_ commands that nobody reviewed: {unreviewed:?}. Before adding one to AI_COMMANDS in acl.rs, ask whether it \
-             can return a key, return terminal or file text, accept context or decide a tool call (the only command that \
-             decides one is ai_decide)"
+             can return a key, return terminal or file text, accept context, decide a tool call (the only command that \
+             decides one is ai_decide) or release a request of wsh ai without the person (the only command that does is \
+             ai_ask_answer, and it needs the seal of the card)"
         );
         let missing: Vec<&String> = reviewed.difference(&found).collect();
         assert!(missing.is_empty(), "{what} lost reviewed ai_ commands: {missing:?}");
@@ -747,6 +750,92 @@ pub fn ai_undo(core: State<Arc<AppCore>>, conversation: String, call_id: String)
     assert_eq!(decision_problems(real, &set(&["ai_undo"])), Vec::<String>::new());
 }
 
+// ---- the one command that releases a request of wsh ai ------------------------------------------------------------------
+
+/// What is wrong with the way the commands in `names` could release a request of `wsh ai`, as sentences:
+/// `ai_ask_answer` takes the request, the verdict and the seal, as strings and in that order, and answers nothing; no
+/// other `ai_` command takes a verdict or a seal.
+fn ask_problems(commands_rs: &str, names: &BTreeSet<String>) -> Vec<String> {
+    const OWN: [&str; 2] = ["verdict", "seal"];
+    let mut problems = Vec::new();
+    for name in names.iter().filter(|name| name.starts_with("ai_")) {
+        let Some(args) = arguments(commands_rs, name) else {
+            problems.push(format!("{name} is in the manifest but is not a command function of commands.rs"));
+            continue;
+        };
+        if name == "ai_ask_answer" {
+            let shown: Vec<(&str, &str)> = args.iter().map(|(arg, ty)| (arg.as_str(), ty.as_str())).collect();
+            let expected = [("ask", "String"), ("verdict", "String"), ("seal", "String")];
+            if shown != expected {
+                problems.push(format!("ai_ask_answer takes {shown:?}, not the reviewed list {expected:?}"));
+            }
+            let answer = return_type(commands_rs, name).unwrap_or_default();
+            if answer != "Result<(), AiFault>" {
+                problems.push(format!("ai_ask_answer answers `{answer}`: it answers nothing"));
+            }
+            continue;
+        }
+        for (arg, _) in &args {
+            if OWN.contains(&arg.as_str()) {
+                problems.push(format!("{name} takes an argument named {arg}: only ai_ask_answer names a verdict or a seal"));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn ai_ask_answer_takes_an_ask_a_verdict_and_a_seal_and_answers_nothing() {
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    assert!(manifest.contains("ai_ask_answer"), "ai_ask_answer is not a command");
+    assert!(manifest.contains("ai_ask_pending"), "ai_ask_pending is not a command");
+    let args = arguments(COMMANDS_RS, "ai_ask_answer").expect("a command function");
+    let shown: Vec<(&str, &str)> = args.iter().map(|(arg, ty)| (arg.as_str(), ty.as_str())).collect();
+    assert_eq!(shown, [("ask", "String"), ("verdict", "String"), ("seal", "String")], "three ids and nothing else");
+    assert_eq!(return_type(COMMANDS_RS, "ai_ask_answer").as_deref(), Some("Result<(), AiFault>"));
+    for forbidden in ["text", "path", "content", "command", "prompt", "input", "body"] {
+        assert!(!args.iter().any(|(arg, _)| arg == forbidden), "ai_ask_answer takes {forbidden}");
+    }
+    // The list command takes nothing from the page: the calling window is filled in by Tauri.
+    assert_eq!(arguments(COMMANDS_RS, "ai_ask_pending").expect("a command function").len(), 1);
+    assert_eq!(
+        arguments(COMMANDS_RS, "ai_ask_pending").expect("a command function")[0].1,
+        "WebviewWindow",
+        "the only argument of the list is the calling window"
+    );
+    assert_eq!(return_type(COMMANDS_RS, "ai_ask_pending").as_deref(), Some("Result<Vec<AskView>, AiFault>"));
+    assert_eq!(ask_problems(COMMANDS_RS, &manifest), Vec::<String>::new());
+
+    // The scanner flags an answer that returns data and one that takes more than the three ids, and accepts the real one.
+    let returns = "pub fn ai_ask_answer(core: State<Arc<AppCore>>, ask: String, verdict: String, seal: String) -> Result<String, AiFault> {\n    todo()\n}\n";
+    let flagged = ask_problems(returns, &set(&["ai_ask_answer"]));
+    assert!(flagged.iter().any(|problem| problem.contains("ai_ask_answer answers `Result<String, AiFault>`")), "{flagged:?}");
+    let wider = "pub fn ai_ask_answer(core: State<Arc<AppCore>>, ask: String, verdict: String, seal: String, text: String) -> Result<(), AiFault> {\n    todo()\n}\n";
+    assert!(!ask_problems(wider, &set(&["ai_ask_answer"])).is_empty());
+    let real = "pub fn ai_ask_answer(core: State<Arc<AppCore>>, ask: String, verdict: String, seal: String) -> Result<(), AiFault> {\n    todo()\n}\n";
+    assert_eq!(ask_problems(real, &set(&["ai_ask_answer"])), Vec::<String>::new());
+}
+
+#[test]
+fn no_other_ai_command_has_a_verdict_or_a_seal() {
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    for name in manifest.iter().filter(|name| name.starts_with("ai_") && *name != "ai_ask_answer") {
+        let others = arguments(COMMANDS_RS, name).expect("a command function");
+        assert!(others.iter().all(|(arg, _)| arg != "verdict" && arg != "seal"), "{name} names a verdict or a seal");
+    }
+    // A second command that takes a seal, or a verdict, is flagged.
+    let source = "\
+pub fn ai_ask_answer(core: State<Arc<AppCore>>, ask: String, verdict: String, seal: String) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_release(core: State<Arc<AppCore>>, ask: String, seal: String) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_judge(core: State<Arc<AppCore>>, verdict: String) -> Result<(), AiFault> {\n    todo()\n}\n\
+pub fn ai_note(core: State<Arc<AppCore>>, conversation: String) -> Result<(), AiFault> {\n    todo()\n}\n";
+    let flagged = ask_problems(source, &set(&["ai_ask_answer", "ai_release", "ai_judge", "ai_note"]));
+    let said = |needle: &str| flagged.iter().any(|problem| problem.contains(needle));
+    assert!(said("ai_release takes an argument named seal"), "{flagged:?}");
+    assert!(said("ai_judge takes an argument named verdict"), "{flagged:?}");
+    assert!(!flagged.iter().any(|problem| problem.starts_with("ai_note") || problem.starts_with("ai_ask_answer")), "{flagged:?}");
+}
+
 /// The part of `source` that ships: up to the test module, without comment lines.
 fn shipped_code(source: &str) -> String {
     let shipped = source.split("\n#[cfg(test)]\nmod ").next().unwrap_or(source);
@@ -786,6 +875,40 @@ fn the_approval_table_is_decided_from_one_place_only() {
     // A call in a comment or in a test module is not one.
     let quiet = vec![("y.rs".to_owned(), "// t.decide(1)\nfn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() { x.decide(1) }\n}\n".to_owned())];
     assert_eq!(decide_calls(&quiet), Vec::<(String, usize)>::new());
+}
+
+/// How many times each file of `files` calls the desk's settle method in the part that ships.
+fn settle_calls(files: &[(String, String)]) -> Vec<(String, usize)> {
+    files
+        .iter()
+        .map(|(name, source)| (name.clone(), shipped_code(source).matches(".settle(").count()))
+        .filter(|(_, count)| *count > 0)
+        .collect()
+}
+
+#[test]
+fn the_ask_table_is_settled_from_one_place_only() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the source directory") {
+        let path = entry.expect("an entry").path();
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            let name = path.file_name().expect("a name").to_string_lossy().into_owned();
+            files.push((name, std::fs::read_to_string(&path).expect("a source file")));
+        }
+    }
+    assert!(files.len() >= 8, "the scan found {} files", files.len());
+    assert_eq!(settle_calls(&files), [("ai_ask.rs".to_owned(), 1)], "a request is settled from one place and one call only");
+
+    // A second call in another file, or a second one in the same file, is counted.
+    let mut more = files.clone();
+    more.push(("rogue.rs".to_owned(), "fn go(a: &A) {\n    a.asks().settle(x, y, z);\n}\n".to_owned()));
+    assert_eq!(settle_calls(&more).len(), 2);
+    let twice = vec![("x.rs".to_owned(), "fn a() { t.settle(1) }\nfn b() { t.settle(2) }\n".to_owned())];
+    assert_eq!(settle_calls(&twice), [("x.rs".to_owned(), 2)]);
+    // A call in a comment or in a test module is not one.
+    let quiet = vec![("y.rs".to_owned(), "// t.settle(1)\nfn a() {}\n#[cfg(test)]\nmod tests {\n    fn t() { x.settle(1) }\n}\n".to_owned())];
+    assert_eq!(settle_calls(&quiet), Vec::<(String, usize)>::new());
 }
 
 /// The variant names of the enum `Cmd` in `source`.

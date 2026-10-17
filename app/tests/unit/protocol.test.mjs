@@ -203,7 +203,7 @@ test("the command table has snake_case argument names and no raw input command",
 
 // ---- the AI chat --------------------------------------------------------------------------------------------------
 
-test("the ai event and the seventeen ai commands are pinned", () => {
+test("the ai events and the nineteen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
   assert.deepEqual(golden.events.names.slice(-2), ["ai", "ai-ask"]);
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
@@ -229,6 +229,8 @@ test("the ai event and the seventeen ai commands are pinned", () => {
     ai_context_preview: ["conversation", "pane", "profile", "model", "kinds"],
     ai_decide: ["conversation", "call_id", "decision", "hash"],
     ai_undo: ["conversation", "call_id"],
+    ai_ask_pending: [],
+    ai_ask_answer: ["ask", "verdict", "seal"],
     ai_cancel: ["conversation"],
     ai_turn_snapshot: ["conversation"],
     ai_profiles: [],
@@ -259,7 +261,15 @@ test("the markdown command takes only the text", () => {
 
 test("the answers and inputs of the ai commands are pinned", () => {
   const answers = golden.answers.ai;
-  assert.deepEqual(keys(answers), ["context_state", "conversations", "fault", "offer", "profiles", "removal", "ticket"]);
+  assert.deepEqual(
+    keys(answers),
+    ["ask_fault", "ask_pending", "context_state", "conversations", "fault", "offer", "profiles", "removal", "ticket"],
+  );
+  // The cards a reloaded page asks for: the view of the event, one for each waiting request.
+  assert.equal(answers.ask_pending.length, 1);
+  assert.deepEqual(answers.ask_pending[0], golden.events["ai-ask"].view, "a pending card is the card of the event");
+  assert.deepEqual(keys(answers.ask_fault), ["code", "reason", "text"]);
+  assert.deepEqual([answers.ask_fault.code, answers.ask_fault.reason], ["ask", "seal_mismatch"]);
   assert.deepEqual(keys(answers.ticket), ["conversation", "turn"]);
   // A refusal is an object, never a string: a code, a reason a dialog can act on (or null) and a fixed text.
   assert.equal(answers.fault.length, 2, "one with a reason and one without");

@@ -7131,7 +7131,7 @@ mod protocol {
     use holzwave_core::ai::profiles::{KeyError, KeySlot, KeyStatus, Preset, ProfileView, Removal};
     use holzwave_core::ai::service::events::{AiEvent, AiEventKind};
     use holzwave_core::ai::service::{
-        AskEvent, AskView, ContextState, FindingView, ItemView, OfferView, ServiceError,
+        AskEvent, AskFault, AskView, ContextState, FindingView, ItemView, OfferView, ServiceError,
     };
     use holzwave_core::ai::service::ask::InputView;
     use holzwave_core::ai::store::{ConversationId, ConversationSummary};
@@ -7495,6 +7495,8 @@ mod protocol {
                 ],
                 "ai": {
                     "ticket": to_value(&TicketView { conversation: "chat-1".into(), turn: 5 }),
+                    "ask_pending": [to_value(&sample_ask())],
+                    "ask_fault": to_value(&AiFault::from_ask(&AskFault::SealMismatch)),
                     "fault": [
                         to_value(&AiFault::from_service(&ServiceError::Key(KeyError::NoSuchSlot))),
                         to_value(&AiFault::no_such_pane()),

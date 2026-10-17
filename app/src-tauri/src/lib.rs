@@ -516,6 +516,8 @@ pub fn run() {
             commands::ai_context_preview,
             commands::ai_decide,
             commands::ai_undo,
+            commands::ai_ask_pending,
+            commands::ai_ask_answer,
             commands::markdown_render,
         ])
         .build(tauri::generate_context!())

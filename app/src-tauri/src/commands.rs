@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use holzwave_core::ai::profiles::KeySlot;
 use holzwave_core::ai::service::events::ChatState;
-use holzwave_core::ai::service::{ContextState, OfferView};
+use holzwave_core::ai::service::{AskView, ContextState, OfferView};
 use holzwave_core::ai::types::ContextKind;
 use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
@@ -1014,6 +1014,25 @@ pub fn ai_decide(
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn ai_undo(core: State<Arc<AppCore>>, conversation: String, call_id: String) -> Result<(), AiFault> {
     core.ai_undo(&conversation, &call_id)
+}
+
+/// The requests of `wsh ai` that wait for an answer in the calling window, oldest first: a page that loaded after the
+/// request was made (a reload, a window that opened late) asks for the cards it missed. It reads an in-memory table and
+/// touches no keychain, file or network, and it holds no text but the prompt each card shows.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_ask_pending(core: State<Arc<AppCore>>, window: WebviewWindow) -> Result<Vec<AskView>, AiFault> {
+    Ok(core.ai_ask_pending(window.label()))
+}
+
+/// The person's press on a card of `wsh ai`: the request, `send` or `refuse`, and the seal the card carried. It answers
+/// nothing; the answer of the model streams back to the program that asked. A refusal is the fault object with the code
+/// `ask` and a stable reason (`unknown_ask`, `seal_mismatch`, `bad_verdict`) and a fixed sentence.
+///
+/// This command exists for the webview only: it releases one waiting request, for its own seal, and the local socket of
+/// `wsh` has no way to reach it.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_ask_answer(core: State<Arc<AppCore>>, ask: String, verdict: String, seal: String) -> Result<(), AiFault> {
+    core.ai_ask_answer(&ask, &verdict, &seal)
 }
 
 /// The profiles with the state of each key (never a key). This reads the keychain, so the settings dialog calls it

@@ -101,6 +101,8 @@
     "allow-ai-context-preview",
     "allow-ai-decide",
     "allow-markdown-render",
-    "allow-ai-undo"
+    "allow-ai-undo",
+    "allow-ai-ask-pending",
+    "allow-ai-ask-answer"
   ]
 }
