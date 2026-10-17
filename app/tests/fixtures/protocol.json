@@ -383,6 +383,13 @@
       "release",
       "composing"
     ],
+    "login_prompt_answer": [
+      "id",
+      "answers"
+    ],
+    "login_prompt_cancel": [
+      "id"
+    ],
     "markdown_render": [
       "text"
     ],
@@ -616,6 +623,37 @@
         "y": 12.0
       }
     ],
+    "login-prompt": {
+      "connection": "Talos",
+      "host": "talos.example",
+      "id": "0123456789abcdef0123456789abcdef",
+      "instructions": "Enter your password and the code of your token.",
+      "name": "Two-factor login",
+      "prompts": [
+        {
+          "echo": false,
+          "text": "Password:"
+        },
+        {
+          "echo": true,
+          "text": "Code:"
+        }
+      ]
+    },
+    "login-prompt-end": [
+      {
+        "id": "0123456789abcdef0123456789abcdef",
+        "outcome": "answered"
+      },
+      {
+        "id": "0123456789abcdef0123456789abcdef",
+        "outcome": "cancelled"
+      },
+      {
+        "id": "0123456789abcdef0123456789abcdef",
+        "outcome": "timed_out"
+      }
+    ],
     "names": [
       "frame",
       "layout",
@@ -628,7 +666,9 @@
       "drag-end",
       "ai",
       "ai-ask",
-      "history-open"
+      "history-open",
+      "login-prompt",
+      "login-prompt-end"
     ],
     "pane-exit": [
       {

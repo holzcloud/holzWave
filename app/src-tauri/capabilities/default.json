@@ -83,6 +83,8 @@
     "allow-history-search",
     "allow-history-delete",
     "allow-history-clear",
+    "allow-login-prompt-answer",
+    "allow-login-prompt-cancel",
     "allow-widgets-list",
     "allow-widget-note-save",
     "allow-ai-send",

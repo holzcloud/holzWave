@@ -881,6 +881,19 @@ pub fn history_clear(core: State<Arc<AppCore>>) -> Result<(), String> {
     core.history_clear()
 }
 
+/// The person answered the question of a login (a one-time code, a PAM prompt): one answer per question, in order. True when
+/// the question was waiting; an unknown, old or malformed id changes nothing. Nothing of the answers is kept or logged.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn login_prompt_answer(core: State<Arc<AppCore>>, id: String, answers: Vec<String>) -> bool {
+    core.login_prompt_answer(&id, answers)
+}
+
+/// The person gave up on the question of a login. True when it was waiting.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn login_prompt_cancel(core: State<Arc<AppCore>>, id: String) -> bool {
+    core.login_prompt_cancel(&id)
+}
+
 /// The widgets of the sidebar, their saved notes and what was wrong with a widget file.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn widgets_list(core: State<Arc<AppCore>>) -> crate::state::WidgetsView {

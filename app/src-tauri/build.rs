@@ -97,6 +97,8 @@ fn main() {
     "history_search",
     "history_delete",
     "history_clear",
+    "login_prompt_answer",
+    "login_prompt_cancel",
     "widgets_list",
     "widget_note_save",
     "connection_save",

@@ -9,8 +9,11 @@
 //! of a chat turn, `{conversation, turn, seq, kind, ...}`, which the page routes by conversation) and `ai-ask` (a request
 //! of `wsh ai` that waits for the person, or is over: `{kind: "waiting", view}` for the window of the pane, `{kind:
 //! "closed", ask, why}` for every window) and `history-open` `{pane}` (the shell of that pane asked for the history
-//! search; it goes to the one window that has the pane); command arguments
-//! are snake_case. Every event but `settings`, `ai`, `exit` and the `closed` half of `ai-ask` is emitted to one window, the one that holds the pane
+//! search; it goes to the one window that has the pane), `login-prompt` `{id, connection, host, name, instructions, prompts:
+//! [{text, echo}]}` (the server of a saved connection asks the person a question to log in; every window; `connection`
+//! and `host` are the person's own saved connection, the rest is the server's text as text) and `login-prompt-end` `{id,
+//! outcome}` (`answered`, `cancelled` or `timed_out`; every window); command arguments
+//! are snake_case. Every event but `settings`, `ai`, `exit`, `login-prompt`, `login-prompt-end` and the `closed` half of `ai-ask` is emitted to one window, the one that holds the pane
 //! (or whose layout changed), with `emit_str_to(label, ..)`; a page has to listen with its own label, because a
 //! listener without a target receives the events of every window.
 //!
@@ -29,6 +32,7 @@ mod ai_write;
 mod ai_exec;
 mod commands;
 mod files_protocol;
+mod login_prompt;
 mod menu;
 mod state;
 mod sync;
@@ -509,6 +513,8 @@ pub fn run() {
             commands::history_search,
             commands::history_delete,
             commands::history_clear,
+            commands::login_prompt_answer,
+            commands::login_prompt_cancel,
             commands::widgets_list,
             commands::widget_note_save,
             commands::ai_send,

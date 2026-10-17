@@ -35,7 +35,7 @@ use holzwave_core::platform::{
 use holzwave_core::pty::process_cwd;
 use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
-use holzwave_core::ssh::{ExecCancel, ExecLimits, ExecResult, SshExec};
+use holzwave_core::ssh::{ExecCancel, ExecLimits, ExecResult, PromptLine, SshExec};
 use holzwave_core::wshinstall::Bundled;
 use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
 use holzwave_core::wire::FrameMsg;
@@ -44,6 +44,7 @@ use serde_json::Value;
 
 use crate::ai_host::{AiHost, AiParts, AiPayload};
 use crate::ai_exec::RemoteExecs;
+use crate::login_prompt::{PromptEnd, PromptHost};
 use crate::ai_tools::{ExecFault, FileTarget, TerminalTarget};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
@@ -393,6 +394,13 @@ pub enum Out {
     /// The shell of `pane` asked for the history search (the binding added by `wsh init`): the page of the window that has
     /// the pane opens the dialog for it.
     HistoryOpen { pane: PaneId },
+    /// The server of a saved connection asks the person a question to log in (a one-time code, a PAM prompt). Goes to every
+    /// window; the page draws a dialog. `connection` and `host` are the name and the host of the person's own saved
+    /// connection, never what the server says; `name`, `instructions` and the texts of `prompts` are the server's text,
+    /// already cleaned and bounded by the core, and are shown as text only.
+    LoginPrompt { id: String, connection: String, host: String, name: String, instructions: String, prompts: Vec<PromptLine> },
+    /// The question `id` is over (answered, cancelled or timed out): every window takes its dialog away.
+    LoginPromptEnd { id: String, outcome: PromptEnd },
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -413,6 +421,8 @@ impl Out {
             Out::Ai(_) => "ai",
             Out::AiAsk(_) => "ai-ask",
             Out::HistoryOpen { .. } => "history-open",
+            Out::LoginPrompt { .. } => "login-prompt",
+            Out::LoginPromptEnd { .. } => "login-prompt-end",
             Out::Exit => "exit",
         }
     }
@@ -427,6 +437,28 @@ struct TitlePayload<'a> {
 #[derive(Serialize)]
 struct HistoryOpenPayload {
     pane: PaneId,
+}
+
+#[derive(Serialize)]
+struct PromptLinePayload<'a> {
+    text: &'a str,
+    echo: bool,
+}
+
+#[derive(Serialize)]
+struct LoginPromptPayload<'a> {
+    id: &'a str,
+    connection: &'a str,
+    host: &'a str,
+    name: &'a str,
+    instructions: &'a str,
+    prompts: Vec<PromptLinePayload<'a>>,
+}
+
+#[derive(Serialize)]
+struct LoginPromptEndPayload<'a> {
+    id: &'a str,
+    outcome: PromptEnd,
 }
 
 #[derive(Serialize)]
@@ -466,6 +498,16 @@ impl Serialize for Out {
             Out::Ai(payload) => payload.serialize(serializer),
             Out::AiAsk(event) => event.serialize(serializer),
             Out::HistoryOpen { pane } => HistoryOpenPayload { pane: *pane }.serialize(serializer),
+            Out::LoginPrompt { id, connection, host, name, instructions, prompts } => LoginPromptPayload {
+                id,
+                connection,
+                host,
+                name,
+                instructions,
+                prompts: prompts.iter().map(|p| PromptLinePayload { text: &p.text, echo: p.echo }).collect(),
+            }
+            .serialize(serializer),
+            Out::LoginPromptEnd { id, outcome } => LoginPromptEndPayload { id, outcome: *outcome }.serialize(serializer),
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -751,6 +793,9 @@ pub struct AppCore {
     ai: AiHost,
     /// The exec primitive of each saved connection a command ran on, kept for the life of the connection list.
     remote_execs: RemoteExecs<SshExec>,
+    /// The questions of keyboard-interactive logins that wait for the person (see [`crate::login_prompt`]). Also the
+    /// prompter of `connections`.
+    prompts: Arc<PromptHost>,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
     saver: Debounced,
     /// How many times the saver job wrote the file, for tests.
@@ -940,6 +985,14 @@ impl AppCore {
         let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
         let host = AiHost::new(&dir, sink.clone(), ai);
         let core = Arc::new_cyclic(|me| {
+            // A login that asks a question raises it through this host. The name and the host of the dialog are looked up in
+            // the saved list by the id of the connection: the core stamps it, the server cannot.
+            let prompts = {
+                let weak = me.clone();
+                let lookup = Box::new(move |id: &str| weak.upgrade().and_then(|core: Arc<AppCore>| core.connections.identity_of(id)));
+                PromptHost::new(sink.clone(), lookup)
+            };
+            connections.set_prompter(prompts.clone());
             // The source of shared content reaches the panes and the files through the core, so it gets a weak
             // reference before the core exists: it keeps the core alive for nothing.
             host.bind(me.clone());
@@ -969,6 +1022,7 @@ impl AppCore {
                 sync,
                 ai: host,
                 remote_execs: RemoteExecs::new(),
+                prompts,
                 monitor: holzwave_core::monitor::Monitor::new(),
                 remote_monitors: holzwave_core::monitor::RemoteMonitors::new(),
                 history,
@@ -986,6 +1040,17 @@ impl AppCore {
         let settings = lock(&core.config).settings.clone();
         core.ai.apply_settings(&settings);
         core
+    }
+
+    /// The person answered the question of a login. Moves the answers into the login; false (and nothing changed) for an
+    /// id that is unknown, old or malformed.
+    pub fn login_prompt_answer(&self, id: &str, answers: Vec<String>) -> bool {
+        self.prompts.answer(id, answers)
+    }
+
+    /// The person gave up on the question of a login.
+    pub fn login_prompt_cancel(&self, id: &str) -> bool {
+        self.prompts.cancel(id)
     }
 
     /// The AI chat service of the shell.
@@ -4539,6 +4604,54 @@ mod tests {
             ..Profile::new(id, name, "127.0.0.1")
         };
         core.connection_save(profile, SecretChange::Keep).expect("a valid connection");
+    }
+
+    #[test]
+    fn the_connections_of_the_core_get_the_host_as_their_prompter() {
+        use holzwave_core::ssh::{PromptAnswer, PromptRound, Prompter, SshAuth};
+
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let profile = Profile {
+            user: "holz".into(),
+            auth: holzwave_core::profiles::Auth::Interactive,
+            ..Profile::new("talos", "Talos", "talos.example")
+        };
+        core.connection_save(profile, SecretChange::Keep).expect("a valid connection");
+
+        // The target of an interactive connection carries the host that raises the question.
+        let target = core.connections.ssh_target("talos").unwrap();
+        let SshAuth::Interactive { prompter: Some(prompter) } = &target.auth else { panic!("no prompter: {:?}", target.auth) };
+        let prompter: Arc<dyn Prompter> = prompter.clone();
+        let asking = std::thread::spawn(move || {
+            prompter.ask(PromptRound {
+                // Whatever the core's own adapter stamps wins: this is what a server would like the dialog to say.
+                connection: "evil".into(),
+                host: "evil.example".into(),
+                name: "Login".into(),
+                instructions: String::new(),
+                prompts: vec![PromptLine { text: "Code:".into(), echo: false }],
+            })
+        });
+        let started = Instant::now();
+        let id = loop {
+            let found = rec.all().into_iter().find_map(|o| match o {
+                Out::LoginPrompt { id, connection, host, .. } => Some((id, connection, host)),
+                _ => None,
+            });
+            if let Some((id, connection, host)) = found {
+                assert_eq!((connection.as_str(), host.as_str()), ("Talos", "talos.example"), "the title is the saved connection's");
+                break id;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "the question never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(!core.login_prompt_answer(&id, vec!["one".into(), "too many".into()]), "the count of answers is the question's");
+        assert!(core.login_prompt_answer(&id, vec!["424242".into()]));
+        assert!(matches!(asking.join().unwrap(), PromptAnswer::Answers(a) if a == ["424242"]));
+        assert!(rec.all().iter().any(|o| matches!(o, Out::LoginPromptEnd { outcome: PromptEnd::Answered, .. })));
+        assert!(!core.login_prompt_cancel(&id), "an ended question cannot be touched");
+        // No answer is in anything the recorder saw.
+        assert!(!format!("{:?}", rec.all()).contains("424242"));
     }
 
     #[test]
@@ -9200,6 +9313,18 @@ mod protocol {
             })),
             Out::AiAsk(AskEvent::Waiting { view: sample_ask() }),
             Out::HistoryOpen { pane: 3 },
+            Out::LoginPrompt {
+                id: "0123456789abcdef0123456789abcdef".into(),
+                connection: "Talos".into(),
+                host: "talos.example".into(),
+                name: "Two-factor login".into(),
+                instructions: "Enter your password and the code of your token.".into(),
+                prompts: vec![
+                    PromptLine { text: "Password:".into(), echo: false },
+                    PromptLine { text: "Code:".into(), echo: true },
+                ],
+            },
+            Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::Answered },
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -9247,6 +9372,12 @@ mod protocol {
                 "ai": payload(9),
                 "ai-ask": payload(10),
                 "history-open": payload(11),
+                "login-prompt": payload(12),
+                "login-prompt-end": [
+                    payload(13),
+                    to_value(&Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::Cancelled }),
+                    to_value(&Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::TimedOut }),
+                ],
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {
