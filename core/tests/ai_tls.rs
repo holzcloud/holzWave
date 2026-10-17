@@ -2,8 +2,8 @@
 //!
 //! No test here reaches the network. `Loopback` is a small HTTP/1.1 server on `127.0.0.1` that records what it was sent
 //! and answers by path, so a test can say what the client must do (stream in order, follow no redirect, send no
-//! compression header, end a silent server) and what the server must have seen. Plan 07-12 builds the shared fake server
-//! in `tests/common` and may move this one there.
+//! compression header, end a silent server) and what the server must have seen. The shared fake server of the other AI
+//! tests lives in `tests/common`; this one may move there.
 //!
 //! The tests of the TLS handshake itself need a real endpoint; they are the two ignored tests at the end.
 
@@ -380,7 +380,7 @@ async fn time_to_first_delta(client: &reqwest::Client, url: &str) -> Duration {
 /// measures the client and its HTTP layer, not the TLS handshake: the handshake appears in the real-HTTPS test.
 #[test]
 #[ignore = "run with --release: cargo test --release -p holzwave-core --no-default-features --test ai_tls -- --ignored --nocapture"]
-fn spike_s1_time_to_first_delta_and_cost_per_event() {
+fn time_to_first_delta_and_cost_per_event() {
     const SERIES: usize = 20;
     const EVENTS: usize = 100_000;
     let options = ClientOptions::new(false, ProxyPolicy::Direct);
@@ -478,7 +478,7 @@ fn chain(error: reqwest::Error) -> String {
 /// secret is sent: a GET without a body or a header of ours.
 #[test]
 #[ignore = "needs network: set HOLZWAVE_TEST_HTTPS_URL"]
-fn spike_s1_real_https_request_with_the_platform_verifier() {
+fn real_https_request_with_the_platform_verifier() {
     let url = std::env::var("HOLZWAVE_TEST_HTTPS_URL")
         .unwrap_or_else(|_| panic!("set HOLZWAVE_TEST_HTTPS_URL to an https URL (HOLZWAVE_TEST_HTTPS_URL is missing)"));
     let client = build_client(&ClientOptions::new(true, ProxyPolicy::System)).expect("a client");
