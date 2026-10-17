@@ -14,9 +14,11 @@
 //! step and what the server answered (status and a short reason), nothing else.
 //!
 //! What this proves that the loopback server of the engine tests cannot: the ETags, the conditional writes, the
-//! multistatus listing and the refusals of a real server, and the refusal of an untrusted certificate. What stays the
-//! owner's: two real computers, their own server and its app-password policy, a private CA in the system store, the
-//! keychain prompts.
+//! multistatus listing and the refusals of a real server, writes within one second (two writes of one file inside a
+//! second share an ETag on Nextcloud, and the checksum of the sealed blob tells them apart, so no version is lost), the
+//! longest theme and widget names, and the refusal of an untrusted certificate. No test pauses: a collision of ETags is
+//! provoked and waited for by looping, never caused or avoided by a sleep. What stays the owner's: two real computers,
+//! their own server and its app-password policy, a private CA in the system store, the keychain prompts.
 
 use std::fs;
 use std::path::PathBuf;
@@ -26,8 +28,8 @@ use holzwave_core::persist::write_atomic;
 use holzwave_core::profiles::{Auth, Profile, Profiles};
 use holzwave_core::secrets::{MemoryStore, SecretStore};
 use holzwave_core::sync::crypto::{Kdf, Key};
-use holzwave_core::sync::engine::{ConfigSource, Syncer, promote_incoming};
-use holzwave_core::sync::webdav::{Backend, Cond, Entry, WebDav};
+use holzwave_core::sync::engine::{ConfigSource, Syncer, max_stem, promote_incoming};
+use holzwave_core::sync::webdav::{Backend, Cond, Entry, WebDav, sha256_hex};
 use holzwave_core::Result;
 
 const PASSPHRASE: &str = "correct horse battery";
@@ -148,9 +150,13 @@ fn real_nextcloud_two_devices_converge() {
     let report = b.connect(suffix, PASSPHRASE).expect("device B opens the folder").sync_once().expect("B syncs");
     assert!(report.errors.is_empty(), "B: {report:?}");
     assert_eq!(report.downloaded.len(), 5, "B downloads the five files: {report:?}");
-    for name in ["settings.json", "layout.json", "themes/dark.json", "connections.json"] {
+    for name in ["settings.json", "themes/dark.json", "connections.json"] {
         assert_eq!(b.text(name), fs::read_to_string(a.dir.join(name)).ok(), "{name} differs on B after the restart");
     }
+    // The layout travels as a unit and is adopted in its canonical form (sorted keys, indented): the same layout, not the
+    // same bytes.
+    let layout = |d: &Device| -> Option<serde_json::Value> { serde_json::from_str(&d.text("layout.json")?).ok() };
+    assert!(layout(&b).is_some() && layout(&b) == layout(&a), "layout.json differs on B after the restart");
     assert_eq!(b.secrets.get("ssh:web").unwrap().as_deref(), Some("hunter2-canary-hunter2"), "B has the saved password");
     assert!(!b.dir.join("secrets.json").exists(), "the secrets never become a file");
 
@@ -261,17 +267,28 @@ fn real_nextcloud_etags_and_preconditions() {
     assert!(e.to_string().contains("precondition failed"), "a made-up ETag under Cond::Match: {e}");
     assert_eq!(dav.get(path).unwrap().unwrap().0, b"one", "a refused write changed nothing");
 
-    // A real Nextcloud derives a file's ETag from the modification time in whole seconds: two writes within one second
-    // can share an ETag. Record what this server does, then leave the second boundary behind so the checks below see
-    // distinct versions. (A device that lost a race inside one second would not be told: see the SUMMARY of this run.)
+    // A real Nextcloud derives a file's ETag from the modification time in whole seconds, so two writes of one file inside
+    // a second can share an ETag. Provoke that (a write, then a conditional write of other content straight after, on a
+    // fresh name each time) and show that the checksum the server reports tells the two versions apart.
+    let (mut collided_at, mut digests, mut collided) = (None, (String::new(), String::new()), (String::new(), String::new()));
+    for attempt in 1..=10 {
+        let probe = format!("collide-{attempt}.bin");
+        let (one, two) = (format!("content one {attempt}"), format!("content two {attempt}"));
+        let e1 = dav.put(&probe, one.as_bytes(), &Cond::Absent).expect("a write to a new name");
+        let e2 = dav.put(&probe, two.as_bytes(), &Cond::Match(e1.clone())).expect("the current ETag is accepted");
+        if e1 == e2 {
+            let listed = dav.list("").unwrap().into_iter().find(|e| e.name == probe).expect("the probe is listed");
+            assert_eq!(listed.checksum.as_deref(), Some(sha256_hex(two.as_bytes()).as_str()), "the reported checksum is the second content's");
+            assert_ne!(listed.checksum.as_deref(), Some(sha256_hex(one.as_bytes()).as_str()), "and differs from the first content's");
+            (collided_at, digests, collided) = (Some(attempt), (sha256_hex(one.as_bytes()), sha256_hex(two.as_bytes())), (probe, two));
+            break;
+        }
+    }
+    let attempt = collided_at.expect("this machine could not provoke a same-second ETag collision in ten attempts: the run proves nothing about it");
+    println!("ETag collision provoked at attempt {attempt}: one ETag for two contents; the checksums are {} and {}", digests.0, digests.1);
+
     let same_second = dav.put(path, b"two", &Cond::Match(first.clone())).expect("the current ETag is accepted");
-    println!(
-        "ETag after a second write within the same second: {}",
-        if same_second == first { "UNCHANGED (known difference: a write inside one second of the previous one is not seen by If-Match)" } else { "changed" }
-    );
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     let second = dav.put(path, b"three", &Cond::Match(same_second.clone())).expect("the current ETag is accepted");
-    assert_ne!(second, same_second, "a write a second later has a new ETag");
     let (bytes, got) = dav.get(path).unwrap().expect("the file exists");
     assert_eq!((bytes.as_slice(), got.as_str()), (b"three".as_slice(), second.as_str()), "GET returns the last write and its ETag");
     assert!(dav.get("no-such-file.bin").unwrap().is_none(), "a name that does not exist is Ok(None)");
@@ -280,6 +297,10 @@ fn real_nextcloud_etags_and_preconditions() {
     // What the client hides: the raw ETag forms and the raw statuses of the refusals.
     let put = raw(suffix, "PUT", path, &[("Content-Type", "application/octet-stream")], b"four");
     println!("raw PUT answer: status {} ETag {:?} OC-ETag {:?}", put.status, put.header("ETag"), put.header("OC-ETag"));
+    // A write without the checksum header: does the server clear or keep the checksum of the file's earlier write? (The
+    // client never writes without it; an older build did.)
+    let listed_sum = |name: &str| dav.list("").unwrap().into_iter().find(|e| e.name == name).and_then(|e| e.checksum);
+    println!("a raw write without OC-Checksum: the listed checksum is now {:?} (the file held {:?} before)", listed_sum(path), sha256_hex(b"three"));
     let get = raw(suffix, "GET", path, &[], &[]);
     println!("raw GET answer: status {} ETag {:?} OC-ETag {:?}", get.status, get.header("ETag"), get.header("OC-ETag"));
     let prop = raw(
@@ -287,11 +308,18 @@ fn real_nextcloud_etags_and_preconditions() {
         "PROPFIND",
         "",
         &[("Depth", "1"), ("Content-Type", "application/xml")],
-        br#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getetag/><d:resourcetype/></d:prop></d:propfind>"#,
+        br#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><d:getetag/><d:resourcetype/><oc:checksums/></d:prop></d:propfind>"#,
     );
     let etag_tags: Vec<&str> = prop.body.split("<d:getetag>").skip(1).filter_map(|p| p.split("</d:getetag>").next()).collect();
     println!("raw PROPFIND: status {} getetag values {:?}", prop.status, etag_tags);
     assert_eq!(prop.status, 207, "PROPFIND answers 207 Multi-Status");
+    // The raw shape of `oc:checksums`, the case of the algorithm name the server returns, and the value against the digest.
+    let sums: Vec<&str> = prop.body.split("<oc:checksum>").skip(1).filter_map(|p| p.split("</oc:checksum>").next()).collect();
+    println!("raw PROPFIND oc:checksums values {sums:?}");
+    let (probe_name, want) = (collided.0.clone(), sha256_hex(collided.1.as_bytes()));
+    let entry_xml = prop.body.split("<d:response>").find(|r| r.contains(&probe_name)).unwrap_or("");
+    println!("raw PROPFIND entry of {probe_name}: {}", entry_xml.split("</d:response>").next().unwrap_or(""));
+    assert!(sums.iter().any(|v| v.to_ascii_lowercase() == format!("sha256:{want}")) || entry_xml.to_ascii_lowercase().contains(&format!("sha256:{want}")), "the server reports the digest of the file it holds: {sums:?}");
     let none_match = raw(suffix, "PUT", path, &[("If-None-Match", "*")], b"x");
     let stale = raw(suffix, "PUT", path, &[("If-Match", "\"0123456789abcdef0123456789abcdef\"")], b"x");
     println!("raw refusals: If-None-Match * on an existing name: {}; a stale If-Match: {}", none_match.status, stale.status);
@@ -310,15 +338,12 @@ fn real_nextcloud_a_conflict_keeps_the_loser() {
     b.connect(suffix, PASSPHRASE).unwrap().sync_once().unwrap();
     assert_eq!(b.text("settings.json").as_deref(), Some("base"));
 
-    // Both change the file. A is first, B is second and finds that both sides changed. A real Nextcloud's ETag moves
-    // with the modification time in whole seconds, so A's write must come a second after the base to be seen as a change.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    // Both change the file. A is first, B is second and finds that both sides changed. No pause: the writes may share an
+    // ETag (the server's moves once per second) and the sync tells them apart by the content.
     a.put("settings.json", "from a");
     b.put("settings.json", "from b");
     let report = a.connect(suffix, PASSPHRASE).unwrap().sync_once().unwrap();
     assert_eq!(report.uploaded, vec!["settings.json"], "A is first, so it is no conflict for A: {report:?}");
-    // B's write comes a second after A's, or the two writes would share one ETag and A would never see B's version.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     let report = b.connect(suffix, PASSPHRASE).unwrap().sync_once().unwrap();
     assert_eq!(report.conflicts, vec!["settings.json"], "B finds both sides changed: {report:?}");
     assert!(report.errors.is_empty(), "{report:?}");
@@ -340,7 +365,6 @@ fn real_nextcloud_a_conflict_keeps_the_loser() {
     assert_eq!(a.text("settings.json").as_deref(), Some("from b"));
 
     // The other direction: the server's counter is higher, so the local version loses and is kept next to the files.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     for text in ["v1", "v2"] {
         a.put("settings.json", text);
         a.connect(suffix, PASSPHRASE).unwrap().sync_once().unwrap();
@@ -356,6 +380,81 @@ fn real_nextcloud_a_conflict_keeps_the_loser() {
     assert_eq!(fs::read_to_string(kept[0].path()).unwrap(), "b only");
     assert_eq!(names(dav.list("backups").unwrap()).len(), 1, "the server's backups did not grow");
     println!("conflict, the local loses: sync-conflicts/{}", kept[0].file_name().to_string_lossy());
+}
+
+/// The ETag of `files/settings.json.hwx` as the listing shows it now.
+fn settings_etag(dav: &WebDav) -> String {
+    dav.list("files").unwrap().into_iter().find(|e| e.name == "settings.json.hwx").expect("the file is listed").etag
+}
+
+/// The two same-second scenarios, back to back and without a pause, in a fresh server folder. Every assertion holds
+/// whether or not the ETags collided; the two flags say whether the first scenario's and the second scenario's did.
+fn same_second_round(round: u32) -> (bool, bool) {
+    // Scenario one: A uploads over the version B last saw, in the same second as the version before; B, which changed the
+    // same file meanwhile, must find a conflict and keep A's version.
+    let suffix = format!("same-{round}-overwrite");
+    let (a, b) = (Device::new(&format!("same-a-{round}")), Device::new(&format!("same-b-{round}")));
+    let dav = webdav(&suffix);
+    let mut sa = a.connect(&suffix, PASSPHRASE).unwrap();
+    a.put("settings.json", "base");
+    assert!(sa.sync_once().unwrap().errors.is_empty());
+    let after_base = settings_etag(&dav);
+    let mut sb = b.connect(&suffix, PASSPHRASE).unwrap();
+    assert_eq!(sb.sync_once().unwrap().downloaded, vec!["settings.json"]);
+    a.put("settings.json", "from a");
+    let report = sa.sync_once().unwrap();
+    assert_eq!((report.uploaded.clone(), report.conflicts.is_empty()), (vec!["settings.json".to_owned()], true), "{report:?}");
+    let first_collided = settings_etag(&dav) == after_base;
+    b.put("settings.json", "from b");
+    let report = sb.sync_once().unwrap();
+    assert_eq!(report.conflicts, vec!["settings.json"], "round {round}: B finds A's version, collided {first_collided}: {report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    let backups = names(dav.list("backups").unwrap());
+    assert_eq!(backups.len(), 1, "round {round}: A's version is kept: {backups:?}");
+    let (loser, _) = dav.get(&format!("backups/{}", backups[0])).unwrap().expect("the backup exists");
+    assert_eq!(decrypt(&dav, "settings.json", &loser), "from a");
+    let (winner, _) = dav.get("files/settings.json.hwx").unwrap().expect("the file exists");
+    assert_eq!(decrypt(&dav, "settings.json", &winner), "from b", "the server's file is B's");
+    let report = sa.sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["settings.json"], "round {round}: A downloads B's version, collided {first_collided}: {report:?}");
+    assert_eq!(a.text("settings.json").as_deref(), Some("from b"));
+
+    // Scenario two: a version written by B in the same second as the one A last saw is downloaded by A.
+    let suffix = format!("same-{round}-download");
+    let (c, d) = (Device::new(&format!("same-c-{round}")), Device::new(&format!("same-d-{round}")));
+    let dav = webdav(&suffix);
+    let mut sc = c.connect(&suffix, PASSPHRASE).unwrap();
+    c.put("settings.json", "v1");
+    assert!(sc.sync_once().unwrap().errors.is_empty());
+    let after_v1 = settings_etag(&dav);
+    let mut sd = d.connect(&suffix, PASSPHRASE).unwrap();
+    assert_eq!(sd.sync_once().unwrap().downloaded, vec!["settings.json"]);
+    d.put("settings.json", "v2");
+    let report = sd.sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["settings.json"], "{report:?}");
+    let second_collided = settings_etag(&dav) == after_v1;
+    let report = sc.sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["settings.json"], "round {round}: the stale device downloads v2, collided {second_collided}: {report:?}");
+    assert_eq!(c.text("settings.json").as_deref(), Some("v2"));
+    (first_collided, second_collided)
+}
+
+#[test]
+#[ignore = "needs a real Nextcloud: run `sh scripts/nextcloud-live-test.sh`"]
+fn real_nextcloud_same_second_writes_are_never_lost() {
+    let (mut overwrite, mut download) = (None, None);
+    for round in 1..=10 {
+        let (first, second) = same_second_round(round);
+        println!("same-second round {round}: ETags collided in the overwrite scenario: {first}, in the download scenario: {second}");
+        overwrite = overwrite.or(first.then_some(round));
+        download = download.or(second.then_some(round));
+        if overwrite.is_some() && download.is_some() {
+            break;
+        }
+    }
+    println!("same-second writes: collided overwrite scenario at round {overwrite:?}, download scenario at round {download:?}; nothing was lost");
+    assert!(overwrite.is_some(), "no round of ten collided in the overwrite scenario: this machine could not provoke a same-second collision, so the run proves nothing about it");
+    assert!(download.is_some(), "no round of ten collided in the download scenario: this machine could not provoke a same-second collision, so the run proves nothing about it");
 }
 
 #[test]
@@ -418,35 +517,68 @@ fn real_nextcloud_size_and_listing() {
     assert!(report.uploaded.is_empty() && report.errors.iter().any(|(n, e)| n == "settings.json" && e.contains("larger than the limit")), "{report:?}");
     assert!(webdav(over).list("files").unwrap().is_empty(), "nothing over the limit reached the server");
 
-    // Thirty themes, and the longest name the format allows.
+    // Thirty themes, the longest theme and the longest widget name the transport can carry, and one name that is too long.
     let many = "many";
     let (d, e) = (Device::new("many-a"), Device::new("many-b"));
     fs::create_dir_all(d.dir.join("themes")).unwrap();
+    fs::create_dir_all(d.dir.join("widgets")).unwrap();
     let mut expected: Vec<String> = Vec::new();
     for i in 0..30 {
         d.put(&format!("themes/t-{i:02}.json"), &format!("{{\"name\":\"t-{i:02}\"}}"));
         expected.push(format!("themes.t-{i:02}.json.hwx"));
     }
-    // A remote name is `themes.` + the name + `.json.hwx` and may be 128 characters at most: 112 characters of name.
-    let longest = "x".repeat(112);
-    d.put(&format!("themes/{longest}.json"), "{\"long\":true}");
-    expected.push(format!("themes.{longest}.json.hwx"));
+    // A name on the server is at most 128 characters: `themes.` + the stem + `.json.hwx` allows a stem of 112, and
+    // `widgets.` one of 111.
+    let (longest_theme, longest_widget) = ("x".repeat(max_stem("themes")), "w".repeat(max_stem("widgets")));
+    assert_eq!((longest_theme.len(), longest_widget.len()), (112, 111));
+    let (theme_name, widget_name) = (format!("themes/{longest_theme}.json"), format!("widgets/{longest_widget}.json"));
+    d.put(&theme_name, "{\"long\":true}");
+    d.put(&widget_name, "{\"long\":\"widget\"}");
+    expected.push(format!("themes.{longest_theme}.json.hwx"));
+    expected.push(format!("widgets.{longest_widget}.json.hwx"));
     expected.sort();
-    // A name the engine accepts (128 characters) but whose remote name is longer than the transport allows.
-    let too_long = "y".repeat(128);
-    d.put(&format!("themes/{too_long}.json"), "{\"long\":\"too\"}");
+    // A name of 128 characters is over the limit: it is reported with the limit and its length, and nothing else stops.
+    let too_long = format!("themes/{}.json", "y".repeat(128));
+    d.put(&too_long, "{\"long\":\"too\"}");
     let report = d.connect(many, PASSPHRASE).unwrap().sync_once().unwrap();
     println!("a theme of 128 characters: errors {:?}", report.errors);
-    assert_eq!(report.uploaded.len(), 31, "thirty themes and the longest allowed one go up: {report:?}");
+    assert_eq!(report.uploaded.len(), 32, "thirty themes, the longest theme and the longest widget go up: {report:?}");
+    assert_eq!(
+        report.errors,
+        vec![(too_long.clone(), "the file name is too long to sync: at most 112 characters before .json in themes/, this one has 128".to_owned())],
+        "{report:?}"
+    );
     let listed = names(webdav(many).list("files").unwrap());
-    assert_eq!(listed, expected, "the multistatus of a real server lists every one of the 31 names");
+    assert_eq!(listed, expected, "the multistatus of a real server lists every one of the 32 names");
     let report = e.connect(many, PASSPHRASE).unwrap().sync_once().unwrap();
-    assert_eq!(report.downloaded.len(), 31, "{report:?}");
+    assert_eq!(report.downloaded.len(), 32, "{report:?}");
     for i in 0..30 {
         let name = format!("themes/t-{i:02}.json");
         assert_eq!(e.text(&name).as_deref(), Some(format!("{{\"name\":\"t-{i:02}\"}}").as_str()), "{name}");
     }
-    assert_eq!(e.text(&format!("themes/{longest}.json")).as_deref(), Some("{\"long\":true}"));
+    assert_eq!(e.text(&theme_name).as_deref(), Some("{\"long\":true}"));
+    assert_eq!(e.text(&widget_name).as_deref(), Some("{\"long\":\"widget\"}"));
+
+    // Each of the two longest files loses a conflict: D edits both and syncs first, E edits both and syncs second, wins,
+    // and D's versions go to `backups/` under names that are safe segments of at most 128 characters.
+    for name in [&theme_name, &widget_name] {
+        d.put(name, "from d");
+        e.put(name, "from e");
+    }
+    let report = d.connect(many, PASSPHRASE).unwrap().sync_once().unwrap();
+    assert!(report.errors.iter().all(|(n, _)| *n == too_long.as_str()) && report.uploaded.len() == 2, "{report:?}");
+    let report = e.connect(many, PASSPHRASE).unwrap().sync_once().unwrap();
+    assert_eq!(report.conflicts.len(), 2, "{report:?}");
+    let dav = webdav(many);
+    let backups = names(dav.list("backups").unwrap());
+    assert_eq!(backups.len(), 2, "one backup for each of the two long files: {backups:?}");
+    for file in &backups {
+        assert!(file.len() <= 128, "{file}");
+        let logical = if file.starts_with("themes") { &theme_name } else { &widget_name };
+        let (blob, _) = dav.get(&format!("backups/{file}")).unwrap().expect("the backup exists");
+        assert_eq!(decrypt(&dav, logical, &blob), "from d", "the backup holds the version that lost");
+        println!("backup name of a long file: {} characters: {file}", file.len());
+    }
 }
 
 #[test]

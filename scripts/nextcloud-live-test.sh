@@ -13,7 +13,11 @@
 # What it proves: that the WebDAV client and the sync engine agree with a real server on PROPFIND, MKCOL, PUT and GET,
 # on the ETags the server sends, on `If-Match` and `If-None-Match: *`, on a conflict, on a wrong app password and a wrong
 # passphrase, on sizes and many names, and that a server whose certificate the system does not trust is refused with a
-# TLS reason before any credential is sent. What it cannot prove stays the owner's (S1): two real computers, the
+# TLS reason before any credential is sent. It also proves that writes within one second are never lost: the server's
+# ETag moves once per second, so the test provokes a real collision of two ETags (no pause anywhere), shows that the
+# checksum the server reports tells the two versions apart, and shows that two devices writing without pauses lose no
+# version; and that the longest theme and widget names (112 and 111 characters) upload, download and lose a conflict,
+# while a longer name is reported with the limit and its length. What it cannot prove stays the owner's (S1): two real computers, the
 # owner's own server and its app-password policy, a private CA in the system store, the keychain prompts.
 #
 # Needs: Docker (the daemon must answer), curl, and the Rust toolchain from scripts/env.sh (no Zig: the test builds
