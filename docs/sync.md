@@ -114,7 +114,8 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   edit of it and is gone from the others at their next start. When the new list is applied and no longer holds a profile
   that the replaced one held, the keychain entry (`ssh:<id>`) of exactly that profile is deleted. Nothing is deleted when
   the new file does not read as a connection list, when none of its profiles is usable, or for a profile it still names:
-  a corrupt or hostile file never wipes the keychain.
+  a corrupt or hostile file never wipes the keychain. Until that start the secrets a run carries follow the staged list
+  and not the live one, so a profile another computer removed does not have its secret uploaded again in between.
 - **The history stays local:** `history.db` is a database, not a file per item, so it cannot be synced entry by entry
   without a tombstone for every command, and a command you forgot must not come back on another computer. That is a
   decision, not a gap, and it can be reopened: syncing the history would be opt-in and would need those per-entry

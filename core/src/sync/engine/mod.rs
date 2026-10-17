@@ -657,9 +657,33 @@ impl ConfigSource {
         save_bases(&root, &bases);
     }
 
+    /// The keychain accounts of the connection profiles whose secrets the sync carries. A downloaded `connections.json`
+    /// waits in `sync-incoming/` until the next start and counts as the local version of its name (see [`Source::read`]),
+    /// so its profiles are the ones that are meant: the live list would still name a profile that another computer
+    /// removed, and a run before the start would upload the stale `ssh:<id>` secret. A staged file that does not read as
+    /// a connection list is not used.
     fn accounts(&self) -> Vec<String> {
-        Profiles::load(&self.dir).0.items.iter().map(|p| p.secret_account()).collect()
+        let staged = read_limited(&self.dir.join(INCOMING).join(CONNECTIONS), MAX_FILE).ok().flatten().and_then(|b| usable_list(&b));
+        let list = staged.unwrap_or_else(|| Profiles::load(&self.dir).0);
+        list.items.iter().map(|p| p.secret_account()).collect()
     }
+}
+
+/// The connection list `bytes` holds, or `None` when it is not one the loader would use: not text, not a list of this
+/// version, or a list that names profiles of which none is usable (a broken file, not the removal of every profile).
+fn usable_list(bytes: &[u8]) -> Option<Profiles> {
+    use crate::layout::LoadStatus;
+    let (profiles, status) = Profiles::from_json(std::str::from_utf8(bytes).ok()?);
+    if matches!(status, LoadStatus::Reset(_)) {
+        return None;
+    }
+    if profiles.items.is_empty() {
+        let raw: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        if raw.get("items").and_then(serde_json::Value::as_array).is_some_and(|items| !items.is_empty()) {
+            return None;
+        }
+    }
+    Some(profiles)
 }
 
 impl Source for ConfigSource {

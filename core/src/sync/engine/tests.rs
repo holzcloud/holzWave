@@ -1989,3 +1989,67 @@ fn an_over_limit_file_error_names_the_file_and_not_the_local_path() {
         assert!(text.contains("not a regular file") && !text.contains(&folder), "{text}");
     }
 }
+
+// ---- the secrets follow the staged connection list ---------------------------------------------------------------------
+
+/// The accounts the secrets file of the server holds, opened with the folder's key.
+fn secret_accounts(srv: &Server, d: &Device) -> Vec<String> {
+    let plain = server_plain(srv, d, SECRETS);
+    let map: BTreeMap<String, String> = serde_json::from_slice(&plain).unwrap();
+    map.into_keys().collect()
+}
+
+#[test]
+fn a_staged_connection_list_decides_whose_secrets_a_run_uploads() {
+    let srv = server();
+    let (a, b) = (device("a-stale"), device("b-stale"));
+    save_connections(&a, &["web", "db"]);
+    a.secrets.set("ssh:web", "web-secret-0001").unwrap();
+    a.secrets.set("ssh:db", "db-secret-0002").unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    promote_incoming(&b.dir);
+    assert_eq!(b.secrets.get("ssh:web").unwrap().as_deref(), Some("web-secret-0001"), "B holds both secrets and both profiles");
+    // A removes `web`; its next run uploads the list without it and the secrets without its entry.
+    save_connections(&a, &["db"]);
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(secret_accounts(&srv, &a), vec!["ssh:db"]);
+    // B downloads the new list: it is staged, and B has not started again. Two runs in between must not bring the removed
+    // profile's secret back to the server, which the live list (still naming it) would do.
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.downloaded.contains(&"connections.json".to_owned()), "{report:?}");
+    let puts = srv.counts().puts;
+    let again = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(!again.uploaded.contains(&SECRETS.to_owned()), "no stale secret is uploaded: {again:?}");
+    assert_eq!(srv.counts().puts, puts, "nothing is written: {again:?}");
+    assert_eq!(secret_accounts(&srv, &a), vec!["ssh:db"], "the removed profile's secret is not on the server");
+    // The start that applies the list forgets the keychain entry of the removed profile, as before.
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted.dropped_profiles, vec!["web"]);
+}
+
+#[test]
+fn the_accounts_come_from_the_staged_list_when_it_reads_and_from_the_live_one_when_it_does_not() {
+    let d = device("accounts");
+    save_connections(&d, &["web", "db"]);
+    let accounts = |d: &Device| {
+        let mut list = ConfigSource::new(&d.dir, d.secrets.clone()).accounts();
+        list.sort();
+        list
+    };
+    assert_eq!(accounts(&d), vec!["ssh:db", "ssh:web"]);
+    // A staged list is the local version of its name: its profiles are the ones whose secrets are meant.
+    fs::create_dir_all(d.dir.join(INCOMING)).unwrap();
+    let staged = device("accounts-staged");
+    save_connections(&staged, &["db"]);
+    stage_connections(&d, &fs::read(staged.dir.join("connections.json")).unwrap());
+    assert_eq!(accounts(&d), vec!["ssh:db"]);
+    // A staged list with no profile at all is a list with none.
+    stage_connections(&d, br#"{"version":1,"items":[]}"#);
+    assert!(accounts(&d).is_empty());
+    // A staged file that is not a connection list, or one in which no profile is usable, is no list: the live one stays.
+    for broken in [&b"not json"[..], &b"\xff\xfe"[..], br#"{"version":99,"items":[]}"#, br#"{"version":1,"items":[{"id":"x"}]}"#] {
+        stage_connections(&d, broken);
+        assert_eq!(accounts(&d), vec!["ssh:db", "ssh:web"], "{}", String::from_utf8_lossy(broken));
+    }
+}
