@@ -142,14 +142,12 @@ impl AiFault {
     }
 
     /// The verdict of a card is neither of the two the page may send.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn invalid_decision() -> AiFault {
         let text = "the decision must be allow or deny".to_owned();
         AiFault { code: "tool", reason: Some("invalid_decision"), text }
     }
 
     /// The table's refusal of a verdict or a call: the stable code of the error and its fixed sentence.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn from_tool(error: &ToolError) -> AiFault {
         AiFault { code: "tool", reason: Some(error.code()), text: error.to_string() }
     }
@@ -329,7 +327,6 @@ impl AiHost {
     }
 
     /// The service, for the calls the shell makes on it directly.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn service(&self) -> &AiService {
         &self.service
     }
@@ -2205,7 +2202,8 @@ mod tests {
         let requests = provider.requests();
         assert_eq!(requests.len(), 2, "the second request carries the result");
         let declared: Vec<&str> = requests[1].tools.iter().map(|spec| spec.name.as_str()).collect();
-        assert_eq!(declared, ["read_file"], "no other tool is offered yet");
+        let read_tools = ["read_file", "list_dir", "grep", "read_pane"];
+        assert_eq!(declared, read_tools, "the four read tools and nothing else");
         let last = requests[1].messages.last().expect("a message");
         assert_eq!(last.role, Role::Tool);
         let returned = last.parts.iter().any(|part| match part {

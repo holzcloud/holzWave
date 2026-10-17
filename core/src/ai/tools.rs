@@ -274,6 +274,8 @@ pub enum ToolError {
     Cancelled,
     /// The host failed to do what was approved.
     Host(Detail),
+    /// The pane was not shared with this chat when the call was resolved.
+    NotShared,
 }
 
 impl ToolError {
@@ -296,6 +298,7 @@ impl ToolError {
             Self::TaintChanged => "taint_changed",
             Self::Cancelled => "cancelled",
             Self::Host(_) => "host",
+            Self::NotShared => "not_shared",
         }
     }
 
@@ -326,6 +329,7 @@ impl fmt::Display for ToolError {
             }
             Self::Cancelled => f.write_str("The turn was stopped."),
             Self::Host(d) => write!(f, "The action failed: {}", d.as_str()),
+            Self::NotShared => f.write_str("That pane is not shared with this chat."),
         }
     }
 }

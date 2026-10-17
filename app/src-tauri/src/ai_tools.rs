@@ -9,12 +9,14 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use holzwave_core::ai::provider::{CancelToken, Detail};
+use holzwave_core::ai::redact::{SourceText, drop_hidden};
 use holzwave_core::ai::store::ConversationId;
 use holzwave_core::ai::tools::{
-    Access, Decision, DenyPolicy, FsKind, MAX_RESULT_BYTES, ReadFile, Resolved, Scope, Style, Ticket, Tool, ToolError,
-    ToolHost, ToolName, ToolOutput,
+    Access, Decision, DenyPolicy, FsKind, Grep, ListDir, MAX_RESULT_BYTES, ReadFile, ReadPane, Resolved, Scope, Style,
+    Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput, visible,
 };
 use holzwave_core::files::{FileSource, Kind};
 use holzwave_core::layout::PaneId;
@@ -33,6 +35,15 @@ pub const READ_BYTES: usize = MAX_RESULT_BYTES - FOOTER_RESERVE;
 /// How many leading bytes of a file are looked at for a NUL, which marks a file as not text.
 const SNIFF_BYTES: usize = 8192;
 
+/// The most characters of one matching line a search shows; the rest of the line is cut.
+const LINE_CHARS: usize = 200;
+
+/// The most bytes of a pane's text one `read_pane` call asks the engine for.
+const PANE_FETCH_BYTES: usize = 65536;
+
+/// The largest file a search opens.
+const GREP_FILE_BYTES: u64 = 1_048_576;
+
 /// The fixed phrases of a refusal. Each is one English line and holds nothing the model wrote.
 const NOT_TEXT: &str = "that file is not text";
 const NOT_A_FILE: &str = "that path is not a regular file";
@@ -43,6 +54,10 @@ const NO_HOME: &str = "the home folder is not known";
 const BAD_END: &str = "the path must name a file, not a folder";
 const REMOTE_LINK: &str = "a link on a remote host is not followed";
 const FOLDER_TOO_LARGE: &str = "that folder is too large to check the file";
+const NOT_A_FOLDER: &str = "that path is not a folder";
+const PANE_GONE: &str = "that pane is closed";
+const PANE_BUSY: &str = "that pane is busy, try again";
+const PANE_UNREADABLE: &str = "that pane could not be read";
 
 fn host(phrase: &str) -> ToolError {
     ToolError::Host(Detail::new(phrase))
@@ -83,7 +98,6 @@ impl fmt::Debug for FileTarget {
 
 /// What a pane's terminal is: the machine it runs on. `Debug` prints the remote flag and nothing else.
 #[derive(Clone)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct TerminalTarget {
     /// What the card calls the machine.
     pub label: String,
@@ -99,7 +113,6 @@ impl fmt::Debug for TerminalTarget {
 
 /// Why a pane's rows could not be read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub enum RowsFault {
     /// The pane is closed.
     Gone,
@@ -113,7 +126,6 @@ pub enum RowsFault {
 ///
 /// `is_open`, `file_target`, `terminal` and `shared` look at tables only. `file_source` may make a source, which can
 /// open a connection, so only `run` calls it. `read_rows` waits for the engine thread of the pane.
-#[cfg_attr(not(test), allow(dead_code))]
 pub trait Targets: Send + Sync {
     /// Whether the pane is in a layout.
     fn is_open(&self, pane: PaneId) -> bool;
@@ -136,11 +148,38 @@ pub trait Targets: Send + Sync {
 pub struct ShellTools {
     policy: DenyPolicy,
     targets: OnceLock<Arc<dyn Targets>>,
+    limits: Option<GrepLimits>,
 }
 
 impl fmt::Debug for ShellTools {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ShellTools").field("bound", &self.targets.get().is_some()).finish_non_exhaustive()
+    }
+}
+
+/// What a search may spend: files opened, bytes read, folders deep and time. The defaults are smaller for a remote
+/// host, where every read is a request over the network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GrepLimits {
+    /// The most files opened.
+    pub files: usize,
+    /// The most bytes read in all.
+    pub bytes: u64,
+    /// The deepest folder visited, counted from the folder searched (which is level 0).
+    pub depth: usize,
+    /// The longest the walk may take.
+    pub budget: Duration,
+}
+
+impl GrepLimits {
+    /// The limits on this computer.
+    pub fn local() -> GrepLimits {
+        GrepLimits { files: 5000, bytes: 64 * 1024 * 1024, depth: 8, budget: Duration::from_secs(20) }
+    }
+
+    /// The limits on a remote host.
+    pub fn remote() -> GrepLimits {
+        GrepLimits { files: 400, bytes: 8 * 1024 * 1024, depth: 8, budget: Duration::from_secs(20) }
     }
 }
 
@@ -154,7 +193,14 @@ enum Ending {
 impl ShellTools {
     /// A host with nothing bound: it offers no tool.
     pub fn new(policy: DenyPolicy) -> ShellTools {
-        ShellTools { policy, targets: OnceLock::new() }
+        ShellTools { policy, targets: OnceLock::new(), limits: None }
+    }
+
+    /// The same host with the limits of a search replaced, for both kinds of machine. For tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_limits(mut self, limits: GrepLimits) -> ShellTools {
+        self.limits = Some(limits);
+        self
     }
 
     /// A host bound to `targets` from the start.
@@ -247,6 +293,337 @@ impl ShellTools {
             .map_err(|denied| ToolError::Denied(denied.rule()))?;
         Ok(real)
     }
+
+    /// What `read_pane` acts on: the pane the call names, which must have a terminal and must be shared with this chat.
+    /// The table asks again right before the call runs, so a share that ended while the card waited gives
+    /// `NotShared` and the engine is never read.
+    fn pane_record(&self, scope: &Scope, args: &ReadPane) -> Result<Resolved, ToolError> {
+        let world = self.world()?;
+        let pane = args.pane;
+        if !world.is_open(pane) {
+            return Err(ToolError::Unavailable);
+        }
+        let terminal = world.terminal(pane).ok_or(ToolError::Unavailable)?;
+        if !world.shared(&scope.conversation, pane) {
+            return Err(ToolError::NotShared);
+        }
+        Ok(if terminal.remote { Resolved::remote(pane, terminal.label) } else { Resolved::local(pane, terminal.label) })
+    }
+
+    /// The folder of a remote host that the server resolved, checked against the deny list before any name in it is
+    /// used.
+    fn resolved_folder(&self, resolved: &str) -> Result<(), ToolError> {
+        self.policy
+            .check(Style::Posix, FsKind::Remote, resolved, Access::Read)
+            .map_err(|denied| ToolError::Denied(denied.rule()))
+    }
+
+    /// `list_dir`: one escaped line per entry, within the bound of the call and of the result.
+    fn list_dir(&self, ticket: &Ticket, args: &ListDir, cancel: &CancelToken) -> Result<ToolOutput, ToolError> {
+        let (source, path, fs) = self.files_of(ticket)?;
+        live(cancel)?;
+        if fs == FsKind::Local {
+            let entry = source.stat(&path).map_err(|_| host(UNREADABLE))?;
+            if entry.kind != Kind::Dir {
+                return Err(host(NOT_A_FOLDER));
+            }
+            live(cancel)?;
+        }
+        let listing = source.list(&path).map_err(|_| host(UNREADABLE))?;
+        if fs == FsKind::Remote {
+            self.resolved_folder(&listing.path)?;
+        }
+        let mut lines = vec![visible(&listing.path)];
+        let mut size = lines[0].len();
+        let wanted = usize::try_from(args.max_entries()).unwrap_or(usize::MAX);
+        let mut shown = 0;
+        for entry in listing.entries.iter().take(wanted) {
+            let kind = match (entry.link, entry.kind) {
+                (true, _) => "link",
+                (false, Kind::Dir) => "dir",
+                (false, Kind::File) => "file",
+                (false, Kind::Other) => "other",
+            };
+            let bytes = if entry.kind == Kind::Dir { 0 } else { entry.size };
+            let line = format!("{kind} {bytes} {}", visible(&entry.name));
+            if size + line.len() + 1 > READ_BYTES {
+                break;
+            }
+            size += line.len() + 1;
+            lines.push(line);
+            shown += 1;
+        }
+        let left = listing.entries.len() - shown;
+        if left > 0 {
+            lines.push(format!("[{left} more entries not shown]"));
+        }
+        if listing.truncated {
+            lines.push("[the source cut the listing]".to_owned());
+        }
+        Ok(ToolOutput::new(lines.join("\n")))
+    }
+
+    /// `grep`: a literal search of one file or of a folder, with limits on matches, files, bytes, depth and time. It
+    /// never follows a link, skips binary, large, denied and `.git` entries, and checks every child it opens again.
+    fn grep(&self, ticket: &Ticket, args: &Grep, cancel: &CancelToken) -> Result<ToolOutput, ToolError> {
+        let (source, root, fs) = self.files_of(ticket)?;
+        let remote = fs == FsKind::Remote;
+        let limits = self.limits.unwrap_or(if remote { GrepLimits::remote() } else { GrepLimits::local() });
+        let ignore_case = args.ignore_case();
+        let mut search = Search {
+            needle: if ignore_case { args.pattern.to_lowercase() } else { args.pattern.clone() },
+            ignore_case,
+            max_matches: usize::try_from(args.max_matches()).unwrap_or(usize::MAX),
+            limits,
+            started: Instant::now(),
+            source: source.as_ref(),
+            cancel,
+            out: String::new(),
+            matches: 0,
+            opened: 0,
+            searched: 0,
+            bytes: 0,
+            skipped: 0,
+            stopped: None,
+        };
+        live(cancel)?;
+        let entry = source.stat(&root).map_err(|_| host(UNREADABLE))?;
+        match entry.kind {
+            Kind::File => {
+                let (open, name) = if remote {
+                    let real = self.remote_file(source.as_ref(), &root, cancel)?;
+                    let name = split_remote(&real).1.to_owned();
+                    (real, name)
+                } else {
+                    let name =
+                        Path::new(&root).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                    (root.clone(), name)
+                };
+                search.file(&open, &name, entry.size)?;
+            }
+            Kind::Dir => self.walk(&mut search, &root, remote)?,
+            Kind::Other => return Err(host(NOT_A_FILE)),
+        }
+        let mut text = search.out;
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!(
+            "[{} matches in {} files searched; {} entries skipped]",
+            search.matches, search.searched, search.skipped
+        ));
+        if let Some(reason) = search.stopped {
+            text.push_str(&format!("\n[stopped: {reason}]"));
+        }
+        Ok(ToolOutput::new(text))
+    }
+
+    /// The folders of a search: an explicit stack, the files of a folder before its subfolders.
+    fn walk(&self, search: &mut Search<'_>, root: &str, remote: bool) -> Result<(), ToolError> {
+        let mut stack: Vec<(String, String, usize)> = vec![(root.to_owned(), String::new(), 0)];
+        let mut first = true;
+        while let Some((folder, relative, depth)) = stack.pop() {
+            live(search.cancel)?;
+            if search.expired() {
+                search.stopped = Some("time limit");
+                break;
+            }
+            let listing = match search.source.list(&folder) {
+                Ok(listing) => listing,
+                Err(_) if first => return Err(host(UNREADABLE)),
+                Err(_) => {
+                    search.skipped += 1;
+                    continue;
+                }
+            };
+            if remote {
+                match self.resolved_folder(&listing.path) {
+                    Ok(()) => {}
+                    Err(error) if first => return Err(error),
+                    Err(_) => {
+                        search.skipped += 1;
+                        continue;
+                    }
+                }
+            }
+            first = false;
+            let base = if listing.path.is_empty() { folder.clone() } else { listing.path.clone() };
+            let mut files: Vec<(String, String, u64)> = Vec::new();
+            let mut folders: Vec<(String, String, usize)> = Vec::new();
+            for entry in &listing.entries {
+                if entry.link || entry.kind == Kind::Other {
+                    search.skipped += 1;
+                    continue;
+                }
+                let child = if remote { join_remote(&base, &entry.name) } else { join_local(&base, &entry.name) };
+                let shown = if relative.is_empty() { entry.name.clone() } else { format!("{relative}/{}", entry.name) };
+                if entry.kind == Kind::Dir {
+                    let hidden = entry.name.eq_ignore_ascii_case(".git") || depth + 1 > search.limits.depth;
+                    match self.openable(&child, remote).filter(|_| !hidden) {
+                        Some(open) => folders.push((open, shown, depth + 1)),
+                        None => search.skipped += 1,
+                    }
+                } else if entry.size > GREP_FILE_BYTES {
+                    search.skipped += 1;
+                } else {
+                    match self.openable(&child, remote) {
+                        Some(open) => files.push((open, shown, entry.size)),
+                        None => search.skipped += 1,
+                    }
+                }
+            }
+            for (open, shown, size) in files {
+                search.file(&open, &shown, size)?;
+                if search.stopped.is_some() {
+                    return Ok(());
+                }
+            }
+            stack.extend(folders.into_iter().rev());
+        }
+        Ok(())
+    }
+
+    /// The path a search may open for `child`, or none when the deny list refuses it: on this computer the path after
+    /// the file system resolved it, on a remote host the path as it is.
+    fn openable(&self, child: &str, remote: bool) -> Option<String> {
+        if remote {
+            return self.policy.check(Style::Posix, FsKind::Remote, child, Access::Read).ok().map(|()| child.to_owned());
+        }
+        let resolved = self.policy.check_local(Path::new(child), Access::Read).ok()?;
+        resolved.into_os_string().into_string().ok()
+    }
+
+    /// `read_pane`: the tail of the last rows of a shared pane, without the cells the user could not see.
+    fn read_pane(&self, args: &ReadPane, cancel: &CancelToken) -> Result<ToolOutput, ToolError> {
+        let world = self.world()?;
+        live(cancel)?;
+        let pane = args.pane;
+        if world.terminal(pane).is_none() {
+            return Err(ToolError::PayloadChanged);
+        }
+        let rows = u16::try_from(args.rows()).unwrap_or(u16::MAX);
+        let read = match world.read_rows(pane, rows, PANE_FETCH_BYTES) {
+            Ok(read) => read,
+            Err(RowsFault::Gone) => return Err(host(PANE_GONE)),
+            Err(RowsFault::Busy) => return Err(host(PANE_BUSY)),
+            Err(RowsFault::Other) => return Err(host(PANE_UNREADABLE)),
+        };
+        let Some(read) = read else { return Ok(ToolOutput::new(NOTHING.to_owned())) };
+        let cleaned = drop_hidden(&SourceText::with_hidden(read.text, read.hidden));
+        let text = cleaned.text.trim_end_matches('\n');
+        if text.is_empty() {
+            return Ok(ToolOutput::new(NOTHING.to_owned()));
+        }
+        Ok(ToolOutput::new(tail_of(text)))
+    }
+}
+
+/// What `read_pane` says when the pane shows nothing.
+const NOTHING: &str = "[the pane shows nothing]";
+
+/// The line that tells a result starts after the beginning of the output.
+const OMITTED: &str = "[earlier output omitted]";
+
+/// `text` itself when it fits, otherwise its tail from a line boundary with a first line that says output was left out.
+fn tail_of(text: &str) -> String {
+    if text.len() <= READ_BYTES {
+        return text.to_owned();
+    }
+    let room = READ_BYTES - OMITTED.len() - 1;
+    let mut start = text.len() - room;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    if let Some(newline) = text[start..].find('\n') {
+        start += newline + 1;
+    }
+    format!("{OMITTED}\n{}", &text[start..])
+}
+
+/// The state of one search: what it looks for, what it may spend and what it has found.
+struct Search<'a> {
+    needle: String,
+    ignore_case: bool,
+    max_matches: usize,
+    limits: GrepLimits,
+    started: Instant,
+    source: &'a dyn FileSource,
+    cancel: &'a CancelToken,
+    out: String,
+    matches: usize,
+    /// Files the search read, whether or not they turned out to be text: what the limit on files counts.
+    opened: usize,
+    /// Text files whose lines were looked at.
+    searched: usize,
+    bytes: u64,
+    skipped: usize,
+    stopped: Option<&'static str>,
+}
+
+impl Search<'_> {
+    fn expired(&self) -> bool {
+        self.started.elapsed() >= self.limits.budget
+    }
+
+    fn hit(&self, line: &str) -> bool {
+        if self.ignore_case { line.to_lowercase().contains(&self.needle) } else { line.contains(&self.needle) }
+    }
+
+    /// Searches one file that is allowed and not too large, unless a limit says the search is over. `shown` is the path
+    /// the matching lines start with; `size` is what the listing said.
+    fn file(&mut self, open: &str, shown: &str, size: u64) -> Result<(), ToolError> {
+        live(self.cancel)?;
+        if self.expired() {
+            self.stopped = Some("time limit");
+        } else if self.opened >= self.limits.files {
+            self.stopped = Some("file limit");
+        } else if self.bytes.saturating_add(size) > self.limits.bytes {
+            self.stopped = Some("size limit");
+        }
+        if self.stopped.is_some() {
+            return Ok(());
+        }
+        self.opened += 1;
+        let Ok(bytes) = self.source.read(open, GREP_FILE_BYTES) else {
+            self.skipped += 1;
+            return Ok(());
+        };
+        self.bytes += bytes.len() as u64;
+        if bytes.iter().take(SNIFF_BYTES).any(|byte| *byte == 0) {
+            self.skipped += 1;
+            return Ok(());
+        }
+        self.searched += 1;
+        let text = String::from_utf8_lossy(&bytes);
+        for (number, line) in text.split('\n').enumerate() {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if !self.hit(line) {
+                continue;
+            }
+            let cut: String = line.chars().take(LINE_CHARS).collect();
+            let ellipsis = if line.chars().nth(LINE_CHARS).is_some() { "\u{2026}" } else { "" };
+            let entry = format!("{}:{}: {}{ellipsis}", visible(shown), number + 1, visible(&cut));
+            if self.out.len() + entry.len() + 1 > READ_BYTES {
+                self.stopped = Some("output limit");
+                return Ok(());
+            }
+            if !self.out.is_empty() {
+                self.out.push('\n');
+            }
+            self.out.push_str(&entry);
+            self.matches += 1;
+            if self.matches >= self.max_matches {
+                self.stopped = Some("match limit");
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `folder` and `name` joined as this computer spells paths.
+fn join_local(folder: &str, name: &str) -> String {
+    Path::new(folder).join(name).into_os_string().into_string().unwrap_or_default()
 }
 
 impl ToolHost for ShellTools {
@@ -256,8 +633,8 @@ impl ToolHost for ShellTools {
             return false;
         }
         match tool {
-            ToolName::ReadFile => world.file_target(pane).is_some(),
-            ToolName::ListDir | ToolName::Grep | ToolName::ReadPane => false,
+            ToolName::ReadFile | ToolName::ListDir | ToolName::Grep => world.file_target(pane).is_some(),
+            ToolName::ReadPane => world.terminal(pane).is_some(),
             ToolName::WriteFile | ToolName::EditFile | ToolName::RunCommand => false,
         }
     }
@@ -265,14 +642,20 @@ impl ToolHost for ShellTools {
     fn resolve(&self, scope: &Scope, tool: &Tool) -> Result<Resolved, ToolError> {
         match tool {
             Tool::ReadFile(args) => self.file_record(scope, tool, &args.path, Ending::File),
-            _ => Err(ToolError::Unavailable),
+            Tool::ListDir(args) => self.file_record(scope, tool, &args.path, Ending::Folder),
+            Tool::Grep(args) => self.file_record(scope, tool, &args.path, Ending::Folder),
+            Tool::ReadPane(args) => self.pane_record(scope, args),
+            Tool::WriteFile(_) | Tool::EditFile(_) | Tool::RunCommand(_) => Err(ToolError::Unavailable),
         }
     }
 
     fn run(&self, ticket: &Ticket, cancel: &CancelToken) -> Result<ToolOutput, ToolError> {
         match ticket.tool() {
             Tool::ReadFile(args) => self.read_file(ticket, args, cancel),
-            _ => Err(ToolError::Unavailable),
+            Tool::ListDir(args) => self.list_dir(ticket, args, cancel),
+            Tool::Grep(args) => self.grep(ticket, args, cancel),
+            Tool::ReadPane(args) => self.read_pane(args, cancel),
+            Tool::WriteFile(_) | Tool::EditFile(_) | Tool::RunCommand(_) => Err(ToolError::Unavailable),
         }
     }
 }
@@ -423,7 +806,6 @@ impl fmt::Debug for CoreTargets {
 
 /// The reason a pane could not be read, from the engine's own words: a closed pane, one that did not answer in time,
 /// or anything else. The library's message is dropped.
-#[cfg_attr(not(test), allow(dead_code))]
 fn fault_of(error: &CoreError) -> RowsFault {
     match error {
         CoreError::Pty(message) if message == "the pane is closed" => RowsFault::Gone,
@@ -468,7 +850,6 @@ impl AppCore {
     /// person was shown. The table compares the hash and refuses any other; an answer of a call that is not waiting is
     /// refused too. This is the one place the approval table is decided, and the command of the webview is its only
     /// caller: no other command, event, socket or subcommand reaches it.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn ai_decide(&self, conversation: &str, call_id: &str, decision: &str, hash: &str) -> Result<(), AiFault> {
         let id = ConversationId::parse(conversation).map_err(|_| AiFault::invalid_conversation())?;
         let verdict = match decision {
@@ -543,6 +924,7 @@ mod tests {
     struct MemFiles {
         folders: HashMap<String, Listing>,
         files: HashMap<String, Vec<u8>>,
+        stats: HashMap<String, Entry>,
         reads: Mutex<Vec<String>>,
     }
 
@@ -555,6 +937,27 @@ mod tests {
 
         fn file(mut self, path: &str, bytes: &[u8]) -> MemFiles {
             self.files.insert(path.to_owned(), bytes.to_vec());
+            self
+        }
+
+        /// What `stat` answers for `path`.
+        fn stat_of(mut self, path: &str, kind: Kind, size: u64) -> MemFiles {
+            let name = path.rsplit('/').next().unwrap_or("").to_owned();
+            self.stats.insert(path.to_owned(), Entry { name, kind, link: false, size, modified: None, hidden: false });
+            self
+        }
+
+        /// A folder holding `count` files named `f<n>.txt`, each with the lines of `text` and the size of `text`.
+        fn with_files(mut self, folder: &str, count: usize, text: &str) -> MemFiles {
+            let mut entries = Vec::new();
+            for n in 0..count {
+                let name = format!("f{n:03}.txt");
+                self.files.insert(format!("{folder}/{name}"), text.as_bytes().to_vec());
+                entries.push(Entry { size: text.len() as u64, ..entry(&name, Kind::File, false) });
+            }
+            let listing = Listing { path: folder.to_owned(), parent: None, entries, truncated: false };
+            self.folders.insert(folder.to_owned(), listing);
+            self.stats.insert(folder.to_owned(), Entry { name: folder.to_owned(), ..entry("", Kind::Dir, false) });
             self
         }
 
@@ -576,8 +979,8 @@ mod tests {
             self.folders.get(path).cloned().ok_or_else(|| Error::Unsupported("no such folder".into()))
         }
 
-        fn stat(&self, _path: &str) -> CoreResult<Entry> {
-            Err(Error::Unsupported("stat is not used on a remote host".into()))
+        fn stat(&self, path: &str) -> CoreResult<Entry> {
+            self.stats.get(path).cloned().ok_or_else(|| Error::Unsupported("no such entry".into()))
         }
 
         fn read(&self, path: &str, limit: u64) -> CoreResult<Vec<u8>> {
@@ -640,6 +1043,22 @@ mod tests {
 
         fn sources_made(&self) -> usize {
             self.world().sources_made
+        }
+
+        fn share(&self, conversation: &str, pane: PaneId) {
+            self.world().shares.insert((conversation.to_owned(), pane));
+        }
+
+        fn unshare(&self, conversation: &str, pane: PaneId) {
+            self.world().shares.remove(&(conversation.to_owned(), pane));
+        }
+
+        fn set_rows(&self, pane: PaneId, answer: Result<Option<TextRead>, RowsFault>) {
+            self.world().rows.insert(pane, answer);
+        }
+
+        fn rows_calls(&self) -> Vec<(PaneId, u16, usize)> {
+            self.world().rows_calls.clone()
         }
     }
 
@@ -746,15 +1165,17 @@ mod tests {
         let offered = |pane: PaneId| -> Vec<&'static str> {
             ToolName::ALL.into_iter().filter(|tool| host.available(*tool, pane)).map(ToolName::as_str).collect()
         };
-        assert_eq!(offered(1), ["read_file"], "this computer, with a file target and a terminal");
+        assert_eq!(offered(1), ["read_file", "list_dir", "grep", "read_pane"], "this computer: files and a terminal");
         assert_eq!(offered(2), Vec::<&str>::new(), "a pane that is not open");
-        assert_eq!(offered(3), Vec::<&str>::new(), "a terminal with no file target offers no file tool yet");
-        assert_eq!(offered(4), ["read_file"], "a file browser has files and no terminal");
-        for tool in [ToolName::WriteFile, ToolName::EditFile, ToolName::RunCommand] {
-            assert!(!host.available(tool, 1), "{tool:?} is not built");
+        assert_eq!(offered(3), ["read_pane"], "a terminal with no file target offers no file tool");
+        assert_eq!(offered(4), ["read_file", "list_dir", "grep"], "a file browser has files and no terminal");
+        for pane in [1, 3, 4] {
+            for tool in [ToolName::WriteFile, ToolName::EditFile, ToolName::RunCommand] {
+                assert!(!host.available(tool, pane), "{tool:?} is not built");
+            }
         }
         let declared: Vec<String> = specs(&host, 1).into_iter().map(|spec| spec.name).collect();
-        assert_eq!(declared, ["read_file"]);
+        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane"]);
     }
 
     #[test]
@@ -925,5 +1346,457 @@ mod tests {
         let before = world.sources_made();
         assert_eq!(read("/srv/app/.env").expect_err("an env file"), ToolError::Denied("env_file"));
         assert_eq!(world.sources_made(), before, "the source was made for a call that never had a card");
+    }
+
+    // ---- list_dir -----------------------------------------------------------------------------------------------
+
+    #[test]
+    fn list_dir_lists_one_escaped_line_per_entry_within_its_bound() {
+        let tmp = Tmp::new("list");
+        let table = table_over(&[]);
+        let (host, _) = host_of(local_world(&tmp, 1), Vec::new());
+        let scope = scope("c1", 1, 1);
+        let list = |path: &str, extra: Value| {
+            let mut args = json!({"path": path});
+            if let (Some(args), Some(extra)) = (args.as_object_mut(), extra.as_object()) {
+                args.extend(extra.clone());
+            }
+            run_call(&table, &host, &scope, "list_dir", args)
+        };
+
+        for n in 0..250 {
+            tmp.write(&format!("many/f{n:03}.txt"), b"x");
+        }
+        let many = tmp.path("many");
+        let all = text_of(list(&many, json!({})));
+        let lines: Vec<&str> = all.lines().collect();
+        assert_eq!(lines.len(), 1 + 200 + 1, "the folder, 200 entries and the note");
+        assert_eq!(lines[0], many);
+        assert_eq!(lines[1], "file 1 f000.txt");
+        assert_eq!(lines[201], "[50 more entries not shown]");
+        let five = text_of(list(&many, json!({"max_entries": 5})));
+        assert_eq!(five.lines().count(), 1 + 5 + 1);
+        assert!(five.ends_with("[245 more entries not shown]"), "{five}");
+
+        // Entries whose lines would not fit stop the list early, and the result is within the cap.
+        for n in 0..150 {
+            tmp.write(&format!("wide/{n:03}{}", "w".repeat(250)), b"x");
+        }
+        let wide = list(&tmp.path("wide"), json!({"max_entries": 150})).expect("a listing");
+        assert!(!wide.truncated() && wide.text().len() <= MAX_RESULT_BYTES, "{}", wide.text().len());
+        assert!(wide.text().lines().last().is_some_and(|line| line.ends_with("more entries not shown]")));
+
+        // A file is not a folder and a missing path cannot be read; neither text holds the path.
+        let file = tmp.write(&format!("{PATH_CANARY}.txt"), b"x");
+        let gone = tmp.path(&format!("{PATH_CANARY}-gone"));
+        assert_eq!(list(&file, json!({})).expect_err("a file"), ToolError::Host(Detail::new(NOT_A_FOLDER)));
+        assert_eq!(list(&gone, json!({})).expect_err("missing"), ToolError::Host(Detail::new(UNREADABLE)));
+
+        // Names with control characters stay one line each; a link is shown as a link and not followed.
+        if cfg!(unix) {
+            let names = ["line\nbreak", "esc\u{1b}[31m", "bidi\u{202e}txt"];
+            for name in names {
+                tmp.write(&format!("odd/{name}"), b"x");
+            }
+            let long = "l".repeat(250);
+            tmp.write(&format!("odd/{long}"), b"x");
+            std::os::unix::fs::symlink(&many, tmp.0.join("odd").join("pointer")).expect("a link");
+            let odd = text_of(list(&tmp.path("odd"), json!({})));
+            assert_eq!(odd.lines().count(), 1 + 5, "one line per entry: {odd:?}");
+            assert!(odd.chars().all(|c| !c.is_control() || c == '\n'), "a raw control character: {odd:?}");
+            for shown in ["line\\nbreak", "esc\\u{1b}[31m", "bidi\\u{202e}txt", &long] {
+                assert!(odd.contains(shown), "{shown} is not in {odd:?}");
+            }
+            assert!(odd.lines().any(|line| line.starts_with("link ") && line.ends_with(" pointer")), "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn list_dir_on_a_remote_folder_that_resolves_into_a_secret_folder_is_refused() {
+        let files = MemFiles::default()
+            .folder("/srv/app/sub", "/home/u/.ssh", vec![entry("zz-secret-name", Kind::File, false)], false)
+            .folder("/srv/app/ok", "/srv/real", vec![entry("a.txt", Kind::File, false)], false)
+            .folder("/srv/big", "/srv/big", vec![entry("a.txt", Kind::File, false)], true)
+            .stat_of("/srv/app/sub", Kind::Dir, 0)
+            .stat_of("/srv/app/ok", Kind::Dir, 0)
+            .stat_of("/srv/big", Kind::Dir, 0);
+        let world = FakeTargets::default().with_files(1, remote_target(Some("/srv/app")), Arc::new(files));
+        let (host, _) = host_of(world, Vec::new());
+        let table = table_over(&[]);
+        let scope = scope("c1", 1, 1);
+        let list = |path: &str| run_call(&table, &host, &scope, "list_dir", json!({"path": path}));
+
+        // The lexical check passes; the folder the server resolved is a secret one, so no name leaves.
+        let error = list("/srv/app/sub").expect_err("resolved into a secret folder");
+        assert_eq!(error, ToolError::Denied("secret_location"));
+        assert!(!error.to_string().contains("zz-secret-name"));
+        let shown = text_of(list("/srv/app/ok/"));
+        let listed = "a folder that resolves to an allowed place is listed under its name";
+        assert_eq!(shown, "/srv/real\nfile 0 a.txt", "{listed}");
+        let cut = text_of(list("/srv/big"));
+        assert!(cut.ends_with("[the source cut the listing]"), "{cut}");
+    }
+
+    // ---- grep ---------------------------------------------------------------------------------------------------
+
+    fn grep_args(pattern: &str, path: &str, extra: Value) -> Value {
+        let mut args = json!({"pattern": pattern, "path": path});
+        if let (Some(args), Some(extra)) = (args.as_object_mut(), extra.as_object()) {
+            args.extend(extra.clone());
+        }
+        args
+    }
+
+    #[test]
+    fn grep_finds_literal_lines_and_skips_links_binaries_large_denied_and_git_files() {
+        let tmp = Tmp::new("grep");
+        let data = tmp.0.join("data");
+        let protected = vec![data.clone()];
+        let table = table_over(&protected);
+        let (host, _) = host_of(local_world(&tmp, 1), protected);
+        let scope = scope("c1", 1, 1);
+        let grep = |pattern: &str, path: &str, extra: Value| {
+            run_call(&table, &host, &scope, "grep", grep_args(pattern, path, extra))
+        };
+
+        tmp.write("a.txt", b"one\nNeedle here\nthree needle\n");
+        tmp.write("sub/b.rs", b"needle in code\n");
+        tmp.write("bin.dat", b"needle\0\0");
+        let mut big = b"needle".to_vec();
+        big.resize(1_500_000, b'x');
+        tmp.write("big.txt", &big);
+        for secret in [".git/config", ".env", ".ssh/id_x", "data/x.txt"] {
+            tmp.write(secret, b"needle");
+        }
+        let mut skipped = 6;
+        if cfg!(unix) {
+            std::os::unix::fs::symlink(tmp.0.join("sub"), tmp.0.join("link")).expect("a link to a folder");
+            std::os::unix::fs::symlink(tmp.0.join("a.txt"), tmp.0.join("linkfile")).expect("a link to a file");
+            skipped += 2;
+        }
+        let root = tmp.path("");
+
+        let found = text_of(grep("needle", &root, json!({})));
+        let footer = format!("[2 matches in 2 files searched; {skipped} entries skipped]");
+        assert_eq!(found, format!("a.txt:3: three needle\nsub/b.rs:1: needle in code\n{footer}"));
+        let folded = text_of(grep("needle", &root, json!({"ignore_case": true})));
+        assert!(folded.contains("a.txt:2: Needle here") && folded.contains("a.txt:3: three needle"), "{folded}");
+        let none = text_of(grep(PATH_CANARY, &root, json!({})));
+        assert_eq!(none, format!("[0 matches in 2 files searched; {skipped} entries skipped]"));
+        assert!(!none.contains(PATH_CANARY), "the pattern is echoed");
+        let single = text_of(grep("needle", &tmp.path("a.txt"), json!({})));
+        assert_eq!(single, "a.txt:3: three needle\n[1 matches in 1 files searched; 0 entries skipped]");
+
+        // The secret files and the protected folder never reach a line, even when asked for directly.
+        for refused in [".env", ".ssh", "data", "data/x.txt"] {
+            let error = grep("needle", &tmp.path(refused), json!({})).expect_err(refused);
+            assert!(matches!(error, ToolError::Denied(_)), "{refused}: {error:?}");
+        }
+
+        // A pattern is a literal, a line is cut and escaped, and a path is not echoed anywhere but in a match.
+        let lit = Tmp::new("grep-lit");
+        let long = format!("needle{}", "x".repeat(400));
+        lit.write("lit.txt", format!("a|b\n.*\nplain\nesc\u{1b}[31mneedle\n{long}\n").as_bytes());
+        let (host2, _) = host_of(local_world(&lit, 1), Vec::new());
+        let table2 = table_over(&[]);
+        let grep2 = |pattern: &str| {
+            run_call(&table2, &host2, &scope, "grep", grep_args(pattern, &lit.path("lit.txt"), json!({})))
+        };
+        assert!(text_of(grep2(".*")).starts_with("lit.txt:2: .*\n[1 matches"));
+        assert!(text_of(grep2("a|b")).starts_with("lit.txt:1: a|b\n[1 matches"));
+        let cut = text_of(grep2("needle"));
+        let lines: Vec<&str> = cut.lines().collect();
+        assert_eq!(lines[0], "lit.txt:4: esc\\u{1b}[31mneedle", "the escape is spelled out: {cut:?}");
+        let bound = "lit.txt:5: ".len() + LINE_CHARS + 1;
+        assert_eq!(lines[1].chars().count(), bound, "cut at the line bound plus an ellipsis");
+        assert!(lines[1].ends_with('\u{2026}'));
+    }
+
+    /// A search over files in memory: a folder of `count` files of `text` on a remote host.
+    fn remote_search(files: MemFiles, limits: GrepLimits) -> (ShellTools, ApprovalTable, Arc<FakeTargets>) {
+        let world = FakeTargets::default().with_files(1, remote_target(Some("/srv")), Arc::new(files));
+        let (host, world) = host_of(world, Vec::new());
+        (host.with_limits(limits), table_over(&[]), world)
+    }
+
+    #[test]
+    fn grep_stops_at_its_limits_and_on_cancel_and_says_why() {
+        let scope = scope("c1", 1, 1);
+        let any = GrepLimits { files: 1000, bytes: 1 << 30, depth: 8, budget: Duration::from_secs(60) };
+        let search = |files: MemFiles, limits: GrepLimits, extra: Value| {
+            let (host, table, _) = remote_search(files, limits);
+            text_of(run_call(&table, &host, &scope, "grep", grep_args("needle", "/srv/p", extra)))
+        };
+
+        // Matches: two lines of five, then the reason.
+        let five = "needle 1\nneedle 2\nneedle 3\nneedle 4\nneedle 5\n";
+        let out = search(MemFiles::default().with_files("/srv/p", 1, five), any, json!({"max_matches": 2}));
+        let expected = "f000.txt:1: needle 1\nf000.txt:2: needle 2\n[2 matches in 1 files searched; 0 entries skipped]";
+        assert_eq!(out, format!("{expected}\n[stopped: match limit]"));
+
+        // Files: three of ten.
+        let ten = MemFiles::default().with_files("/srv/p", 10, "needle\n");
+        let out = search(ten, GrepLimits { files: 3, ..any }, json!({}));
+        assert!(out.ends_with("[3 matches in 3 files searched; 0 entries skipped]\n[stopped: file limit]"), "{out}");
+
+        // Bytes: the third file would pass the limit.
+        let ten = MemFiles::default().with_files("/srv/p", 10, "needle\n");
+        let out = search(ten, GrepLimits { bytes: 20, ..any }, json!({}));
+        assert!(out.ends_with("[2 matches in 2 files searched; 0 entries skipped]\n[stopped: size limit]"), "{out}");
+
+        // Depth: a folder two levels down is skipped and counted, and the search is not stopped.
+        let tree = MemFiles::default()
+            .folder("/srv/p", "/srv/p", vec![entry("a", Kind::Dir, false)], false)
+            .folder(
+                "/srv/p/a",
+                "/srv/p/a",
+                vec![entry("b", Kind::Dir, false), entry("one.txt", Kind::File, false)],
+                false,
+            )
+            .folder("/srv/p/a/b", "/srv/p/a/b", vec![entry("two.txt", Kind::File, false)], false)
+            .file("/srv/p/a/one.txt", b"needle\n")
+            .file("/srv/p/a/b/two.txt", b"needle\n")
+            .stat_of("/srv/p", Kind::Dir, 0);
+        let out = search(tree, GrepLimits { depth: 1, ..any }, json!({}));
+        assert_eq!(out, "a/one.txt:1: needle\n[1 matches in 1 files searched; 1 entries skipped]");
+
+        // Time: a budget of nothing reads no file.
+        let files = Arc::new(MemFiles::default().with_files("/srv/p", 3, "needle\n"));
+        let world = FakeTargets::default().with_files(1, remote_target(Some("/srv")), files.clone());
+        let (host, _) = host_of(world, Vec::new());
+        let host = host.with_limits(GrepLimits { budget: Duration::ZERO, ..any });
+        let table = table_over(&[]);
+        let out = text_of(run_call(&table, &host, &scope, "grep", grep_args("needle", "/srv/p", json!({}))));
+        assert_eq!(out, "[0 matches in 0 files searched; 0 entries skipped]\n[stopped: time limit]");
+        assert!(files.read_paths().is_empty(), "a file was read after the budget ran out");
+
+        // The defaults of a remote host are the small ones.
+        assert_eq!((GrepLimits::remote().files, GrepLimits::local().files), (400, 5000));
+        assert!(GrepLimits::remote().bytes < GrepLimits::local().bytes);
+        let many = MemFiles::default().with_files("/srv/p", 401, "needle\n");
+        let world = FakeTargets::default().with_files(1, remote_target(Some("/srv")), Arc::new(many));
+        let (host, _) = host_of(world, Vec::new());
+        let args = grep_args("needle", "/srv/p", json!({"max_matches": 200}));
+        let out = text_of(run_call(&table_over(&[]), &host, &scope, "grep", args));
+        assert!(out.contains("files searched") && out.len() <= MAX_RESULT_BYTES);
+        let lines = out.lines().filter(|line| line.starts_with('f')).count();
+        assert!(lines > 0 && lines <= 200);
+
+        // The whole output stays within the cap when every line is long.
+        let wide = format!("needle{}\n", "y".repeat(240)).repeat(100);
+        let out = run_call(
+            &table_over(&[]),
+            &remote_search(MemFiles::default().with_files("/srv/p", 1, &wide), any).0,
+            &scope,
+            "grep",
+            grep_args("needle", "/srv/p", json!({"max_matches": 200})),
+        )
+        .expect("a search");
+        assert!(!out.truncated() && out.text().len() <= MAX_RESULT_BYTES);
+        assert!(out.text().ends_with("[stopped: output limit]"), "{}", out.text());
+
+        // A cancel raised while the second file is read ends the call before the next read.
+        let token = CancelToken::new();
+        let ten = MemFiles::default().with_files("/srv/p", 10, "needle\n");
+        let tripwire = Arc::new(Tripwire::new(ten, token.clone(), 2));
+        let world = FakeTargets::default().with_files(1, remote_target(Some("/srv")), tripwire.clone());
+        let (host, _) = host_of(world, Vec::new());
+        let table = table_over(&[]);
+        let args = grep_args("needle", "/srv/p", json!({}));
+        let call = ToolCall { id: "call".to_owned(), name: "grep".to_owned(), args };
+        let pending = table.propose(&host, &scope, &call).expect("a card");
+        table.decide("c1", "call", Decision::Allow, &pending.hash).expect("decided");
+        assert_eq!(table.run(&host, &scope, "call", &token).expect_err("cancelled"), ToolError::Cancelled);
+        assert!(tripwire.reads() <= 3, "{} reads", tripwire.reads());
+    }
+
+    /// Files that raise a cancel token when the `after`-th read has happened.
+    struct Tripwire {
+        inner: MemFiles,
+        token: CancelToken,
+        after: usize,
+        reads: AtomicUsize,
+    }
+
+    impl Tripwire {
+        fn new(inner: MemFiles, token: CancelToken, after: usize) -> Tripwire {
+            Tripwire { inner, token, after, reads: AtomicUsize::new(0) }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    impl FileSource for Tripwire {
+        fn label(&self) -> String {
+            self.inner.label()
+        }
+
+        fn home(&self) -> CoreResult<String> {
+            self.inner.home()
+        }
+
+        fn list(&self, path: &str) -> CoreResult<Listing> {
+            self.inner.list(path)
+        }
+
+        fn stat(&self, path: &str) -> CoreResult<Entry> {
+            self.inner.stat(path)
+        }
+
+        fn read(&self, path: &str, limit: u64) -> CoreResult<Vec<u8>> {
+            let done = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if done >= self.after {
+                self.token.cancel();
+            }
+            self.inner.read(path, limit)
+        }
+
+        fn read_range(&self, path: &str, offset: u64, len: u64) -> CoreResult<Vec<u8>> {
+            self.inner.read_range(path, offset, len)
+        }
+
+        fn write(&self, path: &str, bytes: &[u8]) -> CoreResult<()> {
+            self.inner.write(path, bytes)
+        }
+    }
+
+    // ---- read_pane ----------------------------------------------------------------------------------------------
+
+    fn pane_text(text: &str) -> Result<Option<TextRead>, RowsFault> {
+        Ok(Some(TextRead { text: text.to_owned(), hidden: Vec::new(), truncated: false }))
+    }
+
+    fn read_pane_args(pane: PaneId, rows: u64) -> Value {
+        json!({"pane": pane, "rows": rows})
+    }
+
+    #[test]
+    fn read_pane_needs_the_share_at_proposal_and_again_at_execution() {
+        let world = FakeTargets::default()
+            .with_files(1, local_target(None, None), Arc::new(MemFiles::default()))
+            .with_terminal(1, false)
+            .with_terminal(5, false)
+            .with_files(6, local_target(None, None), Arc::new(MemFiles::default()));
+        world.set_rows(5, pane_text("first\nsecond\n"));
+        let (host, world) = host_of(world, Vec::new());
+        let table = table_over(&[]);
+        let scope = scope("c1", 1, 1);
+        let call = |id: &str, pane: PaneId| ToolCall {
+            id: id.to_owned(),
+            name: "read_pane".to_owned(),
+            args: read_pane_args(pane, 20),
+        };
+
+        // No share: refused when the call is proposed, no card, and the engine is never asked.
+        assert_eq!(table.propose(&host, &scope, &call("a", 5)).expect_err("not shared"), ToolError::NotShared);
+        assert!(table.pending("c1").is_empty());
+        assert!(world.rows_calls().is_empty());
+        // The share of another chat, or of the pane the call acts for by default, does not count.
+        world.share("c2", 5);
+        world.share("c1", 1);
+        assert_eq!(table.propose(&host, &scope, &call("b", 5)).expect_err("not shared"), ToolError::NotShared);
+
+        // Shared: the card names the fields of the tool, and the text comes back without its last line break.
+        world.share("c1", 5);
+        let card = table.propose(&host, &scope, &call("c", 5)).expect("a card");
+        let names: Vec<&str> = card.payload.iter().map(|field| field.name).collect();
+        assert_eq!(names, ["tool", "pane", "target", "remote", "rows"]);
+        table.decide("c1", "c", Decision::Allow, &card.hash).expect("decided");
+        let output = table.run(&host, &scope, "c", &CancelToken::new()).expect("a result");
+        assert_eq!(output.text(), "first\nsecond");
+        assert_eq!(world.rows_calls(), [(5, 20, PANE_FETCH_BYTES)]);
+
+        // A share that ended while the card waited: the engine is never read.
+        let card = table.propose(&host, &scope, &call("d", 5)).expect("a card");
+        table.decide("c1", "d", Decision::Allow, &card.hash).expect("decided");
+        world.unshare("c1", 5);
+        let error = table.run(&host, &scope, "d", &CancelToken::new()).expect_err("not shared any more");
+        assert_eq!(error, ToolError::NotShared);
+        assert_eq!(world.rows_calls().len(), 1, "the engine was read after the share ended");
+
+        // A pane that is a file browser has no terminal.
+        assert_eq!(table.propose(&host, &scope, &call("e", 6)).expect_err("no terminal"), ToolError::Unavailable);
+    }
+
+    #[test]
+    fn read_pane_drops_hidden_cells_keeps_the_tail_and_maps_faults_to_fixed_texts() {
+        let world = FakeTargets::default().with_terminal(1, false);
+        world.share("c1", 1);
+        let (host, world) = host_of(world, Vec::new());
+        let table = table_over(&[]);
+        let scope = scope("c1", 1, 1);
+        let read = |rows: Result<Option<TextRead>, RowsFault>| {
+            world.set_rows(1, rows);
+            run_call(&table, &host, &scope, "read_pane", read_pane_args(1, 100))
+        };
+
+        // A concealed word is gone; ranges that are reversed, outside the text or inside a character change nothing
+        // else and do not panic.
+        let hidden = TextRead { text: "visible SECRETWORD text".to_owned(), hidden: vec![8..18], truncated: false };
+        assert_eq!(text_of(read(Ok(Some(hidden)))), "visible  text");
+        #[allow(clippy::reversed_empty_ranges)]
+        let odd = vec![5..3, 100..200, 2..3];
+        let odd = TextRead { text: "a\u{e9}b".to_owned(), hidden: odd, truncated: false };
+        assert_eq!(text_of(read(Ok(Some(odd)))), "ab");
+
+        // A long pane gives its tail from a line boundary, with a first line that says so.
+        let lines: String = (0..20_000).map(|n| format!("line {n}\n")).collect();
+        assert!(lines.len() > 100 * 1024);
+        let tail = text_of(read(pane_text(&lines)));
+        assert!(tail.len() <= READ_BYTES, "{}", tail.len());
+        assert!(tail.starts_with("[earlier output omitted]\nline "));
+        assert!(tail.ends_with("line 19999"));
+        let second = tail.lines().nth(1).expect("a line");
+        assert!(second.trim_start_matches("line ").parse::<u32>().is_ok(), "a cut line: {second}");
+
+        // Nothing to show.
+        assert_eq!(text_of(read(Ok(None))), "[the pane shows nothing]");
+        assert_eq!(text_of(read(pane_text(""))), "[the pane shows nothing]");
+        assert_eq!(text_of(read(pane_text("\n\n"))), "[the pane shows nothing]");
+
+        // Every fault is a fixed phrase.
+        for (fault, phrase) in [
+            (RowsFault::Gone, PANE_GONE),
+            (RowsFault::Busy, PANE_BUSY),
+            (RowsFault::Other, PANE_UNREADABLE),
+        ] {
+            assert_eq!(read(Err(fault)).expect_err("a fault"), ToolError::Host(Detail::new(phrase)));
+        }
+    }
+
+    #[test]
+    fn no_debug_output_of_the_host_or_its_targets_shows_a_path_a_pattern_or_text() {
+        let target = FileTarget {
+            source: "local".to_owned(),
+            label: format!("{PATH_CANARY}-label"),
+            remote: true,
+            home: Some(format!("/{PATH_CANARY}-home")),
+            cwd: Some(format!("/{PATH_CANARY}-cwd")),
+        };
+        let terminal = TerminalTarget { label: format!("{PATH_CANARY}-term"), remote: false };
+        let policy = DenyPolicy::new(vec![PathBuf::from(format!("/{PATH_CANARY}"))]);
+        let bound = ShellTools::with_targets(policy, Arc::new(FakeTargets::default()));
+        let unbound = ShellTools::new(DenyPolicy::new(Vec::new()));
+        let core = CoreTargets::new(Weak::new());
+        let shown = [
+            format!("{bound:?} {bound:#?}"),
+            format!("{unbound:?} {unbound:#?}"),
+            format!("{target:?} {target:#?}"),
+            format!("{terminal:?} {terminal:#?}"),
+            format!("{:?} {:#?}", RowsFault::Busy, RowsFault::Gone),
+            format!("{:?} {:#?}", GrepLimits::local(), GrepLimits::remote()),
+            format!("{core:?} {core:#?}"),
+        ];
+        for text in &shown {
+            assert!(!text.contains(PATH_CANARY), "a Debug line shows a path or a label: {text}");
+        }
+        // Each type that holds a path or a label prints a flag or a number instead.
+        for (text, expected) in shown.iter().zip(["bound: true", "bound: false", "remote: true", "remote: false"]) {
+            assert!(text.contains(expected), "{text}");
+        }
+        assert!(shown[5].contains("5000") && shown[5].contains("400"), "{}", shown[5]);
+        assert!(shown[6].contains("alive: false"), "{}", shown[6]);
     }
 }

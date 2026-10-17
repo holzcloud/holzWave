@@ -517,6 +517,7 @@ fn every_error() -> Vec<ToolError> {
         ToolError::TaintChanged,
         ToolError::Cancelled,
         ToolError::Host(Detail::new("no such file")),
+        ToolError::NotShared,
     ]
 }
 
@@ -539,6 +540,7 @@ fn tool_errors_have_stable_codes_and_texts_without_arguments() {
         "taint_changed",
         "cancelled",
         "host",
+        "not_shared",
     ];
     let errors = every_error();
     assert_eq!(errors.len(), codes.len());
@@ -553,7 +555,7 @@ fn tool_errors_have_stable_codes_and_texts_without_arguments() {
         let _: &dyn std::error::Error = error;
     }
 
-    // The thirteen variants without a detail say the same thing whatever call they came from.
+    // The fourteen variants without a detail say the same thing whatever call they came from.
     let canary = "CANARY-9c41";
     let host = FakeHost::remote();
     let table = table_with(&[]);

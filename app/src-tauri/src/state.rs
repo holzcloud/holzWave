@@ -2166,7 +2166,6 @@ impl AppCore {
 
     /// What the terminal of `pane` is: the saved connection it runs, or this computer. `None` for a pane that is not
     /// open and for one that shows a block. Reads the tables only.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn tool_terminal(&self, pane: PaneId) -> Option<TerminalTarget> {
         if !self.pane_is_open(pane) || self.blocks.block_of(pane).is_some() {
             return None;
