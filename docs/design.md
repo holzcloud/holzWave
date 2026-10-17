@@ -175,7 +175,7 @@ AI chat, AI chat states, AI sidebar, drag) and a platform switch. The PNGs are r
    moves to the bottom, and an accessory row (`esc tab ctrl alt ← ↑ ↓ →`) sits above the system keyboard. Colours,
    type and spacing tokens are identical.
 
-**Size tokens for touch:** minimum target 44 px on mobile and 28 px on desktop; the accessory row keys are 44 px high.
+**Size tokens for touch:** minimum target 44 px on mobile and 28 px on desktop; the accessory row keys are 44 px high. The buttons of the title bar are the exception: they keep the size of the other bar buttons at every width, also in a window of 640 px and narrower.
 
 ### 6.1 The window: three levels
 

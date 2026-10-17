@@ -5,9 +5,14 @@ account, scheduled runs, popover. Tested against an in-memory WebDAV server, not
 
 ## What is synced
 
-`layout.json`, `settings.json`, `connections.json` and `themes/<name>.json`, plus the connection secrets (passwords and
-key passphrases from the OS keychain) as one virtual file, `secrets.json`, which is never written to disk. Machine-local
-state (`session.json`, `known_hosts`, `pane_*.json`) is not synced.
+`layout.json`, `settings.json`, `connections.json`, `themes/<name>.json`, `widgets/<name>.json` and `widget_notes.json`,
+plus the connection secrets (passwords and key passphrases from the OS keychain) as one virtual file, `secrets.json`, which
+is never written to disk. Machine-local state (`session.json`, `known_hosts`, `pane_*.json`) is not synced.
+
+Also not synced: `history.db` (deletions are not synced, so a command you forgot would come back), `ai.json` and `chats/`
+(the AI providers and the chats), and the keychain entries of the AI providers (a provider key stays on the computer where
+you typed it, so enter it again on another one). The three AI settings (`ai_local_only`, `ai_local_context` and
+`ai_persist_context`) are part of `settings.json` and do travel with it.
 
 ## Decisions
 

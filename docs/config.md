@@ -1,7 +1,7 @@
 # Configuration files
 
-Everything holzWave remembers is a plain JSON file that can be read and edited by hand. The files do not depend on how a
-later phase moves them between machines (F25). This document is written from the code of Phase 2 and the examples in
+Everything holzWave remembers is a plain JSON file that can be read and edited by hand. The files do not depend on how
+sync moves them between machines (F25). This document is written from the code and the examples in
 it are parsed by `core/tests/project_policy.rs` (the widget examples by `core/tests/widgets_schema.rs`), so a format
 change that forgets the document fails a test.
 
@@ -27,8 +27,8 @@ it for the platform:
 | Windows | `%APPDATA%\ch.holzcloud.holzwave\` |
 
 The macOS path is the one the app is built and tested for; the Linux and Windows paths are what the resolver returns for
-the same identifier and are confirmed in Phase 2.2. The tests run against scratch directories and never touch the real
-one.
+the same identifier and have not been confirmed on those platforms yet (rows of [test-plan.md](test-plan.md)). The tests run
+against scratch directories and never touch the real one.
 
 | File | Holds | Written | Machine-local |
 |---|---|---|---|
@@ -41,6 +41,9 @@ one.
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
 | `pane_blocks.json` | which pane shows a file browser, a preview, the system monitor or a chat, of which source and path (for a chat the path is the id of its conversation and the messages are not in this file) | when it changes | yes |
 | `ai.json` | the AI provider profiles, without keys | when a profile is saved or deleted | yes |
+| `chats/<id>.json` | one AI chat per file, readable by you only; terminal context is a marker unless `ai_persist_context` is on | when a message is stored | yes |
+| `history.db` | the command history, with the host each command ran on | when a command is reported | yes |
+| `widgets/<id>.json`, `widget_notes.json` | your widgets, and the texts of the note widgets | by you, and when a note changes | no |
 | `<name>.bad` | the bytes of a file that could not be used | when such a file is loaded | |
 
 Rules that hold for every file:
@@ -240,8 +243,8 @@ one key. The key is a single printable character (`D`, `]`, `1`, `,`) or a name:
 **A chord is text with a platform meaning.** `Cmd` is the Command key on macOS and the Super (Windows) key elsewhere,
 which the operating system usually keeps for itself, so no default on Windows or Linux uses it. A `settings.json`
 written on one platform therefore carries that platform's chords: a copy of `keybindings` from a Mac would bind Super
-chords on Windows. Copy the file between machines only after translating `Cmd` (settings sync in Phase 4 has to do the
-same, not copy the `keybindings` overrides across platforms as they are).
+chords on Windows. Copy the file between machines only after translating `Cmd` (the settings sync does the same: it does not copy
+the `keybindings` overrides across platforms as they are).
 
 **Resolution**, in this order:
 
@@ -508,10 +511,12 @@ reach the web view is part of the human checklist in [test-plan.md](test-plan.md
 
 ## Privacy
 
-holzWave has no telemetry and no account, anywhere (DESK-26, F33). It makes no network connection of its own: the one
-outward action is a link you click, which is handed to the platform's opener (`open`, `xdg-open`, `explorer`) for
-`http`, `https` and `mailto` links, and the file manager reveal of a path. There is no update check, no crash report
-and no usage counter.
+holzWave has no telemetry and no account, anywhere (DESK-26, F33). It opens a network connection only when you ask for
+one: an SSH connection you start, the sync you set up, a link you click (handed to the platform's opener, `open`,
+`xdg-open` or `explorer`, for `http`, `https` and `mailto` links, and the file manager reveal of a path) and, if you set
+up a provider, the message you send to it. There is no update check, no crash report and no usage counter. Opening the
+app, a chat, the providers dialog or a pane makes no request; a name lookup of a provider that is given by a host name
+happens only when you press a control that needs its destination.
 
 That claim is a test, not a promise: `core/tests/project_policy.rs` fails when
 
@@ -520,10 +525,29 @@ That claim is a test, not a promise: `core/tests/project_policy.rs` fails when
 - first-party Rust or page sources use a network API or an absolute URL;
 - the page policy allows a remote origin, or an updater or a CI workflow appears.
 
+The AI chat has tests of its own for the same claim: a send that nobody approved leaves nothing.
+`core/tests/ai_egress.rs` counts the connections of an idle service (zero) and searches everything a provider receives
+for planted secrets.
+
 Two honest exceptions are named in the test, both for the crate `reqwest`. The Tauri 3 alpha links it for a dev-server
 proxy that a desktop build never starts (the app sets no `devUrl`). `holzwave-core` links it for the AI chat client in
 `core/src/ai/http.rs`, the only first-party file allowed to name it, which uses rustls with the platform's certificate
 verifier; building that client opens no connection.
+
+**The AI chat.** What leaves your computer is the text you type, the context you ticked (a pane has to be shared
+first) and the results of the tool calls you allowed on their own cards, and nothing else. Terminal content leaves
+only after you share that pane: every send shows chips with exactly what goes out, the page never holds the text of a
+chip, and secrets of known shapes are replaced by a marker before the preview. That is best effort and no guarantee: a
+secret in another form can still be sent. A pane is shared once, and the sharing ends when you change the provider,
+the model or the address, and when the pane or the chat closes. `ai_local_context` decides whether a provider on this
+computer, or the Apple model, asks the same way (`ask`, the default) or not (`auto`), and `ai_local_only` refuses
+every destination that leaves the computer. Provider keys are in the operating system keychain only, are never shown
+again, are bound to the address they were saved for and are never synced. `ai.json` holds the providers without keys.
+`chats/` holds one file per chat, readable by you only, with terminal context stored as a marker unless
+`ai_persist_context` is on (then the cleaned text is stored; turning it off removes it from existing chats). Neither
+is synced. The answer of a model is untrusted text and never runs, and every tool action needs your approval on its
+own card. holzWave asks OpenAI not to store a request (`store: false`) and OpenRouter not to collect it
+(`data_collection: deny`) and cannot promise more: what a provider keeps is that provider's own policy.
 
 ## `sync.json` and `sync_state.json`
 
