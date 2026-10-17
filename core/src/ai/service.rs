@@ -34,6 +34,7 @@
 //!
 //! [`ApiKey`]: crate::ai::types::ApiKey
 
+pub mod ask;
 pub mod coalesce;
 pub mod context;
 pub mod dispatch;
@@ -70,6 +71,8 @@ pub use events::{
     AiEvent, AiEventKind, ApplyResult, ChatItem, ChatMessage, ChatPart, ChatState, EndView, ErrorView, LastTurn,
     Partial, Route, Trimmed, title_from,
 };
+
+pub use ask::{AskEvent, AskFault, AskInput, AskLimits, AskNotify, AskOut, AskVerdict, AskView, Asks, ClosedWhy};
 
 pub use context::{
     CUT_NOTE, ContextRefusal, ContextSource, ContextState, Fetched, FindingView, ItemView, MAX_PREVIEW_KINDS,

@@ -5,9 +5,11 @@
 //! core's [`state::Out`] events into Tauri events, and it registers the commands of [`commands`].
 //!
 //! Webview contract: the events are `frame` (a frame message of the core), `layout` (the view), `title`
-//! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}`, `settings` (a settings view) and `ai` (one event
-//! of a chat turn, `{conversation, turn, seq, kind, ...}`, which the page routes by conversation); command arguments
-//! are snake_case. Every event but `settings`, `ai` and `exit` is emitted to one window, the one that holds the pane
+//! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}`, `settings` (a settings view), `ai` (one event
+//! of a chat turn, `{conversation, turn, seq, kind, ...}`, which the page routes by conversation) and `ai-ask` (a request
+//! of `wsh ai` that waits for the person, or is over: `{kind: "waiting", view}` for the window of the pane, `{kind:
+//! "closed", ask, why}` for every window); command arguments
+//! are snake_case. Every event but `settings`, `ai`, `exit` and the `closed` half of `ai-ask` is emitted to one window, the one that holds the pane
 //! (or whose layout changed), with `emit_str_to(label, ..)`; a page has to listen with its own label, because a
 //! listener without a target receives the events of every window.
 //!
@@ -18,6 +20,7 @@
 //! user typed. A tool call that waits for the person is decided by `ai_decide`, which takes the chat, the call, `allow`
 //! or `deny` and the hash of the card, and answers nothing.
 
+mod ai_ask;
 mod ai_host;
 mod ai_tools;
 mod ai_write;
@@ -531,11 +534,33 @@ pub fn run() {
 }
 
 /// The app's side of `wsh`.
-struct IpcHandler(std::sync::Arc<AppCore>);
+pub(crate) struct IpcHandler(std::sync::Arc<AppCore>);
 
 impl holzwave_ipc::Handler for IpcHandler {
     fn handle(&self, pane: Option<u64>, cmd: holzwave_ipc::Cmd) -> Result<String, String> {
         self.0.ipc_command(pane, cmd)
+    }
+
+    /// `wsh ai` is a request that waits for the person in the window and answers as a stream; every other command is
+    /// answered as one text, as the trait's default does.
+    fn handle_stream(
+        &self,
+        pane: Option<u64>,
+        cmd: holzwave_ipc::Cmd,
+        input: String,
+        gone: &holzwave_ipc::Gone,
+        out: &mut dyn holzwave_ipc::Sink,
+    ) -> Result<(), String> {
+        match cmd {
+            holzwave_ipc::Cmd::Ai { prompt, .. } => self.0.ai_ask(pane, prompt, input, gone, out),
+            other => {
+                let answer = self.handle(pane, other)?;
+                if !answer.is_empty() {
+                    out.text(&answer).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 

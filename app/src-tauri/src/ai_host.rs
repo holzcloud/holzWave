@@ -17,7 +17,7 @@ use holzwave_core::ai::provider::Provider;
 use holzwave_core::ai::redact::SourceText;
 use holzwave_core::ai::service::events::{AiEvent, ChatState};
 use holzwave_core::ai::service::{
-    AiService, AiSink, ContextRefusal, ContextSource, ContextState, Fetched, OfferView, ReadRefusal, SendRequest,
+    AiService, AiSink, AskFault, Asks, ContextRefusal, ContextSource, ContextState, Fetched, OfferView, ReadRefusal, SendRequest,
     ServiceError, TurnTicket,
 };
 use holzwave_core::ai::store::{ConversationId, ConversationSummary, JsonDirStore, StoreError};
@@ -34,6 +34,7 @@ use holzwave_core::settings::Settings;
 use holzwave_core::textread::TextRegion;
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::ai_ask::ShellAskNotify;
 use crate::ai_tools::{CoreTargets, ShellTools};
 use crate::ai_write::UndoFault;
 use crate::state::{AppCore, Out, Sink, Target};
@@ -162,6 +163,12 @@ impl AiFault {
     /// The table's refusal of a verdict or a call: the stable code of the error and its fixed sentence.
     pub fn from_tool(error: &ToolError) -> AiFault {
         AiFault { code: "tool", reason: Some(error.code()), text: error.to_string() }
+    }
+
+    /// The refusal of an answer to a card of `wsh ai`: the code `ask`, the stable name of the reason and its fixed
+    /// sentence. The page acts on `unknown_ask`, `seal_mismatch` and `bad_verdict`.
+    pub(crate) fn from_ask(fault: &AskFault) -> AiFault {
+        AiFault { code: "ask", reason: Some(fault.reason()), text: fault.to_string() }
     }
 
     /// A change that could not be taken back: the code `undo`, the stable name of the reason and its fixed sentence.
@@ -316,6 +323,10 @@ pub struct AiHost {
     context: Arc<ShellContext>,
     /// The host of the agent's tools, kept for the same reason.
     tools: Arc<ShellTools>,
+    /// The desk of the requests that shells make: the sink of the service, so it sees every event first.
+    asks: Arc<Asks>,
+    /// Tells the window of a pane that a request waits; bound to the core once it exists.
+    notify: Arc<ShellAskNotify>,
 }
 
 impl AiHost {
@@ -326,8 +337,11 @@ impl AiHost {
         let dirs = protected_dirs(dir, &parts.protected);
         let context = Arc::new(ShellContext::new(&dirs));
         let tools = Arc::new(ShellTools::new(DenyPolicy::new(dirs.clone())));
+        // The desk wraps the sink of the page: events of a request from a shell stay with the desk, the others go on.
+        let notify = Arc::new(ShellAskNotify::new(sink.clone()));
+        let asks = Asks::new(Arc::new(ShellAiSink { sink }), notify.clone());
         let mut builder =
-            AiService::builder(Arc::new(JsonDirStore::new(dir.join(CHATS_DIR))), Arc::new(ShellAiSink { sink }), dir)
+            AiService::builder(Arc::new(JsonDirStore::new(dir.join(CHATS_DIR))), asks.clone(), dir)
                 .vault(parts.vault)
                 .deny_policy(DenyPolicy::new(dirs))
                 .tool_host(tools.clone())
@@ -335,12 +349,13 @@ impl AiHost {
         if let Some(clock) = parts.clock {
             builder = builder.clock(clock);
         }
-        AiHost { service: builder.build(), context, tools }
+        AiHost { service: builder.build(), context, tools, asks, notify }
     }
 
     /// Gives the source of shared content and the host of the tools the core they read panes and files through. Held
     /// weakly and set once; a call after the first changes nothing.
     pub fn bind(&self, core: Weak<AppCore>) {
+        self.notify.bind(core.clone());
         self.context.bind(core.clone());
         self.tools.bind(Arc::new(CoreTargets::new(core)));
     }
@@ -348,6 +363,11 @@ impl AiHost {
     /// The service, for the calls the shell makes on it directly.
     pub fn service(&self) -> &AiService {
         &self.service
+    }
+
+    /// The desk of the requests that shells make.
+    pub(crate) fn asks(&self) -> &Arc<Asks> {
+        &self.asks
     }
 
     /// The host of the agent's tools, which keeps what a person may still take back.

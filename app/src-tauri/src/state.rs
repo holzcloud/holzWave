@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
+use holzwave_core::ai::service::AskEvent;
 use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened};
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
 use holzwave_core::files::{Entry, FileSource, Listing};
@@ -371,6 +372,9 @@ pub enum Out {
     /// One event of a chat turn, for every window: the page routes it by conversation and rebuilds the chat from the
     /// `seq` of the turn, or from a snapshot when one is missing.
     Ai(AiPayload),
+    /// A request from a shell waits for the person, or is over: the page draws or removes a card. `Waiting` goes to the
+    /// window of the pane that asked, `Closed` to every window.
+    AiAsk(AskEvent),
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -389,6 +393,7 @@ impl Out {
             Out::DragHover { .. } => "drag-hover",
             Out::DragEnd => "drag-end",
             Out::Ai(_) => "ai",
+            Out::AiAsk(_) => "ai-ask",
             Out::Exit => "exit",
         }
     }
@@ -435,6 +440,7 @@ impl Serialize for Out {
             }
             Out::DragEnd => serializer.serialize_unit(),
             Out::Ai(payload) => payload.serialize(serializer),
+            Out::AiAsk(event) => event.serialize(serializer),
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -721,8 +727,8 @@ pub struct AppCore {
     me: Weak<AppCore>,
 }
 
-/// What `wsh ai` is told while no chat answers it.
-const WSH_AI_UNCONNECTED: &str = "no chat is connected to wsh ai in this build of holzWave";
+/// What the single-answer path says to `wsh ai`: the request is answered as a stream (see `ai_ask`), never as one line.
+const WSH_AI_STREAM_ONLY: &str = "wsh ai is answered as a stream, not as one line";
 
 impl AppCore {
     /// Load the layouts from `dir/layout.json` (a fresh one-pane window `main` when there is none or it is unusable;
@@ -861,6 +867,12 @@ impl AppCore {
         lock(&self.routes).live.contains_key(&pane)
     }
 
+    /// The label of the window that has `pane`, or `None` when no layout holds it. The lock of the table of routes is
+    /// released before this returns.
+    pub(crate) fn pane_window(&self, pane: PaneId) -> Option<String> {
+        lock(&self.routes).live.get(&pane).map(|label| label.to_string())
+    }
+
     /// The view of the window `label`. An unknown label is the error `no such window`.
     pub fn view_in(&self, label: &str) -> Result<View, String> {
         let set = lock(&self.windows);
@@ -952,7 +964,7 @@ impl AppCore {
             return Ok("holzWave".into());
         }
         if let Cmd::Ai { .. } = &cmd {
-            return Err(WSH_AI_UNCONNECTED.into());
+            return Err(WSH_AI_STREAM_ONLY.into());
         }
         if let Cmd::Hist { line, cwd, exit } = &cmd {
             // Not every command is kept (secrets, a leading space); that is not an error for the shell.
@@ -972,7 +984,7 @@ impl AppCore {
                 self.block_open_in(&label, "right", BlockKind::Preview, "local", &path)?
             }
             Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
-            Cmd::Ai { .. } => return Err(WSH_AI_UNCONNECTED.into()),
+            Cmd::Ai { .. } => return Err(WSH_AI_STREAM_ONLY.into()),
             Cmd::Ping | Cmd::Hist { .. } => return Ok(String::new()),
         };
         self.sink.send(Target::window(&label), Out::Layout(view));
@@ -4328,12 +4340,12 @@ mod tests {
 
     /// A core over an existing scratch directory, so that a test can put files there first.
     #[test]
-    fn the_local_socket_refuses_an_ai_request_when_no_chat_answers() {
+    fn the_single_answer_path_still_refuses_an_ai_request() {
         use holzwave_ipc::Cmd;
         let (core, _rec, _dir) = core("sh", &[]);
         let pane = core.view().focus;
         let ask = || Cmd::Ai { prompt: "hi".into(), stdin_bytes: 0 };
-        let said = Err("no chat is connected to wsh ai in this build of holzWave".to_owned());
+        let said = Err("wsh ai is answered as a stream, not as one line".to_owned());
         assert_eq!(core.ipc_command(Some(pane), ask()), said);
         assert_eq!(core.ipc_command(None, ask()), said);
         assert_eq!(core.ipc_command(Some(9999), ask()), said, "a missing pane cannot change the answer");
@@ -7116,7 +7128,10 @@ mod protocol {
     };
     use holzwave_core::ai::profiles::{KeyError, KeySlot, KeyStatus, Preset, ProfileView, Removal};
     use holzwave_core::ai::service::events::{AiEvent, AiEventKind};
-    use holzwave_core::ai::service::{ContextState, FindingView, ItemView, OfferView, ServiceError};
+    use holzwave_core::ai::service::{
+        AskEvent, AskView, ContextState, FindingView, ItemView, OfferView, ServiceError,
+    };
+    use holzwave_core::ai::service::ask::InputView;
     use holzwave_core::ai::store::{ConversationId, ConversationSummary};
     use holzwave_core::ai::tools::Decision;
     use holzwave_core::ai::types::{ContextKind, Locality};
@@ -7281,6 +7296,27 @@ mod protocol {
         Value::Object(out)
     }
 
+    /// A card of `wsh ai` as the core builds it: a cloud destination, piped text counted with one finding.
+    fn sample_ask() -> AskView {
+        AskView {
+            ask: "0123456789abcdef0123456789abcdef".into(),
+            seal: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            pane: 3,
+            prompt: "why does this fail".into(),
+            prompt_findings: Vec::new(),
+            input: Some(InputView {
+                lines: 142,
+                bytes: 6254,
+                sent_bytes: 5939,
+                findings: vec![FindingView { rule: "anthropic_key".into(), count: 1 }],
+            }),
+            profile: "claude".into(),
+            model: "claude-sonnet".into(),
+            host: "api.anthropic.com".into(),
+            locality: Locality::Cloud,
+        }
+    }
+
     fn samples() -> Value {
         let frame = FrameMsg {
             pane: 3,
@@ -7323,6 +7359,7 @@ mod protocol {
                 seq: 2,
                 kind: AiEventKind::Delta { text: "Hel".into() },
             })),
+            Out::AiAsk(AskEvent::Waiting { view: sample_ask() }),
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -7368,6 +7405,7 @@ mod protocol {
                 ],
                 "drag-end": payload(8),
                 "ai": payload(9),
+                "ai-ask": payload(10),
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {

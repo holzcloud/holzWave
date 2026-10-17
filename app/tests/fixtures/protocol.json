@@ -480,6 +480,31 @@
       "text": "Hel",
       "turn": 5
     },
+    "ai-ask": {
+      "kind": "waiting",
+      "view": {
+        "ask": "0123456789abcdef0123456789abcdef",
+        "host": "api.anthropic.com",
+        "input": {
+          "bytes": 6254,
+          "findings": [
+            {
+              "count": 1,
+              "rule": "anthropic_key"
+            }
+          ],
+          "lines": 142,
+          "sent_bytes": 5939
+        },
+        "locality": "cloud",
+        "model": "claude-sonnet",
+        "pane": 3,
+        "profile": "claude",
+        "prompt": "why does this fail",
+        "prompt_findings": [],
+        "seal": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    },
     "cwd": {
       "cwd": "/Users/holz/Projects/holzWave",
       "pane": 3
@@ -523,7 +548,8 @@
       "incoming-drop",
       "drag-hover",
       "drag-end",
-      "ai"
+      "ai",
+      "ai-ask"
     ],
     "pane-exit": [
       {

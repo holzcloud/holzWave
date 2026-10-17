@@ -45,7 +45,7 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask"]);
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
   assert.deepEqual(keys(golden.events.cwd), ["cwd", "pane"]);
   const exits = golden.events["pane-exit"];
@@ -205,9 +205,18 @@ test("the command table has snake_case argument names and no raw input command",
 
 test("the ai event and the seventeen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
-  assert.equal(golden.events.names.at(-1), "ai");
+  assert.deepEqual(golden.events.names.slice(-2), ["ai", "ai-ask"]);
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
   assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
+  // A request of `wsh ai` that waits for the person: the card for the window of the pane, flat, and nothing but the
+  // counts of the piped text.
+  assert.deepEqual(keys(golden.events["ai-ask"]), ["kind", "view"]);
+  assert.equal(golden.events["ai-ask"].kind, "waiting");
+  assert.deepEqual(
+    keys(golden.events["ai-ask"].view),
+    ["ask", "host", "input", "locality", "model", "pane", "profile", "prompt", "prompt_findings", "seal"],
+  );
+  assert.deepEqual(keys(golden.events["ai-ask"].view.input), ["bytes", "findings", "lines", "sent_bytes"]);
   // The commands: exactly these and exactly these arguments. A send has no argument that could carry terminal text
   // or a decision, only the ids of an offer; the one command that decides a call is ai_decide; a key command has no way to hand a key back.
   const expected = {
