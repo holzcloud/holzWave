@@ -320,7 +320,7 @@ fn a_local_edit_made_after_a_download_is_kept_before_the_download_is_applied() {
     connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
     write_atomic(&b.dir.join("settings.json"), b"local edit").unwrap();
     let promoted = promote_incoming_with_report(&b.dir);
-    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec!["settings.json".into()], skipped: vec![] });
+    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec!["settings.json".into()], skipped: vec![], ..Promoted::default() });
     assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "from a");
     let copies = kept_copies(&b);
     assert_eq!(copies.len(), 1, "{copies:?}");
@@ -354,7 +354,7 @@ fn a_download_over_an_unedited_file_keeps_no_copy() {
     let srv = server();
     let (_a, b) = staged_over(&srv, "13", "settings.json", "v1", "v2");
     let promoted = promote_incoming_with_report(&b.dir);
-    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec![], skipped: vec![], ..Promoted::default() });
     assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "v2");
     assert!(!b.dir.join("sync-conflicts").exists() && !b.dir.join("sync-kept.json").exists());
     let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
@@ -417,7 +417,7 @@ fn a_copy_that_cannot_be_written_leaves_the_download_staged_and_the_live_file_al
     write_atomic(&b.dir.join("settings.json"), b"my edit").unwrap();
     fs::write(b.dir.join("sync-conflicts"), "in the way").unwrap();
     let promoted = promote_incoming_with_report(&b.dir);
-    assert_eq!(promoted, Promoted { applied: vec![], kept: vec![], skipped: vec!["settings.json".into()] });
+    assert_eq!(promoted, Promoted { applied: vec![], kept: vec![], skipped: vec!["settings.json".into()], ..Promoted::default() });
     assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "my edit", "the live file is untouched");
     assert!(b.dir.join("sync-incoming").join("settings.json").is_file(), "the download waits");
     assert!(b.dir.join("sync-incoming").join(".live-at-stage.json").is_file(), "its base waits with it");
@@ -425,7 +425,7 @@ fn a_copy_that_cannot_be_written_leaves_the_download_staged_and_the_live_file_al
     // The next start, with the way free, applies the download and keeps the copy.
     fs::remove_file(b.dir.join("sync-conflicts")).unwrap();
     let promoted = promote_incoming_with_report(&b.dir);
-    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec!["settings.json".into()], skipped: vec![] });
+    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec!["settings.json".into()], skipped: vec![], ..Promoted::default() });
     assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "from a");
     assert_eq!(kept_copies(&b).iter().map(|c| c.1.as_str()).collect::<Vec<_>>(), vec!["my edit"]);
     assert!(!b.dir.join("sync-incoming").exists());
@@ -565,7 +565,7 @@ fn promote_where_moves_only_what_is_wanted() {
     stage(&d, "settings.json", "{\"font_size\":20}");
     stage(&d, "widget_notes.json", "{}");
     let promoted = promote_where(&d.dir, &is_unowned);
-    assert_eq!(promoted, Promoted { applied: vec!["themes/dark.json".into(), "widget_notes.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(promoted, Promoted { applied: vec!["themes/dark.json".into(), "widget_notes.json".into()], kept: vec![], skipped: vec![], ..Promoted::default() });
     assert!(d.dir.join("themes").join("dark.json").is_file() && d.dir.join("widget_notes.json").is_file());
     assert!(!d.dir.join("settings.json").exists(), "an owned file is not applied");
     let incoming = d.dir.join("sync-incoming");
@@ -599,7 +599,7 @@ fn the_record_of_a_name_that_waits_waits_with_it() {
     assert_eq!(record.keys().cloned().collect::<Vec<_>>(), vec!["settings.json"], "{record:?}");
     // The start-up promote then still sees that the live settings.json was not touched since staging: no copy.
     let promoted = promote_incoming_with_report(&b.dir);
-    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec![], skipped: vec![], ..Promoted::default() });
     assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "from a");
     assert!(!incoming.exists());
 }
@@ -684,7 +684,7 @@ fn an_adopted_layout_brings_its_own_pane_assignments_and_drops_this_devices() {
     assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["layout.json"]);
     assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().downloaded, vec!["layout.json"]);
     let promoted = promote_incoming_with_report(&b.dir);
-    assert_eq!(promoted, Promoted { applied: vec!["layout.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(promoted, Promoted { applied: vec!["layout.json".into()], kept: vec![], skipped: vec![], ..Promoted::default() });
     assert_eq!(json(&b, "layout.json"), serde_json::json!({"panes": [1, 2, 3]}));
 
     let panes = [1, 2, 3];
@@ -902,7 +902,7 @@ fn a_failed_backup_stops_the_adoption() {
     fs::write(d.dir.join("sync-conflicts"), "in the way").unwrap();
     let live: Vec<Vec<u8>> = ["layout.json", PANES_FILE, BLOCKS_FILE].iter().map(|f| fs::read(d.dir.join(f)).unwrap()).collect();
     let promoted = promote_incoming_with_report(&d.dir);
-    assert_eq!(promoted, Promoted { applied: vec![], kept: vec![], skipped: vec!["layout.json".into()] });
+    assert_eq!(promoted, Promoted { applied: vec![], kept: vec![], skipped: vec!["layout.json".into()], ..Promoted::default() });
     let after: Vec<Vec<u8>> = ["layout.json", PANES_FILE, BLOCKS_FILE].iter().map(|f| fs::read(d.dir.join(f)).unwrap()).collect();
     assert_eq!(live, after, "every live file is untouched");
     assert_eq!(fs::read(d.dir.join("sync-incoming").join("layout.json")).unwrap(), unit, "the unit stays staged");
@@ -934,7 +934,7 @@ fn the_unit_is_applied_in_one_order() {
     let copies = kept_copies(&once).len();
     ConfigSource::new(&once.dir, once.secrets.clone()).write("layout.json", unit).unwrap();
     let again = promote_incoming_with_report(&once.dir);
-    assert_eq!(again, Promoted { applied: vec!["layout.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(again, Promoted { applied: vec!["layout.json".into()], kept: vec![], skipped: vec![], ..Promoted::default() });
     assert_eq!(files(&once), files(&adopt("order-2", &|_| {})));
     assert_eq!(kept_copies(&once).len(), copies);
     // A crash after the pane files were written and before the layout was: the next start finishes the step.
@@ -981,7 +981,7 @@ fn a_layout_edited_after_the_download_was_staged_is_copied_before_the_unit_repla
     // The person arranged panes after the download was staged and before the app was started again.
     write_atomic(&b.dir.join("layout.json"), br#"{"arranged":"by hand"}"#).unwrap();
     let promoted = promote_incoming_with_report(&b.dir);
-    assert_eq!(promoted, Promoted { applied: vec!["layout.json".into()], kept: vec!["layout.json".into()], skipped: vec![] });
+    assert_eq!(promoted, Promoted { applied: vec!["layout.json".into()], kept: vec!["layout.json".into()], skipped: vec![], ..Promoted::default() });
     let copies = kept_copies(&b);
     assert!(copies.iter().any(|c| c.0.starts_with("layout.json.") && c.1 == r#"{"arranged":"by hand"}"#), "{copies:?}");
     assert_eq!(json(&b, "layout.json"), serde_json::json!({"panes": [1, 2, 3]}));
@@ -1345,4 +1345,70 @@ fn a_staged_copy_of_a_deleted_name_goes_too() {
     let copies = kept_copies(&b);
     assert_eq!(copies.len(), 1, "{copies:?}");
     assert_eq!(copies[0].1, "{\"name\":\"dark\"}", "the live file was copied");
+}
+
+// ---- a connection that another device deleted -----------------------------------------------------------------------
+
+/// Stage `bytes` as the download of `connections.json` on `d`, as a run would.
+fn stage_connections(d: &Device, bytes: &[u8]) {
+    write_atomic(&d.dir.join(INCOMING).join("connections.json"), bytes).unwrap();
+}
+
+#[test]
+fn a_connection_deleted_on_another_device_is_gone_here() {
+    let srv = server();
+    let (a, b) = (device("a-conn"), device("b-conn"));
+    save_connections(&a, &["web", "db"]);
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    let first = promote_incoming_with_report(&b.dir);
+    assert_eq!(first, Promoted { applied: vec!["connections.json".into()], ..Promoted::default() }, "nothing was held before");
+    // A deletes `web`; the deletion travels as the edit of one file.
+    save_connections(&a, &["db"]);
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted.applied, vec!["connections.json"]);
+    assert_eq!(promoted.dropped_profiles, vec!["web"]);
+    let (now, _) = Profiles::load(&b.dir);
+    assert_eq!(now.items.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["db"]);
+}
+
+#[test]
+fn a_corrupt_connections_file_drops_nothing() {
+    let valid_none = br#"{"version":1,"items":[{"id":"web","name":"Web","host":"","user":"u"}]}"#;
+    for (label, bytes) in [
+        ("not JSON", &b"this is not json"[..]),
+        ("not UTF-8", &[0xff, 0xfe, 0x00][..]),
+        ("another version", br#"{"version":2,"items":[]}"#),
+        ("the wrong shape", br#"{"items":"web"}"#),
+        ("a list of invalid profiles only", &valid_none[..]),
+    ] {
+        let d = device("corrupt-conn");
+        save_connections(&d, &["web", "db"]);
+        stage_connections(&d, bytes);
+        let promoted = promote_incoming_with_report(&d.dir);
+        assert_eq!(promoted.applied, vec!["connections.json"], "{label}: applied as before");
+        assert!(promoted.dropped_profiles.is_empty(), "{label}: {promoted:?}");
+    }
+}
+
+#[test]
+fn a_profile_that_is_still_there_is_never_dropped() {
+    let d = device("kept-conn");
+    save_connections(&d, &["web", "db"]);
+    // `web` stays with other fields; `db` stays but is invalid now (it has no host): neither counts as removed.
+    stage_connections(
+        &d,
+        br#"{"version":1,"items":[{"id":"web","name":"Other","host":"new.example","user":"x","auth":"password"},{"id":"db","name":"Db","host":"","user":"u"}]}"#,
+    );
+    assert!(promote_incoming_with_report(&d.dir).dropped_profiles.is_empty());
+    // A list that really lacks one drops exactly that one, sorted.
+    save_connections(&d, &["web", "db", "cache"]);
+    stage_connections(&d, br#"{"version":1,"items":[{"id":"db","name":"Db","host":"h","user":"u","key_path":"~/.ssh/k"}]}"#);
+    assert_eq!(promote_incoming_with_report(&d.dir).dropped_profiles, vec!["cache", "web"]);
+    // No live list before: nothing is known, nothing is dropped.
+    let fresh = device("fresh-conn");
+    stage_connections(&fresh, br#"{"version":1,"items":[]}"#);
+    assert!(promote_incoming_with_report(&fresh.dir).dropped_profiles.is_empty());
 }

@@ -23,6 +23,7 @@ use crate::pool::{Connection, SessionPool};
 use crate::persist::{read_limited, write_atomic};
 use crate::profiles::{Kind, Profile, Profiles};
 use crate::secrets::SecretStore;
+use crate::sync::webdav::safe_segment;
 use crate::{Error, Result};
 
 pub const PANES_FILE: &str = "pane_connections.json";
@@ -250,6 +251,17 @@ impl Connections {
         Ok(())
     }
 
+    /// Delete the keychain entries `ssh:<id>` of the connections that went (another computer deleted them). Only an id
+    /// that is a safe name of at most 64 bytes is used and only an account that starts with `ssh:` is touched; a missing
+    /// entry is fine and any other error is left for the next start to try again.
+    pub fn forget_secrets(&self, ids: &[String]) {
+        for id in ids {
+            if id.len() <= 64 && safe_segment(id) {
+                let _ = self.secrets.delete(&format!("ssh:{id}"));
+            }
+        }
+    }
+
     /// Say that `pane` runs connection `id`. Takes effect when the pane is started.
     pub fn assign(&self, pane: PaneId, id: &str) -> Result<()> {
         self.ensure_opens_here(id)?;
@@ -348,6 +360,28 @@ mod tests {
         let secrets = Arc::new(MemoryStore::default());
         let (c, _) = Connections::load(d, secrets.clone(), Some(PathBuf::from("/home/holz")), live);
         (c, secrets)
+    }
+
+    #[test]
+    fn forget_secrets_deletes_exactly_the_named_accounts() {
+        let d = dir("forget");
+        let (c, secrets) = manager(&d, &[]);
+        for account in ["ssh:web", "ssh:db", "ai:key", "web", "ssh:a/b", "ssh:..", "ssh:x:y"] {
+            secrets.set(account, "s3cret").unwrap();
+        }
+        c.forget_secrets(&["web".to_owned(), "gone".to_owned()]);
+        assert_eq!(secrets.get("ssh:web").unwrap(), None, "the named account goes; a missing one is fine");
+        assert_eq!(secrets.get("ssh:db").unwrap().as_deref(), Some("s3cret"));
+        assert_eq!(secrets.get("ai:key").unwrap().as_deref(), Some("s3cret"), "an account that is not a connection is never touched");
+        assert_eq!(secrets.get("web").unwrap().as_deref(), Some("s3cret"));
+        // An id that is not a safe name is ignored, whatever account it would build.
+        let long = "a".repeat(65);
+        c.forget_secrets(&["a/b".into(), "..".into(), "x:y".into(), String::new(), long, "..".into()]);
+        for account in ["ssh:a/b", "ssh:..", "ssh:x:y"] {
+            assert_eq!(secrets.get(account).unwrap().as_deref(), Some("s3cret"), "{account}");
+        }
+        c.forget_secrets(&["db".into()]);
+        assert_eq!(secrets.get("ssh:db").unwrap(), None);
     }
 
     #[test]

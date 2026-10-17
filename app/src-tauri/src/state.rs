@@ -79,6 +79,20 @@ fn default_secrets() -> Arc<dyn SecretStore> {
     Arc::new(holzwave_core::secrets::KeychainStore)
 }
 
+/// The saved connections, and the keychain entries of the profiles that a list from another computer removed: those
+/// profiles are gone from the list just applied, so their secrets go too. Only exactly those ids are touched (and none
+/// when the new list did not read as one: the sync reports no ids then), see `Promoted::dropped_profiles`.
+fn load_connections(
+    dir: &Path,
+    secrets: Arc<dyn SecretStore>,
+    live_panes: &[PaneId],
+    dropped: &[String],
+) -> (Connections, holzwave_core::layout::LoadStatus) {
+    let (connections, status) = Connections::load(dir, secrets, user_home(), live_panes);
+    connections.forget_secrets(dropped);
+    (connections, status)
+}
+
 // ---- what the webview sees -------------------------------------------------------------------------------------
 
 /// What the sidebar's widgets need.
@@ -778,7 +792,8 @@ impl AppCore {
     /// hand-edited file is honoured before the first command can run.
     pub fn new_with_ai(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec, ai: AiParts) -> Arc<AppCore> {
         // What the sync downloaded last time is put in place before anything is read.
-        let applied = holzwave_core::sync::engine::promote_incoming_with_report(&dir).applied;
+        let promoted = holzwave_core::sync::engine::promote_incoming_with_report(&dir);
+        let applied = promoted.applied;
         if !applied.is_empty() {
             eprintln!("holzwave: applied from sync: {}", applied.join(", "));
         }
@@ -808,7 +823,7 @@ impl AppCore {
         let config = Mutex::new(Config::load(&dir));
         let connections = {
             let live = lock(&windows).all_panes();
-            let (connections, status) = Connections::load(&dir, default_secrets(), user_home(), &live);
+            let (connections, status) = load_connections(&dir, default_secrets(), &live, &promoted.dropped_profiles);
             match status {
                 holzwave_core::layout::LoadStatus::Clean => {}
                 holzwave_core::layout::LoadStatus::Repaired(notes) => {
@@ -5296,6 +5311,35 @@ mod tests {
 
     fn theme_json(name: &str) -> String {
         serde_json::to_string(&Theme { name: name.into(), ..Theme::papier() }).expect("theme json")
+    }
+
+    #[test]
+    fn a_start_after_a_download_forgets_the_secrets_of_removed_profiles() {
+        use holzwave_core::secrets::MemoryStore;
+        let dir = Scratch::new("forgets-secrets");
+        let list = |ids: &[&str]| {
+            let items: Vec<String> = ids
+                .iter()
+                .map(|id| format!(r#"{{"id":"{id}","name":"{id}","host":"h.example","user":"u","auth":"password"}}"#))
+                .collect();
+            format!(r#"{{"version":1,"items":[{}]}}"#, items.join(","))
+        };
+        // This computer knows `web` and `db` and holds a secret for each; a download without `web` waits for the start.
+        std::fs::write(dir.0.join("connections.json"), list(&["web", "db"])).unwrap();
+        staged(&dir, "connections.json", list(&["db"]).as_bytes());
+        let secrets = Arc::new(MemoryStore::default());
+        secrets.set("ssh:web", "web-secret").unwrap();
+        secrets.set("ssh:db", "db-secret").unwrap();
+        secrets.set("ai:key", "ai-secret").unwrap();
+
+        let promoted = holzwave_core::sync::engine::promote_incoming_with_report(&dir.0);
+        assert_eq!(promoted.dropped_profiles, ["web"]);
+        let (connections, _) = load_connections(&dir.0, secrets.clone(), &[], &promoted.dropped_profiles);
+
+        assert_eq!(secrets.get("ssh:web").unwrap(), None, "the removed profile's secret is gone");
+        assert_eq!(secrets.get("ssh:db").unwrap().as_deref(), Some("db-secret"), "the other profile's secret stays");
+        assert_eq!(secrets.get("ai:key").unwrap().as_deref(), Some("ai-secret"), "no other entry is touched");
+        assert_eq!(connections.list().len(), 1);
     }
 
     #[test]

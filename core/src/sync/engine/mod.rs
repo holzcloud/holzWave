@@ -52,6 +52,8 @@ const DIRS: [&str; 2] = ["themes", "widgets"];
 const STATE: &str = "sync_state.json";
 /// The synced name whose payload is a layout unit.
 const LAYOUT: &str = "layout.json";
+/// The synced name of the saved connections.
+const CONNECTIONS: &str = "connections.json";
 /// The version of the layout unit, and the most entries one of its two maps may hold.
 const UNIT_VERSION: u32 = 1;
 const MAX_UNIT_ENTRIES: usize = 4096;
@@ -170,6 +172,10 @@ pub struct Promoted {
     pub kept: Vec<String>,
     /// The names left staged because the copy of the live file could not be written; the next start tries again.
     pub skipped: Vec<String>,
+    /// The ids of the saved connections that the replaced `connections.json` held and the new one does not, sorted. Empty
+    /// when the new file did not read as a connection list: a corrupt or hostile file never drops anything. The caller
+    /// deletes the keychain entries of these profiles ([`crate::connections::Connections::forget_secrets`]).
+    pub dropped_profiles: Vec<String>,
 }
 
 /// Move what the sync downloaded into place. Called once at start, before the configuration is read. Returns the names
@@ -240,11 +246,16 @@ pub fn promote_where(dir: &Path, wanted: &dyn Fn(&str) -> bool) -> Promoted {
             continue;
         }
         let live_path = dir.join(&name);
-        let incoming = read_limited(&path, MAX_FILE).ok().flatten().map(|b| digest(&b));
+        let staged_bytes = read_limited(&path, MAX_FILE).ok().flatten();
+        let incoming = staged_bytes.as_deref().map(digest);
+        let mut old_connections = None;
         let edited = match read_limited(&live_path, MAX_FILE) {
             Ok(None) => false,
             Ok(Some(live)) => {
                 let hash = digest(&live);
+                if name == CONNECTIONS {
+                    old_connections = Some(live.clone());
+                }
                 let changed = incoming.as_deref() != Some(hash.as_str())
                     && !matches!(bases.get(&name), Some(Some(base)) if *base == hash);
                 if changed && !copy_edit(dir, &name, &live) {
@@ -265,6 +276,9 @@ pub fn promote_where(dir: &Path, wanted: &dyn Fn(&str) -> bool) -> Promoted {
         if fs::rename(&path, &live_path).is_ok() {
             if edited {
                 out.kept.push(name.clone());
+            }
+            if let (Some(old), Some(new)) = (&old_connections, &staged_bytes) {
+                out.dropped_profiles = dropped_profiles(old, new);
             }
             out.applied.push(name);
         } else {
@@ -289,6 +303,31 @@ pub fn promote_where(dir: &Path, wanted: &dyn Fn(&str) -> bool) -> Promoted {
         save_bases(&root, &left);
     }
     out
+}
+
+/// The ids of the profiles the connection list `old` holds and the list `new` does not. Nothing when `new` is not a
+/// connection list (it would be reset by the loader, not emptied) and nothing for a profile that is still named in it,
+/// however invalid its other fields are: only a profile that is really gone counts, so a corrupt or hostile file cannot
+/// make the app delete a keychain entry.
+fn dropped_profiles(old: &[u8], new: &[u8]) -> Vec<String> {
+    use crate::layout::LoadStatus;
+    let read = |bytes: &[u8]| std::str::from_utf8(bytes).ok().map(Profiles::from_json).filter(|(_, status)| !matches!(status, LoadStatus::Reset(_)));
+    let (Some((before, _)), Some((after, _))) = (read(old), read(new)) else { return Vec::new() };
+    // The ids the new file names, including those a repair left out.
+    let mut named: BTreeSet<String> = after.items.iter().map(|p| p.id.clone()).collect();
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(new) {
+        if let Some(serde_json::Value::Array(items)) = map.get("items") {
+            // A list in which no profile is usable is a broken file, not the deletion of everything.
+            if after.items.is_empty() && !items.is_empty() {
+                return Vec::new();
+            }
+            named.extend(items.iter().filter_map(|i| i.get("id").and_then(serde_json::Value::as_str)).map(str::to_owned));
+        }
+    }
+    let mut gone: Vec<String> = before.items.iter().map(|p| p.id.clone()).filter(|id| !named.contains(id)).collect();
+    gone.sort();
+    gone.dedup();
+    gone
 }
 
 /// Write the live file `bytes` of `name` to `sync-conflicts/` before it is replaced. Whether that worked.

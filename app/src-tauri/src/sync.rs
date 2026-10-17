@@ -289,12 +289,12 @@ mod tests {
 
     fn report(uploaded: &[&str], downloaded: &[&str], conflicts: &[&str]) -> Report {
         let own = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
-        Report { uploaded: own(uploaded), downloaded: own(downloaded), conflicts: own(conflicts), errors: Vec::new() }
+        Report { uploaded: own(uploaded), downloaded: own(downloaded), conflicts: own(conflicts), errors: Vec::new(), ..Report::default() }
     }
 
     fn applied(names: &[&str], kept: &[&str], skipped: &[&str]) -> Promoted {
         let own = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
-        Promoted { applied: own(names), kept: own(kept), skipped: own(skipped) }
+        Promoted { applied: own(names), kept: own(kept), skipped: own(skipped), ..Promoted::default() }
     }
 
     /// A runtime whose applier answers `promoted` and counts its calls.
