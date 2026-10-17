@@ -564,7 +564,8 @@ password and the passphrase are in the keychain (`sync:password`, `sync:passphra
 the device's random id and, per synced file, what the last run left behind (counter, ETag, SHA-256). `sync-incoming/`
 holds the downloads of the files the running app owns (`layout.json`, `settings.json`, `connections.json`) until the next
 start; themes, widgets and notes are moved into place right after the run, and `sync-conflicts/` holds the local versions
-that lost a conflict or were replaced by a download (among them the two pane files a downloaded layout replaced). See [sync.md](sync.md).
+that lost a conflict, were replaced by a download (among them the two pane files a downloaded layout replaced) or were
+removed because another computer deleted the theme or widget. See [sync.md](sync.md).
 
 ## `history.db`
 
@@ -616,9 +617,10 @@ reaching holzWave over an SSH tunnel, which is not built; a command that does re
 connection is stored under that connection and found from the panes that run it. An `ssh` typed in a local pane is a local
 pane: what you type after it is not recorded either. The directory of a command from another host is not recorded.
 
-**Sync.** History is not synced. The sync format has no place for `history.db`, and deletions are not synced (a deleted
-file comes back on the next run, see [sync.md](sync.md)), so a command forgotten with `Shift+Delete` would return. If
-history sync is built it will be opt-in and needs deletions in sync first.
+**Sync.** History is not synced. It is a database, not a file per item, so it cannot be carried entry by entry, and a
+command forgotten with `Shift+Delete` must not come back on another computer (deletions of themes and widgets do travel,
+see [sync.md](sync.md), but not those of single entries). If history sync is built it will be opt-in and needs deletions
+of single entries in sync first.
 
 ## Command marks
 
