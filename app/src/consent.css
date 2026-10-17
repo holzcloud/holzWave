@@ -100,6 +100,7 @@
   .chat-composer .chat-ctx, .chat-bar .chat-local, .chat-consent button, .consent-kind, .consent-row, .consent-item {
     min-height: max(44px, calc(44rem / 12));
   }
+  .chat-consent button { min-width: max(44px, calc(44rem / 12)); }
   .chat-cards { max-height: 60%; }
   .consent-kind, .consent-row { padding: 0 .167rem; }
   .consent-actions { gap: .667rem; }

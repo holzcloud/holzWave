@@ -721,7 +721,8 @@ inside the card closes it and is not passed on; `Space` ticks; `Enter` in the co
 control carries `data-field`, so a typed character reaches no terminal.
 
 **Narrow screens (640 px and narrower).** `Context…`, every button, every checkbox row and every item row are at least
-44 px high, the card is at most 60 % of the viewport height and scrolls inside, and the composer text stays at least 16 px.
+44 px high, every button is also at least 44 px wide, the card is at most 60 % of the viewport height and scrolls inside, and
+the composer text stays at least 16 px.
 
 ![Sharing context on a phone](design/ai-consent-phone.png)
 
