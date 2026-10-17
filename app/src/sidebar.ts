@@ -4,6 +4,7 @@
 // `Escape` gives the keyboard back to the terminal. A command from the history or a widget is put on the prompt of the
 // focused pane and never run; a link is opened by the system.
 import { registerAction } from "./actions.js";
+import { aiFormShown, columnChanged, initAiSidebar } from "./aisidebar.js";
 import { call } from "./bridge.js";
 import { connect, connections } from "./connections.js";
 import { paneConns } from "./connstate.js";
@@ -251,23 +252,29 @@ async function loadWidgets(): Promise<void> {
 
 // ---- showing it -----------------------------------------------------------------------------------------------------
 
-function build(container: HTMLElement): void {
+/** The sections go into `div.sb-main`, which the column hides while it shows the AI form (aisidebar.ts); the box is answered. */
+function build(container: HTMLElement): HTMLElement {
   container.replaceChildren();
-  const hosts = section(container, "Hosts");
+  const main = el("div", "sb-main", container);
+  const hosts = section(main, "Hosts");
   hostsBox = el("div", "sb-hosts", hosts);
-  buildHistory(container);
-  const widgets = section(container, "Widgets");
+  buildHistory(main);
+  const widgets = section(main, "Widgets");
   widgetsBox = el("div", "", widgets);
+  return main;
 }
 
 /** Show or hide the sidebar. The stage changes size, so the grid is measured again. */
 export function setSidebar(on: boolean): void {
   if (!side) return;
   shown = on;
+  // The AI form is told before the column hides, so it can give the keyboard back while the focus is still inside it.
+  columnChanged(on);
   side.hidden = !on;
   button?.setAttribute("aria-pressed", on ? "true" : "false");
   remember(on);
-  if (on) {
+  // Hosts and widgets are drawn only while the column shows the sidebar form.
+  if (on && !aiFormShown()) {
     drawHosts();
     void loadWidgets();
   }
@@ -289,7 +296,16 @@ export async function initSidebar(): Promise<void> {
   } catch {
     // the sidebar still works without its style sheet
   }
-  build(side);
+  const main = build(side);
+  await initAiSidebar(side, main, {
+    shown: () => shown,
+    show: () => setSidebar(true),
+    fit,
+    refresh: () => {
+      drawHosts();
+      void loadWidgets();
+    },
+  });
   const info = document.querySelector(".bar-info");
   if (info) {
     button = el("button", "sidebar-btn label");
@@ -302,11 +318,11 @@ export async function initSidebar(): Promise<void> {
   registerAction({ id: "sidebar.toggle", title: "Show or hide the sidebar", run: toggleSidebar });
   // The hosts follow the connections; the widget files are read again now and then (a hand edit shows up).
   setInterval(() => {
-    if (!shown) return;
+    if (!shown || aiFormShown()) return;
     drawHostsIfChanged();
   }, 1000);
   setInterval(() => {
-    if (shown) void loadWidgets();
+    if (shown && !aiFormShown()) void loadWidgets();
   }, 10_000);
   if (remembered()) setSidebar(true);
 }

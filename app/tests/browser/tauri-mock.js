@@ -47,6 +47,16 @@
 //       sent           every event the mock produced, in order, dropped ones included
 //       chat(id)       a copy of the state of a chat (the empty state for an unknown chat)
 //       setState(id, partial)  set members of a chat's state, for example an interrupted message or a pinned profile
+//       save(id, { title, agoMs, profile, model, messages })  the chat is stored, as the core keeps it after a first send: the list
+//                      command names it, with the six members of the core's summary (`created` and `updated` in Unix SECONDS, the
+//                      time of the call minus `agoMs`; `profile` and `model` null when not given), and its state holds `messages`
+//                      (a list of `[role, text]` pairs) with the title, the profile and the model. A first send of a chat that is
+//                      not stored stores it, and every send moves its `updated`
+//       chatNotes      the `notes` member of the answer of `ai_conversation_list` (default none): the core's lines about its folder
+//       deleted        the id of every chat `ai_conversation_delete` was asked for and removed, in order. A delete refuses a bad id
+//                      as `invalid_conversation`, removes the record and the state of the chat, answers whether a chat was removed
+//                      and, when a turn of that chat runs, stops it and delivers one late `turn_ended` event (end `cancelled`)
+//                      that the state no longer takes, as the core's service may still send one for a chat that is gone
 //       context        the context commands of the core, played for the consent card:
 //                      panes      pane number -> `{ kinds, items }`; `kinds` is what the pane offers (in the order to list
 //                                 them) and `items[kind]` the item a read of that kind finds (`{ label, bytes, findings,
@@ -214,6 +224,9 @@
     keychain: true,
     keys: {},
     acknowledged: [],
+    stored: new Map(), // chat id -> the summary the list command names
+    chatNotes: [],
+    deleted: [],
   };
   const emptyState = (id) => ({
     conversation: id, title: "", profile: null, model: null, turn: 0, seq: 0, running: false, messages: [],
@@ -229,6 +242,19 @@
     const line = text.split("\n").map((l) => l.trim().replace(/\s+/g, " ")).find((l) => l !== "") ?? "";
     const chars = Array.from(line);
     return chars.length <= 60 ? line : `${chars.slice(0, 60).join("").trimEnd()}…`;
+  };
+  /** The chats the list command names: newest `updated` first, ties by id, the six members of the core's summary only. */
+  const listedChats = () =>
+    [...ai.stored.values()]
+      .sort((a, b) => b.updated - a.updated || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .map((c) => ({ id: c.id, title: c.title, created: c.created, updated: c.updated, profile: c.profile, model: c.model }));
+  /** A chat has a file once a message was sent: the record is made at the first send and moves with every one. */
+  const keepStored = (id, text, profile, model) => {
+    const now = Math.floor(Date.now() / 1000);
+    const before = ai.stored.get(id);
+    ai.stored.set(id, {
+      id, title: before?.title || titleOf(text), created: before?.created ?? now, updated: now, profile: profile ?? null, model: model || null,
+    });
   };
   /** The state takes one event: the rules of the core's reducer, enough for the events the mock produces. */
   const take = (state, e) => {
@@ -1003,10 +1029,33 @@
   const aiCommands = {
     ...contextCommands,
     ai_conversation_new: () => `chat-mock-${++ai.chatNo}`,
-    ai_conversation_list: () => ({ chats: [], notes: [] }),
+    ai_conversation_list: () => ({ chats: listedChats(), notes: structuredClone(ai.chatNotes) }),
     ai_conversation_delete: ({ conversation }) => {
+      if (typeof conversation !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(conversation)) {
+        throw fault("invalid_conversation", "the conversation id is not valid");
+      }
       for (const key of [...undoable.keys()]) if (key.startsWith(`${conversation}|`)) undoable.delete(key);
-      return ai.chats.delete(conversation);
+      const state = ai.chats.get(conversation);
+      const removed = ai.stored.delete(conversation);
+      ai.chats.delete(conversation);
+      appr.live.delete(conversation);
+      if (removed) ai.deleted.push(conversation);
+      if (ai.running === conversation) {
+        // The turn is stopped and nothing is written back; the service may still send the end of it, which no state takes.
+        const turn = state?.turn ?? 0;
+        const seq = (state?.seq ?? 0) + 1;
+        ai.queue = [];
+        ai.running = null;
+        clearTimeout(ai.timer);
+        ai.timer = 0;
+        setTimeout(() => {
+          mock.emit("ai", {
+            conversation, turn, seq, kind: "turn_ended", end: "cancelled", error: null, rounds: 1,
+            usage: { input_tokens: 0, output_tokens: 0 }, saved: false,
+          });
+        }, 0);
+      }
+      return removed;
     },
     ai_profiles: () => ({ profiles: listed(), notes: structuredClone(noteLines()) }),
     ai_profile_save: ({ input }) => {
@@ -1134,6 +1183,7 @@
       const route = { profile: id, model: model || known.model || chat.model || "", host: known.host ?? null, locality: known.locality ?? "loopback" };
       const before = redeem(conversation, pane, contextRoute(conversation, id, model), offer, picked);
       const turn = ++ai.turnNo;
+      keepStored(conversation, text, id, route.model);
       ai.queue = turnEvents(conversation, turn, text, route, ai.scripts.shift() ?? {}, before, pane);
       ai.running = conversation;
       pump();
@@ -1357,6 +1407,27 @@
     },
     drop: (n) => void (ai.dropLeft = n),
     chat: (id) => structuredClone(chatOf(id)),
+    save(id, { title = "", agoMs = 0, profile = null, model = null, messages = [] } = {}) {
+      const at = Math.floor((Date.now() - agoMs) / 1000);
+      ai.stored.set(id, { id, title, created: at, updated: at, profile, model });
+      const state = chatOf(id);
+      state.title = title;
+      state.profile = profile;
+      state.model = model;
+      state.messages = messages.map(([role, text], i) => ({
+        id: `${id}-m${i + 1}`, role, ts: at, model: role === "assistant" ? model : null, status: "complete", usage: null,
+        parts: [{ type: "text", text }],
+      }));
+    },
+    get chatNotes() {
+      return ai.chatNotes;
+    },
+    set chatNotes(value) {
+      ai.chatNotes = value;
+    },
+    get deleted() {
+      return structuredClone(ai.deleted);
+    },
     setState(id, partial) {
       Object.assign(chatOf(id), structuredClone(partial));
     },
@@ -1364,8 +1435,9 @@
       clearTimeout(ai.timer);
       Object.assign(ai, {
         profiles: [], scripts: [], chatNo: 0, turnNo: NOW, queue: [], running: null, holdLeft: null, dropLeft: 0, timer: 0,
-        notes: [], keychain: true, keys: {}, acknowledged: [],
+        notes: [], keychain: true, keys: {}, acknowledged: [], chatNotes: [], deleted: [],
       });
+      ai.stored.clear();
       ai.chats.clear();
       ai.sent.length = 0;
       appr.decisions.length = 0;

@@ -1,0 +1,47 @@
+/* The AI form of the sidebar column (aisidebar.ts, docs/design.md section 6.18): 23.333 rem (280 px at the base size) in the
+   place of the sidebar, a hairline on its left like the sidebar. Every colour is a `--hw-*` token, every size is in rem so the UI
+   scale moves it with the rest of the chrome (a pixel value only for 1 px hairlines, the 2 px focus ring and row bar, and the
+   28 px and 44 px touch minimums). Flat and hairline: no colour ramp, no soft edge, no shadow, no motion. Hairlines read `--hw-line` and
+   dim text `--hw-dim`, so `contrast-high` reaches them. Rose marks the chat on screen and the focus cues only. */
+
+#sidebar[data-form="chat"] { width: 23.333rem; }
+.sb-ai { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.sb-ai[hidden] { display: none; }
+
+/* The head: the name of the form at the left, the way back at the right, a hairline below. */
+.sb-ai .ai-side-head { flex: none; align-items: center; margin: 0; padding: .333rem .833rem; border-bottom: 1px solid var(--hw-line); }
+.sb-ai .ai-side-back { box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); padding: 0 .333rem; border: 0; background: none;
+                       color: var(--hw-dim); cursor: pointer; font: inherit; letter-spacing: inherit; text-transform: inherit; }
+.sb-ai .ai-side-back:hover { color: var(--hw-ink); }
+
+/* The chat bar row: the title button fills it, `New chat` follows. */
+.sb-ai .ai-side-bar { flex: none; display: flex; align-items: center; gap: .5rem; padding: .5rem .833rem; border-bottom: 1px solid var(--hw-line); }
+.sb-ai .ai-side-title { flex: 1 1 0; min-width: 0; box-sizing: border-box; display: flex; align-items: center; gap: .5rem;
+                        min-height: max(28px, calc(28rem / 12)); padding: 0 .667rem; border: 1px solid var(--hw-line);
+                        border-radius: .333rem; background: none; color: var(--hw-ink); cursor: pointer;
+                        font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; letter-spacing: normal; text-align: left;
+                        text-transform: none; }
+.sb-ai .ai-side-title:hover { background: var(--hw-rose-wash); }
+.ai-side-text { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-side-caret { flex: none; color: var(--hw-dim); }
+
+/* The list: flat, under the head, at most 40 % of the column, scrolling inside. */
+.sb-ai .ai-side-chats { flex: none; box-sizing: border-box; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--hw-line); }
+.sb-ai .ai-side-chats[hidden] { display: none; }
+.ai-side-list { list-style: none; margin: 0; padding: 0; }
+.ai-side-row { display: flex; align-items: stretch; border-left: 2px solid transparent; }
+.ai-side-row[data-current="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
+.sb-ai .ai-side-pick { flex: 1 1 auto; min-width: 0; box-sizing: border-box; display: grid; grid-template-columns: 1rem minmax(0, 1fr);
+                       column-gap: .5rem; align-items: center; min-height: max(28px, calc(28rem / 12)); padding: .333rem .5rem;
+                       border: 0; background: none; color: var(--hw-ink); cursor: pointer; font: inherit; text-align: left; }
+.sb-ai .ai-side-pick:hover { background: var(--hw-rose-wash); }
+.ai-side-mark { grid-column: 1; grid-row: 1 / span 2; align-self: start; color: var(--hw-ink); }
+.ai-side-name { grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-side-meta { grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--hw-dim);
+                font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); }
+
+/* The chat: the module of the chat pane fills the rest of the column. The block classes of its host put its absolute place
+   and its fill back to the column's own. */
+.sb-ai .side-chat { position: relative; flex: 1 1 0; min-height: 0; background: none; border-top: 1px solid var(--hw-line); }
+
+.sb-ai button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }

@@ -381,3 +381,50 @@ export const releaseCommand = (page) => page.evaluate(() => window.__MOCK__.ai.e
 
 /** Every command the mock ran, oldest first. */
 export const commandRuns = (page) => page.evaluate(() => window.__MOCK__.ai.exec.runs);
+
+/** Two stored chats of the sidebar tests: a saved list as the core would keep it, with the texts of their messages. */
+export const SAVED_A = {
+  id: "chat-saved-a",
+  title: "Why is talos-3 NotReady?",
+  agoMs: 2 * 3600 * 1000,
+  profile: "local-1",
+  model: "llama3.2",
+  messages: [["user", "Why is talos-3 NotReady?"], ["assistant", "Check talosctl health."]],
+};
+export const SAVED_B = {
+  id: "chat-saved-b",
+  title: "Plan the backup job",
+  agoMs: 3 * 86400 * 1000,
+  profile: "local-1",
+  model: "llama3.2",
+  messages: [["user", "Plan the backup job"], ["assistant", "Start with a snapshot schedule."]],
+};
+
+/** Store `list` (members of `SAVED_A`'s shape) in the mock, as the core keeps chats that were sent. */
+export async function saveChats(page, list) {
+  await page.evaluate((chats) => {
+    for (const { id, ...rest } of chats) window.__MOCK__.ai.save(id, rest);
+  }, list);
+}
+
+/** Show the column when it is hidden, turn it into the AI chat with the page action and wait for the composer. */
+export async function openSide(page) {
+  if (await page.locator("#sidebar").isHidden()) await page.keyboard.press("Meta+b");
+  await page.evaluate(() => window.__registry.runAction("ai.sidebar"));
+  await page.waitForSelector('#sidebar[data-form="chat"] textarea.chat-input');
+}
+
+/** Every row of the chat list as the DOM shows it. */
+export const sideRows = (page) =>
+  page.evaluate(() =>
+    [...document.querySelectorAll("#sidebar li.ai-side-row")].map((row) => ({
+      id: row.dataset.id,
+      current: row.dataset.current === "true",
+      pane: row.dataset.pane === undefined ? null : Number(row.dataset.pane),
+      mark: row.querySelector(".ai-side-mark")?.textContent ?? "",
+      title: row.querySelector(".ai-side-name")?.textContent ?? "",
+      meta: row.querySelector(".ai-side-meta")?.textContent ?? "",
+      armed: row.querySelector("button.ai-side-del")?.dataset.armed === "true",
+      canDelete: row.querySelector("button.ai-side-del") !== null,
+    })),
+  );

@@ -1,8 +1,11 @@
 /* The sidebar (sidebar.ts, docs/design.md 6.11): 18 rem (216 px at the base size) at the right of the stage, a hairline on
    its left, sections separated by hairlines. Flat: no shadow. The state of a host is a dot and a word. */
-#sidebar { flex: none; width: 18rem; box-sizing: border-box; overflow-y: auto; background: var(--hw-ground-2);
-           border-left: 1px solid var(--hw-line); }
+#sidebar { flex: none; width: 18rem; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden;
+           background: var(--hw-ground-2); border-left: 1px solid var(--hw-line); }
 #sidebar[hidden] { display: none; }
+/* The sections of the sidebar form scroll inside the column; the other form (aisidebar.css) takes the column's place. */
+.sb-main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.sb-main[hidden] { display: none; }
 .sidebar-btn { margin-left: .667rem; padding: .167rem .5rem; background: none; border: 1px solid transparent; border-radius: .333rem;
                color: var(--hw-dim); cursor: pointer; white-space: nowrap; }
 .sidebar-btn:hover { border-color: var(--hw-line); color: var(--hw-ink); }

@@ -99,6 +99,7 @@ default.
 | AI providers dialog | the box of the Settings dialog (6.13): groups under `.label` legends, a list of providers as a radio group, a form with a write-only key field, a disclosure card for a gateway or a server of the user's own; on a phone it is the screen |
 | Context card | a flat strip in the chat pane (6.14): a 2 px bar on its left, native checkboxes, one solid action, hairlines above and below, no shadow; it names the pane, the destination and every item that would go out |
 | Approval card | a flat strip entry in the chat pane (6.15): a 2 px bar on its left, mono payload rows, one solid action, hairlines above and below, no shadow; it shows every field of a tool call, where the result goes and what untrusted text is in the turn |
+| Chat list | a flat list inside the sidebar column (6.18): one row per stored chat with a mark (`●` on screen, `○`), a title and a mono line with the model and the age, the chat on screen with the rose wash and a 2 px rose bar, a delete button that asks twice (`×`, then `Delete?`); hairlines above and below, scrolls inside, no shadow |
 | Diff box | a hairline box in mono inside an approval card (6.16): a head line with the kind, the counts and the sizes, then the changed lines with their line numbers and a `+` or `-` sign as the cue; no fill, wraps and scrolls inside, at most 16 rem high |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
@@ -195,12 +196,13 @@ the sidebar and the status line.
 | Title bar (32 px) | window buttons (left on macOS, right on Windows and Linux), workspace pills, `＋`; right group: sync state `☁ synced`, `✦ AI`, `▥ Sidebar` toggle, `⌘K` |
 | Tab row (28 px) | numbered tabs, a `⌁` mark on tabs with a remote connection, `＋`; a hint line right-aligned |
 | Area | the split tree of the shown tab, 1 px hairlines between panes, no gaps; the focused pane has the rose line on its header |
-| Sidebar (216 px, collapsible) | **Hosts** (state dot, protocol, reconnect counter), **Context** (Kubernetes context and namespace, Azure subscription, GAM profile), **History** (fuzzy search), **Widgets** |
+| Sidebar (216 px, collapsible) | **Hosts** (state dot, protocol, reconnect counter), **Context** (Kubernetes context and namespace, Azure subscription, GAM profile), **History** (fuzzy search), **Widgets**. The column has a second form, the AI chat (280 px, 6.18), that takes its place |
 | Status line (24 px) | tmux-style segments: workspace (solid), tabs and panes, Kubernetes context, Azure subscription, git branch, SSH count, sync state, renderer, encoding, version |
 
-The AI chat is a pane (6.12). Its second form, in the sidebar's column, replaces the sidebar when it is opened and comes
-with the sidebar section of the chat. Every segment of the status line and every title-bar button opens the matching
-popover or dialog.
+The AI chat is a pane (6.12). Its second form, in the sidebar's column, replaces the sidebar while it is shown (6.18): the
+palette entry `AI chat in the sidebar` and `✦ AI` (when the tab has no chat pane) turn the shown column into the chat, and
+`◂ Sidebar` turns it back. Every segment of the status line and every title-bar button opens the matching popover or
+dialog.
 
 ### 6.3 Views
 
@@ -224,7 +226,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | AI chat: file changes | ![](design/ai-write.png) ![](design/ai-write-states.png) | the diff in the approval card, the Undo button and the states of a change (6.16): the kind, the counts and the sizes, the lines around each change with a `+` or `-` sign, the digest of the old text as the last field and the sentence that only the outcome is sent; then the rows of writes that ran, one that was taken back, one refused as changed and one whose undo was refused, and the card of a new file on a remote host |
 | AI chat: running a command | ![](design/ai-command.png) ![](design/ai-command-states.png) | the command card, the end of the command next to the buttons, and the states of a finished command (6.17): the whole command in a payload box with no height limit, the banner with the sentence that a command will run, then the rows of a command that ran, one that failed, one that timed out and one that was denied, each with its report as text, and the card of a command on a remote host while it runs |
 | AI providers | ![](design/ai-providers.png) | the dialog for providers, keys, the two privacy settings and the gateway disclosure (6.13) |
-| AI chat (sidebar) | ![](design/ai-chat.png) | the column form, which replaces the sidebar; the column is drawn ahead of the work that builds it, while the consent card is built and described in 6.14 |
+| AI chat (sidebar) | ![](design/ai-chat.png) | the column form (6.18), which replaces the sidebar: the head with `◂ Sidebar`, the title button and `＋ New chat`, the chat of 6.12 below it with the consent card of 6.14 |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -259,7 +261,7 @@ the bottom bar holds the tabs of the shown workspace. Tokens are the ones above;
 
 ![Phone](design/7-phone.png)
 
-A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) and the approval card (6.15) sit inside the screen with the same 44 px targets, and on a phone the payload box of the approval card scrolls inside it. The diff box of a write card (6.16) is part of the card with the same 44 px targets, wraps its rows and scrolls inside its own height, and the `Undo` button of a finished write is 44 px too. On a phone the command card (6.17) grows and the strip scrolls, the command wraps and the buttons keep their 44 px targets. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text.
+A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) and the approval card (6.15) sit inside the screen with the same 44 px targets, and on a phone the payload box of the approval card scrolls inside it. The diff box of a write card (6.16) is part of the card with the same 44 px targets, wraps its rows and scrolls inside its own height, and the `Undo` button of a finished write is 44 px too. On a phone the command card (6.17) grows and the strip scrolls, the command wraps and the buttons keep their 44 px targets. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text. The AI form of the sidebar column (6.18) is the screen on a phone like the sidebar is, with the same 44 px targets and composer text of at least 16 px.
 
 ### 6.7 Platforms
 
@@ -362,6 +364,8 @@ hidden at first and remembers whether it was shown. Sections, each under a `.lab
 
 The **Context** section (Kubernetes, Azure, GAM) is drawn with the integrations, not before.
 
+The column has a second form, the AI chat (6.18). Only one form shows at a time; `Cmd+B` and `▥ Sidebar` show and hide the column in whichever form it is in.
+
 ### 6.12 AI chat
 
 The chat is a pane of its own kind, like the file browser and the monitor: it fills a tile below a pane header, it is
@@ -369,12 +373,12 @@ opened next to the focused pane, and it is closed like any pane. Nothing in the 
 provider sheet on a narrow screen.
 
 **Opening.** The title-bar button `✦ AI`, the palette entries `AI chat` and `New AI chat`, and the chord of `ai.open`
-(`Cmd+Shift+A` on macOS, `Ctrl+Shift+A` on Windows and Linux) open a chat as a pane. `ai.open` focuses the chat pane of
-the shown tab when there is one and otherwise splits the focused pane to the right with a new chat; `ai.new_chat` (no
-default chord) always starts a new conversation in a new pane. The button is pressed (rose wash and rose border, as
-`▥ Sidebar`, with `aria-pressed`) while the shown tab has a chat pane. The sidebar form of the chat, which replaces the
-sidebar when it is opened, comes with the sidebar section of the chat. While calls wait for a decision the button shows
-the number, `✦ AI · 2` (6.15).
+(`Cmd+Shift+A` on macOS, `Ctrl+Shift+A` on Windows and Linux) open a chat. `✦ AI` and `ai.open` follow one order: a chat
+whose tool call waits for a decision and is not on screen is shown first (6.15); else the chat pane of the shown tab is
+focused; else a shown sidebar column becomes the AI chat (6.18); else the focused pane is split to the right with a new
+chat. `ai.new_chat` (no default chord) always starts a new conversation in a new pane. The button is pressed (rose wash and
+rose border, as `▥ Sidebar`, with `aria-pressed`) while a chat is on screen, in a pane of the shown tab or in the column.
+While calls wait for a decision the button shows the number, `✦ AI · 2` (6.15).
 
 **Header.** Type icon `✦`, title `chat`, and right-aligned in mono the chat's title (the first line of the first message,
 at most 60 characters) or `new chat` before there is one.
@@ -997,3 +1001,94 @@ sideways.
 
 **Accessibility.** As in 6.15: the card is a group named by its title, every hairline is `--hw-line` so `contrast-high`
 holds, and nothing moves. A failed command is told by the mark `!` and the word `error` as well as by colour.
+
+### 6.18 AI chat in the sidebar
+
+The column at the right of the stage (6.11) has two forms that take turns: the sidebar (hosts, history and widgets, 18 rem
+wide) and the AI chat (23.333 rem, 280 px at the base size, with a hairline on its left like the sidebar). Only one shows at
+a time. `▥ Sidebar` and `Cmd+B` show and hide the column in whichever form it is in. The form is not remembered across
+launches: the column opens as the sidebar, so a launch never puts a transcript on the screen or asks the core for a chat
+unasked. The title bar needs no new control.
+
+The chat in the column is the module of the chat pane (6.12): the same bar, transcript, strip of cards, status line and
+composer, fed by the same events. It is not a block, so it is not in the layout and not restored at launch (its file is,
+and the list shows it).
+
+**Entering.** The palette entry `AI chat in the sidebar` (no chord) shows the column in the AI form and gives the composer
+the keyboard; with the form already showing it only gives the keyboard. `✦ AI` and the chord of `ai.open` follow the order
+of 6.12: a chat whose tool call waits and is not on screen, else the chat pane of the shown tab, else a shown column
+becomes the AI chat, else a new chat opens as a pane. `ai.new_chat` always opens a new conversation in a new pane. The
+button is pressed while a chat is on screen in either form.
+
+**Leaving.** `◂ Sidebar` in the head returns the column to the sidebar form and the keyboard to the terminal. The chat keeps
+running and keeps its transcript. Hiding the column while the focus is inside it gives the keyboard to the terminal.
+
+**Head.** A `.label` row, `✦ AI CHAT` at the left and `◂ Sidebar` (dim, no border) at the right, a hairline below. Under it
+the chat bar row: the title button (the chat's title in mono on one line with an ellipsis, a caret `▾` that turns `▴` while
+the list is open, `new chat` before the first message) and `＋ New chat` (hairline). The chat's own bar (provider chip,
+place chip, `Providers…`, usage) follows as in 6.12.
+
+| Control | Rule | Second cue |
+|---|---|---|
+| `◂ Sidebar` | dim text, no border; returns the column to the sidebar | the arrow and the word |
+| Title button | opens and closes the list; `aria-expanded`, `aria-controls` the list | the caret `▾` and `▴` |
+| `＋ New chat` | hairline; makes an id and shows an empty chat; asks the core for no file | the words |
+| Row on screen | rose wash, a 2 px rose bar on its left, `aria-current` | the mark `●` against `○` |
+| Row of a chat in a pane | says `in pane 3` instead of the age; no `×` | the words |
+| `×` | 28 px high; the first press arms it | it turns into `Delete?`, underlined, in the danger colour |
+
+**Chat list.** The list opens under the head inside the column: flat, a hairline above and below, at most 40 % of the height
+of the column, scrolling inside. The list is read from the core when it opens and nowhere else. There is one row per chat
+that has a file, newest first, and always a row for the chat on screen (first when it has no file yet, titled `new chat`
+with the line `nothing sent yet`). A row has the mark `●` (on screen) or `○`, the title (one line, ellipsis; `untitled
+chat` when empty) and under it, in mono and dim, the model the chat is pinned to and how long ago it last changed
+(`llama3.2 · 2 h ago`). Titles are the first line of what someone typed, so they are text and nothing else. The notes that
+the core sends about the folder are shown as dim lines above the rows (at most five). At most 500 rows are drawn.
+
+**One chat has one place.** A chat that is open in a pane of this window says `in pane 3` instead of the age. Choosing it
+focuses that pane (or, when the pane is in another tab, says `That chat is open in another tab.`), and it has no delete
+button, so a chat is never in the column and in a pane at once. A switch carries nothing: the strip, the attached offer and
+the draft belong to the chat they were made for, and a chat that is left and idle lets go of its page session, and with it a
+share it held. A chat that is replying keeps streaming and is whole when the user returns.
+
+**Delete is deliberate.** Every other saved row has a delete button `×` at its right. The first press turns it into
+`Delete?` (the word is the cue); the second press on the same button deletes the chat with its file and stops a running
+reply; there is no undo. Any other press, `Escape`, closing the list or reading it again disarms it. Deleting the chat on
+screen shows a new empty chat. A sentence about the list (a refusal in the core's words, `Chat deleted.`) is said in a
+one-line status line under the head, so it is seen with the list closed.
+
+**The chat.** The module of 6.12 fills the rest of the column: bar, transcript, strip of cards, status line, composer. It
+acts for the last terminal or preview pane the user focused (6.14), with the focused pane as the only fallback; every send
+names that pane and a turn is stopped when that pane closes. Closing any other pane does nothing to it.
+
+**Cards.** The consent card (6.14), the approval card with the diff and the command (6.15 to 6.17) and the tool rows are the
+same components in the strip. In the column the payload rows stack (the name above its value, the size at the right of the
+name), the diff and the command wrap and never need a horizontal scroll, and the strip is at most half the height of the
+column and scrolls inside.
+
+**A decision is brought to the person.** When a tool call waits in the column's chat and the column is hidden or shows the
+sidebar, `✦ AI · n` shows the column in the AI form on that chat. A card never takes the keyboard by itself.
+
+**Keys and focus.** Opening the AI form focuses the composer. `Escape` in the composer stops a running reply or gives the
+keyboard to the terminal (6.12); `Escape` in the list closes it (first it disarms a `Delete?`); the arrows move between the
+rows, `Home` and `End` go to the first and the last. Every control carries `data-field`, so the page's own keys stay with it.
+
+**Narrow screens (640 px and narrower).** The column is the screen, as the sidebar is. `◂ Sidebar`, the title button,
+`＋ New chat`, the row buttons and `×` are at least 44 px high (`×` also 44 px wide), composer text is at least 16 px, and the
+provider picker stays the bottom sheet of 6.12.
+
+**Accessibility.** While the AI form shows, the column is an `aside` named `AI chat`. The title button has `aria-expanded`
+and `aria-controls` the list; the list is a `list` named `Chats` and the chat on screen has `aria-current`; the status line
+of the list is `role="status"`; `×` is named `Delete` and described by its row. Hairlines are `--hw-line` so `contrast-high`
+holds, nothing moves, and under forced colours the chat on screen and the focused controls get a system-colour outline.
+Rose marks only the chat on screen and the focus cues.
+
+| Sentence | Where |
+|---|---|
+| new chat | the title of a chat with no message, in the head and in its row |
+| nothing sent yet | the line of the row of a chat with no file |
+| untitled chat | the title of a stored chat whose title is empty |
+| Delete? | the armed delete button |
+| Chat deleted. | the status line after a delete |
+| That chat is open in another tab. | the status line after a press on a row whose pane is in another tab |
+| The list was not understood. | the status line when the core's list cannot be read |
