@@ -708,6 +708,9 @@ pub struct AppCore {
     history: holzwave_core::history::History,
     /// The system monitor's sampler, shared by every monitor pane.
     monitor: holzwave_core::monitor::Monitor,
+    /// The sessions of the other computers that monitor panes show: one per saved connection, built at the first sample
+    /// and dropped when the last monitor pane of the connection closes.
+    remote_monitors: holzwave_core::monitor::RemoteMonitors,
     /// The encrypted sync: its account, its runs and what the page shows of them.
     sync: crate::sync::SyncRuntime,
     /// The AI chat service and the calls the commands make on it. It owns its threads and takes no lock of the core.
@@ -842,6 +845,7 @@ impl AppCore {
                 ai: host,
                 remote_execs: RemoteExecs::new(),
                 monitor: holzwave_core::monitor::Monitor::new(),
+                remote_monitors: holzwave_core::monitor::RemoteMonitors::new(),
                 history,
                 ipc: Mutex::new(None),
                 saver,
@@ -1017,9 +1021,19 @@ impl AppCore {
         holzwave_core::widgets::save_note(&self.dir, id, text).map_err(|e| e.to_string())
     }
 
-    /// What this computer is doing now, for a monitor pane. Blocks for a few milliseconds: not on the main thread.
-    pub fn monitor_sample(&self) -> holzwave_core::monitor::Snapshot {
-        self.monitor.sample()
+    /// What the computer of a monitor pane is doing now: this one, or the saved SSH connection the pane's block names. The
+    /// page names the pane and never an address, so the core alone decides which computer is asked. Blocks (a few
+    /// milliseconds here, a round trip for another computer): not on the main thread.
+    pub fn monitor_sample(&self, pane: PaneId) -> Result<holzwave_core::monitor::Reading, String> {
+        let block = self
+            .blocks
+            .block_of(pane)
+            .filter(|block| block.kind == BlockKind::Monitor)
+            .ok_or_else(|| "this pane shows no system monitor".to_owned())?;
+        if block.source == LOCAL {
+            return Ok(holzwave_core::monitor::Reading::Live(self.monitor.sample()));
+        }
+        self.remote_monitors.sample(&self.connections, &block.source)
     }
 
     /// The state of the sync, for the page.
@@ -1082,6 +1096,17 @@ impl AppCore {
         } else {
             path.to_owned()
         };
+        // A monitor of another computer needs a saved SSH connection: said before any pane is made.
+        if kind == BlockKind::Monitor && source != LOCAL {
+            match self.connections.kind_of(source) {
+                Some(ConnectionKind::Ssh) => {}
+                None => return Err(format!("no connection {source}")),
+                Some(_) => {
+                    let name = self.connections.label_of(source).unwrap_or_else(|| source.to_owned());
+                    return Err(format!("the system monitor needs an SSH connection, and {name} is not one"));
+                }
+            }
+        }
         let block = Block { kind, source: source.to_owned(), path };
         // Checked before the pane is made, so a refused block leaves no empty pane behind.
         self.blocks.assign(0, block.clone()).map_err(|e| e.to_string())?;
@@ -1797,6 +1822,8 @@ impl AppCore {
         // A chat pane that leaves the layout ends the shares of its chat: the block is read before it is forgotten.
         let chat = self.blocks.block_of(pane).filter(|block| block.kind == BlockKind::Chat).map(|block| block.path);
         self.blocks.forget(pane);
+        // The last monitor pane of a computer that closes ends that computer's session.
+        self.remote_monitors.keep_only(&self.blocks.remote_monitor_sources());
         self.session_saver.touch();
         if let Some(chat) = chat {
             self.ai.chat_closed(&chat);
@@ -4148,6 +4175,83 @@ mod tests {
         drop(core);
         let again = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
         assert_eq!(again.blocks_list().len(), 2);
+    }
+
+    /// A saved SSH connection that needs no secret and is never reached: a key file that does not exist.
+    fn saved_ssh(core: &AppCore, id: &str, name: &str) {
+        let profile = Profile {
+            user: "holz".into(),
+            auth: holzwave_core::profiles::Auth::Key,
+            key_path: "/nonexistent/holzwave-test-key".into(),
+            ..Profile::new(id, name, "127.0.0.1")
+        };
+        core.connection_save(profile, SecretChange::Keep).expect("a valid connection");
+    }
+
+    #[test]
+    fn monitor_pane_of_this_computer_is_sampled_by_its_pane_id() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let view = core.block_open_in("main", "tab", BlockKind::Monitor, LOCAL, "").unwrap();
+        match core.monitor_sample(view.focus) {
+            Ok(holzwave_core::monitor::Reading::Live(s)) => assert!(s.cores >= 1 && s.mem_total > 0),
+            other => panic!("not a live reading: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn monitor_pane_refuses_a_pane_that_shows_no_monitor() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        let folder = dir.0.join("docs");
+        std::fs::create_dir(&folder).unwrap();
+        let shell = only_pane(&core);
+        let files = core.block_open_in("main", "tab", BlockKind::Files, LOCAL, folder.to_str().unwrap()).unwrap().focus;
+        for pane in [shell, files, 9_999] {
+            assert_eq!(core.monitor_sample(pane), Err("this pane shows no system monitor".to_owned()), "pane {pane}");
+        }
+    }
+
+    #[test]
+    fn monitor_pane_of_another_computer_needs_a_saved_ssh_connection_at_open() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let panes = core.view().panes.len();
+        let tabs = core.view().tabs.len();
+        let error = core.block_open_in("main", "tab", BlockKind::Monitor, "nope", "").unwrap_err();
+        assert!(error.contains("no connection nope"), "{error}");
+        let wsl = Profile { kind: ConnectionKind::Wsl, ..Profile::new("box", "Box", "Ubuntu") };
+        core.connection_save(wsl, SecretChange::Keep).unwrap();
+        let error = core.block_open_in("main", "tab", BlockKind::Monitor, "box", "").unwrap_err();
+        assert!(error.contains("needs an SSH connection"), "{error}");
+        assert_eq!((core.view().panes.len(), core.view().tabs.len()), (panes, tabs), "no empty pane was made");
+        saved_ssh(&core, "talos", "Talos");
+        let view = core.block_open_in("main", "tab", BlockKind::Monitor, "talos", "").unwrap();
+        let blocks = core.blocks_list();
+        let shown = blocks.iter().find(|b| b.pane == view.focus).expect("the pane has a block");
+        assert_eq!((shown.block.source.as_str(), shown.source_label.as_str()), ("talos", "Talos"));
+    }
+
+    #[test]
+    fn monitor_pane_of_a_deleted_connection_answers_with_the_reason() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        core.blocks.assign(pane, Block { kind: BlockKind::Monitor, source: "gone".into(), path: String::new() }).unwrap();
+        let error = core.monitor_sample(pane).unwrap_err();
+        assert!(error.contains("no connection gone"), "{error}");
+        assert!(!error.starts_with("unsupported"), "{error}");
+    }
+
+    #[test]
+    fn closing_the_last_monitor_pane_of_a_computer_drops_its_session() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        saved_ssh(&core, "talos", "Talos");
+        let first = core.block_open_in("main", "tab", BlockKind::Monitor, "talos", "").unwrap().focus;
+        let second = core.block_open_in("main", "right", BlockKind::Monitor, "talos", "").unwrap().focus;
+        // The key file does not exist, so the sample fails without any network; the session is built all the same.
+        assert!(core.monitor_sample(first).is_err());
+        assert_eq!(core.remote_monitors.len(), 1);
+        core.close_pane(first);
+        assert_eq!(core.remote_monitors.len(), 1, "another pane still shows the computer");
+        core.close_pane(second);
+        assert_eq!(core.remote_monitors.len(), 0, "the last pane is gone");
     }
 
     #[test]
@@ -7488,6 +7592,19 @@ mod protocol {
                 "copy_mode": [
                     to_value(&CopyStateMsg { active: true, selecting: false, yanked: None }),
                     to_value(&CopyStateMsg { active: false, selecting: false, yanked: Some("text".into()) }),
+                ],
+                "monitor": [
+                    to_value(&holzwave_core::monitor::Reading::Live(holzwave_core::monitor::Snapshot {
+                        cpu: 37.5,
+                        cores: 4,
+                        mem_used: 7_561_216_000,
+                        mem_total: 16_777_216_000,
+                        net_rx: 2_100_000,
+                        net_tx: 500_000,
+                        uptime: 5402,
+                        procs: vec![holzwave_core::monitor::Proc { pid: 842, name: "node server".into(), cpu: 200.0, mem: 204_800_000 }],
+                    })),
+                    to_value(&holzwave_core::monitor::Reading::Unsupported { system: "Darwin".into() }),
                 ],
                 "release_outside": [
                     to_value(&Released::TornOff { label: "window-12".into() }),

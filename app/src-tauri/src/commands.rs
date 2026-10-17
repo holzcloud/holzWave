@@ -840,10 +840,11 @@ pub fn sync_off(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
     core.sync_off()
 }
 
-/// What this computer is doing: CPU, memory, network and the busiest processes.
+/// What the computer of a monitor pane is doing: CPU, memory, network and the busiest processes, or the word that it is
+/// not a computer this monitor can read. The page names a pane and never an address: the pane's block names the source.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn monitor_sample(core: State<Arc<AppCore>>) -> holzwave_core::monitor::Snapshot {
-    core.monitor_sample()
+pub fn monitor_sample(core: State<Arc<AppCore>>, pane: PaneId) -> Result<holzwave_core::monitor::Reading, String> {
+    core.monitor_sample(pane)
 }
 
 /// Typed commands that match `query` (fuzzy), newest and best first; an empty query lists the newest.

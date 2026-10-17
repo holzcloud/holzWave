@@ -147,6 +147,30 @@
         "yanked": "text"
       }
     ],
+    "monitor": [
+      {
+        "cores": 4,
+        "cpu": 37.5,
+        "mem_total": 16777216000,
+        "mem_used": 7561216000,
+        "net_rx": 2100000,
+        "net_tx": 500000,
+        "procs": [
+          {
+            "cpu": 200.0,
+            "mem": 204800000,
+            "name": "node server",
+            "pid": 842
+          }
+        ],
+        "state": "live",
+        "uptime": 5402
+      },
+      {
+        "state": "unsupported",
+        "system": "Darwin"
+      }
+    ],
     "release_outside": [
       {
         "label": "window-12",
@@ -361,7 +385,9 @@
     "markdown_render": [
       "text"
     ],
-    "monitor_sample": [],
+    "monitor_sample": [
+      "pane"
+    ],
     "mouse": [
       "pane",
       "action",

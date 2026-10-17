@@ -596,7 +596,7 @@ function monitorBlock(info: BlockInfo, root: HTMLElement): Instance {
     // A hidden window (or a tab that is not shown) costs nothing: the sample waits.
     if (!document.hidden && root.offsetParent !== null) {
       try {
-        const s = readSample(await call<unknown>("monitor_sample"));
+        const s = readSample(await call<unknown>("monitor_sample", { pane: info.pane }));
         if (s && alive) draw(s);
       } catch {
         // the next second asks again

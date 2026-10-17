@@ -190,6 +190,18 @@ test("the paste outcomes and the search and copy-mode answers are pinned", () =>
   for (const a of golden.answers.copy_mode) assert.deepEqual(keys(a), ["active", "selecting", "yanked"]);
 });
 
+test("the monitor sample takes a pane and answers live or unsupported", () => {
+  assert.deepEqual(golden.commands.monitor_sample, ["pane"], "the page names a pane, never an address");
+  const [live, unsupported] = golden.answers.monitor;
+  assert.equal(golden.answers.monitor.length, 2);
+  assert.deepEqual([live.state, unsupported.state], ["live", "unsupported"]);
+  assert.deepEqual(keys(live), ["cores", "cpu", "mem_total", "mem_used", "net_rx", "net_tx", "procs", "state", "uptime"]);
+  assert.deepEqual(keys(unsupported), ["state", "system"]);
+  assert.equal(typeof unsupported.system, "string");
+  assert.equal(live.procs.length, 1);
+  assert.deepEqual(keys(live.procs[0]), ["cpu", "mem", "name", "pid"]);
+});
+
 test("the command table has snake_case argument names and no raw input command", () => {
   const names = Object.keys(golden.commands);
   assert.ok(names.length >= 20, `only ${names.length} commands`);
