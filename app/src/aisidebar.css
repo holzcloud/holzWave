@@ -25,9 +25,23 @@
 .ai-side-text { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-side-caret { flex: none; color: var(--hw-dim); }
 
+/* `New chat`: a hairline button after the title button. */
+.sb-ai .ai-side-new { flex: none; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); padding: 0 .667rem; border: 1px solid var(--hw-line);
+                      border-radius: .333rem; background: none; color: var(--hw-ink); cursor: pointer; font-family: "JetBrains Mono", ui-monospace, monospace;
+                      font-size: 1rem; letter-spacing: normal; text-transform: none; white-space: nowrap; }
+.sb-ai .ai-side-new:hover { background: var(--hw-rose-wash); }
+
+/* One sentence about the list under the head, seen with the list closed: dim, and a refusal in the danger colour and underlined. */
+.sb-ai .ai-side-status { flex: none; margin: 0; padding: .333rem .833rem; border-bottom: 1px solid var(--hw-line); color: var(--hw-dim);
+                         font-size: calc(11rem / 12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-ai .ai-side-status[hidden] { display: none; }
+.sb-ai .ai-side-status[data-kind="error"] { color: var(--hw-danger); text-decoration: underline; }
+
 /* The list: flat, under the head, at most 40 % of the column, scrolling inside. */
 .sb-ai .ai-side-chats { flex: none; box-sizing: border-box; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--hw-line); }
 .sb-ai .ai-side-chats[hidden] { display: none; }
+.ai-side-notes { padding: .333rem .833rem 0; }
+.ai-side-note { margin: 0 0 .333rem; color: var(--hw-dim); font-size: calc(11rem / 12); overflow-wrap: anywhere; }
 .ai-side-list { list-style: none; margin: 0; padding: 0; }
 .ai-side-row { display: flex; align-items: stretch; border-left: 2px solid transparent; }
 .ai-side-row[data-current="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
@@ -35,6 +49,12 @@
                        column-gap: .5rem; align-items: center; min-height: max(28px, calc(28rem / 12)); padding: .333rem .5rem;
                        border: 0; background: none; color: var(--hw-ink); cursor: pointer; font: inherit; text-align: left; }
 .sb-ai .ai-side-pick:hover { background: var(--hw-rose-wash); }
+/* The delete button: the first press arms it and it says `Delete?` (the word is the cue, the danger colour and the underline back it). */
+.sb-ai .ai-side-del { flex: none; align-self: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); margin-right: .5rem; padding: 0 .5rem;
+                      border: 1px solid var(--hw-line); border-radius: .333rem; background: none; color: var(--hw-dim); cursor: pointer;
+                      font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: normal; text-transform: none; }
+.sb-ai .ai-side-del:hover { color: var(--hw-ink); }
+.sb-ai .ai-side-del[data-armed="true"] { border-color: var(--hw-danger); color: var(--hw-danger); text-decoration: underline; }
 .ai-side-mark { grid-column: 1; grid-row: 1 / span 2; align-self: start; color: var(--hw-ink); }
 .ai-side-name { grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-side-meta { grid-column: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--hw-dim);

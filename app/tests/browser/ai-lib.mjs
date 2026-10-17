@@ -428,3 +428,11 @@ export const sideRows = (page) =>
       canDelete: row.querySelector("button.ai-side-del") !== null,
     })),
   );
+
+/** Open the list of chats from the title button, press the pick button of `id` and wait for the list to close. */
+export async function pickChat(page, id) {
+  await page.locator(".ai-side-title").click();
+  await page.waitForSelector("#ai-side-chats:not([hidden]) li.ai-side-row");
+  await page.locator(`li.ai-side-row[data-id="${id}"] button.ai-side-pick`).click();
+  await page.waitForFunction(() => document.querySelector("#ai-side-chats").hidden);
+}

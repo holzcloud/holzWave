@@ -6,18 +6,20 @@
 // press: not at launch, not when the column opens as the sidebar, not when the chat mounts or redraws.
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
-import { chatTitles } from "./blockstate.js";
-import { mountChat } from "./chat.js";
+import { chatTitles, paneBlocks } from "./blockstate.js";
+import { chatClosed, mountChat, releaseChat } from "./chat.js";
 import type { ChatView } from "./chat.js";
 import { isChatId } from "./chatstate.js";
 import { faultText } from "./chatview.js";
-import { headTitle, listRows, readChatList } from "./chatlist.js";
+import { LIST_NOTES, armWords, headTitle, listRows, readChatList } from "./chatlist.js";
 import type { RowView } from "./chatlist.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
+import { applyView } from "./scene.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
+import type { View } from "./types.js";
 
 /** What the column hands to the AI form: whether it is shown, how to show it, how to measure the stage again, how to redraw the sidebar. */
 export interface ColumnHooks {
@@ -38,14 +40,25 @@ let host: HTMLElement | null = null;
 let titleButton: HTMLButtonElement | null = null;
 let titleText: HTMLElement | null = null;
 let caret: HTMLElement | null = null;
+let statusLine: HTMLElement | null = null;
 let listBox: HTMLElement | null = null;
+let notesBox: HTMLElement | null = null;
 let listEl: HTMLElement | null = null;
 let form: Form = "sidebar";
 let view: ChatView | null = null;
 let current: string | null = null;
 let listOpen = false;
 let reading = false;
+let making = false;
 let opening: Promise<string | null> | null = null;
+/** The delete button that the first press armed, or null. */
+let armed: HTMLButtonElement | null = null;
+/** The chats this form has shown, oldest first: each one that is not on screen is let go of when it is idle. */
+const visited: string[] = [];
+/** The most chats the sweep remembers. */
+const MAX_VISITED = 64;
+/** Numbers the names of the rows, so each delete button is described by its own row. */
+let rowNumber = 0;
 
 /** The id of the list region, named by the title button. */
 const LIST_ID = "ai-side-chats";
@@ -93,18 +106,26 @@ export async function initAiSidebar(box: HTMLElement, main: HTMLElement, handed:
   caret = el("span", "ai-side-caret", titleButton);
   caret.textContent = "▾";
   titleButton.addEventListener("click", () => void toggleList());
+  const fresh = control("ai-side-new", bar, "＋ New chat");
+  fresh.addEventListener("click", () => void pressNew());
+
+  statusLine = el("p", "ai-side-status", root);
+  statusLine.setAttribute("role", "status");
+  statusLine.hidden = true;
 
   listBox = el("div", "ai-side-chats", root);
   listBox.id = LIST_ID;
   listBox.hidden = true;
+  notesBox = el("div", "ai-side-notes", listBox);
   listEl = el("ul", "ai-side-list", listBox);
   listEl.setAttribute("aria-label", "Chats");
+  listBox.addEventListener("keydown", onListKey);
 
   // The block classes put the chat's buttons and rules to work inside the column: its style sheets are written for a
   // block root (`.block button` is the reset the chat's controls start from).
   host = el("div", "block block-chat side-chat", root);
 
-  for (const node of [back, titleButton]) {
+  for (const node of [back, titleButton, fresh]) {
     node.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
@@ -138,6 +159,7 @@ function setForm(next: Form): void {
   if (next === "sidebar") {
     // The chat module keeps the session, so coming back costs one snapshot.
     closeList();
+    say("", "note");
     view?.dispose();
     view = null;
     if (hooks.shown()) hooks.refresh();
@@ -153,6 +175,21 @@ function showChat(id: string): void {
   else if (view.conversation !== id) view.show(id);
   current = id;
   if (titleText !== null) setText(titleText, headTitle(chatTitles.get(id) ?? ""));
+  sweep(id);
+}
+
+/**
+ * Remember that `id` was shown, and let go of every other chat this form showed that is idle (`releaseChat` keeps a chat that
+ * replies, waits for a decision or holds a draft). A switch, a new chat, a delete and the opening of the list all end here.
+ */
+function sweep(on: string): void {
+  const at = visited.indexOf(on);
+  if (at >= 0) visited.splice(at, 1);
+  visited.push(on);
+  while (visited.length > MAX_VISITED) visited.shift();
+  for (const id of [...visited]) {
+    if (id !== on && releaseChat(id)) visited.splice(visited.indexOf(id), 1);
+  }
 }
 
 async function open(newChat: boolean): Promise<string | null> {
@@ -207,14 +244,67 @@ export function sidebarConversation(): string | null {
 
 // ---- the list ----------------------------------------------------------------------------------------------------------
 
+/** Say one sentence about the list under the head, where it is seen with the list closed; an empty text clears it. */
+function say(text: string, kind: "note" | "error"): void {
+  if (statusLine === null) return;
+  setText(statusLine, text);
+  statusLine.hidden = text === "";
+  if (text === "") statusLine.removeAttribute("data-kind");
+  else statusLine.dataset.kind = kind;
+}
+
+function disarm(): void {
+  const button = armed;
+  if (button === null) return;
+  armed = null;
+  button.removeAttribute("data-armed");
+  setText(button, armWords(false));
+  document.removeEventListener("pointerdown", onOutsidePress, true);
+  document.removeEventListener("keydown", onOutsideKey, true);
+}
+
+/** The first press on a delete button: it says `Delete?` and waits for a second press on the same button. */
+function arm(button: HTMLButtonElement): void {
+  disarm();
+  armed = button;
+  button.dataset.armed = "true";
+  setText(button, armWords(true));
+  document.addEventListener("pointerdown", onOutsidePress, true);
+  document.addEventListener("keydown", onOutsideKey, true);
+}
+
+/** A press anywhere but on the armed button disarms it. */
+function onOutsidePress(e: Event): void {
+  if (armed !== null && e.target !== armed) disarm();
+}
+
+/** A key anywhere but on the armed button disarms it; `Escape` inside the list is the list's own and disarms first. */
+function onOutsideKey(e: Event): void {
+  if (armed === null) return;
+  const key = (e as KeyboardEvent).key;
+  const inList = listBox !== null && e.target instanceof Node && listBox.contains(e.target);
+  if (key === "Escape" && inList) return;
+  if (e.target === armed && (key === "Enter" || key === " ")) return;
+  disarm();
+}
+
 function closeList(): void {
+  disarm();
   listOpen = false;
   if (listBox !== null) listBox.hidden = true;
   titleButton?.setAttribute("aria-expanded", "false");
   if (caret !== null) setText(caret, "▾");
 }
 
+/** The pane of this window that shows each chat, from the core's list of blocks. */
+function chatPanes(): Map<string, number> {
+  const panes = new Map<string, number>();
+  for (const block of paneBlocks.values()) if (block.kind === "chat") panes.set(block.path, block.pane);
+  return panes;
+}
+
 async function toggleList(): Promise<void> {
+  say("", "note");
   if (listOpen) {
     closeList();
     return;
@@ -222,24 +312,32 @@ async function toggleList(): Promise<void> {
   if (reading || current === null) return;
   reading = true;
   let raw: unknown = null;
+  let sentence = "";
   try {
     raw = await call<unknown>("ai_conversation_list");
-  } catch {
-    raw = null;
+  } catch (e) {
+    sentence = faultText(e);
   } finally {
     reading = false;
   }
   if (form !== "chat" || current === null || listBox === null) return;
-  const chats = typeof raw === "object" && raw !== null ? readChatList(raw).chats : [];
-  drawList(listRows(chats, current, chatTitles.get(current) ?? "", new Map(), Math.floor(Date.now() / 1000)));
+  const understood = typeof raw === "object" && raw !== null && !Array.isArray(raw);
+  const list = understood ? readChatList(raw) : { chats: [], notes: [] };
+  if (!understood && sentence === "") sentence = LIST_NOTES.unreadable;
+  say(sentence, "error");
+  drawList(list.notes, listRows(list.chats, current, chatTitles.get(current) ?? "", chatPanes(), Math.floor(Date.now() / 1000)));
+  disarm();
   listOpen = true;
   listBox.hidden = false;
   titleButton?.setAttribute("aria-expanded", "true");
   if (caret !== null) setText(caret, "▴");
+  sweep(current);
 }
 
-function drawList(rows: readonly RowView[]): void {
-  if (listEl === null) return;
+function drawList(notes: readonly string[], rows: readonly RowView[]): void {
+  if (listEl === null || notesBox === null) return;
+  notesBox.replaceChildren();
+  for (const note of notes) el("p", "ai-side-note", notesBox).textContent = note;
   listEl.replaceChildren();
   for (const row of rows) {
     const item = el("li", "ai-side-row", listEl);
@@ -249,15 +347,109 @@ function drawList(rows: readonly RowView[]): void {
     const pick = control("ai-side-pick", item, "");
     if (row.current) pick.setAttribute("aria-current", "true");
     el("span", "ai-side-mark", pick).textContent = row.mark;
-    el("span", "ai-side-name", pick).textContent = row.title;
+    const name = el("span", "ai-side-name", pick);
+    name.textContent = row.title;
+    name.id = `ai-side-name-${++rowNumber}`;
     el("span", "ai-side-meta", pick).textContent = row.meta;
-    pick.addEventListener("click", () => choose(row));
+    pick.addEventListener("click", () => void choose(row));
+    if (row.canDelete) {
+      const del = control("ai-side-del", item, armWords(false));
+      del.setAttribute("aria-label", "Delete");
+      del.setAttribute("aria-describedby", name.id);
+      del.addEventListener("click", () => {
+        say("", "note");
+        if (armed === del) void remove(row.id);
+        else arm(del);
+      });
+    }
   }
 }
 
-/** A press on the pick button of a row. */
-function choose(row: RowView): void {
+/** A press on the pick button of a row: show that chat, or focus the pane that shows it. */
+async function choose(row: RowView): Promise<void> {
+  say("", "note");
+  if (row.pane !== null) {
+    const pane = row.pane;
+    if (!(state.view?.panes.some(([id]) => id === pane) ?? false)) {
+      disarm();
+      say(LIST_NOTES.otherTab, "note");
+      return;
+    }
+    try {
+      applyView(await call<View>("focus_pane", { pane }));
+    } catch (e) {
+      say(faultText(e), "error");
+      return;
+    }
+    closeList();
+    return;
+  }
   closeList();
   if (row.id !== current) showChat(row.id);
   view?.focus();
+}
+
+/** The second press on an armed delete button: the core deletes the chat with its file and stops a reply of it. */
+async function remove(id: string): Promise<void> {
+  disarm();
+  try {
+    await call("ai_conversation_delete", { conversation: id });
+  } catch (e) {
+    say(faultText(e), "error");
+    return;
+  }
+  listEl?.querySelector(`li.ai-side-row[data-id="${id}"]`)?.remove();
+  say(LIST_NOTES.deleted, "note");
+  const wasOnScreen = id === current;
+  if (wasOnScreen) {
+    // The chat on screen is gone: a new empty one takes its place, and the list is read again when it is next opened.
+    closeList();
+    const sentence = await openSidebarChat(true);
+    if (sentence !== null) say(sentence, "error");
+  }
+  const at = visited.indexOf(id);
+  if (at >= 0) visited.splice(at, 1);
+  // The core has stopped a reply and written nothing back; the page forgets the session, and later events of the chat find none.
+  chatClosed(id);
+}
+
+async function pressNew(): Promise<void> {
+  if (making) return;
+  making = true;
+  try {
+    say("", "note");
+    const sentence = await openSidebarChat(true);
+    if (sentence !== null) {
+      say(sentence, "error");
+      return;
+    }
+    closeList();
+  } finally {
+    making = false;
+  }
+}
+
+/** The keys of the list: the arrows move between the rows, `Escape` disarms first and then closes. */
+function onListKey(e: KeyboardEvent): void {
+  if (listBox === null) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    if (armed !== null) {
+      disarm();
+      return;
+    }
+    closeList();
+    titleButton?.focus({ preventScroll: true });
+    return;
+  }
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "Home" && e.key !== "End") return;
+  const picks = Array.from(listBox.querySelectorAll<HTMLButtonElement>("button.ai-side-pick"));
+  if (picks.length === 0) return;
+  e.preventDefault();
+  const here = e.target instanceof Element ? e.target.closest("li.ai-side-row")?.querySelector("button.ai-side-pick") : null;
+  const at = picks.findIndex((p) => p === here);
+  const to =
+    e.key === "Home" ? 0 : e.key === "End" ? picks.length - 1 : Math.min(picks.length - 1, Math.max(0, at + (e.key === "ArrowDown" ? 1 : -1)));
+  picks[to]?.focus({ preventScroll: true });
 }

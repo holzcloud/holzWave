@@ -3,13 +3,17 @@
 // typed message leaves as the one send call. Nothing is read, made or deleted unasked.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { SAVED_A, SAVED_B, boot, calls, openSide, saveChats, sendText, sideRows } from "./ai-lib.mjs";
+import { SAVED_A, SAVED_B, VIEW3, boot, calls, chatBlock, openSide, pickChat, saveChats, sendText, sideRows } from "./ai-lib.mjs";
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
   await traceCase(page, url);
   await contractCase(page, url);
   await quietCase(page, url);
+  await listCase(page, url);
+  await newCase(page, url);
+  await deleteCase(page, url);
+  await paneCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -178,4 +182,307 @@ async function quietCase(page, url) {
   await page.waitForSelector('#sidebar:not([hidden])[data-form="chat"] textarea.chat-input');
   assert.equal((await calls(page, "widgets_list")).length, reads, "the sidebar's widgets are not read for the AI form");
   assert.equal((await aiCalls(page)).filter((c) => c === "ai_conversation_new").length, 1, "the chat that was on screen is shown again");
+}
+
+const PROTOCOL = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
+const FAULT = (text) => ({ code: "store", reason: null, text });
+const status = (page) => page.locator("p.ai-side-status");
+const focusedRow = (page) => page.evaluate(() => document.activeElement?.closest("li.ai-side-row")?.dataset.id ?? null);
+
+/** Open the list from the title button and wait for it to be drawn. */
+async function openList(page) {
+  await page.locator(".ai-side-title").click();
+  await page.waitForSelector("#ai-side-chats:not([hidden])");
+}
+
+async function listCase(page, url) {
+  await boot(page, url);
+  await saveChats(page, [SAVED_A, SAVED_B]);
+  await openSide(page);
+
+  // The list is read each time it opens and nowhere else.
+  await openList(page);
+  assert.equal((await calls(page, "ai_conversation_list")).length, 1);
+  await page.locator(".ai-side-title").click();
+  assert.equal(await page.locator("#ai-side-chats").isHidden(), true);
+  assert.equal(await page.locator(".ai-side-caret").textContent(), "▾");
+  assert.equal((await calls(page, "ai_conversation_list")).length, 1, "closing reads nothing");
+  await openList(page);
+  assert.equal((await calls(page, "ai_conversation_list")).length, 2);
+  assert.equal(await page.locator(".ai-side-caret").textContent(), "▴");
+  assert.deepEqual((await sideRows(page)).map((r) => r.id), ["chat-mock-1", "chat-saved-a", "chat-saved-b"], "the core's order, the unsaved chat first");
+
+  // Escape with the focus in the list closes it and puts the focus on the title button.
+  await page.locator('li[data-id="chat-saved-a"] button.ai-side-pick').focus();
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#ai-side-chats").isHidden(), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("ai-side-title")), true);
+
+  // The arrows move between the rows; Enter on a pick button switches.
+  await openList(page);
+  const first = page.locator('li[data-id="chat-mock-1"] button.ai-side-pick');
+  await first.focus();
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await focusedRow(page), "chat-saved-a");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await focusedRow(page), "chat-mock-1");
+  await page.keyboard.press("ArrowUp");
+  assert.equal(await focusedRow(page), "chat-mock-1", "the first stays");
+  await page.keyboard.press("End");
+  assert.equal(await focusedRow(page), "chat-saved-b");
+  await page.keyboard.press("Home");
+  assert.equal(await focusedRow(page), "chat-mock-1");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => document.querySelectorAll("#sidebar .chat-msg").length === 2);
+  assert.equal(await page.locator(".ai-side-title .ai-side-text").textContent(), SAVED_A.title);
+
+  // Notes of the core: shown as text above the rows, at most five.
+  await page.evaluate(() => { window.__MOCK__.ai.chatNotes = ["chat-9.json: damaged"]; });
+  await openList(page);
+  assert.deepEqual(await page.locator("p.ai-side-note").allTextContents(), ["chat-9.json: damaged"]);
+  await page.locator(".ai-side-title").click();
+  await page.evaluate(() => { window.__MOCK__.ai.chatNotes = Array.from({ length: 6 }, (_, i) => `note ${i}`); });
+  await openList(page);
+  assert.equal(await page.locator("p.ai-side-note").count(), 5);
+  await page.locator(".ai-side-title").click();
+  await page.evaluate(() => { window.__MOCK__.ai.chatNotes = []; });
+
+  // A refusal is said in the core's words and leaves the row of the chat on screen; a later read clears it.
+  await page.evaluate((f) => window.__MOCK__.on("ai_conversation_list", () => { throw f; }), FAULT("The chats could not be read."));
+  await openList(page);
+  assert.equal(await status(page).textContent(), "The chats could not be read.");
+  assert.equal(await status(page).getAttribute("data-kind"), "error");
+  assert.deepEqual((await sideRows(page)).map((r) => r.id), ["chat-saved-a"], "only the chat on screen");
+  await page.locator(".ai-side-title").click();
+  await page.evaluate(() => window.__MOCK__.on("ai_conversation_list", null));
+  await openList(page);
+  assert.equal(await status(page).isHidden(), true, "a later read clears the sentence");
+  await page.locator(".ai-side-title").click();
+
+  // An answer the reader cannot use.
+  await page.evaluate(() => window.__MOCK__.on("ai_conversation_list", () => null));
+  await openList(page);
+  assert.equal(await status(page).textContent(), "The list was not understood.");
+  assert.equal(await status(page).getAttribute("data-kind"), "error");
+  await page.locator(".ai-side-title").click();
+  await page.evaluate(() => window.__MOCK__.on("ai_conversation_list", null));
+
+  // Sixty stored chats: the list is at most 40 % of the column and scrolls inside; the column never scrolls sideways.
+  await saveChats(page, Array.from({ length: 60 }, (_, i) => ({ ...SAVED_B, id: `chat-bulk-${i}`, title: `Bulk chat ${i} with a title that is long enough to be cut by the column` })));
+  await openList(page);
+  const box = await page.evaluate(() => {
+    const list = document.getElementById("ai-side-chats");
+    const side = document.getElementById("sidebar");
+    return {
+      list: list.getBoundingClientRect().height, side: side.getBoundingClientRect().height, scroll: list.scrollHeight, client: list.clientHeight,
+      overflow: getComputedStyle(list).overflowY, wide: side.scrollWidth, shown: side.clientWidth,
+    };
+  });
+  assert.ok(box.list <= box.side * 0.4 + 1, `the list is at most 40 % of the column (${box.list} of ${box.side})`);
+  assert.ok(box.scroll > box.client && ["auto", "scroll"].includes(box.overflow), "it scrolls inside");
+  assert.ok(box.wide <= box.shown, "no horizontal scroll");
+}
+
+async function newCase(page, url) {
+  await boot(page, url);
+  await saveChats(page, [SAVED_A, SAVED_B]);
+  await openSide(page);
+  assert.equal(await page.locator("button.ai-side-new").textContent(), "＋ New chat");
+  await pickChat(page, "chat-saved-a");
+  await page.waitForFunction(() => document.querySelectorAll("#sidebar .chat-msg").length === 2);
+
+  // A press makes a second id, no list call, an empty chat and the keyboard on the composer.
+  const lists = (await calls(page, "ai_conversation_list")).length;
+  await page.locator("button.ai-side-new").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_conversation_new").length === 2);
+  await page.waitForFunction(() => document.querySelectorAll("#sidebar .chat-msg").length === 0);
+  assert.equal((await calls(page, "ai_conversation_list")).length, lists, "no list call");
+  assert.equal(await page.locator(".ai-side-title .ai-side-text").textContent(), "new chat");
+  assert.equal(await page.evaluate(() => document.activeElement?.matches("textarea.chat-input")), true);
+  assert.deepEqual((await calls(page, "ai_turn_snapshot")).at(-1), { conversation: "chat-mock-2" });
+
+  // The chat that was left is still in the next list, and an open list is closed by the press.
+  await openList(page);
+  assert.deepEqual((await sideRows(page)).map((r) => r.id), ["chat-mock-2", "chat-saved-a", "chat-saved-b"]);
+  await page.locator("button.ai-side-new").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_conversation_new").length === 3);
+  assert.equal(await page.locator("#ai-side-chats").isHidden(), true, "the press closed the list");
+
+  // Two quick presses while the answer is held make one call.
+  await page.evaluate(() => window.__MOCK__.on("ai_conversation_new", () => new Promise((go) => { window.__RELEASE_NEW = () => go("chat-held-1"); })));
+  await page.evaluate(() => { const b = document.querySelector("button.ai-side-new"); b.click(); b.click(); });
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_conversation_new").length === 4);
+  await page.waitForTimeout(100);
+  assert.equal((await calls(page, "ai_conversation_new")).length, 4, "one call for two presses");
+  await page.evaluate(() => window.__RELEASE_NEW());
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_turn_snapshot").some((a) => a.conversation === "chat-held-1"));
+
+  // A refusal leaves the chat as it was and says why.
+  await page.evaluate((f) => window.__MOCK__.on("ai_conversation_new", () => { throw f; }), FAULT("The chat could not be made."));
+  const snapshots = (await calls(page, "ai_turn_snapshot")).length;
+  await page.locator("button.ai-side-new").click();
+  await page.waitForFunction(() => document.querySelector("p.ai-side-status")?.textContent === "The chat could not be made.");
+  assert.equal(await status(page).getAttribute("data-kind"), "error");
+  assert.equal((await calls(page, "ai_turn_snapshot")).length, snapshots, "the chat on screen is unchanged");
+}
+
+async function deleteCase(page, url) {
+  await boot(page, url);
+  await saveChats(page, [SAVED_A, SAVED_B]);
+  await openSide(page);
+  await openList(page);
+  const unsaved = (await sideRows(page))[0];
+  assert.equal(unsaved.id, "chat-mock-1");
+  assert.equal(unsaved.canDelete, false, "the unsaved chat has no delete");
+  await page.locator(".ai-side-title").click();
+  await pickChat(page, "chat-saved-a");
+  await page.waitForFunction(() => document.querySelectorAll("#sidebar .chat-msg").length === 2);
+  await openList(page);
+  const del = (id) => page.locator(`li[data-id="${id}"] button.ai-side-del`);
+  assert.equal(await del("chat-saved-b").textContent(), "×");
+  assert.equal(await del("chat-saved-b").getAttribute("aria-label"), "Delete");
+  assert.equal(await page.locator("button.ai-side-del").count(), 2, "a saved chat on screen can be deleted too");
+
+  // The first press arms and sends nothing.
+  await del("chat-saved-b").click();
+  assert.equal(await del("chat-saved-b").getAttribute("data-armed"), "true");
+  assert.equal(await del("chat-saved-b").textContent(), "Delete?");
+  assert.equal((await calls(page, "ai_conversation_delete")).length, 0);
+  // Escape disarms and the list stays; a second Escape closes it.
+  await del("chat-saved-b").focus();
+  await page.keyboard.press("Escape");
+  assert.equal((await sideRows(page)).some((r) => r.armed), false);
+  assert.equal(await page.locator("#ai-side-chats").isHidden(), false);
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#ai-side-chats").isHidden(), true);
+
+  // Any other press disarms: another button's first press, the title button, reading the list again.
+  await openList(page);
+  await del("chat-saved-b").click();
+  await del("chat-saved-a").click();
+  assert.deepEqual((await sideRows(page)).map((r) => r.armed), [true, false], "arming another disarms the first (rows: A, B)");
+  await page.locator(".ai-side-title").click();
+  assert.equal(await page.locator("button.ai-side-del[data-armed]").count(), 0, "closing disarms");
+  await openList(page);
+  await del("chat-saved-b").click();
+  await page.locator(".ai-side-title").click();
+  await openList(page);
+  assert.equal((await sideRows(page)).some((r) => r.armed), false, "reading again disarms");
+  // A press or a key anywhere else disarms it, the list stays open.
+  await del("chat-saved-b").click();
+  await page.locator(".ai-side-head span").first().click();
+  assert.equal(await page.locator("button.ai-side-del[data-armed]").count(), 0, "a press elsewhere disarms");
+  assert.equal(await page.locator("#ai-side-chats").isHidden(), false);
+  await del("chat-saved-b").click();
+  await page.keyboard.press("a");
+  assert.equal(await page.locator("button.ai-side-del[data-armed]").count(), 0, "a key elsewhere disarms");
+  await page.locator(".ai-side-title").click();
+  assert.equal((await calls(page, "ai_conversation_delete")).length, 0, "nothing was deleted by any of it");
+
+  // The second press on the same button deletes: one call with the row's id.
+  await openList(page);
+  await del("chat-saved-b").click();
+  await del("chat-saved-b").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_conversation_delete").length === 1);
+  const asked = (await calls(page, "ai_conversation_delete"))[0];
+  assert.deepEqual(asked, { conversation: "chat-saved-b" });
+  assert.deepEqual(Object.keys(asked), PROTOCOL.commands.ai_conversation_delete);
+  await page.waitForFunction(() => !document.querySelector('li[data-id="chat-saved-b"]'));
+  assert.equal(await status(page).textContent(), "Chat deleted.");
+  assert.equal(await status(page).getAttribute("data-kind"), "note");
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.ai.deleted), ["chat-saved-b"]);
+  assert.equal(await page.locator(".ai-side-title .ai-side-text").textContent(), SAVED_A.title, "the chat on screen is unchanged");
+
+  // Deleting the chat on screen shows a new empty chat.
+  await del("chat-saved-a").click();
+  await del("chat-saved-a").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_conversation_delete").length === 2);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_conversation_new").length === 2);
+  await page.waitForFunction(() => document.querySelectorAll("#sidebar .chat-msg").length === 0);
+  assert.equal(await page.locator(".ai-side-title .ai-side-text").textContent(), "new chat");
+  assert.equal(await page.evaluate(() => document.activeElement?.matches("textarea.chat-input")), true);
+  await openList(page);
+  assert.deepEqual((await sideRows(page)).map((r) => r.id), ["chat-mock-2"], "its row is gone at the next read");
+  await page.locator(".ai-side-title").click();
+
+  // A refusal is told in the core's words and keeps the row.
+  await saveChats(page, [SAVED_A, SAVED_B]);
+  await page.evaluate((f) => window.__MOCK__.on("ai_conversation_delete", () => { throw f; }), FAULT("The chat could not be deleted."));
+  await openList(page);
+  await del("chat-saved-b").click();
+  await del("chat-saved-b").click();
+  await page.waitForFunction(() => document.querySelector("p.ai-side-status")?.textContent === "The chat could not be deleted.");
+  assert.equal(await status(page).getAttribute("data-kind"), "error");
+  assert.equal(await page.locator('li[data-id="chat-saved-b"]').count(), 1, "the row stays");
+  assert.equal(await page.locator("button.ai-side-del[data-armed]").count(), 0);
+  await page.evaluate(() => window.__MOCK__.on("ai_conversation_delete", null));
+  await page.locator(".ai-side-title").click();
+
+  // A reply that runs while its chat is deleted: the late end event changes nothing in the new chat.
+  await pickChat(page, "chat-saved-b");
+  await page.waitForFunction(() => document.querySelectorAll("#sidebar .chat-msg").length === 2);
+  await page.evaluate(() => window.__MOCK__.ai.hold(2));
+  await sendText(page, "keep talking");
+  await page.waitForFunction(() => document.querySelector(".chat-partial .chat-text")?.textContent === "Hello ");
+  await openList(page);
+  await del("chat-saved-b").click();
+  await del("chat-saved-b").click();
+  await page.waitForFunction(() => window.__MOCK__.ai.deleted.includes("chat-saved-b"));
+  await page.waitForFunction(() => document.querySelectorAll("#sidebar .chat-msg").length === 0 && !document.querySelector("#sidebar .chat-partial"));
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator("#sidebar .chat-msg, #sidebar .chat-partial, #sidebar .chat-end").count(), 0, "the new chat is untouched");
+}
+
+async function paneCase(page, url) {
+  await boot(page, url, { view: VIEW3, blocks: [chatBlock("chat-saved-b")] });
+  await saveChats(page, [SAVED_A, SAVED_B]);
+  await page.waitForSelector('.block[data-pane="3"].block-chat');
+  await openSide(page);
+  await pickChat(page, "chat-saved-a");
+  await page.waitForFunction(() => document.querySelectorAll("#sidebar .chat-msg").length === 2);
+
+  await openList(page);
+  const rows = await sideRows(page);
+  const b = rows.find((r) => r.id === "chat-saved-b");
+  assert.equal(b.pane, 3);
+  assert.equal(b.meta, "llama3.2 · in pane 3");
+  assert.equal(b.canDelete, false, "a chat in a pane has no delete");
+  const snapshots = (await calls(page, "ai_turn_snapshot")).length;
+  await page.locator('li[data-id="chat-saved-b"] button.ai-side-pick').click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("focus_pane").length === 1);
+  assert.deepEqual((await calls(page, "focus_pane"))[0], { pane: 3 });
+  assert.equal(await page.locator("#ai-side-chats").isHidden(), true);
+  assert.equal(await page.locator(".ai-side-title .ai-side-text").textContent(), SAVED_A.title, "the column stays on its chat");
+  assert.equal((await calls(page, "ai_turn_snapshot")).length, snapshots, "the column asked for no snapshot");
+
+  // With the pane in another tab the press only says so.
+  const without = { ...VIEW3, panes: VIEW3.panes.slice(0, 2), tabs: [{ title: "shell", active: true, focus: 2, panes: 2 }] };
+  await page.evaluate((v) => window.__MOCK__.emit("layout", v), without);
+  await page.waitForFunction(() => !document.querySelector('.block[data-pane="3"].block-chat'));
+  await openList(page);
+  await page.locator('li[data-id="chat-saved-b"] button.ai-side-pick').click();
+  await page.waitForFunction(() => document.querySelector("p.ai-side-status")?.textContent === "That chat is open in another tab.");
+  assert.equal((await calls(page, "focus_pane")).length, 1, "no further focus_pane call");
+  assert.equal(await page.locator("#ai-side-chats").isHidden(), false, "the list stays");
+
+  // `ai.new_chat` opens a pane with a fresh id and never the chat the column shows.
+  await page.evaluate(() => window.__registry.runAction("ai.new_chat"));
+  await page.waitForFunction(() => window.__MOCK__.callsOf("block_open").length === 1);
+  const opened = (await calls(page, "block_open"))[0];
+  assert.equal(opened.kind, "chat");
+  assert.notEqual(opened.path, "chat-saved-a");
+  assert.equal(opened.path, "chat-mock-2");
+  await page.locator(".ai-side-title").click();
+
+  // After the pane is closed the chat is an ordinary stored chat again.
+  await page.evaluate(() => { window.__BLOCKS = window.__BLOCKS.filter((b) => b.path !== "chat-saved-b"); });
+  await page.evaluate(async () => (await import(new URL("blocks.js", location.href).href)).refreshBlocks());
+  await openList(page);
+  const after = (await sideRows(page)).find((r) => r.id === "chat-saved-b");
+  assert.equal(after.pane, null);
+  assert.equal(after.canDelete, true);
+  assert.match(after.meta, /3 d ago$/);
+  await page.locator('li[data-id="chat-saved-b"] button.ai-side-pick').click();
+  await page.waitForFunction(() => document.querySelector(".ai-side-title .ai-side-text")?.textContent === "Plan the backup job");
 }

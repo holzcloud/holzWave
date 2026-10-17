@@ -1442,6 +1442,32 @@ export function chatClosed(conversation: string): void {
   updateBadge();
 }
 
+/**
+ * Let go of the page's session of an idle chat that nothing shows: the sidebar column calls this for a chat it left, so an
+ * attached offer, a share's card and a finished transcript of one chat never wait behind another. The session stays while a
+ * view shows it, while a reply runs or a send is on its way, while a call waits for a decision, while the person has a draft
+ * in it and while a chat pane holds the chat. The core's chat and its files are not touched, no command is called and no reply
+ * is stopped; the next view that shows the chat makes a fresh session and asks for a snapshot. Answers whether it let go.
+ */
+export function releaseChat(conversation: string): boolean {
+  const s = sessions.get(conversation);
+  if (s === undefined) return false;
+  if (s.views.size > 0 || s.feed.state.running || s.sending || s.feed.state.pending.length > 0) return false;
+  if (s.approvals.waiting() > 0 || s.draft !== "") return false;
+  for (const block of paneBlocks.values()) {
+    if (block.kind === "chat" && block.path === conversation) return false;
+  }
+  dirty.delete(s);
+  s.consent?.dispose();
+  s.approvals.dispose();
+  s.undos.dispose();
+  sessions.delete(conversation);
+  wantFocus.delete(conversation);
+  setChatTitle(conversation, "");
+  updateBadge();
+  return true;
+}
+
 /** Make the button, register the two actions and listen to the core's `ai` events. Call once at start-up. */
 export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void> {
   opener = open;

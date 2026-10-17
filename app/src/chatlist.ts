@@ -119,6 +119,18 @@ export function ageWords(updated: number, now: number): string {
   return ago(updated, now);
 }
 
+/** The words of the delete button of a row: the mark, and after the first press the question. */
+export function armWords(armed: boolean): string {
+  return armed ? "Delete?" : "×";
+}
+
+/** The sentences the list says itself (the core's refusals are said in its own words). */
+export const LIST_NOTES = {
+  deleted: "Chat deleted.",
+  otherTab: "That chat is open in another tab.",
+  unreadable: "The list was not understood.",
+} as const;
+
 /** The title the head shows for a chat: the cleaned title, or `new chat` before there is one. */
 export function headTitle(title: string): string {
   const words = titleWords(title);
