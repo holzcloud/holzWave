@@ -743,6 +743,56 @@ characters, and a longer result ends with `[cut for display]`. A message of the 
 `✦ AI · 2` (the number in the warn colour; the number is the cue) with the accessible name `AI chat, 2 calls wait for your
 decision`.
 
+**Words.** Every sentence of the card is fixed, except what the core says: the page holds the words of the tools, of the
+effect and of the states as tables, and the sentences below as constants. The names of the refusals, the tools, the effects
+and the two verdicts are held to the core by a golden file that the core's tests write; a name the core adds or renames fails
+there and in the page's tests in the same change.
+
+| Tool | Words |
+|---|---|
+| `read_file` | Read a file |
+| `list_dir` | List a folder |
+| `grep` | Search files |
+| `read_pane` | Read a pane |
+
+| Effect | Words |
+|---|---|
+| `read` | Reads only. Nothing is changed. |
+
+| Refusal of a decision | The card |
+|---|---|
+| `unknown_call`, `not_pending`, `already_used`, `cancelled`, `duplicate_call`, `too_many`, `not_approved` | `That call is no longer waiting.` (a quiet line, no buttons, the same note in the status line) and one request for the state of the chat |
+| `hash_mismatch`, `payload_changed`, `taint_changed`, `scope_mismatch` | stays, with `The request changed. Nothing ran. Read the card again.`, and one request for the state of the chat |
+| any other reason, an unknown one, `invalid_decision` | stays, with the core's own text above the buttons; an answer that is not the core's refusal reads `The decision could not be sent.` |
+
+A refusal is never retried: the next press is a new decision of the person.
+
+| Sentence | Where |
+|---|---|
+| Approval needed | title of a card that waits |
+| Cannot show in full | title of a request over the caps |
+| Cannot show this request | title of a request that cannot be shown for any other reason |
+| Allow once, Deny | the two buttons |
+| Allows this one call only. Nothing is kept for later. Esc denies. | foot of a card that waits |
+| Sending… | while the verdict travels |
+| Allowed · running…, Denied | after the verdict, until the core's result removes the card |
+| That call is no longer waiting. | an ended card |
+| remote host | chip of a remote target |
+| Untrusted text in this turn | title of the banner |
+| This turn contains text you did not write (output of list_dir). It can try to steer the assistant. Check the target and every field before you allow. | the banner; the brackets name the core's labels and are left out when there are none |
+| The result is sent to llama3.2 at localhost:11434 (this computer). | the destination; the host and the place are left out when the route does not tell them |
+| The result is sent to the model of this chat. | the destination when the route is not known |
+| This request is too large to show in full. It can only be denied. | a request over the caps |
+| This page does not know this kind of request, so it cannot show it. It can only be denied. | an unknown tool or effect |
+| This request could not be read in full. It can only be denied. | a field of a wrong shape |
+| This request cannot be shown or answered here. Stop the reply to end it. | a request with no usable hash |
+| 3 more calls wait for a decision. | beyond the 16 cards that are drawn |
+| Result · untrusted text | label of an opened result |
+| Show result (1.2 KiB), Hide result | the toggle of a result |
+| [cut for display] | end of a result of more than 20000 characters |
+| ran, error, waiting, no result | state words of a tool row, with the marks `✓`, `!`, `…` and `–` |
+| waiting for your decision | status line while calls wait |
+
 **Narrow screens (640 px and narrower).** `Allow once`, `Deny` and the result toggle are at least 44 px high, the strip is
 at most 60 % of the viewport height and scrolls inside, and the payload box scrolls inside.
 

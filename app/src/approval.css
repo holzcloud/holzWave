@@ -52,6 +52,14 @@
 .approval-hash { margin: 0 0 .333rem; color: var(--hw-dim); font-family: "JetBrains Mono", ui-monospace, monospace;
                  font-size: calc(11rem / 12); }
 
+/* Untrusted text in the turn: a 2 px warn bar, the mark and the label say so, and the sentence says what that text can do. */
+.approval-taint { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0 .5rem; margin: 0 0 .333rem; padding: .167rem .5rem;
+                  border: 1px solid var(--hw-line); border-left: 2px solid var(--hw-warn); }
+.approval-taint-mark, .approval-taint-title { color: var(--hw-warn); text-decoration: underline; }
+.approval-taint-mark { font-family: "JetBrains Mono", ui-monospace, monospace; font-weight: 700; text-decoration: none; }
+.approval-taint-text { grid-column: 1 / -1; margin: .167rem 0 0; color: var(--hw-ink); font-family: "Manrope", system-ui, sans-serif;
+                       font-size: 1.083rem; line-height: 1.45; overflow-wrap: anywhere; }
+
 /* The buttons: hairline, mono, uppercase; the one that allows is solid. */
 .approval-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .333rem 0; }
 .chat-approval button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
@@ -73,3 +81,26 @@
 
 /* The number of waiting calls on the title-bar button: the warn colour, and the number itself is the cue. */
 .ai-btn .ai-count { color: var(--hw-warn); }
+
+/* ---- the rows of tool calls in the transcript ----------------------------------------------------------------------- */
+
+.chat-tools { margin: .333rem 0 0; }
+.chat-tool { display: flex; flex-wrap: wrap; align-items: baseline; gap: .167rem .5rem; padding: .167rem 0; border-top: 1px solid var(--hw-line);
+             font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; line-height: 1.4; white-space: normal; }
+.tool-mark { flex: none; width: 1rem; color: var(--hw-dim); }
+.tool-words { flex: none; color: var(--hw-ink); }
+.tool-summary { flex: 1 1 8rem; min-width: 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+.tool-state { flex: none; margin-left: auto; color: var(--hw-dim); }
+.chat-tool[data-state="error"] .tool-mark, .chat-tool[data-state="error"] .tool-state { color: var(--hw-danger); }
+.chat-tool[data-state="error"] .tool-state { text-decoration: underline; }
+.chat-tool[data-state="waiting"] .tool-state { color: var(--hw-warn); }
+.chat-tool .tool-toggle { display: inline-flex; align-items: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); margin-left: 1.5rem;
+                          padding: 0 .667rem; border: 1px solid var(--hw-line); border-radius: .333rem; background: none; color: var(--hw-ink);
+                          cursor: pointer; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: normal;
+                          text-transform: none; }
+.chat-tool .tool-toggle:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.chat-tool .tool-toggle:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.tool-untrusted { flex: 0 0 calc(100% - 1.5rem); margin: .167rem 0 0 1.5rem; color: var(--hw-dim); }
+.tool-result { flex: 0 0 calc(100% - 1.5rem); box-sizing: border-box; max-height: 14rem; margin: 0 0 0 1.5rem; overflow: auto; padding: .333rem .5rem;
+               border: 1px solid var(--hw-line); border-radius: .333rem; color: var(--hw-ink); font-family: "JetBrains Mono", ui-monospace, monospace;
+               font-size: 1rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }

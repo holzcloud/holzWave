@@ -1,0 +1,39 @@
+{
+  "codes": [
+    "unknown_tool",
+    "invalid_arguments",
+    "unavailable",
+    "denied",
+    "too_many",
+    "duplicate_call",
+    "unknown_call",
+    "not_pending",
+    "hash_mismatch",
+    "not_approved",
+    "already_used",
+    "payload_changed",
+    "scope_mismatch",
+    "taint_changed",
+    "cancelled",
+    "host",
+    "not_shared"
+  ],
+  "decisions": [
+    "allow",
+    "deny"
+  ],
+  "effects": [
+    "read",
+    "write",
+    "exec"
+  ],
+  "tools": {
+    "edit_file": "write",
+    "grep": "read",
+    "list_dir": "read",
+    "read_file": "read",
+    "read_pane": "read",
+    "run_command": "exec",
+    "write_file": "write"
+  }
+}

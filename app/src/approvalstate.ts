@@ -7,7 +7,9 @@
 // The core makes the card and its hash from one list of fields; this module keeps that list as it came, in its order, and
 // keeps the hash as it was sent. The page never computes or changes a hash.
 
+import type { ChatMessage } from "./chatstate.js";
 import { faultText } from "./chatview.js";
+import { sizeWords } from "./consentstate.js";
 
 /** What a press decides. The core's two words. */
 export type Verdict = "allow" | "deny";
@@ -53,6 +55,29 @@ export interface Destination {
   /** The place word of the core's locality (`this computer`, `cloud`); null when it is not known. */
   place: string | null;
   /** Whether the place leaves the computer. */
+  leaves: boolean;
+}
+
+/** What became of a tool call: it waits for a decision, ran, ended in an error, or has no result (the turn is over). */
+export type ToolState = "waiting" | "ran" | "error" | "none";
+
+/** One tool call of an assistant message as the transcript draws it. */
+export interface ToolRow {
+  id: string;
+  name: string;
+  summary: string;
+  state: ToolState;
+  /** The result as text, made visible and cut for display; null while there is none. */
+  content: string | null;
+  /** The length of the whole result in UTF-8 bytes. */
+  bytes: number;
+}
+
+/** One piece of the line that says where the result goes. */
+export interface DestinationPart {
+  kind: "text" | "model" | "host" | "place";
+  text: string;
+  /** Whether this place leaves the computer; false for every other piece. */
   leaves: boolean;
 }
 
@@ -318,6 +343,15 @@ export const WORDS = Object.freeze({
   cannotTitleLarge: "Cannot show in full",
   cannotTitle: "Cannot show this request",
   noHash: "This request cannot be shown or answered here. Stop the reply to end it.",
+  resultLabel: "Result · untrusted text",
+  hide: "Hide result",
+  cut: "[cut for display]",
+  destinationLead: "The result is sent to ",
+  taintTail: "It can try to steer the assistant. Check the target and every field before you allow.",
+  stateRan: "ran",
+  stateError: "error",
+  stateWaiting: "waiting",
+  stateNone: "no result",
 });
 
 /** `pane 1 · This computer`: the core's pane number and target label. */
@@ -328,4 +362,130 @@ export function targetWords(pane: number, target: string): string {
 /** `hash 9f3a41c2d7be`: the first characters of the hash the decision will repeat. */
 export function hashWords(hash: string): string {
   return `hash ${hash.slice(0, HASH_SHOWN)}`;
+}
+
+/** The line that says where the result of an approved call goes, as pieces: the place piece is the only one that can leave. */
+export function destinationParts(dest: Destination | null): DestinationPart[] {
+  if (dest === null) return [{ kind: "text", text: WORDS.destinationUnknown, leaves: false }];
+  const parts: DestinationPart[] = [
+    { kind: "text", text: WORDS.destinationLead, leaves: false },
+    { kind: "model", text: dest.model, leaves: false },
+  ];
+  if (dest.host !== null && dest.host !== "") {
+    parts.push({ kind: "text", text: " at ", leaves: false }, { kind: "host", text: dest.host, leaves: false });
+  }
+  if (dest.place !== null) {
+    parts.push({ kind: "text", text: " (", leaves: false }, { kind: "place", text: dest.place, leaves: dest.leaves });
+    parts.push({ kind: "text", text: ").", leaves: false });
+  } else {
+    parts.push({ kind: "text", text: ".", leaves: false });
+  }
+  return parts;
+}
+
+/** The banner of a turn that holds text the user did not write: its title, and a sentence that names the core's labels. */
+export function taintWords(labels: readonly string[]): { title: string; text: string } {
+  const named = labels.length === 0 ? "" : ` (${labels.join(", ")})`;
+  return { title: WORDS.bannerTitle, text: `This turn contains text you did not write${named}. ${WORDS.taintTail}` };
+}
+
+// ---- the rows of tool calls -----------------------------------------------------------------------------------------
+
+/** One result of a tool call as it came. */
+export interface ToolResult {
+  content: string;
+  is_error: boolean;
+}
+
+/** The results of a chat by the id of the call they answer, made in one pass over the messages. */
+export function indexResults(messages: readonly ChatMessage[]): Map<string, ToolResult> {
+  const out = new Map<string, ToolResult>();
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    for (const part of message.parts) {
+      if (part.type === "tool_result") out.set(part.call_id, { content: part.content, is_error: part.is_error });
+    }
+  }
+  return out;
+}
+
+/** The length of `text` in UTF-8 bytes. */
+function utf8Length(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
+ * `text` made visible and cut at `max` characters of what is shown, never in the middle of a character; `tail` is added when
+ * it was cut. Only the first `max` characters of a long text are looked at, so a huge result costs no more than a long one.
+ */
+function cutShown(text: string, max: number, tail: string): string {
+  const visible = showText(text.length > max ? text.slice(0, max) : text);
+  if (text.length <= max && visible.length <= max) return visible;
+  let end = max;
+  const last = visible.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${visible.slice(0, end)}${tail}`;
+}
+
+/**
+ * The rows of the tool calls of one assistant message, one for each `tool_call` part, in order. A call waits while the core
+ * lists it as pending, or has no result while the turn runs; it `ran` or ended in an `error` when it has a result; and has
+ * no result when the turn is over without one. A result for a call that no message holds is never looked up.
+ */
+export function rowsOf(
+  message: ChatMessage,
+  results: ReadonlyMap<string, ToolResult>,
+  pending: ReadonlySet<string>,
+  running: boolean,
+): ToolRow[] {
+  const rows: ToolRow[] = [];
+  for (const part of message.parts) {
+    if (part.type !== "tool_call") continue;
+    const result = results.get(part.id);
+    let state: ToolState;
+    if (result !== undefined) state = result.is_error ? "error" : "ran";
+    else state = pending.has(part.id) || running ? "waiting" : "none";
+    rows.push({
+      id: part.id,
+      name: part.name,
+      summary: cutShown(part.summary, MAX_SUMMARY, "…"),
+      state,
+      content: result === undefined ? null : cutShown(result.content, MAX_SHOWN, `\n${WORDS.cut}`),
+      bytes: result === undefined ? 0 : utf8Length(result.content),
+    });
+  }
+  return rows;
+}
+
+/** The state word at the right of a tool row; the word is the cue. */
+export function stateWord(state: ToolState): string {
+  switch (state) {
+    case "ran":
+      return WORDS.stateRan;
+    case "error":
+      return WORDS.stateError;
+    case "waiting":
+      return WORDS.stateWaiting;
+    case "none":
+      return WORDS.stateNone;
+  }
+}
+
+/** The mark at the left of a tool row: `✓` ran, `!` error, `…` waiting, `–` no result. */
+export function stateMark(state: ToolState): string {
+  switch (state) {
+    case "ran":
+      return "✓";
+    case "error":
+      return "!";
+    case "waiting":
+      return "…";
+    case "none":
+      return "–";
+  }
+}
+
+/** The text of the toggle of a result: `Show result (1.2 KiB)` while it is closed, `Hide result` while it is open. */
+export function toggleWords(open: boolean, bytes: number): string {
+  return open ? WORDS.hide : `Show result (${sizeWords(bytes)})`;
 }

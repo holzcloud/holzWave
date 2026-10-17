@@ -8,8 +8,11 @@
 // made (`isTrusted` false) is ignored, `Escape` with the focus inside a card denies that call, and nothing else does.
 
 import type { Approvals, CardModel } from "./approval.js";
-import { EFFECT_WORDS, TOOL_WORDS, WORDS, cannotWords, hashWords, moreWords, showText, targetWords } from "./approvalstate.js";
-import type { Destination } from "./approvalstate.js";
+import {
+  EFFECT_WORDS, TOOL_WORDS, WORDS, cannotWords, destinationParts, hashWords, moreWords, showText, stateMark, stateWord, targetWords,
+  taintWords, toggleWords,
+} from "./approvalstate.js";
+import type { Destination, ToolRow } from "./approvalstate.js";
 import { sizeWords } from "./consentstate.js";
 import { el } from "./dom.js";
 
@@ -109,25 +112,26 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
         el("span", "approval-value", li).textContent = row.value;
         el("span", "approval-bytes", li).textContent = sizeWords(row.bytes);
       }
-      const dest = view.destination();
       const line = el("p", "approval-dest", section);
-      if (dest === null) {
-        line.textContent = WORDS.destinationUnknown;
-      } else {
-        line.append(document.createTextNode("The result is sent to "));
-        el("span", "approval-model", line).textContent = dest.model;
-        if (dest.host !== null && dest.host !== "") {
-          line.append(document.createTextNode(" at "));
-          el("span", "approval-host", line).textContent = dest.host;
+      for (const part of destinationParts(view.destination())) {
+        if (part.kind === "text") {
+          line.append(document.createTextNode(part.text));
+          continue;
         }
-        if (dest.place !== null) {
-          line.append(document.createTextNode(" ("));
-          const place = el("span", "approval-place", line);
-          place.dataset.leaves = dest.leaves ? "true" : "false";
-          place.textContent = dest.place;
-          line.append(document.createTextNode(")"));
-        }
-        line.append(document.createTextNode("."));
+        const piece = el("span", `approval-${part.kind}`, line);
+        piece.textContent = part.text;
+        if (part.kind === "place") piece.dataset.leaves = part.leaves ? "true" : "false";
+      }
+      // Text the user did not write is in this turn: the core's labels, in words, and what that text can do.
+      if (a.tainted) {
+        const words = taintWords(a.taint);
+        const banner = el("div", "approval-taint", section);
+        banner.dataset.tone = "warn";
+        const mark = el("span", "approval-taint-mark", banner);
+        mark.textContent = "!";
+        mark.setAttribute("aria-hidden", "true");
+        el("span", "approval-taint-title label", banner).textContent = words.title;
+        el("p", "approval-taint-text", banner).textContent = words.text;
       }
     }
     if (seen.hash !== null) el("p", "approval-hash", section).textContent = hashWords(seen.hash);
@@ -235,4 +239,41 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
     more?.remove();
     more = null;
   };
+}
+
+/** Numbers the result boxes, so a toggle can name the box it opens. */
+let resultNumber = 0;
+
+/**
+ * One tool call of the transcript: a mark, the words of the tool, the core's one-line summary and the state word, and, when
+ * there is a result, a toggle that opens it as text in a box labelled untrusted. The summary and the result are text nodes:
+ * they are never parsed, linked or turned into elements. `toggle` is called by a press on the toggle.
+ */
+export function toolRowNode(row: ToolRow, open: boolean, toggle: () => void): HTMLElement {
+  const node = el("div", "chat-tool");
+  node.dataset.call = row.id;
+  node.dataset.state = row.state;
+  node.dataset.tool = showText(row.name);
+  const mark = el("span", "tool-mark", node);
+  mark.textContent = stateMark(row.state);
+  mark.setAttribute("aria-hidden", "true");
+  el("span", "tool-words", node).textContent = toolWords(row.name);
+  el("span", "tool-summary", node).textContent = row.summary;
+  el("span", "tool-state", node).textContent = stateWord(row.state);
+  if (row.content !== null) {
+    const toggler = button(node, "tool-toggle", `result-${row.id}`, toggleWords(open, row.bytes));
+    toggler.setAttribute("aria-expanded", open ? "true" : "false");
+    toggler.addEventListener("click", (e) => {
+      if (e.isTrusted) toggle();
+    });
+    if (open) {
+      const id = `tool-result-${++resultNumber}`;
+      toggler.setAttribute("aria-controls", id);
+      el("div", "tool-untrusted label", node).textContent = WORDS.resultLabel;
+      const box = el("pre", "tool-result", node);
+      box.id = id;
+      box.textContent = row.content;
+    }
+  }
+  return node;
 }

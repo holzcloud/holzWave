@@ -4,9 +4,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { canAllow, canDeny, readApproval, showText } from "../../dist/approvalstate.js";
+import {
+  CHANGED, EFFECT_WORDS, ENDED, TOOL_WORDS, VERDICTS, WORDS, canAllow, canDeny, cannotWords, destinationParts, hashWords, indexResults,
+  outcomeOf, readApproval, rowsOf, showText, targetWords, taintWords,
+} from "../../dist/approvalstate.js";
 
 const RUN = JSON.parse(readFileSync(new URL("../fixtures/ai_tool_stream.json", import.meta.url), "utf8"));
+const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/ai_approval.json", import.meta.url), "utf8"));
+const PROTOCOL = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
 const HASH = "9f3a41c2d7be5a60b1c4e8f2d3a7094b6c5d1e0f8a2b3c4d5e6f708192a3b4c5";
 
 /** The eleven members of the core's card, with the payload of a `read_file` call in the core's order. */
@@ -187,4 +192,128 @@ test("a request that cannot be shown in full can only be denied", () => {
 
   // The same entry made valid again is `ok`.
   assert.equal(readApproval(card()).why, "ok");
+});
+
+test("the page's tables are the core's tables", () => {
+  // The two verdicts are the core's and the command table's.
+  assert.deepEqual([...VERDICTS], GOLDEN.decisions);
+  assert.deepEqual([...VERDICTS], PROTOCOL.ops.ai_decision);
+  // The tools the page can show are the tools of the golden whose effect it handles.
+  const handled = Object.keys(EFFECT_WORDS);
+  const shown = Object.keys(GOLDEN.tools).filter((tool) => handled.includes(GOLDEN.tools[tool]));
+  assert.deepEqual(Object.keys(TOOL_WORDS).sort(), shown.sort(), "a tool that is added or renamed in the core stops here");
+  for (const effect of handled) assert.ok(GOLDEN.effects.includes(effect), effect);
+  // The refusals the page acts on are codes of the core, and no code is in both sets.
+  for (const name of [...ENDED, ...CHANGED]) assert.ok(GOLDEN.codes.includes(name), `${name} is not a code of the core`);
+  for (const name of ENDED) assert.ok(!CHANGED.has(name), name);
+  for (const name of ["unknown_call", "not_pending", "hash_mismatch"]) assert.ok(ENDED.has(name) || CHANGED.has(name), name);
+  for (const code of GOLDEN.codes) assert.ok(["ended", "changed", "refused"].includes(outcomeOf(code)), code);
+  assert.equal(outcomeOf("unknown_call"), "ended");
+  assert.equal(outcomeOf("hash_mismatch"), "changed");
+  for (const other of ["something_new", "invalid_decision", "denied", "host", "", null]) assert.equal(outcomeOf(other), "refused", String(other));
+  // Every sentence is a plain sentence: no markup, no address, and none that says anything is kept or allowed in advance.
+  for (const [name, text] of Object.entries(WORDS)) {
+    assert.ok(text.length >= 3, name);
+    assert.ok(!text.includes("://") && !text.includes("<") && !text.includes(">"), name);
+    assert.ok(!/\b(always|remember(ed)?|auto-?approve|in advance|for the session)\b/i.test(text), `${name}: ${text}`);
+  }
+  for (const text of [...Object.values(TOOL_WORDS), ...Object.values(EFFECT_WORDS)]) assert.ok(text.length >= 3 && !text.includes("<"), text);
+});
+
+test("tool rows pair a call with its result by call id and say what happened", () => {
+  const message = (role, parts, id = "m") => ({ id, role, ts: 0, model: null, status: "complete", usage: null, parts });
+  const call = (id, name = "read_file", summary = "{\"path\":\"/a\"}") => ({ type: "tool_call", id, name, summary });
+  const result = (callId, content, isError = false) => ({ type: "tool_result", call_id: callId, content, is_error: isError });
+  const assistant = message("assistant", [{ type: "text", text: "Let me look." }, call("call_1"), call("call_2", "list_dir")], "m1");
+  const tool = message("tool", [result("call_1", "héllo", false)], "m2");
+  const index = indexResults([assistant, tool]);
+  assert.deepEqual([...index.keys()], ["call_1"]);
+
+  const rows = rowsOf(assistant, index, new Set(), true);
+  assert.deepEqual(rows.map((r) => [r.id, r.name, r.state]), [["call_1", "read_file", "ran"], ["call_2", "list_dir", "waiting"]]);
+  assert.equal(rows[0].content, "héllo");
+  assert.equal(rows[0].bytes, 6, "the length of the result in UTF-8 bytes");
+  assert.equal(rows[1].content, null);
+  assert.equal(rows[1].summary, "{\"path\":\"/a\"}");
+  assert.deepEqual(rowsOf(assistant, index, new Set(), false).map((r) => r.state), ["ran", "none"], "no result and no turn: no result");
+  assert.equal(rowsOf(assistant, index, new Set(["call_2"]), false)[1].state, "waiting", "a call that waits for a decision waits");
+
+  // An error result.
+  const failed = indexResults([message("tool", [result("call_1", "boom", true)])]);
+  assert.equal(rowsOf(assistant, failed, new Set(), false)[0].state, "error");
+
+  // Text is made visible and cut: the summary at 120 characters with an ellipsis, the result at 20000 characters.
+  const hostile = message("assistant", [call("call_9", "read_file", `a\u202e${"b".repeat(300)}`)]);
+  const cut = rowsOf(hostile, new Map(), new Set(), true)[0];
+  assert.ok(!cut.summary.includes("\u202e"));
+  assert.ok(cut.summary.endsWith("\u2026"));
+  assert.ok(Array.from(cut.summary).length <= 121);
+  const big = indexResults([message("tool", [result("call_9", `x${"y".repeat(30000)}\u0001`)])]);
+  const long = rowsOf(hostile, big, new Set(), false)[0];
+  assert.ok(long.content.startsWith("xyyy"));
+  assert.ok(long.content.endsWith(WORDS.cut), "a longer result ends with the cut note");
+  assert.ok(long.content.length <= 20000 + WORDS.cut.length + 2);
+  assert.equal(long.bytes, 30002, "the size is the whole result");
+  const control = indexResults([message("tool", [result("call_9", "a\u0001b")])]);
+  assert.equal(rowsOf(hostile, control, new Set(), false)[0].content, "a\\u{1}b");
+
+  // A tool the table does not know still gets a row; a result for a call that nobody asked for is ignored.
+  const odd = message("assistant", [call("call_5", "write_file")]);
+  assert.equal(rowsOf(odd, new Map(), new Set(), true)[0].name, "write_file");
+  const stray = indexResults([message("tool", [result("call_404", "lost")])]);
+  assert.deepEqual(rowsOf(assistant, stray, new Set(), false).map((r) => r.state), ["none", "none"]);
+  assert.deepEqual(rowsOf(message("assistant", [{ type: "text", text: "hi" }]), index, new Set(), true), []);
+
+  // The results are indexed in one pass over the messages, not looked up by scanning the list for each call.
+  const many = Array.from({ length: 4096 }, (_, i) => message(i % 2 === 0 ? "assistant" : "tool", i % 2 === 0 ? [call(`c${i}`)] : [result(`c${i - 1}`, "ok")], `m${i}`));
+  let reads = 0;
+  const watched = new Proxy(many, {
+    get(target, key, receiver) {
+      if (typeof key === "string" && /^\d+$/.test(key)) reads += 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const all = indexResults(watched);
+  assert.equal(all.size, 2048);
+  assert.ok(reads <= many.length * 2, `${reads} reads for ${many.length} messages`);
+});
+
+test("words: sizes, hashes, destinations, targets, banners and sentences", () => {
+  const hash = "9f3a41c2d7be5a60b1c4e8f2d3a7094b6c5d1e0f8a2b3c4d5e6f708192a3b4c5";
+  assert.equal(hashWords(hash), "hash 9f3a41c2d7be");
+  assert.equal(targetWords(1, "This computer"), "pane 1 \u00b7 This computer");
+  assert.equal(targetWords(2, "talos-1"), "pane 2 \u00b7 talos-1");
+
+  // The destination: the model, the host and the place, in the core's words.
+  const whole = destinationParts({ model: "llama3.2", host: "localhost:11434", place: "this computer", leaves: false });
+  assert.deepEqual(whole.map((p) => [p.kind, p.text]), [
+    ["text", "The result is sent to "], ["model", "llama3.2"], ["text", " at "], ["host", "localhost:11434"], ["text", " ("],
+    ["place", "this computer"], ["text", ")."],
+  ]);
+  assert.equal(whole.find((p) => p.kind === "place").leaves, false);
+  const away = destinationParts({ model: "big", host: "api.example.org", place: "cloud", leaves: true });
+  assert.equal(away.find((p) => p.kind === "place").leaves, true);
+  const noHost = destinationParts({ model: "llama3.2", host: null, place: "this computer", leaves: false });
+  assert.ok(!noHost.some((p) => p.kind === "host"));
+  assert.equal(noHost.map((p) => p.text).join(""), "The result is sent to llama3.2 (this computer).");
+  const noPlace = destinationParts({ model: "llama3.2", host: "h", place: null, leaves: false });
+  assert.ok(!noPlace.some((p) => p.kind === "place"));
+  assert.equal(noPlace.map((p) => p.text).join(""), "The result is sent to llama3.2 at h.");
+  assert.deepEqual(destinationParts(null), [{ kind: "text", text: "The result is sent to the model of this chat.", leaves: false }]);
+
+  // The banner names the labels of the core and says that the text can steer the assistant.
+  const banner = taintWords(["output of list_dir"]);
+  assert.equal(banner.title, "Untrusted text in this turn");
+  assert.ok(banner.text.includes("(output of list_dir)"));
+  assert.ok(banner.text.includes("can try to steer the assistant"));
+  assert.ok(taintWords(["a", "b"]).text.includes("(a, b)"));
+  const bare = taintWords([]);
+  assert.ok(!bare.text.includes("(") && bare.text.includes("can try to steer the assistant"));
+
+  // A card that can only be denied says why: one sentence for each class of reason.
+  assert.equal(cannotWords("ok"), "");
+  const sentences = ["large", "tool", "effect", "shape"].map(cannotWords);
+  assert.ok(sentences.every((t) => t.endsWith("It can only be denied.")));
+  assert.equal(sentences[1], sentences[2], "an unknown tool and an unknown effect read the same");
+  assert.equal(new Set(sentences).size, 3);
 });

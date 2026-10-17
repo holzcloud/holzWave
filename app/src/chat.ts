@@ -17,8 +17,9 @@
 import { registerAction } from "./actions.js";
 import { onProfilesChanged, openProviders } from "./aisettings.js";
 import { Approvals } from "./approval.js";
-import { waitingLabel, waitingName } from "./approvalstate.js";
-import { mountApprovals } from "./approvalcard.js";
+import { indexResults, rowsOf, waitingLabel, waitingName } from "./approvalstate.js";
+import type { ToolResult } from "./approvalstate.js";
+import { mountApprovals, toolRowNode } from "./approvalcard.js";
 import type { CardView as ApprovalView } from "./approvalcard.js";
 import { reviewIds } from "./aistate.js";
 import { call, listen } from "./bridge.js";
@@ -26,8 +27,8 @@ import { paneBlocks, setChatTitle } from "./blockstate.js";
 import { ChatFeed, isChatId, messageText, readChatEvent, readChatState } from "./chatstate.js";
 import type { ChatMessage, PendingCall, Route } from "./chatstate.js";
 import {
-  MAX_TEXT_BYTES, chipView, endNote, faultText, linkKind, outcomeWord, pickProfile, readProfiles, roleWord, setupLabel,
-  statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
+  MAX_TEXT_BYTES, chipView, endNote, faultText, leavesComputer, linkKind, localityWord, outcomeWord, pickProfile, readProfiles, roleWord,
+  setupLabel, statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
 } from "./chatview.js";
 import type { ChipView, EndNote, ProfileChoice } from "./chatview.js";
 import { Consent } from "./consent.js";
@@ -125,6 +126,8 @@ interface Session {
   readonly approvals: Approvals;
   /** The list of waiting calls the controller was last given, so an unchanged list is not read again. */
   pendingSeen: readonly PendingCall[] | null;
+  /** The calls whose result the person opened. */
+  readonly openResults: Set<string>;
 }
 
 /** The rendered HTML of finished replies by message id, with the text it was made from; the oldest goes first. */
@@ -214,6 +217,7 @@ function sessionFor(conversation: string): Session {
         },
       }),
       pendingSeen: null,
+      openResults: new Set(),
     };
     sessions.set(conversation, s);
     // The number on the title-bar button follows every chat of this window.
@@ -442,6 +446,8 @@ interface Article {
   markdown: "none" | "asked" | "done";
   /** The lines of context sent that are drawn under the text, joined; empty for none. */
   notes: string;
+  /** What the tool rows under the text were drawn from; empty for none. */
+  tools: string;
 }
 
 /** Whether `parent` holds exactly `nodes`, in order. */
@@ -721,9 +727,20 @@ class Mounted implements ChatView {
     this.approvalOff = null;
   }
 
-  /** What the approval cards need to know of the page: where a result goes (not yet told) and the way back to the composer. */
+  /**
+   * What the approval cards need to know of the page: where a result goes and the way back to the composer. The place is the
+   * core's word for the route of the turn that is running; with no route of this turn (after a reload) it is not told.
+   */
   private approvalView(): ApprovalView {
-    return { destination: () => null, focusComposer: () => this.focus() };
+    return {
+      destination: () => {
+        const s = this.session;
+        const route = s.route;
+        if (route === null || s.routeTurn !== s.feed.state.turn) return null;
+        return { model: route.model, host: route.host, place: localityWord(route.locality), leaves: leavesComputer(route.locality) };
+      },
+      focusComposer: () => this.focus(),
+    };
   }
 
   private unmountCard(): void {
@@ -857,6 +874,9 @@ class Mounted implements ChatView {
 
     const nodes: HTMLElement[] = [];
     const seen = new Set<string>();
+    // A message of the role tool draws nothing of its own: its results are shown in the rows of the calls they answer.
+    const results = indexResults(st.messages);
+    const waiting = new Set(st.pending.map((p) => p.call_id));
     for (const m of st.messages) {
       if (m.role === "tool") continue;
       seen.add(m.id);
@@ -866,6 +886,7 @@ class Mounted implements ChatView {
         this.articles.set(m.id, a);
       }
       this.updateArticle(a, m);
+      this.drawTools(a, m, results, waiting, st.running);
       nodes.push(a.node);
     }
     for (const id of this.articles.keys()) {
@@ -882,7 +903,7 @@ class Mounted implements ChatView {
         const text = el("div", "chat-text", node);
         this.streamed = document.createTextNode("");
         text.append(this.streamed);
-        this.streaming = { node, who, text, plain: null, label: null, markdown: "done", notes: "" };
+        this.streaming = { node, who, text, plain: null, label: null, markdown: "done", notes: "", tools: "" };
       }
       drawWho(this.streaming, "assistant", statusWord(st));
       if (this.streamed.data !== st.partial.text) this.streamed.data = st.partial.text;
@@ -918,7 +939,7 @@ class Mounted implements ChatView {
     node.dataset.status = m.status;
     const who = el("div", "chat-who label", node);
     const text = el("div", "chat-text", node);
-    return { node, who, text, plain: null, label: null, markdown: "none", notes: "" };
+    return { node, who, text, plain: null, label: null, markdown: "none", notes: "", tools: "" };
   }
 
   private updateArticle(a: Article, m: ChatMessage): void {
@@ -935,6 +956,46 @@ class Mounted implements ChatView {
     // that stopped, failed or was cut.
     if (m.role === "assistant" && m.status === "complete" && plain !== "" && a.markdown === "none") this.render(a, m.id, plain);
     this.drawNotes(a, m);
+  }
+
+  /**
+   * Under the text of an assistant message that asked for tools: one row per call. The rows are drawn again only when what
+   * they show changed, and a toggle that had the keyboard keeps it.
+   */
+  private drawTools(a: Article, m: ChatMessage, results: ReadonlyMap<string, ToolResult>, waiting: ReadonlySet<string>, running: boolean): void {
+    const open = this.session.openResults;
+    let key = "";
+    if (m.role === "assistant") {
+      for (const part of m.parts) {
+        if (part.type !== "tool_call") continue;
+        const r = results.get(part.id);
+        key += `${part.id}|${part.name}|${part.summary.length}|${r === undefined ? "-" : `${r.is_error ? "e" : "r"}${r.content.length}`}|${
+          waiting.has(part.id) ? "w" : ""}${open.has(part.id) ? "o" : ""}\n`;
+      }
+      if (key !== "") key += running ? "running" : "idle";
+    }
+    if (a.tools === key) return;
+    a.tools = key;
+    const old = a.node.querySelector(":scope > .chat-tools");
+    const active = document.activeElement;
+    const had = old !== null && active !== null && old.contains(active) ? (active.closest(".chat-tool") as HTMLElement | null)?.dataset.call : undefined;
+    old?.remove();
+    if (key === "") return;
+    const box = el("div", "chat-tools", a.node);
+    for (const row of rowsOf(m, results, waiting, running)) {
+      box.append(
+        toolRowNode(row, open.has(row.id), () => {
+          if (open.has(row.id)) open.delete(row.id);
+          else open.add(row.id);
+          schedule(this.session);
+        }),
+      );
+    }
+    if (had !== undefined) {
+      for (const node of box.querySelectorAll<HTMLElement>(".chat-tool")) {
+        if (node.dataset.call === had) node.querySelector<HTMLElement>(".tool-toggle")?.focus({ preventScroll: true });
+      }
+    }
   }
 
   /** Under the text of a user message that carried context: one quiet line per approval, from the message's own parts. */

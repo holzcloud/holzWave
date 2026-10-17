@@ -4,7 +4,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  TOOL_PATH, TOOL_TEXT, VIEW_P1, boot, calls, decisionCalls, openAi, openCard, reloadKeeping, scriptTool, sendText, tickClock,
+  OTHER_PROFILE, PROFILE, TOOL_PATH, TOOL_TEXT, VIEW_P1, boot, calls, decisionCalls, openAi, openCard, reloadKeeping, scriptTool, sendText,
+  tickClock,
 } from "./ai-lib.mjs";
 
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
@@ -22,6 +23,9 @@ export default async function ({ engine, page, url, errors }) {
   await cancelCase(page, url);
   await keysCase(page, url, engine);
   await badgeCase(page, url);
+  await rowsCase(page, url);
+  await bannerCase(page, url);
+  await destinationCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -496,4 +500,167 @@ async function badgeCase(page, url) {
   await page.waitForFunction(() => document.querySelector(".ai-btn")?.dataset.waiting === undefined);
   assert.equal((await button.textContent()).trim(), "✦ AI");
   assert.equal(await button.getAttribute("aria-label"), null);
+}
+
+/** A result that tries to be markup, a link and a handler: it must be shown as exactly this text. */
+const HOSTILE = "zq-result-<img src=x onerror=alert(1)> [x](javascript:alert(1)) zqres-1d5c";
+
+/** The row of a call in the transcript. */
+const rowOf = (page, id) => page.locator(`.chat-msg[data-role="assistant"] .chat-tool[data-call="${id}"]`);
+
+/** Press the toggle of a row and wait for its result to be drawn. */
+async function opened(row) {
+  await row.locator("button.tool-toggle").click();
+  await row.locator("pre.tool-result").waitFor();
+}
+
+/** Ask for one file, allow it once the window has passed, and wait for the end of the turn. */
+async function allowed(page, spec, text = "read it") {
+  await scriptTool(page, { tool: "read_file", path: TOOL_PATH, answer: "Done.", ...spec });
+  await sendText(page, text);
+  const card = await openCard(page, spec.id);
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await page.waitForFunction(() => !window.__MOCK__.ai.chat("chat-mock-1").running);
+  await page.waitForSelector(`.chat-tool[data-call="${spec.id}"]:not([data-state="waiting"])`);
+}
+
+async function rowsCase(page, url) {
+  await chatBesidePane1(page, url);
+  await allowed(page, { id: "call_1", result: TOOL_TEXT });
+  let row = rowOf(page, "call_1");
+  assert.equal(await row.getAttribute("data-state"), "ran");
+  assert.equal(await row.locator(".tool-words").textContent(), "Read a file");
+  assert.equal(await row.locator(".tool-summary").textContent(), JSON.stringify({ path: TOOL_PATH }));
+  assert.equal(await row.locator(".tool-state").textContent(), "ran");
+  const toggle = row.locator("button.tool-toggle");
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+  assert.match(await toggle.textContent(), /^Show result \(\d+(\.\d)? (B|KiB)\)$/);
+  assert.equal(await page.locator("pre.tool-result").count(), 0, "the result is drawn only when it is opened");
+  await toggle.click();
+  await row.locator('button.tool-toggle[aria-expanded="true"]').waitFor();
+  assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(await toggle.textContent(), "Hide result");
+  assert.equal(await row.locator(".tool-untrusted").textContent(), "Result · untrusted text");
+  assert.ok((await row.locator("pre.tool-result").textContent()).includes(TOOL_TEXT));
+  // Messages of the role tool draw nothing of their own.
+  const messages = await page.evaluate(() => window.__MOCK__.ai.chat("chat-mock-1").messages.filter((m) => m.role !== "tool").length);
+  assert.equal(await page.locator(".chat-msg").count(), messages);
+  // The open state survives the next draw: a fresh snapshot replaces the text the store does not keep, and the box stays open.
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.waitForFunction(() => document.querySelector(".tool-result")?.textContent === "[tool output not stored]");
+  assert.equal(await row.locator("button.tool-toggle").getAttribute("aria-expanded"), "true");
+
+  // A hostile result is text and nothing else; a long one is cut at 20000 characters.
+  await chatBesidePane1(page, url);
+  await allowed(page, { id: "call_1", result: HOSTILE });
+  await opened(rowOf(page, "call_1"));
+  assert.equal(await rowOf(page, "call_1").locator("pre.tool-result").textContent(), HOSTILE);
+  const markup = await page.evaluate(() => ({
+    elements: document.querySelectorAll(".chat-tool img, .chat-tool a, .chat-tool script, .chat-tool iframe").length,
+    images: document.querySelectorAll("img").length,
+    handlers: [...document.querySelectorAll(".chat-tool *")].filter((n) => n.getAttributeNames().some((a) => a.startsWith("on"))).length,
+  }));
+  assert.deepEqual(markup, { elements: 0, images: 0, handlers: 0 });
+  await allowed(page, { id: "call_2", result: "y".repeat(30000) }, "and a long one");
+  await opened(rowOf(page, "call_2"));
+  const long = await rowOf(page, "call_2").locator("pre.tool-result").textContent();
+  assert.ok(long.startsWith("y".repeat(20000)) && !long.startsWith("y".repeat(20001)));
+  assert.ok(long.endsWith("[cut for display]"));
+
+  // A denied call and a stopped call are errors and say what happened.
+  await chatBesidePane1(page, url);
+  await scriptTool(page, { id: "call_1", tool: "read_file", path: TOOL_PATH, answer: "Done." });
+  await sendText(page, "first");
+  await (await openCard(page, "call_1")).locator("button.approval-deny").click();
+  await page.waitForSelector('.chat-tool[data-call="call_1"][data-state="error"]');
+  row = rowOf(page, "call_1");
+  assert.equal(await row.locator(".tool-state").textContent(), "error");
+  await opened(row);
+  assert.equal(await row.locator("pre.tool-result").textContent(), "The user denied this action.");
+  await scriptTool(page, { id: "call_2", tool: "read_file", path: TOOL_PATH, answer: "Done." });
+  await sendText(page, "second");
+  await openCard(page, "call_2");
+  await page.locator('.chat-send[data-mode="stop"]').click();
+  await page.waitForFunction(() => window.__MOCK__.ai.chat("chat-mock-1").ended?.end === "cancelled");
+  row = rowOf(page, "call_2");
+  await page.waitForSelector('.chat-tool[data-call="call_2"][data-state="error"]');
+  await opened(row);
+  assert.equal(await row.locator("pre.tool-result").textContent(), "This call did not run: the turn was stopped.");
+}
+
+async function bannerCase(page, url) {
+  await chatBesidePane1(page, url);
+  const finish = async () => {
+    await page.waitForFunction(() => !window.__MOCK__.ai.chat("chat-mock-1").running);
+  };
+  const ask = async (spec, text) => {
+    await scriptTool(page, { tool: "read_file", path: TOOL_PATH, answer: "Done.", ...spec });
+    await sendText(page, text);
+    return openCard(page, spec.id);
+  };
+
+  // No labels and no flag: no banner.
+  let card = await ask({ id: "call_1" }, "one");
+  assert.equal(await card.getAttribute("data-tainted"), "false");
+  assert.equal(await card.locator(".approval-taint").count(), 0);
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await finish();
+
+  // After a read in this chat the core marks the next card with the tool whose output is in the history.
+  card = await ask({ id: "call_2" }, "two");
+  assert.equal(await card.getAttribute("data-tainted"), "true");
+  const history = card.locator('.approval-taint[data-tone="warn"]');
+  assert.ok((await history.textContent()).includes("output of read_file"));
+  await card.locator("button.approval-deny").click();
+  await finish();
+
+  // The flag and the labels of the core are shown as they are.
+  card = await ask({ id: "call_3", tainted: true, taint: ["output of list_dir", "attached context"] }, "three");
+  assert.equal(await card.getAttribute("data-tainted"), "true");
+  const text = await card.locator(".approval-taint").textContent();
+  for (const words of ["Untrusted text in this turn", "output of list_dir", "attached context", "can try to steer the assistant"]) {
+    assert.ok(text.includes(words), `${words} in ${text}`);
+  }
+  await card.locator("button.approval-deny").click();
+  await finish();
+
+  // A list of labels without the flag still shows the banner.
+  card = await ask({ id: "call_4", tainted: false, taint: ["output of list_dir"] }, "four");
+  assert.equal(await card.getAttribute("data-tainted"), "true");
+  assert.ok((await card.locator(".approval-taint").textContent()).includes("output of list_dir"));
+  await card.locator("button.approval-deny").click();
+  await finish();
+}
+
+async function destinationCase(page, url) {
+  // The place comes from the route of the turn, in the core's word.
+  await chatBesidePane1(page, url);
+  let card = await askForFile(page);
+  assert.equal(await card.locator("p.approval-dest").textContent(), `The result is sent to ${PROFILE.model} at ${PROFILE.host} (this computer).`);
+  assert.equal(await card.locator(".approval-place").getAttribute("data-leaves"), "false");
+  assert.equal(await card.getAttribute("data-remote"), "false");
+  assert.equal(await card.locator(".approval-remote").count(), 0);
+
+  // A cloud route leaves the computer, and says so in words.
+  await chatBesidePane1(page, url, { profiles: [PROFILE, OTHER_PROFILE] });
+  await page.locator(".chat-chip").click();
+  await page.locator('.chat-choice[data-id="other-1"]').click();
+  card = await askForFile(page);
+  assert.equal(await card.locator("p.approval-dest").textContent(), `The result is sent to ${OTHER_PROFILE.model} at ${OTHER_PROFILE.host} (cloud).`);
+  assert.equal(await card.locator(".approval-place").getAttribute("data-leaves"), "true");
+
+  // After a reload the route is not known: the card does not guess a place.
+  await reloadKeeping(page);
+  card = await openCard(page, "call_1");
+  assert.equal(await card.locator("p.approval-dest").textContent(), "The result is sent to the model of this chat.");
+  assert.equal(await card.locator(".approval-place").count(), 0);
+
+  // A remote target says so.
+  await chatBesidePane1(page, url);
+  card = await askForFile(page, { remote: true, target: "talos-1" });
+  assert.equal(await card.getAttribute("data-remote"), "true");
+  assert.equal(await card.locator(".approval-remote").textContent(), "remote host");
+  assert.equal(await card.locator(".approval-where").textContent(), "pane 1 · talos-1");
 }
