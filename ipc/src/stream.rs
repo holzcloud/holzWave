@@ -9,13 +9,16 @@
 use std::io::{self, BufReader, Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::Duration;
 
-use interprocess::local_socket::traits::Stream as _;
+use interprocess::local_socket::traits::{RecvHalf as _, Stream as _};
 use interprocess::local_socket::{RecvHalf, SendHalf};
 use serde::{Deserialize, Serialize};
 
-use crate::{Cmd, Handler, MAX_LINE, Request, Response, read_bounded_line};
+use crate::{BUSY_STREAMS, Cmd, Handler, Limits, MAX_LINE, Request, Response, Slot, answer, read_bounded_line};
 
 /// The longest text of one `text` event, in bytes.
 pub const MAX_CHUNK: usize = 8192;
@@ -31,6 +34,26 @@ const MAX_END_MESSAGE: usize = 4096;
 const INPUT_SHORT: &str = "the input ended before its announced length";
 const INPUT_NOT_TEXT: &str = "the input is not text (it is not valid UTF-8 or has a NUL)";
 const HANDLER_FAILED: &str = "holzWave failed while answering";
+const INPUT_LATE: &str = "the input did not arrive in time";
+const INPUT_EXTRA: &str = "unexpected data after the input";
+const OUTPUT_LIMIT: &str = "the answer is longer than the limit";
+/// How often the watcher looks whether the handler has returned.
+const WATCH_POLL: Duration = Duration::from_millis(200);
+/// The members of an `ai` request.
+const AI_MEMBERS: [&str; 5] = ["token", "pane", "cmd", "prompt", "stdin_bytes"];
+
+/// The first member of an `ai` request that the request does not have, shown cut at 40 characters and escaped, or `None`
+/// (also for every other command). The request type would ignore such a member; this refuses it by name.
+pub(crate) fn stray_member(value: &serde_json::Value) -> Option<String> {
+    if value.get("cmd").and_then(|c| c.as_str()) != Some("ai") {
+        return None;
+    }
+    let key = value.as_object()?.keys().find(|k| !AI_MEMBERS.contains(&k.as_str()))?;
+    let shown: String = key.chars().take(40).collect();
+    let escaped = format!("{shown:?}");
+    let inner = escaped.strip_prefix('"').and_then(|e| e.strip_suffix('"')).unwrap_or(&escaped);
+    Some(if key.chars().count() > 40 { format!("{inner}...") } else { inner.to_owned() })
+}
 
 /// One line the server writes after the request was accepted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,32 +188,80 @@ fn write_event(out: &mut impl Write, event: &Event) -> io::Result<()> {
 struct WireSink<'a, W: Write> {
     out: &'a mut W,
     gone: &'a Gone,
+    /// Bytes of text and notes written so far.
+    written: usize,
+    /// Whether a write was refused because the answer reached [`MAX_OUTPUT`].
+    limit_hit: bool,
 }
 
 impl<W: Write> WireSink<'_, W> {
-    fn send(&mut self, event: &Event) -> io::Result<()> {
+    fn send(&mut self, event: &Event, size: usize) -> io::Result<()> {
         if self.gone.is_gone() {
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the client is gone"));
         }
-        write_event(self.out, event).inspect_err(|_| self.gone.set())
+        if self.written + size > MAX_OUTPUT {
+            self.limit_hit = true;
+            return Err(io::Error::other(OUTPUT_LIMIT));
+        }
+        write_event(self.out, event).inspect_err(|_| self.gone.set())?;
+        self.written += size;
+        Ok(())
     }
 }
 
 impl<W: Write> Sink for WireSink<'_, W> {
     fn text(&mut self, text: &str) -> io::Result<()> {
         for piece in pieces(text, MAX_CHUNK) {
-            self.send(&Event::Text { text: piece.to_owned() })?;
+            self.send(&Event::Text { text: piece.to_owned() }, piece.len())?;
         }
         Ok(())
     }
 
     fn note(&mut self, text: &str) -> io::Result<()> {
-        self.send(&Event::Note { text: cut_to(text, MAX_NOTE).to_owned() })
+        let note = cut_to(text, MAX_NOTE);
+        self.send(&Event::Note { text: note.to_owned() }, note.len())
     }
 }
 
-/// The server half of a stream: `ready`, the body, the handler, one `end`.
-pub(crate) fn serve(mut reader: BufReader<RecvHalf>, mut send: SendHalf, request: Request, handler: &dyn Handler) {
+/// Watch the receive half while the handler runs: the client must send nothing after the body, so end of file, any byte or
+/// an error means it left. Ends when the handler has returned.
+fn watch(mut reader: BufReader<RecvHalf>, gone: &Gone, done: &AtomicBool) {
+    let mut byte = [0u8; 64];
+    loop {
+        match reader.read(&mut byte) {
+            Ok(_) => {
+                if !done.load(Ordering::SeqCst) {
+                    gone.set();
+                }
+                return;
+            }
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {
+                if done.load(Ordering::SeqCst) {
+                    return;
+                }
+            }
+            Err(_) => {
+                if !done.load(Ordering::SeqCst) {
+                    gone.set();
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// The server half of a stream: a stream slot, `ready`, the body, the handler with a watcher beside it, one `end`.
+pub(crate) fn serve(
+    mut reader: BufReader<RecvHalf>,
+    mut send: SendHalf,
+    request: Request,
+    handler: &dyn Handler,
+    limits: &Limits,
+    streams: &Arc<AtomicUsize>,
+) {
+    let Some(slot) = Slot::take(streams, limits.streams) else {
+        return answer(&mut send, false, BUSY_STREAMS);
+    };
     if write_event(&mut send, &Event::Ready).is_err() {
         return;
     }
@@ -199,25 +270,48 @@ pub(crate) fn serve(mut reader: BufReader<RecvHalf>, mut send: SendHalf, request
     };
     let announced = request.cmd.body_len();
     let mut body = Vec::with_capacity(announced);
-    let read = (&mut reader).take(announced as u64).read_to_end(&mut body);
-    if read.is_err() || body.len() < announced {
-        return end(&mut send, false, INPUT_SHORT);
+    match (&mut reader).take(announced as u64).read_to_end(&mut body) {
+        Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            return end(&mut send, false, INPUT_LATE);
+        }
+        Err(_) => return end(&mut send, false, INPUT_SHORT),
+        Ok(_) if body.len() < announced => return end(&mut send, false, INPUT_SHORT),
+        Ok(_) => {}
+    }
+    if !reader.buffer().is_empty() {
+        return end(&mut send, false, INPUT_EXTRA);
     }
     let input = match String::from_utf8(body) {
         Ok(text) if !text.contains('\0') => text,
         _ => return end(&mut send, false, INPUT_NOT_TEXT),
     };
-    let gone = Gone::new();
-    let result = {
-        let mut sink = WireSink { out: &mut send, gone: &gone };
-        catch_unwind(AssertUnwindSafe(|| handler.handle_stream(request.pane, request.cmd, input, &gone, &mut sink)))
+    let gone = Arc::new(Gone::new());
+    let done = Arc::new(AtomicBool::new(false));
+    // The watcher polls: its read times out every 200 ms so that it sees `done` (the result is ignored; named pipes have no
+    // timeouts and there the watcher ends when the client closes, which it does as soon as it has read `end`).
+    let _ = reader.get_ref().set_timeout(Some(WATCH_POLL));
+    let watcher = {
+        let (gone, done) = (gone.clone(), done.clone());
+        thread::Builder::new().name("holzwave-ipc-watch".into()).spawn(move || watch(reader, &gone, &done))
+    };
+    let Ok(watcher) = watcher else {
+        return end(&mut send, false, HANDLER_FAILED);
+    };
+    let (result, limit_hit) = {
+        let mut sink = WireSink { out: &mut send, gone: &gone, written: 0, limit_hit: false };
+        let result = catch_unwind(AssertUnwindSafe(|| handler.handle_stream(request.pane, request.cmd, input, &gone, &mut sink)));
+        (result, sink.limit_hit)
     };
     gone.finish();
+    done.store(true, Ordering::SeqCst);
     match result {
+        Ok(Ok(())) if limit_hit => end(&mut send, false, OUTPUT_LIMIT),
         Ok(Ok(())) => end(&mut send, true, ""),
         Ok(Err(message)) => end(&mut send, false, &message),
         Err(_) => end(&mut send, false, HANDLER_FAILED),
     }
+    drop(slot);
+    let _ = watcher.join();
 }
 
 /// What a finished stream said.
@@ -262,12 +356,17 @@ pub fn stream_request(
         return Ok(Outcome { ok: refusal.ok, message: refusal.message });
     }
     send.write_all(input)?;
+    let mut total = 0usize;
     let mut next = Some(first);
     loop {
         let text = match next.take() {
             Some(t) => t,
             None => read_bounded_line(&mut reader)?,
         };
+        total += text.len();
+        if total > MAX_REPLY {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "the reply is longer than the limit"));
+        }
         if text.is_empty() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the app closed the connection before the answer ended"));
         }
@@ -348,5 +447,154 @@ mod tests {
         assert!(pieces("", 8).is_empty());
         assert_eq!(cut_to("aä", 2), "a");
         assert_eq!(cut_to("ab", 5), "ab");
+    }
+
+    use interprocess::local_socket::traits::Listener as _;
+    use interprocess::local_socket::ListenerOptions;
+    use std::path::PathBuf;
+
+    fn folder(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hw-ipcf-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn ai(n: u32) -> Request {
+        Request { token: "t".into(), pane: None, cmd: Cmd::Ai { prompt: "q".into(), stdin_bytes: n } }
+    }
+
+    /// A server for one connection that reads the request line, writes `first`, reads `read_body` bytes, writes `rest`, and
+    /// then either closes (`linger` false) or returns how many bytes the client sends before it closes.
+    fn fake(dir: &Path, first: Vec<String>, read_body: usize, rest: Vec<String>, linger: bool) -> thread::JoinHandle<usize> {
+        crate::make_private_dir(dir).unwrap();
+        let listener = ListenerOptions::new().name(crate::name(dir).unwrap()).create_sync().unwrap();
+        thread::spawn(move || {
+            let Ok(stream) = listener.accept() else { return usize::MAX };
+            let _ = stream.set_recv_timeout(Some(Duration::from_secs(3)));
+            let (recv, mut send) = stream.split();
+            let mut reader = BufReader::new(recv);
+            if read_bounded_line(&mut reader).is_err() {
+                return usize::MAX;
+            }
+            for line in &first {
+                let _ = send.write_all(format!("{line}\n").as_bytes());
+            }
+            let mut body = vec![0u8; read_body];
+            if read_body > 0 && reader.read_exact(&mut body).is_err() {
+                return usize::MAX;
+            }
+            for line in &rest {
+                if send.write_all(format!("{line}\n").as_bytes()).is_err() {
+                    break;
+                }
+            }
+            if !linger {
+                return 0;
+            }
+            // What the client sends after that (nothing, when it behaves): bytes until it closes or the timeout.
+            let mut extra = Vec::new();
+            let _ = reader.read_to_end(&mut extra);
+            extra.len()
+        })
+    }
+
+    fn collect(dir: &Path, request: &Request, input: &[u8]) -> (Vec<Event>, io::Result<Outcome>) {
+        let mut events = Vec::new();
+        let outcome = stream_request(dir, request, input, &mut |e| {
+            events.push(e.clone());
+            Ok(())
+        });
+        (events, outcome)
+    }
+
+    #[test]
+    fn the_client_ignores_unknown_events_and_returns_the_outcome() {
+        let d = folder("a");
+        let server = fake(
+            &d,
+            vec![r#"{"event":"ready"}"#.into()],
+            2,
+            vec![
+                r#"{"event":"progress","pct":5}"#.into(),
+                r#"{"event":"text","text":"hi "}"#.into(),
+                r#"{"event":"note","text":"n"}"#.into(),
+                r#"{"event":"end","ok":true,"message":"done"}"#.into(),
+            ],
+            true,
+        );
+        let (events, outcome) = collect(&d, &ai(2), b"ab");
+        assert_eq!(events, [Event::Text { text: "hi ".into() }, Event::Note { text: "n".into() }]);
+        assert_eq!(outcome.unwrap(), Outcome { ok: true, message: "done".into() });
+        assert_eq!(server.join().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_reply_line_longer_than_the_limit_is_an_error() {
+        let d = folder("b");
+        let long = format!(r#"{{"event":"text","text":"{}"}}"#, "x".repeat(MAX_LINE));
+        let server = fake(&d, vec![r#"{"event":"ready"}"#.into()], 0, vec![long], true);
+        let (_, outcome) = collect(&d, &ai(0), b"");
+        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let _ = server.join();
+
+        // Many short lines that add up to more than the whole reply may hold.
+        let d = folder("b2");
+        let line = format!(r#"{{"event":"text","text":"{}"}}"#, "y".repeat(MAX_LINE / 2));
+        let many = vec![line; MAX_REPLY / (MAX_LINE / 2) + 8];
+        let server = fake(&d, vec![r#"{"event":"ready"}"#.into()], 0, many, true);
+        let (_, outcome) = collect(&d, &ai(0), b"");
+        let err = outcome.unwrap_err();
+        assert!(err.kind() == io::ErrorKind::InvalidData && err.to_string().contains("reply is longer"), "{err}");
+        let _ = server.join();
+    }
+
+    #[test]
+    fn a_stream_that_closes_without_an_end_is_an_error() {
+        let d = folder("c");
+        let server = fake(&d, vec![r#"{"event":"ready"}"#.into()], 0, vec![r#"{"event":"text","text":"half"}"#.into()], false);
+        let (events, outcome) = collect(&d, &ai(0), b"");
+        assert_eq!(events, [Event::Text { text: "half".into() }]);
+        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        let _ = server.join();
+    }
+
+    #[test]
+    fn a_refusal_line_is_an_outcome_and_sends_no_input() {
+        let d = folder("d");
+        let server = fake(&d, vec![r#"{"ok":false,"message":"refused: no"}"#.into()], 0, vec![], true);
+        let (events, outcome) = collect(&d, &ai(5), b"hello");
+        assert!(events.is_empty());
+        assert_eq!(outcome.unwrap(), Outcome { ok: false, message: "refused: no".into() });
+        assert_eq!(server.join().unwrap(), 0, "no byte arrived after the request line");
+    }
+
+    #[test]
+    fn the_client_refuses_a_request_whose_input_length_differs() {
+        let nowhere = folder("e");
+        for (request, input) in [(ai(3), &b"ab"[..]), (ai(0), b"x"), (Request { token: "t".into(), pane: None, cmd: Cmd::Ping }, b"")] {
+            let (events, outcome) = collect(&nowhere, &request, input);
+            assert!(events.is_empty());
+            assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::InvalidInput, "{request:?}");
+        }
+        let long = Request { token: "t".into(), pane: None, cmd: Cmd::Ai { prompt: "p".repeat(MAX_LINE), stdin_bytes: 0 } };
+        assert_eq!(collect(&nowhere, &long, b"").1.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_stray_member_of_an_ai_request_is_named() {
+        let clean = serde_json::json!({"token":"t","pane":1,"cmd":"ai","prompt":"q","stdin_bytes":0});
+        assert_eq!(stray_member(&clean), None);
+        let mut extra = clean.clone();
+        extra["consent"] = serde_json::json!(true);
+        assert_eq!(stray_member(&extra).as_deref(), Some("consent"));
+        let mut long = clean.clone();
+        long["k".repeat(200)] = serde_json::json!(1);
+        let shown = stray_member(&long).unwrap();
+        assert_eq!(shown, format!("{}...", "k".repeat(40)));
+        let mut odd = clean.clone();
+        odd["a\"\nb"] = serde_json::json!(1);
+        assert_eq!(stray_member(&odd).as_deref(), Some("a\\\"\\nb"), "the name is escaped");
+        let other = serde_json::json!({"token":"t","cmd":"ping","consent":true});
+        assert_eq!(stray_member(&other), None, "only an ai request is held to its names");
     }
 }

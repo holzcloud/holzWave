@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{GenericFilePath, GenericNamespaced, ListenerOptions, Stream, ToFsName, ToNsName};
@@ -57,11 +58,17 @@ pub const MAX_PROMPT: usize = 16 * 1024;
 pub const MAX_STDIN: usize = 1024 * 1024;
 /// How many requests are handled at once.
 const MAX_CLIENTS: usize = 8;
+/// How many streams run at once. They count against [`MAX_CLIENTS`] too, so the rest stays free for the shell hooks.
+const MAX_STREAMS: usize = 2;
+/// How long a connection may stay silent before it is dropped (not on Windows: named pipes have no timeouts).
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Refusal texts that tests and clients rely on.
 const PROMPT_TOO_LONG: &str = "the prompt is longer than 16384 bytes or has a NUL";
 const INPUT_TOO_LONG: &str = "the input is longer than 1048576 bytes";
 const NOTHING_TO_ASK: &str = "there is nothing to ask: give a prompt or pipe text in";
+const BUSY_STREAMS: &str = "busy: wsh ai requests are running already; try again when one has ended";
+const NO_REQUEST_IN_TIME: &str = "no request arrived in time";
 
 /// What `wsh` can ask.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,11 +239,16 @@ fn answer(stream: &mut impl Write, ok: bool, message: impl Into<String>) {
     let _ = stream.write_all(line.as_bytes());
 }
 
-fn serve_one(stream: Stream, token: &str, handler: &dyn Handler) {
+fn serve_one(stream: Stream, token: &str, handler: &dyn Handler, limits: &Limits, streams: &Arc<AtomicUsize>) {
+    // A connection that says nothing is dropped after the timeout (named pipes have none: the result is ignored).
+    let _ = stream.set_recv_timeout(Some(limits.read_timeout));
     let (recv, mut send) = stream.split();
     let mut reader = BufReader::new(recv);
     let line = match read_bounded_line(&mut reader) {
         Ok(l) => l,
+        Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            return answer(&mut send, false, NO_REQUEST_IN_TIME);
+        }
         Err(e) => return answer(&mut send, false, e.to_string()),
     };
     // The token first: a request that does not carry it is not looked at any further.
@@ -247,6 +259,11 @@ fn serve_one(stream: Stream, token: &str, handler: &dyn Handler) {
     if !value.get("token").and_then(|t| t.as_str()).is_some_and(|t| same(t, token)) {
         return answer(&mut send, false, "refused: wsh must run in a holzWave terminal (the token is missing or wrong)");
     }
+    // The structure of the request type ignores members it does not know; an `ai` request is held to its five names, so a
+    // request that carries `consent: true` or the like fails before any handler.
+    if let Some(key) = stream::stray_member(&value) {
+        return answer(&mut send, false, format!("unknown field `{key}` in an ai request"));
+    }
     let request: Request = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(e) => return answer(&mut send, false, format!("unknown command: {e}")),
@@ -255,7 +272,7 @@ fn serve_one(stream: Stream, token: &str, handler: &dyn Handler) {
         return answer(&mut send, false, why);
     }
     if request.cmd.is_stream() {
-        return stream::serve(reader, send, request, handler);
+        return stream::serve(reader, send, request, handler, limits, streams);
     }
     match handler.handle(request.pane, request.cmd) {
         Ok(m) => answer(&mut send, true, m),
@@ -284,8 +301,49 @@ impl Drop for Server {
     }
 }
 
-/// Make the directory (only its user may enter it) and listen in it.
+/// How many connections run at once and how long a silent one is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Requests of every kind that are handled at once.
+    pub clients: usize,
+    /// Streams that run at once; they are part of `clients`, so `clients - streams` slots stay for the others.
+    pub streams: usize,
+    /// How long a connection may say nothing (Unix only; a named pipe has no timeouts).
+    pub read_timeout: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits { clients: MAX_CLIENTS, streams: MAX_STREAMS, read_timeout: READ_TIMEOUT }
+    }
+}
+
+/// A place in a counted pool, given back when the guard is dropped (so a panic or a failed thread start leaks none).
+struct Slot(Arc<AtomicUsize>);
+
+impl Slot {
+    fn take(counter: &Arc<AtomicUsize>, max: usize) -> Option<Slot> {
+        if counter.fetch_add(1, Ordering::SeqCst) >= max {
+            counter.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Slot(counter.clone()))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Make the directory (only its user may enter it) and listen in it, with the default [`Limits`].
 pub fn serve(dir: &Path, token: String, handler: Arc<dyn Handler>) -> io::Result<Server> {
+    serve_with(dir, token, handler, Limits::default())
+}
+
+/// Make the directory (only its user may enter it) and listen in it.
+pub fn serve_with(dir: &Path, token: String, handler: Arc<dyn Handler>, limits: Limits) -> io::Result<Server> {
     make_private_dir(dir)?;
     let socket = dir.join("ipc.sock");
     // A socket left by a crashed run is not a reason to refuse to start.
@@ -296,22 +354,24 @@ pub fn serve(dir: &Path, token: String, handler: Arc<dyn Handler>) -> io::Result
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let active = Arc::new(AtomicUsize::new(0));
+    let streams = Arc::new(AtomicUsize::new(0));
     thread::Builder::new().name("holzwave-ipc".into()).spawn(move || {
         for stream in listener.incoming() {
             if flag.load(Ordering::SeqCst) {
                 return;
             }
             let Ok(stream) = stream else { continue };
-            if active.fetch_add(1, Ordering::SeqCst) >= MAX_CLIENTS {
-                active.fetch_sub(1, Ordering::SeqCst);
+            let Some(slot) = Slot::take(&active, limits.clients) else {
                 let mut stream = stream;
                 answer(&mut stream, false, "busy");
                 continue;
-            }
-            let (token, handler, active) = (token.clone(), handler.clone(), active.clone());
+            };
+            let (token, handler, streams) = (token.clone(), handler.clone(), streams.clone());
+            // The slot moves into the thread: it is given back when the thread ends, however it ends, and when the thread
+            // cannot start the closure (and the slot with it) is dropped.
             let _ = thread::Builder::new().name("holzwave-ipc-client".into()).spawn(move || {
-                serve_one(stream, &token, &*handler);
-                active.fetch_sub(1, Ordering::SeqCst);
+                let _slot = slot;
+                serve_one(stream, &token, &*handler, &limits, &streams);
             });
         }
     })?;
@@ -532,5 +592,14 @@ mod tests {
         assert_eq!(deciding_names(&synthetic, "Fake"), [a, b, c]);
         assert!(deciding_names(&synthetic, "Missing")[0].starts_with("no enum"));
         assert!(deciding_names("pub enum Fake {\n    Ping,\n", "Fake")[0].contains("does not end"));
+    }
+
+    #[test]
+    fn the_debug_output_of_a_request_hides_the_token() {
+        let r = req("s3cr3t-token-value", Some(4), Cmd::Ai { prompt: "hello".into(), stdin_bytes: 2 });
+        let shown = format!("{r:?}");
+        assert!(shown.contains("hidden") && !shown.contains("s3cr3t-token-value"), "{shown}");
+        assert!(shown.contains("pane"), "{shown}");
+        assert!(!format!("{r:#?}").contains("s3cr3t"));
     }
 }
