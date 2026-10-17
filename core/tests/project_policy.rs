@@ -2450,12 +2450,11 @@ const PLAN_LABEL_SKIPPED_DIRS: [&str; 7] = ["target", "node_modules", ".build", 
 const PLAN_LABEL_ALLOWED: [(&str, &str, &str); 0] = [];
 
 /// The labels of the private planning tree in `text`, as one-based line numbers and the label text. Four shapes: a plan id
-/// (the two digits of the phase, a hyphen and two digits, alone: not inside a date, a longer number, a word, a version),
-/// a threat id, the name of the phase directory, and a test or function name that carries a spike label.
+/// (the two digits of a phase, a hyphen and two digits, alone: not inside a date, a longer number, a word, a version),
+/// a threat id, the name of the phase directory, and a test or function name that carries a spike label. The plan id, the
+/// threat id and the directory rules run for every phase of [`plan_label_phases`]; the spike rules run once per line.
 fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
-    let phase = String::from("0") + "7";
-    let threat = format!("T-{phase}-");
-    let directory = format!("{phase}-extras");
+    let phases = plan_label_phases();
     let spike = String::from("spike") + "_s";
     let spike_word = String::from("spike") + " S";
     let mut hits = Vec::new();
@@ -2467,22 +2466,25 @@ fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
             chars.len() >= i + want.len() && chars[i..i + want.len()] == want[..]
         };
         for i in 0..chars.len() {
-            // A plan id: the phase, a hyphen and two digits.
-            if at(i, &format!("{phase}-")) {
-                let before_ok = i == 0 || !(chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '-' | '_' | '.'));
-                let digits = i + 3 + 1 < chars.len() && chars[i + 3].is_ascii_digit() && chars[i + 4].is_ascii_digit();
-                let after_ok = !chars.get(i + 5).is_some_and(char::is_ascii_digit);
-                if before_ok && digits && after_ok {
-                    hits.push((number, chars[i..i + 5].iter().collect()));
+            for (phase, directory) in &phases {
+                let threat = format!("T-{phase}-");
+                // A plan id: the phase, a hyphen and two digits.
+                if at(i, &format!("{phase}-")) {
+                    let before_ok = i == 0 || !(chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '-' | '_' | '.'));
+                    let digits = i + 3 + 1 < chars.len() && chars[i + 3].is_ascii_digit() && chars[i + 4].is_ascii_digit();
+                    let after_ok = !chars.get(i + 5).is_some_and(char::is_ascii_digit);
+                    if before_ok && digits && after_ok {
+                        hits.push((number, chars[i..i + 5].iter().collect()));
+                    }
                 }
-            }
-            // A threat id: T, the phase and a digit.
-            if at(i, &threat) && chars.get(i + threat.chars().count()).is_some_and(char::is_ascii_digit) {
-                hits.push((number, chars[i..i + threat.chars().count() + 1].iter().collect()));
-            }
-            // The name of the phase directory.
-            if at(i, &directory) {
-                hits.push((number, directory.clone()));
+                // A threat id: T, the phase and a digit.
+                if at(i, &threat) && chars.get(i + threat.chars().count()).is_some_and(char::is_ascii_digit) {
+                    hits.push((number, chars[i..i + threat.chars().count() + 1].iter().collect()));
+                }
+                // The name of the phase directory.
+                if at(i, directory) {
+                    hits.push((number, directory.clone()));
+                }
             }
             // A spike label in a name or in words: the prefix, a digit from 1 to 5, and no letter or digit right after.
             for prefix in [&spike, &spike_word] {
@@ -2498,6 +2500,15 @@ fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
         }
     }
     hits
+}
+
+/// The phases whose labels stay out of the public tree, as the two digits of the phase and the name of its directory.
+/// Built from pieces so that this file holds no label.
+fn plan_label_phases() -> Vec<(String, String)> {
+    vec![
+        (String::from("0") + "7", String::from("0") + "7-extras"),
+        (String::from("0") + "8", String::from("0") + "8-" + "native" + "-integrationen"),
+    ]
 }
 
 /// Every text file of the first-party directories, and `README.md`, sorted. The walk is private to this guard: it skips
@@ -2545,26 +2556,34 @@ fn no_public_file_carries_a_plan_label() {
 
 #[test]
 fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips_dates_and_longer_numbers() {
-    // Every sample is built from pieces, so that this file holds no label itself.
-    let phase = String::from("0") + "7";
-    let id = format!("{phase}-{}", 12);
+    // Every sample is built from pieces, so that this file holds no label itself. Each row runs for both phases.
+    let second_name = String::from("native") + "-integrationen";
+    for (phase, name) in [(String::from("0") + "7", "extras"), (String::from("0") + "8", second_name.as_str())] {
+        let id = format!("{phase}-{}", 12);
+        let hit = |text: &str| plan_label_hits(text).into_iter().map(|(_, label)| label).collect::<Vec<_>>();
+        assert_eq!(hit(&id), [id.clone()], "an id alone ({phase})");
+        assert_eq!(hit(&format!("see ({id})")), [id.clone()], "an id in parentheses ({phase})");
+        assert_eq!(hit(&format!("{id} starts the line")), [id.clone()], "an id at the start ({phase})");
+        assert_eq!(hit(&format!("ends the line {id}")), [id.clone()], "an id at the end ({phase})");
+        assert!(hit(&format!("on 2026-{id}")).is_empty(), "inside a date ({phase})");
+        assert!(hit(&format!("x{id}")).is_empty(), "after a letter ({phase})");
+        assert!(hit(&format!("5{id}")).is_empty(), "after a digit ({phase})");
+        assert!(hit(&format!("{id}3")).is_empty(), "before a third digit ({phase})");
+        assert!(hit(&format!("1.{id}")).is_empty(), "after a dot ({phase})");
+        assert!(hit(&format!("a_{id}")).is_empty(), "after an underscore ({phase})");
+        assert!(hit(&format!("{phase}-x")).is_empty(), "a hyphen and a letter ({phase})");
+        assert!(hit(&format!("v{phase}.1")).is_empty(), "a version number ({phase})");
+        let threat = format!("T-{phase}-024");
+        assert_eq!(hit(&format!("a bound ({threat})")), [format!("T-{phase}-0")], "a threat id ({phase})");
+        assert!(hit(&format!("T-{phase}-SC")).is_empty(), "the reserved threat name has no digit ({phase})");
+        let directory = format!("{phase}-{name}");
+        assert_eq!(hit(&format!("the folder {directory}/")), [directory.clone()], "the phase directory ({phase})");
+        assert_eq!(plan_label_hits(&format!("one\ntwo {id}\nthree")), [(2, id)], "the line number is one-based ({phase})");
+    }
+    // The shapes of the first phase and the spike labels are unchanged: only these two phases, nothing in between.
+    let other = String::from("0") + "9";
+    assert!(plan_label_hits(&format!("{other}-12 and T-{other}-1 and {other}-extras")).is_empty(), "a phase that is no label");
     let hit = |text: &str| plan_label_hits(text).into_iter().map(|(_, label)| label).collect::<Vec<_>>();
-    assert_eq!(hit(&id), [id.clone()], "an id alone");
-    assert_eq!(hit(&format!("see ({id})")), [id.clone()], "an id in parentheses");
-    assert_eq!(hit(&format!("{id} starts the line")), [id.clone()], "an id at the start");
-    assert_eq!(hit(&format!("ends the line {id}")), [id.clone()], "an id at the end");
-    assert!(hit(&format!("on 2026-{id}")).is_empty(), "inside a date");
-    assert!(hit(&format!("x{id}")).is_empty(), "after a letter");
-    assert!(hit(&format!("5{id}")).is_empty(), "after a digit");
-    assert!(hit(&format!("{id}3")).is_empty(), "before a third digit");
-    assert!(hit(&format!("1.{id}")).is_empty(), "after a dot");
-    assert!(hit(&format!("a_{id}")).is_empty(), "after an underscore");
-    assert!(hit(&format!("{phase}-x")).is_empty(), "a hyphen and a letter");
-    let threat = format!("T-{phase}-024");
-    assert_eq!(hit(&format!("a bound ({threat})")), [format!("T-{phase}-0")], "a threat id");
-    assert!(hit(&format!("T-{phase}-SC")).is_empty(), "the reserved threat name has no digit");
-    let directory = format!("{phase}-extras");
-    assert_eq!(hit(&format!("the folder {directory}/")), [directory.clone()], "the phase directory");
     let spike = String::from("spike") + "_s";
     assert_eq!(hit(&format!("fn {spike}1_first_delta()")), [format!("{spike}1")], "a spike name with a tail");
     assert_eq!(hit(&format!("fn round_trip_{spike}5()")), [format!("{spike}5")], "a spike name at the end");
@@ -2575,7 +2594,9 @@ fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips
     let words = String::from("spike") + " S";
     assert_eq!(hit(&format!("the {words}1 numbers")), [format!("{words}1")], "a spike label written as words");
     assert!(hit(&format!("the {words}6 numbers")).is_empty(), "a spike word with another digit");
-    assert_eq!(plan_label_hits(&format!("one\ntwo {id}\nthree")), [(2, id)], "the line number is one-based");
+    // A line that holds labels of both phases reports both.
+    let both = format!("{}-01 and {}-02", String::from("0") + "7", String::from("0") + "8");
+    assert_eq!(hit(&both).len(), 2, "both phases on one line");
 }
 
 // ---- the architecture and the golden of the protocol ----------------------------------------------------------
