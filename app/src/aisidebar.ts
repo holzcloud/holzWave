@@ -254,6 +254,7 @@ export const sidebarChat: SidebarHandle = {
   showing: () => form === "chat" && (hooks?.shown() ?? false),
   columnShown: () => hooks?.shown() ?? false,
   open: () => openSidebarChat(false),
+  conversation: sidebarConversation,
   reveal(conversation: string): boolean {
     // Only the chat the column holds is brought back: a call that waits in it must reach the person in either form, hidden or not.
     if (hooks === null || current === null || current !== conversation) return false;

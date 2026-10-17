@@ -13,6 +13,7 @@ import { initChrome } from "./chrome.js";
 import { initConnections } from "./connections.js";
 import { initSync } from "./sync.js";
 import { initHistory } from "./historyview.js";
+import { initInline } from "./inline.js";
 import { sidebarChat } from "./aisidebar.js";
 import { initSidebar } from "./sidebar.js";
 import { openConnections } from "./connections-ui.js";
@@ -63,6 +64,8 @@ async function main() {
   await initSync(() => {});
   // The AI chat: its title-bar button lands between the sync button and the sidebar button.
   await initChat(openBlock, { watchSettings, sidebar: sidebarChat });
+  // The palette actions of the chat: they hand a message and a card to the chat module, so it must exist first.
+  await initInline();
   // The providers dialog changes the two privacy settings through the same queue as the Settings dialog.
   initAiSettings({ change, watch: watchSettings });
   initHistory();

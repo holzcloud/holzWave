@@ -486,3 +486,40 @@ test("a prefill ticks the kinds and previews at once when allowed, and waits for
   await closed.consent.share();
   assert.deepEqual(closed.calls.map(([cmd]) => cmd), ["ai_context_state", "ai_context_state", "ai_context_share"]);
 });
+
+test("a prefill in order of preference ticks only the first kind the state lists", async () => {
+  const pick = (kinds, extra = {}) => make({ answers: { ai_context_state: () => STATE({ shared: true, kinds, ...extra }) } });
+
+  const first = pick(["selection", "screen", "last_command"]);
+  await first.consent.open(["last_command", "screen"], { first: true });
+  assert.deepEqual(first.calls.map(([cmd]) => cmd), ["ai_context_state", "ai_context_preview"]);
+  assert.deepEqual(first.calls[1][1].kinds, ["last_command"], "the first of the preference that is listed");
+  assert.deepEqual(first.consent.model.ticked, ["last_command"]);
+
+  const second = pick(["selection", "screen"]);
+  await second.consent.open(["last_command", "screen"], { first: true });
+  assert.deepEqual(second.calls[1][1].kinds, ["screen"]);
+  assert.deepEqual(second.consent.model.ticked, ["screen"]);
+
+  const none = pick(["selection"]);
+  await none.consent.open(["last_command", "screen"], { first: true });
+  assert.deepEqual(none.calls.map(([cmd]) => cmd), ["ai_context_state"], "nothing listed, nothing previewed");
+  assert.deepEqual(none.consent.model.ticked, []);
+
+  // Asking: nothing is previewed before the share; after it the first listed kind of the preference is read, not both.
+  const all = ["selection", "screen", "last_command"];
+  const ask = make({
+    answers: { ai_context_state: () => STATE({ kinds: all }), ai_context_share: (args) => STATE({ kinds: all, shared: args.shared }) },
+  });
+  await ask.consent.open(["last_command", "screen"], { first: true });
+  assert.deepEqual(ask.calls.map(([cmd]) => cmd), ["ai_context_state"]);
+  assert.deepEqual(ask.consent.model.prefill, ["last_command", "screen"], "the order the caller gave is kept");
+  await ask.consent.share();
+  assert.deepEqual(ask.calls.map(([cmd]) => cmd), ["ai_context_state", "ai_context_share", "ai_context_preview"]);
+  assert.deepEqual(ask.calls[2][1].kinds, ["last_command"]);
+
+  // Without the option the old rule holds: every listed kind of the prefill is ticked, in the order of the state.
+  const both = pick(["selection", "screen", "last_command"]);
+  await both.consent.open(["last_command", "screen"]);
+  assert.deepEqual(both.calls[1][1].kinds, ["screen", "last_command"]);
+});

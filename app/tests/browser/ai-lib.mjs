@@ -460,3 +460,46 @@ export async function sendSide(page, text) {
   await page.locator("#sidebar .chat-input").fill(text);
   await page.locator("#sidebar .chat-input").press("Enter");
 }
+
+/** Run the action `id` through the page's registry, as a chord or the palette would. It does not wait for what the action starts. */
+export const runAction = (page, id) =>
+  page.evaluate((action) => {
+    window.__registry.runAction(action);
+  }, id);
+
+/** The text of the composer under `scope` (a selector; the first composer of the page by default). */
+export const draftOf = (page, scope = "") => page.locator(`${scope} textarea.chat-input`.trim()).first().inputValue();
+
+/** Deliver a full `frame` event of pane `pane` with the members of `over` laid over a blank one (`selection`, `modes`). */
+export async function emitFrame(page, pane, over = {}) {
+  await page.evaluate(
+    ([p, extra]) => {
+      window.__FRAME_SEQ = (window.__FRAME_SEQ ?? 1000) + 1;
+      window.__MOCK__.emit("frame", {
+        pane: p, seq: window.__FRAME_SEQ, full: true, cols: 20, rows: 4, fg: 0xffffff, bg: 0x101010, cursor: null,
+        scrollbar: [0, 4, 4], selection: [], matches: [], search: null, copy_cursor: null,
+        modes: { alt: false, bracketed_paste: false, mouse: false }, changed: [], ...extra,
+      });
+    },
+    [pane, over],
+  );
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+}
+
+/** The `kinds` of every preview call the page made, oldest first. */
+export const previewKinds = async (page) => (await callsOf(page, "ai_context_preview")).map((args) => args.kinds);
+
+/** The names of the commands the page called, oldest first. */
+export const commandNames = (page) => page.evaluate(() => window.__MOCK__.calls.map((c) => c[0]));
+
+/**
+ * Let the page see its layout twice, so the pane it was last on is the pane the chats act for (the rule follows the focus
+ * between two draws), and give the keyboard to the terminal input.
+ */
+export async function settle(page) {
+  for (let i = 0; i < 2; i += 1) {
+    await page.evaluate(() => window.__MOCK__.emit("layout", window.__MOCK__.view()));
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  }
+  await page.evaluate(() => document.getElementById("ime").focus());
+}

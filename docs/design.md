@@ -100,6 +100,7 @@ default.
 | Context card | a flat strip in the chat pane (6.14): a 2 px bar on its left, native checkboxes, one solid action, hairlines above and below, no shadow; it names the pane, the destination and every item that would go out |
 | Approval card | a flat strip entry in the chat pane (6.15): a 2 px bar on its left, mono payload rows, one solid action, hairlines above and below, no shadow; it shows every field of a tool call, where the result goes and what untrusted text is in the turn |
 | Chat list | a flat list inside the sidebar column (6.18): one row per stored chat with a mark (`●` on screen, `○`), a title and a mono line with the model and the age, the chat on screen with the rose wash and a 2 px rose bar, a delete button that asks twice (`×`, then `Delete?`); hairlines above and below, scrolls inside, no shadow |
+| Reply action | a hairline mono button under a one-line code block of a finished reply (6.19): its word is its name, it puts the line at the prompt of the pane the chat acts for and never runs it; a block with characters that are not shown gets a warn line instead; no shadow |
 | Diff box | a hairline box in mono inside an approval card (6.16): a head line with the kind, the counts and the sizes, then the changed lines with their line numbers and a `+` or `-` sign as the cue; no fill, wraps and scrolls inside, at most 16 rem high |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
@@ -381,6 +382,8 @@ focused; else a shown sidebar column becomes the AI chat (6.18); else the focuse
 chat. `ai.new_chat` (no default chord) always starts a new conversation in a new pane. The button is pressed (rose wash and
 rose border, as `▥ Sidebar`, with `aria-pressed`) while a chat is on screen, in a pane of the shown tab or in the column.
 While calls wait for a decision the button shows the number, `✦ AI · 2` (6.15).
+The palette entries `Explain error` and `Command from description` open the chat in the same order, write a message into
+its composer and never send it (6.19).
 
 **Header.** Type icon `✦`, title `chat`, and right-aligned in mono the chat's title (the first line of the first message,
 at most 60 characters) or `new chat` before there is one.
@@ -443,6 +446,7 @@ status line and the composer.
 **Markdown.** The preview's allow-list. `code` and fenced blocks are mono. No image is ever loaded or shown. A link opens
 in the system browser by a click only and shows its address as its tooltip. A link whose address carries a query string or
 a user name is not a link: it is text followed by the address in brackets.
+A one-line code block of a finished reply has the button `Insert at prompt` under it (6.19).
 
 **Keys and focus.** Opening a chat focuses the composer, and so does the pane gaining the focus. `Enter` sends (not while
 an input method composes), `Shift+Enter` makes a new line, and `Escape` stops a running reply and otherwise gives the
@@ -574,7 +578,8 @@ pane first.` in the status line. When the user focuses another such pane the car
 on desktop, 44 px at 640 px and narrower, with `aria-expanded` and `aria-controls` the card. A press opens the card and
 only then is the core asked (it looks up a host name when it classifies a destination), so a mount, a focus or a redraw
 asks nothing. While an offer is attached the button reads `Context · 1 item` (`Context · 2 items`, `Context · none` when
-every item is unticked), so what will go out is visible next to `Send`.
+every item is unticked), so what will go out is visible next to `Send`. The palette action `Explain error` (6.19) opens the card for the pane the chat acts for with
+one item chosen and previewed and shares nothing by itself.
 
 **Modes.** Each mode has words, so colour is never the only cue.
 
@@ -1102,3 +1107,79 @@ Rose marks only the chat on screen and the focus cues.
 | Chat deleted. | the status line after a delete |
 | That chat is open in another tab. | the status line after a press on a row whose pane is in another tab |
 | The list was not understood. | the status line when the core's list cannot be read |
+
+### 6.19 Palette and inline actions
+
+The chat has two entries in the palette and one button in its transcript. They prepare and the person decides: nothing
+here sends a message, shares a pane, reads the text of a pane or runs a command.
+
+| Palette entry | Chord on macOS | Chord on Windows and Linux | What it prepares |
+|---|---|---|---|
+| `Explain error` | `Cmd+Shift+Y` | `Ctrl+Shift+Y` | a message in the composer and the context card of 6.14 for the pane the chat acts for, with one item chosen |
+| `Command from description` | `Cmd+Shift+G` | `Ctrl+Shift+G` | the start of a message that asks for one shell command, with no context |
+
+Both are listed with `AI chat`, `New AI chat`, `AI chat in the sidebar` and `AI providers…` under the section word `ai`,
+with the chord of the running platform at the right. Both can be changed or unbound in the key binding editor (6.4). `Y` is
+for why and `G` for generate; `Ctrl+Shift+E` stays unused because the input method of GNOME takes it. They add no control
+to the title bar, the pane header or the status line: nothing in the page tells which command of a pane failed, so there is
+nothing to attach a control to, and nothing is drawn for what is not built.
+
+**Where they open.** Both follow the order of 6.12 for `✦ AI`: a chat whose tool call waits and is not on screen, else the
+chat pane of the shown tab, else the shown column, which becomes the AI chat (6.18), else the focused pane is split to the
+right with a new chat. The message goes into the composer of the chat that came up and into no other, the composer gets the
+keyboard with the caret at the end, and a second run of an action leaves one copy of the text and no second chat. A draft
+the person has already typed is kept as it is: the prepared text goes in only when the composer is empty.
+
+**Explain error.** It acts for the pane the chat acts for (6.14) and needs that pane to be a terminal pane; otherwise the
+notice `Focus a terminal pane to explain its error.` is shown and nothing opens. The composer receives `Explain the error
+in the attached terminal output: what went wrong, the most likely cause, and the command or change that fixes it.` The
+context card (6.14) opens for that pane with one item chosen, in this order: the selection when the pane shows one; else the
+last command and its output when the core lists that kind; else the visible screen. The last command appears only when the
+engine can bound command output, so the second choice is what happens when it cannot. The card, its words and its rules are
+those of 6.14: the pane is still shared first (the card asks), the item is previewed before anything can leave, the redaction
+findings and the destination are shown, and the person can tick another item or none. The status line says `Nothing is sent
+until you press Send.`
+
+**Command from description.** The composer receives `Write one shell command for this task. Reply with the command alone in
+one code block and, after it, one sentence saying what it does. Task: ` with the caret after the colon and the space. No
+context card opens and nothing from the terminal goes with the message; what leaves is the person's finished text. The status
+line says `Describe the task after "Task:", then press Send.`
+
+**Insert at prompt.** Under a code block of a finished assistant reply that is one line (after one trailing line break is
+dropped and the ends are trimmed), has at most 1024 characters and holds no hidden character, a hairline button `Insert at
+prompt` (mono, uppercase, a `.label`) stands left under the block. A click puts exactly that line at the prompt of the pane
+the chat acts for, at the cursor, through the paste path of the terminal, with no line break, and does not run it; the
+terminal pane then has the keyboard and the status line says `Inserted at the prompt of pane 1. It was not run.` It inserts
+nothing and says why when that pane is not a terminal pane of the shown tab (`There is no terminal pane to insert into.`),
+when it shows a full-screen program (`That pane shows a full-screen program, so nothing was inserted.`), or when the terminal
+refuses the text (`The terminal did not take the text, so nothing was inserted.`); a refused paste is never repeated. The
+click must be a real press: an event that a script made is ignored. The line is checked again at the click, and the page
+sends no key press at all, so the person reads the line at the prompt and presses `Enter` themselves.
+
+| State of a code block | What is drawn | Second cue |
+|---|---|---|
+| one clean line | the button `Insert at prompt` | the word |
+| several lines, a tab, an empty block, a line over 1024 characters | nothing | none; the person selects and copies what they want |
+| one line that holds a hidden character | no button; under the block the line `! Not insertable: it holds characters that are not shown.` in the warn colour, underlined | the mark `!` and the words |
+
+A hidden character is a control character (an escape sequence, a carriage return, a C1 control, DEL), a bidirectional
+control, a zero-width, tag or private-use character, a line or paragraph separator, or a space that is not the plain space.
+A reply gets at most 16 buttons and notes.
+
+**Narrow screens (640 px and narrower).** `Insert at prompt` is at least 44 px high, and the prepared message in the composer
+is at least 16 px like all composer text; the context card keeps its own 44 px rules. On a narrow screen the click also shows
+the terminal pane (the layout answer of focusing it), where the inserted line is.
+
+**Accessibility.** The button's text is its name and the block above it is read first; the warn line is text with the mark
+and words; the status line is the live region; hairlines are `--hw-line` so `contrast-high` holds; nothing moves; under
+forced colours the button and its focus ring use system colours; the keyboard focus ring is 2 px.
+
+| Sentence | Where |
+|---|---|
+| Nothing is sent until you press Send. | the status line after `Explain error` |
+| Describe the task after "Task:", then press Send. | the status line after `Command from description` |
+| Focus a terminal pane to explain its error. | the notice when the pane the chat acts for is not a terminal |
+| Inserted at the prompt of pane N. It was not run. | the status line after a click on `Insert at prompt` |
+| There is no terminal pane to insert into. | the status line when the pane is no terminal pane of the shown tab |
+| That pane shows a full-screen program, so nothing was inserted. | the status line when the pane is on the alternate screen |
+| The terminal did not take the text, so nothing was inserted. | the status line when the paste was refused or empty |

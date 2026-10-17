@@ -161,6 +161,8 @@ const EXPECTED = {
   "Cmd+Shift+H": "history.open",
   "Cmd+B": "sidebar.toggle",
   "Cmd+Shift+A": "ai.open",
+  "Cmd+Shift+Y": "ai.explain_error",
+  "Cmd+Shift+G": "ai.command_from_description",
   "Cmd+=": "font.increase",
   "Cmd+-": "font.decrease",
   "Cmd+0": "font.reset",

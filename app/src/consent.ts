@@ -44,6 +44,12 @@ export interface ConsentModel {
   prefill: CtxKind[];
 }
 
+/** How a caller wants its prefill read. */
+export interface OpenOptions {
+  /** The prefill is an order of preference: only the first kind of it that the state lists is ticked. */
+  first?: boolean;
+}
+
 /** What the card says when an answer is not one the page understands. */
 const NOT_UNDERSTOOD = "The answer was not understood.";
 
@@ -67,6 +73,8 @@ export class Consent {
   /** The route of the latest question, kept to see a change. */
   private known: Route | null = null;
   private disposed = false;
+  /** The prefill is an order of preference, kept with the prefill until the card closes. */
+  private first = false;
 
   constructor(private readonly deps: ConsentDeps) {}
 
@@ -88,10 +96,10 @@ export class Consent {
 
   /**
    * Ask the core where this chat's message would go and whether the pane is shared; the answer decides between asking
-   * (`ask`) and picking (`pick`). `prefill` names kinds to tick once the pane may be read. Ignored while a command is in
-   * flight.
+   * (`ask`) and picking (`pick`). `prefill` names kinds to tick once the pane may be read; with `options.first` it is an order
+   * of preference and only the first kind of it that the state lists is ticked. Ignored while a command is in flight.
    */
-  async open(prefill: CtxKind[] = []): Promise<void> {
+  async open(prefill: CtxKind[] = [], options: OpenOptions = {}): Promise<void> {
     if (this.disposed || this.m.busy !== null) return;
     const route = this.deps.route();
     if (route.pane === null) return;
@@ -102,6 +110,7 @@ export class Consent {
     this.m.off = [];
     this.m.fault = null;
     this.m.prefill = [...prefill];
+    this.first = options.first === true;
     const token = this.begin("state");
     let raw: unknown;
     try {
@@ -343,6 +352,7 @@ export class Consent {
     this.m.ticked = [];
     this.m.fault = null;
     this.m.prefill = [];
+    this.first = false;
   }
 
   /** Mark a command as started and answer the token that tells later whether its answer is still wanted. */
@@ -433,7 +443,9 @@ export class Consent {
   /** After an answer that left the pick list: the kinds a caller asked for are ticked and read at once. */
   private async follow(): Promise<void> {
     if (this.m.mode !== "pick" || this.m.prefill.length === 0 || this.m.state === null) return;
-    const wanted = this.m.state.kinds.filter((kind) => this.m.prefill.includes(kind));
+    const listed = this.m.state.kinds;
+    const preferred = this.first ? this.m.prefill.find((kind) => listed.includes(kind)) : undefined;
+    const wanted = this.first ? (preferred === undefined ? [] : [preferred]) : listed.filter((kind) => this.m.prefill.includes(kind));
     this.m.prefill = [];
     if (wanted.length === 0) return;
     this.m.ticked = wanted;

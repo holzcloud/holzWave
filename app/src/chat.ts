@@ -32,11 +32,14 @@ import {
 } from "./chatview.js";
 import type { ChipView, EndNote, ProfileChoice } from "./chatview.js";
 import { Consent } from "./consent.js";
+import type { OpenOptions } from "./consent.js";
 import { mountCard } from "./consentcard.js";
 import type { CardView } from "./consentcard.js";
 import { NOTES, contextArguments, ctxButtonView, paneWords, sentLine } from "./consentstate.js";
 import type { CtxKind, Route as ConsentRoute } from "./consentstate.js";
 import { el, loadStyles } from "./dom.js";
+import { IntentSlot } from "./inlinestate.js";
+import type { ChatIntent } from "./inlinestate.js";
 import { focusInput } from "./keyboard.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
 import { paneLabel } from "./panehead.js";
@@ -163,6 +166,12 @@ const dirty = new Set<Session>();
 let frame = 0;
 let opener: BlockOpener | null = null;
 let sidebar: SidebarHandle | null = null;
+/** The chat that the last successful `openChat` brought up or focused; null before one and while one is on its way. */
+let opened: string | null = null;
+/** The intent of an action whose chat was not drawn yet when it was handed over. */
+const parked = new IntentSlot();
+/** The call of `openWithIntent` that is on its way. */
+let intending: Promise<string | null> | null = null;
 let button: HTMLButtonElement | null = null;
 /** The profile chosen last in this window: a new chat starts with it. */
 let lastChoice: string | null = null;
@@ -189,6 +198,8 @@ export interface SidebarHandle {
   open(): Promise<string | null>;
   /** Show the column's own chat when it is `conversation`; false for any other chat. */
   reveal(conversation: string): boolean;
+  /** The chat the column shows; null while it shows the sidebar. */
+  conversation(): string | null;
 }
 
 /** What the page offers the chat besides the bridge: the settings watch and the sidebar column. */
@@ -671,6 +682,20 @@ class Mounted implements ChatView {
     this.input.focus({ preventScroll: true });
   }
 
+  /**
+   * Put `text` into the composer when the chat's draft is empty, through the composer's own input path (the count and the
+   * button follow), with the caret at the end and the keyboard in the composer. A draft that is not empty stays as it is.
+   * Never sends.
+   */
+  prefill(text: string): void {
+    if (this.session.draft === "") {
+      this.input.value = text;
+      this.input.dispatchEvent(new Event("input"));
+      this.input.setSelectionRange(text.length, text.length);
+    }
+    this.focus();
+  }
+
   show(conversation: string): void {
     if (conversation === this.session.id) return;
     this.session.views.delete(this);
@@ -685,6 +710,7 @@ class Mounted implements ChatView {
     this.log.replaceChildren();
     this.session = sessionFor(conversation);
     this.attach(this.session);
+    takeParked(conversation);
   }
 
   dispose(): void {
@@ -816,7 +842,7 @@ class Mounted implements ChatView {
    * profile list is read first when it is not known (a user act, like a send), and two providers with no choice open the
    * picker. Answers null, or the sentence that says why the card did not open.
    */
-  async beginContext(prefill: CtxKind[]): Promise<string | null> {
+  async beginContext(prefill: CtxKind[], options?: OpenOptions): Promise<string | null> {
     const s = this.session;
     const consent = consentFor(s);
     if (acting === null) return NOTES.noPane;
@@ -839,7 +865,7 @@ class Mounted implements ChatView {
       });
       return REVIEW_FIRST;
     }
-    await consent.open(prefill);
+    await consent.open(prefill, options);
     return null;
   }
 
@@ -1382,7 +1408,9 @@ class Mounted implements ChatView {
  * pane, the focused terminal pane for a chat in the sidebar later.
  */
 export function mountChat(host: HTMLElement, conversation: string, options: { pane: () => number | null }): ChatView {
-  return new Mounted(host, conversation, options.pane);
+  const view = new Mounted(host, conversation, options.pane);
+  takeParked(conversation);
+  return view;
 }
 
 /** The pane of the shown tab that holds a chat, the focused one first. */
@@ -1402,9 +1430,13 @@ function shownChatPane(): number | null {
  */
 export async function openChat(newChat: boolean): Promise<string | null> {
   if (opener === null) return "the chat is not started";
+  opened = null;
   if (!newChat) {
     for (const s of sessions.values()) {
-      if (s.approvals.waiting() > 0 && sidebar?.reveal(s.id) === true) return null;
+      if (s.approvals.waiting() > 0 && sidebar?.reveal(s.id) === true) {
+        opened = s.id;
+        return null;
+      }
     }
     const pane = shownChatPane();
     if (pane !== null) {
@@ -1416,9 +1448,14 @@ export async function openChat(newChat: boolean): Promise<string | null> {
       for (const s of sessions.values()) {
         for (const view of s.views) if (view.pane() === pane) view.focus();
       }
+      opened = paneBlocks.get(pane)?.path ?? null;
       return null;
     }
-    if (sidebar !== null && sidebar.columnShown()) return sidebar.open();
+    if (sidebar !== null && sidebar.columnShown()) {
+      const reason = await sidebar.open();
+      if (reason === null) opened = sidebar.conversation();
+      return reason;
+    }
   }
   let id: unknown;
   try {
@@ -1430,19 +1467,72 @@ export async function openChat(newChat: boolean): Promise<string | null> {
   wantFocus.add(id);
   const reason = await opener("chat", "local", id, "right");
   if (reason !== null) wantFocus.delete(id);
+  else opened = id;
   return reason;
+}
+
+/**
+ * Open the chat the way `openChat(false)` does and hand it an intent: the text goes into the composer of the chat that came up
+ * when its draft is empty, the card for the pane the chat acts for opens with the kinds of the intent, and the status line
+ * says what is ready. It never sends, never shares and never reads a pane. One call at a time: a second call while the first
+ * awaits gets the first call's answer. Answers null, or one sentence.
+ */
+export function openWithIntent(intent: ChatIntent): Promise<string | null> {
+  if (intending !== null) return intending;
+  const running = bringUp(intent).finally(() => {
+    intending = null;
+  });
+  intending = running;
+  return running;
+}
+
+async function bringUp(intent: ChatIntent): Promise<string | null> {
+  const reason = await openChat(false);
+  if (reason !== null) return reason;
+  const conversation = opened;
+  if (conversation === null) return "the chat could not be opened";
+  return applyIntent(conversation, intent);
+}
+
+/** Apply `intent` to the chat `conversation` when it is drawn, else keep it until it is. */
+async function applyIntent(conversation: string, intent: ChatIntent): Promise<string | null> {
+  const s = sessions.get(conversation);
+  const view = s === undefined ? undefined : [...s.views][0];
+  if (s === undefined || view === undefined) {
+    parked.park(conversation, intent);
+    return null;
+  }
+  view.prefill(intent.text);
+  const sentence = intent.kinds.length > 0 ? await attachContext(conversation, intent.kinds, { first: intent.first }) : null;
+  sayTo(s, intent.ready, "note");
+  return sentence;
+}
+
+/** A chat was just drawn: the intent that waited for it is applied now; a sentence of it is told as a notice. */
+function takeParked(conversation: string): void {
+  const intent = parked.take(conversation);
+  if (intent === null) return;
+  void applyIntent(conversation, intent).then((sentence) => {
+    if (sentence !== null) showNotice(sentence);
+  });
+}
+
+/** The pane the chats act for now (the last focused terminal or preview pane of the shown tab), or null. A read only. */
+export function actingPane(): number | null {
+  return acting;
 }
 
 /**
  * Open the card of the chat `conversation` for the pane it acts for, tick the kinds the core lists among `kinds` and read
  * them once the pane is shared or sharing is not required. It never shares by itself and never sends. Answers null, or one
  * sentence that says why the card did not open (the chat is not on screen, no pane can be shared, no provider is chosen).
+ * With `options.first` the kinds are an order of preference and only the first one the core lists is ticked.
  */
-export async function attachContext(conversation: string, kinds: CtxKind[]): Promise<string | null> {
+export async function attachContext(conversation: string, kinds: CtxKind[], options?: { first?: boolean }): Promise<string | null> {
   const s = sessions.get(conversation);
   const view = s === undefined ? undefined : [...s.views][0];
   if (view === undefined) return "The chat is not open.";
-  return view.beginContext(kinds);
+  return view.beginContext(kinds, options);
 }
 
 /**
@@ -1461,6 +1551,7 @@ export function chatClosed(conversation: string): void {
   }
   sessions.delete(conversation);
   wantFocus.delete(conversation);
+  parked.drop(conversation);
   setChatTitle(conversation, "");
   updateBadge();
 }
