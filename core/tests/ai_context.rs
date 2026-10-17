@@ -982,6 +982,13 @@ fn only_the_explicit_calls_read_a_pane_or_look_up_a_name() {
         .expect("a preview");
     assert_eq!((resolver.lookups(), rig.source.reads()), (3, 2));
     assert_eq!(fake.accepted(), 1, "none of them opened a connection");
+
+    // A command of the shell can run on the thread of an async runtime, where the chokepoint refuses a blocking call:
+    // the calls look the destination up on a thread of their own and still work there.
+    let runtime = tokio::runtime::Builder::new_current_thread().build().expect("a runtime");
+    let inside = runtime.block_on(async { service.context_state(&chat, PANE, Some("llm"), None) });
+    assert!(inside.is_ok(), "{inside:?}");
+    assert_eq!(resolver.lookups(), 4);
 }
 
 #[test]
