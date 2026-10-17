@@ -392,7 +392,7 @@ operating system's keychain under the service `ch.holzcloud.holzwave` and the ac
   "items": [
     { "id": "talos", "name": "Talos", "kind": "ssh", "host": "10.0.4.12", "port": 22, "user": "holz",
       "auth": "key", "key_path": "~/.ssh/id_ed25519", "jump": "bastion", "startup": "tmux attach -t main",
-      "reconnect_attempts": 5, "reconnect_delay_secs": 3 }
+      "reconnect_attempts": 5, "reconnect_delay_secs": 3, "wsh": true }
   ]
 }
 ```
@@ -407,6 +407,7 @@ operating system's keychain under the service `ch.holzcloud.holzwave` and the ac
 | `startup` | a line typed into the shell once it runs |
 | `reconnect_attempts`, `reconnect_delay_secs` | how often and how fast a lost connection is made again; 0 attempts does not reconnect |
 | `shell` | Docker only: the shell to start; empty is `sh` |
+| `wsh` | SSH only. `true` allows the `wsh` tunnel on this connection: a program on the host can open files and rename the pane through it, and never use the AI or approve anything. Default `false`, and then it is left out of the file; WSL and Docker connections with it are dropped on load |
 
 A connection that does not validate is dropped when the file is loaded, with a note in the log, and the original is kept
 as `connections.json.bad`. A host key that is not in `known_hosts` is learned on first use; a key that **differs** from a
