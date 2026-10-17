@@ -61,6 +61,14 @@ pub struct Block {
     pub source: String,
     /// A directory for a browser, a file for a preview.
     pub path: String,
+    /// A preview that opens its file in the editor at once (`wsh edit`) and not as a rendered page. Only a preview has it;
+    /// it is left out of the file when false, and the preview forgets it when it moves to another file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub edit: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// What the page is told about a block pane.
@@ -188,6 +196,8 @@ impl Blocks {
             return Err(Error::Unsupported("the path is empty, too long or has a NUL".into()));
         }
         block.path = path.to_owned();
+        // The editor was asked for one file: another file is shown the way it always is.
+        block.edit = false;
         drop(panes);
         self.save();
         Ok(())
@@ -409,6 +419,9 @@ pub fn portable(block: &Block) -> bool {
 }
 
 fn valid(block: &Block) -> bool {
+    if block.edit && block.kind != BlockKind::Preview {
+        return false;
+    }
     match block.kind {
         // The monitor looks at this computer or at a saved SSH connection and has no path. Whether the connection exists
         // and is SSH is checked when the pane is opened.
@@ -433,7 +446,7 @@ mod tests {
 
     #[test]
     fn portable_blocks_are_the_ones_with_a_saved_connection_or_the_monitor() {
-        let block = |kind, source: &str| Block { kind, source: source.into(), path: String::new() };
+        let block = |kind, source: &str| Block { kind, source: source.into(), path: String::new(), edit: false };
         for kind in [BlockKind::Files, BlockKind::Preview, BlockKind::Monitor, BlockKind::Chat] {
             // A saved connection is the same saved connection on every computer.
             assert!(portable(&block(kind, "web-1")), "{kind:?} of a saved connection");
@@ -459,9 +472,9 @@ mod tests {
     #[test]
     fn a_block_is_assigned_changed_saved_and_restored() {
         let (d, blocks, conns) = setup("assign");
-        blocks.assign(1, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into() }).unwrap();
+        blocks.assign(1, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into(), edit: false }).unwrap();
         blocks.update(1, "/var").unwrap();
-        assert!(blocks.assign(2, Block { kind: BlockKind::Preview, source: String::new(), path: "/x".into() }).is_err());
+        assert!(blocks.assign(2, Block { kind: BlockKind::Preview, source: String::new(), path: "/x".into(), edit: false }).is_err());
         assert!(blocks.update(9, "/x").is_err());
         let views = blocks.views(&conns);
         assert_eq!(views.len(), 1);
@@ -477,7 +490,7 @@ mod tests {
     #[test]
     fn a_monitor_block_names_this_computer_or_a_saved_connection_and_has_no_path() {
         let (d, blocks, _) = setup("monitor");
-        let monitor = |source: &str, path: &str| Block { kind: BlockKind::Monitor, source: source.into(), path: path.into() };
+        let monitor = |source: &str, path: &str| Block { kind: BlockKind::Monitor, source: source.into(), path: path.into(), edit: false };
         blocks.assign(1, monitor(LOCAL, "")).unwrap();
         blocks.assign(2, monitor("talos", "")).unwrap();
         assert!(blocks.assign(3, monitor(LOCAL, "/x")).is_err(), "no path");
@@ -493,7 +506,7 @@ mod tests {
     #[test]
     fn the_hosts_that_have_a_monitor_are_listed_once() {
         let (d, blocks, _) = setup("hosts");
-        let block = |kind, source: &str, path: &str| Block { kind, source: source.into(), path: path.into() };
+        let block = |kind, source: &str, path: &str| Block { kind, source: source.into(), path: path.into(), edit: false };
         blocks.assign(1, block(BlockKind::Monitor, "talos", "")).unwrap();
         blocks.assign(2, block(BlockKind::Monitor, "talos", "")).unwrap();
         blocks.assign(3, block(BlockKind::Monitor, LOCAL, "")).unwrap();
@@ -507,7 +520,7 @@ mod tests {
     }
 
     fn chat(path: &str) -> Block {
-        Block { kind: BlockKind::Chat, source: LOCAL.into(), path: path.into() }
+        Block { kind: BlockKind::Chat, source: LOCAL.into(), path: path.into(), edit: false }
     }
 
     #[test]
@@ -538,7 +551,7 @@ mod tests {
     #[test]
     fn a_chat_block_needs_this_computer_and_a_valid_chat_id() {
         let (d, blocks, _) = setup("chatvalid");
-        let on = |source: &str, path: &str| Block { kind: BlockKind::Chat, source: source.into(), path: path.into() };
+        let on = |source: &str, path: &str| Block { kind: BlockKind::Chat, source: source.into(), path: path.into(), edit: false };
         let long = "a".repeat(65);
         let refused =
             ["../etc/passwd", "a/b", "a\\b", "a.b", "con", "NUL", long.as_str(), "chat\0", "\u{e9}", "", "a b"];
@@ -571,7 +584,7 @@ mod tests {
     fn a_chat_block_can_only_move_to_another_valid_chat_id() {
         let (d, blocks, _) = setup("chatupdate");
         blocks.assign(1, chat("chat-1")).unwrap();
-        blocks.assign(2, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into() }).unwrap();
+        blocks.assign(2, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into(), edit: false }).unwrap();
         blocks.update(1, "chat-2").unwrap();
         assert_eq!(blocks.block_of(1).unwrap().path, "chat-2");
         assert_eq!(Blocks::load(&d, None, &[1, 2]).block_of(1).unwrap().path, "chat-2");
@@ -601,6 +614,63 @@ mod tests {
         assert_eq!(blocks.block_of(1), Some(chat("chat-1")));
         assert!(blocks.block_of(2).is_none() && blocks.block_of(3).is_none());
         assert_eq!(blocks.block_of(4).unwrap().kind, BlockKind::Files);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn preview(path: &str, edit: bool) -> Block {
+        Block { kind: BlockKind::Preview, source: "web-1".into(), path: path.into(), edit }
+    }
+
+    #[test]
+    fn an_edit_flag_is_left_out_when_false_and_valid_only_for_a_preview() {
+        let (d, blocks, conns) = setup("editflag");
+        blocks.assign(1, preview("/srv/a.md", false)).unwrap();
+        blocks.assign(2, preview("/srv/b.md", true)).unwrap();
+        let text = fs::read_to_string(d.join(BLOCKS_FILE)).unwrap();
+        assert_eq!(text.matches("\"edit\"").count(), 1, "only the flagged block writes the member: {text}");
+        let views = blocks.views(&conns);
+        assert!(serde_json::to_value(&views[0]).unwrap().get("edit").is_none(), "left out of what the page is told");
+        assert_eq!(serde_json::to_value(&views[1]).unwrap()["edit"], serde_json::json!(true));
+
+        let others = [
+            Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into(), edit: true },
+            Block { kind: BlockKind::Monitor, source: "talos".into(), path: String::new(), edit: true },
+            chat_with_edit("chat-1"),
+        ];
+        for block in others {
+            let kind = block.kind;
+            assert!(blocks.assign(3, block).is_err(), "{kind:?} has no editor to open");
+        }
+        assert!(blocks.block_of(3).is_none());
+
+        // The flag survives a restart; a file written before the member existed means false; a flagged block that is no
+        // preview is dropped like any other block that is not valid.
+        let again = Blocks::load(&d, None, &[1, 2]);
+        assert_eq!((again.block_of(1).unwrap().edit, again.block_of(2).unwrap().edit), (false, true));
+        let old = r#"{"1": {"kind": "preview", "source": "local", "path": "/a"},
+                      "2": {"kind": "files", "source": "local", "path": "/a", "edit": true},
+                      "3": {"kind": "preview", "source": "local", "path": "/b", "edit": true}}"#;
+        fs::write(d.join(BLOCKS_FILE), old).unwrap();
+        let loaded = Blocks::load(&d, None, &[1, 2, 3]);
+        assert!(!loaded.block_of(1).unwrap().edit);
+        assert!(loaded.block_of(2).is_none());
+        assert!(loaded.block_of(3).unwrap().edit);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn chat_with_edit(path: &str) -> Block {
+        Block { edit: true, ..chat(path) }
+    }
+
+    #[test]
+    fn moving_a_preview_to_another_file_clears_the_flag() {
+        let (d, blocks, _) = setup("editmove");
+        blocks.assign(1, preview("/srv/a.md", true)).unwrap();
+        blocks.update(1, "/srv/b.md").unwrap();
+        let block = blocks.block_of(1).unwrap();
+        assert_eq!((block.path.as_str(), block.edit), ("/srv/b.md", false));
+        assert!(!fs::read_to_string(d.join(BLOCKS_FILE)).unwrap().contains("edit"), "and the file says so");
+        assert!(!Blocks::load(&d, None, &[1]).block_of(1).unwrap().edit);
         let _ = fs::remove_dir_all(&d);
     }
 

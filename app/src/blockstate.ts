@@ -16,6 +16,8 @@ export interface BlockInfo {
   path: string;
   /** The name of the source for the header. */
   source_label: string;
+  /** A preview that opens its file in the editor at once (`wsh edit`). Present only when the core says `true`. */
+  edit?: boolean;
 }
 
 export interface FileEntry {
@@ -81,13 +83,16 @@ export function readBlocks(raw: unknown): BlockInfo[] {
     if (typeof o.source !== "string" || typeof o.path !== "string") continue;
     // A chat's path becomes the argument of chat commands: one that is not a plausible chat id never leaves this list.
     if (o.kind === "chat" && !isChatId(o.path)) continue;
-    out.push({
+    const block: BlockInfo = {
       pane: o.pane,
       kind: o.kind as BlockKind,
       source: o.source.slice(0, 64),
       path: o.path.slice(0, 4096),
       source_label: typeof o.source_label === "string" ? o.source_label.slice(0, 256) : o.source,
-    });
+    };
+    // Like the core, which leaves the member out when it is false: a strict `true` and nothing else, and only a preview has it.
+    if (o.edit === true && o.kind === "preview") block.edit = true;
+    out.push(block);
   }
   return out;
 }

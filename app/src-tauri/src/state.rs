@@ -1053,14 +1053,8 @@ impl AppCore {
         let pane = pane.ok_or("HOLZWAVE_PANE is not set")?;
         let label = lock(&self.routes).live.get(&pane).map(|l| l.to_string()).ok_or("this pane is not open any more")?;
         let view = match cmd {
-            Cmd::View { path } | Cmd::Edit { path } => {
-                let p = std::path::Path::new(&path);
-                if !p.is_absolute() || !p.is_file() {
-                    return Err(format!("{path}: no such file"));
-                }
-                self.focus_pane_in(&label, pane)?;
-                self.block_open_in(&label, "right", BlockKind::Preview, "local", &path)?
-            }
+            Cmd::View { path } => self.open_local_file_beside(&label, pane, &path, false)?,
+            Cmd::Edit { path } => self.open_local_file_beside(&label, pane, &path, true)?,
             Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
             Cmd::Ai { .. } => return Err(WSH_AI_STREAM_ONLY.into()),
             Cmd::HistOpen => {
@@ -1107,22 +1101,39 @@ impl AppCore {
         let view = match cmd {
             Cmd::Ping => return Ok("holzWave".into()),
             Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
-            Cmd::View { path } | Cmd::Edit { path } => {
-                if !path.starts_with('/') {
-                    return Err(WSH_NOT_ABSOLUTE.into());
-                }
-                let source = self.blocks.source(&self.connections, &profile.id).map_err(|_| WSH_NO_HOST.to_owned())?;
-                let entry = source.stat(&path).map_err(|_| WSH_NO_SUCH_FILE.to_owned())?;
-                if entry.kind != holzwave_core::files::Kind::File {
-                    return Err(WSH_NOT_A_FILE.into());
-                }
-                self.focus_pane_in(&label, pane)?;
-                self.block_open_in(&label, "right", BlockKind::Preview, &profile.id, &path)?
-            }
+            Cmd::View { path } => self.open_remote_file_beside(&label, pane, &profile, &path, false)?,
+            Cmd::Edit { path } => self.open_remote_file_beside(&label, pane, &profile, &path, true)?,
             Cmd::Hist { .. } | Cmd::HistOpen | Cmd::Ai { .. } => return Err(REMOTE_REFUSED.into()),
         };
         self.sink.send(Target::window(&label), Out::Layout(view));
         Ok(String::new())
+    }
+
+    /// `wsh view` and `wsh edit` through a tunnel: an absolute path that the pane's own saved connection finds to be a
+    /// regular file opens in a preview beside `pane`, in the editor when `edit` is set. The path is resolved on the pane's
+    /// host over SFTP and never on this computer.
+    fn open_remote_file_beside(&self, label: &str, pane: PaneId, profile: &Profile, path: &str, edit: bool) -> Result<View, String> {
+        if !path.starts_with('/') {
+            return Err(WSH_NOT_ABSOLUTE.into());
+        }
+        let source = self.blocks.source(&self.connections, &profile.id).map_err(|_| WSH_NO_HOST.to_owned())?;
+        let entry = source.stat(path).map_err(|_| WSH_NO_SUCH_FILE.to_owned())?;
+        if entry.kind != holzwave_core::files::Kind::File {
+            return Err(WSH_NOT_A_FILE.into());
+        }
+        self.focus_pane_in(label, pane)?;
+        self.block_open_edit_in(label, "right", BlockKind::Preview, &profile.id, path, edit)
+    }
+
+    /// `wsh view` and `wsh edit` of a local pane: an absolute path of a file of this computer opens in a preview beside
+    /// `pane`, in the editor when `edit` is set.
+    fn open_local_file_beside(&self, label: &str, pane: PaneId, path: &str, edit: bool) -> Result<View, String> {
+        let p = std::path::Path::new(path);
+        if !p.is_absolute() || !p.is_file() {
+            return Err(format!("{path}: no such file"));
+        }
+        self.focus_pane_in(label, pane)?;
+        self.block_open_edit_in(label, "right", BlockKind::Preview, LOCAL, path, edit)
     }
 
     /// Tell the window `label` that the shell of `pane` asked for the history search, when `pane` is the one in focus in
@@ -1268,6 +1279,20 @@ impl AppCore {
     /// Open a file browser or a preview in a new tab (`placement` is `tab`) or beside the focused pane (`right`, `down`).
     /// The pane runs no process; the answer is the view with the new pane focused.
     pub fn block_open_in(&self, label: &str, placement: &str, kind: BlockKind, source: &str, path: &str) -> Result<View, String> {
+        self.block_open_edit_in(label, placement, kind, source, path, false)
+    }
+
+    /// [`AppCore::block_open_in`] with the flag of a preview that opens its file in the editor at once (`wsh edit`). The
+    /// flag is for a preview: any other kind with it is refused with the block.
+    pub fn block_open_edit_in(
+        &self,
+        label: &str,
+        placement: &str,
+        kind: BlockKind,
+        source: &str,
+        path: &str,
+        edit: bool,
+    ) -> Result<View, String> {
         let path = if path.is_empty() && kind == BlockKind::Files {
             self.blocks.start_dir(&self.connections, source).map_err(|e| e.to_string())?
         } else {
@@ -1284,7 +1309,7 @@ impl AppCore {
                 }
             }
         }
-        let block = Block { kind, source: source.to_owned(), path };
+        let block = Block { kind, source: source.to_owned(), path, edit };
         // Checked before the pane is made, so a refused block leaves no empty pane behind.
         self.blocks.assign(0, block.clone()).map_err(|e| e.to_string())?;
         self.blocks.forget(0);
@@ -4436,7 +4461,7 @@ mod tests {
     fn monitor_pane_of_a_deleted_connection_answers_with_the_reason() {
         let (core, _rec, _dir) = core("/bin/cat", &[]);
         let pane = only_pane(&core);
-        core.blocks.assign(pane, Block { kind: BlockKind::Monitor, source: "gone".into(), path: String::new() }).unwrap();
+        core.blocks.assign(pane, Block { kind: BlockKind::Monitor, source: "gone".into(), path: String::new(), edit: false }).unwrap();
         let error = core.monitor_sample(pane).unwrap_err();
         assert!(error.contains("no connection gone"), "{error}");
         assert!(!error.starts_with("unsupported"), "{error}");
@@ -8025,7 +8050,7 @@ mod tests {
         // A block pane that has a saved connection assigned (a preview of a file of the host) runs nothing.
         let block = t.core.split(true).focus;
         t.core.connections.assign(block, "web-1").unwrap();
-        t.core.blocks.assign(block, Block { kind: BlockKind::Preview, source: "web-1".into(), path: "/srv/a".into() }).unwrap();
+        t.core.blocks.assign(block, Block { kind: BlockKind::Preview, source: "web-1".into(), path: "/srv/a".into(), edit: false }).unwrap();
         assert!(crate::wsh_tunnel::tunnel_for(&t.core, block).is_none(), "a block pane");
     }
 
@@ -8117,6 +8142,41 @@ mod tests {
         assert!(core.blocks.block_of(view.focus).is_none(), "the pane in focus was not turned into the preview");
         assert!(core.blocks.views(&core.connections).is_empty());
         assert_eq!(core.view().panes.len(), panes);
+    }
+
+    #[test]
+    fn wsh_edit_sets_the_flag_and_wsh_view_does_not() {
+        use holzwave_ipc::Cmd;
+        // This computer: the local socket's path.
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        let file = dir.0.join("notes.md");
+        std::fs::write(&file, "# notes\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let pane = only_pane(&core);
+        let opened = |core: &AppCore| core.blocks.block_of(core.view().focus).expect("the new pane shows a block");
+
+        assert_eq!(core.ipc_command(Some(pane), Cmd::Edit { path: path.clone() }), Ok(String::new()));
+        let edit = opened(&core);
+        assert_eq!((edit.kind, edit.source.as_str(), edit.path.as_str(), edit.edit), (BlockKind::Preview, LOCAL, path.as_str(), true));
+        assert_ne!(core.view().focus, pane, "beside the pane, as before");
+
+        assert_eq!(core.ipc_command(Some(pane), Cmd::View { path: path.clone() }), Ok(String::new()));
+        assert!(!opened(&core).edit, "wsh view shows the page");
+
+        // A host over a tunnel: the same two commands through the forwarded socket.
+        let t = ticked(&[("/srv/notes.md", "# notes\n")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let answer = through(&tunnel, json!({"cmd": "edit", "path": "/srv/notes.md"}));
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        let block = t.core.blocks.block_of(t.core.view().focus).unwrap();
+        assert_eq!((block.source.as_str(), block.path.as_str(), block.edit), ("web-1", "/srv/notes.md", true));
+        let answer = through(&tunnel, json!({"cmd": "view", "path": "/srv/notes.md"}));
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        let block = t.core.blocks.block_of(t.core.view().focus).unwrap();
+        assert_eq!((block.source.as_str(), block.edit), ("web-1", false));
+        // Written down for a restart: the first preview keeps the flag, the second does not write it.
+        let file = std::fs::read_to_string(t._dir.0.join(holzwave_core::blocks::BLOCKS_FILE)).unwrap();
+        assert_eq!(file.matches("\"edit\"").count(), 1, "{file}");
     }
 }
 

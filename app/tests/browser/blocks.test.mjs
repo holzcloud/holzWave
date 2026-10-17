@@ -10,6 +10,7 @@ export default async function ({ page, url, errors }) {
   await actionsCase(page, url);
   await browserCase(page, url);
   await previewCase(page, url);
+  await editFlagCase(page, url);
   await pdfCase(page, url);
   await safeHtmlCase(page, url);
   // That case feeds the allow-list hostile markup: the policy reports the style and the handlers it parses, nothing else.
@@ -264,6 +265,56 @@ async function previewCase(page, url) {
   await open(page, url, [PREVIEW("/home/holz/a.txt")], { __OPEN: { __throw: "sftp: the request timed out" } });
   await page.waitForFunction(() => document.querySelector(".bk-status")?.textContent.includes("timed out"));
   assert.equal(await page.locator(".bk-status").getAttribute("data-failed"), "true");
+}
+
+// `wsh edit` opens a preview with the flag `edit`: a Markdown file goes to the editor at once, a text file is in the editor
+// as always, and a kind that has no editor ignores the flag. Without the flag Markdown is the rendered page.
+async function editFlagCase(page, url) {
+  const opened = (over) => ({ name: "x", size: 10, content: "text", mime: "text/plain", language: null, html: null, text: "", ...over });
+  const markdown = opened({ name: "notes.md", content: "markdown", mime: "text/markdown", html: "<h1>Phase 2</h1>", text: "# Phase 2" });
+  const flagged = (path) => ({ ...PREVIEW(path), edit: true });
+  const lines = () => page.locator(".cm-line").evaluateAll((n) => n.map((l) => l.textContent));
+
+  // Markdown with the flag: the editor, no rendered page first and no `e` needed.
+  await open(page, url, [flagged("/srv/notes.md")], { __OPEN: markdown });
+  await page.waitForSelector(".bk-editor .cm-line");
+  assert.deepEqual(await lines(), ["# Phase 2"]);
+  assert.equal(await page.locator(".md").count(), 0, "the page was never drawn");
+  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_open"))).length, 1, "the file was opened once");
+
+  // Leaving the editor without changes shows the page, and the page stays (the flag was for the first load only).
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".md h1");
+  assert.equal(await page.locator(".bk-editor").count(), 0);
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator(".md h1").count(), 1, "the editor does not open again");
+
+  // Without the flag the same file is the rendered page.
+  await open(page, url, [PREVIEW("/srv/notes.md")], { __OPEN: markdown });
+  await page.waitForSelector(".md h1");
+  assert.equal(await page.locator(".bk-editor").count(), 0);
+
+  // The flag does not read as true for anything but `true`.
+  await open(page, url, [{ ...PREVIEW("/srv/notes.md"), edit: "yes" }], { __OPEN: markdown });
+  await page.waitForSelector(".md h1");
+  assert.equal(await page.locator(".bk-editor").count(), 0);
+
+  // A text file is in the editor with or without it.
+  await open(page, url, [flagged("/srv/main.rs")], { __OPEN: opened({ name: "main.rs", size: 11, language: "rust", text: "fn main() {}" }) });
+  await page.waitForSelector(".bk-editor .cm-line");
+  assert.deepEqual(await lines(), ["fn main() {}"]);
+
+  // A Markdown file the editor does not open (too large) is the page, flag or not.
+  await open(page, url, [flagged("/srv/big.md")], { __OPEN: { ...markdown, text: null } });
+  await page.waitForSelector(".md h1");
+  assert.equal(await page.locator(".bk-editor").count(), 0);
+
+  // An image has no editor: the flag changes nothing.
+  const GRANT = { url: "holzfile://localhost/0123456789abcdef0123456789abcdef", token: "0123456789abcdef0123456789abcdef", mime: "image/png", size: 5 };
+  await open(page, url, [flagged("/srv/a.png")], { __OPEN: opened({ name: "a.png", content: "image", mime: "image/png", size: 5, text: null }), __GRANT: GRANT });
+  await page.locator(".bk-image").waitFor();
+  assert.equal(await page.locator(".bk-editor").count(), 0);
 }
 
 async function safeHtmlCase(page, url) {

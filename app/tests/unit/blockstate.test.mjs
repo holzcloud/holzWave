@@ -18,6 +18,18 @@ test("the list of blocks is read entry by entry and what is not well formed is d
   assert.equal(list[1].source_label, "talos", "a missing label is the source's id");
 });
 
+test("readBlocks reads edit as a strict boolean, for a preview only, and leaves it out when it is not true", () => {
+  const preview = { pane: 2, kind: "preview", source: "talos", path: "/srv/notes.md", source_label: "Talos" };
+  const read = (extra, base = preview) => readBlocks([{ ...base, ...extra }])[0];
+  assert.equal(read({ edit: true }).edit, true);
+  for (const not of [false, "true", "yes", 1, 0, null, {}, []]) {
+    assert.equal("edit" in read({ edit: not }), false, `${JSON.stringify(not)} is not true`);
+  }
+  assert.equal("edit" in read({}), false, "a missing member is false");
+  assert.equal("edit" in read({ edit: true }, { ...preview, kind: "files" }), false, "only a preview has an editor to open");
+  assert.deepEqual(read({ edit: true }), { ...preview, edit: true });
+});
+
 // The object the core pins for a chat block (blocks.rs, a_chat_block_holds_a_conversation_id_and_survives_a_restart).
 const CHAT = { pane: 1, kind: "chat", source: "local", path: "chat-golden", source_label: "This computer" };
 

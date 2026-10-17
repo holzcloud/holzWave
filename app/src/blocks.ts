@@ -315,6 +315,9 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
   /** The digest of the bytes as last read or saved: what a save is compared with exactly. `null` with `expected`. */
   let expectedDigest: string | null = null;
   let facts = "";
+  /** `wsh edit` asked for the editor: the first load of a Markdown file opens it at once, once, so that leaving the editor
+   * without changes shows the page as it does for a file that was opened with `wsh view`. */
+  let startInEditor = info.edit === true;
 
   const setDirty = (dirty: boolean): void => {
     if (dirty === dirtyPanes.has(info.pane)) return;
@@ -416,6 +419,11 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
     try {
       switch (opened.content) {
         case "markdown": {
+          if (startInEditor && opened.text !== null) {
+            startInEditor = false;
+            await edit(opened.text, "markdown", true);
+            break;
+          }
           const doc = el("div", "md", body);
           // The core cleaned this HTML; the page copies it through an allow-list of its own and never uses innerHTML.
           doc.tabIndex = 0;
@@ -495,7 +503,10 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
     update(next) {
       const changed = next.path !== current.path || next.source !== current.source;
       current = next;
-      if (changed) void load();
+      if (changed) {
+        startInEditor = next.edit === true;
+        void load();
+      }
     },
     key(e) {
       if (pdf) return pdf.key(e);
