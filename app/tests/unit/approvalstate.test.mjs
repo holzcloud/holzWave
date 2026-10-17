@@ -5,8 +5,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  CHANGED, EFFECT_WORDS, ENDED, TOOL_WORDS, VERDICTS, WORDS, canAllow, canDeny, cannotWords, destinationParts, hashWords, indexResults,
-  outcomeOf, readApproval, rowsOf, showText, targetWords, taintWords,
+  CHANGED, EFFECT_WORDS, ENDED, HANDLED_EFFECTS, MAX_DIFF_CHARS, MAX_DIFF_ROWS, MAX_TOTAL, MAX_VALUE, TOOL_EFFECT, TOOL_WORDS, VERDICTS,
+  WORDS, canAllow, canDeny, cannotWords, destinationParts, diffHead, gapWords, hashWords, indexResults, outcomeOf, readApproval, rowsOf,
+  showText, targetWords, taintWords,
 } from "../../dist/approvalstate.js";
 
 const RUN = JSON.parse(readFileSync(new URL("../fixtures/ai_tool_stream.json", import.meta.url), "utf8"));
@@ -150,17 +151,17 @@ test("a request that cannot be shown in full can only be denied", () => {
     assert.equal(seen.hash, HASH);
   };
 
-  // Too large: more than 16 rows, a value over 65536 characters, more than 131072 characters in all.
+  // Too large: more than 16 rows, a value over 393216 characters, more than 524288 characters in all.
   assert.equal(readApproval(card({ payload: rowsOf(16) })).why, "ok");
   verdict(card({ payload: rowsOf(17) }), "large");
   const big = card();
-  big.payload[4] = { name: "path", value: "a".repeat(65537), bytes: 65537 };
+  big.payload[4] = { name: "path", value: "a".repeat(393217), bytes: 393217 };
   verdict(big, "large");
   const edge = card();
-  edge.payload[4] = { name: "path", value: "a".repeat(65536), bytes: 65536 };
+  edge.payload[4] = { name: "path", value: "a".repeat(393216), bytes: 393216 };
   assert.equal(readApproval(edge).why, "ok");
   const total = card();
-  total.payload = [{ name: "tool", value: "read_file", bytes: 9 }, ...Array.from({ length: 3 }, (_, i) => ({ name: `f${i}`, value: "b".repeat(50000), bytes: 50000 }))];
+  total.payload = [{ name: "tool", value: "read_file", bytes: 9 }, ...Array.from({ length: 3 }, (_, i) => ({ name: `f${i}`, value: "b".repeat(180000), bytes: 180000 }))];
   verdict(total, "large");
 
   // A tool and an effect the page does not know.
@@ -363,4 +364,124 @@ test("a write card is read with its diff row by row and keeps its hash", () => {
   assert.equal(wrongEffect.why, "effect");
   assert.equal(wrongEffect.hash, sent.hash);
   for (const name of Object.keys(WRITE.cards)) assert.equal(readApproval(WRITE.cards[name]).why, "ok", name);
+});
+
+test("a diff the page cannot show in full and a write card without one can only be denied", () => {
+  const sent = WRITE.cards.replace;
+  const clone = (extra = {}) => ({ ...structuredClone(sent), ...extra });
+  const withDiff = (change) => clone({ diff: { ...structuredClone(sent.diff), ...change } });
+  const verdict = (entry, why) => {
+    const seen = readApproval(entry);
+    assert.equal(seen.why, why, JSON.stringify(entry.diff).slice(0, 120));
+    assert.equal(seen.approval, null);
+    assert.equal(canDeny(seen), true, "a valid hash can still be denied");
+    assert.equal(canAllow(seen), false);
+    assert.equal(seen.hash, sent.hash, "the hash is kept");
+  };
+
+  // Every card of the golden reads, with its hash, its payload names and its rows member by member (also the gap and the note).
+  for (const [name, one] of Object.entries(WRITE.cards)) {
+    const seen = readApproval(one);
+    assert.equal(seen.why, "ok", name);
+    assert.equal(seen.hash, one.hash, name);
+    assert.deepEqual(seen.approval.rows.map((r) => r.name), one.payload.map((p) => p.name), name);
+    assert.deepEqual(seen.approval.diff.rows, one.diff.rows, `${name}: the rows`);
+  }
+  const ops = new Set(WRITE.cards.edit_all.diff.rows.map((r) => r.op));
+  assert.ok(ops.has("gap") && ops.has("note"), "the golden holds a gap row and a note row");
+
+  // Too large: more rows or more characters than the page shows.
+  const row = (n) => ({ op: "ctx", old: n + 1, new: n + 1, text: "x" });
+  const many = (count) => withDiff({ rows: Array.from({ length: count }, (_, n) => row(n)), added: 0, removed: 0 });
+  assert.equal(readApproval(many(MAX_DIFF_ROWS)).why, "ok", "the most rows is shown");
+  verdict(many(MAX_DIFF_ROWS + 1), "large");
+  const wide = (chars) => withDiff({ rows: [{ op: "add", old: null, new: 1, text: "a".repeat(chars) }, { op: "add", old: null, new: 2, text: "b".repeat(chars) }], added: 2, removed: 0 });
+  assert.equal(readApproval(wide(MAX_DIFF_CHARS / 2)).why, "ok", "the most characters is shown");
+  verdict(wide(MAX_DIFF_CHARS / 2 + 1), "large");
+
+  // A diff of the wrong shape, member by member.
+  const rows = (...list) => withDiff({ rows: list, added: list.filter((r) => r.op === "add").length, removed: list.filter((r) => r.op === "del").length });
+  verdict(rows({ op: "move", old: 1, new: 1, text: "x" }), "shape");
+  verdict(rows({ op: "ctx", old: 1, text: "x" }), "shape");
+  verdict(rows({ op: "del", old: 1, new: 2, text: "x" }), "shape");
+  verdict(rows({ op: "add", old: 1, new: 1, text: "x" }), "shape");
+  for (const bad of [0, -1, 1.5, "1", null]) verdict(rows({ op: "ctx", old: bad, new: 1, text: "x" }), "shape");
+  verdict(rows({ op: "gap", skipped: 0 }), "shape");
+  verdict(rows({ op: "note" }), "shape");
+  verdict(rows({ op: "ctx", old: 1, new: 1, text: 7 }), "shape");
+  verdict(rows("not a row"), "shape");
+  verdict(withDiff({ added: 2 }), "shape");
+  verdict(withDiff({ removed: 0 }), "shape");
+  verdict(withDiff({ kind: "move" }), "shape");
+  verdict(withDiff({ before_bytes: -1 }), "shape");
+  verdict(withDiff({ before_bytes: "3" }), "shape");
+  verdict(withDiff({ after_bytes: 1.5 }), "shape");
+  verdict(withDiff({ rows: "none" }), "shape");
+  verdict(clone({ diff: null }), "shape");
+  verdict(clone({ diff: [] }), "shape");
+
+  // A member that is not part of its shape is not copied.
+  const extra = withDiff({ rows: [{ op: "ctx", old: 1, new: 1, text: "x", html: "<b>x</b>" }], added: 0, removed: 0 });
+  const kept = readApproval(extra);
+  assert.equal(kept.why, "ok");
+  assert.deepEqual(Object.keys(kept.approval.diff.rows[0]), ["op", "old", "new", "text"]);
+  assert.ok(!JSON.stringify(kept).includes("html"));
+
+  // The same entry made valid again is `ok`, and a hidden character in a row stays visible as text.
+  assert.equal(readApproval(clone()).why, "ok");
+  const bidi = readApproval(rows({ op: "add", old: null, new: 1, text: "a\u202eb" }));
+  assert.equal(bidi.why, "ok");
+  assert.equal(bidi.approval.diff.rows[0].text, "a\\u{202e}b");
+  assert.ok(!JSON.stringify(bidi).includes("\u202e"));
+});
+
+test("the words and caps of write cards are the core's", () => {
+  const limits = WRITE.limits;
+  assert.equal(MAX_VALUE, 393216);
+  assert.ok(MAX_VALUE >= limits.payload_value_chars, "the longest escaped value of a legal write fits");
+  assert.equal(MAX_TOTAL, 524288);
+  assert.ok(MAX_TOTAL >= limits.payload_total_chars, "the largest card of a legal write fits");
+  assert.equal(MAX_DIFF_ROWS, limits.diff_rows);
+  assert.equal(MAX_DIFF_CHARS, limits.diff_chars);
+
+  // The tools and the effects are the golden's.
+  const shown = Object.keys(GOLDEN.tools).filter((tool) => GOLDEN.tools[tool] === "read" || GOLDEN.tools[tool] === "write");
+  assert.deepEqual(Object.keys(TOOL_WORDS).sort(), shown.sort());
+  assert.deepEqual(Object.keys(TOOL_EFFECT).sort(), shown.sort());
+  for (const tool of shown) assert.equal(TOOL_EFFECT[tool], GOLDEN.tools[tool], tool);
+  for (const effect of Object.keys(EFFECT_WORDS)) assert.ok(GOLDEN.effects.includes(effect), effect);
+  assert.deepEqual([...HANDLED_EFFECTS].sort(), Object.keys(EFFECT_WORDS).sort());
+
+  // The head of a diff: the kind in words, the core's counts and the sizes.
+  const diff = (kind, added, removed, before, after) => ({ kind, added, removed, before_bytes: before, after_bytes: after, rows: [] });
+  const replace = diffHead(diff("replace", 1, 1, 1229, 1331));
+  assert.deepEqual([replace.kind, replace.counts], ["Replaces the whole file", "1 line added, 1 removed"]);
+  assert.match(replace.size, /^1\.\d KiB \u2192 1\.\d KiB$/);
+  const create = diffHead(diff("create", 3, 0, null, 80));
+  assert.deepEqual([create.kind, create.counts], ["Creates a new file", "3 lines added, 0 removed"]);
+  assert.equal(create.size, "new \u00b7 80 B");
+  assert.equal(diffHead(diff("edit", 2, 1, 10, 12)).kind, "Changes parts of the file");
+  assert.equal(gapWords(40), "40 unchanged lines");
+
+  // The destination and the banner of a write; a read keeps its words.
+  const route = { model: "llama3.2", host: "localhost:11434", place: "this computer", leaves: false };
+  assert.equal(destinationParts(route, "write")[0].text, "Only the outcome (saved or not) is sent to ");
+  assert.equal(
+    destinationParts(route, "write").map((p) => p.text).join(""),
+    "Only the outcome (saved or not) is sent to llama3.2 at localhost:11434 (this computer).",
+  );
+  assert.deepEqual(destinationParts(null, "write"), [{ kind: "text", text: "Only the outcome (saved or not) is sent to the model of this chat.", leaves: false }]);
+  assert.equal(destinationParts(route, "read")[0].text, "The result is sent to ");
+  assert.deepEqual(destinationParts(route), destinationParts(route, "read"));
+  const sentence = "A file will be changed. Check the changes below before you allow it.";
+  assert.ok(taintWords(["output of read_file"], "write").text.endsWith(sentence));
+  assert.ok(!taintWords(["output of read_file"], "read").text.includes("A file will be changed"));
+  assert.deepEqual(taintWords(["a"]), taintWords(["a"], "read"));
+
+  // Every sentence is plain, and none says that anything is kept or allowed in advance.
+  for (const [name, text] of Object.entries(WORDS)) {
+    assert.ok(text.length >= 3, name);
+    assert.ok(!text.includes("://") && !text.includes("<") && !text.includes(">"), name);
+    assert.ok(!/\b(always|remember(ed)?|auto-?approve|in advance|for the session)\b/i.test(text), `${name}: ${text}`);
+  }
 });

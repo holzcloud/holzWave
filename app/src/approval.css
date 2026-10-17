@@ -69,6 +69,8 @@
 .diff-text { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--hw-ink); }
 .diff-row[data-op="add"] .diff-sign { color: var(--hw-ok); }
 .diff-row[data-op="del"] .diff-sign { color: var(--hw-danger); }
+.diff-row[data-op="gap"] { margin: .167rem 0; border-top: 1px solid var(--hw-line); border-bottom: 1px solid var(--hw-line); }
+.diff-row[data-op="note"] { color: var(--hw-dim); }
 .diff-gap { grid-column: 1 / -1; color: var(--hw-dim); }
 .diff-note { grid-column: 4; color: var(--hw-dim); }
 

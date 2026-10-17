@@ -362,9 +362,13 @@ export const MAX_ITEMS = 64;
 /** The most events a feed holds while it waits for a snapshot. */
 export const MAX_HELD = 1024;
 
-/** How deep and how wide the members of a pending entry that pass through may be. */
+/**
+ * How deep and how wide the members of a pending entry that pass through may be. A write card carries its diff: at most 4000
+ * rows of five values each (the page's own cap, `MAX_DIFF_ROWS`), about 20000 values in all, so the budget is a little above that.
+ * An entry over the budget is dropped as a whole, and the call would then wait with no card.
+ */
 const MAX_PASS_DEPTH = 8;
-const MAX_PASS_NODES = 4096;
+const MAX_PASS_NODES = 24576;
 
 const ROLES: readonly Role[] = ["user", "assistant", "tool"];
 const STATUSES: readonly MessageStatus[] = ["complete", "cancelled", "failed", "interrupted"];

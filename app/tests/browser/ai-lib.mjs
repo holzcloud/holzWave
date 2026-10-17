@@ -331,3 +331,23 @@ export const changeFile = (page, path, text) => page.evaluate(([p, t]) => window
 
 /** The text of a file in the mock, or null when there is none. */
 export const fileText = (page, path) => page.evaluate((p) => window.__MOCK__.ai.write.text(p), path);
+
+/** `count` added rows of a scripted diff, as the core would send them for a text of that many new lines. */
+export const addRows = (count) => Array.from({ length: count }, (_, i) => ({ op: "add", old: null, new: i + 1, text: `new line ${i + 1}` }));
+
+/** A diff of the core's shape over the rows `list`; the counts are the rows' own. */
+export const diffOf = (list, kind = "replace") => ({
+  kind,
+  added: list.filter((r) => r.op === "add").length,
+  removed: list.filter((r) => r.op === "del").length,
+  before_bytes: 1,
+  after_bytes: 1,
+  rows: list,
+});
+
+/** A text of `count` characters. */
+export const chars = (count) => "q".repeat(count);
+
+/** The payload of a scripted card: the tool row and the fields `rest` (a list of `[name, value]`), each with its length. */
+export const payloadOf = (tool, rest) =>
+  [["tool", tool], ...rest].map(([name, value]) => ({ name, value, bytes: new TextEncoder().encode(value).length }));

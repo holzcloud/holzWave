@@ -57,8 +57,11 @@ function diffBox(parent: Element, diff: Diff): HTMLElement {
   const head = el("p", "diff-head", box);
   head.id = `diff-head-${++diffNumber}`;
   box.setAttribute("aria-labelledby", head.id);
+  // The three pieces are separated by a space, so the head reads as one line when it names the box.
   el("span", "diff-kind", head).textContent = words.kind;
+  head.append(document.createTextNode(" "));
   el("span", "diff-count", head).textContent = words.counts;
+  head.append(document.createTextNode(" "));
   el("span", "diff-size", head).textContent = words.size;
   const list = el("ol", "diff-rows", box);
   for (const row of diff.rows) {

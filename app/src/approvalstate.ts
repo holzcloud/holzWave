@@ -108,10 +108,13 @@ export interface DestinationPart {
 export const MAX_ROWS = 16;
 /** The longest field name, in characters. */
 export const MAX_NAME = 40;
-/** The longest value of one field, in characters. */
-export const MAX_VALUE = 65536;
-/** The most characters of all values of one card. */
-export const MAX_TOTAL = 131072;
+/**
+ * The longest value of one field, in characters. It is the escaped size of the largest `write_file` the tools allow (128 KiB
+ * of soft hyphens, each written in six characters), and is held to the core by `limits` of the write card's golden.
+ */
+export const MAX_VALUE = 393216;
+/** The most characters of all values of one card; held to the core's `limits` as well. */
+export const MAX_TOTAL = 524288;
 /** The most rows of a diff, and the most characters of its row text; a longer diff can only be denied. */
 export const MAX_DIFF_ROWS = 4000;
 export const MAX_DIFF_CHARS = 524288;

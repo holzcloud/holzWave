@@ -749,7 +749,7 @@ async function narrowCase(page, url) {
   for (const b of t.toggles) assert.ok(b.h >= 44 - 0.5 && b.w >= 44 - 0.5, `a toggle is ${b.w} by ${b.h}`);
 
   // A request that can only be denied has a `Deny` of the same size.
-  const huge = { id: "call_3", tool: "read_file", payload: [{ name: "tool", value: "read_file", bytes: 9 }, { name: "path", value: "z".repeat(70000), bytes: 70000 }] };
+  const huge = { id: "call_3", tool: "read_file", payload: [{ name: "tool", value: "read_file", bytes: 9 }, { name: "path", value: "z".repeat(400000), bytes: 400000 }] };
   await scriptTool(page, { calls: [huge], answer: "Done." });
   await sendText(page, "a huge one");
   await page.waitForSelector('section[data-call="call_3"][data-mode="cannot"]');
@@ -856,7 +856,7 @@ async function modesCase(page, url, engine) {
   // A request that cannot be shown in full has the mode `cannot`, a `Deny` and no `Allow once`.
   await page.locator('section[data-call="call_2"] .approval-deny').click();
   await page.waitForFunction(() => !window.__MOCK__.ai.chat("chat-x").running);
-  const huge = { id: "call_3", tool: "read_file", payload: [{ name: "tool", value: "read_file", bytes: 9 }, { name: "path", value: "z".repeat(70000), bytes: 70000 }] };
+  const huge = { id: "call_3", tool: "read_file", payload: [{ name: "tool", value: "read_file", bytes: 9 }, { name: "path", value: "z".repeat(400000), bytes: 400000 }] };
   await scriptTool(page, { calls: [huge], answer: "Done." });
   await sendText(page, "a huge one");
   const cannot = await openCard(page, "call_3");

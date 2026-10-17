@@ -214,7 +214,7 @@ test("one decision per card at a time, records follow the call id and the hash, 
   // A request that cannot be shown has the mode `cannot`; its hash can be denied, and an allow does nothing.
   const cannot = make();
   const huge = card("call_1", HASH_A);
-  huge.payload[4] = { name: "path", value: "a".repeat(70000), bytes: 70000 };
+  huge.payload[4] = { name: "path", value: "a".repeat(400000), bytes: 400000 };
   cannot.approvals.sync([huge, card("call_2", "not a hash")]);
   assert.deepEqual(cannot.approvals.cards.map((c) => c.mode), ["cannot", "cannot"]);
   await cannot.approvals.decide("call_1", "allow");

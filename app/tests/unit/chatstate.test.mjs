@@ -482,3 +482,17 @@ test("the module touches no DOM, no network and no command", () => {
   const hit = text.split("\n").findIndex((line) => banned.test(line));
   assert.equal(hit, -1, `line ${hit + 1} uses something the module must not use`);
 });
+
+test("a write card with the most rows its diff may have reaches the page whole", () => {
+  // A diff is at most 4000 rows of five values each; an entry that is too wide is dropped as a whole, and the call would wait
+  // with no card, so the budget of a pending entry has to cover the largest card the page shows.
+  const rows = Array.from({ length: 4000 }, (_, i) => ({ op: "add", old: null, new: i + 1, text: `line ${i + 1}` }));
+  const diff = { kind: "replace", added: 4000, removed: 0, before_bytes: 1, after_bytes: 1, rows };
+  const read = readChatEvent(ev(5, 7, "tool_proposed", { pending: pendingCall({ tool: "write_file", diff }) }));
+  assert.ok(read !== null, "the event was dropped");
+  assert.equal(read.pending.diff.rows.length, 4000);
+  assert.deepEqual(read.pending.diff.rows[3999], rows[3999]);
+  // An entry far beyond the page's caps is still dropped.
+  const huge = Array.from({ length: 40000 }, (_, i) => ({ op: "add", old: null, new: i + 1, text: "x" }));
+  assert.equal(readChatEvent(ev(5, 7, "tool_proposed", { pending: pendingCall({ diff: { ...diff, rows: huge } }) })), null);
+});
