@@ -5,7 +5,7 @@
 
 mod common;
 
-use holzwave_core::textread::{MAX_HIDDEN_RANGES, MAX_READ_BYTES, MAX_READ_ROWS, TextRead, TextRegion};
+use holzwave_core::textread::{MAX_READ_BYTES, MAX_READ_ROWS, TextRead, TextRegion};
 use holzwave_core::TerminalEngine;
 
 #[cfg(unix)]
@@ -140,6 +140,7 @@ mod engine_reads {
     use std::time::Duration;
 
     use holzwave_core::engine::{SelectMode, SelectOp};
+    use holzwave_core::textread::MAX_HIDDEN_RANGES;
 
     use super::*;
     use common::engine;
