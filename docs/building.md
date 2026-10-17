@@ -35,6 +35,30 @@ without a hyphen); commit and push them afterwards. The repository is its own Ho
 NSIS installer and attaches it to the same release. Both scripts refuse a dirty tree or a `main` that differs from
 `origin/main`.
 
+**`wsh` in the packages.** Every release script builds `wsh` for its target and hands the Tauri bundler the overlay
+`app/src-tauri/tauri.wsh.conf.json` with `--config`: `bundle.externalBin` names the sidecar `binaries/wsh`, and the two static
+Linux builds are `bundle.resources` (`wsh/linux-x86_64` and `wsh/linux-aarch64` in the resource folder of the app, which the
+app installs on a remote Linux host). It is an overlay and not part of `tauri.conf.json` because `tauri-build` requires a named
+sidecar file at compile time: the default configuration names none, so `cargo test` and `cargo run` need no binary. The bundler
+installs the sidecar beside the app executable, which is the folder that the app puts on a pane's `PATH` when `wsh` is in it:
+`Contents/MacOS/wsh` in the macOS app, `wsh.exe` in the install folder on Windows, `/usr/bin/wsh` in the deb and the rpm and
+`usr/bin/wsh` in the AppImage. The Flatpak does not carry it, see [flatpak.md](flatpak.md). `sh scripts/wsh-sidecar.sh <rust target
+triple>` builds the sidecar for one target into `app/src-tauri/binaries/` (an ignored folder of build products, never committed).
+`sh scripts/wsh-linux.sh` builds the two static Linux binaries (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`)
+on any host with no Linux cross compiler: `wsh` has no C dependency, so the linker is `zig cc` (Zig 0.16 is a build requirement
+already) or, where that does not link, Rust's own `rust-lld`; run `rustup target add x86_64-unknown-linux-musl
+aarch64-unknown-linux-musl` once. It checks with `file` that each is an ELF of the right machine and statically linked.
+Each release script then inspects the package it built: `scripts/bundle-check-macos.sh` (the file is beside the executable that
+`CFBundleExecutable` names, it is arm64, its signature is valid, `wsh help` runs, the Linux resources are static ELF files, nothing is
+world-writable, and the files are byte-identical to the ones built), `scripts/release-windows-cross.sh` (`7z` lists `wsh.exe`
+and the resources in the installer and `wsh.exe` is identical to the built one), `scripts/linux-container-bundle.sh` (the deb and
+the rpm list `/usr/bin/wsh` and the resources, and `wsh` is identical to the built one; the AppImage is a note, as before) and
+`scripts/release-windows.ps1` (`wsh.exe` beside `holzwave-app.exe` is the built one; the Linux builds come from `-LinuxWsh`, a
+folder made by `sh scripts/wsh-linux.sh` on a Mac or Linux host, and without it the installer has no Linux resources and says so).
+The macOS bundle, the GNU-ABI installer and the arm64 deb, rpm and AppImage of the container script were built and inspected on a Mac
+with these checks; `scripts/release-windows.ps1` (the MSVC installer) and the amd64 Linux build were not run since `wsh` was added to
+them, and no installed package has been run on a machine of the owner yet.
+
 **Preview packages for Windows and Linux, built on this Mac** (owner decision of 2026-10-14; they only build and checksum,
 they never publish):
 

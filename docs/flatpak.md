@@ -19,6 +19,14 @@ repository, never a Flathub package; there is no signing, no repository and no a
 | `packaging/flatpak/ch.holzcloud.holzwave.desktop` | The desktop file (`Categories=System;TerminalEmulator;`) |
 | `scripts/build-flatpak.sh` | `--check` (validate the three files), `--container-build` (build in Docker), no argument (build and install on a Linux machine) |
 
+## What the Flatpak does not carry: `wsh`
+
+The deb, the rpm, the AppImage, the macOS app and the Windows installer install the `wsh` command beside the app. The Flatpak does
+not. Its panes run on the host through `flatpak-spawn --host`, and a shell on the host cannot see `/app/bin`, so a copy of `wsh`
+installed there would be unreachable from every pane. If you want `wsh` on the host of a Flatpak install, put a copy on the host
+yourself; the static Linux build that the packages of the other formats carry (`sh scripts/wsh-linux.sh` makes it) runs on any
+Linux host. The manifest installs only `holzwave-app`.
+
 ## Build and run (the owner's Linux machine)
 
 1. Install `flatpak` and `flatpak-builder` with your package manager, and add Flathub once:
