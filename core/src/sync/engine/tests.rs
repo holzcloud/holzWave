@@ -7,7 +7,17 @@ use super::*;
 use crate::secrets::MemoryStore;
 use crate::sync::webdav::WebDav;
 
-/// An in-memory WebDAV server: the verbs the sync uses, ETags, and the conditions on a write.
+/// How often a server's ETags move: with every write, or once per (virtual) second like Nextcloud's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Granularity {
+    #[default]
+    PerWrite,
+    Second,
+}
+
+/// An in-memory WebDAV server: the verbs the sync uses, ETags, and the conditions on a write. With
+/// [`Granularity::Second`] the ETag of a file is the virtual second of its last write, and with `checksums` the server
+/// keeps the `OC-Checksum` of a write and reports it in the listing, as Nextcloud does.
 #[derive(Default)]
 struct Store {
     files: BTreeMap<String, (Vec<u8>, u64)>,
@@ -15,11 +25,45 @@ struct Store {
     next: u64,
     puts: u32,
     gets: u32,
+    granularity: Granularity,
+    checksums: bool,
+    /// The virtual clock of [`Granularity::Second`]; it moves only through [`Server::set_second`].
+    clock: u64,
+    /// The checksum stored with each file (a write without the header clears it).
+    sums: BTreeMap<String, String>,
+    /// The reads of names under `files/`.
+    blob_gets: u32,
+    /// The writes of a checksum server whose `OC-Checksum` was missing or did not match the body.
+    bad_sums: u32,
+    /// A part of a path whose next read is answered with 500.
+    fail_get: Option<String>,
+    /// A file of `files/` that disappears right after the next listing of that folder.
+    vanish: Option<String>,
+}
+
+/// What a test counts on the server: reads of blobs, writes, and writes with a wrong or missing checksum header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Counts {
+    blob_gets: u32,
+    puts: u32,
+    bad_sums: u32,
 }
 
 struct Server {
     url: String,
     store: Arc<Mutex<Store>>,
+}
+
+impl Server {
+    /// Move the virtual clock of a one-second server.
+    fn set_second(&self, second: u64) {
+        self.store.lock().unwrap().clock = second;
+    }
+
+    fn counts(&self) -> Counts {
+        let s = self.store.lock().unwrap();
+        Counts { blob_gets: s.blob_gets, puts: s.puts, bad_sums: s.bad_sums }
+    }
 }
 
 fn serve(stream: TcpStream, store: Arc<Mutex<Store>>) {
@@ -57,9 +101,17 @@ fn serve(stream: TcpStream, store: Arc<Mutex<Store>>) {
                 }
                 "GET" => {
                     s.gets += 1;
-                    match s.files.get(&rel) {
-                        Some((b, e)) => (200, format!("ETag: \"v{e}\"\r\n"), b.clone()),
-                        None => (404, String::new(), vec![]),
+                    if rel.starts_with("files/") {
+                        s.blob_gets += 1;
+                    }
+                    if s.fail_get.as_deref().is_some_and(|part| rel.contains(part)) {
+                        s.fail_get = None;
+                        (500, String::new(), vec![])
+                    } else {
+                        match s.files.get(&rel) {
+                            Some((b, e)) => (200, format!("ETag: \"v{e}\"\r\n"), b.clone()),
+                            None => (404, String::new(), vec![]),
+                        }
                     }
                 }
                 "PUT" => {
@@ -69,11 +121,28 @@ fn serve(stream: TcpStream, store: Arc<Mutex<Store>>) {
                         (_, Some(m)) => current.as_deref() == Some(m.as_str()),
                         _ => true,
                     };
-                    if ok {
+                    let sum = headers.get("oc-checksum").cloned();
+                    let right = format!("sha256:{}", digest(&body));
+                    if ok && s.checksums && sum.as_deref().is_some_and(|v| v != right) {
+                        // A header that does not match the body is refused, as a server that checks it does.
+                        s.bad_sums += 1;
+                        (400, String::new(), vec![])
+                    } else if ok {
                         s.next += 1;
                         s.puts += 1;
-                        let e = s.next;
+                        let e = if s.granularity == Granularity::Second { s.clock } else { s.next };
                         let created = current.is_none();
+                        if s.checksums {
+                            match sum {
+                                Some(v) => {
+                                    s.sums.insert(rel.clone(), v);
+                                }
+                                None => {
+                                    s.bad_sums += 1;
+                                    s.sums.remove(&rel);
+                                }
+                            }
+                        }
                         s.files.insert(rel, (body, e));
                         (if created { 201 } else { 204 }, format!("ETag: \"v{e}\"\r\n"), vec![])
                     } else {
@@ -85,16 +154,22 @@ fn serve(stream: TcpStream, store: Arc<Mutex<Store>>) {
                         (404, String::new(), vec![])
                     } else {
                         let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
-                        let mut xml = String::from(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">"#);
+                        let mut xml = String::from(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">"#);
                         xml.push_str(&format!("<d:response><d:href>/dav/{prefix}</d:href><d:propstat><d:prop><d:getetag>\"d\"</d:getetag><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>"));
                         for (p, (_, e)) in &s.files {
                             if let Some(name) = p.strip_prefix(&prefix) {
                                 if !name.contains('/') {
-                                    xml.push_str(&format!("<d:response><d:href>/dav/{p}</d:href><d:propstat><d:prop><d:getetag>&quot;v{e}&quot;</d:getetag><d:resourcetype/></d:prop></d:propstat></d:response>"));
+                                    let sum = s.sums.get(p).filter(|_| s.checksums).map_or(String::new(), |v| format!("<oc:checksums><oc:checksum>{v}</oc:checksum></oc:checksums>"));
+                                    xml.push_str(&format!("<d:response><d:href>/dav/{p}</d:href><d:propstat><d:prop><d:getetag>&quot;v{e}&quot;</d:getetag><d:resourcetype/>{sum}</d:prop></d:propstat></d:response>"));
                                 }
                             }
                         }
                         xml.push_str("</d:multistatus>");
+                        if rel == "files" {
+                            if let Some(gone) = s.vanish.take() {
+                                s.files.remove(&format!("files/{gone}"));
+                            }
+                        }
                         (207, "Content-Type: application/xml\r\n".into(), xml.into_bytes())
                     }
                 }
@@ -110,9 +185,19 @@ fn serve(stream: TcpStream, store: Arc<Mutex<Store>>) {
 }
 
 fn server() -> Server {
+    start(Granularity::PerWrite, false)
+}
+
+/// A server whose ETags move once per virtual second (the clock starts at 1000 and moves through
+/// [`Server::set_second`]); `checksums` makes it keep and report the `OC-Checksum` of a write, like Nextcloud.
+fn server_coarse(checksums: bool) -> Server {
+    start(Granularity::Second, checksums)
+}
+
+fn start(granularity: Granularity, checksums: bool) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}/dav", listener.local_addr().unwrap().port());
-    let store = Arc::new(Mutex::new(Store::default()));
+    let store = Arc::new(Mutex::new(Store { granularity, checksums, clock: 1000, ..Store::default() }));
     let shared = store.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -1411,4 +1496,73 @@ fn a_profile_that_is_still_there_is_never_dropped() {
     let fresh = device("fresh-conn");
     stage_connections(&fresh, br#"{"version":1,"items":[]}"#);
     assert!(promote_incoming_with_report(&fresh.dir).dropped_profiles.is_empty());
+}
+
+// ---- a server whose ETag moves once per second -------------------------------------------------------------------------
+
+/// The texts of the replaced versions of `name` that the server keeps in `backups/`, opened with the folder's key.
+fn backed_up(srv: &Server, d: &Device, name: &str) -> Vec<String> {
+    let syncer = connect(srv, d, "pw").unwrap();
+    let flat = format!("backups/{}.", name.replace('/', "."));
+    let blobs: Vec<Vec<u8>> = srv.store.lock().unwrap().files.iter().filter(|(k, _)| k.starts_with(&flat)).map(|(_, v)| v.0.clone()).collect();
+    let mut texts: Vec<String> = blobs.iter().map(|b| String::from_utf8(syncer.key.open(name, b).unwrap().1.to_vec()).unwrap()).collect();
+    texts.sort();
+    texts
+}
+
+/// Two devices level on `settings.json` = `base`, all inside one second of the server.
+fn level_pair(srv: &Server, tag: &str) -> (Device, Device) {
+    let (a, b) = (device(&format!("a-{tag}")), device(&format!("b-{tag}")));
+    put(&a, "settings.json", "base");
+    connect(srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(text(&b, "settings.json").as_deref(), Some("base"));
+    (a, b)
+}
+
+/// A uploads `from a`; B, which changed the same file to `from b` meanwhile, syncs in the same second. Nothing may be
+/// lost: B finds the conflict and one of the versions is kept where a person can reach it.
+fn same_second_overwrite(srv: &Server, tag: &str) -> (Device, Device) {
+    let (a, b) = level_pair(srv, tag);
+    put(&a, "settings.json", "from a");
+    assert_eq!(connect(srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["settings.json"]);
+    put(&b, "settings.json", "from b");
+    let report = connect(srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.conflicts, vec!["settings.json"], "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(backed_up(srv, &b, "settings.json"), vec!["from a"], "A's version is kept on the server");
+    assert_eq!(server_plain(srv, &b, "settings.json"), b"from b");
+    (a, b)
+}
+
+#[test]
+#[ignore = "fails until the fix of the next commit"]
+fn a_write_in_the_same_second_as_the_last_seen_version_is_a_conflict_not_an_overwrite() {
+    let srv = server_coarse(true);
+    let (a, _b) = same_second_overwrite(&srv, "ss1");
+    // A's next run sees B's version, although the ETag did not move, because the checksum did.
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["settings.json"], "{report:?}");
+    assert_eq!(text(&a, "settings.json").as_deref(), Some("from b"));
+}
+
+/// B changes a file in the same second in which A last saw it written; the version B wrote is `v2`.
+fn same_second_second_writer(srv: &Server, tag: &str) -> (Device, Device) {
+    let (a, b) = (device(&format!("a-{tag}")), device(&format!("b-{tag}")));
+    put(&a, "settings.json", "v1");
+    connect(srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(srv, &b, "pw").unwrap().sync_once().unwrap();
+    put(&b, "settings.json", "v2");
+    assert_eq!(connect(srv, &b, "pw").unwrap().sync_once().unwrap().uploaded, vec!["settings.json"]);
+    (a, b)
+}
+
+#[test]
+#[ignore = "fails until the fix of the next commit"]
+fn a_version_written_in_the_same_second_as_the_last_seen_one_is_downloaded() {
+    let srv = server_coarse(true);
+    let (a, _b) = same_second_second_writer(&srv, "ss2");
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["settings.json"], "{report:?}");
+    assert_eq!(text(&a, "settings.json").as_deref(), Some("v2"));
 }
