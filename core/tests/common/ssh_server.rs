@@ -18,6 +18,7 @@
 //!
 //! The server runs on a thread of its own with a loopback listener on a free port, until the process ends.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -32,7 +33,7 @@ use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Msg, Server as _, Session};
 use russh::{Channel, ChannelId};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 /// What the server accepts.
 #[derive(Clone)]
@@ -244,7 +245,7 @@ impl server::Server for Factory {
     type Handler = Handler;
     fn new_client(&mut self, _: Option<SocketAddr>) -> Handler {
         let index = self.seen.connections.fetch_add(1, Ordering::SeqCst);
-        Handler { seen: self.seen.clone(), options: self.options.clone(), index }
+        Handler { seen: self.seen.clone(), options: self.options.clone(), index, shells: HashSet::new() }
     }
 }
 
@@ -253,6 +254,8 @@ struct Handler {
     options: Options,
     /// The zero-based index of this connection.
     index: usize,
+    /// The channels that run the shell. Data on any other channel (a forwarded connection) is not the shell's input.
+    shells: HashSet<ChannelId>,
 }
 
 impl Handler {
@@ -291,6 +294,32 @@ impl server::Handler for Handler {
         Ok(())
     }
 
+    // A jump request. The server only forwards to loopback addresses, and only when it was made a jump host; any other
+    // request is rejected by dropping the reply.
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host: &str,
+        port: u32,
+        _originator: &str,
+        _originator_port: u32,
+        reply: server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Ok(port) = u16::try_from(port) else { return Ok(()) };
+        self.seen.direct_tcpip.lock().unwrap().push((host.to_string(), port));
+        if !self.options.jump || host != "127.0.0.1" {
+            return Ok(());
+        }
+        let Ok(mut onward) = TcpStream::connect((host, port)).await else { return Ok(()) };
+        reply.accept().await;
+        let mut stream = channel.into_stream();
+        tokio::spawn(async move {
+            let _ = tokio::io::copy_bidirectional(&mut stream, &mut onward).await;
+        });
+        Ok(())
+    }
+
     async fn pty_request(
         &mut self,
         channel: ChannelId,
@@ -309,12 +338,16 @@ impl server::Handler for Handler {
 
     async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
         self.seen.shells.fetch_add(1, Ordering::SeqCst);
+        self.shells.insert(channel);
         session.channel_success(channel)?;
         session.data(channel, format!("welcome {}\r\n", self.index).into_bytes())?;
         Ok(())
     }
 
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+        if !self.shells.contains(&channel) {
+            return Ok(());
+        }
         let text = String::from_utf8_lossy(data).to_string();
         if text.trim() == "exit" {
             session.exit_status_request(channel, 3)?;
