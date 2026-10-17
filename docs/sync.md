@@ -7,7 +7,13 @@ account, scheduled runs, popover. Tested against an in-memory WebDAV server, not
 
 `layout.json`, `settings.json`, `connections.json`, `themes/<name>.json`, `widgets/<name>.json` and `widget_notes.json`,
 plus the connection secrets (passwords and key passphrases from the OS keychain) as one virtual file, `secrets.json`, which
-is never written to disk. Machine-local state (`session.json`, `known_hosts`, `pane_*.json`) is not synced.
+is never written to disk. Machine-local state (`session.json`, `known_hosts`) is not synced. The two pane files
+(`pane_connections.json` and `pane_blocks.json`) are machine-local too, but their shared part travels inside the layout:
+
+`layout.json` is synced as a **layout unit**: the layout, which panes run which saved connection, and the blocks whose
+source is a saved connection (a remote file browser or preview) or the monitor of this computer. A local folder, a local
+preview and a chat are tied to the computer they were made on and are never shared. No secret is part of the unit. The
+unit is one file on the server like any other (`files/layout.json.hwx`); the format of the blob does not change.
 
 Also not synced: `history.db` (deletions are not synced, so a command you forgot would come back), `ai.json` and `chats/`
 (the AI providers and the chats), and the keychain entries of the AI providers (a provider key stays on the computer where
@@ -45,6 +51,18 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   moved into place when the app starts again, because the running app rewrites them from memory and would overwrite a
   file replaced under it. The popover asks for a restart only while such a download waits (or a staged file could not
   be applied).
+- **Adopting a layout:** pane ids are small per-device counters, so two devices use the same numbers for different
+  panes. A layout taken over without the assignments that belong to it would meet the other device's own pane files:
+  a saved host or a file block could land on another pane, and a connected pane of the other device would come up as a
+  plain shell. So an adoption replaces this device's `pane_connections.json` and `pane_blocks.json` with the ones of the
+  unit, as one step, with the layout (the last writer wins, as for every file). The files it replaces are copied to
+  `sync-conflicts/` first (the file name, then the time); when a copy cannot be written nothing is applied and the unit
+  stays staged. The working directories kept in `session.json` for the old panes are forgotten (the window frame is
+  kept). A layout uploaded by an older build, a plain layout without assignments, is still accepted and clears the
+  assignments. A downloaded unit is checked before it is staged and again before it is applied: a layout that is not
+  an object, a pane that is not a number, a connection id that is not a plain name, a member of another version or
+  more than 4096 entries refuse it. A device that never adopts a layout keeps its assignments as they are; building the
+  unit changes none of its files.
 - **Adding a device:** enter the endpoint, user, app password and the same passphrase. A QR code comes with mobile.
 - **Local state:** `sync_state.json` (device id; per file the counter, ETag and SHA-256 of what the last run left
   behind), `sync.json` (endpoint, user, on/off), `sync-incoming/` (the downloads of the files the running app owns, which wait for the next start, with a

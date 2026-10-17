@@ -37,9 +37,9 @@ against scratch directories and never touch the real one.
 | `layout.json` | workspaces, tabs, panes and split ratios | 250 ms after the first change of a burst, and on quit | no |
 | `session.json` | the working directory of each pane and the window frame | 2 s after the first change of a burst, and on quit | yes |
 | `connections.json` | the saved SSH, WSL and Docker connections, without secrets | when a connection is saved or deleted | no |
-| `pane_connections.json` | which pane runs which connection | when it changes | yes |
+| `pane_connections.json` | which pane runs which connection | when it changes | yes (the assignments travel inside the layout, see [sync.md](sync.md)) |
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
-| `pane_blocks.json` | which pane shows a file browser, a preview, the system monitor or a chat, of which source and path (for a chat the path is the id of its conversation and the messages are not in this file) | when it changes | yes |
+| `pane_blocks.json` | which pane shows a file browser, a preview, the system monitor or a chat, of which source and path (for a chat the path is the id of its conversation and the messages are not in this file) | when it changes | yes (the blocks of a saved connection and the monitor travel inside the layout, see [sync.md](sync.md)) |
 | `ai.json` | the AI provider profiles, without keys | when a profile is saved or deleted | yes |
 | `chats/<id>.json` | one AI chat per file, readable by you only; terminal context is a marker unless `ai_persist_context` is on | when a message is stored | yes |
 | `history.db` | the command history, with the host each command ran on | when a command is reported | yes |
@@ -462,6 +462,10 @@ editing, but it is plain JSON and a damaged one is repaired rather than trusted:
   numbers);
 - a file over 1 MiB is moved to `layout.json.bad` unread.
 
+The file itself holds the layout only. In the sync it travels as a *layout unit*, together with the part of
+`pane_connections.json` and `pane_blocks.json` that makes sense on another computer; adopting a unit replaces both pane
+files here and keeps the old ones in `sync-conflicts/` (see [sync.md](sync.md)).
+
 <!-- example: layout.json -->
 ```json
 {
@@ -560,7 +564,7 @@ password and the passphrase are in the keychain (`sync:password`, `sync:passphra
 the device's random id and, per synced file, what the last run left behind (counter, ETag, SHA-256). `sync-incoming/`
 holds the downloads of the files the running app owns (`layout.json`, `settings.json`, `connections.json`) until the next
 start; themes, widgets and notes are moved into place right after the run, and `sync-conflicts/` holds the local versions
-that lost a conflict or were replaced by a download. See [sync.md](sync.md).
+that lost a conflict or were replaced by a download (among them the two pane files a downloaded layout replaced). See [sync.md](sync.md).
 
 ## `history.db`
 
