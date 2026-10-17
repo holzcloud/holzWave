@@ -19,6 +19,9 @@
 //!   absence of CI (D-04);
 //! * the examples of `docs/config.md`, which are parsed by the real loaders, so the document cannot drift from the code;
 //! * the owner's Windows and Linux list: every row W1 to W14 and L1 to L11 is in `docs/test-plan.md` exactly once.
+//! * the documents themselves: the rows of Part 7 of the test plan, no label of the private planning tree and no hidden
+//!   character in a public file, the command and event counts and names of the architecture against the protocol golden,
+//!   and the test targets that the documents name.
 //!
 //! Every exception is data with a reason and an exact scope, and every guard is a small function that returns
 //! sentences, so a test can hand it a wrong input and see it fail. An exception that matches nothing any more fails
@@ -2325,8 +2328,8 @@ fn table_cells(line: &str) -> Option<Vec<String>> {
 }
 
 /// What is wrong with the rows `ids` in the document `doc`, one sentence each: a row that is missing, one that appears
-/// twice, one without its plan pointer, its instruction or its expected result. A row is a table row whose first cell
-/// is exactly the id. The Result column (the fifth cell) is never looked at: it is the owner's to fill in.
+/// twice, one without its area or plan pointer, its instruction or its expected result. A row is a table row whose
+/// first cell is exactly the id. The Result column (the fifth cell) is never looked at: it is the owner's to fill in.
 fn test_plan_row_problems(doc: &str, ids: &[String]) -> Vec<String> {
     let rows: Vec<Vec<String>> = doc.lines().filter_map(table_cells).collect();
     let mut problems = Vec::new();
@@ -2387,4 +2390,330 @@ fn the_row_check_of_the_test_plan_sees_missing_duplicate_and_empty_rows_and_igno
     // A filled Result column changes nothing.
     let done = "| W1 | 02.2-04 | run it | it runs | fail: a long line | with | bars |\n";
     assert!(test_plan_row_problems(done, &["W1".to_owned()]).is_empty());
+}
+
+// ---- Part 7 of the test plan ------------------------------------------------------------------------------
+
+/// The rows of Part 7 of `docs/test-plan.md` (the AI chat, the Apple on-device model and the rest of the extras): the
+/// human checks no suite can run. Every id is in the document exactly once, with an area, an instruction and an expected
+/// result; the Result cell is the owner's.
+const AI_TEST_PLAN_ROWS: [&str; 1] = ["AI-A4"];
+
+fn ai_test_plan_row_ids() -> Vec<String> {
+    AI_TEST_PLAN_ROWS.iter().map(|id| (*id).to_owned()).collect()
+}
+
+#[test]
+fn test_plan_has_every_ai_and_extras_row_exactly_once() {
+    let problems = test_plan_row_problems(&read("docs/test-plan.md"), &ai_test_plan_row_ids());
+    assert!(problems.is_empty(), "docs/test-plan.md Part 7: {problems:?}");
+}
+
+// ---- no plan label in the public tree -----------------------------------------------------------------------
+
+/// The first-party directories whose text files are public: the labels of the private planning tree stay out of them.
+const PLAN_LABEL_DIRS: [&str; 13] = [
+    "core",
+    "ipc",
+    "wsh",
+    "plugins",
+    "spike",
+    "app/src",
+    "app/src-tauri",
+    "app/tests",
+    "app/scripts",
+    "docs",
+    "scripts",
+    "packaging",
+    "assets",
+];
+
+/// The extensions of the text files that are scanned.
+const PLAN_LABEL_EXTENSIONS: [&str; 22] = [
+    "rs", "ts", "mjs", "cjs", "js", "css", "html", "md", "json", "toml", "sh", "zsh", "fish", "ps1", "swift", "yml", "yaml",
+    "txt", "sse", "ndjson", "desktop", "xml",
+];
+
+/// Directory names that hold build output or vendored code and are never scanned.
+const PLAN_LABEL_SKIPPED_DIRS: [&str; 7] = ["target", "node_modules", ".build", "dist", "dist-bench", "gen", "vendor"];
+
+/// A label that is allowed in a file, as `(file, label, reason)`. An entry names a true false positive; it is never a way
+/// to get a leaked label past the scan.
+const PLAN_LABEL_ALLOWED: [(&str, &str, &str); 0] = [];
+
+/// The labels of the private planning tree in `text`, as one-based line numbers and the label text. Four shapes: a plan id
+/// (the two digits of the phase, a hyphen and two digits, alone: not inside a date, a longer number, a word, a version),
+/// a threat id, the name of the phase directory, and a test or function name that carries a spike label.
+fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
+    let phase = String::from("0") + "7";
+    let threat = format!("T-{phase}-");
+    let directory = format!("{phase}-extras");
+    let spike = String::from("spike") + "_s";
+    let mut hits = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let number = index + 1;
+        let chars: Vec<char> = line.chars().collect();
+        let at = |i: usize, pattern: &str| -> bool {
+            let want: Vec<char> = pattern.chars().collect();
+            chars.len() >= i + want.len() && chars[i..i + want.len()] == want[..]
+        };
+        for i in 0..chars.len() {
+            // A plan id: the phase, a hyphen and two digits.
+            if at(i, &format!("{phase}-")) {
+                let before_ok = i == 0 || !(chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '-' | '_' | '.'));
+                let digits = i + 3 + 1 < chars.len() && chars[i + 3].is_ascii_digit() && chars[i + 4].is_ascii_digit();
+                let after_ok = !chars.get(i + 5).is_some_and(char::is_ascii_digit);
+                if before_ok && digits && after_ok {
+                    hits.push((number, chars[i..i + 5].iter().collect()));
+                }
+            }
+            // A threat id: T, the phase and a digit.
+            if at(i, &threat) && chars.get(i + threat.chars().count()).is_some_and(char::is_ascii_digit) {
+                hits.push((number, chars[i..i + threat.chars().count() + 1].iter().collect()));
+            }
+            // The name of the phase directory.
+            if at(i, &directory) {
+                hits.push((number, directory.clone()));
+            }
+            // A spike label in a name: the prefix, a digit from 1 to 5, and no letter or digit right after.
+            if at(i, &spike) {
+                let n = i + spike.chars().count();
+                if chars.get(n).is_some_and(|c| ('1'..='5').contains(c)) && !chars.get(n + 1).is_some_and(|c| c.is_alphanumeric())
+                {
+                    hits.push((number, chars[i..=n].iter().collect()));
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// Every text file of the first-party directories, and `README.md`, sorted. The walk is private to this guard: it skips
+/// the directories of build output and vendored code by name.
+fn plan_label_files() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !PLAN_LABEL_SKIPPED_DIRS.contains(&name.as_str()) {
+                    walk(&path, out);
+                }
+            } else if path.extension().and_then(|e| e.to_str()).is_some_and(|e| PLAN_LABEL_EXTENSIONS.contains(&e)) {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for dir in PLAN_LABEL_DIRS {
+        walk(&root().join(dir), &mut out);
+    }
+    out.push(root().join("README.md"));
+    out.sort();
+    out
+}
+
+#[test]
+fn no_public_file_carries_a_plan_label() {
+    let mut problems = Vec::new();
+    for path in plan_label_files() {
+        // A file that is not UTF-8 is not text and is not scanned.
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        let file = shown(&path);
+        for (line, label) in plan_label_hits(&text) {
+            if PLAN_LABEL_ALLOWED.iter().any(|(f, l, _)| *f == file && *l == label) {
+                continue;
+            }
+            problems.push(format!("{file}:{line}: {label}"));
+        }
+    }
+    assert!(problems.is_empty(), "labels of the private planning tree in the public files:\n{}", problems.join("\n"));
+}
+
+#[test]
+fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips_dates_and_longer_numbers() {
+    // Every sample is built from pieces, so that this file holds no label itself.
+    let phase = String::from("0") + "7";
+    let id = format!("{phase}-{}", 12);
+    let hit = |text: &str| plan_label_hits(text).into_iter().map(|(_, label)| label).collect::<Vec<_>>();
+    assert_eq!(hit(&id), [id.clone()], "an id alone");
+    assert_eq!(hit(&format!("see ({id})")), [id.clone()], "an id in parentheses");
+    assert_eq!(hit(&format!("{id} starts the line")), [id.clone()], "an id at the start");
+    assert_eq!(hit(&format!("ends the line {id}")), [id.clone()], "an id at the end");
+    assert!(hit(&format!("on 2026-{id}")).is_empty(), "inside a date");
+    assert!(hit(&format!("x{id}")).is_empty(), "after a letter");
+    assert!(hit(&format!("5{id}")).is_empty(), "after a digit");
+    assert!(hit(&format!("{id}3")).is_empty(), "before a third digit");
+    assert!(hit(&format!("1.{id}")).is_empty(), "after a dot");
+    assert!(hit(&format!("a_{id}")).is_empty(), "after an underscore");
+    assert!(hit(&format!("{phase}-x")).is_empty(), "a hyphen and a letter");
+    let threat = format!("T-{phase}-024");
+    assert_eq!(hit(&format!("a bound ({threat})")), [format!("T-{phase}-0")], "a threat id");
+    assert!(hit(&format!("T-{phase}-SC")).is_empty(), "the reserved threat name has no digit");
+    let directory = format!("{phase}-extras");
+    assert_eq!(hit(&format!("the folder {directory}/")), [directory.clone()], "the phase directory");
+    let spike = String::from("spike") + "_s";
+    assert_eq!(hit(&format!("fn {spike}1_first_delta()")), [format!("{spike}1")], "a spike name with a tail");
+    assert_eq!(hit(&format!("fn round_trip_{spike}5()")), [format!("{spike}5")], "a spike name at the end");
+    assert!(hit(&format!("{spike}6_x")).is_empty(), "a digit that is no spike");
+    assert!(hit(&format!("{spike}10_x")).is_empty(), "a longer number");
+    assert!(hit(&format!("{spike}a_x")).is_empty(), "a letter after the prefix");
+    assert!(hit(&(String::from("spike") + "_report")).is_empty(), "a plain spike prefix");
+    assert_eq!(plan_label_hits(&format!("one\ntwo {id}\nthree")), [(2, id)], "the line number is one-based");
+}
+
+// ---- the architecture and the golden of the protocol ----------------------------------------------------------
+
+/// The golden of the app protocol, parsed.
+fn protocol_golden() -> serde_json::Value {
+    serde_json::from_str(&read("app/tests/fixtures/protocol.json")).expect("protocol.json is JSON")
+}
+
+/// The text of a Markdown section: from the line that starts with `heading_start` up to, not including, the next line that
+/// starts with two hash signs and a space. Empty when no line starts with it.
+fn markdown_section(doc: &str, heading_start: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in doc.lines() {
+        if inside && line.starts_with("## ") {
+            break;
+        }
+        if !inside && line.starts_with(heading_start) {
+            inside = true;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[test]
+fn architecture_md_states_the_command_and_event_counts_of_the_golden() {
+    let golden = protocol_golden();
+    let commands = golden["commands"].as_object().expect("the golden has an object of commands").len();
+    let events = golden["events"]["names"].as_array().expect("the golden lists the event names").len();
+    let section = markdown_section(&read("docs/architecture.md"), "## 6.");
+    assert!(!section.is_empty(), "docs/architecture.md has no section 6");
+    let sentence = format!("set of {commands} commands and {events} events");
+    assert!(
+        section.contains(&sentence),
+        "section 6 of docs/architecture.md must say `{sentence}` (the golden has {commands} commands and {events} events)"
+    );
+}
+
+// ---- the test targets the documents name ----------------------------------------------------------------------
+
+/// The words that follow `--test ` (with the space) in `doc`: letters, digits and underscores. `--test-threads` has no
+/// space after `--test` and is not read.
+fn documented_test_targets(doc: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = doc;
+    while let Some(at) = rest.find("--test ") {
+        rest = &rest[at + "--test ".len()..];
+        let word: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        if !word.is_empty() {
+            out.push(word);
+        }
+    }
+    out
+}
+
+/// Whether a test target of that name exists in one of the crates that have integration tests.
+fn test_target_exists(name: &str) -> bool {
+    ["core/tests", "ipc/tests", "wsh/tests", "app/src-tauri/tests", "plugins/apple-ai/tests"].iter().any(|dir| {
+        let base = root().join(dir);
+        base.join(format!("{name}.rs")).is_file() || base.join(name).join("mod.rs").is_file()
+    })
+}
+
+/// The public documents that carry text for people: `docs/*.md` (not the design folder) and the readme.
+fn public_documents() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = fs::read_dir(root().join("docs"))
+        .expect("docs/ exists")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
+    out.push(root().join("README.md"));
+    out.sort();
+    out
+}
+
+#[test]
+fn test_plan_commands_name_only_test_targets_that_exist() {
+    let mut problems = Vec::new();
+    for path in public_documents() {
+        let text = fs::read_to_string(&path).expect("a document is UTF-8");
+        for word in documented_test_targets(&text) {
+            if !test_target_exists(&word) {
+                problems.push(format!("{} names the test target `{word}`, which does not exist", shown(&path)));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn the_test_target_scan_reads_the_word_after_dash_dash_test_and_ignores_test_threads() {
+    let doc = "run `cargo test -p x --test project_policy -- --test-threads 1` and `--test ai_http`, then `--test` alone,\n\
+               and --test  spaced and `--test budget`.";
+    assert_eq!(documented_test_targets(doc), ["project_policy", "ai_http", "budget"]);
+    assert!(test_target_exists("project_policy"));
+    assert!(test_target_exists("live"), "a target of the Apple crate");
+    assert!(!test_target_exists("no_such_target_anywhere"));
+}
+
+// ---- hidden characters in the documents ------------------------------------------------------------------------
+
+/// Ranges of code points that no document should hold, each as `(first, last)`: the C0 controls (the line feed, the
+/// carriage return and the tab are allowed and checked apart), the delete character and the C1 controls, the soft hyphen,
+/// the Arabic letter mark, the zero-width and direction marks, the embedding and override controls, the word joiner and
+/// the isolates, the byte order mark and the tag block.
+const HIDDEN_RANGES: [(u32, u32); 10] = [
+    (0x00, 0x1F),
+    (0x7F, 0x7F),
+    (0x80, 0x9F),
+    (0xAD, 0xAD),
+    (0x061C, 0x061C),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x2069),
+    (0xFEFF, 0xFEFF),
+    (0xE0000, 0xE007F),
+];
+
+fn is_hidden_or_control(c: char) -> bool {
+    if matches!(c, '\n' | '\r' | '\t') {
+        return false;
+    }
+    let n = c as u32;
+    HIDDEN_RANGES.iter().any(|(first, last)| (*first..=*last).contains(&n))
+}
+
+#[test]
+fn public_documents_hold_no_hidden_or_control_character() {
+    let mut problems = Vec::new();
+    for path in public_documents() {
+        let text = fs::read_to_string(&path).expect("a document is UTF-8");
+        for (index, line) in text.lines().enumerate() {
+            for c in line.chars().filter(|c| is_hidden_or_control(*c)) {
+                problems.push(format!("{}:{}: U+{:04X}", shown(&path), index + 1, c as u32));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "hidden or control characters in the documents:\n{}", problems.join("\n"));
+}
+
+#[test]
+fn the_hidden_character_predicate_allows_whitespace_and_flags_the_invisible_ones() {
+    let make = |n: u32| char::from_u32(n).expect("a scalar value");
+    for fine in ['\t', '\n', '\r', ' ', 'a', 'é', '→', '✦', '✅'] {
+        assert!(!is_hidden_or_control(fine), "{fine:?} is plain text");
+    }
+    for hidden in [0x00, 0x1B, 0x7F, 0x85, 0xAD, 0x200B, 0x200E, 0x202E, 0x2066, 0xFEFF, 0xE0041].map(make) {
+        assert!(is_hidden_or_control(hidden), "U+{:04X} is hidden or a control", hidden as u32);
+    }
 }
