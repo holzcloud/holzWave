@@ -273,6 +273,18 @@ mod tests {
     }
 
     #[test]
+    fn a_widget_and_its_items_are_json_objects_never_positional_arrays() {
+        // serde would read a struct from an array of its member values; nothing documents that and no schema describes it.
+        let bad = |text: &str| parse(text, "x").unwrap_err();
+        assert!(bad(r#"[null,null,"T","note"]"#).contains("a widget file is a JSON object with named members"));
+        assert!(bad(r#"[]"#).contains("a widget file is a JSON object with named members"));
+        assert!(bad(r#"{"title":"T","kind":"list","items":[["Pods","kubectl get pods",null]]}"#)
+            .contains("an item is a JSON object with named members"));
+        assert!(bad(r#"{"title":"T","kind":"note","items":[["Pods"]]}"#).contains("an item is a JSON object with named members"));
+        assert!(parse(r#"{"title":"T","kind":"list","items":[{"label":"a","command":"ls"}]}"#, "x").is_ok());
+    }
+
+    #[test]
     fn one_bad_file_costs_one_widget_and_says_which() {
         let d = dir("c");
         fs::write(d.join(DIR).join("good.json"), r#"{"title":"Good","kind":"note"}"#).unwrap();
