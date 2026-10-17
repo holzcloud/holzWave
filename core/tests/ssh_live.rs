@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 use common::ssh_server::Out;
 use holzwave_core::conn::{ConnState, Link};
 use holzwave_core::files::{FileSource, SftpSource};
+#[cfg(unix)]
+use holzwave_core::pool::{Connection, ForwardError, ForwardSink, ForwardedStream};
 use holzwave_core::ssh::{ExecCancel, ExecEnd, ExecLimits, HostKeyPolicy, SshAuth, SshExec, SshLink, SshTarget};
 
 /// The seconds a wait for the real server may take.
@@ -106,4 +108,65 @@ fn real_openssh_sftp_and_exec() {
     assert_eq!((result.status, result.end), (Some(0), ExecEnd::Finished));
     assert!(started.elapsed() < Duration::from_secs(WAIT), "the command took too long");
     println!("live: one strict exec command ran and returned LIVE_42");
+}
+
+/// A sink that answers nothing: the forward is the point, not what comes through it.
+#[cfg(unix)]
+struct Silent;
+
+#[cfg(unix)]
+impl ForwardSink for Silent {
+    fn serve(&self, _stream: ForwardedStream) {}
+}
+
+/// A socket path of the form the forward accepts that no other run has used.
+#[cfg(unix)]
+fn fresh_socket_path() -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    format!("/tmp/holzwave-{:032x}.sock", nanos ^ (u128::from(std::process::id()) << 96))
+}
+
+/// What the design of the tunnel rests on, shown against the real server: `sshd` makes the socket, an owner-only file, when
+/// it accepts the forward; it refuses a path that is already there; and it leaves the file behind when the forward is cancelled
+/// and when the login ends (the OpenSSH of this check does not unlink it), with nothing listening on it any more. That is why
+/// every start of a shell asks for a path nobody has asked for before.
+#[cfg(unix)]
+#[test]
+#[ignore = "needs a real sshd: run scripts/ssh-loopback-check.sh"]
+fn real_openssh_forwards_a_socket_and_refuses_a_path_that_is_there() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    let path = fresh_socket_path();
+    let first = Connection::standalone("first", target(key("HOLZWAVE_TEST_SSH_KEY_ED25519", false))).unwrap();
+    let second = Connection::standalone("second", target(key("HOLZWAVE_TEST_SSH_KEY_ED25519", false))).unwrap();
+    let ask = |connection: &std::sync::Arc<Connection>| {
+        let c = connection.clone();
+        let path = path.clone();
+        connection.block_on(async move { c.forward(&path, std::sync::Arc::new(Silent)).await })
+    };
+
+    let guard = ask(&first).expect("sshd accepts a Unix socket forward (AllowStreamLocalForwarding)");
+    let meta = std::fs::metadata(&path).expect("sshd made the socket");
+    assert!(meta.file_type().is_socket(), "{path} is a socket");
+    assert_eq!(meta.permissions().mode() & 0o077, 0, "the socket is owner-only: {:o}", meta.permissions().mode());
+    assert!(std::os::unix::net::UnixStream::connect(&path).is_ok(), "something listens while the forward is up");
+    println!("live: sshd made the forwarded socket, owner-only, and it accepts connections");
+
+    assert!(matches!(ask(&second), Err(ForwardError::Refused)), "a path that is still there is refused");
+    println!("live: sshd refuses a socket path that exists");
+
+    first.block_on(guard.cancel());
+    // The forward is gone: nothing listens, so the socket reaches nothing. The file itself may stay (see above).
+    let started = Instant::now();
+    while std::os::unix::net::UnixStream::connect(&path).is_ok() {
+        assert!(started.elapsed() < Duration::from_secs(WAIT), "the socket still accepts connections after the cancel");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let left = std::path::Path::new(&path).exists();
+    println!("live: after the cancel nothing listens on the socket (the file {} behind)", if left { "stays" } else { "is gone, not left" });
+    if left {
+        // The same path would be refused again: a new start must ask for a new path, never for this one.
+        assert!(matches!(ask(&second), Err(ForwardError::Refused)), "a file that stays still refuses the path");
+        println!("live: the path of a file that stays is refused again, so every start asks for a new path");
+        let _ = std::fs::remove_file(&path);
+    }
 }

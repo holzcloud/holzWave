@@ -1,8 +1,12 @@
 #!/bin/sh
 # A real OpenSSH server on loopback as the judge of the SSH client: public-key login with Ed25519 and RSA keys, in the
 # OpenSSH format, in PEM (PKCS#1) and in PKCS#8, with and without a passphrase; a jump through the same server
-# (direct-tcpip); one SFTP listing; one strict exec command. The in-process tests of core/tests/ssh_auth.rs prove the
-# same paths against a fake server; this check proves that the fake and the real server agree.
+# (direct-tcpip); one SFTP listing; one strict exec command; and the tunnel of `wsh`: a reverse forward of a Unix socket
+# (the server runs with AllowStreamLocalForwarding yes, set below) through which the real `wsh` binary, typed into the
+# pane of a saved connection, pings, renames the pane and opens a preview and an editor of a file of that host, while
+# `wsh ai`, `wsh hist add` and a wrong token are refused (the ignored test `wsh_tunnel_live` of holzwave-app). The
+# in-process tests of core/tests/ssh_auth.rs and core/tests/tunnel.rs prove the same paths against a fake server; this
+# check proves that the fake and the real server agree.
 #
 #   sh scripts/ssh-loopback-check.sh
 #
@@ -14,12 +18,15 @@
 # known hosts file, and it generates nothing that outlives the run.
 #
 # Needs: ssh-keygen, ssh-keyscan, /usr/sbin/sshd, an sftp-server binary (/usr/libexec/sftp-server, /usr/lib/openssh/
-# sftp-server or /usr/lib/ssh/sftp-server) and the Rust toolchain (no Zig: the tests build without the engine).
+# sftp-server or /usr/lib/ssh/sftp-server) and the Rust toolchain. The tests of the SSH client build without the engine;
+# the test of the tunnel is a test of the app crate and needs Zig 0.16 (scripts/env.sh finds it).
 # Present on macOS and on most Linux hosts. The passphrases of the generated keys are throwaway text and reach the test
 # only through its environment.
 #
 # What it cannot cover: a host that is not OpenSSH, a password login (the server here allows keys only), the network
-# (everything is loopback), and the user's own shell start-up beyond what the login shell prints.
+# (everything is loopback), the user's own shell start-up beyond what the login shell prints, a Linux host (the `wsh` that
+# runs is the build of this computer, by its absolute path in the build folder, so nothing is installed into the user's
+# home), and another processor. The static Linux builds of `wsh` are run in a container by scripts/wsh-linux.sh.
 #
 # Exit status: 0 when every check passed (the last line is "ssh-loopback-check: ok"), 1 when a check failed, 2 when a
 # tool is missing. A missing tool is a failed gate, never a skip. The script installs nothing.
@@ -196,8 +203,20 @@ export HOLZWAVE_TEST_SSH_KEY_RSA_PEM_PASS="$dir/user_rsa_pem_pass"
 export HOLZWAVE_TEST_SSH_KEY_RSA_PKCS8="$dir/user_rsa_pkcs8"
 export HOLZWAVE_TEST_SSH_KEY_RSA_PKCS8_PASS="$pkcs8_pass"
 
+# The real `wsh`, built before the tunnel test needs it and named by its absolute path: nothing is installed anywhere.
+if cargo build --locked --offline -p wsh; then
+    target_dir=${CARGO_TARGET_DIR:-$PWD/target}
+    HOLZWAVE_TEST_WSH="$target_dir/debug/wsh"
+    export HOLZWAVE_TEST_WSH
+    [ -x "$HOLZWAVE_TEST_WSH" ] || fail "the built wsh is not at $HOLZWAVE_TEST_WSH"
+else
+    fail "wsh did not build"
+fi
+
 if cargo test --locked --offline -p holzwave-core --no-default-features --test ssh_live \
-    -- --ignored --nocapture --test-threads=1; then
+    -- --ignored --nocapture --test-threads=1 &&
+    cargo test --locked --offline -p holzwave-app --lib \
+        -- --ignored --nocapture --test-threads=1 wsh_tunnel_live; then
     result=0
 else
     result=1

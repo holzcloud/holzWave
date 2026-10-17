@@ -106,7 +106,16 @@ against an in-process SSH and SFTP server and the page stub; not yet run on real
   `setmeta title <text>`, `ping`, `hist` and `init <shell>` (the history hooks and the `^R` binding of Phase 6) and `ai <prompt>`:
   ask-only, text piped in is sent along, the window confirms before anything leaves the computer, and the answer streams
   into the pane with the characters a terminal could act on removed.
-- Open: remote hosts through an SSH tunnel (the remote pane has no variables yet); packaging `wsh` with the installers.
+- ✅ `wsh` on a Linux host through an SSH tunnel: a saved SSH connection opts in with `Use wsh on this host`; its panes then
+  get a private Unix socket forwarded back over the connection's own login (`HOLZWAVE_SOCKET`, `HOLZWAVE_TOKEN`,
+  `HOLZWAVE_PANE`), and `view`, `edit`, `setmeta title` and `ping` work for a file of that host over SFTP, while `ai`, the history
+  commands and everything that decides are refused there. The palette action `Install wsh on this host` uploads the bundled
+  static build (Linux, `x86_64` and `aarch64`) to `~/.holzwave/bin` and checks it. Tested against a test server and against a
+  real OpenSSH on loopback with the build of this computer; the owner has not run it on a real Linux host yet.
+- ✅ The macOS, Windows and Linux packages made by the release scripts carry `wsh` beside the app (not the Flatpak); no installed
+  build has been run by the owner yet.
+- Open: `wsh` in WSL and Docker panes (they have no SSH session to forward over), on hosts that are not Linux, an uninstall action
+  and an update check at connect.
 
 ## Phase 6 — Extras
 
@@ -115,7 +124,7 @@ stub. Not yet run with real accounts, a real local model server or a real Apple 
 manual rows are in Part 7 of [test-plan.md](test-plan.md).
 
 - ✅ Sidebar with hosts, history search and widgets (note, Pomodoro timer, command/link list; custom ones from `widgets/*.json`, validated, no code). The files are described by [widget.schema.json](widget.schema.json) and a test keeps the schema and the loader in step. Open: the Context section (with the integrations), widgets on mobile.
-- ✅ History with fuzzy search: SQLite (`history.db`, mode 0600, `secure_delete`), fzf-style matching (`nucleo-matcher`), fed by shell hooks through `wsh` (`wsh init bash|zsh|fish`; PowerShell panes report on their own), a best-effort filter keeps secrets and leading-space commands out, a dialog with `Cmd/Ctrl+Shift+H` and a sidebar section. `^R` is an opt-in binding (`wsh init <shell> --ctrl-r`). Open: remote hosts (a command from a pane on a saved connection is found from that pane, but nothing typed on the far side is recorded; the way in is `wsh` over an SSH tunnel), optional sync (deletions of themes and widgets travel, but the history is a database that cannot be carried entry by entry, so a forgotten command would come back; it stays local until deletions of single entries can be synced).
+- ✅ History with fuzzy search: SQLite (`history.db`, mode 0600, `secure_delete`), fzf-style matching (`nucleo-matcher`), fed by shell hooks through `wsh` (`wsh init bash|zsh|fish`; PowerShell panes report on their own), a best-effort filter keeps secrets and leading-space commands out, a dialog with `Cmd/Ctrl+Shift+H` and a sidebar section. `^R` is an opt-in binding (`wsh init <shell> --ctrl-r`). Open: remote hosts (a command from a pane on a saved connection is found from that pane, but nothing typed on the far side is recorded: the tunnel refuses the history commands on purpose, so a remote host cannot write into the history), optional sync (deletions of themes and widgets travel, but the history is a database that cannot be carried entry by entry, so a forgotten command would come back; it stays local until deletions of single entries can be synced).
 - ✅ System monitor block (CPU, memory, network, busiest processes; `sysinfo`). Other computers over SSH: built for Linux hosts (a fixed read-only command through the exec session of a saved connection, names and numbers only; another system is shown as not supported).
 - ✅ AI chat behind a provider abstraction: Anthropic, OpenAI, Gemini, local servers (Ollama, LM Studio, llama.cpp), AI gateways and the Apple model. Four surfaces: a chat pane, the sidebar column, the palette actions and `wsh ai`. Terminal context is sent only with consent, per pane; every tool action needs your approval; keys live in the OS keychain; none of it is synced.
 - ✅ Apple AI provider: a Rust crate with a Swift package behind a small C interface (Foundation Models, macOS 26+, Apple Silicon, Apple Intelligence switched on), linked weakly and registered only where it is available. Otherwise it cannot be chosen and you choose another provider: there is no silent fallback. Open: the launch on a Mac below macOS 26 and the real model (rows AI-A1 to AI-A4 of the test plan).

@@ -8782,6 +8782,143 @@ mod tests {
         assert_eq!(t.core.bundled_wsh().aarch64.map(|b| b.len() as u64), Some(MAX_BUNDLED_WSH), "at the bound");
     }
 
+    /// The text of every row of `pane` that any frame carried as changed, oldest first.
+    #[cfg(unix)]
+    fn rows_of(rec: &Recorder, pane: PaneId) -> Vec<String> {
+        rec.frames(pane)
+            .iter()
+            .flat_map(|f| f.changed.iter().map(|row| row.runs.iter().flat_map(|r| r.0.chars()).filter(|c| *c != '\0').collect::<String>()))
+            .collect()
+    }
+
+    /// The tunnel against a real OpenSSH server, with the real `wsh` binary: `scripts/ssh-loopback-check.sh` starts a
+    /// throwaway `sshd` on 127.0.0.1 that allows Unix socket forwarding, builds `wsh`, and passes in where both are. The
+    /// test saves a connection to it with `wsh` ticked, starts a pane, and types the real `wsh` into the real remote shell.
+    ///
+    /// The server runs on this computer, so the socket the forward makes is a file here, which the test can look at; and
+    /// the `wsh` that runs is the macOS (or host) build by its absolute path, so nothing is installed into a real home.
+    /// What it cannot prove: a Linux host, another processor, the static Linux build (Docker proves that one runs).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "needs a real sshd and a built wsh: run scripts/ssh-loopback-check.sh"]
+    fn wsh_tunnel_live() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        fn var(name: &str) -> String {
+            std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set; run this test through scripts/ssh-loopback-check.sh"))
+        }
+        const LIVE_WAIT: Duration = Duration::from_secs(30);
+        let (host, port, user) = (var("HOLZWAVE_TEST_SSH_HOST"), var("HOLZWAVE_TEST_SSH_PORT"), var("HOLZWAVE_TEST_SSH_USER"));
+        let (known, key_file, wsh) = (var("HOLZWAVE_TEST_SSH_KNOWN_HOSTS"), var("HOLZWAVE_TEST_SSH_KEY_ED25519"), var("HOLZWAVE_TEST_WSH"));
+        assert!(Path::new(&wsh).is_absolute(), "HOLZWAVE_TEST_WSH names the built wsh by an absolute path");
+
+        let dir = Scratch::new("live");
+        std::fs::copy(&known, dir.0.join("known_hosts")).expect("the server's host key is the app's known host");
+        let mut profiles = holzwave_core::profiles::Profiles::default();
+        let mut profile = Profile::new("live-host", "Live host", host);
+        profile.port = port.parse().expect("a port number");
+        profile.user = user;
+        profile.auth = holzwave_core::profiles::Auth::Key;
+        profile.key_path = key_file;
+        profile.wsh = true;
+        profile.reconnect_attempts = 0;
+        profiles.upsert(profile).unwrap();
+        profiles.save(&dir.0).unwrap();
+        let (core, rec) = core_in(&dir, "sh", &[]);
+        let local = only_pane(&core);
+        let remote = core.split(true).focus;
+        core.connections.assign(remote, "live-host").unwrap();
+        core.start_pane(remote, 100, 30, 0, 0).expect("the pane starts");
+        core.focus_pane_in(MAIN_WINDOW, remote).unwrap();
+
+        // The line as committed text, then the Enter key runs it, as a person types.
+        let type_line = |line: &str| {
+            core.text(remote, line.to_owned()).expect("typed");
+            core.key(remote, key("Enter", "Enter")).expect("Enter");
+        };
+        let wait_for = |needle: &str, what: &str| {
+            assert!(wait_until(LIVE_WAIT, || rec.has_text(remote, needle)), "no `{needle}` on the screen ({what}): {:?}", rows_of(&rec, remote));
+        };
+
+        // The login shell prints its prompt when it is ready; what is typed before that may be lost to its start-up files.
+        assert!(
+            wait_until(LIVE_WAIT, || rows_of(&rec, remote).iter().any(|row| !row.trim().is_empty())),
+            "the remote shell printed nothing: {:?}",
+            rows_of(&rec, remote)
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        // The remote shell runs: it does a sum. Then the variables the wrapped start gave it, by their effect only.
+        type_line(&format!("W='{wsh}'"));
+        type_line("printf 'L1=[%s]\\n' \"$((6*7))\"");
+        wait_for("L1=[42]", "the shell runs");
+        println!("live: the pane's shell runs on the real sshd");
+        type_line("printf 'S1=[%s]\\n' \"$HOLZWAVE_SOCKET\"");
+        type_line("printf 'I1=[%s]\\n' \"${HOLZWAVE_IPC-unset}\"");
+        type_line("printf 'T1=[%s]\\n' \"${#HOLZWAVE_TOKEN}\"");
+        wait_for("T1=[32]", "a token of 32 characters is set (its value is never printed)");
+        wait_for("I1=[unset]", "HOLZWAVE_IPC is not set on a remote host, so the history hooks stay off");
+        let socket = rows_of(&rec, remote)
+            .iter()
+            .find_map(|row| row.split("S1=[").nth(1).and_then(|rest| rest.split(']').next()).filter(|path| path.starts_with('/')).map(str::to_owned))
+            .expect("the shell has HOLZWAVE_SOCKET");
+        assert!(holzwave_core::pool::valid_forward_path(&socket), "{socket}");
+        // The server made the socket (on this computer): a socket file that only its owner can reach.
+        let meta = std::fs::metadata(&socket).expect("sshd made the socket while the pane runs");
+        assert!(meta.file_type().is_socket(), "{socket} is a socket");
+        assert_eq!(meta.permissions().mode() & 0o077, 0, "the socket is owner-only: {:o}", meta.permissions().mode());
+        println!("live: the forwarded socket exists, is owner-only, and HOLZWAVE_IPC is not set");
+
+        // ping through the real forward with the real binary.
+        type_line("printf 'R1=[%s]\\n' \"$(\"$W\" ping 2>&1)\"");
+        wait_for("R1=[holzWave]", "wsh ping through the tunnel");
+        println!("live: wsh ping answers through the forward");
+
+        // setmeta renames this pane.
+        type_line("\"$W\" setmeta title live-ok");
+        assert!(wait_until(LIVE_WAIT, || core.view().pane_names.contains(&(remote, "live-ok".to_owned()))), "{:?}", core.view().pane_names);
+        assert!(!core.view().pane_names.iter().any(|(pane, _)| *pane == local), "no other pane was renamed");
+        println!("live: wsh setmeta title renames the pane");
+
+        // view and edit of a file of that host, over the real SFTP of the real server.
+        let file = dir.0.join("note.md");
+        std::fs::write(&file, "# live\n\nhello\n").unwrap();
+        let file_text = file.to_string_lossy().into_owned();
+        type_line(&format!("\"$W\" view '{file_text}'"));
+        let open = |edit: bool| {
+            core.blocks.views(&core.connections).into_iter().any(|v| {
+                v.block.kind == BlockKind::Preview && v.block.source == "live-host" && v.block.path == file_text && v.block.edit == edit
+            })
+        };
+        assert!(wait_until(LIVE_WAIT, || open(false)), "no preview of the host's file: {:?}", core.blocks.views(&core.connections));
+        type_line(&format!("\"$W\" edit '{file_text}'"));
+        assert!(wait_until(LIVE_WAIT, || open(true)), "no editor of the host's file: {:?}", core.blocks.views(&core.connections));
+        println!("live: wsh view and wsh edit open the host's file beside the pane");
+
+        // What a remote process must never do: the AI, the history and a wrong token.
+        let history_before = core.history_search("", 50).len();
+        type_line("printf 'A1=[%s]\\n' \"$(\"$W\" ai hello 2>&1)\"");
+        wait_for("A1=[wsh: not available over a remote connection]", "wsh ai is refused");
+        type_line("printf 'H1=[%s]\\n' \"$(\"$W\" hist add 0 /tmp pwned 2>&1)\"");
+        wait_for("H1=[wsh: not available over a remote connection]", "wsh hist add is refused");
+        type_line("printf 'X1=[%s]\\n' \"$(HOLZWAVE_TOKEN=wrong \"$W\" ping 2>&1)\"");
+        wait_for("X1=[wsh: refused", "a wrong token is refused");
+        assert_eq!(core.history_search("", 50).len(), history_before, "nothing reached the history");
+        assert!(!core.history_search("pwned", 50).iter().any(|_| true), "the refused history command was not stored");
+        println!("live: wsh ai, wsh hist add and a wrong token are refused");
+
+        // Closing the pane ends the forward: nothing listens on the socket any more, so a process on the host can reach nothing
+        // through it. The file may stay behind (this OpenSSH does not unlink it); the next pane gets a new path.
+        core.close_pane_in(MAIN_WINDOW, remote).unwrap();
+        assert!(
+            wait_until(LIVE_WAIT, || std::os::unix::net::UnixStream::connect(&socket).is_err()),
+            "the socket still accepts connections after the pane closed: {socket}"
+        );
+        let left = Path::new(&socket).exists();
+        println!("live: nothing listens on the socket after the pane closed (the file {})", if left { "stays behind" } else { "is gone" });
+        if left {
+            let _ = std::fs::remove_file(&socket);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_resource_files_are_read_only_from_the_resource_folder() {
