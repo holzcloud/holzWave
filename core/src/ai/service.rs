@@ -35,6 +35,7 @@
 //! [`ApiKey`]: crate::ai::types::ApiKey
 
 pub mod coalesce;
+pub mod context;
 pub mod dispatch;
 pub mod events;
 
@@ -48,24 +49,34 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::ai::agent::{Agent, AgentEvent, Limits, TurnEnd, TurnRequest, repair_dangling};
-use crate::ai::gate::{ApprovedContext, Gate};
-use crate::ai::http::{Http, HttpConfig, Origin};
-use crate::ai::profiles::{AiConfig, KeyError, KeySlot, KeyVault, ProfileError, ProfileInput, ProfileView, Removal};
+use crate::ai::gate::{
+    ApprovedContext, Destination, Gate, MAX_ITEMS, OFFER_TTL, OfferId, OfferRequest, RequestItem,
+};
+use crate::ai::http::{Http, HttpConfig, NetworkPolicy, Origin, Target};
+use crate::ai::profiles::{
+    AiConfig, KeyError, KeySlot, KeyVault, Profile, ProfileError, ProfileInput, ProfileView, Removal,
+};
 use crate::ai::provider::{AiError, CancelToken, ErrorClass, Provider};
 use crate::ai::store::{ContextStorage, Conversation, ConversationId, ConversationStore, Listing, StoreError};
 use crate::ai::tools::{
     ApprovalTable, DenyPolicy, Resolved as ToolResolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput,
 };
-use crate::ai::types::{ApiKey, ContextNote, Message, Part, Role, Usage};
+use crate::ai::types::{ApiKey, ContextKind, ContextNote, Locality, Message, Part, Role, Usage};
 use crate::layout::{LoadStatus, PaneId};
-use crate::settings::Settings;
+use crate::settings::{AiLocalContext, Settings};
 
 pub use events::{
     AiEvent, AiEventKind, ApplyResult, ChatItem, ChatMessage, ChatPart, ChatState, EndView, ErrorView, LastTurn,
     Partial, Route, Trimmed, title_from,
 };
 
+pub use context::{
+    CUT_NOTE, ContextRefusal, ContextSource, ContextState, Fetched, FindingView, ItemView, MAX_PREVIEW_KINDS,
+    MAX_SHARES, NoContext, OfferView, READ_BYTES, ReadRefusal, ShareKey, share_required,
+};
+
 use coalesce::{Batch, Coalescer, DeltaKind};
+use context::{ShareBook, offer_scope};
 use dispatch::{Registry, adapter_for};
 
 /// The most turns that run at the same time. A further `send` is [`ServiceError::TooManyTurns`].
@@ -113,6 +124,24 @@ fn unix_seconds() -> i64 {
 /// Whether `text` is a short plain label a chat file accepts.
 fn is_label(text: &str) -> bool {
     text.len() <= MAX_LABEL && !text.chars().any(char::is_control)
+}
+
+/// The profile of a call: the one it names, else the one the chat is pinned to. A blank name is no name.
+fn pick_profile(requested: Option<&str>, pinned: Option<&str>) -> Option<String> {
+    requested.or(pinned).filter(|id| !id.is_empty()).map(str::to_owned)
+}
+
+/// The model of a call: the first candidate that is not blank (the one it names, the chat's pin, the profile's).
+fn pick_model(candidates: &[Option<&str>]) -> Option<String> {
+    candidates.iter().flatten().find(|name| !name.trim().is_empty()).map(|name| (*name).to_owned())
+}
+
+/// Whether one envelope is attached twice.
+fn has_duplicate(contexts: &[ApprovedContext]) -> bool {
+    contexts
+        .iter()
+        .enumerate()
+        .any(|(index, context)| contexts[..index].iter().any(|earlier| earlier.hash() == context.hash()))
 }
 
 // ---- the sink -----------------------------------------------------------------------------------------------------
@@ -167,6 +196,8 @@ pub enum ServiceError {
     ContextTooMany,
     /// The same context was attached twice.
     ContextDuplicate,
+    /// A pane, an offer or a destination was refused for shared content. The reason is one of 13 stable names.
+    Context(ContextRefusal),
     /// The thread of the turn could not be started.
     Spawn,
     /// The conversation store refused the request.
@@ -193,6 +224,7 @@ impl ServiceError {
             ServiceError::NoProfile => "no_profile",
             ServiceError::ContextTooMany => "context_too_many",
             ServiceError::ContextDuplicate => "context_duplicate",
+            ServiceError::Context(_) => "context",
             ServiceError::Spawn => "spawn",
             ServiceError::Store(_) => "store",
             ServiceError::Profile(_) => "profile",
@@ -214,6 +246,7 @@ impl fmt::Display for ServiceError {
             ServiceError::NoProfile => f.write_str("no provider is chosen for this chat"),
             ServiceError::ContextTooMany => f.write_str("too many contexts are attached"),
             ServiceError::ContextDuplicate => f.write_str("the same context is attached twice"),
+            ServiceError::Context(refusal) => fmt::Display::fmt(refusal, f),
             ServiceError::Spawn => f.write_str("the turn could not be started"),
             ServiceError::Store(_) => f.write_str("the chat store refused the request"),
             ServiceError::Profile(error) => write!(f, "the provider profile was refused: {error}"),
@@ -228,6 +261,7 @@ impl fmt::Debug for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ServiceError::Profile(error) => write!(f, "Profile({})", error.reason()),
+            ServiceError::Context(refusal) => write!(f, "Context({})", refusal.reason()),
             ServiceError::Key(error) => {
                 let name = match error {
                     KeyError::NoSecureStore => "NoSecureStore",
@@ -261,12 +295,13 @@ pub struct SendRequest {
     profile: Option<String>,
     model: Option<String>,
     context: Vec<ApprovedContext>,
+    offer: Option<(OfferId, Vec<u32>)>,
 }
 
 impl SendRequest {
     /// A message for `conversation`, typed in `pane`.
     pub fn new(conversation: ConversationId, text: String, pane: PaneId) -> SendRequest {
-        SendRequest { conversation, text, pane, profile: None, model: None, context: Vec::new() }
+        SendRequest { conversation, text, pane, profile: None, model: None, context: Vec::new(), offer: None }
     }
 
     /// Sends through this profile and pins the chat to it.
@@ -290,6 +325,16 @@ impl SendRequest {
         self.context = context;
         self
     }
+
+    /// Sends the picked items of an offer with this message. The service redeems the offer for this chat, this pane and
+    /// the route of this send only, so an offer made elsewhere is refused (`stale_offer`), and an offer that needs the
+    /// pane to be shared is refused when it is not (`not_shared`). The offer is spent by the send; it counts against
+    /// [`MAX_CONTEXTS_PER_TURN`] with the contexts attached through [`SendRequest::context`].
+    #[must_use]
+    pub fn offer(mut self, offer: OfferId, picked: Vec<u32>) -> SendRequest {
+        self.offer = Some((offer, picked));
+        self
+    }
 }
 
 impl fmt::Debug for SendRequest {
@@ -301,6 +346,7 @@ impl fmt::Debug for SendRequest {
             .field("profile", &self.profile)
             .field("model", &self.model)
             .field("contexts", &self.context.len())
+            .field("offer", &self.offer.as_ref().map(|(_, picked)| picked.len()))
             .finish()
     }
 }
@@ -402,6 +448,12 @@ struct Inner {
     host: Arc<dyn ToolHost>,
     limits: Limits,
     clock: fn() -> i64,
+    /// Where the text of a pane or a file comes from.
+    source: Arc<dyn ContextSource>,
+    /// Which pane is shared for which chat and route, and the live offer of each chat.
+    shares: ShareBook,
+    /// The setting "ai_local_context" is `auto`: a local destination does not need the pane to be shared first.
+    local_auto: AtomicBool,
     /// Providers registered by id; they are used before any profile.
     registry: Registry,
     /// The next turn number; seeded from the clock so numbers differ across runs.
@@ -580,6 +632,132 @@ impl Inner {
     /// The current profiles, copied so that no lock is held while the keychain is read.
     fn config_copy(&self) -> AiConfig {
         lock(&self.config).config.clone()
+    }
+}
+
+// ---- the route of a context call ------------------------------------------------------------------------------------
+
+/// The scope word of a provider that was registered by id: it has no base address.
+const REGISTERED_SCOPE: &str = "registered";
+
+/// What a context call knows about its route before it looks at the destination: no lookup and no keychain.
+struct ContextRoute {
+    profile: String,
+    model: String,
+    key: ShareKey,
+    target: RouteTarget,
+}
+
+/// What the route points at, copied so that no lock is held while it is used.
+enum RouteTarget {
+    Registered(Arc<dyn Provider>),
+    Profile(Box<Profile>),
+}
+
+impl Inner {
+    /// The route of `profile` with the model a call asks for, then the chat's pin, then the profile's own. A registered
+    /// provider has no address, so its scope is a fixed word. Nothing is looked up: the address is read as text.
+    fn route(
+        &self,
+        profile: &str,
+        requested: Option<&str>,
+        pinned: Option<&str>,
+    ) -> Result<ContextRoute, ServiceError> {
+        if let Some(provider) = self.registry.get(profile) {
+            let model = pick_model(&[requested, pinned, Some(profile)]).unwrap_or_default();
+            let scope = REGISTERED_SCOPE.to_owned();
+            let key = ShareKey { profile: profile.to_owned(), model: model.clone(), scope };
+            let target = RouteTarget::Registered(provider);
+            return Ok(ContextRoute { profile: profile.to_owned(), model, key, target });
+        }
+        let found = lock(&self.config).config.get(profile).cloned();
+        let found = found.ok_or(ServiceError::Profile(ProfileError::UnknownProfile))?;
+        let address = found.address().map_err(|_| ServiceError::Context(ContextRefusal::Destination))?;
+        let model = pick_model(&[requested, pinned, Some(found.model.as_str())]).unwrap_or_default();
+        let key = ShareKey { profile: profile.to_owned(), model: model.clone(), scope: address.scope };
+        Ok(ContextRoute { profile: profile.to_owned(), model, key, target: RouteTarget::Profile(Box::new(found)) })
+    }
+
+    /// Tells the gate to forget offers the share book gave up.
+    fn discard_all(&self, offers: Vec<OfferId>) {
+        for offer in &offers {
+            self.gate.discard(offer);
+        }
+    }
+
+    /// Where text would go on `route`, and the class of that place. One name lookup for a host name and none for an
+    /// address; a registered provider is judged by its capabilities. "Local only" refuses a place that leaves the
+    /// device.
+    /// This is one of the two places that classify a destination: it belongs to an explicit call of the user.
+    fn destination(&self, route: &ContextRoute) -> Result<Destination, ServiceError> {
+        let local_only = self.local_only.load(Ordering::SeqCst);
+        let refuse = |locality: Locality| {
+            if local_only && locality.leaves_device() {
+                Err(ServiceError::Context(ContextRefusal::LocalOnly))
+            } else {
+                Ok(())
+            }
+        };
+        match &route.target {
+            RouteTarget::Registered(provider) => {
+                let locality = provider.capabilities(&route.model).locality;
+                refuse(locality)?;
+                Ok(Destination { host: route.profile.clone(), locality })
+            }
+            RouteTarget::Profile(profile) => {
+                let unusable = || ServiceError::Context(ContextRefusal::Destination);
+                let target = Target::parse(&profile.base_url, profile.allow_lan_http).map_err(|_| unusable())?;
+                let address = profile.address().map_err(|_| unusable())?;
+                // The switch is applied here and not inside the policy, so a refusal for it is never confused with
+                // one for an address the chokepoint will not use.
+                let policy = NetworkPolicy::new(profile.allow_lan_http, false);
+                let locality = self.classify_apart(&target, &policy)?;
+                refuse(locality)?;
+                Ok(Destination { host: address.host, locality })
+            }
+        }
+    }
+
+    /// Classifies `target` on a thread of its own: the chokepoint refuses a blocking call from inside an async runtime,
+    /// and a command of the shell may run on one.
+    fn classify_apart(&self, target: &Target, policy: &NetworkPolicy) -> Result<Locality, ServiceError> {
+        let cancel = CancelToken::new();
+        let http = &self.http;
+        let answer = thread::scope(|scope| {
+            let spawned = thread::Builder::new()
+                .name("ai-classify".to_owned())
+                .spawn_scoped(scope, || http.classify(target, policy, &cancel).ok().map(|resolved| resolved.locality));
+            match spawned {
+                Ok(handle) => Ok(handle.join().unwrap_or(None)),
+                Err(_) => Err(ServiceError::Spawn),
+            }
+        })?;
+        answer.ok_or(ServiceError::Context(ContextRefusal::Destination))
+    }
+
+    /// Spends an offer for the send of `conversation` from `pane` on `route`. The gate checks the chat, the pane and
+    /// the route (a scoped offer), and the share is looked at again after the approval: a destination that asks must
+    /// still have its pane shared. Every failure of the gate is `stale_offer`.
+    fn redeem(
+        &self,
+        conversation: &ConversationId,
+        pane: PaneId,
+        route: Option<&ContextRoute>,
+        profile: &str,
+        offer: &OfferId,
+        picked: &[u32],
+    ) -> Result<ApprovedContext, ServiceError> {
+        let stale = || ServiceError::Context(ContextRefusal::StaleOffer);
+        let route = route.ok_or_else(stale)?;
+        let scope = offer_scope(conversation.as_str(), pane, &route.key);
+        let approved = self.gate.approve_scoped(offer, picked, profile, &scope).map_err(|_| stale())?;
+        if share_required(approved.locality(), self.local_auto.load(Ordering::SeqCst))
+            && !self.shares.has(conversation.as_str(), pane, &route.key)
+        {
+            return Err(ServiceError::Context(ContextRefusal::NotShared));
+        }
+        self.shares.forget_offer(conversation.as_str(), offer);
+        Ok(approved)
     }
 }
 
@@ -778,6 +956,7 @@ pub struct ServiceBuilder {
     policy: DenyPolicy,
     limits: Limits,
     clock: fn() -> i64,
+    source: Arc<dyn ContextSource>,
 }
 
 impl ServiceBuilder {
@@ -823,6 +1002,13 @@ impl ServiceBuilder {
         self
     }
 
+    /// Where panes and files give their text. The default offers nothing.
+    #[must_use]
+    pub fn context_source(mut self, source: Arc<dyn ContextSource>) -> ServiceBuilder {
+        self.source = source;
+        self
+    }
+
     /// Builds the service. This reads `ai.json` once and nothing else: no socket is opened, no keychain entry is
     /// read, no thread is started.
     pub fn build(self) -> AiService {
@@ -847,6 +1033,9 @@ impl ServiceBuilder {
             host: self.host,
             limits: self.limits,
             clock: self.clock,
+            source: self.source,
+            shares: ShareBook::default(),
+            local_auto: AtomicBool::new(false),
             registry: Registry::new(),
             next_turn: AtomicU64::new(seed),
             turns: Mutex::new(HashMap::new()),
@@ -905,6 +1094,7 @@ impl AiService {
             policy: DenyPolicy::new(Vec::new()),
             limits: Limits::default(),
             clock: unix_seconds,
+            source: Arc::new(NoContext),
         }
     }
 
@@ -942,7 +1132,7 @@ impl AiService {
     /// The call validates the request, reads the chat file and starts a thread named `ai-turn-<n>`; it never waits for
     /// the keychain or the network, so it is safe on a command thread. Everything that can go wrong later (an unknown
     /// profile, a missing key, a provider error) arrives as the `turn_ended` event of the turn.
-    pub fn send(&self, request: SendRequest) -> Result<TurnTicket, ServiceError> {
+    pub fn send(&self, mut request: SendRequest) -> Result<TurnTicket, ServiceError> {
         let inner = &self.inner;
         if inner.closing.load(Ordering::SeqCst) {
             return Err(ServiceError::ShuttingDown);
@@ -953,14 +1143,16 @@ impl AiService {
         if request.text.len() > MAX_USER_TEXT_BYTES {
             return Err(ServiceError::TextTooLong);
         }
-        if request.context.len() > MAX_CONTEXTS_PER_TURN {
+        // The picks are looked at before anything is spent or stored, so a bad list never uses up an offer.
+        if let Some((_, picked)) = &request.offer
+            && (picked.is_empty() || picked.len() > MAX_ITEMS)
+        {
+            return Err(ServiceError::Context(ContextRefusal::BadPick));
+        }
+        if request.context.len() + usize::from(request.offer.is_some()) > MAX_CONTEXTS_PER_TURN {
             return Err(ServiceError::ContextTooMany);
         }
-        let twice =
-            request.context.iter().enumerate().any(|(index, context)| {
-                request.context[..index].iter().any(|earlier| earlier.hash() == context.hash())
-            });
-        if twice {
+        if has_duplicate(&request.context) {
             return Err(ServiceError::ContextDuplicate);
         }
         let turn = inner.reserve(&request.conversation, request.pane)?;
@@ -972,15 +1164,29 @@ impl AiService {
             None => Conversation::new(request.conversation.clone(), inner.now()),
         };
         repair_dangling(&mut conversation.messages);
-        let profile = request
-            .profile
-            .clone()
-            .or_else(|| conversation.profile.clone())
-            .filter(|id| !id.is_empty())
+        let profile = pick_profile(request.profile.as_deref(), conversation.profile.as_deref())
             .ok_or(ServiceError::NoProfile)?;
         // Recorded before the profile is resolved, so a removal or a revocation that comes in between still finds the
         // turn.
         lock(&turn.info).profile = Some(profile.clone());
+
+        // The route of this send, without a lookup. A share made on another route ends here, for a send with an offer
+        // and for a plain one alike, so a changed provider, model or address always asks again.
+        let route = inner.route(&profile, request.model.as_deref(), conversation.model.as_deref()).ok();
+        if let Some(route) = &route
+            && (request.offer.is_some() || inner.shares.holds_any(request.conversation.as_str()))
+        {
+            inner.discard_all(inner.shares.reset_route(request.conversation.as_str(), &route.key));
+        }
+        let mut contexts = std::mem::take(&mut request.context);
+        if let Some((offer, picked)) = request.offer.take() {
+            let (chat, pane) = (&request.conversation, request.pane);
+            let approved = inner.redeem(chat, pane, route.as_ref(), &profile, &offer, &picked)?;
+            contexts.push(approved);
+            if has_duplicate(&contexts) {
+                return Err(ServiceError::ContextDuplicate);
+            }
+        }
 
         let number = inner.draw_turn(&conversation.messages);
         turn.number.store(number, Ordering::SeqCst);
@@ -996,7 +1202,7 @@ impl AiService {
             profile,
             model: request.model,
             prefix: format!("m{number}"),
-            context: request.context,
+            context: contexts,
         };
         let thread_inner = Arc::clone(inner);
         let thread_turn = Arc::clone(&turn);
@@ -1063,6 +1269,185 @@ impl AiService {
         }
     }
 
+    // ---- shared context -------------------------------------------------------------------------------------
+
+    /// The profile and the model of a context call: what it names, else what the chat is pinned to. The chat file is
+    /// read only when something is missing.
+    fn context_route(
+        &self,
+        conversation: &ConversationId,
+        profile: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<ContextRoute, ServiceError> {
+        let inner = &self.inner;
+        let (mut pinned_profile, mut pinned_model) = (None, None);
+        if profile.is_none() || model.is_none() {
+            if let Some(stored) = inner.store.load(conversation).map_err(ServiceError::Store)? {
+                pinned_profile = stored.profile;
+                pinned_model = stored.model;
+            }
+        }
+        let profile = pick_profile(profile, pinned_profile.as_deref()).ok_or(ServiceError::NoProfile)?;
+        inner.route(&profile, model, pinned_model.as_deref())
+    }
+
+    /// The route and the destination of a context call. A call on another route than a share was made on ends that
+    /// share first, so the old record is gone for good.
+    fn context_call(
+        &self,
+        conversation: &ConversationId,
+        profile: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<(ContextRoute, Destination), ServiceError> {
+        let inner = &self.inner;
+        let route = self.context_route(conversation, profile, model)?;
+        inner.discard_all(inner.shares.reset_route(conversation.as_str(), &route.key));
+        let destination = inner.destination(&route)?;
+        Ok((route, destination))
+    }
+
+    fn state_of(
+        &self,
+        conversation: &ConversationId,
+        pane: PaneId,
+        route: &ContextRoute,
+        destination: &Destination,
+        kinds: Vec<ContextKind>,
+    ) -> ContextState {
+        let inner = &self.inner;
+        ContextState {
+            profile: route.profile.clone(),
+            model: route.model.clone(),
+            host: destination.host.clone(),
+            locality: destination.locality,
+            required: share_required(destination.locality, inner.local_auto.load(Ordering::SeqCst)),
+            shared: inner.shares.has(conversation.as_str(), pane, &route.key),
+            kinds,
+            persist: inner.persist.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Where the text of `pane` would go for this chat, whether the user must share the pane first, whether it is
+    /// shared, and what the pane can offer. Nothing is read from the pane.
+    ///
+    /// This classifies the destination, which is one name lookup for a host name and none for an address, so it
+    /// belongs to an act of the user and never to a mount. It blocks: call it from a worker thread. `profile` and
+    /// `model` may be `None`: the chat's pin is used. A call on another route than a share was made on ends that
+    /// share.
+    pub fn context_state(
+        &self,
+        conversation: &ConversationId,
+        pane: PaneId,
+        profile: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<ContextState, ServiceError> {
+        let (route, destination) = self.context_call(conversation, profile, model)?;
+        let kinds = self.inner.source.kinds(pane);
+        Ok(self.state_of(conversation, pane, &route, &destination, kinds))
+    }
+
+    /// Shares `pane` for the chat on this route, or ends the share. A share is the permission to read the pane into an
+    /// offer; nothing is read now and nothing is attached to a later message. A pane that offers no kind cannot be
+    /// shared. Like [`AiService::context_state`] it classifies the destination and blocks.
+    pub fn context_share(
+        &self,
+        conversation: &ConversationId,
+        pane: PaneId,
+        profile: Option<&str>,
+        model: Option<&str>,
+        shared: bool,
+    ) -> Result<ContextState, ServiceError> {
+        let inner = &self.inner;
+        let (route, destination) = self.context_call(conversation, profile, model)?;
+        let kinds = inner.source.kinds(pane);
+        if shared {
+            if kinds.is_empty() {
+                return Err(ServiceError::Context(ContextRefusal::NothingToShare));
+            }
+            inner.discard_all(inner.shares.record(conversation.as_str(), pane, &route.key));
+        } else {
+            inner.discard_all(inner.shares.unshare(conversation.as_str(), pane));
+        }
+        Ok(self.state_of(conversation, pane, &route, &destination, kinds))
+    }
+
+    /// Reads the asked kinds from `pane` and offers what was read: the answer holds labels, sizes and what the cleaner
+    /// removed, never text. The pane must be shared first unless the destination is local and the user switched the ask
+    /// off. The chat holds one live offer; a new preview voids the old one. The offer lives [`OFFER_TTL`] and can be
+    /// spent by a send of this chat, from this pane, on this route, once.
+    ///
+    /// This reads the pane (an engine thread, a file) and classifies the destination: it blocks, so call it from a
+    /// worker thread. No lock of the service is held while the source is read.
+    pub fn context_preview(
+        &self,
+        conversation: &ConversationId,
+        pane: PaneId,
+        profile: Option<&str>,
+        model: Option<&str>,
+        kinds: &[ContextKind],
+    ) -> Result<OfferView, ServiceError> {
+        let inner = &self.inner;
+        let refuse = |why: ContextRefusal| ServiceError::Context(why);
+        let route = self.context_route(conversation, profile, model)?;
+        inner.discard_all(inner.shares.reset_route(conversation.as_str(), &route.key));
+        let repeated = kinds.iter().enumerate().any(|(at, kind)| kinds[..at].contains(kind));
+        if kinds.is_empty() || kinds.len() > MAX_PREVIEW_KINDS || repeated {
+            return Err(refuse(ContextRefusal::BadKinds));
+        }
+        let destination = inner.destination(&route)?;
+        let required = share_required(destination.locality, inner.local_auto.load(Ordering::SeqCst));
+        // Nothing is asked of the pane before the user shared it.
+        if required && !inner.shares.has(conversation.as_str(), pane, &route.key) {
+            return Err(refuse(ContextRefusal::NotShared));
+        }
+        let offered = inner.source.kinds(pane);
+        if kinds.iter().any(|kind| !offered.contains(kind)) {
+            return Err(refuse(ContextRefusal::UnsupportedKind));
+        }
+        let mut items = Vec::new();
+        let mut empty = Vec::new();
+        for kind in kinds {
+            match inner.source.read(pane, *kind, READ_BYTES) {
+                Ok(Some(fetched)) => {
+                    let label = if fetched.cut { format!("{}{CUT_NOTE}", fetched.label) } else { fetched.label };
+                    items.push(RequestItem::new(*kind, label, fetched.text));
+                }
+                Ok(None) => empty.push(*kind),
+                Err(why) => return Err(refuse(why.into())),
+            }
+        }
+        if items.is_empty() {
+            return Err(refuse(ContextRefusal::NothingToShare));
+        }
+        let scope = offer_scope(conversation.as_str(), pane, &route.key);
+        let request = OfferRequest::new(route.profile.clone(), destination, items).scoped(scope);
+        let offer = inner.gate.offer(request).map_err(|error| match error {
+            AiError::InvalidRequest(_) => refuse(ContextRefusal::NothingToShare),
+            _ => refuse(ContextRefusal::Unreadable),
+        })?;
+        match inner.shares.set_offer(conversation.as_str(), pane, &route.key, offer.id().clone(), required) {
+            Ok(old) => inner.discard_all(old.into_iter().collect()),
+            Err(()) => {
+                // The share ended while the text was read: no offer is left behind.
+                inner.gate.discard(offer.id());
+                return Err(refuse(ContextRefusal::NotShared));
+            }
+        }
+        let persist = inner.persist.load(Ordering::SeqCst);
+        Ok(OfferView::of(&offer, &route.profile, &route.model, OFFER_TTL.as_secs(), empty, persist))
+    }
+
+    /// Whether `pane` is shared for the chat. A route change, the end of the chat or of the pane, and the removal of
+    /// the profile each end a share, so the answer is accurate while a turn runs.
+    pub fn is_shared(&self, conversation: &ConversationId, pane: PaneId) -> bool {
+        self.inner.shares.is_shared(conversation.as_str(), pane)
+    }
+
+    /// Tells the service that a chat ended (its pane closed): its shares and its live offer go.
+    pub fn chat_closed(&self, conversation: &ConversationId) {
+        self.inner.discard_all(self.inner.shares.chat_closed(conversation.as_str()));
+    }
+
     // ---- settings -------------------------------------------------------------------------------------------
 
     /// Applies the two settings the service reads: `ai_local_only` and `ai_persist_context`. Both start off, so call
@@ -1076,6 +1461,7 @@ impl AiService {
         let inner = &self.inner;
         let was_local = inner.local_only.swap(settings.ai_local_only, Ordering::SeqCst);
         let was_persisting = inner.persist.swap(settings.ai_persist_context, Ordering::SeqCst);
+        inner.local_auto.store(settings.ai_local_context == AiLocalContext::Auto, Ordering::SeqCst);
         let mut effect = SettingsEffect { cancelled: 0, scrub_started: false };
         if !was_local && settings.ai_local_only {
             effect.cancelled = inner.stop_leaving();
@@ -1361,10 +1747,7 @@ fn turn_body(inner: &Arc<Inner>, turn: &Arc<Turn>, emitter: &Emitter, job: Job) 
         Ok(chosen) => chosen,
         Err(error) => return failed(&error, true),
     };
-    let model = [requested, conversation.model.clone(), chosen.model.clone()]
-        .into_iter()
-        .flatten()
-        .find(|name| !name.trim().is_empty());
+    let model = pick_model(&[requested.as_deref(), conversation.model.as_deref(), chosen.model.as_deref()]);
     let Some(model) = model else {
         return refused(ErrorClass::InvalidRequest, "no model is chosen", true);
     };

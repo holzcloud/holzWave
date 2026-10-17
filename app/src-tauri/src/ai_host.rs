@@ -135,6 +135,7 @@ impl AiFault {
     pub fn from_service(error: &ServiceError) -> AiFault {
         let reason = match error {
             ServiceError::Profile(profile) => Some(profile.reason()),
+            ServiceError::Context(refusal) => Some(refusal.reason()),
             ServiceError::Key(key) => Some(match key {
                 KeyError::NoSecureStore => "no_secure_store",
                 KeyError::Store => "store",
