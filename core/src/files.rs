@@ -77,6 +77,11 @@ pub trait FileSource: Send + Sync {
     fn write(&self, path: &str, bytes: &[u8]) -> Result<()>;
 }
 
+/// The names beside a file that an SFTP save works with: the new bytes are written to the first, and on a server that
+/// will not rename over an existing file the old file waits in the second while the new one takes its place.
+const TMP_SUFFIX: &str = ".holzwave-tmp";
+const OLD_SUFFIX: &str = ".holzwave-old";
+
 fn bad(path: &str) -> Result<()> {
     if path.is_empty() || path.len() > MAX_PATH || path.contains('\0') {
         return Err(Error::Unsupported("the path is empty, too long or has a NUL".into()));
@@ -413,29 +418,64 @@ impl FileSource for SftpSource {
     fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
         bad(path)?;
         let path = path.to_owned();
-        let aside = format!("{path}.holzwave-tmp");
+        let aside = format!("{path}{TMP_SUFFIX}");
+        let old = format!("{path}{OLD_SUFFIX}");
+        // The closure may run twice (a lost connection is made again once): the temporary file is opened with truncate,
+        // so a second run writes it afresh. A message that cannot be an `sftp::Error` comes back as the inner `Err`.
         self.run(|c| {
-            let (path, aside) = (path.clone(), aside.clone());
+            let (path, aside, old) = (path.clone(), aside.clone(), old.clone());
             async move {
-                let mode = c.sftp.metadata(path.clone()).await.ok();
-                let mut file = c.sftp.open_with_flags(aside.clone(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE).await?;
-                file.write_all(bytes).await?;
-                file.flush().await?;
-                file.shutdown().await?;
-                if let Some(meta) = mode {
-                    // Keep the permissions of the file that is replaced.
-                    let mut keep = russh_sftp::protocol::FileAttributes::empty();
-                    keep.permissions = meta.permissions;
-                    let _ = c.sftp.set_metadata(aside.clone(), keep).await;
+                let existing = c.sftp.metadata(path.clone()).await.ok();
+                let wrote = async {
+                    let mut file = c.sftp.open_with_flags(aside.clone(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE).await?;
+                    file.write_all(bytes).await?;
+                    file.flush().await?;
+                    file.shutdown().await?;
+                    Ok::<(), russh_sftp::client::error::Error>(())
                 }
-                if c.sftp.rename(aside.clone(), path.clone()).await.is_err() {
-                    // A server that does not rename over an existing file: remove it, then rename.
-                    c.sftp.remove_file(path.clone()).await?;
-                    c.sftp.rename(aside, path).await?;
+                .await;
+                if let Err(e) = wrote {
+                    // Whatever was written is not wanted: nothing stays behind, the old file was never touched.
+                    let _ = c.sftp.remove_file(aside.clone()).await;
+                    return Err(e);
                 }
-                Ok(())
+                let Some(meta) = existing else {
+                    // A new file: one rename, nothing to swap.
+                    return match c.sftp.rename(aside.clone(), path).await {
+                        Ok(()) => Ok(Ok(())),
+                        Err(e) => {
+                            let _ = c.sftp.remove_file(aside).await;
+                            Err(e)
+                        }
+                    };
+                };
+                // Keep the permissions of the file that is replaced.
+                let mut keep = russh_sftp::protocol::FileAttributes::empty();
+                keep.permissions = meta.permissions;
+                let _ = c.sftp.set_metadata(aside.clone(), keep).await;
+                if c.sftp.rename(aside.clone(), path.clone()).await.is_ok() {
+                    return Ok(Ok(()));
+                }
+                // A server that does not rename over an existing file (OpenSSH's does not): the old file is moved aside,
+                // the new one put in its place and the old one removed. The old file is never removed before the new
+                // one is in place, and it is put back when the middle step fails.
+                let _ = c.sftp.remove_file(old.clone()).await; // a copy left by an earlier failure
+                if let Err(e) = c.sftp.rename(path.clone(), old.clone()).await {
+                    let _ = c.sftp.remove_file(aside).await;
+                    return Err(e);
+                }
+                if let Err(e) = c.sftp.rename(aside.clone(), path.clone()).await {
+                    if c.sftp.rename(old.clone(), path.clone()).await.is_ok() {
+                        let _ = c.sftp.remove_file(aside).await;
+                        return Err(e);
+                    }
+                    return Ok(Err(format!("the file could not be replaced ({e}); the new text is in {aside} and the old file is in {old}")));
+                }
+                let _ = c.sftp.remove_file(old).await; // the new file is in place: a copy that stays is harmless
+                Ok(Ok(()))
             }
-        })
+        })?
+        .map_err(|message| Error::Unsupported(format!("sftp: {message}")))
     }
 }
 
@@ -566,21 +606,63 @@ mod sftp_tests {
     use std::collections::HashMap;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    /// What the test server is told to get wrong, switched per test. All off: it serves a directory faithfully, and its
+    /// `rename` overwrites an existing target.
+    #[derive(Default)]
+    struct Faults {
+        /// Opening any file fails.
+        fail_open: AtomicBool,
+        /// Writing to any file fails.
+        fail_write: AtomicBool,
+        /// `rename` refuses a target that exists, as OpenSSH's `sftp-server` does.
+        rename_refuses_existing: AtomicBool,
+        /// Moving the file that is being replaced to its `.holzwave-old` name fails.
+        fail_move_aside: AtomicBool,
+        /// Moving the new file to a name that does not exist (its place after the old one was moved away) fails.
+        fail_into_place: AtomicBool,
+        /// Moving a `.holzwave-old` file back fails.
+        fail_restore: AtomicBool,
+    }
+
+    /// The faults of the server and the log of what it was asked, shared with the test.
+    #[derive(Default)]
+    struct Shared {
+        faults: Faults,
+        /// One line per operation that changes something: `open P`, `write P`, `rename OLD NEW`, `remove P`, `setstat P`.
+        log: Mutex<Vec<String>>,
+    }
+
+    impl Shared {
+        fn note(&self, line: String) {
+            self.log.lock().unwrap().push(line);
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+
+        fn on(&self, fault: &AtomicBool) {
+            fault.store(true, Ordering::SeqCst);
+        }
+    }
 
     /// An SSH server with an SFTP subsystem that serves a real directory.
     #[derive(Clone)]
-    struct Fake;
+    struct Fake(Arc<Shared>);
 
     struct Conn {
         channels: HashMap<ChannelId, Channel<Msg>>,
+        shared: Arc<Shared>,
     }
 
     impl server::Server for Fake {
         type Handler = Conn;
         fn new_client(&mut self, _: Option<SocketAddr>) -> Conn {
-            Conn { channels: HashMap::new() }
+            Conn { channels: HashMap::new(), shared: self.0.clone() }
         }
     }
 
@@ -606,7 +688,7 @@ mod sftp_tests {
             if name == "sftp" {
                 if let Some(channel) = self.channels.remove(&id) {
                     session.channel_success(id)?;
-                    russh_sftp::server::run(channel.into_stream(), Files::default()).await;
+                    russh_sftp::server::run(channel.into_stream(), Files { shared: self.shared.clone(), ..Files::default() }).await;
                     return Ok(());
                 }
             }
@@ -624,6 +706,7 @@ mod sftp_tests {
     struct Files {
         handles: HashMap<String, Open>,
         next: u32,
+        shared: Arc<Shared>,
     }
 
     fn status(id: u32, code: StatusCode) -> Status {
@@ -693,6 +776,10 @@ mod sftp_tests {
 
         async fn open(&mut self, id: u32, path: String, flags: russh_sftp::protocol::OpenFlags, _a: FileAttributes) -> std::result::Result<Handle, Self::Error> {
             use russh_sftp::protocol::OpenFlags as F;
+            if self.shared.faults.fail_open.load(Ordering::SeqCst) {
+                return Err(StatusCode::PermissionDenied);
+            }
+            self.shared.note(format!("open {path}"));
             let mut options = std::fs::OpenOptions::new();
             options.read(flags.contains(F::READ)).write(flags.contains(F::WRITE)).create(flags.contains(F::CREATE)).truncate(flags.contains(F::TRUNCATE));
             let file = options.open(&path).map_err(|e| io_status(&e))?;
@@ -716,6 +803,10 @@ mod sftp_tests {
 
         async fn write(&mut self, id: u32, handle: String, offset: u64, data: Vec<u8>) -> std::result::Result<Status, Self::Error> {
             let Some(Open::File(file)) = self.handles.get_mut(&handle) else { return Err(StatusCode::Failure) };
+            if self.shared.faults.fail_write.load(Ordering::SeqCst) {
+                return Err(StatusCode::Failure);
+            }
+            self.shared.note(format!("write {handle}"));
             file.seek(SeekFrom::Start(offset)).map_err(|e| io_status(&e))?;
             file.write_all(&data).map_err(|e| io_status(&e))?;
             Ok(status(id, StatusCode::Ok))
@@ -726,22 +817,50 @@ mod sftp_tests {
             Ok(status(id, StatusCode::Ok))
         }
 
-        async fn setstat(&mut self, id: u32, _path: String, _attrs: FileAttributes) -> std::result::Result<Status, Self::Error> {
+        async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> std::result::Result<Status, Self::Error> {
+            self.shared.note(format!("setstat {path}"));
+            #[cfg(unix)]
+            if let Some(mode) = attrs.permissions {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o7777)).map_err(|e| io_status(&e))?;
+            }
+            #[cfg(not(unix))]
+            let _ = attrs;
             Ok(status(id, StatusCode::Ok))
         }
 
         async fn rename(&mut self, id: u32, old: String, new: String) -> std::result::Result<Status, Self::Error> {
+            let faults = &self.shared.faults;
+            let refuse = (faults.rename_refuses_existing.load(Ordering::SeqCst) && std::path::Path::new(&new).exists())
+                || (faults.fail_move_aside.load(Ordering::SeqCst) && new.ends_with(OLD_SUFFIX))
+                || (faults.fail_into_place.load(Ordering::SeqCst) && old.ends_with(TMP_SUFFIX) && !std::path::Path::new(&new).exists())
+                || (faults.fail_restore.load(Ordering::SeqCst) && old.ends_with(OLD_SUFFIX));
+            self.shared.note(format!("rename {old} {new}"));
+            if refuse {
+                return Err(StatusCode::Failure);
+            }
             std::fs::rename(old, new).map_err(|e| io_status(&e))?;
             Ok(status(id, StatusCode::Ok))
         }
 
         async fn remove(&mut self, id: u32, path: String) -> std::result::Result<Status, Self::Error> {
+            self.shared.note(format!("remove {path}"));
             std::fs::remove_file(path).map_err(|e| io_status(&e))?;
             Ok(status(id, StatusCode::Ok))
         }
     }
 
     fn serve() -> SocketAddr {
+        serve_with(Arc::default())
+    }
+
+    /// A server whose faults and log the test holds.
+    fn serve_shared() -> (SocketAddr, Arc<Shared>) {
+        let shared = Arc::<Shared>::default();
+        (serve_with(shared.clone()), shared)
+    }
+
+    fn serve_with(shared: Arc<Shared>) -> SocketAddr {
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let config = Arc::new(server::Config {
             keys: vec![key],
@@ -755,7 +874,7 @@ mod sftp_tests {
             rt.block_on(async move {
                 let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
                 tx.send(socket.local_addr().unwrap()).unwrap();
-                let _ = Fake.run_on_socket(config, &socket).await;
+                let _ = Fake(shared).run_on_socket(config, &socket).await;
             });
         });
         rx.recv().unwrap()
@@ -822,6 +941,160 @@ mod sftp_tests {
         src.write(d.join("fresh.txt").to_str().unwrap(), b"x").unwrap();
         assert_eq!(fs::read_to_string(d.join("fresh.txt")).unwrap(), "x");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    fn names(d: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    /// The operations of the log that move or remove a file, in order.
+    fn moves(shared: &Shared) -> Vec<String> {
+        shared.log().into_iter().filter(|l| l.starts_with("rename ") || l.starts_with("remove ")).collect()
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file_and_the_old_file_intact() {
+        let d = scratch("fail-write");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.fail_write);
+        let src = source(addr);
+        assert!(src.write(p.to_str().unwrap(), b"new content").is_err());
+        assert_eq!(names(&d), ["f.txt"], "no temporary file stays");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_open_leaves_nothing() {
+        let d = scratch("fail-open");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.fail_open);
+        let src = source(addr);
+        assert!(src.write(p.to_str().unwrap(), b"new content").is_err());
+        assert!(src.write(d.join("fresh.txt").to_str().unwrap(), b"x").is_err());
+        assert_eq!(names(&d), ["f.txt"]);
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_server_that_refuses_to_rename_over_an_existing_file_still_saves() {
+        let d = scratch("swap");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        let src = source(addr);
+        let target = p.to_str().unwrap();
+        src.write(target, b"new content").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "new content");
+        assert_eq!(names(&d), ["f.txt"], "neither the temporary file nor the old copy stays");
+        // The old file is never removed: it is moved aside, and only that copy is removed once the new file is in place.
+        let (tmp, old) = (format!("{target}.holzwave-tmp"), format!("{target}.holzwave-old"));
+        let log = moves(&shared);
+        assert!(!log.contains(&format!("remove {target}")), "the target is never removed: {log:?}");
+        assert_eq!(
+            log,
+            [
+                format!("rename {tmp} {target}"), // refused: the target exists
+                format!("remove {old}"),          // a copy of an earlier failure, if there is one
+                format!("rename {target} {old}"),
+                format!("rename {tmp} {target}"),
+                format!("remove {old}"),
+            ]
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_swap_restores_the_old_file() {
+        let d = scratch("swap-restore");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        shared.on(&shared.faults.fail_into_place);
+        let src = source(addr);
+        let err = src.write(p.to_str().unwrap(), b"new content").unwrap_err().to_string();
+        assert!(err.starts_with("unsupported: sftp:"), "the save did not succeed: {err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old", "the old file is back under its name");
+        assert_eq!(names(&d), ["f.txt"], "the temporary file is gone and so is the old copy");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_move_aside_leaves_the_old_file_in_place() {
+        let d = scratch("swap-aside");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        shared.on(&shared.faults.fail_move_aside);
+        let src = source(addr);
+        assert!(src.write(p.to_str().unwrap(), b"new content").is_err());
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        assert_eq!(names(&d), ["f.txt"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_restore_says_where_the_new_text_is() {
+        let d = scratch("swap-lost");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        shared.on(&shared.faults.fail_into_place);
+        shared.on(&shared.faults.fail_restore);
+        let src = source(addr);
+        let target = p.to_str().unwrap();
+        let err = src.write(target, b"new content").unwrap_err().to_string();
+        assert!(err.contains(&format!("the new text is in {target}.holzwave-tmp")), "{err}");
+        assert!(err.contains(&format!("the old file is in {target}.holzwave-old")), "{err}");
+        assert_eq!(names(&d), ["f.txt.holzwave-old", "f.txt.holzwave-tmp"]);
+        assert_eq!(fs::read_to_string(d.join("f.txt.holzwave-old")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(d.join("f.txt.holzwave-tmp")).unwrap(), "new content");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_new_file_is_created_without_a_swap() {
+        let d = scratch("fresh");
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        let src = source(addr);
+        let target = d.join("fresh.txt");
+        let target = target.to_str().unwrap();
+        src.write(target, b"x").unwrap();
+        assert_eq!(names(&d), ["fresh.txt"]);
+        assert_eq!(moves(&shared), [format!("rename {target}.holzwave-tmp {target}")], "one rename, no old copy");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissions_of_the_old_file_are_kept_through_the_swap() {
+        use std::os::unix::fs::PermissionsExt;
+        for refuses in [false, true] {
+            let d = scratch(&format!("mode-{refuses}"));
+            let p = d.join("f.txt");
+            fs::write(&p, "old").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
+            let (addr, shared) = serve_shared();
+            if refuses {
+                shared.on(&shared.faults.rename_refuses_existing);
+            }
+            source(addr).write(p.to_str().unwrap(), b"new content").unwrap();
+            assert_eq!(fs::read_to_string(&p).unwrap(), "new content");
+            assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o640, "swap through a refusing server: {refuses}");
+            let _ = fs::remove_dir_all(&d);
+        }
     }
 
     #[test]
