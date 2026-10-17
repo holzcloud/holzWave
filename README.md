@@ -12,8 +12,8 @@
 
 **holzWave** is an open-source terminal emulator written from scratch in Rust, built on Tauri 3 and
 [libghostty](https://github.com/ghostty-org/ghostty). It aims to run on macOS, Windows, Linux, iOS and Android with one
-look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, and settings that sync through your own
-Nextcloud. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
+look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, settings that sync through your own
+Nextcloud, and an AI chat that sees your terminal only after you share that pane. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
 > **Alpha, macOS only.** holzWave is at `0.0.1-alpha2`: a preview build for Apple Silicon, unsigned (no Developer ID,
@@ -56,6 +56,21 @@ brew install --cask holzcloud/holzwave/holzwave@preview
 |---|---|---|
 | ![holzWave on macOS](docs/design/platforms/macos.png) | ![holzWave on Windows](docs/design/platforms/windows.png) | ![holzWave on Linux](docs/design/platforms/linux.png) |
 
+<table>
+<tr><th>AI chat in a pane</th><th>Sharing a pane</th><th>Approving a tool call</th></tr>
+<tr>
+<td><img src="docs/design/ai-chat-pane.png" alt="AI chat in a pane beside the shell"></td>
+<td><img src="docs/design/ai-consent-ask.png" alt="The card that asks before a pane is shared with the model"></td>
+<td><img src="docs/design/ai-approval.png" alt="The approval card of a tool call with its fields and hash"></td>
+</tr>
+<tr><th><code>wsh ai</code> request</th><th>Chats in the sidebar</th><th>Changing a file</th></tr>
+<tr>
+<td><img src="docs/design/ai-wsh.png" alt="A wsh ai request waiting for an answer in the window"></td>
+<td><img src="docs/design/ai-sidebar-list.png" alt="The list of stored chats in the sidebar column"></td>
+<td><img src="docs/design/ai-write.png" alt="The diff card of a file change with its Undo button"></td>
+</tr>
+</table>
+
 The same window is drawn on every platform; only the OS window buttons and the keyboard shortcuts differ. All views and
 the design rules are in [docs/design.md](docs/design.md).
 
@@ -73,7 +88,11 @@ Built and tested on macOS from source:
 | SSH (reconnect, jump host, keychain), WSL and Docker panes, connection manager | built, tested against a test server, not yet against real hosts |
 | File browser, previews (Markdown, text, image, video, audio, PDF) and code editor, local and over SFTP | built, tested against a test server, not yet against real hosts |
 | Encrypted Nextcloud/WebDAV sync (XChaCha20-Poly1305, Argon2id) | built, tested against a test server, not yet against a real Nextcloud |
-| `wsh` CLI (`view`, `edit`, `setmeta title`) over a private local socket | built, not yet packaged with the installers |
+| `wsh` CLI (`view`, `edit`, `setmeta title`, `ai`, the history hooks) over a private local socket | built, not yet packaged with the installers |
+| Sidebar with hosts, history search and widgets (described by a JSON Schema), a `^R` binding for the history | built, tested against test servers |
+| System monitor of this computer and of Linux hosts over SSH | built, tested against a test server, not yet against real hosts |
+| AI chat in a pane, the sidebar, the palette and `wsh ai`: Anthropic, OpenAI, Gemini, local servers and gateways; you share a pane before its text leaves, and every tool action asks first | built, tested against test servers, not yet against real providers |
+| Apple on-device model (macOS 26 or later with Apple Intelligence) | built, not yet run on a real Mac |
 | iOS, Android, Windows, Linux | planned |
 
 Per-phase detail: [docs/status.md](docs/status.md).
@@ -81,7 +100,9 @@ Per-phase detail: [docs/status.md](docs/status.md).
 ## Build from source
 
 macOS on Apple Silicon is the only verified platform. You need Rust, Node and **Zig 0.16.0 exactly**, because
-`libghostty-vt` does not build with Zig 0.17.
+`libghostty-vt` does not build with Zig 0.17. On a Mac the Swift toolchain (Xcode or the Command Line Tools) is also needed
+for the bridge of the on-device model, and the model itself needs the Xcode 26 SDK; with an older SDK the app builds without
+it.
 
 ```sh
 brew install rustup zig@0.16 node
@@ -97,14 +118,17 @@ More in [docs/building.md](docs/building.md).
 
 Phase 1 (spike) is done, phase 2 (desktop MVP) is built and waits for its manual checks, and phase 3 (SSH, WSL, Docker,
 connection manager), phase 4 (file browser, previews, editor), the encrypted sync and the `wsh` CLI are built and
-tested against test servers. The system monitor, the history search and the sidebar with widgets are built too; the AI chat follows, then the native integrations and mobile.
+tested against test servers. The system monitor (local and over SSH), the history search and the sidebar with widgets are
+built too, and so are the AI chat and the on-device model, whose manual checks wait for real accounts and Macs (Part 7 of
+the [test plan](docs/test-plan.md)); the native integrations and mobile follow.
 Versions go `0.0.1-alpha2`, `0.0.1-beta1`, `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation
 
 [Architecture](docs/architecture.md) · [Design](docs/design.md) · [Roadmap](docs/roadmap.md) ·
-[Status and stack](docs/status.md) · [Building](docs/building.md) · [Sync format](docs/sync.md)
+[Status and stack](docs/status.md) · [Building](docs/building.md) · [Sync format](docs/sync.md) ·
+[Configuration files](docs/config.md) · [Test plan](docs/test-plan.md)
 
 ## License and credits
 

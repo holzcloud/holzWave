@@ -15,8 +15,12 @@
   connections open as local panes. Tested against an in-process SSH server; not yet tried against real hosts.
 - **Your own sync (planned).** Settings, themes, profiles and layouts over WebDAV/Nextcloud, end-to-end encrypted, no
   server of ours.
-- **AI with consent (planned).** Terminal context leaves the device only after you share that pane, and every send
-  shows what goes out. Local models first.
+- **AI with consent.** A chat in a pane, in the sidebar, in the palette actions and in `wsh ai`, with Anthropic,
+  OpenAI, Gemini, local servers (Ollama, LM Studio, llama.cpp), AI gateways and, on a Mac with macOS 26 and Apple
+  Intelligence, the on-device model. You can share the selection, the screen, the last command and its output (with a
+  shell hook) and a file. Terminal context leaves the device only after you share that pane, every send shows what
+  goes out, and every tool action asks first. Tested against test servers and scripted providers, not yet against real
+  providers, a real Apple model or Windows and Linux hardware.
 - **Few dependencies.** No frontend framework and no bundler. Security-critical code (VT parsing, SSH) comes from
   established libraries, never hand-rolled.
 
@@ -50,14 +54,16 @@
 
 Built and tested on macOS: local shell, resize, wide Unicode; tiled panes, dividers, tabs, workspaces; scrollback,
 selection, copy, paste; saved layout; WebGL2 with Canvas 2D fallback. SSH, WSL and Docker connections with a connection manager, and file browsers and previews (Markdown, text, images,
-video, audio; local and over SFTP) are built (core and page; see the notes above). Not built:
+video, audio; local and over SFTP) are built (core and page; see the notes above). So are the AI chat with its providers and
+surfaces, the on-device model, the widgets (described by a JSON Schema), the `^R` binding, a history that follows the host of the focused pane, and the system monitor of this computer and of Linux hosts over SSH. These were tested against test
+servers and scripted providers, not yet against real providers, a real Apple model or Windows and Linux hardware; the manual
+rows are in Part 7 of [test-plan.md](test-plan.md). Not built:
 
 | Phase | Planned |
 |---|---|
 | 2 | Key encoder, Kitty keyboard, engine replies, themes, dirty-row frames |
-| 7 | AI chat, Apple on-device AI |
-| 8 | Kubernetes, Talos, Azure CLI, GAM7 blocks |
-| 9 | iOS (SSH) and Android (local shell and SSH) |
+| 8 | Kubernetes, Talos, Azure CLI, GAM7 blocks, and the Context section of the sidebar with them |
+| 9 | iOS (SSH) and Android (local shell and SSH), widgets on mobile, AI provider keys on mobile (they need a mobile secret store) |
 | 10 | Kitty graphics, hyperlinks, signed packages |
 
 Deliberately not included: a web browser block. Phase numbers here follow the project plan summary; the detailed

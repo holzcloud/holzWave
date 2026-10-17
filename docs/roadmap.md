@@ -104,17 +104,22 @@ against an in-process SSH and SFTP server and the page stub; not yet run on real
   folder only the user can enter, and every request carries a secret that only the panes of this run of the app know
   (`HOLZWAVE_IPC`, `HOLZWAVE_TOKEN`, `HOLZWAVE_PANE`, set for local panes; `wsh` beside the app is put on their `PATH`).
 - ✅ Commands: `view <file>` and `edit <file>` (a preview beside the pane; Markdown opens as a page, `e` edits it),
-  `setmeta title <text>`, `ping`. `ai` comes with the AI chat.
+  `setmeta title <text>`, `ping`, `hist` and `init <shell>` (the history hooks and the `^R` binding of Phase 6) and `ai <prompt>`:
+  ask-only, text piped in is sent along, the window confirms before anything leaves the computer, and the answer streams
+  into the pane with the characters a terminal could act on removed.
 - Open: remote hosts through an SSH tunnel (the remote pane has no variables yet); packaging `wsh` with the installers.
 
 ## Phase 6 — Extras
 
-- ✅ Sidebar with hosts, history search and widgets (note, Pomodoro timer, command/link list; custom ones from `widgets/*.json`, validated, no code). Open: the Context section (with the integrations), a key for `^R`, widgets on mobile.
-- ✅ History with fuzzy search: SQLite (`history.db`, mode 0600, `secure_delete`), fzf-style matching (`nucleo-matcher`), fed by shell hooks through `wsh` (`wsh init bash|zsh|fish`), a best-effort filter keeps secrets and leading-space commands out, a dialog with `Cmd/Ctrl+Shift+H`. Open: the sidebar section, remote hosts, optional sync.
-- ✅ System monitor block (local: CPU, memory, network, busiest processes; `sysinfo`). Other computers over SSH: open.
-- AI chat behind a provider abstraction (local and cloud). Terminal context is sent only with consent.
-- Apple AI provider: a Swift bridge as a Tauri plugin (Foundation Models, macOS 26+, Apple Silicon). Selectable only
-  on supported Macs, with a fallback otherwise.
+Status: built in the core and the page and covered by tests against in-process servers, scripted providers and a page
+stub. Not yet run with real accounts, a real local model server or a real Apple model, nor on Windows and Linux; the
+manual rows are in Part 7 of [test-plan.md](test-plan.md).
+
+- ✅ Sidebar with hosts, history search and widgets (note, Pomodoro timer, command/link list; custom ones from `widgets/*.json`, validated, no code). The files are described by [widget.schema.json](widget.schema.json) and a test keeps the schema and the loader in step. Open: the Context section (with the integrations), widgets on mobile.
+- ✅ History with fuzzy search: SQLite (`history.db`, mode 0600, `secure_delete`), fzf-style matching (`nucleo-matcher`), fed by shell hooks through `wsh` (`wsh init bash|zsh|fish`; PowerShell panes report on their own), a best-effort filter keeps secrets and leading-space commands out, a dialog with `Cmd/Ctrl+Shift+H` and a sidebar section. `^R` is an opt-in binding (`wsh init <shell> --ctrl-r`). Open: remote hosts (a command from a pane on a saved connection is found from that pane, but nothing typed on the far side is recorded; the way in is `wsh` over an SSH tunnel), optional sync (deletions are not synced, so a forgotten command would come back).
+- ✅ System monitor block (CPU, memory, network, busiest processes; `sysinfo`). Other computers over SSH: built for Linux hosts (a fixed read-only command through the exec session of a saved connection, names and numbers only; another system is shown as not supported).
+- ✅ AI chat behind a provider abstraction: Anthropic, OpenAI, Gemini, local servers (Ollama, LM Studio, llama.cpp), AI gateways and the Apple model. Four surfaces: a chat pane, the sidebar column, the palette actions and `wsh ai`. Terminal context is sent only with consent, per pane; every tool action needs your approval; keys live in the OS keychain; none of it is synced.
+- ✅ Apple AI provider: a Rust crate with a Swift package behind a small C interface (Foundation Models, macOS 26+, Apple Silicon, Apple Intelligence switched on), linked weakly and registered only where it is available. Otherwise it cannot be chosen and you choose another provider: there is no silent fallback. Open: the launch on a Mac below macOS 26 and the real model (rows AI-A1 to AI-A4 of the test plan).
 
 ## Phase 6b — Native integrations (desktop)
 
@@ -135,6 +140,8 @@ Connection data goes through the secret store and sync.
 - Touch UI, a soft keyboard with special keys, a simplified layout (one block per screen).
 - Dropped on mobile: Docker/WSL, a local `wsh`, and the K8s/Talos/Azure/GAM7 wrappers (only where it makes sense).
 - Sync and the secret store work on mobile too.
+- The AI chat core builds for mobile, but provider keys need a mobile secret store, so the chat refuses to send on mobile until
+  there is one.
 
 ## Phase 8 — Polish
 
@@ -148,6 +155,6 @@ Connection data goes through the secret store and sync.
 |---|---|
 | The `libghostty` API is young and may change | Everything sits behind the `TerminalEngine` trait; `alacritty_terminal` is the fallback |
 | The iOS sandbox allows no local shell | iOS is SSH-only by design |
-| Apple AI is reachable only from Swift | A bridge plugin, and the provider is optional |
+| Apple AI is reachable only from Swift | A small Swift package behind a C interface in a crate of its own (macOS only, linked weakly), and the provider is optional |
 | The sync encryption format cannot change later without a migration | Decide it before any sync code is written |
-| AI and secrets | Context is never sent without consent; secrets live only in the OS keychain |
+| AI and secrets | Context is never sent without consent, and the page never sees the text of a chip; secrets live only in the OS keychain |
