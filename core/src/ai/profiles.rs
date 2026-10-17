@@ -390,8 +390,10 @@ fn address_of(target: &Target) -> Address {
     Address { scope: origin.scope(), host }
 }
 
-/// What the user typed to make or change a profile.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What the user typed to make or change a profile. `Debug` prints the preset, the wire, the flags and sizes, never the
+/// name, the address or the model: an address that was typed with a key in its query is refused, but the text was typed
+/// and must not be printed on the way to the refusal.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProfileInput {
     /// The id of the profile to change; `None` makes a new profile with an id made from the name.
     pub id: Option<String>,
@@ -410,6 +412,21 @@ pub struct ProfileInput {
     /// The user has read the disclosure for this address and accepts it: the origin is recorded as acknowledged when
     /// the preset asks for an acknowledgement there.
     pub acknowledge_gateway: bool,
+}
+
+impl fmt::Debug for ProfileInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProfileInput")
+            .field("preset", &self.preset)
+            .field("wire", &self.wire)
+            .field("has_id", &self.id.is_some())
+            .field("name_bytes", &self.name.len())
+            .field("base_url_bytes", &self.base_url.len())
+            .field("model_bytes", &self.model.len())
+            .field("allow_lan_http", &self.allow_lan_http)
+            .field("acknowledge_gateway", &self.acknowledge_gateway)
+            .finish()
+    }
 }
 
 impl ProfileInput {
