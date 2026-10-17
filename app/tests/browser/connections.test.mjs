@@ -10,6 +10,7 @@ export default async function ({ page, url, errors }) {
   await stateCase(page, url);
   await dialogCase(page, url);
   await wshCase(page, url);
+  await installCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -181,6 +182,41 @@ async function dialogCase(page, url) {
 
 const WSH_NOTE =
   "A program on this host can then open files and rename this pane in holzWave through a private tunnel. It can never use the AI or approve anything. The host must allow Unix socket forwarding.";
+
+/** The palette action that installs `wsh` on the host of the focused pane: one call with the pane and nothing else. */
+async function installCase(page, url) {
+  await open(page, url);
+  const entry = await page.evaluate(() => window.__registry.listActions().find((a) => a.id === "wsh.install"));
+  assert.equal(entry?.title, "Install wsh on this host", "the action has its words in the palette");
+  const focus = await page.evaluate(async () => (await import(new URL("state.js", location.href).href)).state.view.focus);
+  assert.equal(typeof focus, "number", "the page knows which pane is in focus");
+
+  assert.equal(await page.evaluate(() => window.__registry.runAction("wsh.install")), true);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("wsh_install").length === 1);
+  const calls = await page.evaluate(() => window.__MOCK__.callsOf("wsh_install"));
+  assert.deepEqual(calls, [{ pane: focus }], "exactly the focused pane and nothing else: no host, no path, no connection");
+
+  // The core refuses a pane that is not an SSH pane with a sentence on the pane; a rejected call is ignored, no page error.
+  await page.evaluate(() => window.__MOCK__.on("wsh_install", () => {
+    throw "wsh was not installed: this pane does not run a saved SSH connection";
+  }));
+  await page.evaluate(() => window.__registry.runAction("wsh.install"));
+  await page.waitForFunction(() => window.__MOCK__.callsOf("wsh_install").length === 2);
+
+  // With no view there is no focused pane: nothing is sent.
+  const sent = await page.evaluate(async () => {
+    const { state } = await import(new URL("state.js", location.href).href);
+    const view = state.view;
+    state.view = null;
+    const before = window.__MOCK__.callsOf("wsh_install").length;
+    window.__registry.runAction("wsh.install");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const after = window.__MOCK__.callsOf("wsh_install").length;
+    state.view = view;
+    return after - before;
+  });
+  assert.equal(sent, 0, "with no focused pane the action sends nothing");
+}
 
 async function wshCase(page, url) {
   await open(page, url);

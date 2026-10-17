@@ -79,6 +79,7 @@
     "allow-sync-now",
     "allow-sync-off",
     "allow-monitor-sample",
+    "allow-wsh-install",
     "allow-history-search",
     "allow-history-delete",
     "allow-history-clear",

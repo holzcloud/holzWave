@@ -36,6 +36,7 @@ use holzwave_core::pty::process_cwd;
 use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
 use holzwave_core::ssh::{ExecCancel, ExecLimits, ExecResult, SshExec};
+use holzwave_core::wshinstall::Bundled;
 use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
 use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
@@ -731,6 +732,12 @@ pub struct AppCore {
     blocks: Blocks,
     /// Where `wsh` finds the app, set once the socket listens: the folder and the secret of this run.
     ipc: Mutex<Option<(PathBuf, String)>>,
+    /// Where the saved SSH connection of each running pane pointed when the pane started, so that a connection edited
+    /// afterwards to another host is never answered for as the old one (see [`crate::wsh_tunnel::Target`]).
+    pane_targets: Mutex<HashMap<PaneId, crate::wsh_tunnel::Target>>,
+    /// The resource folder of the app, where the bundled `wsh` builds for Linux hosts are (set once at start; none in a test
+    /// and in a build made without them).
+    resource_dir: Mutex<Option<PathBuf>>,
     /// The typed commands, searchable. An empty in-memory one when the file cannot be opened.
     history: holzwave_core::history::History,
     /// The system monitor's sampler, shared by every monitor pane.
@@ -771,6 +778,50 @@ const WSH_NO_SUCH_FILE: &str = "no such file on this host, or it cannot be read"
 /// What a file browser, a preview or a monitor is told when the layout cannot hold another pane.
 const NO_ROOM_FOR_A_PANE: &str = "there is no room for another pane here";
 const WSH_NO_HOST: &str = "the connection of this pane could not be used";
+/// What a remote `wsh` is told when the saved connection of its pane was edited to point at another host after the pane
+/// started: the pane is of the old host, so nothing is answered for it on the new one.
+const WSH_TARGET_CHANGED: &str = "the saved connection of this pane now points to another host; close this pane and open it again";
+
+/// What the install of `wsh` on a host says when it cannot start. Fixed sentences, like the ones of the core: nothing of this
+/// computer, no command and no secret in them.
+const INSTALL_NO_PANE: &str = "wsh was not installed: this pane is not running";
+const INSTALL_NOT_SSH: &str = "wsh was not installed: this pane does not run a saved SSH connection";
+const INSTALL_NOT_FOCUSED: &str = "wsh was not installed: this is not the pane in focus";
+const INSTALL_TARGET_CHANGED: &str =
+    "wsh was not installed: the saved connection of this pane now points to another host; close this pane and open it again";
+const INSTALL_NO_CONNECTION: &str = "wsh was not installed: the connection of this pane could not be used";
+/// The most bytes of a bundled `wsh` that are read: the builds are about half a megabyte.
+const MAX_BUNDLED_WSH: u64 = 16 * 1024 * 1024;
+
+/// The sentence the install says for its result: what was done on the connection called `name` (control characters of the
+/// name made spaces), or the core's own sentence for a refusal.
+fn install_sentence(result: &Result<holzwave_core::wshinstall::Installed, String>, name: &str) -> String {
+    use holzwave_core::wshinstall::Installed;
+    let name: String = name.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let version = env!("CARGO_PKG_VERSION");
+    match result {
+        Ok(Installed::Installed(_)) => format!("wsh {version} was installed on {name}"),
+        Ok(Installed::AlreadyCurrent(_)) => format!("wsh {version} is already installed on {name}"),
+        Err(sentence) => sentence.clone(),
+    }
+}
+
+/// One bundled build: a regular file (a link is not followed) of at most [`MAX_BUNDLED_WSH`] bytes, or `None`.
+fn read_bundled(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_BUNDLED_WSH) {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    // The opened file again: what was checked is what is read.
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_BUNDLED_WSH {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.take(MAX_BUNDLED_WSH + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= MAX_BUNDLED_WSH).then_some(bytes)
+}
 
 /// The host of every history entry that comes from a pane without a saved connection.
 const LOCAL_HOST: &str = "local";
@@ -922,6 +973,8 @@ impl AppCore {
                 remote_monitors: holzwave_core::monitor::RemoteMonitors::new(),
                 history,
                 ipc: Mutex::new(None),
+                pane_targets: Mutex::new(HashMap::new()),
+                resource_dir: Mutex::new(None),
                 saver,
                 writes,
                 exiting: AtomicBool::new(false),
@@ -1094,10 +1147,17 @@ impl AppCore {
     ///
     /// A path is resolved by the pane's own saved connection over SFTP and never on this computer. Blocks on the
     /// network: the sink's thread, never the main one.
-    pub fn wsh_remote(&self, pane: PaneId, cmd: holzwave_ipc::Cmd) -> Result<String, String> {
+    ///
+    /// `target` is where the pane's connection pointed when its tunnel was made. A connection that was edited to another
+    /// host since is refused with a fixed sentence, because the process that asks is on the old host and a path would
+    /// otherwise be resolved on the new one.
+    pub fn wsh_remote(&self, pane: PaneId, target: &crate::wsh_tunnel::Target, cmd: holzwave_ipc::Cmd) -> Result<String, String> {
         use holzwave_ipc::{Cmd, REMOTE_REFUSED};
         let label = lock(&self.routes).live.get(&pane).map(|l| l.to_string()).ok_or(WSH_PANE_GONE)?;
         let profile = self.wsh_profile(pane)?;
+        if !target.is(&profile) {
+            return Err(WSH_TARGET_CHANGED.into());
+        }
         let view = match cmd {
             Cmd::Ping => return Ok("holzWave".into()),
             Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
@@ -1134,6 +1194,64 @@ impl AppCore {
         }
         self.focus_pane_in(label, pane)?;
         self.block_open_edit_in(label, "right", BlockKind::Preview, LOCAL, path, edit)
+    }
+
+    /// Tell the app where the resource folder of the package is, which holds the static `wsh` builds for Linux hosts
+    /// (`wsh/linux-x86_64` and `wsh/linux-aarch64`). Not set in a test, and a build made without them has no such folder.
+    pub fn set_resource_dir(&self, dir: PathBuf) {
+        *lock(&self.resource_dir) = Some(dir);
+    }
+
+    /// The bundled builds, read from the two fixed names in the resource folder. A name that is missing, is not a regular
+    /// file (a link is not followed), or is larger than [`MAX_BUNDLED_WSH`] is `None`: the install then says this build
+    /// of the app has no `wsh` for that processor.
+    fn bundled_wsh(&self) -> Bundled {
+        let Some(dir) = lock(&self.resource_dir).clone() else { return Bundled::default() };
+        let folder = dir.join("wsh");
+        // The folder must be a real folder, so that a link cannot send the two reads elsewhere.
+        if !std::fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir()) {
+            return Bundled::default();
+        }
+        Bundled { x86_64: read_bundled(&folder.join("linux-x86_64")), aarch64: read_bundled(&folder.join("linux-aarch64")) }
+    }
+
+    /// Put the bundled `wsh` on the host of the saved SSH connection that `pane` runs, as the person asked by choosing
+    /// `Install wsh on this host` in the pane they have in focus. The result is one sentence, which is also put on the
+    /// pane's screen, and a refusal is one too: a pane that is not running, one that does not run a saved SSH
+    /// connection, one that is not the focused pane of its window, and one whose connection was edited to another host
+    /// since the pane started (the install would otherwise go to a host the pane never showed). Nothing is installed without
+    /// this call, and nothing but `~/.holzwave/bin/wsh` on the host is created (see `holzwave_core::wshinstall`). Blocks
+    /// on the network: the command that calls it is async.
+    pub fn wsh_install(&self, pane: PaneId) -> Result<String, String> {
+        // A block pane has no screen to say anything on, and neither has a pane that is not running.
+        if self.blocks.block_of(pane).is_some() {
+            return Err(INSTALL_NOT_SSH.into());
+        }
+        let handle = self.handle(pane).ok_or_else(|| INSTALL_NO_PANE.to_owned())?;
+        let say = |sentence: &str| -> String {
+            let _ = handle.notice(sentence);
+            sentence.to_owned()
+        };
+        if !self.is_focused(pane) {
+            return Err(say(INSTALL_NOT_FOCUSED));
+        }
+        // An assignment takes effect when a pane starts, so a pane that has no recorded target runs a local shell.
+        let recorded = lock(&self.pane_targets).get(&pane).cloned();
+        let profile = self.connections.profile_of(pane).filter(|p| p.kind == ConnectionKind::Ssh);
+        let (Some(profile), Some(recorded)) = (profile, recorded) else { return Err(say(INSTALL_NOT_SSH)) };
+        if !recorded.is(&profile) {
+            return Err(say(INSTALL_TARGET_CHANGED));
+        }
+        let connection = self.connections.session(&profile.id).map_err(|_| say(INSTALL_NO_CONNECTION))?;
+        let result = holzwave_core::wshinstall::install(&connection, &self.bundled_wsh(), env!("CARGO_PKG_VERSION"));
+        let sentence = say(&install_sentence(&result, &profile.name));
+        result.map(|_| sentence.clone()).map_err(|_| sentence)
+    }
+
+    /// Whether `pane` is the focused pane of the tab its window shows.
+    fn is_focused(&self, pane: PaneId) -> bool {
+        let Some(label) = lock(&self.routes).live.get(&pane).map(|l| l.to_string()) else { return false };
+        lock(&self.windows).layout(&label).is_some_and(|layout| layout.tab().focus == pane)
     }
 
     /// Tell the window `label` that the shell of `pane` asked for the history search, when `pane` is the one in focus in
@@ -2028,6 +2146,7 @@ impl AppCore {
         lock(&self.last_cwd).remove(&pane);
         lock(&self.last_title).remove(&pane);
         lock(&self.starts).remove(&pane);
+        lock(&self.pane_targets).remove(&pane);
         self.connections.forget(pane);
         // A chat pane that leaves the layout ends the shares of its chat: the block is read before it is forgotten.
         let chat = self.blocks.block_of(pane).filter(|block| block.kind == BlockKind::Chat).map(|block| block.path);
@@ -2593,7 +2712,13 @@ impl AppCore {
     fn apply_connection(&self, pane: PaneId, spec: &mut PaneSpec) {
         match self.connections.apply(pane, spec) {
             Err(e) => spec.notice = Some(format!("holzWave: cannot open the connection: {e}")),
-            Ok(()) if spec.ssh_connection.is_some() => spec.tunnel = crate::wsh_tunnel::tunnel_for(self, pane),
+            Ok(()) if spec.ssh_connection.is_some() => {
+                // Where the connection points now is where this pane is: recorded before anything can be asked of it.
+                if let Some(profile) = self.connections.profile_of(pane) {
+                    lock(&self.pane_targets).insert(pane, crate::wsh_tunnel::Target::of(&profile));
+                }
+                spec.tunnel = crate::wsh_tunnel::tunnel_for(self, pane);
+            }
             Ok(()) => {}
         }
     }
@@ -7960,6 +8085,13 @@ mod tests {
         host: Arc<Host>,
     }
 
+    impl Ticked {
+        /// Where the connection of the ticked pane points now, as a pane that started now would have recorded it.
+        fn target(&self) -> crate::wsh_tunnel::Target {
+            crate::wsh_tunnel::Target::of(&self.core.wsh_profile(self.remote).expect("the ticked pane runs a ticked connection"))
+        }
+    }
+
     fn ticked(files: &[(&str, &str)]) -> Ticked {
         let dir = Scratch::new("ticked");
         let mut profiles = holzwave_core::profiles::Profiles::default();
@@ -8223,7 +8355,7 @@ mod tests {
             Cmd::Hist { line: "ls".into(), cwd: "/".into(), exit: Some(0) },
             Cmd::HistOpen,
         ] {
-            assert_eq!(t.core.wsh_remote(t.remote, cmd.clone()), Err(NOT_REMOTE.to_owned()), "{cmd:?}");
+            assert_eq!(t.core.wsh_remote(t.remote, &t.target(), cmd.clone()), Err(NOT_REMOTE.to_owned()), "{cmd:?}");
         }
         assert_eq!(state_of(&t), before, "the events, the layout, the blocks and the history are as they were");
         assert!(t.core.history.search("", None, 10).is_empty());
@@ -8421,7 +8553,7 @@ mod tests {
             if cmd.allowed_remote() {
                 accepted.push(name.clone());
             }
-            if t.core.wsh_remote(t.remote, cmd.clone()) != Err(NOT_REMOTE.to_owned()) {
+            if t.core.wsh_remote(t.remote, &t.target(), cmd.clone()) != Err(NOT_REMOTE.to_owned()) {
                 handled.push(name);
             }
         }
@@ -8440,7 +8572,7 @@ mod tests {
         let t = ticked(&[("/srv/a.txt", "a")]);
         let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
         let (token, path) = (token_of(&tunnel), tunnel.path.clone());
-        let sink = crate::wsh_tunnel::WshSink::new(t.core.downgrade(), t.remote, token.clone());
+        let sink = crate::wsh_tunnel::WshSink::new(t.core.downgrade(), t.remote, token.clone(), t.target());
         let mut spec = PaneSpec::new("sh", 80, 24);
         t.core.apply_connection(t.remote, &mut spec);
         let spec_tunnel = spec.tunnel.clone().expect("a tunnel");
@@ -8471,6 +8603,210 @@ mod tests {
             }
             assert!(!text.contains("holzwave-") || text.contains("holzwave-test"), "a socket path is in {text}");
         }
+    }
+
+    /// Edit the saved connection of the ticked pane (`web-1`), the rest as it was.
+    fn edit_connection(t: &Ticked, change: impl FnOnce(&mut Profile)) {
+        let mut profile = t.core.connections.profile_of(t.remote).expect("the connection is saved");
+        change(&mut profile);
+        t.core.connections.save(profile, SecretChange::Keep).expect("saves");
+    }
+
+    #[test]
+    fn a_request_from_a_pane_of_an_edited_connection_is_refused_and_the_host_is_never_asked() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        assert_eq!(through(&tunnel, json!({"cmd": "ping"}))["ok"], true);
+
+        // Renaming the connection moves nothing: the host, the port and the user are the target.
+        let original = t.core.connections.profile_of(t.remote).unwrap();
+        edit_connection(&t, |p| p.name = "Renamed".into());
+        assert_eq!(through(&tunnel, json!({"cmd": "ping"}))["ok"], true, "a new name is the same host");
+
+        for (what, change) in [
+            ("host", Box::new(|p: &mut Profile| p.host = "other.example.invalid".into()) as Box<dyn Fn(&mut Profile)>),
+            ("port", Box::new(|p: &mut Profile| p.port = 2222)),
+            ("user", Box::new(|p: &mut Profile| p.user = "someone-else".into())),
+        ] {
+            edit_connection(&t, |p| *p = original.clone());
+            let before = lock(&t.host.seen).len();
+            edit_connection(&t, |p| change(p));
+            for request in [
+                json!({"cmd": "ping"}),
+                json!({"cmd": "view", "path": "/srv/a.txt"}),
+                json!({"cmd": "edit", "path": "/srv/a.txt"}),
+                json!({"cmd": "setmeta", "key": "title", "value": "x"}),
+            ] {
+                let answer = through(&tunnel, request.clone());
+                assert_eq!(answer, json!({"ok": false, "message": WSH_TARGET_CHANGED}), "{what}: {request}");
+            }
+            assert_eq!(lock(&t.host.seen).len(), before, "{what}: nothing was asked of any host");
+            assert!(t.core.blocks.views(&t.core.connections).is_empty(), "{what}: no preview opened");
+            // The sentence is fixed: it names no host, no user and no path.
+            let text = WSH_TARGET_CHANGED;
+            assert!(!text.contains("example") && !text.contains("someone"), "{text}");
+        }
+
+        // A pane that starts now records where the connection points now, and is answered.
+        let fresh = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        assert_eq!(through(&fresh, json!({"cmd": "ping"}))["ok"], true);
+        // The old tunnel stays refused until the connection points where it did.
+        assert_eq!(through(&tunnel, json!({"cmd": "ping"}))["ok"], false);
+        edit_connection(&t, |p| {
+            p.host = "web.example.invalid".into();
+            p.port = 22;
+            p.user = "holz".into();
+        });
+        assert_eq!(through(&tunnel, json!({"cmd": "ping"}))["ok"], true, "pointing back is the same target again");
+    }
+
+    #[test]
+    fn the_target_is_recorded_when_the_pane_starts_and_forgotten_when_it_closes() {
+        let t = ticked(&[]);
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.remote, &mut spec);
+        assert!(lock(&t.core.pane_targets).contains_key(&t.remote));
+        // A pane that runs a local shell, or a connection that is not SSH, records nothing.
+        let mut local = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.local, &mut local);
+        assert!(!lock(&t.core.pane_targets).contains_key(&t.local));
+        let debug = format!("{:?}", t.target());
+        assert!(!debug.contains("web.example") && !debug.contains("holz"), "{debug}");
+        t.core.forget_pane(t.remote);
+        assert!(!lock(&t.core.pane_targets).contains_key(&t.remote));
+    }
+
+    /// Start the pane `pane` of `t` and focus it, as the person's act would find it.
+    fn started_and_focused(t: &Ticked, pane: PaneId) {
+        t.core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+        t.core.focus_pane_in(MAIN_WINDOW, pane).expect("focus");
+    }
+
+    fn says(t: &Ticked, pane: PaneId, words: &str) -> bool {
+        wait_until(WAIT, || t.rec.has_text(pane, words))
+    }
+
+    #[test]
+    fn an_install_on_a_pane_that_is_not_ssh_says_so_on_the_pane() {
+        let t = ticked(&[]);
+        // A local pane.
+        started_and_focused(&t, t.local);
+        assert_eq!(t.core.wsh_install(t.local), Err(INSTALL_NOT_SSH.to_owned()));
+        assert!(says(&t, t.local, "does not run a saved SSH"), "the sentence is on the pane: {:?}", t.rec.all());
+
+        // A connection assigned to a pane that already runs a local shell takes effect when it starts: not SSH yet.
+        t.core.connections.assign(t.local, "web-1").unwrap();
+        assert_eq!(t.core.wsh_install(t.local), Err(INSTALL_NOT_SSH.to_owned()));
+
+        // A Docker connection on a running pane.
+        let mut docker = Profile::new("api", "API", "api-1");
+        docker.kind = ConnectionKind::Docker;
+        t.core.connections.save(docker, SecretChange::Keep).unwrap();
+        let pane = t.core.split(true).focus;
+        started_and_focused(&t, pane);
+        t.core.connections.assign(pane, "api").unwrap();
+        assert_eq!(t.core.wsh_install(pane), Err(INSTALL_NOT_SSH.to_owned()));
+        assert!(says(&t, pane, "does not run a saved SSH"));
+
+        // A block pane has no screen, and a pane that is not open is not running.
+        let block = t.core.split(true).focus;
+        t.core.blocks.assign(block, Block { kind: BlockKind::Preview, source: "web-1".into(), path: "/srv/a".into(), edit: false }).unwrap();
+        assert_eq!(t.core.wsh_install(block), Err(INSTALL_NOT_SSH.to_owned()));
+        assert_eq!(t.core.wsh_install(9999), Err(INSTALL_NO_PANE.to_owned()));
+        // An SSH pane that has not started yet is not running either.
+        assert_eq!(t.core.wsh_install(t.unticked), Err(INSTALL_NO_PANE.to_owned()));
+        // Nothing was recorded for any of them: no connection was made up.
+        assert!(lock(&t.core.pane_targets).is_empty());
+    }
+
+    #[test]
+    fn an_install_only_acts_for_the_pane_in_focus() {
+        let t = ticked(&[]);
+        started_and_focused(&t, t.remote);
+        started_and_focused(&t, t.unticked);
+        // `unticked` is in focus now: the install for `remote` is refused, on its own screen.
+        assert_eq!(t.core.wsh_install(t.remote), Err(INSTALL_NOT_FOCUSED.to_owned()));
+        assert!(says(&t, t.remote, "not the pane in focus"));
+    }
+
+    #[test]
+    fn an_install_for_a_connection_edited_to_another_host_is_refused() {
+        let t = ticked(&[]);
+        started_and_focused(&t, t.remote);
+        assert!(lock(&t.core.pane_targets).contains_key(&t.remote), "recorded when the pane started");
+        edit_connection(&t, |p| p.host = "other.example.invalid".into());
+        assert_eq!(t.core.wsh_install(t.remote), Err(INSTALL_TARGET_CHANGED.to_owned()));
+        assert!(says(&t, t.remote, "now points to"), "{:?}", t.rec.all());
+        let text = INSTALL_TARGET_CHANGED;
+        assert!(!text.contains("example") && !text.contains("holz"), "{text}");
+    }
+
+    #[test]
+    fn the_install_sentences_name_the_connection_and_nothing_else() {
+        use holzwave_core::wshinstall::Installed;
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(install_sentence(&Ok(Installed::Installed("/home/holz/.holzwave/bin/wsh".into())), "Web 1"), format!("wsh {version} was installed on Web 1"));
+        assert_eq!(install_sentence(&Ok(Installed::AlreadyCurrent("/x".into())), "Web 1"), format!("wsh {version} is already installed on Web 1"));
+        assert_eq!(install_sentence(&Err("wsh was not installed: because".into()), "Web 1"), "wsh was not installed: because");
+        // A name with control characters cannot be an escape sequence.
+        let sentence = install_sentence(&Ok(Installed::Installed(String::new())), "A\u{1b}[2Jb\r\nc");
+        assert!(!sentence.chars().any(char::is_control), "{sentence:?}");
+        // No path of the host or of this computer is in a success sentence.
+        assert!(!install_sentence(&Ok(Installed::Installed("/home/holz/.holzwave/bin/wsh".into())), "Web 1").contains("/home"));
+    }
+
+    #[test]
+    fn an_install_without_bundled_binaries_says_so() {
+        let t = ticked(&[]);
+        // No resource folder at all, an empty one, and one without the `wsh` folder: nothing is bundled.
+        assert!(t.core.bundled_wsh().x86_64.is_none() && t.core.bundled_wsh().aarch64.is_none());
+        let res = Scratch::new("resources");
+        t.core.set_resource_dir(res.0.clone());
+        let none = t.core.bundled_wsh();
+        assert!(none.x86_64.is_none() && none.aarch64.is_none());
+        // With the files present they are read and passed on, each for its own processor.
+        std::fs::create_dir(res.0.join("wsh")).unwrap();
+        std::fs::write(res.0.join("wsh/linux-x86_64"), b"\x7fELFx86").unwrap();
+        std::fs::write(res.0.join("wsh/linux-aarch64"), b"\x7fELFarm").unwrap();
+        let both = t.core.bundled_wsh();
+        assert_eq!((both.x86_64.as_deref(), both.aarch64.as_deref()), (Some(&b"\x7fELFx86"[..]), Some(&b"\x7fELFarm"[..])));
+        // One of the two is enough for the host that needs it.
+        std::fs::remove_file(res.0.join("wsh/linux-aarch64")).unwrap();
+        let one = t.core.bundled_wsh();
+        assert!(one.x86_64.is_some() && one.aarch64.is_none());
+        // A file over 16 MiB is not read.
+        let big = std::fs::File::create(res.0.join("wsh/linux-aarch64")).unwrap();
+        big.set_len(MAX_BUNDLED_WSH + 1).unwrap();
+        assert!(t.core.bundled_wsh().aarch64.is_none(), "over the bound");
+        big.set_len(MAX_BUNDLED_WSH).unwrap();
+        assert_eq!(t.core.bundled_wsh().aarch64.map(|b| b.len() as u64), Some(MAX_BUNDLED_WSH), "at the bound");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_resource_files_are_read_only_from_the_resource_folder() {
+        use std::os::unix::fs::symlink;
+        let t = ticked(&[]);
+        let res = Scratch::new("resources-links");
+        let elsewhere = Scratch::new("elsewhere");
+        std::fs::write(elsewhere.0.join("secret"), b"\x7fELFnot-a-resource").unwrap();
+        t.core.set_resource_dir(res.0.clone());
+        std::fs::create_dir(res.0.join("wsh")).unwrap();
+        // A link in place of a file is not followed.
+        symlink(elsewhere.0.join("secret"), res.0.join("wsh/linux-x86_64")).unwrap();
+        // A directory in place of a file is not a regular file.
+        std::fs::create_dir(res.0.join("wsh/linux-aarch64")).unwrap();
+        let bundled = t.core.bundled_wsh();
+        assert!(bundled.x86_64.is_none() && bundled.aarch64.is_none());
+        // A link in place of the folder sends neither read elsewhere.
+        std::fs::remove_dir_all(res.0.join("wsh")).unwrap();
+        std::fs::write(elsewhere.0.join("linux-x86_64"), b"\x7fELFelsewhere").unwrap();
+        symlink(&elsewhere.0, res.0.join("wsh")).unwrap();
+        let bundled = t.core.bundled_wsh();
+        assert!(bundled.x86_64.is_none() && bundled.aarch64.is_none(), "{:?}", bundled);
+        // The two names are fixed: nothing in this function reads a name that came from anywhere else.
+        let source = include_str!("state.rs");
+        assert_eq!(source.matches("\"linux-x86_64\"").count(), 2, "the two fixed names appear in the reader and in this test only");
     }
 }
 

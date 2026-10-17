@@ -369,6 +369,10 @@ pub fn run() {
             if let Some(source) = ai_device::system() {
                 core.ai().use_device(source);
             }
+            // The bundled `wsh` builds for Linux hosts are in the resource folder; without one the install says so.
+            if let Ok(resources) = app.path().resource_dir() {
+                core.set_resource_dir(resources);
+            }
             app.manage(core.clone());
             if let Some(window) = app.get_webview_window("main") {
                 restore_window(&window, &core, "main");
@@ -501,6 +505,7 @@ pub fn run() {
             commands::sync_now,
             commands::sync_off,
             commands::monitor_sample,
+            commands::wsh_install,
             commands::history_search,
             commands::history_delete,
             commands::history_clear,

@@ -542,7 +542,10 @@
       "text"
     ],
     "widgets_list": [],
-    "window_ready": []
+    "window_ready": [],
+    "wsh_install": [
+      "pane"
+    ]
   },
   "events": {
     "ai": {

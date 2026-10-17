@@ -849,6 +849,14 @@ pub fn monitor_sample(core: State<Arc<AppCore>>, pane: PaneId) -> Result<holzwav
     core.monitor_sample(pane)
 }
 
+/// Put the bundled `wsh` on the host of the saved SSH connection the focused pane runs, verify it there and say the result
+/// as a line on the pane. The page names the pane and never a host; the core resolves the connection, and nothing is
+/// installed without this call (the palette action `Install wsh on this host`). The answer is the sentence the pane shows.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn wsh_install(core: State<Arc<AppCore>>, pane: PaneId) -> Result<String, String> {
+    core.wsh_install(pane)
+}
+
 /// Typed commands that match `query` (fuzzy), newest and best first; an empty query lists the newest. The search is the
 /// history of the host the focused pane of the calling window runs on: the page sends no host.
 #[tauri::command(async, rename_all = "snake_case")]

@@ -338,6 +338,15 @@ holzWave through a private tunnel. It can never use the AI or approve anything. 
 forwarding." The checkbox is the same row as `Remove the saved password` (a box and its words, no colour cue). A host
 that is not ticked gets no tunnel, no wrapped shell and no socket. WSL and Docker connections do not show the row.
 
+The palette entry `Install wsh on this host` acts on the connection of the pane that has the focus: it uploads the
+bundled static `wsh` to the host's `~/.holzwave/bin`, runs `wsh version` there to check it, and says the result as one line
+on the pane, in the warn colour like the other connection lines (`wsh 0.0.1 was installed on Name`, `wsh 0.0.1 is already
+installed on Name`, or why not: a host that is not Linux, a processor other than `x86_64` or `aarch64`, a build of holzWave
+without the bundled files, a server that refuses the upload). It runs only when the person chooses it, never when a
+connection opens and never on a timer, and it works for a pane that runs a saved SSH connection only; for any other pane
+it says so on the pane. The connection must also have `Use wsh on this host` ticked for the tunnel to start. There is no
+new drawing: the line is the pane's existing notice line.
+
 ### Candidates considered
 
 The five earlier candidates stay as the record of the alternatives: [Glas](design/1-glas.png),

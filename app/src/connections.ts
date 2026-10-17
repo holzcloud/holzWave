@@ -103,6 +103,18 @@ export async function initConnections(
   applyView = apply;
   onChange = changed;
   registerAction({ id: "connections.open", title: "Connections…", run: open });
+  // The one explicit act that puts `wsh` on the host of the focused SSH pane. The page names the pane and never a host; the
+  // core resolves the saved connection, says the result as a line on the pane, and refuses what is not an SSH pane. A call
+  // that fails is ignored: the sentence is already on the pane's screen.
+  registerAction({
+    id: "wsh.install",
+    title: "Install wsh on this host",
+    run: () => {
+      const pane = state.view?.focus;
+      if (pane === undefined) return;
+      void call<string>("wsh_install", { pane }).catch(() => undefined);
+    },
+  });
   await refreshConnections();
   await pollConnections();
   setInterval(() => void pollConnections(), POLL_MS);

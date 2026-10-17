@@ -93,6 +93,7 @@ fn main() {
     "sync_now",
     "sync_off",
     "monitor_sample",
+    "wsh_install",
     "history_search",
     "history_delete",
     "history_clear",
