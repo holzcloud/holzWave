@@ -2451,6 +2451,7 @@ fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
     let threat = format!("T-{phase}-");
     let directory = format!("{phase}-extras");
     let spike = String::from("spike") + "_s";
+    let spike_word = String::from("spike") + " S";
     let mut hits = Vec::new();
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
@@ -2477,12 +2478,15 @@ fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
             if at(i, &directory) {
                 hits.push((number, directory.clone()));
             }
-            // A spike label in a name: the prefix, a digit from 1 to 5, and no letter or digit right after.
-            if at(i, &spike) {
-                let n = i + spike.chars().count();
-                if chars.get(n).is_some_and(|c| ('1'..='5').contains(c)) && !chars.get(n + 1).is_some_and(|c| c.is_alphanumeric())
-                {
-                    hits.push((number, chars[i..=n].iter().collect()));
+            // A spike label in a name or in words: the prefix, a digit from 1 to 5, and no letter or digit right after.
+            for prefix in [&spike, &spike_word] {
+                if at(i, prefix) {
+                    let n = i + prefix.chars().count();
+                    if chars.get(n).is_some_and(|c| ('1'..='5').contains(c))
+                        && !chars.get(n + 1).is_some_and(|c| c.is_alphanumeric())
+                    {
+                        hits.push((number, chars[i..=n].iter().collect()));
+                    }
                 }
             }
         }
@@ -2562,6 +2566,9 @@ fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips
     assert!(hit(&format!("{spike}10_x")).is_empty(), "a longer number");
     assert!(hit(&format!("{spike}a_x")).is_empty(), "a letter after the prefix");
     assert!(hit(&(String::from("spike") + "_report")).is_empty(), "a plain spike prefix");
+    let words = String::from("spike") + " S";
+    assert_eq!(hit(&format!("the {words}1 numbers")), [format!("{words}1")], "a spike label written as words");
+    assert!(hit(&format!("the {words}6 numbers")).is_empty(), "a spike word with another digit");
     assert_eq!(plan_label_hits(&format!("one\ntwo {id}\nthree")), [(2, id)], "the line number is one-based");
 }
 
