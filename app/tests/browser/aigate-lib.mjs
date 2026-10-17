@@ -492,3 +492,88 @@ export function finish(ctx, expected) {
   assert.deepEqual(ctx.surfaces, expected, "every surface of the file ran");
   assert.ok(ctx.probes >= expected.length, "every surface was probed");
 }
+
+// ---- touch targets -----------------------------------------------------------------------------------------------------------
+
+/**
+ * The controls that are allowed to be smaller than the minimum, each with its reason. An entry with `narrowOnly` is exempt from the
+ * 44 pixel minimum of a phone-sized window only; the 28 pixel minimum of a desktop one applies to it.
+ */
+export const TARGET_EXEMPT = [
+  {
+    selector: ".chat-text a",
+    reason: "a link inside running text is not a button: its size is the size of its words, and the page opens it only through the shell",
+  },
+  {
+    selector: ".bar-info button",
+    reason: "the title bar keeps one height for all its buttons (the chat button is one of them), so on a narrow window it is not given a 44 pixel height alone",
+    narrowOnly: true,
+  },
+];
+
+/**
+ * The size of the touch targets of the page now. `spec.min` is the smallest side in CSS pixels (44 on a phone, 28 on a desktop),
+ * `spec.narrow` says which window it is, `spec.selectors` are the controls the state must show (every one must match at least
+ * one visible control, else the state was not reached) and `spec.scope` is a selector inside which every other visible control
+ * (`button`, `[role="radio"]`, `[role="checkbox"]`, `input`, `textarea`, `summary`, `a[href]`) is measured too and must be large
+ * enough or match an entry of `TARGET_EXEMPT`. A checkbox or a radio is measured by its label. Answers the lines of what is wrong.
+ */
+export async function measure(page, spec) {
+  const exempt = TARGET_EXEMPT.map((e) => ({ selector: e.selector, narrowOnly: e.narrowOnly === true }));
+  assert.ok(TARGET_EXEMPT.every((e) => typeof e.reason === "string" && e.reason.length > 20), "every exemption names its reason");
+  return page.evaluate(
+    ({ selectors, scope, min, narrow, exemptions }) => {
+      const lines = [];
+      const slack = 0.5;
+      const visible = (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden";
+      const targetOf = (n) =>
+        n instanceof HTMLInputElement && (n.type === "checkbox" || n.type === "radio") ? (n.labels?.[0] ?? n.closest("label") ?? n) : n;
+      const sizeOf = (n) => {
+        const r = targetOf(n).getBoundingClientRect();
+        return { w: r.width, h: r.height };
+      };
+      const where = (n) => {
+        const cls = typeof n.className === "string" && n.className !== "" ? `.${n.className.split(/\s+/)[0]}` : "";
+        return `${n.localName}${cls}${n.id === "" ? "" : `#${n.id}`}`;
+      };
+      const seen = new Set();
+      for (const selector of selectors) {
+        const found = [...document.querySelectorAll(selector)].filter(visible);
+        if (found.length === 0) {
+          lines.push(`missing: ${selector} matches no visible control, so the state was not reached`);
+          continue;
+        }
+        for (const n of found) {
+          seen.add(targetOf(n));
+          const { w, h } = sizeOf(n);
+          if (Math.min(w, h) < min - slack) lines.push(`small: ${selector} (${where(n)}) is ${w.toFixed(1)} by ${h.toFixed(1)}, the least is ${min}`);
+        }
+      }
+      if (scope !== null) {
+        const root = document.querySelector(scope);
+        if (root === null) lines.push(`missing: the scope ${scope} is not on the page`);
+        else {
+          const all = root.querySelectorAll('button, [role="radio"], [role="checkbox"], input, textarea, summary, a[href]');
+          for (const n of all) {
+            if (!visible(n) && !(n instanceof HTMLInputElement && targetOf(n) !== n && visible(targetOf(n)))) continue;
+            if (n instanceof HTMLInputElement && n.type === "hidden") continue;
+            const target = targetOf(n);
+            if (seen.has(target)) continue;
+            const { w, h } = sizeOf(n);
+            if (Math.min(w, h) >= min - slack) continue;
+            if (exemptions.some((e) => (!e.narrowOnly || narrow) && n.matches(e.selector))) continue;
+            lines.push(`unlisted: a control that is not in the table is ${w.toFixed(1)} by ${h.toFixed(1)}: ${where(n)} (${n.textContent.trim().slice(0, 30)})`);
+          }
+        }
+      }
+      return lines;
+    },
+    { selectors: spec.selectors, scope: spec.scope ?? null, min: spec.min, narrow: spec.narrow === true, exemptions: exempt },
+  );
+}
+
+/** The two windows of the sweep: a phone and a desktop. */
+export const WINDOWS = [
+  { name: "phone", size: { width: 390, height: 780 }, min: 44, narrow: true },
+  { name: "desktop", size: { width: 1000, height: 640 }, min: 28, narrow: false },
+];
