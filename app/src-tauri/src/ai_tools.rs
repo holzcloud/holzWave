@@ -667,8 +667,8 @@ impl ToolHost for ShellTools {
         match tool {
             ToolName::ReadFile | ToolName::ListDir | ToolName::Grep => world.file_target(pane).is_some(),
             ToolName::ReadPane => world.terminal(pane).is_some(),
-            ToolName::WriteFile => world.file_target(pane).is_some(),
-            ToolName::EditFile | ToolName::RunCommand => false,
+            ToolName::WriteFile | ToolName::EditFile => world.file_target(pane).is_some(),
+            ToolName::RunCommand => false,
         }
     }
 
@@ -679,7 +679,8 @@ impl ToolHost for ShellTools {
             Tool::Grep(args) => self.file_record(scope, tool, &args.path, Ending::Folder),
             Tool::ReadPane(args) => self.pane_record(scope, args),
             Tool::WriteFile(args) => self.file_record(scope, tool, &args.path, Ending::File),
-            Tool::EditFile(_) | Tool::RunCommand(_) => Err(ToolError::Unavailable),
+            Tool::EditFile(args) => self.file_record(scope, tool, &args.path, Ending::File),
+            Tool::RunCommand(_) => Err(ToolError::Unavailable),
         }
     }
 
@@ -689,8 +690,8 @@ impl ToolHost for ShellTools {
             Tool::ListDir(args) => self.list_dir(ticket, args, cancel),
             Tool::Grep(args) => self.grep(ticket, args, cancel),
             Tool::ReadPane(args) => self.read_pane(args, cancel),
-            Tool::WriteFile(_) => crate::ai_write::run(self, ticket, cancel),
-            Tool::EditFile(_) | Tool::RunCommand(_) => Err(ToolError::Unavailable),
+            Tool::WriteFile(_) | Tool::EditFile(_) => crate::ai_write::run(self, ticket, cancel),
+            Tool::RunCommand(_) => Err(ToolError::Unavailable),
         }
     }
 
@@ -923,8 +924,9 @@ impl AppCore {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
+    use super::rig::run_call;
 
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
@@ -1178,20 +1180,6 @@ pub(crate) mod tests {
         (ShellTools::with_targets(DenyPolicy::new(protected), world.clone()), world)
     }
 
-    /// Proposes a call, decides on the card's hash and runs it: the whole way a call goes, for a host under test.
-    pub(crate) fn run_call(
-        table: &ApprovalTable,
-        host: &ShellTools,
-        scope: &Scope,
-        name: &str,
-        args: Value,
-    ) -> Result<ToolOutput, ToolError> {
-        let call = ToolCall { id: "call".to_owned(), name: name.to_owned(), args };
-        let pending = table.propose(host, scope, &call)?;
-        table.decide(&scope.conversation, "call", Decision::Allow, &pending.hash)?;
-        table.run(host, scope, "call", &CancelToken::new())
-    }
-
     fn local_world(tmp: &Tmp, pane: PaneId) -> FakeTargets {
         let target = local_target(Some(&tmp.path("")), Some(&tmp.path("")));
         FakeTargets::default().with_files(pane, target, Arc::new(LocalSource::new(Some(tmp.0.clone()))))
@@ -1224,19 +1212,21 @@ pub(crate) mod tests {
         };
         assert_eq!(
             offered(1),
-            ["read_file", "list_dir", "grep", "read_pane", "write_file"],
+            ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file"],
             "this computer: files and a terminal"
         );
         assert_eq!(offered(2), Vec::<&str>::new(), "a pane that is not open");
         assert_eq!(offered(3), ["read_pane"], "a terminal with no file target offers no file tool");
-        assert_eq!(offered(4), ["read_file", "list_dir", "grep", "write_file"], "a file browser has files and no terminal");
+        assert_eq!(
+            offered(4),
+            ["read_file", "list_dir", "grep", "write_file", "edit_file"],
+            "a file browser has files and no terminal"
+        );
         for pane in [1, 3, 4] {
-            for tool in [ToolName::EditFile, ToolName::RunCommand] {
-                assert!(!host.available(tool, pane), "{tool:?} is not built");
-            }
+            assert!(!host.available(ToolName::RunCommand, pane), "run_command is not built");
         }
         let declared: Vec<String> = specs(&host, 1).into_iter().map(|spec| spec.name).collect();
-        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file"]);
+        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file"]);
     }
 
     #[test]
@@ -1859,5 +1849,44 @@ pub(crate) mod tests {
         }
         assert!(shown[5].contains("5000") && shown[5].contains("400"), "{}", shown[5]);
         assert!(shown[6].contains("alive: false"), "{}", shown[6]);
+    }
+}
+
+/// The way a call goes, for the tests of this module and of the write module: they share it so that the approval table is
+/// decided in this file only.
+#[cfg(test)]
+pub(crate) mod rig {
+    use super::*;
+
+    use holzwave_core::ai::tools::ApprovalTable;
+    use holzwave_core::ai::types::ToolCall;
+    use serde_json::Value;
+
+    /// Proposes a call, decides on the card's hash and runs it: the whole way a call goes, for a host under test.
+    pub(crate) fn run_call(
+        table: &ApprovalTable,
+        host: &ShellTools,
+        scope: &Scope,
+        name: &str,
+        args: Value,
+    ) -> Result<ToolOutput, ToolError> {
+        run_call_between(table, host, scope, name, args, &|| {})
+    }
+
+    /// [`run_call`] with a step between the decision and the run, in which a test changes the world: a file that another
+    /// program writes after the person approved the card.
+    pub(crate) fn run_call_between(
+        table: &ApprovalTable,
+        host: &ShellTools,
+        scope: &Scope,
+        name: &str,
+        args: Value,
+        between: &dyn Fn(),
+    ) -> Result<ToolOutput, ToolError> {
+        let call = ToolCall { id: "call".to_owned(), name: name.to_owned(), args };
+        let pending = table.propose(host, scope, &call)?;
+        table.decide(&scope.conversation, "call", Decision::Allow, &pending.hash)?;
+        between();
+        table.run(host, scope, "call", &CancelToken::new())
     }
 }

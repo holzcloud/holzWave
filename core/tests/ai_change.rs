@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use holzwave_core::ai::provider::CancelToken;
 use holzwave_core::ai::tools::{
-    ApprovalTable, Base, Change, ChangeFault, Decision, DenyPolicy, DiffKind, DiffRow, Inspected, Resolved, Scope,
-    Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput, diff, diff_with, plan,
+    ApprovalTable, Base, Change, ChangeFault, Decision, DenyPolicy, DiffKind, DiffRow, FsKind, Inspected, MAX_BASE_BYTES,
+    Pending, Resolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput, diff, diff_with, plan, visible,
+    visible_multiline,
 };
 use holzwave_core::ai::types::ToolCall;
 use holzwave_core::layout::PaneId;
@@ -41,6 +42,7 @@ struct State {
     inspects: usize,
     reads: usize,
     ran: Vec<Ran>,
+    kind: FsKind,
 }
 
 /// One call the host was asked to run: what its ticket held.
@@ -58,7 +60,21 @@ struct WriteHost {
 
 impl WriteHost {
     fn new() -> Self {
-        Self { state: Arc::new(Mutex::new(State { files: BTreeMap::new(), inspects: 0, reads: 0, ran: Vec::new() })) }
+        Self {
+            state: Arc::new(Mutex::new(State {
+                files: BTreeMap::new(),
+                inspects: 0,
+                reads: 0,
+                ran: Vec::new(),
+                kind: FsKind::Remote,
+            })),
+        }
+    }
+
+    /// The same host acting on this computer instead.
+    fn on_this_computer(self) -> Self {
+        self.state().kind = FsKind::Local;
+        self
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -94,7 +110,10 @@ impl ToolHost for WriteHost {
     }
 
     fn resolve(&self, _scope: &Scope, tool: &Tool) -> Result<Resolved, ToolError> {
-        let mut resolved = Resolved::remote(3, "build box");
+        let mut resolved = match self.state().kind {
+            FsKind::Remote => Resolved::remote(3, "build box"),
+            FsKind::Local => Resolved::local(3, "This computer"),
+        };
         if let Some(path) = tool.path() {
             resolved = resolved.with_path(path);
         }
@@ -503,4 +522,343 @@ fn a_read_card_keeps_its_shape_and_a_host_that_does_not_inspect_keeps_the_old_ca
     let card: Value = serde_json::from_str(&text).expect("a card");
     assert_eq!(payload_names(&card), ["tool", "pane", "target", "remote", "path", "content", "resolved_path"]);
     assert!(pending.diff().is_none());
+}
+
+fn edit_call(id: &str, path: &str, old: &str, new: &str, all: bool) -> ToolCall {
+    ToolCall {
+        id: id.to_owned(),
+        name: "edit_file".to_owned(),
+        args: json!({"path": path, "old_text": old, "new_text": new, "replace_all": all}),
+    }
+}
+
+/// The card as JSON, for a call that must make one.
+fn card_of(table: &ApprovalTable, host: &WriteHost, call: &ToolCall) -> Value {
+    let pending = table.propose(host, &scope(), call).unwrap_or_else(|error| panic!("no card: {error}"));
+    serde_json::to_value(&pending).expect("a card")
+}
+
+/// The sentence the model hears for a call that the table refused before any card existed.
+fn refusal_of(table: &ApprovalTable, host: &WriteHost, call: &ToolCall) -> String {
+    let error = table.propose(host, &scope(), call).expect_err("a call that makes no card");
+    assert!(matches!(error, ToolError::InvalidArguments(_)), "{error:?}");
+    assert!(table.pending("chat-1").iter().all(|card| card.call_id != call.id), "a refused call leaves no card waiting");
+    error.to_result(&call.id).content
+}
+
+fn texts_of(card: &Value) -> Vec<String> {
+    card["diff"]["rows"].as_array().expect("rows").iter().filter_map(|row| row["text"].as_str().map(str::to_owned)).collect()
+}
+
+#[test]
+fn hidden_characters_are_escaped_in_the_rows_and_the_payload() {
+    let old = "plain\nbad\u{202e}line\u{200b}x\n\tindent\u{e0041}\r\nback\\slash\n";
+    let new = "plain\nbad\u{202e}LINE\u{200b}x\n\tindent\u{e0041}\r\nback\\slash\nu{202e} literal\n";
+    let host = WriteHost::new().with_file(NOTES, old, 5);
+    let card = card_of(&table(), &host, &write_call("c1", NOTES, new));
+    let rows = card["diff"]["rows"].as_array().expect("rows");
+    let shown = serde_json::to_string(rows).expect("rows");
+    for raw in ['\u{202e}', '\u{200b}', '\u{e0041}', '\r'] {
+        assert!(!shown.contains(raw), "a raw {raw:?} is in the rows");
+    }
+    let lines: Vec<String> = texts_of(&card);
+    assert!(lines.iter().any(|t| t.contains("\\u{202e}")), "the bidi override is written out: {lines:?}");
+    assert!(lines.iter().any(|t| t.contains("\\u{200b}")), "{lines:?}");
+    assert!(lines.iter().any(|t| t.contains("\\u{e0041}")), "{lines:?}");
+    assert!(lines.iter().any(|t| t.contains("\\t")), "a tab: {lines:?}");
+    assert!(lines.iter().any(|t| t.ends_with("\\r") || t.contains("\\r")), "a carriage return is shown as \\r: {lines:?}");
+    assert!(lines.iter().any(|t| t.contains("back\\\\slash")), "a backslash is doubled: {lines:?}");
+    // A line that really holds a backslash and the letters differs from the line that holds the character.
+    let escaped = visible("a\u{202e}b");
+    let literal = visible("a\\u{202e}b");
+    assert_ne!(escaped, literal);
+    // Every row is `visible` of its line, and the content of the payload is `visible_multiline` of the content.
+    let del: Vec<&str> = rows.iter().filter(|r| r["op"] == "del").map(|r| r["text"].as_str().expect("text")).collect();
+    assert_eq!(del, [visible("bad\u{202e}line\u{200b}x")]);
+    assert_eq!(payload_value(&card, "content"), Some(visible_multiline(new)));
+}
+
+#[test]
+fn a_change_too_large_to_show_is_refused_with_a_phrase_and_no_card() {
+    let lines = |tag: &str, n: usize| -> String { (0..n).map(|i| format!("{tag} {i}\n")).collect() };
+    let table = table();
+    let phrase = ChangeFault::NotShown.phrase();
+
+    // 3000 lines replaced by 3000 other lines are 6000 rows: refused, nothing waits, nothing runs.
+    let host = WriteHost::new().with_file(NOTES, &lines("old", 3000), 5);
+    let said = refusal_of(&table, &host, &write_call("big", NOTES, &lines("new", 3000)));
+    assert!(said.contains(phrase), "{said}");
+    assert_eq!(host.run_count(), 0);
+
+    // Exactly 4000 rows are shown, and one more pair is not.
+    let host = WriteHost::new().with_file(NOTES, &lines("old", 2000), 5);
+    let accepted = table.propose(&host, &scope(), &write_call("edge", NOTES, &lines("new", 2000))).expect("4000 rows");
+    let accepted_diff = accepted.diff().expect("a diff").clone();
+    assert_eq!(accepted_diff.rows.len(), 4000);
+    let rebuilt_old: String = accepted_diff.rows.iter().filter_map(|r| if let DiffRow::Del { text, .. } = r { Some(format!("{text}\n")) } else { None }).collect();
+    let rebuilt_new: String = accepted_diff.rows.iter().filter_map(|r| if let DiffRow::Add { text, .. } = r { Some(format!("{text}\n")) } else { None }).collect();
+    assert_eq!((rebuilt_old, rebuilt_new), (lines("old", 2000), lines("new", 2000)), "the accepted diff rebuilds both texts");
+    let host = WriteHost::new().with_file(NOTES, &lines("old", 2001), 5);
+    let said = refusal_of(&table, &host, &write_call("over", NOTES, &lines("new", 2001)));
+    assert!(said.contains(phrase), "{said}");
+
+    // Ten scattered edits in a file of 20000 lines stay cheap and keep their context and gaps.
+    let long: String = (0..20_000).map(|i| if i % 2000 == 7 { format!("XX {i}\n") } else { format!("l{i:05}\n") }).collect();
+    assert!(long.len() < MAX_BASE_BYTES);
+    let host = WriteHost::new().with_file(NOTES, &long, 5);
+    let started = std::time::Instant::now();
+    let card = card_of(&table, &host, &edit_call("scatter", NOTES, "XX", "YY", true));
+    let spent = started.elapsed();
+    println!("diff of 20000 lines with ten edits: {spent:?}");
+    assert!(spent.as_secs() < 20, "ten scattered edits took {spent:?}");
+    let rows = card["diff"]["rows"].as_array().expect("rows");
+    assert_eq!(rows.iter().filter(|r| r["op"] == "del").count(), 10);
+    assert_eq!(rows.iter().filter(|r| r["op"] == "add").count(), 10);
+    assert!(rows.iter().any(|r| r["op"] == "gap"));
+    assert!(rows.len() < 100, "context and gaps only: {}", rows.len());
+
+    // One line of 600000 characters replaced by a short text is refused for its characters.
+    let wide = "a".repeat(600_000);
+    let host = WriteHost::new().with_file(NOTES, &wide, 5);
+    let said = refusal_of(&table, &host, &write_call("wide", NOTES, "short"));
+    assert!(said.contains(phrase), "{said}");
+}
+
+#[test]
+fn edit_file_replaces_one_match_or_all_and_refuses_the_rest() {
+    let table = table();
+    let text = "one foo two\nfoo\nthree foo\n";
+    let host = WriteHost::new().with_file(NOTES, text, 9);
+
+    // One match: a card of kind edit with the eleven fields and the effective `replace_all`.
+    let single = "keep\nonly bar here\nkeep\n";
+    let host_one = WriteHost::new().with_file(NOTES, single, 9);
+    let card = card_of(&table, &host_one, &edit_call("e1", NOTES, "bar", "baz", false));
+    assert_eq!(card["diff"]["kind"], json!("edit"));
+    assert_eq!(
+        payload_names(&card),
+        ["tool", "pane", "target", "remote", "path", "old_text", "new_text", "replace_all", "resolved_path", "stamp", "base"]
+    );
+    assert_eq!(payload_value(&card, "replace_all").as_deref(), Some("false"));
+
+    // Three matches without `replace_all`: a refusal; with it, the card has the three changes.
+    let said = refusal_of(&table, &host, &edit_call("e2", NOTES, "foo", "bar", false));
+    assert!(said.contains(ChangeFault::Ambiguous.phrase()), "{said}");
+    let card = card_of(&table, &host, &edit_call("e3", NOTES, "foo", "bar", true));
+    let rows = card["diff"]["rows"].as_array().expect("rows");
+    assert_eq!(rows.iter().filter(|r| r["op"] == "del").count(), 3);
+    assert_eq!(rows.iter().filter(|r| r["op"] == "add").count(), 3);
+    assert_eq!(payload_value(&card, "replace_all").as_deref(), Some("true"));
+
+    // No match, equal texts, no file.
+    let said = refusal_of(&table, &host, &edit_call("e4", NOTES, "absent", "x", false));
+    assert!(said.contains(ChangeFault::NoMatch.phrase()), "{said}");
+    let said = refusal_of(&table, &host, &edit_call("e5", NOTES, "foo", "foo", false));
+    assert!(said.contains(ChangeFault::Same.phrase()), "{said}");
+    let said = refusal_of(&table, &WriteHost::new(), &edit_call("e6", NOTES, "foo", "bar", false));
+    assert!(said.contains(ChangeFault::NoFile.phrase()), "{said}");
+
+    // Matches are counted without overlap: `aa` in `aaaa` is two.
+    let host_aa = WriteHost::new().with_file(NOTES, "aaaa\n", 9);
+    let said = refusal_of(&table, &host_aa, &edit_call("e7", NOTES, "aa", "b", false));
+    assert!(said.contains(ChangeFault::Ambiguous.phrase()), "{said}");
+    let card = card_of(&table, &host_aa, &edit_call("e8", NOTES, "aa", "b", true));
+    assert_eq!(card["diff"]["after_bytes"], json!(3), "two matches replaced by `b`, then the line break");
+
+    // A result over the limit is refused before any diff work.
+    let large = "x".repeat(MAX_BASE_BYTES - 10);
+    let host_large = WriteHost::new().with_file(NOTES, &large, 9);
+    let said = refusal_of(&table, &host_large, &edit_call("e9", NOTES, "x", "yy", true));
+    assert!(said.contains(ChangeFault::TooLarge.phrase()), "{said}");
+
+    // The planner's text for the allowed call is the base with the replacement made by hand.
+    let tool = Tool::parse("edit_file", &json!({"path": NOTES, "old_text": "foo", "new_text": "bar", "replace_all": true})).expect("a tool");
+    let change = plan(&tool, &Base::Text(text.to_owned())).expect("a change");
+    assert_eq!(change.after, "one bar two\nbar\nthree bar\n");
+    let tool = Tool::parse("edit_file", &json!({"path": NOTES, "old_text": "bar", "new_text": "baz"})).expect("a tool");
+    assert_eq!(plan(&tool, &Base::Text(single.to_owned())).expect("a change").after, "keep\nonly baz here\nkeep\n");
+
+    // None of the phrases holds a path or text.
+    for fault in [
+        ChangeFault::NotAWrite, ChangeFault::NoFile, ChangeFault::NoMatch, ChangeFault::Ambiguous, ChangeFault::Same,
+        ChangeFault::Unchanged, ChangeFault::TooLarge, ChangeFault::NotShown,
+    ] {
+        let phrase = fault.phrase();
+        assert!(!phrase.contains('/') && !phrase.contains(OLD_CANARY) && !phrase.contains(NEW_CANARY), "{phrase}");
+        assert!(!phrase.contains('\n') && !phrase.is_empty());
+    }
+}
+
+#[test]
+fn a_new_file_has_only_added_rows_and_no_stamp() {
+    let table = table();
+    let host = WriteHost::new();
+    let card = card_of(&table, &host, &write_call("n1", "/w/new.txt", "one\ntwo\n"));
+    assert_eq!(card["diff"]["kind"], json!("create"));
+    assert_eq!(card["diff"]["before_bytes"], Value::Null);
+    assert_eq!(card["diff"]["removed"], json!(0));
+    let rows = card["diff"]["rows"].as_array().expect("rows");
+    assert!(rows.iter().all(|r| r["op"] == "add"), "only added rows");
+    assert_eq!(payload_names(&card), ["tool", "pane", "target", "remote", "path", "content", "resolved_path", "base"]);
+    assert_eq!(payload_value(&card, "base").as_deref(), Some("none"));
+
+    // An empty text for a file that does not exist is a card with no rows.
+    let card = card_of(&table, &host, &write_call("n2", "/w/empty.txt", ""));
+    assert_eq!(card["diff"]["rows"], json!([]));
+    assert_eq!(card["diff"]["kind"], json!("create"));
+
+    // The same text as the file holds is refused with its phrase, and no card exists.
+    let host = WriteHost::new().with_file(NOTES, "same\n", 5);
+    let said = refusal_of(&table, &host, &write_call("n3", NOTES, "same\n"));
+    assert!(said.contains(ChangeFault::Unchanged.phrase()), "{said}");
+}
+
+#[test]
+fn the_base_digest_and_the_stamp_are_part_of_the_hash() {
+    let call = write_call("h1", NOTES, "text\n");
+    let hash_with = |host: &WriteHost| table().propose(host, &scope(), &call).expect("a card").hash;
+    let baseline = hash_with(&WriteHost::new().with_file(NOTES, "abc\n", 7));
+    let one_byte = hash_with(&WriteHost::new().with_file(NOTES, "abd\n", 7));
+    let stamp = hash_with(&WriteHost::new().with_file(NOTES, "abc\n", 8));
+    let absent = hash_with(&WriteHost::new());
+    let empty = hash_with(&WriteHost::new().with_file(NOTES, "", 7));
+    let all = [&baseline, &one_byte, &stamp, &absent, &empty];
+    for (i, a) in all.iter().enumerate() {
+        for b in &all[i + 1..] {
+            assert_ne!(a, b, "two different worlds gave the same hash");
+        }
+    }
+    assert_eq!(baseline, hash_with(&WriteHost::new().with_file(NOTES, "abc\n", 7)), "the same inputs give the same hash");
+
+    // The row is `none` or `sha256:` and 64 lower-case hex digits, and its size is that length.
+    for (host, expected) in [(WriteHost::new(), 4usize), (WriteHost::new().with_file(NOTES, "", 1), 71)] {
+        let pending = table().propose(&host, &scope(), &call).expect("a card");
+        let base = pending.payload.iter().find(|field| field.name == "base").expect("a base row");
+        assert_eq!(base.bytes, expected);
+        assert_eq!(base.value.len(), expected);
+        if expected == 71 {
+            assert!(base.value.starts_with("sha256:") && base.value[7..].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        } else {
+            assert_eq!(base.value, "none");
+        }
+    }
+}
+
+#[test]
+fn a_file_changed_after_the_card_refuses_the_call_even_with_the_same_time_and_size() {
+    let call = write_call("x1", NOTES, "text one\n");
+    let propose_and_allow = |host: &WriteHost| -> ApprovalTable {
+        let table = table();
+        let pending = table.propose(host, &scope(), &call).expect("a card");
+        table.decide("chat-1", "x1", Decision::Allow, &pending.hash).expect("decided");
+        table
+    };
+    let attempt = |table: &ApprovalTable, host: &WriteHost| {
+        let outcome = table.run(host, &scope(), "x1", &CancelToken::new());
+        assert_eq!(outcome.expect_err("refused"), ToolError::PayloadChanged);
+        assert_eq!(host.run_count(), 0, "the host never ran");
+        assert!(table.pending("chat-1").is_empty());
+        let again = table.run(host, &scope(), "x1", &CancelToken::new()).expect_err("the call is gone");
+        assert_eq!(again, ToolError::UnknownCall);
+    };
+
+    // Other text of the same length and the same change time.
+    let host = WriteHost::new().with_file(NOTES, "abcdef\n", 100);
+    let table = propose_and_allow(&host);
+    host.change(NOTES, "abcdeX\n", 100);
+    attempt(&table, &host);
+
+    // The file is removed meanwhile.
+    let host = WriteHost::new().with_file(NOTES, "abcdef\n", 100);
+    let table = propose_and_allow(&host);
+    host.remove(NOTES);
+    attempt(&table, &host);
+
+    // A file appears where the card was for a new file.
+    let host = WriteHost::new();
+    let table = propose_and_allow(&host);
+    host.change(NOTES, "somebody else\n", 100);
+    attempt(&table, &host);
+
+    // Only the change time moves, the text is the same.
+    let host = WriteHost::new().with_file(NOTES, "abcdef\n", 100);
+    let table = propose_and_allow(&host);
+    host.change(NOTES, "abcdef\n", 101);
+    attempt(&table, &host);
+
+    // An edit whose text vanished from the file is a changed payload too, not an argument error.
+    let host = WriteHost::new().with_file(NOTES, "keep foo keep\n", 100);
+    let table = self::table();
+    let edit = edit_call("x2", NOTES, "foo", "bar", false);
+    let pending = table.propose(&host, &scope(), &edit).expect("a card");
+    table.decide("chat-1", "x2", Decision::Allow, &pending.hash).expect("decided");
+    host.change(NOTES, "keep fo0 keep\n", 100);
+    assert_eq!(table.run(&host, &scope(), "x2", &CancelToken::new()).expect_err("refused"), ToolError::PayloadChanged);
+    assert_eq!(host.run_count(), 0);
+}
+
+#[test]
+fn the_host_is_asked_to_inspect_only_after_the_walls_passed() {
+    let table = table();
+    let host = WriteHost::new();
+    for path in ["/home/u/.ssh/config", "/proj/.env", "/home/u/.zshrc", "/proj/.git/hooks/pre-commit"] {
+        let error = table.propose(&host, &scope(), &write_call("w", path, "x")).expect_err(path);
+        assert!(matches!(error, ToolError::Denied(_)), "{path}: {error:?}");
+    }
+    assert_eq!(host.inspects(), 0, "a protected place is never looked at");
+
+    // The directories the shell protects: a write below one is refused before the host looks.
+    let data = std::env::temp_dir().join(format!("holzwave-change-{}", std::process::id()));
+    std::fs::create_dir_all(&data).expect("a folder");
+    let protected = data.canonicalize().expect("canonical");
+    let guarded = ApprovalTable::new(DenyPolicy::new(vec![protected.clone()]));
+    let local = WriteHost::new().on_this_computer();
+    let inside = protected.join("settings.json");
+    let error = guarded.propose(&local, &scope(), &write_call("w", inside.to_str().expect("utf-8"), "x")).expect_err("protected");
+    assert!(matches!(error, ToolError::Denied(_)), "{error:?}");
+    assert_eq!(local.inspects(), 0);
+    let _ = std::fs::remove_dir_all(&data);
+
+    // A read call never asks the host to inspect; a write that passes the walls asks once when proposed and once when run.
+    let host = WriteHost::new().with_file(NOTES, "a\n", 3);
+    let read = ToolCall { id: "r".to_owned(), name: "read_file".to_owned(), args: json!({"path": NOTES}) };
+    table.propose(&host, &scope(), &read).expect("a read card");
+    assert_eq!(host.inspects(), 0);
+    let pending = table.propose(&host, &scope(), &write_call("w2", NOTES, "b\n")).expect("a card");
+    assert_eq!(host.inspects(), 1);
+    table.decide("chat-1", "w2", Decision::Allow, &pending.hash).expect("decided");
+    table.run(&host, &scope(), "w2", &CancelToken::new()).expect("ran");
+    assert_eq!(host.inspects(), 2);
+}
+
+#[test]
+fn no_debug_output_of_the_change_types_shows_text() {
+    let old = format!("alpha\nbeta {OLD_CANARY}\ngamma\n");
+    let new = format!("alpha\nbeta {NEW_CANARY}\ngamma\n");
+    let host = WriteHost::new().with_file(NOTES, &old, 4);
+    let table = table();
+    let pending: Pending = table.propose(&host, &scope(), &write_call("d1", NOTES, &new)).expect("a card");
+    let change = Change { before: Some(old.clone()), after: new.clone(), kind: DiffKind::Replace };
+    let made = diff(&change).expect("a diff");
+    let inspected = Inspected::new(Base::Text(old.clone()), Some(4));
+    let resolved = Resolved::remote(3, "build box").with_path(NOTES).with_base(Base::Text(old.clone()));
+    let mut shown: Vec<String> = Vec::new();
+    for text in [&old, &new] {
+        shown.push(format!("{:?} {:#?}", Base::Text(text.clone()), Base::Text(text.clone())));
+    }
+    shown.push(format!("{:?} {:#?}", Base::Absent, Base::Absent));
+    shown.push(format!("{change:?} {change:#?}"));
+    shown.push(format!("{made:?} {made:#?}"));
+    for row in &made.rows {
+        shown.push(format!("{row:?} {row:#?}"));
+    }
+    for row in [DiffRow::Gap { skipped: 4 }, DiffRow::Note { text: NEW_CANARY.to_owned() }] {
+        shown.push(format!("{row:?} {row:#?}"));
+    }
+    shown.push(format!("{inspected:?} {inspected:#?}"));
+    shown.push(format!("{resolved:?} {resolved:#?}"));
+    shown.push(format!("{pending:?} {pending:#?}"));
+    let all = shown.join("\n");
+    assert!(!all.contains(OLD_CANARY) && !all.contains(NEW_CANARY) && !all.contains("alpha") && !all.contains("gamma"), "{all}");
+    assert!(all.contains("bytes>") && all.contains("absent"), "a size is shown: {all}");
 }

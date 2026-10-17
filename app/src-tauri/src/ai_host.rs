@@ -2222,8 +2222,8 @@ mod tests {
         let requests = provider.requests();
         assert_eq!(requests.len(), 2, "the second request carries the result");
         let declared: Vec<&str> = requests[1].tools.iter().map(|spec| spec.name.as_str()).collect();
-        let offered = ["read_file", "list_dir", "grep", "read_pane", "write_file"];
-        assert_eq!(declared, offered, "the four read tools and the write tool, and nothing else");
+        let offered = ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file"];
+        assert_eq!(declared, offered, "the four read tools and the two write tools, and nothing else");
         let last = requests[1].messages.last().expect("a message");
         assert_eq!(last.role, Role::Tool);
         let returned = last.parts.iter().any(|part| match part {
@@ -2980,5 +2980,175 @@ mod tests {
         assert!(sent.contains("The user denied this action."), "the model is told");
         assert!(!sent.contains(OLD_TEXT), "the old text of the file reached the model after a denial");
         assert!(!stored_text(&scratch.0).contains(OLD_TEXT), "the old text reached a stored chat");
+    }
+
+    /// A chat whose model asked for `args` of `tool` over `todo` and is waiting for a decision: the core, its recorder, the
+    /// chat, the card's hash and the provider.
+    fn waiting_call(
+        scratch: &Path,
+        tool: &str,
+        args: Value,
+    ) -> (Arc<AppCore>, Arc<AiRecorder>, String, String, Arc<ScriptedProvider>) {
+        let (core, rec) = core_with(scratch, KeyVault::unavailable());
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted").with_turn(tool_call_turn("call_1", tool, args)).with_turn(text_turn("Done.")),
+        );
+        let chat = new_chat();
+        start(&core, &chat, pane_of(&core), "change my file");
+        let card = event_of(&rec, &chat, "tool_proposed");
+        let hash = card["pending"]["hash"].as_str().expect("a hash").to_owned();
+        (core, rec, chat, hash, provider)
+    }
+
+    #[test]
+    fn an_edit_call_changes_one_match_and_the_diff_shows_it() {
+        let tree = Scratch::new("edit-tree");
+        let scratch = Scratch::new("edit-trace");
+        let todo = todo_tree(&tree.0);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let missing = json!({"path": todo, "old_text": "no such line", "new_text": "x"});
+        let edit = json!({"path": todo, "old_text": format!("beta {OLD_TEXT}"), "new_text": format!("beta {NEW_TEXT}")});
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "edit_file", edit))
+                .with_turn(text_turn("Done."))
+                .with_turn(tool_call_turn("call_2", "edit_file", missing))
+                .with_turn(text_turn("It was not there.")),
+        );
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        start(&core, &chat, pane, "change my todo list");
+        let proposed = event_of(&rec, &chat, "tool_proposed");
+        let card = &proposed["pending"];
+        assert_eq!((card["tool"].as_str(), card["effect"].as_str()), (Some("edit_file"), Some("write")));
+        assert_eq!(card["diff"]["kind"], json!("edit"));
+        assert_eq!(
+            payload_names(card),
+            ["tool", "pane", "target", "remote", "path", "old_text", "new_text", "replace_all", "resolved_path", "stamp", "base"]
+        );
+        let hash = card["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(result["is_error"], json!(false), "{result}");
+        assert!(result["content"].as_str().is_some_and(|text| text.ends_with("1 line added, 1 removed.")));
+        assert_eq!(std::fs::read_to_string(&todo).expect("the file"), new_todo(), "one line is replaced, the rest is kept");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)));
+
+        // An edit whose text is not in the file has no card; the model is told with the fixed phrase and goes on.
+        start(&core, &chat, pane, "and once more");
+        let second = nth_event(&rec, &chat, "tool_result", 1);
+        assert_eq!(second["call_id"], json!("call_2"));
+        assert_eq!(second["is_error"], json!(true));
+        let text = second["content"].as_str().expect("content");
+        assert!(text.contains("old_text was not found in the file"), "{text}");
+        assert!(!text.contains("no such line") && !text.contains(todo.to_str().expect("utf-8")), "{text}");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended_turns(&chat) == 2));
+        assert_eq!(events_of(&rec, &chat, "tool_proposed").len(), 1, "the second call never had a card");
+        assert_eq!(ends_of(&rec, &chat), ["done", "done"]);
+        assert_eq!(provider.calls(), 4);
+    }
+
+    #[test]
+    fn a_file_changed_after_the_card_is_refused_when_the_call_runs() {
+        let changed = ToolError::PayloadChanged.to_string();
+        let other = old_todo().replace("old", "oth");
+        assert_eq!(other.len(), old_todo().len());
+
+        // (a) Other text of the same length and the same change time.
+        let tree = Scratch::new("stale-tree");
+        let scratch = Scratch::new("stale-trace");
+        let todo = todo_tree(&tree.0);
+        let before = std::fs::metadata(&todo).expect("metadata").modified().expect("a time");
+        let (core, rec, chat, hash, provider) =
+            waiting_call(&scratch.0, "write_file", json!({"path": todo, "content": new_todo()}));
+        std::fs::write(&todo, &other).expect("the other program writes");
+        std::fs::File::options().write(true).open(&todo).expect("open").set_modified(before).expect("the time is set back");
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!((result["is_error"].clone(), result["content"].clone()), (json!(true), json!(changed)));
+        assert_eq!(std::fs::read(&todo).expect("the file"), other.as_bytes(), "the file is as the other program left it");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)));
+        let sent = serde_json::to_string(&provider.requests().iter().map(|r| &r.messages).collect::<Vec<_>>()).expect("serialises");
+        assert!(!sent.contains(OLD_TEXT), "the old text reached the model");
+
+        // (b) The file is removed while the card waits.
+        let tree = Scratch::new("stale-tree");
+        let scratch = Scratch::new("stale-trace");
+        let todo = todo_tree(&tree.0);
+        let (core, rec, chat, hash, _) = waiting_call(&scratch.0, "write_file", json!({"path": todo, "content": new_todo()}));
+        std::fs::remove_file(&todo).expect("removed");
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!((result["is_error"].clone(), result["content"].clone()), (json!(true), json!(changed)));
+        assert!(!todo.exists(), "nothing was written");
+
+        // (c) A card for a new file, and a file appears where it would go.
+        let tree = Scratch::new("stale-tree");
+        let scratch = Scratch::new("stale-trace");
+        let proj = tree.0.join("proj");
+        std::fs::create_dir_all(&proj).expect("a folder");
+        let fresh = proj.canonicalize().expect("canonical").join("fresh.txt");
+        let (core, rec, chat, hash, _) = waiting_call(&scratch.0, "write_file", json!({"path": fresh, "content": new_todo()}));
+        std::fs::write(&fresh, "somebody else\n").expect("the other program writes");
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!((result["is_error"].clone(), result["content"].clone()), (json!(true), json!(changed)));
+        assert_eq!(std::fs::read_to_string(&fresh).expect("the file"), "somebody else\n");
+    }
+
+    #[test]
+    fn a_write_to_protected_places_is_refused_before_any_card() {
+        let home = Scratch::new("wwall-home");
+        let scratch = Scratch::new("wwall-data");
+        let (core, rec) = core_protecting(&scratch.0, Vec::new());
+        let data = scratch.0.canonicalize().expect("canonical");
+        let root = home.0.canonicalize().expect("canonical");
+        let ssh = put(&root, "home/.ssh/config", &format!("secret {SECRET_TEXT}\n"));
+        let zshrc = put(&root, "home/.zshrc", "export A=1\n");
+        let env = put(&root, "proj/.env", "A=1\n");
+        std::fs::create_dir_all(root.join("proj/.git/hooks")).expect("a folder");
+        let hook = root.join("proj/.git/hooks/pre-commit");
+        let mut places = vec![data.join("settings.json"), zshrc.clone(), ssh.clone(), env.clone(), hook.clone()];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("home/.ssh"), root.join("proj/link")).expect("a link");
+            places.push(root.join("proj/link/new.txt"));
+        }
+
+        let mut provider = scripted_tools("scripted");
+        for (n, path) in places.iter().enumerate() {
+            provider = provider.with_turn(tool_call_turn(&format!("call_{n}"), "write_file", json!({"path": path, "content": "pwned\n"})));
+            provider = provider.with_turn(text_turn("noted"));
+        }
+        let provider = register(&core, "scripted", provider);
+        let chat = new_chat();
+        let pane = pane_of(&core);
+        for n in 0..places.len() {
+            say(&core, &rec, &chat, pane, &format!("write number {n}"));
+        }
+        assert!(events_of(&rec, &chat, "tool_proposed").is_empty(), "a protected place showed a card");
+        let results = events_of(&rec, &chat, "tool_result");
+        assert_eq!(results.len(), places.len());
+        let refusal = ToolError::Denied("secret_location").to_string();
+        for (n, result) in results.iter().enumerate() {
+            assert_eq!(result["is_error"], json!(true), "call {n}");
+            assert_eq!(result["content"], json!(refusal), "call {n} does not give the fixed refusal");
+        }
+        assert_eq!(std::fs::read_to_string(&zshrc).expect("the file"), "export A=1\n");
+        assert_eq!(std::fs::read_to_string(&env).expect("the file"), "A=1\n");
+        assert!(!hook.exists() && !data.join("settings.json").exists() && !root.join("home/.ssh/new.txt").exists());
+        assert!(ends_of(&rec, &chat).iter().all(|end| end == "done"));
+
+        let snapshot = json_of(&core.ai().snapshot(&chat).expect("a snapshot"));
+        let shown = everything_serialised(&rec, &[snapshot]);
+        assert!(!shown.contains(SECRET_TEXT), "the secret reached an event or a view");
+        let sent: String =
+            provider.requests().iter().map(|r| serde_json::to_string(&r.messages).expect("serialises")).collect();
+        assert!(!sent.contains(SECRET_TEXT), "the secret reached the model");
     }
 }

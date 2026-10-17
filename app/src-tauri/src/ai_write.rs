@@ -159,12 +159,13 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use holzwave_core::ai::tools::{ApprovalTable, DenyPolicy, Scope, specs};
+    use holzwave_core::ai::types::ToolCall;
     use holzwave_core::files::{Entry, Listing};
     use holzwave_core::layout::PaneId;
     use holzwave_core::{Error, Result as CoreResult};
     use serde_json::{Value, json};
 
-    use crate::ai_tools::tests::run_call;
+    use crate::ai_tools::rig::{run_call, run_call_between};
     use crate::ai_tools::{FileTarget, RowsFault, SaveFault, TerminalTarget, Targets};
 
     use holzwave_core::ai::tools::{ToolHost, ToolName};
@@ -187,7 +188,6 @@ mod tests {
     struct Mem {
         files: Mutex<BTreeMap<String, Held>>,
         folders: Mutex<BTreeSet<String>>,
-        links: Mutex<BTreeSet<String>>,
         listings: Mutex<BTreeMap<String, Listing>>,
         reads: AtomicUsize,
         stats: AtomicUsize,
@@ -226,6 +226,10 @@ mod tests {
 
         fn read_count(&self) -> usize {
             self.reads.load(Ordering::SeqCst)
+        }
+
+        fn stat_count(&self) -> usize {
+            self.stats.load(Ordering::SeqCst)
         }
     }
 
@@ -301,6 +305,7 @@ mod tests {
         clock: AtomicI64,
         refuse: Mutex<Option<SaveFault>>,
         appear: Mutex<Option<(String, String)>>,
+        sources: AtomicUsize,
     }
 
     impl Stage {
@@ -329,6 +334,10 @@ mod tests {
             *self.appear.lock().unwrap_or_else(PoisonError::into_inner) = Some((path.to_owned(), text.to_owned()));
         }
 
+        fn sources_made(&self) -> usize {
+            self.sources.load(Ordering::SeqCst)
+        }
+
         fn mem_of(&self, source: &str) -> Option<Arc<Mem>> {
             self.files.values().find(|(target, _)| target.source == source).map(|(_, mem)| mem.clone())
         }
@@ -344,6 +353,7 @@ mod tests {
         }
 
         fn file_source(&self, pane: PaneId) -> Option<Arc<dyn FileSource>> {
+            self.sources.fetch_add(1, Ordering::SeqCst);
             self.files.get(&pane).map(|(_, mem)| mem.clone() as Arc<dyn FileSource>)
         }
 
@@ -433,11 +443,11 @@ mod tests {
         assert!(!host.available(ToolName::WriteFile, 3), "a terminal with no file target has no file to write");
         assert!(host.available(ToolName::WriteFile, 4), "a file browser has files");
         assert!(!host.available(ToolName::WriteFile, 2), "a pane that is not open");
-        for tool in [ToolName::EditFile, ToolName::RunCommand] {
-            assert!(!host.available(tool, 1), "{tool:?} is not built yet");
-        }
+        assert!(host.available(ToolName::EditFile, 1) && host.available(ToolName::EditFile, 4));
+        assert!(!host.available(ToolName::EditFile, 3) && !host.available(ToolName::EditFile, 2));
+        assert!(!host.available(ToolName::RunCommand, 1), "run_command is not built yet");
         let declared: Vec<String> = specs(&host, 1).into_iter().map(|spec| spec.name).collect();
-        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file"]);
+        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file"]);
     }
 
     #[test]
@@ -486,5 +496,199 @@ mod tests {
             assert!(!output.text().contains(canary), "the outcome says too much: {}", output.text());
         }
         assert_eq!(mem.text(&path), Some(new), "the file holds the new text");
+    }
+
+    /// A remote host `box` on pane 1 over `mem`, with `/srv/app` listed as the server resolves it.
+    fn remote_host(mem: &Arc<Mem>) -> (ShellTools, Arc<Stage>) {
+        let stage = Arc::new(Stage::default().with_files(1, target("box", "build box", true), mem.clone()));
+        (ShellTools::with_targets(DenyPolicy::new(Vec::new()), stage.clone()), stage)
+    }
+
+    fn edit_args(path: &str, old: &str, new: &str, all: bool) -> Value {
+        json!({"path": path, "old_text": old, "new_text": new, "replace_all": all})
+    }
+
+    #[test]
+    fn an_edit_changes_only_the_matched_text_and_keeps_the_rest_byte_for_byte() {
+        let original = ["fn main() {", "\tlet \u{e9} = 1;", "\tlet \u{e9} = 2;", "}"].join("\r\n");
+        let mem = Arc::new(Mem::default());
+        mem.put("/w/main.rs", original.as_bytes(), 1_700_000_000);
+        let (host, stage) = this_computer(&mem);
+        let table = table();
+
+        let output = run_call(&table, &host, &scope(1), "edit_file", edit_args("/w/main.rs", "\tlet \u{e9} = 1;", "\tlet \u{e9} = 3;", false))
+            .expect("edited");
+        let saves = stage.saves();
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].text, original.replace("= 1;", "= 3;"), "the line endings, the tab and the accent are kept");
+        assert_eq!(saves[0].expected, Some(1_700_000_000));
+        assert!(output.text().ends_with("1 line added, 1 removed."), "{}", output.text());
+
+        // The accent occurs on two lines: without `replace_all` the call is refused at proposal and nothing is saved.
+        let before = stage.saves().len();
+        let call = ToolCall { id: "call".to_owned(), name: "edit_file".to_owned(), args: edit_args("/w/main.rs", "\u{e9}", "e", false) };
+        let error = table.propose(&host, &scope(1), &call).expect_err("several matches");
+        assert!(error.to_string().contains("old_text occurs more than once"), "{error}");
+        assert_eq!(stage.saves().len(), before);
+
+        let output = run_call(&table, &host, &scope(1), "edit_file", edit_args("/w/main.rs", "\u{e9}", "e", true)).expect("edited");
+        let saves = stage.saves();
+        assert_eq!(saves.last().map(|s| s.text.as_str()), Some(["fn main() {", "\tlet e = 3;", "\tlet e = 2;", "}"].join("\r\n").as_str()));
+        assert!(output.text().ends_with("2 lines added, 2 removed."), "{}", output.text());
+    }
+
+    #[test]
+    fn a_new_file_is_saved_only_if_it_is_still_absent() {
+        let mem = Arc::new(Mem::default());
+        let (host, stage) = this_computer(&mem);
+        let table = table();
+
+        let output = run_call(&table, &host, &scope(1), "write_file", write_args("/w/new.txt", "one\ntwo\n")).expect("created");
+        let saves = stage.saves();
+        assert_eq!(saves.len(), 1);
+        assert_eq!(saves[0].expected, Some(CREATE_ONLY), "a new file is saved only while it is absent");
+        assert!(output.text().starts_with("Created the file."), "{}", output.text());
+        assert!(output.text().ends_with("2 lines added, 0 removed."), "{}", output.text());
+
+        // The file appeared after the card: the save is refused and the other program's file stays.
+        let mem = Arc::new(Mem::default());
+        let (host, stage) = this_computer(&mem);
+        stage.appear_before_save("/w/race.txt", "somebody else\n");
+        let error = run_call(&table, &host, &scope(1), "write_file", write_args("/w/race.txt", "mine\n")).expect_err("refused");
+        assert_eq!(error, host_error(SAVE_REFUSED));
+        assert_eq!(mem.text("/w/race.txt").as_deref(), Some("somebody else\n"), "the file stays as the other program made it");
+
+        // A folder that is not there is refused at proposal; nothing is read or saved.
+        let mem = Arc::new(Mem::default());
+        let (host, stage) = this_computer(&mem);
+        let error = run_call(&table, &host, &scope(1), "write_file", write_args("/nowhere/new.txt", "x\n")).expect_err("no folder");
+        assert_eq!(error, host_error(NO_FOLDER));
+        assert!(stage.saves().is_empty());
+        assert_eq!(mem.read_count(), 0);
+    }
+
+    /// The error a host answers with a fixed phrase.
+    fn host_error(phrase: &str) -> ToolError {
+        ToolError::Host(holzwave_core::ai::provider::Detail::new(phrase))
+    }
+
+    #[test]
+    fn a_binary_oversized_or_non_utf8_file_is_refused_with_fixed_phrases() {
+        let mem = Arc::new(Mem::default());
+        mem.put(&format!("/w/{PATH_CANARY}.bin"), b"ab\0cd", 1);
+        mem.put(&format!("/w/{PATH_CANARY}.latin"), &[0x66, 0xe9, 0x67], 1);
+        mem.put(&format!("/w/{PATH_CANARY}.big"), &vec![b'a'; MAX_BASE_BYTES + 1], 1);
+        let (host, stage) = this_computer(&mem);
+        let table = table();
+        let write = |name: &str| run_call(&table, &host, &scope(1), "write_file", write_args(&format!("/w/{name}"), "x\n"));
+
+        for (name, phrase) in [(format!("{PATH_CANARY}.bin"), NOT_TEXT), (format!("{PATH_CANARY}.latin"), NOT_TEXT)] {
+            let error = write(&name).expect_err(&name);
+            assert_eq!(error, host_error(phrase), "{name}");
+            assert!(!error.to_string().contains(PATH_CANARY), "{error}");
+        }
+        let reads = mem.read_count();
+        let error = write(&format!("{PATH_CANARY}.big")).expect_err("too big");
+        assert_eq!(error, host_error(TOO_BIG));
+        assert_eq!(mem.read_count(), reads, "the file is not read before its size is known");
+        let error = run_call(&table, &host, &scope(1), "write_file", write_args("/w", "x\n")).expect_err("a folder");
+        assert_eq!(error, host_error(NOT_A_FILE));
+        assert!(!error.to_string().contains(PATH_CANARY));
+        assert!(stage.saves().is_empty());
+    }
+
+    #[test]
+    fn a_remote_write_needs_the_real_folder_and_refuses_a_link() {
+        let mem = Arc::new(Mem::default());
+        mem.put("/srv/app/notes.txt", b"remote words\n", 1_700_000_050);
+        mem.put("/srv/app/link.txt", b"link bytes\n", 1);
+        let file = |name: &str, link: bool, size: u64, modified: Option<i64>| entry(name, Kind::File, link, size, modified);
+        mem.list_as(
+            "/srv/app",
+            "/srv/app",
+            vec![file("notes.txt", false, 13, Some(1_700_000_050)), file("link.txt", true, 11, Some(1))],
+            false,
+        );
+        mem.list_as("/srv/link", "/srv/real", vec![file("x.txt", false, 1, Some(1))], false);
+        mem.list_as("/srv/big", "/srv/big", vec![file("a.txt", false, 1, Some(1))], true);
+        let (host, stage) = remote_host(&mem);
+        let table = table();
+        let write = |path: &str| run_call(&table, &host, &scope(1), "write_file", write_args(path, "new words\n"));
+
+        write("/srv/app/notes.txt").expect("saved");
+        let saves = stage.saves();
+        assert_eq!(saves.len(), 1);
+        assert_eq!((saves[0].source.as_str(), saves[0].expected), ("box", Some(1_700_000_050)), "the change time of its entry");
+        assert_eq!(write("/srv/app/new.txt").map(|o| o.text().starts_with("Created the file.")), Ok(true), "a new file in a listed folder");
+
+        let reads = mem.read_count();
+        assert_eq!(write("/srv/app/link.txt").expect_err("a link"), host_error(REMOTE_LINK));
+        assert_eq!(mem.read_count(), reads, "the bytes of a link are never read");
+
+        for path in ["/srv/app/../app/notes.txt", "/srv//app/notes.txt", "/srv/link/x.txt"] {
+            assert_eq!(write(path).expect_err(path), host_error(NOT_THE_REAL_PATH), "{path}");
+        }
+        assert_eq!(write("/srv/big/zzz.txt").expect_err("truncated"), host_error(FOLDER_TOO_LARGE));
+        assert_eq!(write("/srv/nolisting/a.txt").expect_err("no listing"), host_error(UNREADABLE));
+
+        let made = stage.sources_made();
+        assert_eq!(write("/srv/app/.env").expect_err("an env file"), ToolError::Denied("env_file"));
+        assert_eq!(stage.sources_made(), made, "a source was made for a call that never had a card");
+    }
+
+    #[test]
+    fn a_changed_file_is_refused_by_the_time_the_card_showed() {
+        let call_with = |change: &dyn Fn(&Mem)| -> Result<ToolOutput, ToolError> {
+            let mem = Arc::new(Mem::default());
+            mem.put("/w/notes.txt", b"abcdef\n", 100);
+            let (host, stage) = this_computer(&mem);
+            let outcome = run_call_between(
+                &table(),
+                &host,
+                &scope(1),
+                "write_file",
+                write_args("/w/notes.txt", "text\n"),
+                &|| change(&mem),
+            );
+            assert!(stage.saves().is_empty(), "nothing was saved over a file that changed");
+            outcome
+        };
+        // The text changes and the change time stays; only the change time moves; the file is removed.
+        assert_eq!(call_with(&|mem| mem.put("/w/notes.txt", b"abcdeX\n", 100)).expect_err("changed"), ToolError::PayloadChanged);
+        assert_eq!(call_with(&|mem| mem.put("/w/notes.txt", b"abcdef\n", 101)).expect_err("touched"), ToolError::PayloadChanged);
+        assert_eq!(call_with(&|mem| mem.remove("/w/notes.txt")).expect_err("removed"), ToolError::PayloadChanged);
+    }
+
+    #[test]
+    fn the_write_tools_cannot_reach_protected_places() {
+        let tree = std::env::temp_dir().join(format!("holzwave-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        for folder in ["data", "home/.ssh", "proj/.git/hooks"] {
+            std::fs::create_dir_all(tree.join(folder)).expect("a folder");
+        }
+        std::fs::write(tree.join("home/.zshrc"), "x").expect("a file");
+        std::fs::write(tree.join("proj/.env"), "x").expect("a file");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tree.join("home/.ssh"), tree.join("proj/link")).expect("a link");
+        let root = tree.canonicalize().expect("canonical");
+
+        let mem = Arc::new(Mem::default());
+        let stage = Arc::new(Stage::default().with_files(1, target("local", "This computer", false), mem.clone()));
+        let policy = DenyPolicy::new(vec![root.join("data")]);
+        let host = ShellTools::with_targets(DenyPolicy::new(vec![root.join("data")]), stage.clone());
+        let table = ApprovalTable::new(policy);
+        let mut places = vec!["data/settings.json", "home/.zshrc", "home/.ssh/config", "proj/.env", "proj/.git/hooks/pre-commit"];
+        if cfg!(unix) {
+            places.push("proj/link/new.txt");
+        }
+        for place in places {
+            let path = root.join(place);
+            let error = run_call(&table, &host, &scope(1), "write_file", write_args(path.to_str().expect("utf-8"), "x\n"))
+                .expect_err(place);
+            assert!(matches!(error, ToolError::Denied(_)), "{place}: {error:?}");
+        }
+        assert_eq!((mem.stat_count(), mem.read_count(), stage.sources_made()), (0, 0, 0), "nothing was looked at");
+        assert!(stage.saves().is_empty());
+        let _ = std::fs::remove_dir_all(&tree);
     }
 }
