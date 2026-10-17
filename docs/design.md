@@ -227,6 +227,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | AI chat: running a command | ![](design/ai-command.png) ![](design/ai-command-states.png) | the command card, the end of the command next to the buttons, and the states of a finished command (6.17): the whole command in a payload box with no height limit, the banner with the sentence that a command will run, then the rows of a command that ran, one that failed, one that timed out and one that was denied, each with its report as text, and the card of a command on a remote host while it runs |
 | AI providers | ![](design/ai-providers.png) | the dialog for providers, keys, the two privacy settings and the gateway disclosure (6.13) |
 | AI chat (sidebar) | ![](design/ai-chat.png) | the column form (6.18), which replaces the sidebar: the head with `◂ Sidebar`, the title button and `＋ New chat`, the chat of 6.12 below it with the consent card of 6.14 |
+| AI chat: conversations | ![](design/ai-sidebar-list.png) | the list of stored chats under the head (6.18): the chat on screen with the rose wash and a 2 px bar, the model and age of every row, a chat in a pane with no `×`, a delete that was armed (`Delete?`), the core's note about its folder and the sentence under the head |
+| AI chat: approval in the column | ![](design/ai-sidebar-cards.png) | the approval card of 6.15 in the strip of the column (6.18): the fields stacked with the size at the right of the name, `✦ AI · 1` in the title bar, the place chip, the hash and the two buttons |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -261,7 +263,7 @@ the bottom bar holds the tabs of the shown workspace. Tokens are the ones above;
 
 ![Phone](design/7-phone.png)
 
-A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) and the approval card (6.15) sit inside the screen with the same 44 px targets, and on a phone the payload box of the approval card scrolls inside it. The diff box of a write card (6.16) is part of the card with the same 44 px targets, wraps its rows and scrolls inside its own height, and the `Undo` button of a finished write is 44 px too. On a phone the command card (6.17) grows and the strip scrolls, the command wraps and the buttons keep their 44 px targets. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text. The AI form of the sidebar column (6.18) is the screen on a phone like the sidebar is, with the same 44 px targets and composer text of at least 16 px.
+A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) and the approval card (6.15) sit inside the screen with the same 44 px targets, and on a phone the payload box of the approval card scrolls inside it. The diff box of a write card (6.16) is part of the card with the same 44 px targets, wraps its rows and scrolls inside its own height, and the `Undo` button of a finished write is 44 px too. On a phone the command card (6.17) grows and the strip scrolls, the command wraps and the buttons keep their 44 px targets. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text. The AI form of the sidebar column (6.18) is the screen on a phone like the sidebar is, with the same 44 px targets and composer text of at least 16 px (the phone image is in 6.18).
 
 ### 6.7 Platforms
 
@@ -1010,6 +1012,8 @@ a time. `▥ Sidebar` and `Cmd+B` show and hide the column in whichever form it 
 launches: the column opens as the sidebar, so a launch never puts a transcript on the screen or asks the core for a chat
 unasked. The title bar needs no new control.
 
+![AI chat in the sidebar](design/ai-chat.png)
+
 The chat in the column is the module of the chat pane (6.12): the same bar, transcript, strip of cards, status line and
 composer, fed by the same events. It is not a block, so it is not in the layout and not restored at launch (its file is,
 and the list shows it).
@@ -1045,6 +1049,8 @@ chat` when empty) and under it, in mono and dim, the model the chat is pinned to
 (`llama3.2 · 2 h ago`). Titles are the first line of what someone typed, so they are text and nothing else. The notes that
 the core sends about the folder are shown as dim lines above the rows (at most five). At most 500 rows are drawn.
 
+![Conversations](design/ai-sidebar-list.png)
+
 **One chat has one place.** A chat that is open in a pane of this window says `in pane 3` instead of the age. Choosing it
 focuses that pane (or, when the pane is in another tab, says `That chat is open in another tab.`), and it has no delete
 button, so a chat is never in the column and in a pane at once. A switch carries nothing: the strip, the attached offer and
@@ -1066,6 +1072,8 @@ same components in the strip. In the column the payload rows stack (the name abo
 name), the diff and the command wrap and never need a horizontal scroll, and the strip is at most half the height of the
 column and scrolls inside.
 
+![Approval in the column](design/ai-sidebar-cards.png)
+
 **A decision is brought to the person.** When a tool call waits in the column's chat and the column is hidden or shows the
 sidebar, `✦ AI · n` shows the column in the AI form on that chat. A card never takes the keyboard by itself.
 
@@ -1076,6 +1084,8 @@ rows, `Home` and `End` go to the first and the last. Every control carries `data
 **Narrow screens (640 px and narrower).** The column is the screen, as the sidebar is. `◂ Sidebar`, the title button,
 `＋ New chat`, the row buttons and `×` are at least 44 px high (`×` also 44 px wide), composer text is at least 16 px, and the
 provider picker stays the bottom sheet of 6.12.
+
+![On a phone](design/ai-sidebar-phone.png)
 
 **Accessibility.** While the AI form shows, the column is an `aside` named `AI chat`. The title button has `aria-expanded`
 and `aria-controls` the list; the list is a `list` named `Chats` and the chat on screen has `aria-current`; the status line

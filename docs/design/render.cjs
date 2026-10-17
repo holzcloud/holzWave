@@ -3,6 +3,14 @@
 //   node docs/design/render.cjs --view <data-v> [--os mac|win|lin] --out <png>   one view, the element #stage
 //   node docs/design/render.cjs --phones <element id> --out <png>                 one row of phones, that element
 //   node docs/design/render.cjs --check                                           every view and every phones row
+//   node docs/design/render.cjs --dump <data-v|phones id|all>                     the SHA-256 of the markup of one view or row, or a
+//                                                                                 JSON object with one for every view and phones row
+//   --html <file>                                                                 with any mode: render this copy of the design page
+//                                                                                 instead of the committed one (the default is unchanged)
+//
+// The dump makes a change that is meant to touch one view provable: a copy of the page before the change (`git show
+// <commit>:docs/design/haarlinie-voll.html`) and the page after it are dumped and compared, and every key whose value differs
+// is a view or row that changed.
 //
 // The page is opened from its file address in headless Chromium at 1400 by 1000 with a device scale factor of 2, as
 // CLAUDE.md says; the stage is made exactly 1120 by 680 (the page fits it to the width of the window otherwise). Every request that is not a file address is refused, so the web font host is never reached; the
@@ -13,6 +21,7 @@
 // It needs `playwright-core` (the version app/package.json pins) in app/node_modules, or anywhere `require` finds it,
 // and a Chromium that Playwright can launch (PLAYWRIGHT_BROWSERS_PATH points at one that is not in the default place).
 // A later change that draws something new in the page reuses this script for its images.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -49,6 +58,8 @@ const usage = () => {
   console.error('usage: node docs/design/render.cjs --view <data-v> [--os mac|win|lin] --out <png>');
   console.error('       node docs/design/render.cjs --phones <element id> --out <png>');
   console.error('       node docs/design/render.cjs --check');
+  console.error('       node docs/design/render.cjs --dump <data-v|phones id|all>');
+  console.error('       any mode: --html <file> renders that copy of the design page');
   process.exit(2);
 };
 
@@ -57,13 +68,13 @@ function parse(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--check') out.check = true;
-    else if (['--view', '--os', '--phones', '--out'].includes(a)) {
+    else if (['--view', '--os', '--phones', '--out', '--dump', '--html'].includes(a)) {
       const v = argv[++i];
       if (v === undefined || v.startsWith('--')) usage();
       out[a.slice(2)] = v;
     } else usage();
   }
-  const modes = [out.check, out.view, out.phones].filter((m) => m !== undefined).length;
+  const modes = [out.check, out.view, out.phones, out.dump].filter((m) => m !== undefined).length;
   if (modes !== 1) usage();
   if ((out.view || out.phones) && !out.out) usage();
   if (out.os && !['mac', 'win', 'lin'].includes(out.os)) usage();
@@ -71,8 +82,8 @@ function parse(argv) {
   return out;
 }
 
-/** The page in a fresh browser: the fonts in, every request that is not a file address refused. */
-async function open() {
+/** The page in a fresh browser: the fonts in, every request that is not a file address refused. `file` is another copy of the page. */
+async function open(file = PAGE) {
   const { chromium } = loadPlaywright();
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: SCALE });
@@ -85,7 +96,7 @@ async function open() {
     refused.push(url);
     return route.abort();
   });
-  await page.goto(pathToFileURL(PAGE).href);
+  await page.goto(pathToFileURL(path.resolve(file)).href);
   await page.addStyleTag({ content: fontCss() });
   // `#fit` has a 1 px border on each side, so 1122 px leave the stage 1120 px: its own size, and a scale of 1.
   await page.addStyleTag({ content: '#fit{width:1122px}' });
@@ -102,12 +113,12 @@ async function show(page, view, os) {
   await page.evaluate(() => document.fonts.ready);
 }
 
-async function check() {
-  const { browser, page, problems, refused } = await open();
+async function check(file) {
+  const { browser, page, problems, refused } = await open(file);
   const failures = [...problems];
   const views = await page.$$eval('#views button', (bs) => bs.map((b) => b.dataset.v));
   if (views.length === 0) failures.push('the view picker has no buttons');
-  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiapprove', 'kiapprovestates', 'kiwrite', 'kiwritestates', 'kicommand', 'kicommandstates', 'kiset']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
+  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiapprove', 'kiapprovestates', 'kiwrite', 'kiwritestates', 'kicommand', 'kicommandstates', 'kiset', 'kichats', 'kisidecards']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
   for (const view of views) {
     await show(page, view);
     const stage = await page.$eval('#stage .m', (m) => m.children.length).catch(() => 0);
@@ -129,9 +140,11 @@ async function check() {
   if (writePhones !== 2) failures.push(`#phones-write holds ${writePhones} phones, not 2`);
   const commandPhones = await page.$$eval('#phones-command .ph1', (n) => n.length);
   if (commandPhones !== 2) failures.push(`#phones-command holds ${commandPhones} phones, not 2`);
+  const sidePhones = await page.$$eval('#phones-side .ph1', (n) => n.length);
+  if (sidePhones !== 2) failures.push(`#phones-side holds ${sidePhones} phones, not 2`);
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);
@@ -139,10 +152,45 @@ async function check() {
   console.log('ok');
 }
 
+const sha256 = (text) => crypto.createHash('sha256').update(text).digest('hex');
+
+/**
+ * The SHA-256 of the rendered markup of every view (the stage and the note under the picker) and of every row of phones (the
+ * markup inside the row), by id. `which` is one id or `all`; no image is made.
+ */
+async function dump(which, file) {
+  const { browser, page, problems } = await open(file);
+  try {
+    const views = await page.$$eval('#views button', (bs) => bs.map((b) => b.dataset.v));
+    const rows = await page.$$eval('.phones', (ns) => ns.map((n) => n.id));
+    const hashes = {};
+    for (const view of views) {
+      if (which !== 'all' && which !== view) continue;
+      await show(page, view);
+      const stage = await page.$eval('#stage', (n) => n.innerHTML);
+      const note = await page.$eval('#note', (n) => n.textContent);
+      hashes[view] = sha256(`${stage}\n${note}`);
+    }
+    for (const row of rows) {
+      if (which !== 'all' && which !== row) continue;
+      hashes[row] = sha256(await page.$eval(`#${row}`, (n) => n.innerHTML));
+    }
+    if (which !== 'all' && hashes[which] === undefined) throw new Error(`no view or phones row ${which}`);
+    console.log(which === 'all' ? JSON.stringify(hashes, null, 2) : hashes[which]);
+  } finally {
+    await browser.close();
+  }
+  if (problems.length > 0) {
+    for (const p of problems) console.error(`FAIL ${p}`);
+    process.exit(1);
+  }
+}
+
 async function main() {
   const args = parse(process.argv.slice(2));
-  if (args.check) return check();
-  const { browser, page, problems } = await open();
+  if (args.check) return check(args.html);
+  if (args.dump !== undefined) return dump(args.dump, args.html);
+  const { browser, page, problems } = await open(args.html);
   try {
     if (args.view) {
       await show(page, args.view, args.os);

@@ -74,3 +74,23 @@
 .sb-ai .side-chat .approval-name { grid-area: name; min-width: 0; overflow-wrap: anywhere; }
 .sb-ai .side-chat .approval-bytes { grid-area: bytes; }
 .sb-ai .side-chat .approval-value { grid-area: value; }
+
+/* ---- narrow screens: 640 px and narrower -------------------------------------------------------------------------------- */
+
+/* The column is the screen, as the sidebar is: the form's own width rule is more specific than the column's, so it needs its own
+   narrow rule. Every control of the head and the list is at least 44 px high (the delete button also 44 px wide); the composer
+   text and the sheet of the provider picker are the chat's own narrow rules, which reach into the column. */
+@media (max-width: 640px) {
+  #sidebar[data-form="chat"] { width: 100%; }
+  .sb-ai .ai-side-back, .sb-ai .ai-side-title, .sb-ai .ai-side-new, .sb-ai .ai-side-pick, .sb-ai .ai-side-del { min-height: max(44px, calc(44rem / 12)); }
+  .sb-ai .ai-side-del { min-width: max(44px, calc(44rem / 12)); }
+}
+
+/* ---- forced colours: system colours outline the chat on screen and the focused controls ------------------------------------- */
+
+@media (forced-colors: active) {
+  :root .ai-side-row[data-current="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  :root .sb-ai .ai-side-title:focus-visible, :root .sb-ai .ai-side-new:focus-visible, :root .sb-ai .ai-side-back:focus-visible,
+  :root .sb-ai .ai-side-pick:focus-visible, :root .sb-ai .ai-side-del:focus-visible { outline: 2px solid ButtonText; outline-offset: 2px; }
+  :root .sb-ai .ai-side-del[data-armed="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+}
