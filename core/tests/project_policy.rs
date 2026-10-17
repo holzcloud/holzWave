@@ -2606,6 +2606,46 @@ fn architecture_md_states_the_command_and_event_counts_of_the_golden() {
     );
 }
 
+/// The text a command is written as in section 6 of the architecture: the name in backticks, with its argument names in
+/// parentheses, joined by a comma and a space in the golden's order, when it has any.
+fn documented_command(name: &str, arguments: &[String]) -> String {
+    if arguments.is_empty() {
+        format!("`{name}`")
+    } else {
+        format!("`{name}({})`", arguments.join(", "))
+    }
+}
+
+#[test]
+fn architecture_md_names_every_ai_command_and_event_as_the_golden_has_them() {
+    let golden = protocol_golden();
+    let section = markdown_section(&read("docs/architecture.md"), "## 6.");
+    let mut missing = Vec::new();
+    let commands = golden["commands"].as_object().expect("the golden has an object of commands");
+    for (name, arguments) in commands {
+        if !(name.starts_with("ai_") || name == "markdown_render") {
+            continue;
+        }
+        let arguments: Vec<String> = arguments
+            .as_array()
+            .expect("a command lists its argument names")
+            .iter()
+            .map(|a| a.as_str().expect("an argument name").to_owned())
+            .collect();
+        let written = documented_command(name, &arguments);
+        if !section.contains(&written) {
+            missing.push(written);
+        }
+    }
+    for name in golden["events"]["names"].as_array().expect("the golden lists the event names") {
+        let written = format!("`{}`", name.as_str().expect("an event name"));
+        if !section.contains(&written) {
+            missing.push(written);
+        }
+    }
+    assert!(missing.is_empty(), "section 6 of docs/architecture.md does not name, as the golden has them: {missing:?}");
+}
+
 // ---- the test targets the documents name ----------------------------------------------------------------------
 
 /// The words that follow `--test ` (with the space) in `doc`: letters, digits and underscores. `--test-threads` has no
