@@ -342,7 +342,7 @@ fn a_closed_port_is_a_connect_error() {
     assert!(started.elapsed() < Duration::from_secs(3), "the refusal took {:?}", started.elapsed());
 }
 
-// ---- spike S1: the numbers and one real endpoint -----------------------------------------------------------
+// ---- the numbers and one real endpoint -----------------------------------------------------------
 
 /// The milliseconds of a duration, for printing.
 fn ms(duration: Duration) -> f64 {
@@ -369,7 +369,7 @@ async fn time_to_first_delta(client: &reqwest::Client, url: &str) -> Duration {
     first.expect("no chunk arrived")
 }
 
-/// What it costs to stream events through the built client (spike S1).
+/// What it costs to stream events through the built client.
 ///
 /// Time to first delta is measured from `send()` to the first non-empty chunk, on one warm client (one connection, an
 /// unmeasured request first) and on a fresh client with a fresh connection each time. The per-event cost is the wall
@@ -385,7 +385,7 @@ fn time_to_first_delta_and_cost_per_event() {
     const EVENTS: usize = 100_000;
     let options = ClientOptions::new(false, ProxyPolicy::Direct);
     let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-    println!("spike S1 on {} {}, {profile} build", std::env::consts::OS, std::env::consts::ARCH);
+    println!("stream numbers on {} {}, {profile} build", std::env::consts::OS, std::env::consts::ARCH);
 
     let started = Instant::now();
     build_client(&options).expect("a client");
