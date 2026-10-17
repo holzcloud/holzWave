@@ -36,6 +36,7 @@ use tauri::{
 };
 
 use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
+use ai_host::AiParts;
 use state::{AppCore, Out, ShellSpec, Sink, Target};
 use windows::{
     CursorSpot, Frame, Normal, Place, WindowTracker, physical_pixels, pointer_is_global, position_beside,
@@ -350,7 +351,12 @@ pub fn run() {
             let tracker = Arc::new(WindowTracker::default());
             app.manage(tracker.clone());
             let sink = Arc::new(TauriSink { app: app.handle().clone(), tracker });
-            let core = AppCore::new(dir, sink, ShellSpec::default());
+            // No tool may touch the data directory, the configuration directory or the folder of the local socket.
+            let mut protected = Vec::new();
+            protected.extend(app.path().app_config_dir().ok());
+            protected.extend(ipc_dir(app.handle()));
+            let parts = AiParts::system().protecting(protected);
+            let core = AppCore::new_with_ai(dir, sink, ShellSpec::default(), parts);
             app.manage(core.clone());
             if let Some(window) = app.get_webview_window("main") {
                 restore_window(&window, &core, "main");
@@ -530,10 +536,20 @@ impl holzwave_ipc::Handler for IpcHandler {
     }
 }
 
+/// The folder of the local socket: `holzwave` in the runtime directory when there is one, `ipc` in the data directory
+/// otherwise, and none when neither is known. The one definition of the place: the code that creates the socket and the
+/// deny list of the agent both get it from here.
+fn ipc_dir_from(runtime: Option<std::ffi::OsString>, data: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    runtime.map(|dir| std::path::PathBuf::from(dir).join("holzwave")).or_else(|| data.map(|dir| dir.join("ipc")))
+}
+
+/// [`ipc_dir_from`] for this run: the runtime directory variable and the data directory of the app.
+fn ipc_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    ipc_dir_from(std::env::var_os("XDG_RUNTIME_DIR"), app.path().app_data_dir().ok())
+}
+
 fn start_ipc(app: &tauri::AppHandle, core: &std::sync::Arc<AppCore>) {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(|d| std::path::PathBuf::from(d).join("holzwave"))
-        .or_else(|| app.path().app_data_dir().ok().map(|d| d.join("ipc")));
+    let dir = ipc_dir(app);
     let (Some(dir), Ok(token)) = (dir, holzwave_ipc::new_token()) else { return };
     match holzwave_ipc::serve(&dir, token.clone(), std::sync::Arc::new(IpcHandler(core.clone()))) {
         Ok(server) => {
@@ -624,5 +640,37 @@ mod tests {
         let full = WindowFacts { fullscreen: true, ..facts((0, 0), (2560, 1440)) };
         assert_eq!(state_to_note(full, &mut normal), None);
         assert_eq!(normal, Some((10, 20, 900, 600)));
+    }
+
+    #[test]
+    fn the_socket_directory_has_one_definition_and_the_agent_protects_it() {
+        use std::ffi::OsString;
+        use std::path::PathBuf;
+
+        // One pure function names the folder.
+        assert_eq!(
+            ipc_dir_from(Some(OsString::from("/run/user/7")), Some(PathBuf::from("/data"))),
+            Some(PathBuf::from("/run/user/7/holzwave")),
+            "the runtime directory wins"
+        );
+        assert_eq!(ipc_dir_from(None, Some(PathBuf::from("/data"))), Some(PathBuf::from("/data/ipc")));
+        assert_eq!(ipc_dir_from(None, None), None);
+
+        // The code that creates the socket and the code that builds the agent's deny list ask the same helper, and
+        // nothing else builds the folder.
+        let whole = include_str!("lib.rs");
+        let shipped = whole.split("\n#[cfg(test)]\nmod tests").next().expect("a first part");
+        let mut code: String =
+            shipped.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        code.push('\n');
+        assert_eq!(code.matches("join(\"holzwave\")").count(), 1, "the folder is built in one place");
+        let body_of = |signature: &str| -> String {
+            let rest = &code[code.find(signature).unwrap_or_else(|| panic!("{signature} is gone"))..];
+            rest[..rest.find("\n}\n").expect("a closing brace")].to_owned()
+        };
+        assert!(body_of("fn start_ipc(").contains("ipc_dir(app)"), "the socket is made in the folder of the helper");
+        assert!(body_of("pub fn run(").contains("ipc_dir(app.handle())"), "the deny list is told the same folder");
+        assert!(code.contains("protecting("), "the core is built with the places the agent may not touch");
+        assert!(body_of("pub fn run(").contains("app_config_dir"), "and with the configuration directory");
     }
 }

@@ -51,12 +51,23 @@ pub struct AiParts {
     pub vault: KeyVault,
     /// A clock for the saved chats (Unix seconds); `None` is the system clock.
     pub clock: Option<fn() -> i64>,
+    /// Places besides the data directory that no tool may touch: the configuration directory and the folder of the
+    /// local socket. Empty unless [`AiParts::protecting`] names some.
+    pub protected: Vec<PathBuf>,
 }
 
 impl AiParts {
     /// The platform keychain and the system clock.
     pub fn system() -> AiParts {
-        AiParts { vault: KeyVault::new(Arc::new(KeychainStore)), clock: None }
+        AiParts { vault: KeyVault::new(Arc::new(KeychainStore)), clock: None, protected: Vec::new() }
+    }
+
+    /// The same parts with `dirs` added to the places no tool may touch. The deny list of the service, of the tools
+    /// and of the source of shared content are all built from the one list.
+    #[must_use]
+    pub fn protecting(mut self, dirs: Vec<PathBuf>) -> AiParts {
+        self.protected.extend(dirs);
+        self
     }
 }
 
@@ -303,14 +314,16 @@ pub struct AiHost {
 
 impl AiHost {
     /// Builds the service over the chats folder and `ai.json` of `dir`. The data directory is the first place the
-    /// agent may never touch. Nothing else happens here: no thread, no socket, no keychain call.
+    /// agent may never touch, then the places `parts` names. Nothing else happens here: no thread, no socket, no
+    /// keychain call.
     pub fn new(dir: &Path, sink: Arc<dyn Sink>, parts: AiParts) -> AiHost {
-        let context = Arc::new(ShellContext::new(dir));
-        let tools = Arc::new(ShellTools::new(DenyPolicy::new(protected_dirs(dir))));
+        let dirs = protected_dirs(dir, &parts.protected);
+        let context = Arc::new(ShellContext::new(&dirs));
+        let tools = Arc::new(ShellTools::new(DenyPolicy::new(dirs.clone())));
         let mut builder =
             AiService::builder(Arc::new(JsonDirStore::new(dir.join(CHATS_DIR))), Arc::new(ShellAiSink { sink }), dir)
                 .vault(parts.vault)
-                .deny_policy(DenyPolicy::new(protected_dirs(dir)))
+                .deny_policy(DenyPolicy::new(dirs))
                 .tool_host(tools.clone())
                 .context_source(context.clone());
         if let Some(clock) = parts.clock {
@@ -515,10 +528,17 @@ impl AiHost {
     }
 }
 
-/// The places the agent may never touch: the data directory today. The tools that follow add the others. The deny
-/// policy of the service and the one the source of shared content reads files through are built from this one list.
-fn protected_dirs(dir: &Path) -> Vec<PathBuf> {
-    vec![dir.to_path_buf()]
+/// The places the agent may never touch: the data directory first, then each of `extra` once. The deny policy of the
+/// service, the one of the tools and the one the source of shared content reads files through are built from this one
+/// list, and it is the one place to add a directory.
+fn protected_dirs(dir: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = vec![dir.to_path_buf()];
+    for place in extra {
+        if !dirs.contains(place) {
+            dirs.push(place.clone());
+        }
+    }
+    dirs
 }
 
 /// The refusal of a context call as the page receives it.
@@ -581,8 +601,8 @@ struct FileRead {
 }
 
 impl ShellContext {
-    fn new(dir: &Path) -> ShellContext {
-        ShellContext { core: OnceLock::new(), deny: DenyPolicy::new(protected_dirs(dir)) }
+    fn new(protected: &[PathBuf]) -> ShellContext {
+        ShellContext { core: OnceLock::new(), deny: DenyPolicy::new(protected.to_vec()) }
     }
 
     fn bind(&self, core: Weak<AppCore>) {
@@ -954,7 +974,7 @@ mod tests {
             dir.to_path_buf(),
             rec.clone(),
             ShellSpec::new("/bin/cat", &[]),
-            AiParts { vault, clock: Some(fixed_clock) },
+            AiParts { vault, clock: Some(fixed_clock), protected: Vec::new() },
         );
         (core, rec)
     }
@@ -1643,7 +1663,7 @@ mod tests {
             dir.to_path_buf(),
             rec.clone(),
             ShellSpec::new("/bin/sh", &["-c", script]),
-            AiParts { vault: KeyVault::unavailable(), clock: Some(fixed_clock) },
+            AiParts { vault: KeyVault::unavailable(), clock: Some(fixed_clock), protected: Vec::new() },
         );
         (core, rec)
     }
@@ -2277,5 +2297,519 @@ mod tests {
         assert!(sent.contains("The user denied this action."), "the model is told");
         assert!(!sent.contains(TOOL_TEXT), "the file text reached the model after a denial");
         assert!(!everything_serialised(&rec, &[]).contains(TOOL_TEXT), "the file text reached an event");
+    }
+
+    // ---- the walls, the lifecycle and the recorded run --------------------------------------------------------
+
+    use holzwave_core::ai::agent::STOPPED_RESULT;
+
+    /// What the files that no tool may read hold, and what two notes hold; they appear in test code only.
+    const SECRET_TEXT: &str = "zq-secret-text-4d18f6";
+    const NOTES_A: &str = "zq-notes-a-2e7b90";
+    const NOTES_B: &str = "zq-notes-b-9c31d5";
+
+    /// Sends a text for `pane` on the route `scripted` and waits for the end of the turn: for a turn that needs no
+    /// decision.
+    fn say(core: &AppCore, rec: &AiRecorder, chat: &str, pane: Pane, text: &str) {
+        let before = rec.ended_turns(chat);
+        core.ai_send(chat, text.to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+        assert!(wait_for(Duration::from_secs(10), || rec.ended_turns(chat) > before), "the turn ends");
+    }
+
+    /// Sends a text for `pane` and does not wait: the turn is going to stop at a card.
+    fn start(core: &AppCore, chat: &str, pane: Pane, text: &str) {
+        core.ai_send(chat, text.to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+    }
+
+    /// The `end` of every turn of `chat` that ended, in order.
+    fn ends_of(rec: &AiRecorder, chat: &str) -> Vec<String> {
+        events_of(rec, chat, "turn_ended").iter().map(|event| event["end"].as_str().unwrap_or("").to_owned()).collect()
+    }
+
+    /// Writes `text` to `<dir>/<name>`, making the folders, and returns the canonical path.
+    fn put(dir: &Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("a folder");
+        std::fs::write(&path, text).expect("a file");
+        path.canonicalize().expect("a canonical path")
+    }
+
+    /// A core over `data` that also protects `extra`, with the recording sink and the fixed clock.
+    fn core_protecting(data: &Path, extra: Vec<PathBuf>) -> (Arc<AppCore>, Arc<AiRecorder>) {
+        let rec = Arc::new(AiRecorder::default());
+        let parts = AiParts { vault: KeyVault::unavailable(), clock: Some(fixed_clock), protected: Vec::new() };
+        let core = AppCore::new_with_ai(
+            data.to_path_buf(),
+            rec.clone(),
+            ShellSpec::new("/bin/cat", &[]),
+            parts.protecting(extra),
+        );
+        (core, rec)
+    }
+
+    #[test]
+    fn a_tool_cannot_reach_the_agents_own_files_or_the_users_secrets() {
+        let home = Scratch::new("wall-home");
+        let sockets = Scratch::new("wall-sockets");
+        let config = Scratch::new("wall-config");
+        let scratch = Scratch::new("wall-data");
+        let (core, rec) = core_protecting(&scratch.0, vec![config.0.clone(), sockets.0.clone()]);
+        let data = scratch.0.canonicalize().expect("canonical");
+        let secret = |dir: &Path, name: &str| put(dir, name, &format!("secret {SECRET_TEXT}\n"));
+        let places = [
+            secret(&data, "settings.json"),
+            secret(&data, "ai.json"),
+            secret(&data, "chats/c.json"),
+            secret(&config.0, "app.json"),
+            secret(&sockets.0, "ipc.sock"),
+            secret(&home.0, ".ssh/id_rsa"),
+            secret(&home.0, ".aws/credentials"),
+            secret(&home.0, "proj/.env"),
+        ];
+        let notes = put(&home.0, "proj/notes.txt", "alpha beta\n");
+        let spelled = home.0.canonicalize().expect("canonical").join("proj/../.ssh/id_rsa");
+        let mut calls: Vec<(&str, Value)> = places.iter().map(|path| ("read_file", json!({"path": path}))).collect();
+        calls.push(("read_file", json!({"path": spelled})));
+        calls.push(("list_dir", json!({"path": data})));
+        calls.push(("grep", json!({"pattern": "zq", "path": data})));
+        assert_eq!(calls.len(), 11);
+
+        let mut provider = scripted_tools("scripted");
+        for (n, (name, args)) in calls.iter().enumerate() {
+            provider = provider.with_turn(tool_call_turn(&format!("call_{n}"), name, args.clone()));
+            provider = provider.with_turn(text_turn("noted"));
+        }
+        let control = tool_call_turn("call_c", "read_file", json!({"path": notes}));
+        let provider = register(&core, "scripted", provider.with_turn(control).with_turn(text_turn("fine")));
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        for n in 0..calls.len() {
+            say(&core, &rec, &chat, pane, &format!("read number {n}"));
+        }
+        assert!(events_of(&rec, &chat, "tool_proposed").is_empty(), "a protected path showed a card");
+        let results = events_of(&rec, &chat, "tool_result");
+        assert_eq!(results.len(), calls.len());
+        let refusal = ToolError::Denied("secret_location").to_string();
+        for (n, result) in results.iter().enumerate() {
+            assert_eq!(result["is_error"], json!(true), "call {n}");
+            assert_eq!(result["content"], json!(refusal), "call {n} does not give the fixed refusal");
+        }
+        assert!(ends_of(&rec, &chat).iter().all(|end| end == "done"));
+
+        // A harmless file in the same tree still produces a card; the person denies it.
+        start(&core, &chat, pane, "now the notes");
+        let card = nth_event(&rec, &chat, "tool_proposed", 0);
+        let hash = card["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_c", "deny", &hash).expect("a denial");
+        assert!(wait_for(Duration::from_secs(10), || rec.ended_turns(&chat) == calls.len() + 1));
+
+        // The secret is in no event, no snapshot and no request.
+        let snapshot = json_of(&core.ai().snapshot(&chat).expect("a snapshot"));
+        let shown = everything_serialised(&rec, &[snapshot]);
+        assert!(!shown.contains(SECRET_TEXT), "the secret reached an event or a view");
+        let sent: String =
+            provider.requests().iter().map(|r| serde_json::to_string(&r.messages).expect("serialises")).collect();
+        assert!(!sent.contains(SECRET_TEXT), "the secret reached the model");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_changes_after_the_card_is_refused_when_the_call_runs() {
+        let tree = Scratch::new("retarget-tree");
+        let scratch = Scratch::new("retarget-data");
+        let a = put(&tree.0, "proj/a.txt", &format!("{NOTES_A}\n"));
+        let b = put(&tree.0, "proj/b.txt", &format!("{NOTES_B}\n"));
+        let link = a.with_file_name("link.txt");
+        std::os::unix::fs::symlink(&a, &link).expect("a link");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "read_file", json!({"path": link})))
+                .with_turn(text_turn("Done.")),
+        );
+        let chat = new_chat();
+        start(&core, &chat, pane_of(&core), "read the link");
+        let card = event_of(&rec, &chat, "tool_proposed");
+        let resolved = card["pending"]["payload"]
+            .as_array()
+            .and_then(|fields| fields.iter().find(|f| f["name"] == "resolved_path"))
+            .map(|f| f["value"].clone());
+        assert_eq!(resolved, Some(json!(a)), "the card shows the file the link points to");
+        let hash = card["pending"]["hash"].as_str().expect("a hash").to_owned();
+
+        // The link now points to another file; the person's decision still carries the hash of the card.
+        std::fs::remove_file(&link).expect("removed");
+        std::os::unix::fs::symlink(&b, &link).expect("a new link");
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(result["is_error"], json!(true));
+        assert_eq!(result["content"], json!(ToolError::PayloadChanged.to_string()));
+        assert!(wait_for(Duration::from_secs(10), || rec.ended(&chat)));
+        assert_eq!(ends_of(&rec, &chat), ["done"]);
+        let sent = serde_json::to_string(&provider.requests()[1].messages).expect("serialises");
+        assert!(sent.contains("The target changed"), "the model is told");
+        let shown = everything_serialised(&rec, &[]);
+        for canary in [NOTES_A, NOTES_B] {
+            assert!(!shown.contains(canary) && !sent.contains(canary), "{canary} was read");
+        }
+    }
+
+    #[test]
+    fn a_read_taints_the_turn_and_attached_context_taints_it_from_the_first_card() {
+        // (a) A read raises the taint of its turn: the card after it says so.
+        let tree = Scratch::new("taint-tree");
+        let scratch = Scratch::new("taint-data");
+        let notes = tool_tree(&tree.0);
+        let proj = notes.parent().expect("a folder").to_path_buf();
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(
+                    Script::new()
+                        .tool_call("call_1", "read_file", json!({"path": notes}))
+                        .tool_call("call_2", "list_dir", json!({"path": proj}))
+                        .stop(StopReason::ToolUse),
+                )
+                .with_turn(text_turn("Done.")),
+        );
+        let chat = new_chat();
+        start(&core, &chat, pane_of(&core), "read and list");
+        let first = nth_event(&rec, &chat, "tool_proposed", 0);
+        let marks = (first["pending"]["tainted"].as_bool(), first["pending"]["taint"].clone());
+        assert_eq!(marks, (Some(false), json!([])));
+        let hash = first["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_1", "allow", &hash).expect("allowed");
+        let second = nth_event(&rec, &chat, "tool_proposed", 1);
+        assert_eq!(second["pending"]["tainted"], json!(true));
+        assert_eq!(second["pending"]["taint"], json!(["output of read_file"]));
+        let hash = second["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_2", "deny", &hash).expect("denied");
+        assert!(wait_for(Duration::from_secs(10), || rec.ended(&chat)));
+
+        // (b) Context the user attached taints the turn before its first card.
+        let other = Scratch::new("taint-ctx");
+        let (core, rec) = core_with_script(&other.0, "printf 'on the screen\\r\\n'; sleep 30");
+        register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "read_file", json!({"path": notes})))
+                .with_turn(text_turn("Done.")),
+        );
+        let pane = pane_of(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+        let chat = new_chat();
+        share(&core, &chat, pane);
+        let view = preview_until(&core, &chat, pane, &[ContextKind::Screen], 10);
+        core.ai_send_with_context(
+            &chat,
+            "explain this".to_owned(),
+            pane,
+            Some("scripted".to_owned()),
+            None,
+            view.offer.clone(),
+            vec![1],
+        )
+        .expect("the send is accepted");
+        let card = event_of(&rec, &chat, "tool_proposed");
+        assert_eq!(card["pending"]["tainted"], json!(true));
+        assert_eq!(card["pending"]["taint"], json!(["attached context"]));
+        let hash = card["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_1", "deny", &hash).expect("denied");
+        assert!(wait_for(Duration::from_secs(10), || rec.ended(&chat)));
+    }
+
+    #[test]
+    fn a_cancel_a_closed_pane_or_a_deleted_chat_voids_the_waiting_card_and_answers_the_call() {
+        let tree = Scratch::new("life-tree");
+        let scratch = Scratch::new("life-data");
+        let notes = tool_tree(&tree.0);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let mut provider = scripted_tools("scripted");
+        for n in 0..3 {
+            provider = provider.with_turn(tool_call_turn(&format!("call_{n}"), "read_file", json!({"path": notes})));
+        }
+        register(&core, "scripted", provider);
+        let first = pane_of(&core);
+        let second = core.split_in(MAIN_WINDOW, false).expect("a split").focus;
+        let (by_cancel, by_close, by_delete) = (new_chat(), new_chat(), new_chat());
+
+        // Each chat waits at its card; the cause that ends the turn is different each time.
+        let mut hashes = Vec::new();
+        let waiting = [(&by_cancel, first), (&by_close, second), (&by_delete, first)];
+        for (n, (chat, pane)) in waiting.into_iter().enumerate() {
+            start(&core, chat, pane, "read the notes");
+            let card = event_of(&rec, chat, "tool_proposed");
+            assert_eq!(card["pending"]["call_id"], json!(format!("call_{n}")));
+            hashes.push(card["pending"]["hash"].as_str().expect("a hash").to_owned());
+        }
+        assert_eq!(core.ai().cancel(&by_cancel), Ok(true));
+        core.close_pane_in(MAIN_WINDOW, second).expect("the pane closes");
+        assert_eq!(core.ai().conversation_delete(&by_delete), Ok(true));
+
+        for (n, chat) in [&by_cancel, &by_close, &by_delete].into_iter().enumerate() {
+            assert!(wait_for(Duration::from_secs(1), || rec.ended(chat)), "the turn of chat {n} ends within a second");
+            assert_eq!(ends_of(&rec, chat), ["cancelled"], "chat {n}");
+            let result = event_of(&rec, chat, "tool_result");
+            assert_eq!(result["call_id"], json!(format!("call_{n}")));
+            assert_eq!((result["is_error"].clone(), result["content"].clone()), (json!(true), json!(STOPPED_RESULT)));
+            assert!(core.ai().service().approvals().pending(chat).is_empty(), "a card outlived chat {n}");
+            let late = decision(&core, chat, &format!("call_{n}"), "allow", &hashes[n]).expect_err("a late decision");
+            assert_eq!((late.code, late.reason), ("tool", Some("unknown_call")), "chat {n}");
+        }
+        assert!(!scratch.chats().join(format!("{by_delete}.json")).exists(), "a deleted chat was written back");
+    }
+
+    #[test]
+    fn a_shared_live_pane_is_read_by_a_tool_and_an_unshared_one_is_refused() {
+        let scratch = Scratch::new("live-pane");
+        let hidden = format!("printf '\\033[8m{SHELL_HIDDEN}\\033[0m after\\r\\n'");
+        let script = format!("printf '{SHELL_TEXT}\\r\\n'; {hidden}; sleep 30");
+        let (core, rec) = core_with_script(&scratch.0, &script);
+        let pane = pane_of(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+        let args = json!({"pane": pane, "rows": 20});
+        let mut provider = scripted_tools("scripted");
+        for n in 1..=3 {
+            provider = provider.with_turn(tool_call_turn(&format!("call_{n}"), "read_pane", args.clone()));
+            provider = provider.with_turn(text_turn("noted"));
+        }
+        register(&core, "scripted", provider);
+        let (asked, chat) = (new_chat(), new_chat());
+        let refusal = ToolError::NotShared.to_string();
+
+        // Not shared: refused when the call is proposed, no card.
+        say(&core, &rec, &asked, pane, "what is on the screen?");
+        let first = nth_event(&rec, &asked, "tool_result", 0);
+        assert_eq!((first["is_error"].clone(), first["content"].clone()), (json!(true), json!(refusal)));
+        assert!(events_of(&rec, &asked, "tool_proposed").is_empty(), "an unshared pane showed a card");
+
+        // Shared in another chat, and the screen shows the output: a card, a decision, the visible text and not the
+        // concealed word. A chat that has a tool result in its history taints its later turns, so this one is new.
+        share(&core, &chat, pane);
+        preview_until(&core, &chat, pane, &[ContextKind::Screen], 20);
+        start(&core, &chat, pane, "and now?");
+        let card = event_of(&rec, &chat, "tool_proposed");
+        assert_eq!(payload_names(&card["pending"]), ["tool", "pane", "target", "remote", "rows"]);
+        assert_eq!(card["pending"]["tainted"], json!(false), "nothing was attached to this turn");
+        let hash = card["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_2", "allow", &hash).expect("allowed");
+        let second = nth_event(&rec, &chat, "tool_result", 0);
+        let content = second["content"].as_str().expect("content");
+        assert!(content.contains(SHELL_TEXT) && content.contains(" after"), "{content}");
+        assert!(!content.contains(SHELL_HIDDEN), "the concealed word reached the model");
+        assert!(wait_for(Duration::from_secs(10), || rec.ended_turns(&chat) == 1));
+
+        // The share is withdrawn: refused again.
+        core.ai_context_share(&chat, pane, Some("scripted".to_owned()), None, false).expect("withdrawn");
+        say(&core, &rec, &chat, pane, "once more");
+        let third = nth_event(&rec, &chat, "tool_result", 1);
+        assert_eq!((third["is_error"].clone(), third["content"].clone()), (json!(true), json!(refusal)));
+        assert_eq!(events_of(&rec, &chat, "tool_proposed").len(), 1);
+    }
+
+    // ---- the recorded tool run --------------------------------------------------------------------------------
+
+    /// What stands for the scratch folder in the recorded tool run.
+    const GOLDEN_ROOT: &str = "/scratch";
+
+    /// `value` with every string that is one of `hashes` replaced by its number as 64 hex digits, and the scratch
+    /// folder (in both spellings, the longer one first) replaced by [`GOLDEN_ROOT`] wherever it occurs in a string.
+    fn normalise_run(value: &mut Value, hashes: &[String], roots: &[String]) {
+        match value {
+            Value::String(text) => {
+                if let Some(at) = hashes.iter().position(|hash| hash == text) {
+                    *text = format!("{:064x}", at + 1);
+                    return;
+                }
+                for root in roots {
+                    if text.contains(root.as_str()) {
+                        *text = text.replace(root.as_str(), GOLDEN_ROOT);
+                    }
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|item| normalise_run(item, hashes, roots)),
+            Value::Object(members) => {
+                let moved = members.get("value").and_then(Value::as_str).is_some_and(|text| {
+                    roots.iter().any(|root| text.contains(root.as_str()))
+                });
+                members.values_mut().for_each(|member| normalise_run(member, hashes, roots));
+                // A card field says how long its raw value is, and the length of a path is the machine's.
+                if moved && let Some(bytes) = members.get("value").and_then(Value::as_str).map(str::len) {
+                    members.insert("bytes".to_owned(), json!(bytes));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Plays three tool turns on the scripted provider (a read the person allows, a read the person denies, and a read
+    /// of a file the deny list protects) and records every `ai` event, the state after each, and the snapshots taken
+    /// live: one while a card waits and one after each turn. Nothing reads a clock and nothing sleeps for a fixed time.
+    fn record_tool_run() -> Value {
+        let tree = Scratch::new("tool-golden-tree");
+        let scratch = Scratch::new("tool-golden");
+        let notes = put(&tree.0, "proj/notes.txt", "alpha beta \n");
+        let env_file = put(&tree.0, "proj/.env", "TOKEN=none\n");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "read_file", json!({"path": notes})))
+                .with_turn(text_turn("The file holds a short note."))
+                .with_turn(tool_call_turn("call_2", "read_file", json!({"path": notes})))
+                .with_turn(text_turn("Understood, I will not read it."))
+                .with_turn(tool_call_turn("call_3", "read_file", json!({"path": env_file})))
+                .with_turn(text_turn("That place is protected.")),
+        );
+        let chat = core.ai().conversation_new().expect("an id");
+        let pane = pane_of(&core);
+        let snapshot = || json_of(&core.ai().snapshot(&chat).expect("a snapshot"));
+        let last_index = || rec.ai_events().len() - 1;
+        let wait = Duration::from_secs(10);
+        let mut snapshots: Vec<(usize, Value)> = Vec::new();
+        let mut hashes: Vec<String> = Vec::new();
+
+        start(&core, &chat, pane, "What does the note say?");
+        let card = event_of(&rec, &chat, "tool_proposed");
+        let proposed_at = rec
+            .ai_events()
+            .iter()
+            .position(|(_, payload)| payload.0.kind.name() == "tool_proposed")
+            .expect("the card is in the log");
+        assert_eq!(proposed_at, last_index(), "the turn waits at its card");
+        snapshots.push((proposed_at, snapshot()));
+        let hash = card["pending"]["hash"].as_str().expect("a hash").to_owned();
+        hashes.push(hash.clone());
+        decision(&core, &chat, "call_1", "allow", &hash).expect("allowed");
+        assert!(wait_for(wait, || rec.ended_turns(&chat) == 1));
+        snapshots.push((last_index(), snapshot()));
+
+        start(&core, &chat, pane, "Read it again.");
+        let card = nth_event(&rec, &chat, "tool_proposed", 1);
+        let hash = card["pending"]["hash"].as_str().expect("a hash").to_owned();
+        hashes.push(hash.clone());
+        decision(&core, &chat, "call_2", "deny", &hash).expect("denied");
+        assert!(wait_for(wait, || rec.ended_turns(&chat) == 2));
+        snapshots.push((last_index(), snapshot()));
+
+        say(&core, &rec, &chat, pane, "Now read the environment file.");
+        snapshots.push((last_index(), snapshot()));
+
+        let events: Vec<AiPayload> = rec.ai_events().into_iter().map(|(_, payload)| payload).collect();
+        let mut state = ChatState::new(&chat);
+        let mut states: Vec<Value> = Vec::new();
+        for payload in &events {
+            assert_eq!(state.apply(&payload.0), ApplyResult::Applied, "{payload:?}");
+            states.push(json_of(&state));
+        }
+
+        // Three turns, each counting from 1 without a hole; a card is open exactly between its proposal and its result.
+        let mut turns: Vec<u64> = events.iter().map(|p| p.0.turn).collect();
+        turns.dedup();
+        assert_eq!(turns.len(), 3, "three different turn numbers");
+        let of_turn = |turn: u64| events.iter().filter(move |p| p.0.turn == turn);
+        for turn in &turns {
+            let seqs: Vec<u64> = of_turn(*turn).map(|p| p.0.seq).collect();
+            assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>(), "turn {turn}");
+        }
+        let kinds = |turn: u64| of_turn(turn).map(|p| p.0.kind.name()).collect::<Vec<_>>();
+        for turn in &turns[..2] {
+            let kinds = kinds(*turn);
+            let at = |kind: &str| kinds.iter().position(|k| *k == kind);
+            let (proposed, result) = (at("tool_proposed"), at("tool_result"));
+            assert!(proposed < result && proposed.is_some(), "a card comes before its result: {kinds:?}");
+        }
+        assert!(!kinds(turns[2]).contains(&"tool_proposed"), "a protected path showed a card");
+        assert!(kinds(turns[2]).contains(&"tool_result"));
+        let mut open = 0;
+        for (event, state) in events.iter().zip(&states) {
+            match event.0.kind.name() {
+                "tool_proposed" => open += 1,
+                "tool_result" if open > 0 => open -= 1,
+                _ => {}
+            }
+            let pending = state["pending"].as_array().map_or(0, Vec::len);
+            let kind = event.0.kind.name();
+            assert_eq!(pending, if kind == "turn_ended" { 0 } else { open }, "{kind}");
+        }
+        let results: Vec<Value> = events
+            .iter()
+            .filter(|p| p.0.kind.name() == "tool_result")
+            .map(|p| json_of(&*p.0))
+            .collect();
+        let flags: Vec<Value> = results.iter().map(|r| r["is_error"].clone()).collect();
+        assert_eq!(flags, [json!(false), json!(true), json!(true)]);
+        assert!(results[0]["content"].as_str().is_some_and(|c| c.starts_with("alpha beta")));
+        assert_eq!(results[1]["content"], json!("The user denied this action."));
+        assert_eq!(ends_of(&rec, &chat), ["done", "done", "done"]);
+
+        // The snapshot while a card waits is the fold of the events at that point. A snapshot after a turn is read from
+        // the store, which keeps no tool output as text: it equals the fold with the output replaced by its marker.
+        assert_eq!(snapshots[0].1, states[snapshots[0].0], "the snapshot at the card");
+        assert_eq!(snapshots[0].1["running"], json!(true));
+        assert_eq!(snapshots[0].1["pending"].as_array().map(Vec::len), Some(1));
+        for (after, live) in &snapshots[1..] {
+            assert_eq!(live, &as_stored(states[*after].clone()), "the snapshot after event {after}");
+        }
+
+        let mut roots = vec![tree.0.canonicalize().expect("canonical").to_string_lossy().into_owned()];
+        roots.push(tree.0.to_string_lossy().into_owned());
+        let mut document = json!({
+            "conversation": chat,
+            "events": events.iter().map(|payload| json_of(&*payload.0)).collect::<Vec<_>>(),
+            "states": states,
+            "snapshots": snapshots.iter().map(|(at, live)| json!({"after": at, "state": live})).collect::<Vec<_>>(),
+        });
+        anonymise(&mut document, &chat);
+        normalise_run(&mut document, &hashes, &roots);
+        document
+    }
+
+    fn tool_golden_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/ai_tool_stream.json")
+    }
+
+    #[test]
+    fn the_scripted_tool_run_is_stable_and_matches_the_ai_tool_stream_golden() {
+        let first = record_tool_run();
+        let second = record_tool_run();
+        assert_eq!(first, second, "two runs of the same script record the same stream");
+
+        // The page gets views: no provider-native turn, no stored context, no key, no machine path and no canary.
+        let mut names = Vec::new();
+        member_names(&first, &mut names);
+        for forbidden in ["native", "stored", "api_key", "key"] {
+            assert!(!names.iter().any(|name| name == forbidden), "the stream has a member named {forbidden}");
+        }
+        let text = first.to_string();
+        for canary in [TEXT_CANARY, KEY_CANARY, TOOL_TEXT, SECRET_TEXT, NOTES_A, NOTES_B] {
+            assert!(!text.contains(canary), "{canary} is in the recorded run");
+        }
+        let temp = std::env::temp_dir();
+        let temp = temp.to_string_lossy();
+        let machine = text.contains(temp.as_ref()) || text.contains("holzwave-ai-");
+        assert!(!machine, "a machine path is in the recorded run");
+        assert!(text.contains("/scratch/proj/notes.txt"));
+
+        let mut expected = serde_json::to_string_pretty(&first).expect("json");
+        expected.push('\n');
+        let path = tool_golden_path();
+        if update_fixtures() {
+            std::fs::write(&path, &expected).expect("write ai_tool_stream.json");
+            return;
+        }
+        let on_disk = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is missing ({e}); run with UPDATE_FIXTURES=1", path.display()));
+        assert!(
+            on_disk == expected,
+            "the recorded run differs from ai_tool_stream.json; review it and run with UPDATE_FIXTURES=1"
+        );
     }
 }

@@ -384,6 +384,109 @@ test("the recorded ai stream is pinned and holds no key, native turn or stored c
   }
 });
 
+test("the recorded ai tool run is pinned and holds no key, native turn or stored context", () => {
+  const stream = JSON.parse(readFileSync(join(here, "../fixtures/ai_tool_stream.json"), "utf8"));
+  assert.deepEqual(keys(stream), ["conversation", "events", "snapshots", "states"]);
+  assert.equal(stream.conversation, "chat-golden");
+  assert.equal(stream.events.length, stream.states.length, "one state after every event");
+
+  const kinds = ["turn_started", "delta", "reasoning", "usage", "trimmed", "message", "tool_proposed", "tool_result", "turn_ended"];
+  for (const event of stream.events) {
+    for (const member of ["conversation", "turn", "seq", "kind"]) assert.ok(member in event, `${member} in ${event.kind}`);
+    assert.ok(kinds.includes(event.kind), event.kind);
+  }
+
+  // Three turns, each counting its seq 1, 2, 3 without a hole, and no turn number twice.
+  const turns = [];
+  for (const event of stream.events) {
+    const last = turns.at(-1);
+    if (last && last.turn === event.turn) last.events.push(event);
+    else turns.push({ turn: event.turn, events: [event] });
+  }
+  assert.equal(turns.length, 3);
+  assert.equal(new Set(turns.map((t) => t.turn)).size, 3);
+  for (const { events } of turns) assert.deepEqual(events.map((e) => e.seq), events.map((_, i) => i + 1));
+  assert.deepEqual(turns.map((t) => t.events.at(-1).end), ["done", "done", "done"]);
+
+  // A card: exactly these members, a read of this computer and a path inside the scratch folder.
+  const cards = stream.events.filter((e) => e.kind === "tool_proposed");
+  assert.equal(cards.length, 2, "the third read is refused before it has a card");
+  for (const { pending } of cards) {
+    assert.deepEqual(keys(pending), [
+      "call_id", "conversation", "effect", "hash", "pane", "payload", "remote", "taint", "tainted", "target", "tool",
+    ]);
+    assert.equal(pending.tool, "read_file");
+    assert.equal(pending.effect, "read");
+    assert.equal(pending.target, "This computer");
+    assert.equal(pending.remote, false);
+    assert.match(pending.hash, /^[0-9a-f]{64}$/, "a hash is 64 lower-case hex digits");
+    assert.deepEqual(pending.payload.map((field) => field.name), [
+      "tool", "pane", "target", "remote", "path", "offset", "limit", "resolved_path",
+    ]);
+    for (const field of pending.payload) assert.deepEqual(keys(field), ["bytes", "name", "value"]);
+    const resolved = pending.payload.find((field) => field.name === "resolved_path").value;
+    assert.ok(resolved.startsWith("/scratch/"), resolved);
+  }
+  // The first card of a chat is unmarked. A chat that holds the output of a tool marks every later card, also in a new
+  // turn: the history is untrusted content too.
+  assert.deepEqual([cards[0].pending.tainted, cards[0].pending.taint], [false, []]);
+  assert.deepEqual([cards[1].pending.tainted, cards[1].pending.taint], [true, ["output of read_file"]]);
+
+  // A card is open from its proposal to its result and never otherwise.
+  let open = 0;
+  stream.events.forEach((event, i) => {
+    if (event.kind === "tool_proposed") open = 1;
+    if (event.kind === "tool_result" || event.kind === "turn_ended") open = 0;
+    assert.equal(stream.states[i].pending.length, open, `${event.kind} at ${i}`);
+    assert.equal(stream.states[i].seq, event.seq);
+    assert.equal(stream.states[i].turn, event.turn);
+  });
+
+  // A refused read is a result with no card, and a denial is the fixed text.
+  const results = stream.events.filter((e) => e.kind === "tool_result");
+  assert.deepEqual(results.map((r) => r.is_error), [false, true, true]);
+  assert.ok(results[0].content.startsWith("alpha beta"));
+  assert.equal(results[1].content, "The user denied this action.");
+  assert.equal(results[0].tool, "read_file");
+  const refused = turns[2].events.map((e) => e.kind);
+  assert.ok(!refused.includes("tool_proposed") && refused.includes("tool_result"));
+
+  // The snapshot taken while a card waits is the state after the event it names. A snapshot taken when no turn runs
+  // is read from the saved chat, which keeps no tool output as text: it is that state with every result replaced by
+  // the fixed marker.
+  const marker = "[tool output not stored]";
+  const stored = (state) => {
+    const copy = structuredClone(state);
+    for (const part of copy.messages.flatMap((message) => message.parts)) {
+      if (part.type === "tool_result") part.content = marker;
+    }
+    return copy;
+  };
+  assert.equal(stream.snapshots.length, 4);
+  for (const snapshot of stream.snapshots) assert.deepEqual(keys(snapshot), ["after", "state"]);
+  const [waiting, ...idle] = stream.snapshots;
+  assert.equal(stream.events[waiting.after].kind, "tool_proposed");
+  assert.equal(waiting.after, stream.events.findIndex((e) => e.kind === "tool_proposed"));
+  assert.deepEqual(waiting.state, stream.states[waiting.after]);
+  assert.equal(waiting.state.running, true);
+  assert.equal(waiting.state.pending.length, 1);
+  assert.deepEqual(waiting.state.pending[0], cards[0].pending, "the snapshot holds the card the event carried");
+  const ends = stream.events.flatMap((e, i) => (e.kind === "turn_ended" ? [i] : []));
+  assert.deepEqual(idle.map((s) => s.after), ends);
+  for (const snapshot of idle) {
+    assert.equal(snapshot.state.running, false);
+    assert.equal(snapshot.state.pending.length, 0);
+    assert.deepEqual(snapshot.state, stored(stream.states[snapshot.after]), `the snapshot after event ${snapshot.after}`);
+  }
+  assert.equal(stream.snapshots.filter((s) => s.state.pending.length === 1).length, 1, "one snapshot has a waiting card");
+
+  // The page gets views: no provider-native turn, no stored context text, no key.
+  const names = memberNames(stream);
+  for (const forbidden of ["native", "stored", "api_key", "key"]) {
+    assert.ok(!names.includes(forbidden), `the stream has a member named ${forbidden}`);
+  }
+});
+
 // ---- call-site scanner --------------------------------------------------------------------------------------------
 
 /** The index just past the string or comment that starts at `i`, or `i` when none starts there. */

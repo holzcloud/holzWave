@@ -721,6 +721,7 @@ impl AppCore {
     /// Load the layouts from `dir/layout.json` (a fresh one-pane window `main` when there is none or it is unusable;
     /// a layout file of before windows is one window) and start nothing: the webview starts each pane once it knows
     /// the pane's size, and the shell opens the windows other than `main` (see [`AppCore::restored_windows`]).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec) -> Arc<AppCore> {
         AppCore::new_with_ai(dir, sink, shell, AiParts::system())
     }

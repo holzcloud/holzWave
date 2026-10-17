@@ -1,0 +1,4771 @@
+{
+  "conversation": "chat-golden",
+  "events": [
+    {
+      "conversation": "chat-golden",
+      "kind": "turn_started",
+      "message": {
+        "id": "m1800000000-user",
+        "model": null,
+        "parts": [
+          {
+            "text": "What does the note say?",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "route": {
+        "host": null,
+        "locality": "on_device",
+        "model": "scripted",
+        "profile": "scripted"
+      },
+      "seq": 1,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "input_tokens": 0,
+      "kind": "usage",
+      "output_tokens": 0,
+      "seq": 2,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000000-1",
+        "model": "scripted",
+        "parts": [
+          {
+            "id": "call_1",
+            "name": "read_file",
+            "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+            "type": "tool_call"
+          }
+        ],
+        "role": "assistant",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 3,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "tool_proposed",
+      "pending": {
+        "call_id": "call_1",
+        "conversation": "chat-golden",
+        "effect": "read",
+        "hash": "0000000000000000000000000000000000000000000000000000000000000001",
+        "pane": 3,
+        "payload": [
+          {
+            "bytes": 9,
+            "name": "tool",
+            "value": "read_file"
+          },
+          {
+            "bytes": 1,
+            "name": "pane",
+            "value": "3"
+          },
+          {
+            "bytes": 13,
+            "name": "target",
+            "value": "This computer"
+          },
+          {
+            "bytes": 5,
+            "name": "remote",
+            "value": "false"
+          },
+          {
+            "bytes": 23,
+            "name": "path",
+            "value": "/scratch/proj/notes.txt"
+          },
+          {
+            "bytes": 1,
+            "name": "offset",
+            "value": "0"
+          },
+          {
+            "bytes": 5,
+            "name": "limit",
+            "value": "16384"
+          },
+          {
+            "bytes": 23,
+            "name": "resolved_path",
+            "value": "/scratch/proj/notes.txt"
+          }
+        ],
+        "remote": false,
+        "taint": [],
+        "tainted": false,
+        "target": "This computer",
+        "tool": "read_file"
+      },
+      "seq": 4,
+      "turn": 1800000000
+    },
+    {
+      "call_id": "call_1",
+      "content": "alpha beta ",
+      "conversation": "chat-golden",
+      "is_error": false,
+      "kind": "tool_result",
+      "redactions": 0,
+      "seq": 5,
+      "tool": "read_file",
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000000-2",
+        "model": null,
+        "parts": [
+          {
+            "call_id": "call_1",
+            "content": "alpha beta ",
+            "is_error": false,
+            "type": "tool_result"
+          }
+        ],
+        "role": "tool",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 6,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "delta",
+      "seq": 7,
+      "text": "The file holds a short note.",
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "input_tokens": 0,
+      "kind": "usage",
+      "output_tokens": 0,
+      "seq": 8,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000000-3",
+        "model": "scripted",
+        "parts": [
+          {
+            "text": "The file holds a short note.",
+            "type": "text"
+          }
+        ],
+        "role": "assistant",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 9,
+      "turn": 1800000000
+    },
+    {
+      "conversation": "chat-golden",
+      "end": "done",
+      "error": null,
+      "kind": "turn_ended",
+      "rounds": 2,
+      "saved": true,
+      "seq": 10,
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "turn_started",
+      "message": {
+        "id": "m1800000001-user",
+        "model": null,
+        "parts": [
+          {
+            "text": "Read it again.",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "route": {
+        "host": null,
+        "locality": "on_device",
+        "model": "scripted",
+        "profile": "scripted"
+      },
+      "seq": 1,
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "input_tokens": 0,
+      "kind": "usage",
+      "output_tokens": 0,
+      "seq": 2,
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000001-1",
+        "model": "scripted",
+        "parts": [
+          {
+            "id": "call_2",
+            "name": "read_file",
+            "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+            "type": "tool_call"
+          }
+        ],
+        "role": "assistant",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 3,
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "tool_proposed",
+      "pending": {
+        "call_id": "call_2",
+        "conversation": "chat-golden",
+        "effect": "read",
+        "hash": "0000000000000000000000000000000000000000000000000000000000000001",
+        "pane": 3,
+        "payload": [
+          {
+            "bytes": 9,
+            "name": "tool",
+            "value": "read_file"
+          },
+          {
+            "bytes": 1,
+            "name": "pane",
+            "value": "3"
+          },
+          {
+            "bytes": 13,
+            "name": "target",
+            "value": "This computer"
+          },
+          {
+            "bytes": 5,
+            "name": "remote",
+            "value": "false"
+          },
+          {
+            "bytes": 23,
+            "name": "path",
+            "value": "/scratch/proj/notes.txt"
+          },
+          {
+            "bytes": 1,
+            "name": "offset",
+            "value": "0"
+          },
+          {
+            "bytes": 5,
+            "name": "limit",
+            "value": "16384"
+          },
+          {
+            "bytes": 23,
+            "name": "resolved_path",
+            "value": "/scratch/proj/notes.txt"
+          }
+        ],
+        "remote": false,
+        "taint": [
+          "output of read_file"
+        ],
+        "tainted": true,
+        "target": "This computer",
+        "tool": "read_file"
+      },
+      "seq": 4,
+      "turn": 1800000001
+    },
+    {
+      "call_id": "call_2",
+      "content": "The user denied this action.",
+      "conversation": "chat-golden",
+      "is_error": true,
+      "kind": "tool_result",
+      "redactions": 0,
+      "seq": 5,
+      "tool": "read_file",
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000001-2",
+        "model": null,
+        "parts": [
+          {
+            "call_id": "call_2",
+            "content": "The user denied this action.",
+            "is_error": true,
+            "type": "tool_result"
+          }
+        ],
+        "role": "tool",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 6,
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "delta",
+      "seq": 7,
+      "text": "Understood, I will not read it.",
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "input_tokens": 0,
+      "kind": "usage",
+      "output_tokens": 0,
+      "seq": 8,
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000001-3",
+        "model": "scripted",
+        "parts": [
+          {
+            "text": "Understood, I will not read it.",
+            "type": "text"
+          }
+        ],
+        "role": "assistant",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 9,
+      "turn": 1800000001
+    },
+    {
+      "conversation": "chat-golden",
+      "end": "done",
+      "error": null,
+      "kind": "turn_ended",
+      "rounds": 2,
+      "saved": true,
+      "seq": 10,
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "turn_started",
+      "message": {
+        "id": "m1800000002-user",
+        "model": null,
+        "parts": [
+          {
+            "text": "Now read the environment file.",
+            "type": "text"
+          }
+        ],
+        "role": "user",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "route": {
+        "host": null,
+        "locality": "on_device",
+        "model": "scripted",
+        "profile": "scripted"
+      },
+      "seq": 1,
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "input_tokens": 0,
+      "kind": "usage",
+      "output_tokens": 0,
+      "seq": 2,
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000002-1",
+        "model": "scripted",
+        "parts": [
+          {
+            "id": "call_3",
+            "name": "read_file",
+            "summary": "{\"path\":\"/scratch/proj/.env\"}",
+            "type": "tool_call"
+          }
+        ],
+        "role": "assistant",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 3,
+      "turn": 1800000002
+    },
+    {
+      "call_id": "call_3",
+      "content": "This location is protected and tools cannot use it.",
+      "conversation": "chat-golden",
+      "is_error": true,
+      "kind": "tool_result",
+      "redactions": 0,
+      "seq": 4,
+      "tool": "read_file",
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000002-2",
+        "model": null,
+        "parts": [
+          {
+            "call_id": "call_3",
+            "content": "This location is protected and tools cannot use it.",
+            "is_error": true,
+            "type": "tool_result"
+          }
+        ],
+        "role": "tool",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 5,
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "delta",
+      "seq": 6,
+      "text": "That place is protected.",
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "input_tokens": 0,
+      "kind": "usage",
+      "output_tokens": 0,
+      "seq": 7,
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "kind": "message",
+      "message": {
+        "id": "m1800000002-3",
+        "model": "scripted",
+        "parts": [
+          {
+            "text": "That place is protected.",
+            "type": "text"
+          }
+        ],
+        "role": "assistant",
+        "status": "complete",
+        "ts": 1800000000,
+        "usage": null
+      },
+      "seq": 8,
+      "turn": 1800000002
+    },
+    {
+      "conversation": "chat-golden",
+      "end": "done",
+      "error": null,
+      "kind": "turn_ended",
+      "rounds": 2,
+      "saved": true,
+      "seq": 9,
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ],
+  "snapshots": [
+    {
+      "after": 3,
+      "state": {
+        "conversation": "chat-golden",
+        "ended": null,
+        "messages": [
+          {
+            "id": "m1800000000-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "What does the note say?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "id": "call_1",
+                "name": "read_file",
+                "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+                "type": "tool_call"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          }
+        ],
+        "model": "scripted",
+        "partial": {
+          "reasoning": "",
+          "text": ""
+        },
+        "pending": [
+          {
+            "call_id": "call_1",
+            "conversation": "chat-golden",
+            "effect": "read",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000001",
+            "pane": 3,
+            "payload": [
+              {
+                "bytes": 9,
+                "name": "tool",
+                "value": "read_file"
+              },
+              {
+                "bytes": 1,
+                "name": "pane",
+                "value": "3"
+              },
+              {
+                "bytes": 13,
+                "name": "target",
+                "value": "This computer"
+              },
+              {
+                "bytes": 5,
+                "name": "remote",
+                "value": "false"
+              },
+              {
+                "bytes": 23,
+                "name": "path",
+                "value": "/scratch/proj/notes.txt"
+              },
+              {
+                "bytes": 1,
+                "name": "offset",
+                "value": "0"
+              },
+              {
+                "bytes": 5,
+                "name": "limit",
+                "value": "16384"
+              },
+              {
+                "bytes": 23,
+                "name": "resolved_path",
+                "value": "/scratch/proj/notes.txt"
+              }
+            ],
+            "remote": false,
+            "taint": [],
+            "tainted": false,
+            "target": "This computer",
+            "tool": "read_file"
+          }
+        ],
+        "profile": "scripted",
+        "running": true,
+        "seq": 4,
+        "title": "What does the note say?",
+        "trimmed": {
+          "exchanges": 0,
+          "results": 0
+        },
+        "turn": 1800000000,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "after": 9,
+      "state": {
+        "conversation": "chat-golden",
+        "ended": {
+          "end": "done",
+          "error": null,
+          "rounds": 2,
+          "saved": true,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        },
+        "messages": [
+          {
+            "id": "m1800000000-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "What does the note say?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "id": "call_1",
+                "name": "read_file",
+                "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+                "type": "tool_call"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-2",
+            "model": null,
+            "parts": [
+              {
+                "call_id": "call_1",
+                "content": "[tool output not stored]",
+                "is_error": false,
+                "type": "tool_result"
+              }
+            ],
+            "role": "tool",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-3",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "The file holds a short note.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          }
+        ],
+        "model": "scripted",
+        "partial": {
+          "reasoning": "",
+          "text": ""
+        },
+        "pending": [],
+        "profile": "scripted",
+        "running": false,
+        "seq": 10,
+        "title": "What does the note say?",
+        "trimmed": {
+          "exchanges": 0,
+          "results": 0
+        },
+        "turn": 1800000000,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "after": 19,
+      "state": {
+        "conversation": "chat-golden",
+        "ended": {
+          "end": "done",
+          "error": null,
+          "rounds": 2,
+          "saved": true,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        },
+        "messages": [
+          {
+            "id": "m1800000000-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "What does the note say?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "id": "call_1",
+                "name": "read_file",
+                "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+                "type": "tool_call"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-2",
+            "model": null,
+            "parts": [
+              {
+                "call_id": "call_1",
+                "content": "[tool output not stored]",
+                "is_error": false,
+                "type": "tool_result"
+              }
+            ],
+            "role": "tool",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-3",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "The file holds a short note.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000001-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "Read it again.",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000001-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "id": "call_2",
+                "name": "read_file",
+                "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+                "type": "tool_call"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000001-2",
+            "model": null,
+            "parts": [
+              {
+                "call_id": "call_2",
+                "content": "[tool output not stored]",
+                "is_error": true,
+                "type": "tool_result"
+              }
+            ],
+            "role": "tool",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000001-3",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "Understood, I will not read it.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          }
+        ],
+        "model": "scripted",
+        "partial": {
+          "reasoning": "",
+          "text": ""
+        },
+        "pending": [],
+        "profile": "scripted",
+        "running": false,
+        "seq": 10,
+        "title": "What does the note say?",
+        "trimmed": {
+          "exchanges": 0,
+          "results": 0
+        },
+        "turn": 1800000001,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "after": 28,
+      "state": {
+        "conversation": "chat-golden",
+        "ended": {
+          "end": "done",
+          "error": null,
+          "rounds": 2,
+          "saved": true,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0
+          }
+        },
+        "messages": [
+          {
+            "id": "m1800000000-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "What does the note say?",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "id": "call_1",
+                "name": "read_file",
+                "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+                "type": "tool_call"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-2",
+            "model": null,
+            "parts": [
+              {
+                "call_id": "call_1",
+                "content": "[tool output not stored]",
+                "is_error": false,
+                "type": "tool_result"
+              }
+            ],
+            "role": "tool",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000000-3",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "The file holds a short note.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000001-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "Read it again.",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000001-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "id": "call_2",
+                "name": "read_file",
+                "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+                "type": "tool_call"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000001-2",
+            "model": null,
+            "parts": [
+              {
+                "call_id": "call_2",
+                "content": "[tool output not stored]",
+                "is_error": true,
+                "type": "tool_result"
+              }
+            ],
+            "role": "tool",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000001-3",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "Understood, I will not read it.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000002-user",
+            "model": null,
+            "parts": [
+              {
+                "text": "Now read the environment file.",
+                "type": "text"
+              }
+            ],
+            "role": "user",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000002-1",
+            "model": "scripted",
+            "parts": [
+              {
+                "id": "call_3",
+                "name": "read_file",
+                "summary": "{\"path\":\"/scratch/proj/.env\"}",
+                "type": "tool_call"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000002-2",
+            "model": null,
+            "parts": [
+              {
+                "call_id": "call_3",
+                "content": "[tool output not stored]",
+                "is_error": true,
+                "type": "tool_result"
+              }
+            ],
+            "role": "tool",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          },
+          {
+            "id": "m1800000002-3",
+            "model": "scripted",
+            "parts": [
+              {
+                "text": "That place is protected.",
+                "type": "text"
+              }
+            ],
+            "role": "assistant",
+            "status": "complete",
+            "ts": 1800000000,
+            "usage": null
+          }
+        ],
+        "model": "scripted",
+        "partial": {
+          "reasoning": "",
+          "text": ""
+        },
+        "pending": [],
+        "profile": "scripted",
+        "running": false,
+        "seq": 9,
+        "title": "What does the note say?",
+        "trimmed": {
+          "exchanges": 0,
+          "results": 0
+        },
+        "turn": 1800000002,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      }
+    }
+  ],
+  "states": [
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 1,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 2,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 3,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [
+        {
+          "call_id": "call_1",
+          "conversation": "chat-golden",
+          "effect": "read",
+          "hash": "0000000000000000000000000000000000000000000000000000000000000001",
+          "pane": 3,
+          "payload": [
+            {
+              "bytes": 9,
+              "name": "tool",
+              "value": "read_file"
+            },
+            {
+              "bytes": 1,
+              "name": "pane",
+              "value": "3"
+            },
+            {
+              "bytes": 13,
+              "name": "target",
+              "value": "This computer"
+            },
+            {
+              "bytes": 5,
+              "name": "remote",
+              "value": "false"
+            },
+            {
+              "bytes": 23,
+              "name": "path",
+              "value": "/scratch/proj/notes.txt"
+            },
+            {
+              "bytes": 1,
+              "name": "offset",
+              "value": "0"
+            },
+            {
+              "bytes": 5,
+              "name": "limit",
+              "value": "16384"
+            },
+            {
+              "bytes": 23,
+              "name": "resolved_path",
+              "value": "/scratch/proj/notes.txt"
+            }
+          ],
+          "remote": false,
+          "taint": [],
+          "tainted": false,
+          "target": "This computer",
+          "tool": "read_file"
+        }
+      ],
+      "profile": "scripted",
+      "running": true,
+      "seq": 4,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 5,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 6,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": "The file holds a short note."
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 7,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": "The file holds a short note."
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 8,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 9,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": {
+        "end": "done",
+        "error": null,
+        "rounds": 2,
+        "saved": true,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": false,
+      "seq": 10,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000000,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 1,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 2,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 3,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [
+        {
+          "call_id": "call_2",
+          "conversation": "chat-golden",
+          "effect": "read",
+          "hash": "0000000000000000000000000000000000000000000000000000000000000001",
+          "pane": 3,
+          "payload": [
+            {
+              "bytes": 9,
+              "name": "tool",
+              "value": "read_file"
+            },
+            {
+              "bytes": 1,
+              "name": "pane",
+              "value": "3"
+            },
+            {
+              "bytes": 13,
+              "name": "target",
+              "value": "This computer"
+            },
+            {
+              "bytes": 5,
+              "name": "remote",
+              "value": "false"
+            },
+            {
+              "bytes": 23,
+              "name": "path",
+              "value": "/scratch/proj/notes.txt"
+            },
+            {
+              "bytes": 1,
+              "name": "offset",
+              "value": "0"
+            },
+            {
+              "bytes": 5,
+              "name": "limit",
+              "value": "16384"
+            },
+            {
+              "bytes": 23,
+              "name": "resolved_path",
+              "value": "/scratch/proj/notes.txt"
+            }
+          ],
+          "remote": false,
+          "taint": [
+            "output of read_file"
+          ],
+          "tainted": true,
+          "target": "This computer",
+          "tool": "read_file"
+        }
+      ],
+      "profile": "scripted",
+      "running": true,
+      "seq": 4,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 5,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 6,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": "Understood, I will not read it."
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 7,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": "Understood, I will not read it."
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 8,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 9,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": {
+        "end": "done",
+        "error": null,
+        "rounds": 2,
+        "saved": true,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": false,
+      "seq": 10,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000001,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 1,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 2,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_3",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/.env\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 3,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_3",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/.env\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 4,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_3",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/.env\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_3",
+              "content": "This location is protected and tools cannot use it.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 5,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_3",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/.env\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_3",
+              "content": "This location is protected and tools cannot use it.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": "That place is protected."
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 6,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_3",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/.env\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_3",
+              "content": "This location is protected and tools cannot use it.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": "That place is protected."
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 7,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": null,
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_3",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/.env\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_3",
+              "content": "This location is protected and tools cannot use it.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "That place is protected.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": true,
+      "seq": 8,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "conversation": "chat-golden",
+      "ended": {
+        "end": "done",
+        "error": null,
+        "rounds": 2,
+        "saved": true,
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "messages": [
+        {
+          "id": "m1800000000-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "What does the note say?",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_1",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_1",
+              "content": "alpha beta ",
+              "is_error": false,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000000-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "The file holds a short note.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Read it again.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_2",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/notes.txt\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_2",
+              "content": "The user denied this action.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000001-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "Understood, I will not read it.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-user",
+          "model": null,
+          "parts": [
+            {
+              "text": "Now read the environment file.",
+              "type": "text"
+            }
+          ],
+          "role": "user",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-1",
+          "model": "scripted",
+          "parts": [
+            {
+              "id": "call_3",
+              "name": "read_file",
+              "summary": "{\"path\":\"/scratch/proj/.env\"}",
+              "type": "tool_call"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-2",
+          "model": null,
+          "parts": [
+            {
+              "call_id": "call_3",
+              "content": "This location is protected and tools cannot use it.",
+              "is_error": true,
+              "type": "tool_result"
+            }
+          ],
+          "role": "tool",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        },
+        {
+          "id": "m1800000002-3",
+          "model": "scripted",
+          "parts": [
+            {
+              "text": "That place is protected.",
+              "type": "text"
+            }
+          ],
+          "role": "assistant",
+          "status": "complete",
+          "ts": 1800000000,
+          "usage": null
+        }
+      ],
+      "model": "scripted",
+      "partial": {
+        "reasoning": "",
+        "text": ""
+      },
+      "pending": [],
+      "profile": "scripted",
+      "running": false,
+      "seq": 9,
+      "title": "What does the note say?",
+      "trimmed": {
+        "exchanges": 0,
+        "results": 0
+      },
+      "turn": 1800000002,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  ]
+}
