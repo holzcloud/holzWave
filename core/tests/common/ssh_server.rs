@@ -27,6 +27,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use holzwave_core::ssh::{HostKeyPolicy, Reconnect, SshAuth, SshTarget, learn_host_key};
+use russh::keys::ssh_key::private::{KeypairData, RsaKeypair};
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, Msg, Server as _, Session};
@@ -156,6 +157,12 @@ impl Server {
 /// An Ed25519 key.
 pub fn ed25519() -> PrivateKey {
     PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()
+}
+
+/// An RSA key of `bits` bits. Generating one takes seconds in a dev build, so a test makes it once.
+pub fn rsa(bits: usize) -> PrivateKey {
+    let pair = RsaKeypair::random(&mut rand::rng(), bits).unwrap();
+    PrivateKey::new(KeypairData::from(pair), "").unwrap()
 }
 
 /// Write `key` into `dir` as `name` in the OpenSSH format, mode 0600 on Unix, encrypted with `passphrase` when one is

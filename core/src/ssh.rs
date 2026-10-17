@@ -480,7 +480,10 @@ async fn open(target: &SshTarget) -> std::result::Result<Handle<Client>, Outcome
             .map_err(|e| lost(&e))?,
         SshAuth::Key { path, passphrase } => {
             let key = load_secret_key(path, passphrase.as_deref())
-                .map_err(|e| Outcome::Fatal(format!("the key {} cannot be used: {e}", path.display())))?;
+                .map_err(|e| {
+                    let why = key_error_text(passphrase.is_some(), &e);
+                    Outcome::Fatal(format!("the key {} cannot be used: {why}", path.display()))
+                })?;
             let hash = session.best_supported_rsa_hash().await.map_err(|e| lost(&e))?.flatten();
             session
                 .authenticate_publickey(target.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash))
@@ -492,6 +495,43 @@ async fn open(target: &SshTarget) -> std::result::Result<Handle<Client>, Outcome
         return Err(Outcome::Fatal(format!("{}@{} refused the login", target.user, target.host)));
     }
     Ok(session)
+}
+
+/// What the pane says when a key file cannot be used, in words that tell the person what to do.
+///
+/// The text is decided by the error and by whether a passphrase was given, never by a guess about the key's cipher: a
+/// wrong passphrase of an OpenSSH key and a damaged file both fail as a decoding error, so the sentence says both.
+/// The function sees no secret (the error and one flag), so no passphrase, password or key byte can be part of the text.
+fn key_error_text(passphrase_given: bool, error: &russh::keys::Error) -> String {
+    use russh::keys::Error as KeyError;
+    match error {
+        KeyError::KeyIsEncrypted if passphrase_given => "the passphrase was not accepted for this key".into(),
+        KeyError::KeyIsEncrypted => "the key is protected by a passphrase; save the passphrase in the connection".into(),
+        KeyError::IO(e) => format!("the key file cannot be read: {e}"),
+        KeyError::UnsupportedKeyType { .. } | KeyError::UnknownAlgorithm(_) => "the key type is not supported".into(),
+        KeyError::SshKey(_)
+        | KeyError::SshEncoding(_)
+        | KeyError::Pkcs8(_)
+        | KeyError::Pkcs1(_)
+        | KeyError::Der(_)
+        | KeyError::Spki(_)
+        | KeyError::Sec1(_)
+        | KeyError::Pad(_)
+        | KeyError::Unpad(_)
+        | KeyError::Rsa(_)
+        | KeyError::Decode(_)
+        | KeyError::Ed25519KeyError(_)
+        | KeyError::EcdsaKeyError(_)
+        | KeyError::KeyIsCorrupt
+        | KeyError::CouldNotReadKey => {
+            if passphrase_given {
+                "the passphrase is wrong or the key file is damaged".into()
+            } else {
+                "the key file is damaged".into()
+            }
+        }
+        other => other.to_string(),
+    }
 }
 
 /// One connected session: log in, open the shell, and pump bytes until it ends.
@@ -1326,6 +1366,64 @@ mod tests {
         out.until("CHANGED", 10);
         let _ = second.key;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The error of really decoding `text` as a key file, for the variants a hand cannot build.
+    fn decode_error(text: &str, passphrase: Option<&str>) -> russh::keys::Error {
+        russh::keys::decode_secret_key(text, passphrase).expect_err("the text is not a usable key")
+    }
+
+    #[test]
+    fn key_errors_are_worded_by_one_function() {
+        use russh::keys::Error as KeyError;
+        use russh::keys::ssh_key;
+        const PASSPHRASE: &str = "correct horse battery staple";
+        const PROTECTED: &str = "the key is protected by a passphrase; save the passphrase in the connection";
+        const NOT_ACCEPTED: &str = "the passphrase was not accepted for this key";
+        const WRONG_OR_DAMAGED: &str = "the passphrase is wrong or the key file is damaged";
+        const DAMAGED: &str = "the key file is damaged";
+        const UNSUPPORTED: &str = "the key type is not supported";
+        // What the old text for a wrong passphrase of an OpenSSH key was; it must never come back.
+        assert_eq!(KeyError::SshKey(ssh_key::Error::Crypto).to_string(), "SshKey: cryptographic error");
+
+        let not_found = || KeyError::IO(io::Error::from(io::ErrorKind::NotFound));
+        let unsupported = || KeyError::UnsupportedKeyType { key_type_string: "dsa".into(), key_type_raw: vec![1, 2] };
+        // Variants that only a real decode can produce: garbage in a PKCS#8 block, an unknown block, a bad base64 text.
+        let pkcs8 = decode_error("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", None);
+        let sealed = decode_error("-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n", Some(PASSPHRASE));
+        let no_block = decode_error("this is not a key", None);
+        let rsa = decode_error("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n", None);
+
+        let table: Vec<(&str, bool, KeyError, String)> = vec![
+            ("KeyIsEncrypted", false, KeyError::KeyIsEncrypted, PROTECTED.into()),
+            ("KeyIsEncrypted", true, KeyError::KeyIsEncrypted, NOT_ACCEPTED.into()),
+            ("KeyIsCorrupt", false, KeyError::KeyIsCorrupt, DAMAGED.into()),
+            ("KeyIsCorrupt", true, KeyError::KeyIsCorrupt, WRONG_OR_DAMAGED.into()),
+            ("CouldNotReadKey", false, KeyError::CouldNotReadKey, DAMAGED.into()),
+            ("CouldNotReadKey", true, KeyError::CouldNotReadKey, WRONG_OR_DAMAGED.into()),
+            ("SshKey(Crypto)", false, KeyError::SshKey(ssh_key::Error::Crypto), DAMAGED.into()),
+            ("SshKey(Crypto)", true, KeyError::SshKey(ssh_key::Error::Crypto), WRONG_OR_DAMAGED.into()),
+            ("UnsupportedKeyType", false, unsupported(), UNSUPPORTED.into()),
+            ("UnsupportedKeyType", true, unsupported(), UNSUPPORTED.into()),
+            ("a garbage PKCS#8 block", false, pkcs8, DAMAGED.into()),
+            ("a garbage encrypted PKCS#8 block", true, sealed, WRONG_OR_DAMAGED.into()),
+            ("a text with no key block", false, no_block, DAMAGED.into()),
+            ("a garbage PKCS#1 block", true, rsa, WRONG_OR_DAMAGED.into()),
+        ];
+        for (name, given, error, sentence) in &table {
+            let text = key_error_text(*given, error);
+            assert_eq!(&text, sentence, "{name}, passphrase given: {given}");
+            assert!(!text.contains("cryptographic error"), "{name}: {text}");
+            assert!(!text.contains(PASSPHRASE), "{name}: {text}");
+        }
+        // A file that cannot be read keeps the reason of the system and says it is the file, with or without a passphrase.
+        for given in [false, true] {
+            let text = key_error_text(given, &not_found());
+            assert!(text.starts_with("the key file cannot be read: "), "{text}");
+            assert!(!text.contains(PASSPHRASE), "{text}");
+        }
+        // Anything that is none of the above is the error's own text.
+        assert_eq!(key_error_text(true, &KeyError::NoHomeDir), KeyError::NoHomeDir.to_string());
     }
 
     #[test]
