@@ -12,8 +12,9 @@
 //! 1. **Every consumer of a channel drains at once.** `russh` hands data to a channel with a bounded `send(..).await` in
 //!    the session task, so one channel whose reader stops stalls every channel of the connection. The consumers here
 //!    read continuously into bounded buffers, and the shell ([`crate::ssh::SshLink`]) closes its channel when its backlog
-//!    passes [`crate::ssh::MAX_BACKLOG`]; a consumer added later (a forwarded socket) must do the same and close its
-//!    channel when its buffer is full, never queue without a bound.
+//!    passes [`crate::ssh::MAX_BACKLOG`], and a forwarded socket ([`Connection::forward`]) hands its bytes to the code
+//!    that answers through a queue of [`FORWARD_QUEUE`] chunks with `try_send` and closes its channel when the queue is
+//!    full; a consumer added later must do the same, never queue without a bound.
 //! 2. **The host-key policy belongs to the opener.** An [`Open::Pinned`] opener (a monitor, the agent, an exec) checks
 //!    the host key of the host and of every jump host strictly: it never *learns* a key, so an unknown key is refused
 //!    and the known hosts file stays as it was. An [`Open::Interactive`] opener (a file browser, later a pane) keeps
@@ -31,15 +32,18 @@
 //! 5. **Idle and bounds.** A session with no lease and no use for [`IDLE`] is closed, and at most [`MAX_CONNECTIONS`]
 //!    connections are kept.
 
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use russh::Disconnect;
-use russh::client::Handle;
+use russh::client::{self, Handle};
+use russh::{Channel, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect};
 use russh_sftp::client::SftpSession;
+use tokio::sync::{mpsc as tmpsc, watch};
 
 use crate::ssh::{Client, Outcome, SshTarget, channel_text, open, pin_hosts};
 use crate::{Error, Result};
@@ -142,6 +146,8 @@ pub struct Session {
     sftp: tokio::sync::Mutex<Option<Arc<SftpSession>>>,
     /// Set when the session was handed to its first user.
     handed_out: AtomicBool,
+    /// The forwarded sockets of this login. A replaced session takes them with it.
+    forwards: Arc<Forwards>,
 }
 
 impl std::fmt::Debug for Session {
@@ -151,8 +157,8 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-    fn new(handle: Handle<Client>) -> Self {
-        Self { handle, sftp: tokio::sync::Mutex::new(None), handed_out: AtomicBool::new(false) }
+    fn new(handle: Handle<Client>, forwards: Arc<Forwards>) -> Self {
+        Self { handle, sftp: tokio::sync::Mutex::new(None), handed_out: AtomicBool::new(false), forwards }
     }
 
     /// The `russh` handle: open a channel with it.
@@ -317,7 +323,8 @@ impl Connection {
             Open::Interactive => self.target.clone(),
             Open::Pinned => pin_hosts(&self.target).map_err(OpenError::fatal)?,
         };
-        let outcome = match tokio::time::timeout(OPEN_TIMEOUT, open_target(&target)).await {
+        let forwards = Arc::new(Forwards::default());
+        let outcome = match tokio::time::timeout(OPEN_TIMEOUT, open_target(&target, &forwards)).await {
             Ok(outcome) => outcome,
             Err(_) => Err(OpenError::lost("the connection timed out")),
         };
@@ -325,7 +332,7 @@ impl Connection {
             Ok(handle) => {
                 *self.failure.lock().unwrap_or_else(PoisonError::into_inner) = None;
                 self.touch(now);
-                let session = Arc::new(Session::new(handle));
+                let session = Arc::new(Session::new(handle, forwards));
                 *slot = Some(session.clone());
                 Ok(session)
             }
@@ -441,8 +448,8 @@ impl Drop for Connection {
 }
 
 /// Log in to `target` on the current runtime.
-async fn open_target(target: &SshTarget) -> std::result::Result<Handle<Client>, OpenError> {
-    match open(target).await {
+async fn open_target(target: &SshTarget, forwards: &Arc<Forwards>) -> std::result::Result<Handle<Client>, OpenError> {
+    match open(target, forwards).await {
         Ok(handle) => Ok(handle),
         Err(Outcome::Fatal(why)) => Err(OpenError::fatal(why)),
         Err(Outcome::Lost(why)) => Err(OpenError::lost(why)),
@@ -460,6 +467,453 @@ impl Drop for Lease {
         let mut usage = self.connection.usage.lock().unwrap_or_else(PoisonError::into_inner);
         usage.leases = usage.leases.saturating_sub(1);
         usage.last_used = usage.last_used.max(Instant::now());
+    }
+}
+
+// ---- reverse forwards of Unix sockets ----------------------------------------------------------------------------
+
+/// The most forwarded connections open at once for one forward; the next one is refused.
+pub const MAX_FORWARDED: usize = 4;
+/// The most bytes read from the remote side of one forwarded connection.
+pub const FORWARD_MAX_READ: usize = 1024 * 1024;
+/// How long a forwarded connection may stay silent before the sink's reader gets [`io::ErrorKind::TimedOut`].
+pub const FORWARD_SILENCE: Duration = Duration::from_secs(10);
+/// How long one forwarded connection lives at most.
+pub const FORWARD_LIFE: Duration = Duration::from_secs(30);
+/// How many chunks wait between the session and the sink. A full queue closes the connection.
+pub const FORWARD_QUEUE: usize = 32;
+/// How long asking the server for or against a forward may take.
+const FORWARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What bounds a forwarded connection. [`ForwardLimits::default`] is the product's; a test lowers the times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForwardLimits {
+    /// Open forwarded connections at once.
+    pub connections: usize,
+    /// Bytes read from the remote side, and bytes the sink may write back.
+    pub bytes: usize,
+    /// The silence after which the sink's reader times out.
+    pub silence: Duration,
+    /// The life of a connection.
+    pub life: Duration,
+    /// Chunks between the session and the sink.
+    pub queue: usize,
+}
+
+impl Default for ForwardLimits {
+    fn default() -> Self {
+        Self { connections: MAX_FORWARDED, bytes: FORWARD_MAX_READ, silence: FORWARD_SILENCE, life: FORWARD_LIFE, queue: FORWARD_QUEUE }
+    }
+}
+
+/// Whether `path` is a path this code asks a server to forward: `/tmp/holzwave-`, 32 lowercase hexadecimal characters and
+/// `.sock`, and nothing else. Anything else is refused before a request is made, so a path never carries a character that
+/// a server's shell or file system could read as more than a name.
+pub fn valid_forward_path(path: &str) -> bool {
+    path.strip_prefix("/tmp/holzwave-")
+        .and_then(|rest| rest.strip_suffix(".sock"))
+        .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// Why a forward could not be made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForwardError {
+    /// The server does not allow Unix socket forwarding (or refused this one).
+    Refused,
+    /// Anything else, as plain text without a credential.
+    Failed(String),
+}
+
+impl std::fmt::Display for ForwardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ForwardError::Refused => f.write_str("the server does not allow Unix socket forwarding"),
+            ForwardError::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for ForwardError {}
+
+/// The code that answers a forwarded connection. It is called on a thread of its own for each connection (so it may
+/// block) and returns when the connection is finished. The core knows nothing of what is spoken over it.
+pub trait ForwardSink: Send + Sync {
+    fn serve(&self, stream: ForwardedStream);
+}
+
+/// One forwarded connection, as the sink sees it.
+pub struct ForwardedStream {
+    pub reader: ForwardReader,
+    pub writer: ForwardWriter,
+}
+
+/// The bytes the remote side sent. Ends with `Ok(0)` when it is done, and gives [`io::ErrorKind::TimedOut`] when nothing
+/// arrives for the silence bound.
+pub struct ForwardReader {
+    rx: mpsc::Receiver<Vec<u8>>,
+    pending: Vec<u8>,
+    pos: usize,
+    silence: Duration,
+}
+
+impl Read for ForwardReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.pos >= self.pending.len() {
+            match self.rx.recv_timeout(self.silence) {
+                Ok(chunk) => {
+                    self.pending = chunk;
+                    self.pos = 0;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => return Err(io::Error::new(io::ErrorKind::TimedOut, "the connection was silent too long")),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.pending.len() - self.pos);
+        buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+/// What the sink says back to the channel.
+enum Back {
+    Data(Vec<u8>),
+    /// The sink wrote more than it may: end the connection.
+    Cut,
+}
+
+/// What the sink writes back. It refuses past the byte bound and ends the connection when it does. The queue behind it is
+/// unbounded in form and bounded by that count (an answer is a few hundred bytes in real use).
+pub struct ForwardWriter {
+    tx: tmpsc::UnboundedSender<Back>,
+    written: usize,
+    cap: usize,
+}
+
+impl Write for ForwardWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.written.saturating_add(buf.len()) > self.cap {
+            let _ = self.tx.send(Back::Cut);
+            return Err(io::Error::other("the answer is longer than a forwarded connection may carry"));
+        }
+        self.tx.send(Back::Data(buf.to_vec())).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the connection ended"))?;
+        self.written += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The sinks of one login, by path, and how many connections each has open. Private to the crate: the handler of the
+/// login asks it what to do with a channel the server opens.
+#[derive(Default)]
+pub(crate) struct Forwards {
+    map: Mutex<HashMap<String, Registered>>,
+}
+
+struct Registered {
+    sink: Arc<dyn ForwardSink>,
+    limits: ForwardLimits,
+    open: Arc<AtomicUsize>,
+}
+
+/// A place among the open connections of one forward, given back when the last owner lets go (the channel's task and the
+/// sink's thread each hold it), so a panic frees it too.
+struct Place(Arc<AtomicUsize>);
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// What a channel that was let in is given.
+pub(crate) struct Admitted {
+    sink: Arc<dyn ForwardSink>,
+    limits: ForwardLimits,
+    place: Place,
+}
+
+impl Forwards {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, Registered>> {
+        self.map.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Register `sink` for `path`; `false` when the path has one already.
+    fn register(&self, path: &str, sink: Arc<dyn ForwardSink>, limits: ForwardLimits) -> Option<Arc<AtomicUsize>> {
+        let mut map = self.map();
+        if map.contains_key(path) {
+            return None;
+        }
+        let open = Arc::new(AtomicUsize::new(0));
+        map.insert(path.to_owned(), Registered { sink, limits, open: open.clone() });
+        Some(open)
+    }
+
+    fn unregister(&self, path: &str) {
+        self.map().remove(path);
+    }
+
+    /// Let a connection for `path` in: it needs a registered sink and a free place. `None` rejects it.
+    pub(crate) fn admit(&self, path: &str) -> Option<Admitted> {
+        let map = self.map();
+        let found = map.get(path)?;
+        if found.open.fetch_add(1, Ordering::SeqCst) >= found.limits.connections {
+            found.open.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Admitted { sink: found.sink.clone(), limits: found.limits, place: Place(found.open.clone()) })
+    }
+}
+
+/// The threads of forwarded connections that are alive. Only tests read it.
+static BRIDGE_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many threads (`hw-fwd`) that serve forwarded connections are alive now. For tests: it shows that a closed
+/// connection, a cancelled forward and a panicking sink leave no thread behind.
+pub fn forward_threads() -> usize {
+    BRIDGE_THREADS.load(Ordering::SeqCst)
+}
+
+/// Counts a live bridge thread: made before the thread starts, dropped when it ends or fails to start.
+struct ThreadCount;
+
+impl ThreadCount {
+    fn new() -> Self {
+        BRIDGE_THREADS.fetch_add(1, Ordering::SeqCst);
+        ThreadCount
+    }
+}
+
+impl Drop for ThreadCount {
+    fn drop(&mut self) {
+        BRIDGE_THREADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A switch that ends both halves of a bridge.
+struct Stop(watch::Sender<bool>);
+
+impl Stop {
+    fn stop(&self) {
+        self.0.send_replace(true);
+    }
+
+    async fn stopped(&self) {
+        let mut rx = self.0.subscribe();
+        if rx.wait_for(|stopped| *stopped).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+type WriteHalf = ChannelWriteHalf<client::Msg>;
+
+/// Bridge a channel the server opened to the sink: a thread runs the sink, and two tasks on the current runtime move the
+/// bytes. The reading task never waits for the sink: it hands chunks over with `try_send` and closes the channel when the
+/// queue is full, when more than the byte bound was read or when the life of the connection is over. The writing task
+/// waits only for the remote side's window, which never holds anything else.
+pub(crate) fn bridge(channel: Channel<client::Msg>, admitted: Admitted) {
+    let Admitted { sink, limits, place } = admitted;
+    let place = Arc::new(place);
+    let (to_sink, from_channel) = mpsc::sync_channel::<Vec<u8>>(limits.queue.max(1));
+    let (to_channel, from_sink) = tmpsc::unbounded_channel::<Back>();
+    let stream = ForwardedStream {
+        reader: ForwardReader { rx: from_channel, pending: Vec::new(), pos: 0, silence: limits.silence },
+        writer: ForwardWriter { tx: to_channel, written: 0, cap: limits.bytes },
+    };
+    let (read, write) = channel.split();
+    let write = Arc::new(write);
+    let stop = Arc::new(Stop(watch::channel(false).0));
+    let counted = ThreadCount::new();
+    let thread_place = place.clone();
+    let spawned = thread::Builder::new().name("hw-fwd".into()).spawn(move || {
+        let _counted = counted;
+        let _place = thread_place;
+        sink.serve(stream);
+    });
+    if spawned.is_err() {
+        // The sink never ran: close the channel and let the places go.
+        let write = write.clone();
+        drop(tokio::spawn(async move {
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.close()).await;
+        }));
+        return;
+    }
+    drop(tokio::spawn(read_side(read, write.clone(), to_sink, stop.clone(), limits, place)));
+    drop(tokio::spawn(write_side(write, from_sink, stop)));
+}
+
+async fn read_side(
+    mut read: ChannelReadHalf,
+    write: Arc<WriteHalf>,
+    to_sink: mpsc::SyncSender<Vec<u8>>,
+    stop: Arc<Stop>,
+    limits: ForwardLimits,
+    _place: Arc<Place>,
+) {
+    let mut to_sink = Some(to_sink);
+    let mut total = 0usize;
+    let life = tokio::time::sleep(limits.life);
+    tokio::pin!(life);
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.stopped() => break,
+            () = &mut life => break,
+            msg = read.wait() => match msg {
+                Some(ChannelMsg::Data { data }) => {
+                    total = total.saturating_add(data.len());
+                    if total > limits.bytes {
+                        break;
+                    }
+                    if let Some(tx) = &to_sink {
+                        match tx.try_send(data.to_vec()) {
+                            Ok(()) => {}
+                            // The sink cannot keep up: the connection ends and the session goes on.
+                            Err(mpsc::TrySendError::Full(_)) => break,
+                            // The sink stopped reading (it has its request): what follows is dropped, but still counted,
+                            // and the answer that may still be on its way is not cut.
+                            Err(mpsc::TrySendError::Disconnected(_)) => to_sink = None,
+                        }
+                    }
+                }
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    total = total.saturating_add(data.len());
+                    if total > limits.bytes {
+                        break;
+                    }
+                }
+                // The remote side is done sending; it may still wait for the answer.
+                Some(ChannelMsg::Eof) => to_sink = None,
+                Some(ChannelMsg::Close) | None => break,
+                Some(_) => {}
+            },
+        }
+    }
+    stop.stop();
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.close()).await;
+}
+
+async fn write_side(write: Arc<WriteHalf>, mut from_sink: tmpsc::UnboundedReceiver<Back>, stop: Arc<Stop>) {
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.stopped() => return,
+            back = from_sink.recv() => match back {
+                Some(Back::Data(bytes)) => {
+                    tokio::select! {
+                        biased;
+                        () = stop.stopped() => return,
+                        sent = write.data_bytes(bytes) => {
+                            if sent.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Back::Cut) => break,
+                // The sink is finished: what it wrote is sent, then the end.
+                None => {
+                    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.eof()).await;
+                    break;
+                }
+            },
+        }
+    }
+    stop.stop();
+}
+
+/// A forward the server agreed to. Dropping it (or [`ForwardGuard::cancel`]) asks the server to stop and forgets the sink.
+pub struct ForwardGuard {
+    session: Arc<Session>,
+    handle: tokio::runtime::Handle,
+    path: String,
+    open: Arc<AtomicUsize>,
+    live: bool,
+}
+
+impl std::fmt::Debug for ForwardGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForwardGuard").field("path", &self.path).finish_non_exhaustive()
+    }
+}
+
+impl ForwardGuard {
+    /// The forwarded connections that are open now.
+    pub fn open(&self) -> usize {
+        self.open.load(Ordering::SeqCst)
+    }
+
+    /// Stop the forward: the sink is forgotten at once and the server is asked to cancel, bounded in time. A session that
+    /// has ended needs no request.
+    pub async fn cancel(mut self) {
+        self.live = false;
+        self.session.forwards.unregister(&self.path);
+        if self.session.is_closed() {
+            return;
+        }
+        let _ = tokio::time::timeout(FORWARD_REQUEST_TIMEOUT.min(CLOSE_TIMEOUT), self.session.handle.cancel_streamlocal_forward(self.path.as_str())).await;
+    }
+}
+
+impl Drop for ForwardGuard {
+    fn drop(&mut self) {
+        if !self.live {
+            return;
+        }
+        // Dropped without `cancel` (a panic, a cancelled task): the sink goes now, the request follows on the connection's
+        // runtime, and its failure does not matter.
+        self.session.forwards.unregister(&self.path);
+        if self.session.is_closed() {
+            return;
+        }
+        let (session, path) = (self.session.clone(), std::mem::take(&mut self.path));
+        drop(self.handle.spawn(async move {
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, session.handle.cancel_streamlocal_forward(path)).await;
+        }));
+    }
+}
+
+impl Connection {
+    /// Ask the host to forward the Unix socket `path` back to `sink` over this connection's login, as an
+    /// [`Open::Interactive`] open (a person's pane asks). The sink is registered before the request, so a channel that
+    /// the server opens at once is not lost. A server that does not allow it gives [`ForwardError::Refused`] and nothing
+    /// else is tried.
+    pub async fn forward(self: &Arc<Self>, path: &str, sink: Arc<dyn ForwardSink>) -> std::result::Result<ForwardGuard, ForwardError> {
+        self.forward_with(path, sink, ForwardLimits::default()).await
+    }
+
+    /// [`Connection::forward`] with the limits of the caller, so a test can lower the times.
+    pub async fn forward_with(
+        self: &Arc<Self>,
+        path: &str,
+        sink: Arc<dyn ForwardSink>,
+        limits: ForwardLimits,
+    ) -> std::result::Result<ForwardGuard, ForwardError> {
+        if !valid_forward_path(path) {
+            return Err(ForwardError::Failed("the socket path is not valid".into()));
+        }
+        let session = self.session(Open::Interactive).await.map_err(|e| ForwardError::Failed(e.why))?;
+        let Some(open) = session.forwards.register(path, sink, limits) else {
+            return Err(ForwardError::Failed("this socket path is forwarded already".into()));
+        };
+        let asked = tokio::time::timeout(FORWARD_REQUEST_TIMEOUT, session.handle.streamlocal_forward(path)).await;
+        let failure = match asked {
+            Ok(Ok(())) => {
+                return Ok(ForwardGuard { session, handle: self.handle.clone(), path: path.to_owned(), open, live: true });
+            }
+            Ok(Err(russh::Error::RequestDenied)) => ForwardError::Refused,
+            Ok(Err(e)) => ForwardError::Failed(e.to_string()),
+            Err(_) => ForwardError::Failed("the server did not answer the forward request".into()),
+        };
+        session.forwards.unregister(path);
+        Err(failure)
     }
 }
 

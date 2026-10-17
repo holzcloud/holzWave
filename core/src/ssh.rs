@@ -37,7 +37,7 @@ use russh::{Channel, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::sync::{mpsc as tmpsc, watch};
 
 use crate::conn::{ConnState, Link, SharedState};
-use crate::pool::{Connection, Open, Session};
+use crate::pool::{Connection, Forwards, Open, Session, bridge};
 use crate::{Error, Result};
 
 /// The most input kept while the connection is down. More is dropped, so a stuck key cannot fill the memory.
@@ -481,10 +481,29 @@ pub(crate) struct Client {
     policy: HostKeyPolicy,
     /// Why the key was refused, for the message.
     refused: Arc<Mutex<Option<String>>>,
+    /// The forwarded sockets of this login: what a channel the server opens may be bridged to.
+    forwards: Arc<Forwards>,
 }
 
 impl client::Handler for Client {
     type Error = russh::Error;
+
+    /// The server opened a channel for a connection to a forwarded Unix socket. It is let in only for a path that has a
+    /// sink on this login and a free place; every other one is rejected. The bytes of an accepted one never wait for the
+    /// sink (see [`bridge`]).
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        channel: Channel<client::Msg>,
+        socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        // A dropped reply rejects the channel.
+        let Some(admitted) = self.forwards.admit(socket_path) else { return Ok(()) };
+        reply.accept().await;
+        bridge(channel, admitted);
+        Ok(())
+    }
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> std::result::Result<bool, Self::Error> {
         let refuse = |why: String| {
@@ -526,7 +545,7 @@ fn is_fatal(error: &russh::Error) -> bool {
 
 /// Open a session to `target`, going through its jump host if it has one, and log in. The pane's connection loop uses it
 /// directly; everything else gets its session from a [`crate::pool::Connection`], which calls it.
-pub(crate) async fn open(target: &SshTarget) -> std::result::Result<Handle<Client>, Outcome> {
+pub(crate) async fn open(target: &SshTarget, forwards: &Arc<Forwards>) -> std::result::Result<Handle<Client>, Outcome> {
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
@@ -540,12 +559,14 @@ pub(crate) async fn open(target: &SshTarget) -> std::result::Result<Handle<Clien
         known_hosts: t.known_hosts.clone(),
         policy: t.host_key,
         refused: refused.clone(),
+        forwards: forwards.clone(),
     };
     let lost = |e: &dyn std::fmt::Display| Outcome::Lost(e.to_string());
     let why_refused = || refused.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
     let mut session = if let Some(jump) = &target.jump {
-        let via = Box::pin(open(jump)).await?;
+        // Only the target's own login serves forwards; a jump host's registry stays empty, so it rejects every one.
+        let via = Box::pin(open(jump, &Arc::new(Forwards::default()))).await?;
         let channel = via
             .channel_open_direct_tcpip(target.host.clone(), target.port as u32, "127.0.0.1", 0)
             .await

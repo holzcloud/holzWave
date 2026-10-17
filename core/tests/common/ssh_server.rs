@@ -21,6 +21,12 @@
 //!   connecting to them and copying both ways; every request is recorded.
 //! - **SFTP.** With [`Options::sftp`] the `sftp` subsystem serves a real directory (and refuses every path outside it);
 //!   every subsystem started is counted.
+//! - **Unix socket forward.** With [`Options::forward`] a `streamlocal-forward@openssh.com` request is accepted (without
+//!   it, or with [`Options::refuse_forward`], it is refused) and recorded, as is its cancel; [`Server::open_forwarded`]
+//!   opens a forwarded channel to the client on the newest login and hands the test a blocking [`ForwardedPeer`].
+//! - **Wrapped shell.** With [`Options::wrapped_shell`] an exec request that starts with `exec sh -c 'HOLZWAVE_` behaves
+//!   like a shell; [`Options::refuse_exec_once`] answers the first exec request with a failure. `Seen::events` holds
+//!   the requests of the channels in order.
 //! - **Cuts and counts.** [`Server::cut`] ends every connection that is open now; `Seen::disconnects` counts the
 //!   connections that ended, whoever ended them.
 //!
@@ -65,6 +71,12 @@ pub struct Options {
     pub max_channels: Option<usize>,
     /// Cut the first connection this many milliseconds after its shell started.
     pub cut_shell_after: Option<u64>,
+    /// Accept `streamlocal-forward@openssh.com` requests.
+    pub forward: bool,
+    /// An exec request that starts the wrapped shell behaves like a shell.
+    pub wrapped_shell: bool,
+    /// The first exec request is answered with a failure.
+    pub refuse_exec_once: bool,
 }
 
 impl Options {
@@ -89,6 +101,9 @@ impl Options {
             shell_flood: None,
             max_channels: None,
             cut_shell_after: None,
+            forward: false,
+            wrapped_shell: false,
+            refuse_exec_once: false,
         }
     }
 
@@ -124,6 +139,31 @@ impl Options {
         self
     }
 
+    /// The same server, and it accepts Unix socket forward requests.
+    pub fn forward(mut self) -> Self {
+        self.forward = true;
+        self
+    }
+
+    /// The same server, and it refuses Unix socket forward requests (the default, said out loud).
+    pub fn refuse_forward(mut self) -> Self {
+        self.forward = false;
+        self
+    }
+
+    /// The same server, and an exec request whose text starts with `exec sh -c 'HOLZWAVE_` behaves like a shell: it
+    /// prints `welcome N` and echoes like the shell.
+    pub fn wrapped_shell(mut self) -> Self {
+        self.wrapped_shell = true;
+        self
+    }
+
+    /// The same server, and the first exec request it gets is answered with a failure.
+    pub fn refuse_exec_once(mut self) -> Self {
+        self.refuse_exec_once = true;
+        self
+    }
+
     /// The same server, and every exec request prints `bytes` (and nothing else) before it ends with status 0.
     pub fn exec_reply(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         self.exec_reply = Some(bytes.into());
@@ -152,6 +192,16 @@ pub struct Seen {
     pub disconnects: AtomicUsize,
     /// `sftp` subsystems started.
     pub sftp_sessions: AtomicUsize,
+    /// The path of every Unix socket forward request, in order.
+    pub forwards: Mutex<Vec<String>>,
+    /// The path of every cancel of a Unix socket forward, in order.
+    pub cancelled_forwards: Mutex<Vec<String>>,
+    /// Exec requests that started the wrapped shell.
+    pub execs_as_shell: AtomicUsize,
+    /// The requests of the session channels in order: `pty`, `shell`, `exec`, `forward PATH`, `cancel PATH`.
+    pub events: Mutex<Vec<String>>,
+    /// Exec requests that were refused by [`Options::refuse_exec_once`].
+    refused_execs: AtomicUsize,
     /// The handles of the connections that logged in, for [`Server::cut`].
     handles: Mutex<Vec<server::Handle>>,
 }
@@ -165,6 +215,25 @@ impl Seen {
     /// The `direct-tcpip` requests so far.
     pub fn direct_tcpip(&self) -> Vec<(String, u16)> {
         self.direct_tcpip.lock().unwrap().clone()
+    }
+
+    /// The paths of the forward requests so far.
+    pub fn forwards(&self) -> Vec<String> {
+        self.forwards.lock().unwrap().clone()
+    }
+
+    /// The paths of the forward cancels so far.
+    pub fn cancelled_forwards(&self) -> Vec<String> {
+        self.cancelled_forwards.lock().unwrap().clone()
+    }
+
+    /// The requests of the channels so far, in order.
+    pub fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+
+    fn event(&self, text: impl Into<String>) {
+        self.events.lock().unwrap().push(text.into());
     }
 }
 
@@ -210,6 +279,18 @@ impl Server {
         }
     }
 
+    /// Open a forwarded Unix socket channel for `path` to the client of the newest login, as `sshd` does when something
+    /// connects to the forwarded socket. `Err` with the reason when the client refuses it or there is no login.
+    pub fn open_forwarded(&self, path: &str) -> Result<ForwardedPeer, String> {
+        let handle = self.seen.handles.lock().unwrap().last().cloned().ok_or("no login")?;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let channel = rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(10), handle.channel_open_forwarded_streamlocal(path)).await })
+            .map_err(|_| "the open timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+        Ok(ForwardedPeer { rt, channel, pending: Vec::new(), ended: false })
+    }
+
     /// A target for a pane: host `127.0.0.1` and this port, user `holz`, three attempts 100 ms apart.
     pub fn target(&self, auth: SshAuth) -> SshTarget {
         let mut target = SshTarget::new("127.0.0.1", "holz", auth);
@@ -233,6 +314,77 @@ impl Server {
         target.known_hosts = Some(known_hosts.to_path_buf());
         target.host_key = HostKeyPolicy::Strict;
         target
+    }
+}
+
+/// The server's end of a forwarded channel, with blocking calls. Every wait is bounded.
+pub struct ForwardedPeer {
+    rt: tokio::runtime::Runtime,
+    channel: Channel<Msg>,
+    pending: Vec<u8>,
+    ended: bool,
+}
+
+impl ForwardedPeer {
+    /// Send `bytes` to the client.
+    pub fn write_all(&mut self, bytes: &[u8]) {
+        self.rt.block_on(async { tokio::time::timeout(Duration::from_secs(10), self.channel.data(bytes)).await }).unwrap().unwrap();
+    }
+
+    /// Send `bytes` and say whether the client took them all within two seconds (`false` when the channel is gone, or the
+    /// client no longer opens its window).
+    pub fn try_write(&mut self, bytes: &[u8]) -> bool {
+        matches!(self.rt.block_on(async { tokio::time::timeout(Duration::from_secs(2), self.channel.data(bytes)).await }), Ok(Ok(())))
+    }
+
+    /// Wait for the next message of the channel for at most `wait`. `None` when nothing came; an end marks the peer ended.
+    fn next(&mut self, wait: Duration) -> Option<Vec<u8>> {
+        let msg = self.rt.block_on(async { tokio::time::timeout(wait, self.channel.wait()).await });
+        match msg {
+            Err(_) => None,
+            Ok(Some(russh::ChannelMsg::Data { data })) => Some(data.to_vec()),
+            Ok(Some(russh::ChannelMsg::Close | russh::ChannelMsg::Eof)) | Ok(None) => {
+                self.ended = true;
+                None
+            }
+            Ok(Some(_)) => Some(Vec::new()),
+        }
+    }
+
+    /// Read up to and including the next newline, for at most 10 s. `None` when the channel ended or nothing came.
+    pub fn read_line(&mut self) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(at) = self.pending.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=at).collect();
+                return Some(String::from_utf8_lossy(&line).into_owned());
+            }
+            if self.ended || Instant::now() >= deadline {
+                return None;
+            }
+            if let Some(chunk) = self.next(deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(200))) {
+                self.pending.extend_from_slice(&chunk);
+            }
+        }
+    }
+
+    /// Whether the channel has ended (the client closed it), waiting up to `wait` for that.
+    pub fn closed_within(&mut self, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while !self.ended && Instant::now() < deadline {
+            self.next(deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(50)));
+        }
+        self.ended
+    }
+
+    /// Whether the channel has ended, looking for a moment.
+    pub fn closed(&mut self) -> bool {
+        self.closed_within(Duration::from_millis(100))
+    }
+
+    /// End the channel from this side.
+    pub fn close(&mut self) {
+        let _ = self.rt.block_on(async { tokio::time::timeout(Duration::from_secs(5), self.channel.close()).await });
     }
 }
 
@@ -471,6 +623,7 @@ impl server::Handler for Handler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.seen.ptys.fetch_add(1, Ordering::SeqCst);
+        self.seen.event("pty");
         session.channel_success(channel)?;
         Ok(())
     }
@@ -478,6 +631,7 @@ impl server::Handler for Handler {
     async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
         self.channels.remove(&channel);
         self.seen.shells.fetch_add(1, Ordering::SeqCst);
+        self.seen.event("shell");
         self.shells.insert(channel);
         session.channel_success(channel)?;
         session.data(channel, format!("welcome {}\r\n", self.index).into_bytes())?;
@@ -524,10 +678,34 @@ impl server::Handler for Handler {
         Ok(())
     }
 
+    async fn streamlocal_forward(&mut self, socket_path: &str, _session: &mut Session) -> Result<bool, Self::Error> {
+        self.seen.forwards.lock().unwrap().push(socket_path.to_string());
+        self.seen.event(format!("forward {socket_path}"));
+        Ok(self.options.forward)
+    }
+
+    async fn cancel_streamlocal_forward(&mut self, socket_path: &str, _session: &mut Session) -> Result<bool, Self::Error> {
+        self.seen.cancelled_forwards.lock().unwrap().push(socket_path.to_string());
+        self.seen.event(format!("cancel {socket_path}"));
+        Ok(true)
+    }
+
     async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
         self.channels.remove(&channel);
         let command = String::from_utf8_lossy(data).to_string();
         self.seen.commands.lock().unwrap().push(command.clone());
+        self.seen.event("exec");
+        if self.options.refuse_exec_once && self.seen.refused_execs.fetch_add(1, Ordering::SeqCst) == 0 {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        if self.options.wrapped_shell && command.starts_with("exec sh -c 'HOLZWAVE_") {
+            self.seen.execs_as_shell.fetch_add(1, Ordering::SeqCst);
+            self.shells.insert(channel);
+            session.channel_success(channel)?;
+            session.data(channel, format!("welcome {}\r\n", self.index).into_bytes())?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
         match &self.options.exec_reply {
             Some(bytes) => session.data(channel, bytes.clone())?,
