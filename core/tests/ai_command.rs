@@ -11,12 +11,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use holzwave_core::ai::provider::CancelToken;
 use holzwave_core::ai::tools::{
-    ApprovalTable, Decision, DenyPolicy, FsKind, Pending, Resolved, Scope, SHOWN_BYTES, Ticket, Tool,
-    ToolError, ToolHost, ToolName, ToolOutput, exit_line, fit, report, timed_out_line,
+    ApprovalTable, Decision, DenyPolicy, FsKind, Pending, Resolved, SHOWN_BYTES, Scope, Shown, Ticket, Tool, ToolError,
+    ToolHost, ToolName, ToolOutput, exit_line, fit, quote, remote_command, report, timed_out_line,
 };
 use holzwave_core::ai::types::ToolCall;
 use holzwave_core::layout::PaneId;
-use holzwave_core::ssh::{ExecEnd, ExecResult};
+use holzwave_core::ssh::{ExecEnd, ExecResult, MAX_EXEC_COMMAND};
 use serde_json::{Value, json};
 
 mod common;
@@ -333,4 +333,193 @@ fn a_failed_output_carries_its_flag_and_a_normal_one_does_not() {
             assert!(shown.contains("failure") && shown.contains(flag) && shown.contains("17"), "{shown}");
         }
     }
+}
+
+/// The output of `/bin/sh -c <script>`, as bytes, and its exit status.
+#[cfg(unix)]
+fn sh(script: &str, dir: Option<&std::path::Path>) -> (Vec<u8>, Option<i32>) {
+    let mut command = std::process::Command::new("/bin/sh");
+    command.arg("-c").arg(script);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let out = command.output().expect("the shell runs");
+    (out.stdout, out.status.code())
+}
+
+#[cfg(unix)]
+#[test]
+fn the_remote_string_survives_a_real_posix_shell_byte_for_byte() {
+    // Thirty texts that a shell would read as something other than text if they were not quoted.
+    let mut texts: Vec<String> = [
+        "'", "''", "a'b'c", "\"", "say \"hi\"", "\\", "a\\nb", "$(echo no)", "`echo no`", "`", "$HOME", "${HOME}", ";", "a; echo no", "&&",
+        "a && echo no", "|", "> out", "\n", "line one\nline two", "\t", "\r", "tab\there", "carriage\rreturn", "caf\u{e9} \u{20ac} \u{1f600}",
+        "-n", "--", "   ", "~/x", "*", "!history", "#not a comment",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    texts.push("'".repeat(8192));
+    assert!(texts.len() >= 30);
+    for text in &texts {
+        let (out, status) = sh(&format!("printf %s {}", quote(text)), None);
+        assert_eq!(status, Some(0), "{text:?}");
+        assert_eq!(out, text.as_bytes(), "the shell read {text:?} as something else");
+    }
+
+    // With a working directory: the folder has a space and a quote in its name, and the command sees it as its own.
+    let folder = Folder::new("cmd-quote");
+    let odd = folder.path.join("it's a \"dir\"");
+    std::fs::create_dir(&odd).expect("a folder");
+    let canonical = odd.canonicalize().expect("canonical");
+    let cwd = canonical.to_str().expect("utf-8");
+    let there = remote_command("printf '%s' \"$PWD\"", Some(cwd)).expect("short enough");
+    assert!(there.starts_with("cd -- ") && there.contains(" && exec sh -c -- "), "{there}");
+    let (out, status) = sh(&there, None);
+    assert_eq!((status, out), (Some(0), cwd.as_bytes().to_vec()));
+    let (_, status) = sh(&remote_command("exit 7", Some(cwd)).expect("short"), None);
+    assert_eq!(status, Some(7), "the status of the command is the status of the string");
+
+    // A folder that does not exist: the command does not run, and the status is not 0.
+    let marker = folder.path.join("marker");
+    let missing = folder.path.join("no such folder");
+    let (_, status) = sh(
+        &remote_command(&format!("touch '{}'", marker.display()), missing.to_str()).expect("short"),
+        None,
+    );
+    assert!(status != Some(0), "{status:?}");
+    assert!(!marker.exists(), "the command ran although its folder is missing");
+
+    // Without a folder there is no `cd`; a command of several lines runs line by line as written.
+    let bare = remote_command("pwd", None).expect("short");
+    assert_eq!(bare, "exec sh -c -- 'pwd'");
+    let (out, _) = sh(&remote_command("printf a\nprintf b\nprintf c", None).expect("short"), None);
+    assert_eq!(out, b"abc");
+
+    // A command whose string is longer than the exec limit has none.
+    assert_eq!(remote_command(&"'".repeat(8192), None), None);
+    assert!(remote_command(&"x".repeat(MAX_EXEC_COMMAND), None).is_none());
+    assert!(remote_command(&"x".repeat(100), Some("/srv/app")).is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_working_directory_in_a_protected_place_is_refused_before_a_card() {
+    let folder = Folder::new(DIR_CANARY);
+    let data = folder.path.join("data");
+    let ipc = data.join("ipc");
+    let ssh = folder.path.join("home/.ssh");
+    let proj = folder.path.join("proj");
+    for dir in [&data, &ipc, &ssh, &proj] {
+        std::fs::create_dir_all(dir).expect("a folder");
+    }
+    std::os::unix::fs::symlink(&ssh, proj.join("link")).expect("a link");
+    let host = CommandHost::local();
+    let table = ApprovalTable::new(DenyPolicy::new(vec![data.canonicalize().expect("canonical")]));
+    let scope = scope(1);
+    for (n, cwd) in [data.clone(), ipc.clone(), ssh.clone(), proj.join("link")].iter().enumerate() {
+        let args = json!({"command": "ls", "cwd": cwd});
+        let error = table.propose(&host, &scope, &call(&format!("call_{n}"), args)).expect_err("a protected folder");
+        assert!(matches!(error, ToolError::Denied(_)), "{error:?}");
+        assert!(!error.to_string().contains(DIR_CANARY), "the refusal holds the folder: {error}");
+    }
+    assert!(table.pending("chat-1").is_empty(), "a card was made for a protected folder");
+    assert!(host.ran().is_empty());
+
+    // A folder next to them is fine.
+    let ok = table.propose(&host, &scope, &call("call_ok", json!({"command": "ls", "cwd": proj}))).expect("a card");
+    assert_eq!(ok.target, "This computer");
+    assert_eq!(table.pending("chat-1").len(), 1);
+}
+
+#[test]
+fn a_working_directory_that_changed_after_the_card_refuses_the_call() {
+    let run_after = |change: &dyn Fn(&CommandHost)| {
+        let host = CommandHost::remote();
+        let table = table();
+        let scope = scope(3);
+        let pending = table
+            .propose(&host, &scope, &call("call_1", json!({"command": "make", "cwd": "/srv/app", "pane": 3})))
+            .expect("a card");
+        table.decide("chat-1", "call_1", Decision::Allow, &pending.hash).expect("allowed");
+        change(&host);
+        let result = table.run(&host, &scope, "call_1", &CancelToken::new());
+        assert_eq!(host.ran().len(), 0, "the host ran a command that was not the one the card showed");
+        assert!(table.pending("chat-1").is_empty());
+        assert_eq!(
+            table.run(&host, &scope, "call_1", &CancelToken::new()).expect_err("the call is gone"),
+            ToolError::UnknownCall
+        );
+        result
+    };
+    // A retargeted folder, another machine name and another kind of machine are each a changed payload.
+    assert_eq!(run_after(&|host| host.retarget("/srv/other")).expect_err("changed"), ToolError::PayloadChanged);
+    assert_eq!(run_after(&|host| host.move_to(FsKind::Remote, "other box")).expect_err("changed"), ToolError::PayloadChanged);
+    assert_eq!(run_after(&|host| host.move_to(FsKind::Local, "build box")).expect_err("changed"), ToolError::PayloadChanged);
+}
+
+#[test]
+fn a_command_after_untrusted_text_is_tainted_and_a_read_is_not() {
+    let host = CommandHost::remote();
+    let table = table();
+    let scope = scope(3);
+    let read = |id: &str| ToolCall { id: id.to_owned(), name: "read_file".to_owned(), args: json!({"path": "/srv/app/notes.txt"}) };
+
+    // A fresh turn: no mark.
+    let first = table.propose(&host, &scope, &call("c1", json!({"command": "make"}))).expect("a card");
+    assert!(!first.tainted && first.taint.is_empty());
+    table.decide("chat-1", "c1", Decision::Allow, &first.hash).expect("allowed");
+    table.run(&host, &scope, "c1", &CancelToken::new()).expect("ran");
+
+    // After a successful command the next one carries the mark `output of run_command`.
+    let second = table.propose(&host, &scope, &call("c2", json!({"command": "make again"}))).expect("a card");
+    assert!(second.tainted);
+    assert_eq!(second.taint, ["output of run_command"]);
+
+    // A read adds its own label, and a read's card is not marked by a read.
+    let before = table.propose(&host, &scope, &read("r1")).expect("a read card");
+    table.decide("chat-1", "r1", Decision::Allow, &before.hash).expect("allowed");
+    table.run(&host, &scope, "r1", &CancelToken::new()).expect("the read ran");
+    let third = table.propose(&host, &scope, &call("c3", json!({"command": "make third"}))).expect("a card");
+    assert_eq!(third.taint, ["output of run_command", "output of read_file"]);
+
+    // A command card proposed before untrusted text came in is void when it is decided after it.
+    let waiting = table.propose(&host, &scope, &call("c4", json!({"command": "make fourth"}))).expect("a card");
+    let again = table.propose(&host, &scope, &read("r2")).expect("a read card");
+    table.decide("chat-1", "r2", Decision::Allow, &again.hash).expect("allowed");
+    table.run(&host, &scope, "r2", &CancelToken::new()).expect("the read ran");
+    let before_count = host.ran().len();
+    assert_eq!(table.decide("chat-1", "c4", Decision::Allow, &waiting.hash), Err(ToolError::TaintChanged));
+    assert_eq!(host.ran().len(), before_count, "a voided command ran");
+
+    // A turn that has read nothing has a fresh mark.
+    let other = Scope { conversation: "chat-1".to_owned(), turn: 2, pane: 3 };
+    let fresh = table.propose(&host, &other, &call("c5", json!({"command": "make"}))).expect("a card");
+    assert!(!fresh.tainted);
+}
+
+#[test]
+fn no_debug_output_of_the_report_types_shows_text() {
+    let folder = Folder::new(DIR_CANARY);
+    let host = CommandHost::local();
+    let table = table();
+    let cwd = folder.path.to_str().expect("utf-8");
+    let command = format!("echo {OUT_CANARY}");
+    let pending = table
+        .propose(&host, &scope(1), &call("call_1", json!({"command": command, "cwd": cwd})))
+        .expect("a card");
+    let result = result(OUT_CANARY, &format!("{OUT_CANARY} {DIR_CANARY}"), Some(3), ExecEnd::Finished);
+    let shown: Shown = fit(OUT_CANARY, DIR_CANARY, SHOWN_BYTES);
+    let output = report(&result, 60);
+    for text in [
+        format!("{shown:?} {shown:#?}"),
+        format!("{output:?} {output:#?}"),
+        format!("{result:?} {result:#?}"),
+        format!("{pending:?} {pending:#?}"),
+    ] {
+        assert!(!text.contains(OUT_CANARY) && !text.contains(DIR_CANARY) && !text.contains(&folder.canonical), "{text}");
+    }
+    assert!(format!("{shown:?}").contains(&OUT_CANARY.len().to_string()) || format!("{shown:?}").contains("Size"), "sizes are shown");
+    assert!(format!("{result:?}").contains("stdout_bytes"), "the sizes of the exec result are shown");
+    assert!(format!("{output:?}").contains("failure"), "the flag is shown");
 }

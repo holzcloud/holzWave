@@ -48,6 +48,111 @@
       "hash": "9c39ed317865c8711228cdf71f439ff0d387d71c34f2cf8d0564e578bb7dfec5",
       "tainted": false,
       "taint": []
+    },
+    "remote": {
+      "conversation": "chat-1",
+      "call_id": "call_1",
+      "tool": "run_command",
+      "effect": "exec",
+      "pane": 3,
+      "target": "build box",
+      "remote": true,
+      "payload": [
+        {
+          "name": "tool",
+          "value": "run_command",
+          "bytes": 11
+        },
+        {
+          "name": "pane",
+          "value": "3",
+          "bytes": 1
+        },
+        {
+          "name": "target",
+          "value": "build box",
+          "bytes": 9
+        },
+        {
+          "name": "remote",
+          "value": "true",
+          "bytes": 4
+        },
+        {
+          "name": "command",
+          "value": "cd build\\n\\tmake check \\u{202e}fi",
+          "bytes": 26
+        },
+        {
+          "name": "cwd",
+          "value": "/srv/app",
+          "bytes": 8
+        },
+        {
+          "name": "timeout_secs",
+          "value": "120",
+          "bytes": 3
+        },
+        {
+          "name": "resolved_cwd",
+          "value": "/srv/app",
+          "bytes": 8
+        }
+      ],
+      "hash": "98fc33f235a0e5dd9547f61afdad80903e47e2dd7e953854048b7857c5a19176",
+      "tainted": false,
+      "taint": []
+    },
+    "tainted": {
+      "conversation": "chat-1",
+      "call_id": "call_1",
+      "tool": "run_command",
+      "effect": "exec",
+      "pane": 1,
+      "target": "This computer",
+      "remote": false,
+      "payload": [
+        {
+          "name": "tool",
+          "value": "run_command",
+          "bytes": 11
+        },
+        {
+          "name": "pane",
+          "value": "1",
+          "bytes": 1
+        },
+        {
+          "name": "target",
+          "value": "This computer",
+          "bytes": 13
+        },
+        {
+          "name": "remote",
+          "value": "false",
+          "bytes": 5
+        },
+        {
+          "name": "command",
+          "value": "make test",
+          "bytes": 9
+        },
+        {
+          "name": "timeout_secs",
+          "value": "60",
+          "bytes": 2
+        },
+        {
+          "name": "resolved_cwd",
+          "value": "/Users/holz/proj",
+          "bytes": 16
+        }
+      ],
+      "hash": "da9d3be474453b1f1c743a6f88f0cdd83f57012c93ef993da3c353afff00d5a0",
+      "tainted": true,
+      "taint": [
+        "output of read_file"
+      ]
     }
   },
   "limits": {

@@ -34,13 +34,15 @@ use holzwave_core::platform::{
 use holzwave_core::pty::process_cwd;
 use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
+use holzwave_core::ssh::{ExecCancel, ExecLimits, ExecResult, SshExec};
 use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
 use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::ai_host::{AiHost, AiParts, AiPayload};
-use crate::ai_tools::{FileTarget, TerminalTarget};
+use crate::ai_exec::RemoteExecs;
+use crate::ai_tools::{ExecFault, FileTarget, TerminalTarget};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
@@ -704,6 +706,8 @@ pub struct AppCore {
     sync: crate::sync::SyncRuntime,
     /// The AI chat service and the calls the commands make on it. It owns its threads and takes no lock of the core.
     ai: AiHost,
+    /// The exec primitive of each saved connection a command ran on, kept for the life of the connection list.
+    remote_execs: RemoteExecs<SshExec>,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
     saver: Debounced,
     /// How many times the saver job wrote the file, for tests.
@@ -827,6 +831,7 @@ impl AppCore {
                 blocks,
                 sync,
                 ai: host,
+                remote_execs: RemoteExecs::new(),
                 monitor: holzwave_core::monitor::Monitor::new(),
                 history,
                 ipc: Mutex::new(None),
@@ -2187,6 +2192,30 @@ impl AppCore {
             Some(profile) => TerminalTarget { label: profile.name, remote: true },
             None => TerminalTarget { label: "This computer".to_owned(), remote: false },
         })
+    }
+
+    /// Runs `command` on the host of the saved connection `connection` through its exec channel, for the command tool. The
+    /// exec primitive of a connection is built once for each version of the connection list, outside every lock of this
+    /// struct (building it reads the keychain and makes a runtime), and the run holds no lock either: it blocks the calling
+    /// turn thread until the command ended, the time ran out or `cancel` was raised. A failure is a scrubbed reason.
+    pub(crate) fn tool_run_remote(
+        &self,
+        connection: &str,
+        command: &str,
+        limits: &ExecLimits,
+        cancel: &ExecCancel,
+    ) -> Result<ExecResult, ExecFault> {
+        let scrubbed = |text: &str| ExecFault::Remote(holzwave_core::ai::provider::Detail::new(text).as_str().to_owned());
+        let generation = self.connections.generation();
+        let exec = self
+            .remote_execs
+            .get_or_build(connection, generation, || {
+                let label = self.connections.label_of(connection).ok_or_else(|| "there is no such connection".to_owned())?;
+                let target = self.connections.ssh_target(connection).map_err(|error| error.to_string())?;
+                SshExec::new(label, target).map(Arc::new).map_err(|error| error.to_string())
+            })
+            .map_err(|why| scrubbed(&why))?;
+        exec.exec(command, limits, cancel).map_err(|error| scrubbed(&error.to_string()))
     }
 
     /// Like [`AppCore::handle`], for the commands that answer with something and so need the pane to exist.

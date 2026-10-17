@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use holzwave_core::ai::agent::STOPPED_RESULT;
 use holzwave_core::ai::provider::CancelToken;
 use holzwave_core::ai::tools::{
-    ApprovalTable, CAPTURE_BYTES, CWD_MISSING, CWD_REMOTE_RELATIVE, CWD_UNKNOWN, DEFAULT_COMMAND_SECS,
+    ApprovalTable, CAPTURE_BYTES, Decision, CWD_MISSING, CWD_REMOTE_RELATIVE, CWD_UNKNOWN, DEFAULT_COMMAND_SECS,
     DenyPolicy, FsKind, MAX_COMMAND_BYTES, MAX_COMMAND_SECS, MAX_PATH_BYTES, Pending, REMOTE_FAILED,
     REMOTE_TOO_LONG, Resolved, SHOWN_BYTES, START_FAILED, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput,
     report,
@@ -57,6 +57,9 @@ impl ToolHost for Machine {
         if let Tool::RunCommand(args) = tool {
             resolved = resolved.with_cwd(args.cwd.as_deref().unwrap_or(self.home));
         }
+        if let Some(path) = tool.path() {
+            resolved = resolved.with_path(path);
+        }
         Ok(resolved)
     }
 
@@ -76,11 +79,33 @@ fn card(machine: &Machine, args: serde_json::Value) -> Pending {
 #[derive(Serialize)]
 struct Cards {
     local: Pending,
+    remote: Pending,
+    tainted: Pending,
+}
+
+/// A card for a local command that was proposed after a successful read in the same turn.
+fn tainted_card(machine: &Machine) -> Pending {
+    let table = ApprovalTable::new(DenyPolicy::new(Vec::new()));
+    let scope = Scope { conversation: "chat-1".to_owned(), turn: 1, pane: machine.pane };
+    let read = ToolCall { id: "read_1".to_owned(), name: "read_file".to_owned(), args: json!({"path": "/Users/holz/proj/Makefile"}) };
+    let first = table.propose(machine, &scope, &read).expect("a read card");
+    table.decide("chat-1", "read_1", Decision::Allow, &first.hash).expect("allowed");
+    table.run(machine, &scope, "read_1", &CancelToken::new()).expect("the read ran");
+    let call = ToolCall { id: "call_1".to_owned(), name: "run_command".to_owned(), args: json!({"command": "make test"}) };
+    table.propose(machine, &scope, &call).expect("a command card")
 }
 
 fn cards() -> Cards {
     let local = Machine { fs: FsKind::Local, pane: 1, target: "This computer", home: "/Users/holz/proj" };
-    Cards { local: card(&local, json!({"command": "printf 'build ok\\n'"})) }
+    let build_box = Machine { fs: FsKind::Remote, pane: 3, target: "build box", home: "/srv/app" };
+    Cards {
+        local: card(&local, json!({"command": "printf 'build ok\\n'"})),
+        remote: card(
+            &build_box,
+            json!({"command": "cd build\n\tmake check \u{202e}fi", "cwd": "/srv/app", "timeout_secs": 120}),
+        ),
+        tainted: tainted_card(&local),
+    }
 }
 
 /// The longest value of one payload row a legal command can have, and the largest total of the values of a card.
@@ -217,6 +242,10 @@ fn the_command_card_golden_matches_the_cards_the_table_builds() {
     let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
     assert_eq!(value["cards"]["local"]["effect"], json!("exec"));
     assert_eq!(value["cards"]["local"]["tool"], json!("run_command"));
+    assert_eq!(value["cards"]["remote"]["remote"], json!(true));
+    assert_eq!(value["cards"]["tainted"]["tainted"], json!(true));
+    assert_eq!(value["cards"]["tainted"]["taint"], json!(["output of read_file"]));
+    assert!(value["limits"]["command_value_chars"].as_u64().is_some_and(|n| n > 20000 && n <= 393_216));
     let top = text.lines().filter(|line| line.starts_with("  \"")).map(str::trim).collect::<Vec<_>>();
     assert_eq!(top, ["\"cards\": {", "\"limits\": {", "\"texts\": {"], "the members are in the order cards, limits, texts");
 

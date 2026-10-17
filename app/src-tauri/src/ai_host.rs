@@ -2443,6 +2443,210 @@ mod tests {
         assert_eq!(std::fs::read(&typed).expect("the file the pane writes"), b"", "something was typed into the pane");
     }
 
+    /// The text the core's golden gives a stopped call: the page and the model hear the same sentence.
+    fn golden_stopped() -> String {
+        let golden: Value = serde_json::from_str(include_str!("../../tests/fixtures/ai_command_card.json")).expect("JSON");
+        golden["texts"]["stopped"].as_str().expect("a sentence").to_owned()
+    }
+
+    /// Whether the process `pid` is alive; a zombie counts as dead.
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().expect("ps runs");
+        let state = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        !state.is_empty() && !state.starts_with('Z')
+    }
+
+    /// The number a command wrote to `path`, waited for.
+    #[cfg(unix)]
+    fn pid_of(path: &Path) -> u32 {
+        let mut found = None;
+        assert!(
+            wait_for(Duration::from_secs(5), || {
+                found = std::fs::read_to_string(path).ok().and_then(|text| text.trim().parse::<u32>().ok());
+                found.is_some()
+            }),
+            "the command did not write {}",
+            path.display()
+        );
+        found.expect("a pid")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_ends_a_running_command_and_everything_it_started() {
+        let tree = Scratch::new("stop-tree");
+        let scratch = Scratch::new("stop-trace");
+        let proj = proj_of(&tool_tree(&tree.0));
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let (bg_file, sh_file) = (scratch.0.join("bg.pid"), scratch.0.join("sh.pid"));
+        let command = format!("sleep 300 & echo $! > '{}'; echo $$ > '{}'; wait", bg_file.display(), sh_file.display());
+        register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "run_command", command_args(&command, &proj)))
+                .with_turn(text_turn("Done.")),
+        );
+        let chat = new_chat();
+        start(&core, &chat, pane_of(&core), "run the checks");
+        let hash = event_of(&rec, &chat, "tool_proposed")["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let (bg, sh) = (pid_of(&bg_file), pid_of(&sh_file));
+        assert!(alive(bg) && alive(sh), "the command is running");
+
+        // A stop reaches the running command: the call ends with the loop's sentence for a stopped call, the turn ends
+        // `cancelled`, and neither the shell nor its helper is left.
+        assert_eq!(core.ai().cancel(&chat), Ok(true));
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!((result["call_id"].as_str(), result["is_error"].as_bool()), (Some("call_1"), Some(true)));
+        assert_eq!(result["content"].as_str(), Some(golden_stopped().as_str()));
+        assert!(wait_for(Duration::from_secs(5), || !alive(bg) && !alive(sh)), "a process of the command is still alive");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], json!("cancelled"));
+
+        let events: Vec<AiPayload> = rec.ai_events().into_iter().map(|(_, payload)| payload).collect();
+        let mut folded = ChatState::new(&chat);
+        for payload in &events {
+            assert_eq!(folded.apply(&payload.0), ApplyResult::Applied, "{payload:?}");
+        }
+        let idle = core.ai().snapshot(&chat).expect("a snapshot");
+        assert_eq!(as_stored(json_of(&folded)), json_of(&idle), "the fold of the events is the snapshot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_in_a_protected_working_directory_is_refused_before_any_card() {
+        let home = Scratch::new("cwall-home");
+        let scratch = Scratch::new("cwall-data");
+        let (core, rec) = core_protecting(&scratch.0, Vec::new());
+        let data = scratch.0.canonicalize().expect("canonical");
+        let root = home.0.canonicalize().expect("canonical");
+        put(&root, "home/.ssh/config", &format!("secret {SECRET_TEXT}\n"));
+        std::fs::create_dir_all(root.join("proj")).expect("a folder");
+        std::os::unix::fs::symlink(root.join("home/.ssh"), root.join("proj/link")).expect("a link");
+        let marker = root.join("marker");
+        let places = [data.clone(), root.join("home/.ssh"), root.join("proj/link")];
+
+        let mut provider = scripted_tools("scripted");
+        for (n, place) in places.iter().enumerate() {
+            let command = format!("touch '{}'", marker.display());
+            provider = provider.with_turn(tool_call_turn(&format!("call_{n}"), "run_command", command_args(&command, place)));
+            provider = provider.with_turn(text_turn("noted"));
+        }
+        let provider = register(&core, "scripted", provider);
+        let chat = new_chat();
+        let pane = pane_of(&core);
+        for n in 0..places.len() {
+            say(&core, &rec, &chat, pane, &format!("run number {n}"));
+        }
+        assert!(events_of(&rec, &chat, "tool_proposed").is_empty(), "a protected folder showed a card");
+        let results = events_of(&rec, &chat, "tool_result");
+        assert_eq!(results.len(), places.len());
+        let refusal = ToolError::Denied("secret_location").to_string();
+        for (n, result) in results.iter().enumerate() {
+            assert_eq!(result["is_error"], json!(true), "call {n}");
+            let text = result["content"].as_str().expect("content");
+            assert!(!text.contains(root.to_str().expect("utf-8")) && !text.contains(".ssh"), "call {n}: {text}");
+            assert_eq!(text, refusal, "call {n} does not give the fixed refusal");
+        }
+        assert!(!marker.exists(), "a command ran in a protected folder");
+        let snapshot = json_of(&core.ai().snapshot(&chat).expect("a snapshot"));
+        assert!(!everything_serialised(&rec, &[snapshot]).contains(SECRET_TEXT), "the secret reached an event or a view");
+        let sent: String =
+            provider.requests().iter().map(|r| serde_json::to_string(&r.messages).expect("serialises")).collect();
+        assert!(!sent.contains(SECRET_TEXT), "the secret reached the model");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_command_is_an_error_row_with_its_output_and_the_turn_goes_on() {
+        let tree = Scratch::new("fail-tree");
+        let scratch = Scratch::new("fail-trace");
+        let proj = proj_of(&tool_tree(&tree.0));
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "run_command", command_args("printf 'zq-cmd-err-2b9c73\\n' >&2; exit 3", &proj)))
+                .with_turn(text_turn("It failed.")),
+        );
+        let chat = new_chat();
+        start(&core, &chat, pane_of(&core), "run it");
+        let hash = event_of(&rec, &chat, "tool_proposed")["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(result["is_error"], json!(true), "{result}");
+        let content = result["content"].as_str().expect("content").to_owned();
+        assert!(content.starts_with("Exit status: 3."), "{content}");
+        assert!(content.contains("Standard error:") && content.contains("zq-cmd-err-2b9c73"), "{content}");
+
+        // The turn goes on to its answer, and the model heard the same text as an error result.
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], json!("done"));
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        let heard = requests[1].messages.last().expect("a message").parts.iter().any(|part| match part {
+            Part::ToolResult(result) => result.call_id == "call_1" && result.content == content && result.is_error,
+            _ => false,
+        });
+        assert!(heard, "the model hears the whole text as an error result");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_after_untrusted_text_is_tainted_and_runs_only_on_its_own_decision() {
+        let tree = Scratch::new("taint-tree");
+        let scratch = Scratch::new("taint-trace");
+        let notes = tool_tree(&tree.0);
+        let proj = proj_of(&notes);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let (ran, denied) = (scratch.0.join("ran.txt"), scratch.0.join("denied.txt"));
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "read_file", json!({"path": notes})))
+                .with_turn(tool_call_turn("call_2", "run_command", command_args(&format!("touch '{}'", ran.display()), &proj)))
+                .with_turn(text_turn("Done."))
+                .with_turn(tool_call_turn("call_3", "run_command", command_args(&format!("touch '{}'", denied.display()), &proj)))
+                .with_turn(text_turn("Understood.")),
+        );
+        let chat = new_chat();
+        start(&core, &chat, pane_of(&core), "read my notes and run the checks");
+        let read_hash = event_of(&rec, &chat, "tool_proposed")["pending"]["hash"].as_str().expect("a hash").to_owned();
+        assert_eq!(event_of(&rec, &chat, "tool_proposed")["pending"]["tainted"], json!(false));
+        decision(&core, &chat, "call_1", "allow", &read_hash).expect("the read is allowed");
+
+        // The command after the read is marked with the label of what was read, and only its own hash decides it.
+        let card = nth_event(&rec, &chat, "tool_proposed", 1)["pending"].clone();
+        assert_eq!(card["call_id"], json!("call_2"));
+        assert_eq!(card["tainted"], json!(true));
+        assert_eq!(card["taint"], json!(["output of read_file"]));
+        let hash = card["hash"].as_str().expect("a hash").to_owned();
+        assert_ne!(hash, read_hash);
+        let refused = decision(&core, &chat, "call_2", "allow", &read_hash).expect_err("another card's hash");
+        assert_eq!((refused.code, refused.reason), ("tool", Some("hash_mismatch")));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!ran.exists(), "a command ran on the hash of another card");
+        decision(&core, &chat, "call_2", "allow", &hash).expect("the command is allowed on its own hash");
+        assert!(wait_for(Duration::from_secs(5), || ran.exists()), "the command did not run");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)));
+
+        // A denied command leaves no trace, and the model is told.
+        start(&core, &chat, pane_of(&core), "and once more");
+        let again = nth_event(&rec, &chat, "tool_proposed", 2)["pending"].clone();
+        assert_eq!(again["call_id"], json!("call_3"));
+        let hash = again["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_3", "deny", &hash).expect("a denial");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended_turns(&chat) == 2));
+        assert!(!denied.exists(), "a denied command ran");
+        let requests = provider.requests();
+        let sent = serde_json::to_string(&requests.last().expect("a request").messages).expect("serialises");
+        assert!(sent.contains("The user denied this action."), "the model is told");
+    }
+
     // ---- the walls, the lifecycle and the recorded run --------------------------------------------------------
 
     use holzwave_core::ai::agent::STOPPED_RESULT;

@@ -131,7 +131,9 @@ pub enum RowsFault {
 pub enum ExecFault {
     /// The world has no way to run a command on a remote host.
     NoRunner,
-    /// The command could not be started.
+    /// The command could not be started. The runner of this computer reports it itself; a world whose runner can fail before
+    /// it connects uses this one.
+    #[cfg_attr(not(test), allow(dead_code))]
     Start,
     /// The remote host or the connection to it failed; the reason is scrubbed text.
     Remote(String),
@@ -950,6 +952,16 @@ impl Targets for CoreTargets {
 
     fn open_source(&self, source: &str) -> Option<Arc<dyn FileSource>> {
         self.0.upgrade()?.tool_open_source(source)
+    }
+
+    fn run_remote(
+        &self,
+        source: &str,
+        command: &str,
+        limits: &ExecLimits,
+        cancel: &ExecCancel,
+    ) -> Result<ExecResult, ExecFault> {
+        self.0.upgrade().ok_or(ExecFault::NoRunner)?.tool_run_remote(source, command, limits, cancel)
     }
 }
 
@@ -1955,6 +1967,21 @@ pub(crate) mod rig {
         let pending = table.propose(host, scope, &call)?;
         table.decide(&scope.conversation, id, Decision::Allow, &pending.hash)?;
         table.run(host, scope, id, &CancelToken::new())
+    }
+
+    /// [`run_call`] with the cancel token of the turn given by the test, so that a test can stop the call while it runs.
+    pub(crate) fn run_call_with(
+        table: &ApprovalTable,
+        host: &ShellTools,
+        scope: &Scope,
+        name: &str,
+        args: Value,
+        cancel: &CancelToken,
+    ) -> Result<ToolOutput, ToolError> {
+        let call = ToolCall { id: "call".to_owned(), name: name.to_owned(), args };
+        let pending = table.propose(host, scope, &call)?;
+        table.decide(&scope.conversation, "call", Decision::Allow, &pending.hash)?;
+        table.run(host, scope, "call", cancel)
     }
 
     /// [`run_call`] with a step between the decision and the run, in which a test changes the world: a file that another
