@@ -298,3 +298,177 @@ fn make_in(pool: &SessionPool, id: &str) -> Arc<Connection> {
     pool.connection(id, 1, || Ok((id.to_owned(), SshTarget::new("127.0.0.1", "holz", SshAuth::Password("pw".into()))))).unwrap()
 }
 
+// ---- the life of a session ---------------------------------------------------------------------------------------
+
+#[test]
+fn eight_threads_at_once_make_one_login() {
+    let rig = Rig::new("eight");
+    let barrier = Arc::new(Barrier::new(8));
+    let workers: Vec<_> = (0..8)
+        .map(|n| {
+            let barrier = barrier.clone();
+            let files = rig.files();
+            let exec = rig.exec();
+            let root = rig.root().to_owned();
+            thread::spawn(move || {
+                barrier.wait();
+                if n % 2 == 0 {
+                    assert_eq!(names(&files, &root), ["a.txt", "b.txt"]);
+                } else {
+                    assert_eq!(run(&exec, &format!("echo {n}")), format!("ran:echo {n}"));
+                }
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(rig.connections(), 1);
+    assert_eq!(rig.logins(), 1, "eight users at once, one login");
+}
+
+#[test]
+fn a_closed_session_is_replaced_once_for_every_user() {
+    let rig = Rig::new("replaced");
+    let files = rig.files();
+    let exec = rig.exec();
+    assert_eq!(names(&files, rig.root()).len(), 2);
+    assert_eq!(run(&exec, "echo first"), "ran:echo first");
+    assert_eq!(rig.logins(), 1);
+
+    rig.server.cut();
+    wait_until("the client to see the cut", || !rig.conn.is_connected());
+
+    // Both users find the session closed and share the one new login.
+    assert_eq!(names(&files, rig.root()).len(), 2);
+    assert_eq!(run(&exec, "echo second"), "ran:echo second");
+    assert_eq!(rig.logins(), 2, "exactly one more login in total");
+    assert_eq!(rig.connections(), 2);
+}
+
+#[test]
+fn a_cut_is_recovered_from_whether_or_not_the_client_has_noticed_it() {
+    // No wait for the client between the cut and the next request: the request may find the session closed, or fail on
+    // it and be tried once more. Either way the user sees no error and the server sees one more login.
+    for round in 1..=5 {
+        let rig = Rig::new("cut-at-once");
+        let files = rig.files();
+        let exec = rig.exec();
+        assert_eq!(names(&files, rig.root()).len(), 2);
+        assert_eq!(run(&exec, "echo first"), "ran:echo first");
+        rig.server.cut();
+        // The server has dropped the connection; the client may or may not have seen it yet.
+        wait_until("the server to drop the connection", || rig.server.seen.disconnects.load(Ordering::SeqCst) == 1);
+        assert_eq!(names(&files, rig.root()).len(), 2, "round {round}: the listing after the cut");
+        assert_eq!(run(&exec, "echo second"), "ran:echo second", "round {round}");
+        assert_eq!(rig.logins(), 2, "round {round}");
+    }
+}
+
+#[test]
+fn a_background_open_waits_after_a_refused_login() {
+    let rig = Rig::with("refused", SshAuth::Password("wrong".into()));
+    let conn = rig.conn.clone();
+    let t0 = Instant::now();
+    let first = pollster(conn.session_at(Open::Pinned, t0)).unwrap_err();
+    assert!(first.fatal, "{first}");
+    assert!(first.why.contains("refused the login"), "{first}");
+    assert_eq!(rig.refused(), 1);
+    assert_eq!(conn.cooldown_left(t0), Some(COOLDOWN_FATAL));
+
+    // A second background open inside the cooldown gets the same reason and makes no attempt.
+    let second = pollster(conn.session_at(Open::Pinned, t0 + Duration::from_secs(5))).unwrap_err();
+    assert_eq!(second, first);
+    assert_eq!(rig.refused(), 1, "no network attempt during the cooldown");
+    assert_eq!(rig.connections(), 1);
+
+    // A person's own open in the same second makes its attempt.
+    let own = pollster(conn.session_at(Open::Interactive, t0 + Duration::from_secs(5))).unwrap_err();
+    assert!(own.why.contains("refused the login"));
+    assert_eq!(rig.refused(), 2, "an interactive open is never made to wait");
+
+    // After the cooldown a background open tries again. (The interactive failure at +5 s moved the record.)
+    let later = t0 + Duration::from_secs(5) + COOLDOWN_FATAL;
+    assert_eq!(conn.cooldown_left(later), None);
+    pollster(conn.session_at(Open::Pinned, later)).unwrap_err();
+    assert_eq!(rig.refused(), 3, "after the cooldown a background open tries again");
+}
+
+#[test]
+fn a_lost_connection_waits_less() {
+    // Nobody listens on this port: the connection is refused, which is a lost connection and not a refused login.
+    let free = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    let dir = Scratch::new("lost");
+    let known = dir.path().join("known_hosts");
+    std::fs::write(&known, "").unwrap();
+    let mut target = SshTarget::new("127.0.0.1", "holz", SshAuth::Password("pw".into()));
+    target.port = port;
+    target.known_hosts = Some(known);
+    let conn = Connection::standalone("Nowhere", target).unwrap();
+    let t0 = Instant::now();
+    let error = pollster(conn.session_at(Open::Pinned, t0)).unwrap_err();
+    assert!(!error.fatal, "{error}");
+    assert_eq!(conn.cooldown_left(t0), Some(COOLDOWN_LOST), "3 s and not 15 s");
+    assert_eq!(conn.cooldown_left(t0 + Duration::from_secs(2)), Some(Duration::from_secs(1)));
+    assert_eq!(conn.cooldown_left(t0 + COOLDOWN_LOST), None);
+    // Inside the cooldown the same reason comes back at once.
+    assert_eq!(pollster(conn.session_at(Open::Pinned, t0 + Duration::from_secs(1))).unwrap_err(), error);
+}
+
+#[test]
+fn an_idle_session_is_closed_and_a_leased_one_is_not() {
+    let server = ssh_server::start(Options::password());
+    let dir = Scratch::new("idle");
+    let known = dir.path().join("known_hosts");
+    server.trust(&known);
+    let pool = SessionPool::new();
+    let make = |id: &str| {
+        pool.connection(id, 1, || Ok((id.to_owned(), server.exec_target(SshAuth::Password("pw".into()), &known)))).unwrap()
+    };
+    let (idle, busy) = (make("idle"), make("busy"));
+    let run_on = |conn: &Arc<Connection>| run(&SshExec::on(conn.clone()).unwrap(), "echo hi");
+    assert_eq!(run_on(&idle), "ran:echo hi");
+    assert_eq!(run_on(&busy), "ran:echo hi");
+    assert_eq!(server.seen.logins.load(Ordering::SeqCst), 2);
+    let lease = busy.lease();
+
+    let late = Instant::now() + IDLE + Duration::from_secs(1);
+    pool.reap(late);
+    wait_until("the idle session to be closed", || server.seen.disconnects.load(Ordering::SeqCst) == 1);
+    assert!(!idle.is_connected());
+    assert!(busy.is_connected(), "a leased session is never closed");
+
+    drop(lease);
+    // The lease moved the clock of the last use to now, so the next 121 s count from there.
+    pool.reap(Instant::now() + IDLE + Duration::from_secs(1));
+    wait_until("the second session to be closed", || server.seen.disconnects.load(Ordering::SeqCst) == 2);
+    assert!(!busy.is_connected());
+
+    // The next use logs in again.
+    assert_eq!(run_on(&idle), "ran:echo hi");
+    assert_eq!(server.seen.logins.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn a_fresh_use_resets_the_idle_clock() {
+    let server = ssh_server::start(Options::password());
+    let dir = Scratch::new("fresh-use");
+    let known = dir.path().join("known_hosts");
+    server.trust(&known);
+    let pool = SessionPool::new();
+    let conn = pool.connection("a", 1, || Ok(("a".into(), server.exec_target(SshAuth::Password("pw".into()), &known)))).unwrap();
+    let t0 = Instant::now();
+    pollster(conn.session_at(Open::Interactive, t0)).unwrap();
+    // A use at 100 s keeps the session through a reap at 150 s.
+    pollster(conn.session_at(Open::Interactive, t0 + Duration::from_secs(100))).unwrap();
+    pool.reap(t0 + Duration::from_secs(150));
+    thread::sleep(Duration::from_millis(200));
+    assert!(conn.is_connected());
+    assert_eq!(server.seen.disconnects.load(Ordering::SeqCst), 0);
+    // 121 s after that use it goes.
+    pool.reap(t0 + Duration::from_secs(100) + IDLE);
+    wait_until("the session to be closed", || server.seen.disconnects.load(Ordering::SeqCst) == 1);
+}
+
