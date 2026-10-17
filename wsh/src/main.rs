@@ -22,6 +22,7 @@ use std::process::ExitCode;
 use holzwave_ipc::{Cmd, Request, Response};
 
 mod ai;
+mod b64;
 mod clean;
 
 const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | ai [--] <prompt>... | init <bash|zsh|fish|powershell> [--ctrl-r]";
@@ -32,6 +33,9 @@ const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text>
 const BASH: &str = include_str!("../hooks/bash.sh");
 const ZSH: &str = include_str!("../hooks/zsh.zsh");
 const FISH: &str = include_str!("../hooks/fish.fish");
+
+/// What `wsh hist add --b64` says about text it cannot use: not base64, not UTF-8, too long or empty.
+const NOT_BASE64: &str = "the command or the directory is not valid base64 text";
 
 /// The binding of Ctrl+R that `wsh init <shell> --ctrl-r` adds after the hook: a file under `hooks/` for each shell, so the
 /// shells and the tests read the text that `wsh init` prints. Nothing binds a key unless the user asks for it with the flag.
@@ -95,8 +99,17 @@ fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
         [c, key, rest @ ..] if c == "setmeta" && !rest.is_empty() => Ok(Cmd::Setmeta { key: key.clone(), value: rest.join(" ") }),
         [c] if c == "ping" => Ok(Cmd::Ping),
         [c, sub] if c == "hist" && sub == "open" => Ok(Cmd::HistOpen),
-        [c, sub, exit, dir, cmd] if c == "hist" && sub == "add" => {
+        [c, sub, exit, dir, cmd] if c == "hist" && sub == "add" && exit != "--b64" => {
             Ok(Cmd::Hist { line: cmd.clone(), cwd: dir.clone(), exit: exit.parse().ok() })
+        }
+        // The form of the PowerShell hook: the directory and the command as base64 text, so that no quoting rule of either
+        // PowerShell can change them. The same `Cmd::Hist` as the plain form, or a refusal before any socket is opened.
+        [c, sub, flag, exit, dir, cmd] if c == "hist" && sub == "add" && flag == "--b64" => {
+            let cwd = b64::decode_text(dir, holzwave_ipc::MAX_PATH).ok_or(NOT_BASE64)?;
+            let line = b64::decode_text(cmd, holzwave_ipc::MAX_HIST).ok_or(NOT_BASE64)?;
+            let cmd = Cmd::Hist { line, cwd, exit: exit.parse().ok() };
+            cmd.check().map_err(|_| NOT_BASE64.to_owned())?;
+            Ok(cmd)
         }
         _ => Err(USAGE.into()),
     }
@@ -339,6 +352,45 @@ mod tests {
     fn init_powershell_without_the_flag_prints_nothing() {
         assert_eq!(init_text(&args(&["powershell"])), Ok(String::new()));
         assert_eq!(init_text(&args(&["powershell", "--ctrl-r"])).unwrap(), POWERSHELL_CTRL_R);
+    }
+
+    #[test]
+    fn hist_add_b64_decodes_the_command_and_the_directory() {
+        let cwd = Path::new("/");
+        for (dir, cmd, text_dir, text_cmd) in [
+            ("Qzpc", "ZWNobyAicXVvdGVkIHdvcmRzIg==", "C:\\", "echo \"quoted words\""),
+            ("L2hvbWUvaG9sego=", "bmHDr3ZlIGNhZsOpIOaXpeacrOiqniDwn5iA", "/home/holz\n", "na\u{ef}ve caf\u{e9} \u{65e5}\u{672c}\u{8a9e} \u{1f600}"),
+        ] {
+            for (status, exit) in [("0", Some(0)), ("1", Some(1)), ("x", None)] {
+                let got = parse(&args(&["hist", "add", "--b64", status, dir, cmd]), cwd).unwrap();
+                assert_eq!(got, Cmd::Hist { line: text_cmd.into(), cwd: text_dir.into(), exit }, "{dir} {cmd}");
+            }
+        }
+        // The same command the plain form sends for the decoded texts.
+        assert_eq!(
+            parse(&args(&["hist", "add", "--b64", "1", "Qzpc", "ZWNobyAicXVvdGVkIHdvcmRzIg=="]), cwd).unwrap(),
+            parse(&args(&["hist", "add", "1", "C:\\", "echo \"quoted words\""]), cwd).unwrap()
+        );
+    }
+
+    #[test]
+    fn hist_add_b64_refuses_text_that_is_not_base64() {
+        let cwd = Path::new("/");
+        let good = "Zm9v";
+        for bad in ["Zg", "Zg=", "Z===", "Zm9v\n", "Zm9v Zm9v", "Zm-v", "Zh==", "====", "Zg==Zg==", "/w=="] {
+            for (dir, cmd) in [(good, bad), (bad, good)] {
+                let got = parse(&args(&["hist", "add", "--b64", "0", dir, cmd]), cwd);
+                assert_eq!(got, Err(NOT_BASE64.to_owned()), "{dir:?} {cmd:?}");
+            }
+        }
+        // An empty command is refused by the same check the app applies; an empty directory is allowed.
+        assert_eq!(parse(&args(&["hist", "add", "--b64", "0", good, ""]), cwd), Err(NOT_BASE64.to_owned()));
+        assert!(parse(&args(&["hist", "add", "--b64", "0", "", good]), cwd).is_ok());
+        // Too long: one symbol more than the encoding of the longest command.
+        let long = "A".repeat(holzwave_ipc::MAX_HIST.div_ceil(3) * 4 + 4);
+        assert_eq!(parse(&args(&["hist", "add", "--b64", "0", good, &long]), cwd), Err(NOT_BASE64.to_owned()));
+        // The five-argument form with the flag in the place of the status is not the plain form.
+        assert_eq!(parse(&args(&["hist", "add", "--b64", "Zm9v", "Zm9v"]), cwd).unwrap_err(), USAGE);
     }
 
     #[test]

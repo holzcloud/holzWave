@@ -35,8 +35,21 @@ use crate::platform::Os;
 ///    `ESC ] 7 ; file://<COMPUTERNAME>/<drive>:/<segments> ESC \` to the console, where PowerShell itself
 ///    percent-encodes the machine name and every segment with `[uri]::EscapeDataString` and the drive keeps its
 ///    letter (a network location, a registry or a certificate drive announces nothing),
-/// 4. puts `$LASTEXITCODE` back, and
-/// 5. returns the text of the original prompt (a default `PS <path>> ` when there was none).
+/// 4. reports a command that is new in the history to `wsh` (see below),
+/// 5. puts `$LASTEXITCODE` back, and
+/// 6. returns the text of the original prompt (a default `PS <path>> ` when there was none).
+///
+/// The history report is automatic in holzWave's own PowerShell panes, because holzWave starts this script itself; the
+/// other shells need a line in their rc file. At each prompt the wrapper reads the last entry of `Get-History`; when its
+/// `Id` is not the one it saw last, it starts `wsh hist add --b64 <status> <directory> <command>` without a window and
+/// does not wait for it. The status is `0` when the last command succeeded and `1` otherwise (the success flag read in the
+/// first statement, not an exit code). The directory and the command go in as base64 of their UTF-8 text and nothing else:
+/// Windows PowerShell 5.1 and PowerShell 7 before 7.3 pass a double quote inside an argument to a native program
+/// differently, so a quoted command, or a directory that ends in a backslash, would arrive cut or split. Entries that
+/// exist before the first prompt are not reported. Nothing is reported for a line that starts with a space, holds a line
+/// break or is longer than 3000 characters, or while the current location is not on the file system provider, or when no
+/// `wsh` is on the path, or when the pane has no `HOLZWAVE_IPC` and `HOLZWAVE_TOKEN`. `wsh` and the store apply their own
+/// filter on top (secrets, control characters).
 ///
 /// The marks `B` and `C` (the command starts, its output follows) are written by an override of
 /// `PSConsoleHostReadLine` that calls the original, writes both marks, remembers that a command ran and returns the
@@ -50,7 +63,9 @@ use crate::platform::Os;
 /// Known limitation: `$?` is not preserved for the original prompt, because the wrapper's own commands reset it.
 /// A prompt framework that reads `$?` may show a wrong status. The mark `D` knows only success or failure, not the
 /// exit code.
-pub const POWERSHELL_PROMPT_SCRIPT: &str = r##"$global:HolzwaveOriginalPrompt = $function:prompt
+pub const POWERSHELL_PROMPT_SCRIPT: &str = r##"$global:HolzwaveWsh = (Get-Command wsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+$global:HolzwaveLastHistoryId = (Get-History -Count 1 -ErrorAction SilentlyContinue).Id
+$global:HolzwaveOriginalPrompt = $function:prompt
 $global:HolzwaveOriginalReadLine = $function:PSConsoleHostReadLine
 if ($global:HolzwaveOriginalReadLine) {
     function global:PSConsoleHostReadLine {
@@ -78,6 +93,22 @@ function global:prompt {
         if ($location.Provider.Name -eq 'FileSystem' -and $path -match '^[A-Za-z]:') {
             $names = $path.Substring(2).Split([char[]]'\/') | Where-Object { $_ -ne '' } | ForEach-Object { [uri]::EscapeDataString($_) }
             [Console]::Write($esc + ']7;file://' + [uri]::EscapeDataString("$env:COMPUTERNAME") + '/' + $path.Substring(0, 2) + '/' + ($names -join '/') + $esc + '\')
+        }
+    } catch {}
+    try {
+        $hwe = Get-History -Count 1
+        if ($hwe -and $hwe.Id -ne $global:HolzwaveLastHistoryId) {
+            $global:HolzwaveLastHistoryId = $hwe.Id
+            $hwc = $hwe.CommandLine
+            if ($global:HolzwaveWsh -and $env:HOLZWAVE_IPC -and $env:HOLZWAVE_TOKEN -and $PWD.Provider.Name -eq 'FileSystem' -and $hwc -and $hwc.Length -le 3000 -and -not $hwc.StartsWith(' ') -and $hwc -notmatch '[\r\n]') {
+                $hwu = [System.Text.Encoding]::UTF8
+                $hwp = New-Object System.Diagnostics.ProcessStartInfo
+                $hwp.FileName = $global:HolzwaveWsh
+                $hwp.Arguments = 'hist add --b64 ' + [int](-not $holzwaveOk) + ' ' + [Convert]::ToBase64String($hwu.GetBytes($PWD.ProviderPath)) + ' ' + [Convert]::ToBase64String($hwu.GetBytes($hwc))
+                $hwp.UseShellExecute = $false
+                $hwp.CreateNoWindow = $true
+                [void][System.Diagnostics.Process]::Start($hwp)
+            }
         }
     } catch {}
     $global:LASTEXITCODE = $holzwaveExit

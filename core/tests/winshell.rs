@@ -157,6 +157,67 @@ fn the_first_statement_of_the_prompt_reads_the_status() {
 }
 
 #[test]
+fn the_script_reports_a_new_history_entry_once_as_base64_arguments() {
+    let script = POWERSHELL_PROMPT_SCRIPT;
+    let body = prompt_body();
+    assert!(script.contains("Get-History"));
+    // The id of the entry is remembered before the process is started, so a failure after it never repeats the report; the
+    // entries that exist before the first prompt are remembered at the start.
+    let remembered = body.find("$global:HolzwaveLastHistoryId = $hwe.Id").expect("remembers the entry");
+    let started = body.find("[System.Diagnostics.Process]::Start").expect("starts wsh");
+    assert!(remembered < started);
+    assert!(body.contains("$hwe.Id -ne $global:HolzwaveLastHistoryId"), "only an entry that is new is reported");
+    let before = script[..script.find("function global:prompt").unwrap()].lines().find(|l| l.starts_with("$global:HolzwaveLastHistoryId")).expect("the first id");
+    assert!(before.contains("Get-History -Count 1"));
+    // The command and the directory are base64 of their UTF-8 text, and the arguments hold nothing else of them.
+    assert_eq!(body.matches("[Convert]::ToBase64String").count(), 2);
+    assert!(body.contains("'hist add --b64 '"));
+    let arguments = body.lines().find(|l| l.contains("$hwp.Arguments")).expect("the arguments");
+    assert_eq!(arguments.matches("$hwc").count(), 1, "the command line appears once, inside its base64 conversion");
+    assert!(arguments.contains("ToBase64String($hwu.GetBytes($hwc))") && arguments.contains("ToBase64String($hwu.GetBytes($PWD.ProviderPath))"));
+    assert!(arguments.contains("[int](-not $holzwaveOk)"), "the status is 0 or 1 from the success flag of the last command");
+    assert!(!arguments.contains("LASTEXITCODE"), "the exit code is not read");
+    // A hidden process that nothing waits for.
+    assert!(body.contains("$hwp.CreateNoWindow = $true") && body.contains("$hwp.UseShellExecute = $false"));
+    assert!(!body.contains("WaitForExit") && !body.contains("Start-Process") && !body.contains("Invoke-Expression"));
+    // Its own try with an empty catch, so a failure never reaches the prompt.
+    let at = body.find("$hwe = Get-History").unwrap();
+    assert!(body[..at].trim_end().ends_with("try {"), "the report opens its own try");
+    let tail = &body[at..];
+    assert!(tail.find("} catch {}").unwrap() > tail.find("[System.Diagnostics.Process]::Start").unwrap());
+}
+
+#[test]
+fn the_report_skips_what_the_rules_say() {
+    let body = prompt_body();
+    let condition = body.lines().find(|l| l.contains("$global:HolzwaveWsh -and")).expect("the condition");
+    for rule in [
+        "$env:HOLZWAVE_IPC",
+        "$env:HOLZWAVE_TOKEN",
+        "$PWD.Provider.Name -eq 'FileSystem'",
+        "$hwc.Length -le 3000",
+        "-not $hwc.StartsWith(' ')",
+        "$hwc -notmatch '[\\r\\n]'",
+    ] {
+        assert!(condition.contains(rule), "{rule}");
+    }
+    assert!(condition.contains("$hwc -and"), "an empty command line is not reported");
+    // The success flag is read before anything else, so the report cannot change it.
+    assert!(body[..body.find("$hwe = Get-History").unwrap()].contains("$holzwaveOk = $?"));
+}
+
+#[test]
+fn the_report_comes_after_the_directory_report_and_before_the_status_is_restored() {
+    let script = POWERSHELL_PROMPT_SCRIPT;
+    let osc7 = script.find("]7;file://").expect("the directory report");
+    let report = script.find("hist add --b64 ").expect("the history report");
+    let restored = script.rfind("$global:LASTEXITCODE").expect("the status is put back");
+    assert!(osc7 < report && report < restored, "{osc7} {report} {restored}");
+    // The new code never names the variable whose two accesses are pinned.
+    assert!(!script[report - 900..restored].contains("LASTEXITCODE"));
+}
+
+#[test]
 fn the_read_line_override_exists_only_when_the_original_does() {
     let script = POWERSHELL_PROMPT_SCRIPT;
     let save = script.find("$global:HolzwaveOriginalReadLine = $function:PSConsoleHostReadLine").expect("saves the original");

@@ -21,6 +21,8 @@
 //! | `a_powershell_pane_announces_its_directory`       | W7  | the prompt wrapper runs and conhost passes OSC 7 on    |
 //! | `a_powershell_pane_marks_a_command`               | W7  | the wrapper's marks A, B, C, D arrive in order and the |
 //! |                                                   |     | engine selects the command's output from them          |
+//! | `a_powershell_pane_reports_a_command_to_wsh`      | W7  | a command with quotes and a failing one reach `wsh hist add --b64` as base64, with status 0 and 1 |
+//! | `a_powershell_ctrl_r_binding_asks_wsh`            | W7  | the PSReadLine binding of `wsh init powershell --ctrl-r` starts `wsh hist open` on Ctrl+R |
 //!
 //! Every wait is bounded and every pane or PTY is closed at the end of its test.
 #![cfg(windows)]
@@ -355,4 +357,100 @@ fn a_powershell_pane_marks_a_command() {
     engine.feed(&raw.seen[a..]);
     let selected = (0..200u32).filter_map(|row| engine.output_at(row, 4096).expect("output_at")).any(|out| out.contains("holzwave-mark"));
     assert!(selected, "no row of the stream is selected as output containing the word: {text:?}");
+}
+
+// ---- the history report and the Ctrl+R binding ---------------------------------------------------------
+
+/// A decoder written for the test, independent of the one in `wsh`: standard alphabet, padding, UTF-8.
+fn from_base64(text: &str) -> String {
+    let symbol = |c: char| "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".find(c).expect("a base64 symbol") as u32;
+    let chars: Vec<char> = text.chars().collect();
+    assert_eq!(chars.len() % 4, 0, "base64 is padded to a multiple of four: {text}");
+    let mut out = Vec::new();
+    for quad in chars.chunks(4) {
+        let pad = quad.iter().filter(|c| **c == '=').count();
+        let bits = quad.iter().fold(0u32, |acc, c| acc << 6 | if *c == '=' { 0 } else { symbol(*c) });
+        out.extend_from_slice(&[(bits >> 16) as u8, (bits >> 8) as u8, bits as u8][..3 - pad]);
+    }
+    String::from_utf8(out).expect("UTF-8 text")
+}
+
+/// A scratch directory with a stand-in `wsh.cmd` that appends its arguments to `calls.txt`, and the spec of a PowerShell pane
+/// that finds it first on its PATH and carries the variables of a holzWave pane. `None` when no PowerShell is installed.
+fn powershell_with_a_stub_wsh(tag: &str) -> Option<(PathBuf, PaneSpec)> {
+    let env = |key: &str| std::env::var(key).ok();
+    let exists = |path: &str| Path::new(path).is_file();
+    let launch = platform::shell_launch(Os::Windows, "", &env, &exists);
+    let program = launch.program.to_lowercase();
+    if !(program.contains("pwsh") || program.contains("powershell")) {
+        println!("skipped: no PowerShell on this machine, the default shell is {}", launch.program);
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("holzwave-conpty-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    // The redirection comes first so that a last digit of the arguments is never read as a handle number.
+    std::fs::write(dir.join("wsh.cmd"), "@echo off\r\n>>\"%~dp0calls.txt\" echo %*\r\n").expect("the stand-in for wsh");
+    let path = format!("{};{}", dir.display(), std::env::var("PATH").unwrap_or_default());
+    let mut spec = PaneSpec::new(launch.program.clone(), 100, 30).args(launch.args.clone()).cwd(&dir);
+    spec.env = vec![
+        ("HOLZWAVE_IPC".into(), dir.to_string_lossy().into_owned()),
+        ("HOLZWAVE_TOKEN".into(), "t".into()),
+        ("HOLZWAVE_PANE".into(), "1".into()),
+        ("PATH".into(), path),
+    ];
+    Some((dir, spec))
+}
+
+/// The lines of `calls.txt` so far.
+fn calls(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("calls.txt")).unwrap_or_default().lines().map(|l| l.trim().to_owned()).filter(|l| !l.is_empty()).collect()
+}
+
+#[test]
+fn a_powershell_pane_reports_a_command_to_wsh() {
+    let Some((dir, spec)) = powershell_with_a_stub_wsh("report") else { return };
+    let log = Log::default();
+    let pane = PaneHandle::spawn_ghostty(1, spec, sink(&log)).expect("the pane starts");
+    assert!(wait_until(WAIT, || has_text(&log, ">")), "no prompt");
+
+    type_line(&pane, "echo \"quoted words\"");
+    type_line(&pane, "Get-Item C:\\no\\such\\item");
+    let reports = |dir: &Path| -> Vec<String> { calls(dir).into_iter().filter(|l| l.starts_with("hist add --b64 ")).collect() };
+    assert!(wait_until(WAIT, || reports(&dir).len() >= 2), "no two reports in calls.txt: {:?}", calls(&dir));
+
+    let found = reports(&dir);
+    let parts = |line: &str| -> Vec<String> { line.split(' ').map(str::to_owned).collect() };
+    let (first, second) = (parts(&found[0]), parts(&found[1]));
+    assert_eq!(first.len(), 6, "{found:?}");
+    assert_eq!(from_base64(&first[5]), "echo \"quoted words\"", "the quotes survive both PowerShell versions");
+    assert_eq!(first[3], "0");
+    assert_eq!(from_base64(&second[5]), "Get-Item C:\\no\\such\\item");
+    assert_eq!(second[3], "1", "a failing command reports status 1");
+    assert!(same_directory(&from_base64(&first[4]), &dir), "the directory is the pane's: {}", from_base64(&first[4]));
+
+    pane.close();
+    assert!(pane.join(Duration::from_secs(5)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_powershell_ctrl_r_binding_asks_wsh() {
+    let Some((dir, spec)) = powershell_with_a_stub_wsh("ctrlr") else { return };
+    let log = Log::default();
+    let pane = PaneHandle::spawn_ghostty(1, spec, sink(&log)).expect("the pane starts");
+    assert!(wait_until(WAIT, || has_text(&log, ">")), "no prompt");
+
+    // What a profile line does: run the text that `wsh init powershell --ctrl-r` prints.
+    let file = std::fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../wsh/hooks/powershell-ctrl-r.ps1")).expect("the binding file");
+    let file = file.to_string_lossy().into_owned();
+    let file = file.strip_prefix(r"\\?\").unwrap_or(&file).to_owned();
+    type_line(&pane, &format!(". ([scriptblock]::Create([IO.File]::ReadAllText('{file}')))"));
+    std::thread::sleep(Duration::from_secs(2));
+    pane.key(DomKey { code: "KeyR".into(), key: "r".into(), mods: Mods::CTRL, ..DomKey::default() }).expect("the key is accepted");
+    assert!(wait_until(WAIT, || calls(&dir).iter().any(|l| l == "hist open")), "no `hist open` in calls.txt: {:?}", calls(&dir));
+
+    pane.close();
+    assert!(pane.join(Duration::from_secs(5)));
+    let _ = std::fs::remove_dir_all(&dir);
 }

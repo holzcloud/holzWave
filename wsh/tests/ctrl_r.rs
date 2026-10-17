@@ -142,3 +142,29 @@ fn wsh_init_adds_the_binding_only_with_the_flag() {
         assert_eq!(twice.out, "", "{shell}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn wsh_hist_add_b64_sends_the_decoded_command() {
+    let rig = rig("b64", Ok(String::new()));
+    let run = run_in(&rig, &["hist", "add", "--b64", "1", "Qzpc", "ZWNobyAicXVvdGVkIHdvcmRzIg=="]);
+    assert_eq!((run.status, run.out.as_str(), run.err.as_str()), (0, "", ""));
+    assert_eq!(
+        rig.rec.seen(),
+        [(Some(7), Cmd::Hist { line: "echo \"quoted words\"".into(), cwd: "C:\\".into(), exit: Some(1) })],
+        "the quotes and the trailing backslash arrive as they were typed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn wsh_hist_add_b64_with_bad_text_sends_nothing() {
+    let rig = rig("b64bad", Ok(String::new()));
+    for (dir, cmd) in [("Qzpc", "ZWNobyAicXVvdGVkIHdvcmRzIg"), ("Qzpc\n", "Zm9v"), ("Qzpc", "/w=="), ("Qzpc", "Zm-v"), ("Zh==", "Zm9v")] {
+        let run = run_in(&rig, &["hist", "add", "--b64", "0", dir, cmd]);
+        assert_eq!(run.status, 2, "{dir:?} {cmd:?}");
+        assert_eq!(run.out, "");
+        assert_eq!(run.err.trim_end(), "the command or the directory is not valid base64 text");
+    }
+    assert!(rig.rec.seen().is_empty(), "no socket was opened for text that is not base64");
+}
