@@ -5,7 +5,9 @@
 //
 // The card is rebuilt when the mode or its content changes and updated in place when only a tick changes, so a keyboard
 // user who ticks a box keeps the focus on it. Opening moves the focus to the first control, and closing returns it to the
-// button `Context…` when the focus was in the card.
+// button `Context…` when the focus was in the card. The strip also holds the approval cards (docs/design.md section 6.15),
+// so this card adds and removes only its own `section.chat-consent`, looks only inside it and answers only to events that
+// come from inside it.
 
 import type { Consent } from "./consent.js";
 import {
@@ -45,20 +47,23 @@ function button(parent: Element, cls: string, key: string, text: string, onClick
 export function mountCard(host: HTMLElement, consent: Consent, view: CardView): () => void {
   let drawnMode = consent.model.mode;
   let signature = "";
+  /** The one section of this card in the strip; null while the card is closed. */
+  let current: HTMLElement | null = null;
   /** The card opened and has not yet put the focus on a control. */
   let wantFocus = false;
   let alive = true;
 
   const ticks = (): void => {
+    if (current === null) return;
     const m = consent.model;
-    for (const box of host.querySelectorAll<HTMLInputElement>("input[data-kind]")) {
+    for (const box of current.querySelectorAll<HTMLInputElement>("input[data-kind]")) {
       box.checked = m.ticked.includes(box.dataset.kind as CtxKind);
     }
-    for (const box of host.querySelectorAll<HTMLInputElement>("input[data-item]")) {
+    for (const box of current.querySelectorAll<HTMLInputElement>("input[data-item]")) {
       box.checked = !m.off.includes(Number(box.dataset.item));
     }
-    for (const b of host.querySelectorAll<HTMLButtonElement>("button.consent-preview")) b.disabled = m.ticked.length === 0;
-    const total = host.querySelector(".consent-total");
+    for (const b of current.querySelectorAll<HTMLButtonElement>("button.consent-preview")) b.disabled = m.ticked.length === 0;
+    const total = current.querySelector(".consent-total");
     if (total !== null && m.offer !== null) {
       const going = m.offer.items.filter((item) => !m.off.includes(item.id));
       const words = totalWords(going.length, going.reduce((sum, item) => sum + item.bytes, 0));
@@ -175,18 +180,21 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
       button(actions, "consent-close", "close", "Close", () => consent.close());
     }
     if (actions.childElementCount > 0) section.append(actions);
-    host.replaceChildren(section);
+    if (current !== null && current.parentElement === host) current.replaceWith(section);
+    else host.append(section);
+    current = section;
   };
 
   const render = (): void => {
     if (!alive) return;
     const m = consent.model;
-    const focusInside = host.contains(document.activeElement);
+    const focusInside = current?.contains(document.activeElement) ?? false;
     const wasInside = focusInside && document.activeElement !== null;
     const key = wasInside ? ((document.activeElement as HTMLElement).dataset.key ?? "") : "";
     if (m.mode === "closed") {
       const had = drawnMode !== "closed";
-      host.replaceChildren();
+      current?.remove();
+      current = null;
       signature = "";
       drawnMode = "closed";
       wantFocus = false;
@@ -203,19 +211,19 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
       build();
       if (key !== "") {
         // The control that had the focus is rebuilt in place; one that is gone hands the focus to the first control later.
-        const same = host.querySelector<HTMLElement>(`[data-key="${key}"]`);
+        const same = current?.querySelector<HTMLElement>(`[data-key="${key}"]`) ?? null;
         if (same !== null) same.focus({ preventScroll: true });
         else wantFocus = true;
       }
     }
     ticks();
     if (wantFocus) {
-      const first = host.querySelector<HTMLElement>("input, button");
+      const first = current?.querySelector<HTMLElement>("input, button") ?? null;
       const active = document.activeElement;
       // Not taken from a field the user went to meanwhile: only from the button that opened the card, the card itself, the
       // page body, or a container of the card (a browser that does not focus a pressed button focuses its nearest container).
       const free =
-        active === null || active === document.body || host.contains(active) || active.contains(host) ||
+        active === null || active === document.body || current?.contains(active) === true || active.contains(host) ||
         (active as HTMLElement).classList.contains("chat-ctx");
       if (first !== null && free) {
         first.focus({ preventScroll: true });
@@ -224,8 +232,9 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
     }
   };
 
+  const inside = (e: Event): boolean => current !== null && e.target instanceof Node && current.contains(e.target);
   const onKey = (e: KeyboardEvent): void => {
-    if (e.key !== "Escape" || e.isComposing) return;
+    if (e.key !== "Escape" || e.isComposing || !inside(e)) return;
     e.preventDefault();
     e.stopPropagation();
     consent.close();
@@ -234,6 +243,7 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
   // that the user is inside it, and closing it returns the focus to `Context…`. Capturing, so it runs before the control's own
   // handler, which may close the card.
   const onPress = (e: MouseEvent): void => {
+    if (!inside(e)) return;
     const target = e.target;
     if (target instanceof HTMLButtonElement || target instanceof HTMLInputElement) target.focus({ preventScroll: true });
   };
@@ -247,6 +257,7 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
     stop();
     host.removeEventListener("keydown", onKey);
     host.removeEventListener("click", onPress, true);
-    host.replaceChildren();
+    current?.remove();
+    current = null;
   };
 }

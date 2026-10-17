@@ -70,8 +70,31 @@
 //                      hold(cmd), release()  the answer of `cmd` waits until `release()`; the call is recorded at once
 //                      A send with `offer` and `picked` redeems a live offer of this chat, pane and route and puts one
 //                      `context` part before the text part of the user message; the refusals are the core's reasons.
+//       script({tools}) a turn that asks for tools: `tools` is a list of calls `{ id, tool, path, pattern, rows, payload, result,
+//                      error, target, remote, tainted, taint, resolved, summary }` (`tool` is one of the four read tools,
+//                      default `read_file`; `payload` replaces the fields the mock builds in the core's order; `result` is
+//                      what an allow returns, `error` marks it an error; `tainted` and `taint` replace what the chat's
+//                      history gives) and `answer` the text after the last result (default `Done.`). The turn emits
+//                      `turn_started`, `usage`, the assistant `message` with one `tool_call` part per call and one
+//                      `tool_proposed` per call, and then waits: the state holds the cards in `pending` and `running`.
+//       approval       the decision part of the core:
+//                      decisions   every decision the core accepted, as `{conversation, call_id, decision, hash}`
+//                      refuse(reason)  the next decision rejects with `{code: "tool", reason, text}`
+//                      changeHash(callId)  the stored hash of a waiting call changes (no event): the old hash gets
+//                                 `hash_mismatch` and the next snapshot carries the new one
+//                      hold(), release()  the answer of a decision waits until `release()`; the call is recorded at once
+//                      waiting(chat)  the ids of the calls that wait in a chat
+//                      save(), restore(saved)  carry the chats and the open turns over a reload of the page
+//                      `ai_decide(conversation, call_id, decision, hash)` rejects with `invalid_conversation` for an unknown
+//                      chat, `invalid_decision` for a verdict other than `allow` or `deny`, `unknown_call` for a call that
+//                      does not wait, `not_pending` for one that was decided and `hash_mismatch` for another hash; else it
+//                      records the decision and queues the `tool_result` (the scripted result for an allow, `The user denied
+//                      this action.` as an error for a deny). When every call of the turn has its result it queues the tool
+//                      `message`, the answer, `usage`, the final `message` and `turn_ended`. A stop (`ai_cancel`) gives each
+//                      waiting call `This call did not run: the turn was stopped.` and ends the turn `cancelled`. A snapshot
+//                      of a chat that is not running holds `[tool output not stored]` for every tool result, as the store does.
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
-//     `ai_turn_snapshot`, `ai_profiles`, `ai_profile_save`, `ai_profile_remove`, `ai_key_set` and `ai_key_clear` have
+//     `ai_decide`, `ai_turn_snapshot`, `ai_profiles`, `ai_profile_save`, `ai_profile_remove`, `ai_key_set` and `ai_key_clear` have
 //     defaults; a rejection is the object `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input
 //     with a member outside the eight of the shell's `ProfileInputMsg`, checks it in the order of the core (id, type,
 //     shape, name, model, address, count) with the stable reason names, makes the id of a new profile from its name and
@@ -204,6 +227,12 @@
         state.messages.push(e.message);
         state.partial = { text: "", reasoning: "" };
         break;
+      case "tool_proposed":
+        state.pending.push(structuredClone(e.pending));
+        break;
+      case "tool_result":
+        state.pending = state.pending.filter((p) => p.call_id !== e.call_id);
+        break;
       case "turn_ended":
         state.running = false;
         state.partial = { text: "", reasoning: "" };
@@ -233,6 +262,155 @@
       pump();
     }, 0);
   };
+  // ---- tool calls ----------------------------------------------------------------------------------------------------
+  // The tool turn of the core, played from the shapes of app/tests/fixtures/ai_tool_stream.json: a card per call (the eleven
+  // members of the core's card, the payload in the core's field order for the four read tools, a 64-character hash), the
+  // decision command with the core's refusals, the result of an allow or a deny, and the end of the turn.
+  const appr = { decisions: [], refuse: null, held: false, waiters: [], live: new Map() };
+  const STORED = "[tool output not stored]";
+  const REFUSALS = {
+    unknown_call: "No open call has this id.",
+    not_pending: "The call was decided already.",
+    hash_mismatch: "The decision does not match the action it was asked for.",
+    invalid_decision: "That is not a decision.",
+    denied: "This location is protected and tools cannot use it.",
+  };
+  const bytesOf = (text) => new TextEncoder().encode(text).length;
+  /** Mock-only: a 64-character lower-case hexadecimal value made from `text` (eight rounds of a 32-bit hash). */
+  const digestOf = (text) => {
+    let out = "";
+    for (let round = 0; round < 8; round++) {
+      let h = (0x811c9dc5 ^ round) >>> 0;
+      const part = `${round}|${text}`;
+      for (let i = 0; i < part.length; i++) {
+        h ^= part.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+      out += h.toString(16).padStart(8, "0");
+    }
+    return out;
+  };
+  /** The call of a script entry: its id, tool, arguments, the summary the assistant message carries and its result. */
+  const toolCall = (spec, index) => {
+    const tool = spec.tool ?? "read_file";
+    const id = spec.id ?? `call_${index + 1}`;
+    const args =
+      tool === "grep" ? { pattern: spec.pattern ?? "", path: spec.path ?? "" }
+      : tool === "read_pane" ? { rows: spec.rows ?? 50 }
+      : { path: spec.path ?? "" };
+    return {
+      id, tool, spec: structuredClone(spec), summary: spec.summary ?? JSON.stringify(args),
+      result: spec.result ?? "ok", error: spec.error === true, decided: null, out: null,
+    };
+  };
+  /** The payload of a card: the fields of the call in the core's order, each with the length of its raw value. */
+  const payloadOf = (call, pane) => {
+    const spec = call.spec;
+    if (Array.isArray(spec.payload)) return structuredClone(spec.payload);
+    const path = spec.path ?? "";
+    const resolved = spec.resolved ?? path;
+    const head = [["tool", call.tool], ["pane", String(pane)], ["target", spec.target ?? "This computer"], ["remote", String(spec.remote === true)]];
+    const rest =
+      call.tool === "list_dir" ? [["path", path], ["max_entries", "200"], ["resolved_path", resolved]]
+      : call.tool === "grep" ? [["pattern", spec.pattern ?? ""], ["path", path], ["ignore_case", "false"], ["max_matches", "50"], ["resolved_path", resolved]]
+      : call.tool === "read_pane" ? [["rows", String(spec.rows ?? 50)]]
+      : [["path", path], ["offset", "0"], ["limit", "16384"], ["resolved_path", resolved]];
+    return [...head, ...rest].map(([name, value]) => ({ name, value, bytes: bytesOf(value) }));
+  };
+  /** The labels the history gives a later card: one `output of <tool>` for each call of the chat that has a result. */
+  const earlierTaint = (conversation) => {
+    const messages = chatOf(conversation).messages;
+    const answered = new Set(messages.flatMap((m) => m.parts.filter((p) => p.type === "tool_result").map((p) => p.call_id)));
+    const labels = [];
+    for (const m of messages) {
+      for (const part of m.parts) {
+        const label = part.type === "tool_call" && answered.has(part.id) ? `output of ${part.name}` : null;
+        if (label !== null && !labels.includes(label)) labels.push(label);
+      }
+    }
+    return labels.slice(0, 8);
+  };
+  const pendingOf = (conversation, call, pane, earlier) => {
+    const spec = call.spec;
+    const payload = payloadOf(call, pane);
+    const taint = spec.taint ?? earlier;
+    return {
+      conversation, call_id: call.id, tool: call.tool, effect: "read", pane, target: spec.target ?? "This computer",
+      remote: spec.remote === true, payload, hash: digestOf(`${call.id}|${JSON.stringify(payload)}`),
+      tainted: spec.tainted ?? taint.length > 0, taint: structuredClone(taint),
+    };
+  };
+  const toolCallMessage = (turn, model, calls) => ({
+    id: `m${turn}-1`, role: "assistant", ts: NOW, model, status: "complete", usage: null,
+    parts: calls.map((c) => ({ type: "tool_call", id: c.id, name: c.tool, summary: c.summary })),
+  });
+  const toolResultMessage = (turn, calls) => ({
+    id: `m${turn}-2`, role: "tool", ts: NOW, model: null, status: "complete", usage: null,
+    parts: calls.map((c) => ({ type: "tool_result", call_id: c.id, content: c.out.content, is_error: c.out.is_error })),
+  });
+  /** Queue `events` of the running turn behind the ones that wait, with the next positions of the turn. */
+  const queueMore = (conversation, events) => {
+    const state = chatOf(conversation);
+    let seq = ai.queue.length > 0 ? ai.queue[ai.queue.length - 1].seq : state.seq;
+    for (const e of events) ai.queue.push({ conversation, turn: state.turn, seq: ++seq, ...e });
+    pump();
+  };
+  /** What follows the last result of a round: the tool message, the answer and the end of the turn. */
+  const afterResults = (live, model) => {
+    const usage = live.usage;
+    return [
+      { kind: "message", message: toolResultMessage(live.turn, live.calls) },
+      { kind: "delta", text: live.answer },
+      { kind: "usage", input_tokens: usage.input_tokens, output_tokens: usage.output_tokens },
+      { kind: "message", message: { id: `m${live.turn}-3`, role: "assistant", ts: NOW, model, status: "complete", usage, parts: [{ type: "text", text: live.answer }] } },
+      { kind: "turn_ended", end: "done", error: null, rounds: 2, usage, saved: true },
+    ];
+  };
+  const decide = async ({ conversation, call_id, decision, hash }) => {
+    const state = ai.chats.get(conversation);
+    if (state === undefined) throw fault("invalid_conversation", "there is no such chat");
+    if (appr.held) await new Promise((go) => appr.waiters.push(go));
+    if (appr.refuse !== null) {
+      const reason = appr.refuse;
+      appr.refuse = null;
+      throw fault("tool", REFUSALS[reason] ?? `The call was refused (${reason}).`, reason);
+    }
+    if (decision !== "allow" && decision !== "deny") throw fault("tool", REFUSALS.invalid_decision, "invalid_decision");
+    const entry = state.pending.find((p) => p.call_id === call_id);
+    const live = appr.live.get(conversation);
+    const call = live?.calls.find((c) => c.id === call_id);
+    if (call?.decided) throw fault("tool", REFUSALS.not_pending, "not_pending");
+    if (entry === undefined || call === undefined) throw fault("tool", REFUSALS.unknown_call, "unknown_call");
+    if (hash !== entry.hash) throw fault("tool", REFUSALS.hash_mismatch, "hash_mismatch");
+    appr.decisions.push({ conversation, call_id, decision, hash });
+    call.decided = decision;
+    call.out = decision === "allow"
+      ? { content: call.result, is_error: call.error }
+      : { content: "The user denied this action.", is_error: true };
+    const events = [{ kind: "tool_result", call_id, tool: call.tool, content: call.out.content, is_error: call.out.is_error, redactions: 0 }];
+    if (live.calls.every((c) => c.decided !== null)) {
+      live.closed = true;
+      events.push(...afterResults(live, state.model));
+    }
+    queueMore(conversation, events);
+    return null;
+  };
+  /** A stop: every call without a result gets the fixed sentence, then the round's tool message. */
+  const stopTools = (conversation, state) => {
+    const live = appr.live.get(conversation);
+    if (live === undefined || live.closed) return [];
+    const open = state.pending.map((p) => p.call_id);
+    const out = [];
+    for (const call of live.calls) {
+      if (!open.includes(call.id)) continue;
+      call.out = { content: "This call did not run: the turn was stopped.", is_error: true };
+      out.push({ kind: "tool_result", call_id: call.id, tool: call.tool, content: call.out.content, is_error: true, redactions: 0 });
+    }
+    live.closed = true;
+    for (const call of live.calls) call.out ??= { content: "This call did not run: the turn was stopped.", is_error: true };
+    out.push({ kind: "message", message: toolResultMessage(live.turn, live.calls) });
+    return out;
+  };
   const userMessage = (turn, text, before = []) => ({
     id: `m${turn}-user`, role: "user", ts: NOW, model: null, status: "complete", usage: null, parts: [...before, { type: "text", text }],
   });
@@ -240,8 +418,21 @@
     id: `m${turn}-1`, role: "assistant", ts: NOW, model, status, usage, parts: [{ type: "text", text }],
   });
   /** The events of one turn from its script, with the head (`conversation`, `turn`) but not the `seq` yet. */
-  const turnEvents = (conversation, turn, text, route, script, before = []) => {
+  const turnEvents = (conversation, turn, text, route, script, before = [], pane = 1) => {
     const out = [{ kind: "turn_started", message: userMessage(turn, text, before), route }];
+    if (script.tools) {
+      // A turn that asks for tools: the assistant's message with one `tool_call` part per call, then one card per call.
+      // The turn waits there; the decisions (`ai_decide`) and a stop produce the rest.
+      const calls = script.tools.map((spec, i) => toolCall(spec, i));
+      appr.live.set(conversation, {
+        turn, pane, answer: script.answer ?? "Done.", usage: script.usage ?? { input_tokens: 11, output_tokens: 5 }, calls, closed: false,
+      });
+      const earlier = earlierTaint(conversation);
+      out.push({ kind: "usage", input_tokens: 0, output_tokens: 0 });
+      out.push({ kind: "message", message: toolCallMessage(turn, route.model, calls) });
+      for (const call of calls) out.push({ kind: "tool_proposed", pending: pendingOf(conversation, call, pane, earlier) });
+      return out.map((e, i) => ({ conversation, turn, seq: i + 1, ...e }));
+    }
     if (script.reasoning) out.push({ kind: "reasoning", text: script.reasoning });
     const usage = script.usage ?? { input_tokens: 11, output_tokens: 5 };
     if (script.fail) {
@@ -643,7 +834,15 @@
       else entry.gateway_key = "not_set";
       return null;
     },
-    ai_turn_snapshot: ({ conversation }) => structuredClone(chatOf(conversation)),
+    ai_turn_snapshot: ({ conversation }) => {
+      const copy = structuredClone(chatOf(conversation));
+      // The store keeps no tool output as text: a chat that is not running shows a marker in its place.
+      if (!copy.running) {
+        for (const m of copy.messages) for (const part of m.parts) if (part.type === "tool_result") part.content = STORED;
+      }
+      return copy;
+    },
+    ai_decide: decide,
     // The core's renderer of Markdown: here the text as one escaped paragraph, unless a test scripts it with `on`.
     markdown_render: ({ text }) =>
       `<p>${String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</p>`,
@@ -659,7 +858,7 @@
       const route = { profile: id, model: model || known.model || chat.model || "", host: known.host ?? null, locality: known.locality ?? "loopback" };
       const before = redeem(conversation, pane, contextRoute(conversation, id, model), offer, picked);
       const turn = ++ai.turnNo;
-      ai.queue = turnEvents(conversation, turn, text, route, ai.scripts.shift() ?? {}, before);
+      ai.queue = turnEvents(conversation, turn, text, route, ai.scripts.shift() ?? {}, before, pane);
       ai.running = conversation;
       pump();
       return { conversation, turn };
@@ -674,6 +873,9 @@
       // The end of a cancelled turn: the text so far is kept as a stopped message, then the turn ends.
       setTimeout(() => {
         let seq = state.seq;
+        for (const e of stopTools(conversation, state)) {
+          produce(conversation, { conversation, turn: state.turn, seq: ++seq, ...e });
+        }
         if (state.partial.text !== "") {
           produce(conversation, {
             conversation, turn: state.turn, seq: ++seq, kind: "message",
@@ -789,6 +991,40 @@
         for (const go of ctx.waiting.splice(0)) go();
       },
     },
+    approval: {
+      get decisions() {
+        return appr.decisions;
+      },
+      refuse(reason) {
+        appr.refuse = reason;
+      },
+      changeHash(callId) {
+        for (const state of ai.chats.values()) {
+          for (const entry of state.pending) if (entry.call_id === callId) entry.hash = digestOf(`${entry.hash}|changed`);
+        }
+      },
+      hold() {
+        appr.held = true;
+      },
+      release() {
+        appr.held = false;
+        for (const go of appr.waiters.splice(0)) go();
+      },
+      waiting: (chat) => chatOf(chat).pending.map((p) => p.call_id),
+      save: () =>
+        structuredClone({
+          chats: [...ai.chats.entries()], live: [...appr.live.entries()], running: ai.running, turnNo: ai.turnNo, chatNo: ai.chatNo,
+          decisions: appr.decisions,
+        }),
+      restore(saved) {
+        ai.chats = new Map(saved.chats);
+        appr.live = new Map(saved.live);
+        ai.running = saved.running;
+        ai.turnNo = saved.turnNo;
+        ai.chatNo = saved.chatNo;
+        appr.decisions.push(...saved.decisions);
+      },
+    },
     script: (turn) => void ai.scripts.push(turn),
     hold: (n) => void (ai.holdLeft = n),
     release() {
@@ -808,6 +1044,11 @@
       });
       ai.chats.clear();
       ai.sent.length = 0;
+      appr.decisions.length = 0;
+      appr.refuse = null;
+      appr.held = false;
+      for (const go of appr.waiters.splice(0)) go();
+      appr.live.clear();
       resetContext();
     },
   };

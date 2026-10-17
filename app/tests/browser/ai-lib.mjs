@@ -43,6 +43,10 @@ export const OTHER_PROFILE = {
 export const PANE_TEXT = "zq-consent-text-71b9e4";
 export const PANE_KEY = "sk-ant-api03-zqconsent5e90b3aXYZ0123456789";
 
+/** The path and the text of a file the mock's tool turns read. Neither may occur in any call, attribute or store. */
+export const TOOL_PATH = "/work/zq-approval-path-3f7b02/notes.txt";
+export const TOOL_TEXT = "zq-approval-text-6a41d9";
+
 /** Two terminal panes side by side. */
 export const VIEW = {
   workspaces: [{ name: "main", active: true, panes: 2 }],
@@ -65,11 +69,21 @@ export const VIEW_P1 = { ...VIEW, tabs: [{ title: "shell", active: true, focus: 
  */
 export async function boot(
   page, url,
-  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {} } = {},
+  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {}, clock = false } = {},
 ) {
   await page.addInitScript(
-    ([saved, shown, existing, chats, shared]) => {
+    ([saved, shown, existing, chats, shared, frozen]) => {
       window.__MOCK__.reset();
+      // A frozen clock: `Date.now` stands still and only `tickClock` moves it, so a window of the page that is measured in
+      // milliseconds is the same on every machine. Off by default, so the other cases keep their page as it was.
+      window.__REAL_NOW ??= Date.now;
+      if (frozen) {
+        const base = window.__REAL_NOW();
+        window.__CLOCK = 0;
+        Date.now = () => base + window.__CLOCK;
+      } else {
+        Date.now = window.__REAL_NOW;
+      }
       Object.assign(window.__MOCK__.ai.context, shared);
       window.__MOCK__.ai.profiles = saved;
       for (const [id, partial] of Object.entries(chats)) window.__MOCK__.ai.setState(id, partial);
@@ -92,7 +106,7 @@ export async function boot(
         return window.__MOCK__.view();
       });
     },
-    [profiles, view, blocks, states, context],
+    [profiles, view, blocks, states, context, clock],
   );
   // The settings of the core are played only when asked for, so the chat cases keep their page exactly as it was.
   if (settings) await settingsCore(page, typeof settings === "object" ? settings : {});
@@ -240,4 +254,51 @@ export async function settingsCore(page, { unavailable = false } = {}) {
     },
     [SETTINGS_VIEW, unavailable],
   );
+}
+
+/**
+ * Queue a turn in which the model asks for tools. `spec` is a call (`id`, `tool`, `path`, `pattern`, `rows`, `payload`,
+ * `result`, `error`, `target`, `remote`, `tainted`, `taint`) or a list of calls in `calls`, and `answer` is the text after
+ * the last result. A call without a result text returns the file text of the tests.
+ */
+export async function scriptTool(page, spec) {
+  const { calls: list, answer, ...single } = spec;
+  const tools = (list ?? [single]).map((c) => ({ result: TOOL_TEXT, ...c }));
+  await page.evaluate(([queued, text]) => window.__MOCK__.ai.script({ tools: queued, ...(text === undefined ? {} : { answer: text }) }), [tools, answer]);
+}
+
+/** Wait for the first approval card; answers its locator. */
+export async function openCard(page, call = null) {
+  const sel = call === null ? "section.chat-approval" : `section.chat-approval[data-call="${call}"]`;
+  await page.waitForSelector(sel);
+  return page.locator(sel).first();
+}
+
+/** The arguments of every decision the page made, oldest first. */
+export const decisionCalls = (page) => callsOf(page, "ai_decide");
+
+/** Move the page's frozen clock forward (the page must have been booted with the `clock` option). */
+export async function tickClock(page, ms) {
+  await page.evaluate((by) => {
+    window.__CLOCK += by;
+  }, ms);
+}
+
+/**
+ * Reload the page and keep what the core would keep: the chats and their open turns, the layout and the block list. The
+ * mock is seeded again before the page asks for its first snapshot.
+ */
+export async function reloadKeeping(page) {
+  const saved = await page.evaluate(() => ({
+    mock: window.__MOCK__.ai.approval.save(), view: window.__MOCK__.view(), blocks: structuredClone(window.__BLOCKS),
+  }));
+  await page.addInitScript((keep) => {
+    window.__MOCK__.ai.approval.restore(keep.mock);
+    window.__MOCK__.setView(keep.view);
+    window.__BLOCKS.length = 0;
+    window.__BLOCKS.push(...keep.blocks);
+  }, saved);
+  await page.reload();
+  await page.waitForSelector(".divider");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_turn_snapshot").length >= 1);
 }

@@ -98,6 +98,7 @@ default.
 | Chat pane | a pane of its own kind (6.12): header `chat`, a bar with the provider chip, a transcript, a status line and a composer; flat and hairline, the only shadow is the provider sheet on a phone |
 | AI providers dialog | the box of the Settings dialog (6.13): groups under `.label` legends, a list of providers as a radio group, a form with a write-only key field, a disclosure card for a gateway or a server of the user's own; on a phone it is the screen |
 | Context card | a flat strip in the chat pane (6.14): a 2 px bar on its left, native checkboxes, one solid action, hairlines above and below, no shadow; it names the pane, the destination and every item that would go out |
+| Approval card | a flat strip entry in the chat pane (6.15): a 2 px bar on its left, mono payload rows, one solid action, hairlines above and below, no shadow; it shows every field of a tool call, where the result goes and what untrusted text is in the turn |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
 No motion in the terminal grid itself. `prefers-reduced-motion` removes all transitions.
@@ -368,7 +369,8 @@ provider sheet on a narrow screen.
 the shown tab when there is one and otherwise splits the focused pane to the right with a new chat; `ai.new_chat` (no
 default chord) always starts a new conversation in a new pane. The button is pressed (rose wash and rose border, as
 `▥ Sidebar`, with `aria-pressed`) while the shown tab has a chat pane. The sidebar form of the chat, which replaces the
-sidebar when it is opened, comes with the sidebar section of the chat.
+sidebar when it is opened, comes with the sidebar section of the chat. While calls wait for a decision the button shows
+the number, `✦ AI · 2` (6.15).
 
 **Header.** Type icon `✦`, title `chat`, and right-aligned in mono the chat's title (the first line of the first message,
 at most 60 characters) or `new chat` before there is one.
@@ -397,12 +399,14 @@ status line and the composer.
   colour, underlined). While a reply streams the label says `ASSISTANT · thinking` (only reasoning so far) or
   `ASSISTANT · writing`. Reasoning text is not shown. A user message that carried context ends with one quiet line in
   mono, `Context sent: Screen of pane 1 (2.4 KiB) → this computer`, from the labels, sizes and place of the message
-  itself, also after a reload; it never shows text. Tool and approval parts draw nothing.
+  itself, also after a reload; it never shows text. An assistant message ends with one row per tool call it made (6.15), and
+  a message of the role tool draws nothing of its own.
 - **End row.** A turn that failed or was cut by a limit has one row with the mark `!`, the class in words and the core's
   one-line text (`! FAILED · overload  The provider is overloaded.`); a limit reads `! STOPPED · step limit`. The danger
   colour and the words are two cues.
-- **Context strip.** Between the transcript and the status line, only while the card of 6.14 is open.
-- **Status line.** One line, `role="status"`: `working`, `thinking`, `writing`, `stopping`, a refused send in the core's
+- **Card strip.** Between the transcript and the status line, only while a card of 6.15 or the card of 6.14 is open; an
+  approval card sits above the context card.
+- **Status line.** One line, `role="status"`: `working`, `thinking`, `writing`, `waiting for your decision`, `stopping`, a refused send in the core's
   words, a hint of the page (dim, for example that sharing ended because the provider changed), and after a turn
   `reply finished`, `reply stopped` or `reply failed`. It clears when the user types.
 - **Composer.** A multi-line field (1 to 8 rows, in the chat text face) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
@@ -432,8 +436,9 @@ a user name is not a link: it is text followed by the address in brackets.
 
 **Keys and focus.** Opening a chat focuses the composer, and so does the pane gaining the focus. `Enter` sends (not while
 an input method composes), `Shift+Enter` makes a new line, and `Escape` stops a running reply and otherwise gives the
-keyboard back to the terminal. The transcript can be focused; the arrows scroll it and `Cmd+C` copies the selected text.
-`Escape` inside the context card closes the card and does nothing else. Closing the pane stops a running reply. Every
+keyboard back to the terminal. A press of `Escape` in the message box stops the reply, and so ends every call that waits
+for a decision; an approval card never takes the keyboard (6.15). The transcript can be focused; the arrows scroll it and
+`Cmd+C` copies the selected text. `Escape` inside the context card closes the card and does nothing else. Closing the pane stops a running reply. Every
 message names the pane the chat acts for (6.14), with context or without.
 
 **Narrow screens (640 px and narrower).** The pane is the screen. `Send`, the chip, the picker rows and the composer are at
@@ -657,3 +662,90 @@ control carries `data-field`, so a typed character reaches no terminal.
 **Accessibility.** The card is a `group` named `Share context`, each checkbox has its visible label, the mode word is text,
 the status line is the live region, every hairline is `--hw-line` so `contrast-high` holds, and nothing moves. Under forced
 colours the card and the place chip get a system-colour outline.
+
+### 6.15 Approving a tool call
+
+The card in which the user sees the exact request of a tool call and allows it once or denies it, and the rows in which
+the transcript shows what a tool call did. The core enforces the rule: a call cannot run without a decision that repeats
+the hash of the card, and the card is made from the same list of fields as the hash. The page only shows that list and
+relays a person's press. It does not summarise, shorten, reorder, merge, translate or classify a field, it keeps nothing
+for later, and it sends the chat, the call, the verdict and the hash of the card, never a path, a command or a text.
+
+**Place.** A flat strip entry in the card strip (6.12), between the transcript and the status line and above the context
+card of 6.14. One card per waiting call, in the order the assistant asked, a hairline above and below, a 2 px bar on its
+left (warn while a decision is needed, danger when the call can only be denied, hairline while the verdict travels and
+after it). Body text is in the chat text face (Manrope 13 px); field names, values, sizes and the hash are in mono. No
+shadow. The strip is at most half the height of the pane and scrolls inside.
+
+**Head.** A `.label` title `Approval needed` with the mark `!`, then the words of the tool (`Read a file`, `List a
+folder`, `Search files`, `Read a pane`), and at the right, in mono, the pane and the target label of the core (`pane 1 ·
+This computer`). When the target is a remote host the chip `remote host` in the warn colour follows; the word is the cue.
+Under the head one line says what the effect is: `Reads only. Nothing is changed.`
+
+**Payload.** A hairline box in mono with one row for every field the core sent, in the core's order: the name (dim), the
+value (ink, wrapped, never cut) and the size (dim, at the right, `27 B`). The box is at most 12 rem high, scrolls inside
+and takes the focus with `Tab`, so it can be scrolled by keyboard. Control, bidirectional, zero-width and tag characters
+are written as escapes (`\u{202e}`); nothing is dropped, and a long value scrolls and is never cut in the middle.
+
+**What cannot be shown.** A request with more than 16 rows, a value over 65536 characters, more than 131072 characters
+in all, a tool or an effect this page does not know, or a field of a wrong shape is not shown as a card that can be
+allowed: it has the danger bar, the title `Cannot show in full` or `Cannot show this request`, a sentence that says why,
+and only `Deny`. A card without a usable hash has no button and says that stopping the reply ends it.
+
+**Destination.** A line under the payload: `The result is sent to llama3.2 at localhost:11434 (this computer).` The place
+is a chip, in the warn colour and underlined when the place leaves the computer, and the place word is the core's (6.12).
+When the route is not known, for example after a reload, the line reads `The result is sent to the model of this chat.`
+
+**Banner.** When the turn holds text the user did not write, a block with a 2 px warn bar, the mark `!` and the label
+`Untrusted text in this turn` says so, with the core's labels (`output of list_dir`, `attached context`) in brackets and
+the sentence that this text can try to steer the assistant. The banner follows the core's taint flag or its list of
+labels, whichever says so. It does not claim that anything is safe.
+
+**Hash and buttons.** The line `hash 9f3a41c2d7be` (the first 12 characters, dim, mono), then `Allow once` (solid
+`--hw-rose-deep`, `--hw-on-accent` text) and `Deny` (hairline), in this order in the document, then the foot `Allows this
+one call only. Nothing is kept for later. Esc denies.` There is no `Always allow`, no allow for the session and no setting
+that could carry one.
+
+**Modes.** Each mode has words, so colour is never the only cue.
+
+| Mode | Bar | Second cue and content |
+|---|---|---|
+| `ask` | warn | the mark `!`, both buttons |
+| `sending` | hairline | title unchanged, buttons disabled, `aria-busy`, the line `Sending…` |
+| `sent` | hairline | the line `Allowed · running…` or `Denied`, no buttons, until the core's result removes the card |
+| `ended` | hairline | the line `That call is no longer waiting.`, no buttons |
+| `cannot` | danger | the mark `!`, the title `Cannot show in full` or `Cannot show this request`, only `Deny` |
+
+A refusal that keeps the card puts the core's text above the buttons in the error tone (danger, underlined). A changed
+request says `The request changed. Nothing ran. Read the card again.` and the card is drawn again from the core's state.
+
+**Keys and focus.**
+
+| Key or press | Effect |
+|---|---|
+| a card appears | nothing: it never takes the focus; the status line says `waiting for your decision` |
+| `Tab` | reaches the payload box, `Allow once` and `Deny` in this order; from the message box `Shift+Tab` reaches `Deny` first |
+| `Space`, `Enter` on a button | decides |
+| `Escape` with the focus inside a card | denies that call and returns the focus to the message box |
+| `Escape` in the message box | stops the reply, which ends every waiting call |
+| a press on `Allow once` within half a second of the card appearing | ignored (a click aimed at something that moved cannot allow a call); `Deny` always works |
+| a click or key press made by a script | ignored |
+
+No key allows a call without the focus on its button.
+
+**Tool rows.** Under the assistant text that asked for it, one row per tool call: a mark (`✓` ran, `!` error, `…`
+waiting, `–` no result), the words of the tool, the core's one-line summary in mono and, at the right, the state word
+(`ran`, `error`, `waiting`, `no result`); the word is the cue. A toggle `Show result (1.2 KiB)` opens the result in a mono
+box under the label `Result · untrusted text`; it is text only (no Markdown, no link, no image), at most 20000
+characters, and a longer result ends with `[cut for display]`. A message of the role tool draws nothing of its own.
+
+**Waiting.** While calls wait, the status line of the chat says `waiting for your decision` and the title-bar button reads
+`✦ AI · 2` (the number in the warn colour; the number is the cue) with the accessible name `AI chat, 2 calls wait for your
+decision`.
+
+**Narrow screens (640 px and narrower).** `Allow once`, `Deny` and the result toggle are at least 44 px high, the strip is
+at most 60 % of the viewport height and scrolls inside, and the payload box scrolls inside.
+
+**Accessibility.** The card is a `group` named by its title, `aria-busy` while sending, the status line is the live region,
+every hairline is `--hw-line` so `contrast-high` holds, and nothing moves. Under forced colours the card, the remote chip
+and the place chip get a system-colour outline.

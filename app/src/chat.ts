@@ -16,11 +16,14 @@
 // `mountChat` and tells `chatClosed` when a chat pane left the core's list.
 import { registerAction } from "./actions.js";
 import { onProfilesChanged, openProviders } from "./aisettings.js";
+import { Approvals } from "./approval.js";
+import { mountApprovals } from "./approvalcard.js";
+import type { CardView as ApprovalView } from "./approvalcard.js";
 import { reviewIds } from "./aistate.js";
 import { call, listen } from "./bridge.js";
 import { paneBlocks, setChatTitle } from "./blockstate.js";
 import { ChatFeed, isChatId, messageText, readChatEvent, readChatState } from "./chatstate.js";
-import type { ChatMessage, Route } from "./chatstate.js";
+import type { ChatMessage, PendingCall, Route } from "./chatstate.js";
 import {
   MAX_TEXT_BYTES, chipView, endNote, faultText, linkKind, outcomeWord, pickProfile, readProfiles, roleWord, setupLabel,
   statusLabel, statusWord, titleWords, tokenWords, usageWords, utf8Bytes,
@@ -117,6 +120,10 @@ interface Session {
   dismissed: boolean;
   /** The sharing of this chat (`consent.ts`); made at the first user act that needs it, never at mount. */
   consent: Consent | null;
+  /** The calls of this chat that wait for a decision (`approval.ts`); making it asks the core nothing. */
+  readonly approvals: Approvals;
+  /** The list of waiting calls the controller was last given, so an unchanged list is not read again. */
+  pendingSeen: readonly PendingCall[] | null;
 }
 
 /** The rendered HTML of finished replies by message id, with the text it was made from; the oldest goes first. */
@@ -190,10 +197,34 @@ function sessionFor(conversation: string): Session {
       sawTurn: false,
       dismissed: false,
       consent: null,
+      approvals: new Approvals({
+        invoke: (cmd, args) => call(cmd, args),
+        conversation: () => conversation,
+        now: () => Date.now(),
+        say: (text, kind) => {
+          const mine = sessions.get(conversation);
+          if (mine !== undefined) sayTo(mine, text, kind);
+        },
+        refresh: () => {
+          const mine = sessions.get(conversation);
+          if (mine === undefined) return;
+          mine.feed.awaitSnapshot();
+          void fetchSnapshot(mine);
+        },
+      }),
+      pendingSeen: null,
     };
     sessions.set(conversation, s);
   }
   return s;
+}
+
+/** Hand the list of waiting calls of `s` to its controller; a list that did not change is not read again. */
+function syncApprovals(s: Session): void {
+  const list = s.feed.state.pending;
+  if (s.pendingSeen === list) return;
+  s.pendingSeen = list;
+  s.approvals.sync(list);
 }
 
 /** Draw every view of `s` on the next animation frame; any number of changes in between are one draw. */
@@ -205,6 +236,7 @@ function schedule(s: Session): void {
     const now = [...dirty];
     dirty.clear();
     for (const session of now) {
+      syncApprovals(session);
       if (setChatTitle(session.id, session.feed.state.title)) renderOverlay();
       for (const view of session.views) view.draw();
     }
@@ -451,6 +483,7 @@ class Mounted implements ChatView {
   private readonly ctx: HTMLButtonElement;
   private cardFor: Consent | null = null;
   private cardOff: (() => void) | null = null;
+  private approvalOff: (() => void) | null = null;
   private cardWatch: (() => void) | null = null;
   private readonly articles = new Map<string, Article>();
   private streaming: Article | null = null;
@@ -589,6 +622,7 @@ class Mounted implements ChatView {
     this.session.views.delete(this);
     this.closePicker(false);
     this.unmountCard();
+    this.unmountApprovals();
     this.articles.clear();
     this.streaming = null;
     this.streamed = null;
@@ -602,6 +636,7 @@ class Mounted implements ChatView {
   dispose(): void {
     this.alive = false;
     this.unmountCard();
+    this.unmountApprovals();
     this.session.views.delete(this);
     this.host.removeEventListener("mousedown", this.onMouseDown);
     this.host.replaceChildren();
@@ -611,6 +646,7 @@ class Mounted implements ChatView {
   private attach(s: Session): void {
     s.views.add(this);
     this.input.value = s.draft;
+    this.approvalOff = mountApprovals(this.cards, s.approvals, this.approvalView());
     this.draw();
     s.feed.awaitSnapshot();
     void fetchSnapshot(s);
@@ -621,6 +657,7 @@ class Mounted implements ChatView {
   /** Bring everything in line with the feed's state. */
   draw(): void {
     if (!this.alive) return;
+    syncApprovals(this.session);
     this.drawBar();
     this.drawTranscript();
     this.drawStatus();
@@ -653,6 +690,16 @@ class Mounted implements ChatView {
     this.ctx.setAttribute("aria-expanded", view.expanded ? "true" : "false");
     if (view.disabled) this.ctx.setAttribute("aria-disabled", "true");
     else this.ctx.removeAttribute("aria-disabled");
+  }
+
+  private unmountApprovals(): void {
+    this.approvalOff?.();
+    this.approvalOff = null;
+  }
+
+  /** What the approval cards need to know of the page: where a result goes (not yet told) and the way back to the composer. */
+  private approvalView(): ApprovalView {
+    return { destination: () => null, focusComposer: () => this.focus() };
   }
 
   private unmountCard(): void {
@@ -1286,6 +1333,7 @@ export function chatClosed(conversation: string): void {
   if (s !== undefined) {
     dirty.delete(s);
     s.consent?.dispose();
+    s.approvals.dispose();
     if (s.feed.state.running) void call("ai_cancel", { conversation }).catch(() => {});
   }
   sessions.delete(conversation);
@@ -1305,6 +1353,11 @@ export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void
     await loadStyles("./consent.css");
   } catch {
     // the chat still works without the style sheet of the card
+  }
+  try {
+    await loadStyles("./approval.css");
+  } catch {
+    // the chat still works without the style sheet of the approval card
   }
   const run = (newChat: boolean): void => {
     void openChat(newChat).then((reason) => {

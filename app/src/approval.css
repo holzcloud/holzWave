@@ -1,0 +1,65 @@
+/*
+ * The approval card of the chat (approvalcard.ts, chat.ts, docs/design.md section 6.15): one strip entry for each call that
+ * waits for a decision, the rows of tool calls in the transcript and the count on the title-bar button. Every colour is a
+ * `--hw-*` token, every size is in rem so the UI scale moves it with the rest of the chrome (a pixel value only for 1 px
+ * hairlines, the 2 px bar and focus ring, the 16 px composer text, the 28 px and 44 px touch minimums and the 640 px
+ * breakpoint). Flat and hairline: nothing here moves, fades or floats, so the motion setting has nothing to remove.
+ * The rules of the buttons carry a parent class so they win over the `.block button` reset of blocks.css, and the hover
+ * rules carry the state so they win over its hover rule.
+ */
+
+/* ---- the card ---------------------------------------------------------------------------------------------------- */
+
+.chat-approval { box-sizing: border-box; padding: .5rem .833rem .667rem; border-top: 1px solid var(--hw-line);
+                 border-bottom: 1px solid var(--hw-line); border-left: 2px solid var(--hw-line); color: var(--hw-ink); }
+.chat-approval[data-mode="ask"] { border-left-color: var(--hw-warn); }
+.chat-approval[data-mode="cannot"] { border-left-color: var(--hw-danger); }
+.approval-head { display: flex; flex-wrap: wrap; align-items: center; gap: .167rem .667rem; margin-bottom: .333rem; }
+.approval-title { color: var(--hw-ink); }
+.approval-mark { display: none; }
+.chat-approval[data-mode="ask"] .approval-mark, .chat-approval[data-mode="cannot"] .approval-mark { display: inline; }
+.chat-approval[data-mode="ask"] .approval-title { color: var(--hw-warn); text-decoration: underline; }
+.chat-approval[data-mode="cannot"] .approval-title { color: var(--hw-danger); text-decoration: underline; }
+.approval-tool { color: var(--hw-ink); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; }
+.approval-where { min-width: 0; margin-left: auto; color: var(--hw-dim); font-family: "JetBrains Mono", ui-monospace, monospace;
+                  font-size: calc(11rem / 12); overflow-wrap: anywhere; }
+.approval-remote { padding: 0 .5rem; border: 1px solid var(--hw-warn); border-radius: 62.5rem; color: var(--hw-warn);
+                   font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); text-decoration: underline; }
+
+.approval-effect, .approval-dest, .approval-verdict, .approval-foot, .approval-fault {
+  margin: 0 0 .333rem; font-family: "Manrope", system-ui, sans-serif; font-size: 1.083rem; line-height: 1.45; overflow-wrap: anywhere;
+}
+.approval-effect { color: var(--hw-dim); }
+.approval-dest { color: var(--hw-ink); }
+.approval-model, .approval-host, .approval-place { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; }
+.approval-place { padding: 0 .5rem; border: 1px solid var(--hw-line); border-radius: 62.5rem; color: var(--hw-dim); }
+.approval-place[data-leaves="true"] { border-color: var(--hw-warn); color: var(--hw-warn); text-decoration: underline; }
+.approval-verdict { color: var(--hw-ink); }
+.approval-foot { color: var(--hw-dim); font-size: calc(11rem / 12); }
+
+/* The fields of the request: one row each, in the core's order. The value is wrapped and the box scrolls; nothing is cut. */
+.approval-payload { box-sizing: border-box; max-height: 12rem; margin: 0 0 .333rem; overflow: auto; padding: .167rem .5rem;
+                    border: 1px solid var(--hw-line); border-radius: .333rem; color: var(--hw-ink);
+                    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; line-height: 1.4; }
+.approval-payload:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
+.approval-rows { margin: 0; padding: 0; list-style: none; }
+.approval-row { display: grid; grid-template-columns: max-content minmax(0, 1fr) max-content; gap: .5rem; align-items: baseline;
+                padding: .167rem 0; border-top: 1px solid var(--hw-line); }
+.approval-row:first-child { border-top: 0; }
+.approval-name, .approval-bytes { color: var(--hw-dim); }
+.approval-value { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--hw-ink); }
+.approval-bytes { text-align: right; white-space: nowrap; }
+.approval-hash { margin: 0 0 .333rem; color: var(--hw-dim); font-family: "JetBrains Mono", ui-monospace, monospace;
+                 font-size: calc(11rem / 12); }
+
+/* The buttons: hairline, mono, uppercase; the one that allows is solid. */
+.approval-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: .333rem 0; }
+.chat-approval button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+                        min-height: max(28px, calc(28rem / 12)); padding: 0 .833rem; border: 1px solid var(--hw-line);
+                        border-radius: .333rem; background: none; color: var(--hw-ink); cursor: pointer;
+                        font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: .1em;
+                        text-transform: uppercase; }
+.chat-approval button:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.chat-approval button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.chat-approval .approval-allow { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep); color: var(--hw-on-accent); }
+.chat-approval .approval-allow:hover { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep); color: var(--hw-on-accent); }
