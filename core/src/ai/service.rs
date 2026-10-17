@@ -62,6 +62,7 @@ use crate::ai::tools::{
     ApprovalTable, DenyPolicy, Resolved as ToolResolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput,
 };
 use crate::ai::types::{ApiKey, ContextKind, ContextNote, Locality, Message, Part, Role, Usage};
+use crate::ai::wire::HttpProvider;
 use crate::layout::{LoadStatus, PaneId};
 use crate::settings::{AiLocalContext, Settings};
 
@@ -134,6 +135,15 @@ fn pick_profile(requested: Option<&str>, pinned: Option<&str>) -> Option<String>
 /// The model of a call: the first candidate that is not blank (the one it names, the chat's pin, the profile's).
 fn pick_model(candidates: &[Option<&str>]) -> Option<String> {
     candidates.iter().flatten().find(|name| !name.trim().is_empty()).map(|name| (*name).to_owned())
+}
+
+/// Whether a message of the chat already carries a note for one of `contexts`.
+fn names_known(messages: &[Message], contexts: &[ApprovedContext]) -> bool {
+    contexts.iter().any(|context| {
+        let hash = context.hash_hex();
+        let mut parts = messages.iter().flat_map(|message| message.parts.iter());
+        parts.any(|part| matches!(part, Part::Context(note) if note.hash == hash))
+    })
 }
 
 /// Whether one envelope is attached twice.
@@ -1183,9 +1193,12 @@ impl AiService {
             let (chat, pane) = (&request.conversation, request.pane);
             let approved = inner.redeem(chat, pane, route.as_ref(), &profile, &offer, &picked)?;
             contexts.push(approved);
-            if has_duplicate(&contexts) {
-                return Err(ServiceError::ContextDuplicate);
-            }
+        }
+        // The consent check of a request names every approved context by its hash in exactly one message. Text that
+        // this chat already carried has the same hash, so sending it again would end the turn after the message was
+        // saved; it is refused here, before anything is stored.
+        if has_duplicate(&contexts) || names_known(&conversation.messages, &contexts) {
+            return Err(ServiceError::ContextDuplicate);
         }
 
         let number = inner.draw_turn(&conversation.messages);
@@ -1242,6 +1255,7 @@ impl AiService {
         let amended = self.inner.amend(|config| config.remove(id, vault));
         if amended.output.removed {
             self.inner.revoke(id);
+            self.inner.discard_all(self.inner.shares.profile_removed(id));
         }
         amended.outcome.map(|()| amended.output)
     }
@@ -1517,12 +1531,16 @@ impl AiService {
             inner.store.delete(conversation)
         };
         lock(&inner.last_turns).retain(|(known, _)| known != conversation.as_str());
+        // A deleted chat keeps no share and no offer, whether or not the file could be removed.
+        self.chat_closed(conversation);
         removed.map_err(ServiceError::Store)
     }
 
     /// Tells the service that a pane closed: the calls that wait for a decision in turns that act for it are voided
-    /// and those turns end as cancelled. Returns how many calls were voided.
+    /// and those turns end as cancelled, and the shares of the pane end with the offers made for it. Returns how many
+    /// calls were voided.
     pub fn pane_closed(&self, pane: PaneId) -> usize {
+        self.inner.discard_all(self.inner.shares.pane_closed(pane));
         self.inner.approvals.cancel_pane(pane)
     }
 
@@ -1645,6 +1663,9 @@ struct Job {
 /// A provider chosen for a turn.
 struct Chosen {
     provider: Arc<dyn Provider>,
+    /// The same provider as the concrete HTTP type when it was built from a profile: the destination is checked once
+    /// more through it when a turn carries shared context.
+    http_provider: Option<Arc<HttpProvider>>,
     host: Option<String>,
     /// The model the profile names.
     model: Option<String>,
@@ -1715,6 +1736,7 @@ impl Inner {
         if let Some(provider) = self.registry.get(profile) {
             return Ok(Chosen {
                 provider,
+                http_provider: None,
                 host: None,
                 model: Some(profile.to_owned()),
                 registered: true,
@@ -1730,8 +1752,44 @@ impl Inner {
         let adapter = adapter_for(resolved.wire(), &origin);
         let host = resolved.host_label().to_owned();
         let model = resolved.model().to_owned();
-        let provider = resolved.into_provider(adapter, Arc::clone(&self.http));
-        Ok(Chosen { provider: Arc::new(provider), host: Some(host), model: Some(model), registered: false, local_only })
+        let provider = Arc::new(resolved.into_provider(adapter, Arc::clone(&self.http)));
+        Ok(Chosen {
+            provider: Arc::clone(&provider) as Arc<dyn Provider>,
+            http_provider: Some(provider),
+            host: Some(host),
+            model: Some(model),
+            registered: false,
+            local_only,
+        })
+    }
+}
+
+/// How far a place is from the device: the order in which the user's approval widens.
+fn distance(locality: Locality) -> u8 {
+    match locality {
+        Locality::OnDevice => 0,
+        Locality::Loopback => 1,
+        Locality::Lan => 2,
+        Locality::Cloud => 3,
+    }
+}
+
+/// The end of a turn whose destination moved outward since its context was approved, or that cannot be checked. A
+/// registered provider has no address to look up, and a turn without context has nothing to protect.
+fn recheck_destination(turn: &Turn, chosen: &Chosen, context: &[ApprovedContext]) -> Option<EndView> {
+    let provider = chosen.http_provider.as_ref().filter(|_| !context.is_empty())?;
+    let moved = || refused(ErrorClass::Policy, "the destination changed since the context was approved", true);
+    match provider.classify(&turn.cancel) {
+        Ok(now) if context.iter().all(|approved| distance(now) <= distance(approved.locality())) => None,
+        Ok(_) => Some(moved()),
+        Err(AiError::Cancelled) => Some(EndView {
+            end: "cancelled".to_owned(),
+            error: None,
+            rounds: 0,
+            usage: Usage::default(),
+            saved: true,
+        }),
+        Err(_) => Some(moved()),
     }
 }
 
@@ -1769,6 +1827,14 @@ fn turn_body(inner: &Arc<Inner>, turn: &Arc<Turn>, emitter: &Emitter, job: Job) 
         && capabilities.locality.leaves_device()
     {
         return refused(ErrorClass::Policy, "local only is on", true);
+    }
+
+    // A context was approved for a destination as it was then. A host name can point somewhere else by now, so a turn
+    // that carries context asks again before anything is stored or sent: a place farther from the device than the
+    // user approved, or one that cannot be checked, ends the turn. This is the second place that classifies a
+    // destination.
+    if let Some(ended) = recheck_destination(turn, &chosen, &context) {
+        return ended;
     }
 
     // The user's message is saved before anything is sent: a chat that cannot be written does not talk to a provider.

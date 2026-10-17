@@ -395,6 +395,20 @@ impl ShareBook {
         book.shares.retain(|share| share.conversation != conversation);
         take_offers(&mut book, |offer| offer.conversation == conversation)
     }
+
+    /// The pane ended: its shares go for every chat, with the offers made for it.
+    pub(super) fn pane_closed(&self, pane: PaneId) -> Vec<OfferId> {
+        let mut book = self.lock();
+        book.shares.retain(|share| share.pane != pane);
+        take_offers(&mut book, |offer| offer.pane == pane)
+    }
+
+    /// The profile was removed: the shares bound to it go, with their offers.
+    pub(super) fn profile_removed(&self, profile: &str) -> Vec<OfferId> {
+        let mut book = self.lock();
+        book.shares.retain(|share| share.key.profile != profile);
+        take_offers(&mut book, |offer| offer.key.profile == profile)
+    }
 }
 
 /// Removes the live offers `gone` selects and returns their ids.
