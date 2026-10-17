@@ -1,0 +1,2 @@
+Config File: /path/to/gamcfg/gam.cfg
+  DEFAULT *

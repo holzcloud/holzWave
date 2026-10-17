@@ -82,9 +82,11 @@ now_ms() {
     python3 -I -c 'import time; print(int(time.time() * 1000))'
 }
 
-# Replace the scratch directory in a stream by a neutral path.
+# Replace the scratch directory in a stream by a neutral path, as the tool may print it resolved (/private/var/... for
+# /var/... on macOS).
+SCRATCH_REAL=$(cd "$SCRATCH" && pwd -P)
 unscratch() {
-    sed "s#$SCRATCH#/path/to#g"
+    sed -e "s#$SCRATCH_REAL#/path/to#g" -e "s#$SCRATCH#/path/to#g"
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -315,6 +317,123 @@ record_kubectl() {
 
 # ---------------------------------------------------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------------------------------------------------
+# az
+# ---------------------------------------------------------------------------------------------------------------------
+
+# Run az with a closed environment, a scratch configuration directory and a scratch HOME. Telemetry is off for the run.
+# The directory is the first argument. The global flags go last, as az accepts them anywhere.
+az_in() {
+    az_dir=$1
+    shift
+    env -i PATH="/usr/bin:/bin:$AZ_BIN" HOME="$SCRATCH/azhome" AZURE_CONFIG_DIR="$az_dir" AZURE_CORE_COLLECT_TELEMETRY=false \
+        "$AZ" "$@" --only-show-errors
+}
+
+record_az() {
+    AZ=$(tool_path az) || {
+        say "az is not installed: nothing recorded" >&2
+        return 2
+    }
+    AZ_BIN=$(dirname "$AZ")
+    mkdir -p "$OUT/az" "$SCRATCH/azhome" "$SCRATCH/azcold" || return 2
+    say "az: $AZ"
+
+    # The first run in a fresh configuration directory is the cold one.
+    t0=$(now_ms)
+    if ! limited 30 az_in "$SCRATCH/azcold" version -o json >"$SCRATCH/az_version.json" 2>"$SCRATCH/az_version.err"; then
+        say "az version failed: $(cat "$SCRATCH/az_version.err")" >&2
+        return 2
+    fi
+    t1=$(now_ms)
+    limited 30 az_in "$SCRATCH/azcold" version -o json >/dev/null 2>&1
+    t2=$(now_ms)
+    say "az timing: cold $((t1 - t0)) ms, warm $((t2 - t1)) ms"
+    python3 -I "$SANITISE" --indent 2 <"$SCRATCH/az_version.json" >"$OUT/az/version.json" || return 2
+    say "recorded az/version.json"
+
+    # The signed-out state: an empty configuration directory.
+    limited 30 az_in "$SCRATCH/azcold" account show -o json >"$SCRATCH/az_signed_out.out" 2>"$SCRATCH/az_signed_out.err"
+    signed_out_status=$?
+    if [ "$signed_out_status" -eq 1 ] && [ ! -s "$SCRATCH/az_signed_out.out" ] && [ -s "$SCRATCH/az_signed_out.err" ]; then
+        python3 -I "$SANITISE" <"$SCRATCH/az_signed_out.err" >"$OUT/az/account_show_signed_out.stderr.txt" || return 2
+        say "recorded az/account_show_signed_out.stderr.txt (exit 1, empty standard output)"
+    else
+        say "az account show in an empty directory did not exit 1 with an empty standard output (status $signed_out_status): not recorded"
+    fi
+
+    # The signed-in shapes. Only the profile file of the user's configuration is copied into the scratch directory (it holds
+    # no token), az reads it there, and the output goes straight through the strict sanitiser: the user's own directory is
+    # never the one az runs in, and no value of the profile survives.
+    profile="${AZURE_CONFIG_DIR:-$HOME/.azure}/azureProfile.json"
+    if [ -s "$profile" ]; then
+        mkdir -p "$SCRATCH/azprofile" && cp "$profile" "$SCRATCH/azprofile/azureProfile.json" || return 2
+        if limited 30 az_in "$SCRATCH/azprofile" account list -o json >"$SCRATCH/az_list.json" 2>/dev/null &&
+            limited 30 az_in "$SCRATCH/azprofile" account show -o json >"$SCRATCH/az_show.json" 2>/dev/null &&
+            [ -s "$SCRATCH/az_list.json" ] && [ -s "$SCRATCH/az_show.json" ]; then
+            python3 -I "$SANITISE" --strict --indent 2 <"$SCRATCH/az_list.json" >"$OUT/az/account_list.json" || return 2
+            python3 -I "$SANITISE" --strict --indent 2 <"$SCRATCH/az_show.json" >"$OUT/az/account_show.json" || return 2
+            say "recorded az/account_list.json and az/account_show.json (strict sanitiser: only the structure survives)"
+        else
+            say "az could not read the profile: the committed account_list.json and account_show.json stay (written)"
+        fi
+    else
+        say "no signed-in az profile here: the committed account_list.json and account_show.json stay (written)"
+    fi
+    # az group list needs a token and the network, and its ids and tags carry names the sanitiser cannot know: the
+    # committed group_list.json is always written by hand.
+}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GAM
+# ---------------------------------------------------------------------------------------------------------------------
+
+# GAM is a shell alias on many machines and on no PATH: HW_GAM, then the PATH, then ~/bin/gam7/gam.
+find_gam() {
+    if [ -n "${HW_GAM:-}" ] && [ -x "$HW_GAM" ]; then
+        printf '%s\n' "$HW_GAM"
+    elif g=$(tool_path gam); then
+        printf '%s\n' "$g"
+    elif [ -x "$HOME/bin/gam7/gam" ]; then
+        printf '%s\n' "$HOME/bin/gam7/gam"
+    else
+        return 1
+    fi
+}
+
+# Run GAM with a closed environment: an empty scratch GAMCFGDIR and a scratch HOME, so that the user's gam.cfg, oauth2.txt
+# and client_secrets.json are never read or written. GAM creates its files in the scratch directory.
+gam_in() {
+    env -i PATH=/usr/bin:/bin HOME="$SCRATCH/gamhome" GAMCFGDIR="$SCRATCH/gamcfg" "$GAM" "$@"
+}
+
+record_gam() {
+    GAM=$(find_gam) || {
+        say "GAM is not installed (HW_GAM, the PATH and ~/bin/gam7/gam were tried): nothing recorded" >&2
+        return 2
+    }
+    mkdir -p "$OUT/gam" "$SCRATCH/gamhome" "$SCRATCH/gamcfg" || return 2
+    say "gam: $GAM"
+    # The clock line changes on every run; the fixture keeps a fixed one.
+    t0=$(now_ms)
+    if ! limited 30 gam_in version >"$SCRATCH/gam_version.txt" 2>"$SCRATCH/gam_version.err"; then
+        say "gam version failed: $(head -c 300 "$SCRATCH/gam_version.err")" >&2
+        return 2
+    fi
+    t1=$(now_ms)
+    say "gam timing: version $((t1 - t0)) ms (first run in an empty directory)"
+    unscratch <"$SCRATCH/gam_version.txt" | sed 's/^Time: .*/Time: 2026-01-01T00:00:00+00:00/' |
+        python3 -I "$SANITISE" >"$OUT/gam/version.txt" || return 2
+    say "recorded gam/version.txt"
+    if ! limited 30 gam_in showsections >"$SCRATCH/gam_sections.txt" 2>"$SCRATCH/gam_sections.err"; then
+        say "gam showsections failed: $(head -c 300 "$SCRATCH/gam_sections.err")" >&2
+        return 2
+    fi
+    unscratch <"$SCRATCH/gam_sections.txt" | python3 -I "$SANITISE" >"$OUT/gam/showsections.txt" || return 2
+    say "recorded gam/showsections.txt (an empty configuration directory: $(wc -l <"$OUT/gam/showsections.txt" | tr -d ' ') lines)"
+    # print_users.csv and info_domain.json are written by hand: they need a signed-in Workspace domain.
+}
+
 [ "$#" -eq 1 ] || usage
 
 status=0
@@ -322,8 +441,16 @@ case "$1" in
     kubectl)
         record_kubectl || status=$?
         ;;
+    az)
+        record_az || status=$?
+        ;;
+    gam)
+        record_gam || status=$?
+        ;;
     all)
-        record_kubectl || status=$?
+        for tool in kubectl az gam; do
+            "$0" "$tool" || status=$?
+        done
         ;;
     *)
         usage

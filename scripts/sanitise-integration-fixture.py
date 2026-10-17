@@ -16,6 +16,9 @@ Text input gets the home directory, e-mail addresses and GUIDs replaced the same
 
 Options:
   --keep-names        leave the values under name and the like alone (a kubeconfig's context names are not identities)
+  --strict            JSON only: every string value is replaced (a GUID by a synthetic one, an address by user@example.com,
+                      anything else by "Item N" of its key) except the values of the keys state, cloudName,
+                      environmentName and type; only the structure of the tool's answer survives
   --redact-exec-env   replace the values of users[].user.exec.env[] (kubectl does not redact them)
   --talos             addresses become 192.0.2.N, host names node-N, certificate-looking strings REDACTED
   --indent N          indentation of JSON output (default 2)
@@ -37,11 +40,13 @@ IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 NAME_KEYS = {"name", "displayName", "tenantDisplayName", "domain"}
 HOST_KEYS = {"hostname", "nodename", "fqdn"}
 KEEP_VALUES = {"AzureCloud", "AzureUSGovernment", "AzureChinaCloud", "AzureGermanCloud", "Enabled", "Succeeded"}
+STRICT_KEEP_KEYS = {"state", "cloudName", "environmentName", "type"}
 SYNTHETIC_EMAIL = "user@example.com"
 
 
 class Sanitiser:
-    def __init__(self, talos=False, redact_exec_env=False, keep_names=False):
+    def __init__(self, talos=False, redact_exec_env=False, keep_names=False, strict=False):
+        self.strict = strict
         self.keep_names = keep_names
         self.talos = talos
         self.redact_exec_env = redact_exec_env
@@ -98,7 +103,20 @@ class Sanitiser:
                 value = value.replace(original, replacement)
         return value
 
+    def strict_string(self, value, key):
+        if key in STRICT_KEEP_KEYS:
+            return value
+        if GUID.fullmatch(value):
+            return GUID.sub(self.guid, value)
+        if EMAIL.fullmatch(value):
+            return SYNTHETIC_EMAIL
+        if not value:
+            return value
+        return self.item(key or "value", value)
+
     def string(self, value, key=None):
+        if self.strict:
+            return self.strict_string(value, key)
         if value in KEEP_VALUES:
             return value
         if self.talos and key in HOST_KEYS and value:
@@ -160,6 +178,7 @@ def main(argv):
     talos = "--talos" in argv
     redact_exec_env = "--redact-exec-env" in argv
     keep_names = "--keep-names" in argv
+    strict = "--strict" in argv
     indent = 2
     if "--indent" in argv:
         try:
@@ -172,7 +191,7 @@ def main(argv):
     except (OSError, UnicodeDecodeError) as error:
         print("sanitise-integration-fixture: cannot read the input: %s" % error, file=sys.stderr)
         return 1
-    sanitiser = Sanitiser(talos=talos, redact_exec_env=redact_exec_env, keep_names=keep_names)
+    sanitiser = Sanitiser(talos=talos, redact_exec_env=redact_exec_env, keep_names=keep_names, strict=strict)
     stripped = raw.lstrip()
     documents = objects_in(raw) if stripped[:1] in ("{", "[") else None
     if documents is not None:

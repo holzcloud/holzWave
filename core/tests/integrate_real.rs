@@ -600,3 +600,155 @@ fn a_context_name_with_colons_slashes_and_an_at_sign_survives_the_overlay() {
     }
     rig.done();
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// az and GAM (fixtures run everywhere; the real tools are gated).
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn the_signed_out_stderr_fixture_names_az_login() {
+    let text = read_fixture("az/account_show_signed_out.stderr.txt");
+    assert!(text.starts_with("ERROR:"), "the line is an error line: {text:?}");
+    assert!(text.contains("az login"), "the line tells the user to run az login: {text:?}");
+}
+
+#[test]
+fn the_az_fixtures_hold_the_members_a_parser_reads() {
+    let list = fixture_json("az/account_list.json");
+    let accounts = list.as_array().expect("account list is an array");
+    assert!(!accounts.is_empty(), "the account list holds at least one subscription");
+    for account in accounts {
+        for member in ["cloudName", "homeTenantId", "id", "isDefault", "managedByTenants", "name", "state", "tenantId", "user"] {
+            assert!(account.get(member).is_some(), "account list entry without {member}");
+        }
+    }
+    assert_eq!(accounts.iter().filter(|a| a["isDefault"] == true).count(), 1, "exactly one default subscription");
+    let shown = fixture_json("az/account_show.json");
+    assert!(shown.get("environmentName").is_some() && shown.get("cloudName").is_none(), "account show has environmentName, not cloudName");
+    assert!(shown["user"].get("name").is_some() && shown["user"].get("type").is_some());
+    let groups = fixture_json("az/group_list.json");
+    for group in groups.as_array().expect("group list is an array") {
+        assert!(group["id"].is_string() && group["location"].is_string() && group["name"].is_string());
+        assert!(group.pointer("/properties/provisioningState").is_some_and(Value::is_string));
+        assert!(group.get("tags").is_some(), "tags is present (an object or null)");
+    }
+    assert!(fixture_json("az/version.json").get("azure-cli").is_some_and(Value::is_string));
+}
+
+#[test]
+fn the_gam_fixtures_show_the_shapes_the_parsers_read() {
+    let version = read_fixture("gam/version.txt");
+    assert!(version.starts_with("GAM "), "the first line names GAM and its version: {version:?}");
+    assert!(version.lines().any(|l| l.starts_with("Config File:")), "a Config File line is there");
+    let sections = read_fixture("gam/showsections.txt");
+    let mut lines = sections.lines();
+    assert!(lines.next().is_some_and(|l| l.starts_with("Config File: ")), "a header line with the file");
+    assert!(lines.any(|l| l.starts_with("  ") && l.trim_end().ends_with(" *")), "an indented section name with the mark of the selected one");
+    let domain = fixture_json("gam/info_domain.json");
+    assert!(domain["customerDomain"].is_string() && domain["isVerified"].is_boolean());
+    assert_eq!(domain["domainAliases"].as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn the_hand_written_csv_fixture_has_a_multi_line_cell() {
+    let text = read_fixture("gam/print_users.csv");
+    // A line that ends inside a quoted cell holds an odd number of quote characters.
+    assert!(text.lines().any(|line| line.matches('"').count() % 2 == 1), "no line ends inside a quoted cell");
+    assert!(text.lines().next().is_some_and(|h| h == "primaryEmail,name.fullName,suspended,orgUnitPath,notes"));
+    assert!(text.contains("\"\"quotes\"\""), "a doubled quote inside a quoted cell");
+    assert!(text.lines().any(|l| l.ends_with(",")), "a blank trailing cell");
+}
+
+/// The real `az`, in a scratch configuration directory and a scratch `HOME`. Returns the output and the wall time.
+fn az_run(az: &Path, config_dir: &Path, args: &[&str], extra: &[(&str, &str)]) -> (std::process::Output, std::time::Duration) {
+    let bin = az.parent().expect("az has a directory");
+    let path = format!("/usr/bin:/bin:{}", bin.display());
+    let path = Path::new(&path).to_path_buf();
+    let mut env: Vec<(&str, &Path)> = vec![("PATH", &path), ("HOME", config_dir), ("AZURE_CONFIG_DIR", config_dir), ("AZURE_CORE_COLLECT_TELEMETRY", Path::new("false"))];
+    env.extend(extra.iter().map(|(name, value)| (*name, Path::new(*value))));
+    let mut full: Vec<&str> = args.to_vec();
+    full.push("--only-show-errors");
+    let start = std::time::Instant::now();
+    let out = run_tool(az, &full, &env);
+    (out, start.elapsed())
+}
+
+#[test]
+fn az_signed_out_exits_1_with_empty_stdout_and_an_error_line() {
+    let Some(az) = real_tool("az") else { return };
+    let scratch = common::scratch_dir("az-out");
+    let (out, took) = az_run(&az, &scratch, &["account", "show", "-o", "json"], &[]);
+    println!("az account show (signed out, cold directory): {} ms", took.as_millis());
+    assert_eq!(out.status.code(), Some(1), "exit status of a signed-out account show");
+    assert!(out.stdout.is_empty(), "standard output is empty: {:?}", String::from_utf8_lossy(&out.stdout));
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(err.starts_with("ERROR:") && err.contains("az login"), "an error line that names az login: {err:?}");
+    assert_eq!(err, read_fixture("az/account_show_signed_out.stderr.txt"), "the recorded line is what the tool prints");
+    fs::remove_dir_all(&scratch).ok();
+}
+
+#[test]
+fn az_version_is_json_with_an_azure_cli_member() {
+    let Some(az) = real_tool("az") else { return };
+    let scratch = common::scratch_dir("az-ver");
+    let (out, took) = az_run(&az, &scratch, &["version", "-o", "json"], &[]);
+    println!("az version (cold directory): {} ms", took.as_millis());
+    assert!(out.status.success(), "az version failed: {}", String::from_utf8_lossy(&out.stderr));
+    let version: Value = serde_json::from_slice(&out.stdout).expect("az version prints JSON");
+    assert!(version["azure-cli"].is_string(), "azure-cli member");
+    let (_, warm) = az_run(&az, &scratch, &["version", "-o", "json"], &[]);
+    println!("az version (warm directory): {} ms", warm.as_millis());
+    fs::remove_dir_all(&scratch).ok();
+}
+
+#[test]
+fn az_json_output_flag_beats_a_configured_table_output() {
+    let Some(az) = real_tool("az") else { return };
+    let scratch = common::scratch_dir("az-table");
+    let (out, _) = az_run(&az, &scratch, &["version", "-o", "json"], &[("AZURE_CORE_OUTPUT", "table")]);
+    assert!(out.status.success(), "az version failed: {}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice::<Value>(&out.stdout).expect("-o json wins over AZURE_CORE_OUTPUT=table");
+    fs::remove_dir_all(&scratch).ok();
+}
+
+/// GAM is a shell alias on many machines: `HW_GAM`, the `PATH`, then `~/bin/gam7/gam`.
+fn find_gam() -> Option<PathBuf> {
+    find_tool("gam").or_else(|| {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        let path = home.join("bin/gam7/gam");
+        is_executable(&path).then_some(path)
+    })
+}
+
+#[test]
+fn gam_version_and_showsections_run_against_an_empty_scratch_directory_and_leave_it_the_only_thing_written() {
+    if !gated() {
+        return;
+    }
+    let Some(gam) = find_gam() else {
+        println!("skipped: GAM is not installed here");
+        return;
+    };
+    let real_dir = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".gam"));
+    let modified = |dir: &Option<PathBuf>| dir.as_ref().and_then(|d| fs::metadata(d).ok()).and_then(|m| m.modified().ok());
+    let before = modified(&real_dir);
+    let scratch = common::scratch_dir("gam");
+    let config = scratch.join("cfg");
+    let home = scratch.join("home");
+    fs::create_dir(&config).expect("config dir");
+    fs::create_dir(&home).expect("home dir");
+    let started = std::time::Instant::now();
+    let version = run_tool(&gam, &["version"], &[("GAMCFGDIR", &config), ("HOME", &home)]);
+    println!("gam version (first run in an empty directory): {} ms", started.elapsed().as_millis());
+    assert!(version.status.success(), "gam version failed: {}", String::from_utf8_lossy(&version.stderr));
+    let version_text = String::from_utf8_lossy(&version.stdout).into_owned();
+    assert!(version_text.starts_with("GAM "), "the first line names GAM: {version_text:?}");
+    assert!(version_text.contains("Config File:") && version_text.contains("gam.cfg"), "the Config File line names the scratch gam.cfg: {version_text:?}");
+    let sections = run_tool(&gam, &["showsections"], &[("GAMCFGDIR", &config), ("HOME", &home)]);
+    assert!(sections.status.success(), "gam showsections failed: {}", String::from_utf8_lossy(&sections.stderr));
+    let sections_text = String::from_utf8_lossy(&sections.stdout).into_owned();
+    assert!(sections_text.contains("DEFAULT *"), "an empty directory shows the DEFAULT section as selected: {sections_text:?}");
+    assert!(config.join("gam.cfg").is_file(), "GAM wrote its configuration into the scratch directory");
+    assert_eq!(modified(&real_dir), before, "the modification time of the real ~/.gam directory changed");
+    fs::remove_dir_all(&scratch).ok();
+}
