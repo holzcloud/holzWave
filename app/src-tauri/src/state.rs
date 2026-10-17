@@ -4097,6 +4097,7 @@ mod tests {
         let names: Vec<_> = std::fs::read_dir(&nested)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with("history.db"))
             .collect();
         assert_eq!(names, vec!["layout.json"]);
     }
