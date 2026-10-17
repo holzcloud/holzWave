@@ -4,7 +4,8 @@
 
 use std::time::{Duration, Instant};
 
-use holzwave_apple_ai::{Availability, Backend, SystemBackend, probe};
+use holzwave_apple_ai::{AppleError, Availability, Backend, GenerateRequest, SystemBackend, native, probe};
+use holzwave_core::ai::provider::{CancelToken, Flow};
 
 /// The (major, minor) of the macOS this test runs on, from `sw_vers`.
 fn macos_version() -> (u32, u32) {
@@ -45,4 +46,58 @@ fn context_size_and_token_count_agree_with_availability() {
         assert_eq!(window, None);
         assert_eq!(count, None);
     }
+}
+
+#[test]
+fn a_call_without_the_model_ends_with_one_typed_error_or_the_model_has_a_window() {
+    let backend = SystemBackend::new();
+    if backend.availability() == Availability::Available {
+        let window = backend.context_size().expect("an available model reports its window");
+        assert!(window > 1024, "window {window}");
+        return;
+    }
+    let late_before = native::late_events();
+    let request = GenerateRequest { instructions: String::new(), prompt: "hello".to_owned(), max_response_tokens: 64 };
+    let mut delivered = 0;
+
+    let result = backend.generate(
+        &request,
+        &mut |_| {
+            delivered += 1;
+            Flow::Continue
+        },
+        &CancelToken::new(),
+    );
+
+    assert_eq!(result, Err(AppleError::Unavailable));
+    assert_eq!(delivered, 0);
+    assert_eq!(native::late_events(), late_before, "an event arrived after the terminal one");
+
+    // Text over the bound is refused before any foreign call, whatever the state of the model.
+    let huge = GenerateRequest { prompt: "x".repeat(holzwave_apple_ai::MAX_INPUT_BYTES + 1), ..request };
+    assert_eq!(backend.generate(&huge, &mut |_| Flow::Continue, &CancelToken::new()), Err(AppleError::ContextExceeded));
+}
+
+#[test]
+fn cancelling_an_unknown_handle_is_harmless() {
+    for handle in [0, -1, 1, 42, i64::MAX, i64::MIN] {
+        native::cancel_handle(handle);
+    }
+    // And twice, as a finished call would see it.
+    native::cancel_handle(7);
+    native::cancel_handle(7);
+}
+
+#[test]
+fn token_counting_never_blocks_for_long() {
+    let backend = SystemBackend::new();
+    let started = Instant::now();
+    let _ = backend.count_tokens("hello");
+    let _ = backend.count_tokens("");
+    assert!(started.elapsed() < Duration::from_secs(3), "counting took {:?}", started.elapsed());
+
+    // A text over the bound is `None` without a foreign call.
+    let started = Instant::now();
+    assert_eq!(backend.count_tokens(&"x".repeat(holzwave_apple_ai::MAX_INPUT_BYTES + 1)), None);
+    assert!(started.elapsed() < Duration::from_millis(500));
 }

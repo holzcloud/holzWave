@@ -6,10 +6,10 @@
 
 mod common;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use holzwave_apple_ai::{AppleProvider, Availability, native, probe};
-use holzwave_core::ai::provider::{CancelToken, Collector, Provider, StreamEvent};
+use holzwave_apple_ai::{AppleError, AppleProvider, Availability, Backend, GenerateRequest, SystemBackend, native, probe};
+use holzwave_core::ai::provider::{AiError, CancelToken, Collector, Flow, Provider, StreamEvent};
 use holzwave_core::ai::types::StopReason;
 
 use common::user_request;
@@ -64,4 +64,94 @@ fn a_real_text_turn_streams_from_the_system_model() {
     assert_eq!(completion.stop_reason, StopReason::EndTurn);
     assert!(completion.usage.input_tokens > 0);
     assert_eq!(native::late_events(), 0);
+}
+
+#[test]
+#[ignore = "needs macOS 26 with Apple Intelligence and HOLZWAVE_TEST_APPLE=1"]
+fn a_real_turn_can_be_cancelled_mid_stream() {
+    if !live_requested() {
+        return;
+    }
+    let provider = AppleProvider::system();
+    let late_before = native::late_events();
+    let cancel = CancelToken::new();
+    let mut cancelled_at = None;
+    let req = user_request("", "Write the numbers 1 to 300, one per line, and nothing else.");
+
+    let result = provider.stream(
+        &req,
+        &mut |event| {
+            if matches!(event, StreamEvent::TextDelta(_)) && cancelled_at.is_none() {
+                cancelled_at = Some(Instant::now());
+                cancel.cancel();
+            }
+            Flow::Continue
+        },
+        &cancel,
+    );
+    let stopped_after = cancelled_at.expect("the reply started").elapsed();
+
+    println!("live cancel ms {}", stopped_after.as_millis());
+    assert_eq!(result.unwrap_err(), AiError::Cancelled);
+    assert!(stopped_after < Duration::from_millis(500), "the cancel took {stopped_after:?}");
+    assert_eq!(native::late_events(), late_before, "an event arrived after the terminal one");
+
+    // The provider serves the next turn normally.
+    let mut collector = Collector::new();
+    provider
+        .stream(&user_request("Answer in one short sentence.", "Say hello."), &mut |e| collector.push(e), &CancelToken::new())
+        .expect("a normal turn after a cancel");
+    assert!(!collector.text().trim().is_empty());
+}
+
+#[test]
+#[ignore = "needs macOS 26 with Apple Intelligence and HOLZWAVE_TEST_APPLE=1"]
+fn the_framework_context_overflow_is_a_typed_error() {
+    if !live_requested() {
+        return;
+    }
+    // About 48 KiB goes straight to the backend, past the budget of the provider.
+    let request = GenerateRequest {
+        instructions: String::new(),
+        prompt: "word ".repeat(9800),
+        max_response_tokens: 64,
+    };
+    let backend = SystemBackend::new();
+    let late_before = native::late_events();
+
+    let result = backend.generate(&request, &mut |_| Flow::Continue, &CancelToken::new());
+
+    println!("live overflow result {result:?}");
+    assert_eq!(result, Err(AppleError::ContextExceeded));
+    assert_eq!(native::late_events(), late_before);
+}
+
+#[test]
+#[ignore = "needs macOS 26 with Apple Intelligence and HOLZWAVE_TEST_APPLE=1"]
+fn two_real_turns_at_once_both_finish() {
+    if !live_requested() {
+        return;
+    }
+    let provider = AppleProvider::system();
+    let started = Instant::now();
+
+    let replies: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ["Say hello.", "Say goodbye."]
+            .into_iter()
+            .map(|text| {
+                let provider = &provider;
+                scope.spawn(move || {
+                    let mut collector = Collector::new();
+                    provider
+                        .stream(&user_request("Answer in one short sentence.", text), &mut |e| collector.push(e), &CancelToken::new())
+                        .expect("both turns finish");
+                    collector.text().to_owned()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+    });
+
+    println!("live two at once ms {}", started.elapsed().as_millis());
+    assert!(replies.iter().all(|reply| !reply.trim().is_empty()), "{replies:?}");
 }

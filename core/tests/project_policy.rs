@@ -1482,7 +1482,7 @@ fn gating_guard_accepts_a_macos_target_table() {
 /// Names that must not appear in the Swift sources of the bridge, each with the reason. The Rust scan of this file reads
 /// no Swift, so Swift gets its own list: the on-device model needs no network, and a network API in the bridge would
 /// make "on device" untrue.
-const SWIFT_FORBIDDEN: [(&str, &str); 8] = [
+const SWIFT_FORBIDDEN: &[(&str, &str)] = &[
     ("URLSession", "a network API: the on-device model needs no network"),
     ("URLRequest", "a network API: the on-device model needs no network"),
     ("NSURLConnection", "a network API: the on-device model needs no network"),
@@ -1495,6 +1495,17 @@ const SWIFT_FORBIDDEN: [(&str, &str); 8] = [
         "the cloud model leaves the device and is not part of this bridge (a prefix match, so \
          PrivateCloudComputeLanguageModel is caught too)",
     ),
+    ("print(", "a console sink: it would write prompt or reply text to a console"),
+    ("NSLog", "a log sink: it would write prompt or reply text to the system log"),
+    ("os_log", "a log sink: it would write prompt or reply text to the system log"),
+    ("Logger(", "a log sink: it would write prompt or reply text to the system log"),
+    ("dump(", "a console sink: it would write prompt or reply text to a console"),
+    ("debugPrint", "a console sink: it would write prompt or reply text to a console"),
+    (
+        "tools:",
+        "a tool declaration: the framework would run its own tool loop and skip the approval of the core",
+    ),
+    ("@Generable", "typed generation and tool schemas are outside a chat-only bridge"),
 ];
 
 /// Names that must not appear in `Package.swift`, each with the reason: `swift build` runs in a build script and must
@@ -1518,6 +1529,108 @@ fn swift_source_problems(label: &str, source: &str, tokens: &[(&str, &str)]) -> 
         }
     }
     problems
+}
+
+/// What is wrong with the way a Swift source uses Apple's language model framework, one sentence each: a file that names
+/// `SystemLanguageModel` or `LanguageModelSession` (comments skipped) must sit behind `#if canImport(FoundationModels)`
+/// and contain an availability check for macOS 26 (`#available(macOS 26` or `@available(macOS 26`), so the app still
+/// starts on a system or an SDK without the framework.
+///
+/// This is a file-level check: it cannot prove that each call site sits inside the guard. The other half of the proof is
+/// the launch of the bridge on a Mac below macOS 26 (`scripts/apple-ai-launch-check.sh`).
+fn swift_framework_problems(label: &str, source: &str) -> Vec<String> {
+    let code = without_comments(source, Syntax::Rust);
+    if !code.contains("SystemLanguageModel") && !code.contains("LanguageModelSession") {
+        return Vec::new();
+    }
+    let mut problems = Vec::new();
+    if !code.contains("#if canImport(FoundationModels)") {
+        problems.push(format!(
+            "{label}: names the language model framework but has no `#if canImport(FoundationModels)`: a build with an \
+             SDK that lacks the framework would fail"
+        ));
+    }
+    if !code.contains("#available(macOS 26") && !code.contains("@available(macOS 26") {
+        problems.push(format!(
+            "{label}: names the language model framework but has no macOS 26 availability check: the app would crash \
+             on an older system"
+        ));
+    }
+    problems
+}
+
+#[test]
+fn swift_framework_use_is_guarded() {
+    let mut problems = Vec::new();
+    let mut files_read = 0;
+    for file in files_below("plugins/apple-ai/swift/Sources", &["swift"]) {
+        let relative = shown(&file);
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("cannot read {relative}: {e}"));
+        problems.extend(swift_framework_problems(&relative, &source));
+        files_read += 1;
+    }
+    assert!(files_read >= 3, "only {files_read} Swift files read: is the walk broken?");
+    assert!(problems.is_empty(), "the Swift side uses the framework unguarded:\n  {}", problems.join("\n  "));
+}
+
+#[test]
+fn framework_guard_reports_an_unguarded_symbol() {
+    let no_sdk_check = "import FoundationModels\nlet model = SystemLanguageModel.default\n";
+    let problems = swift_framework_problems("A.swift", no_sdk_check);
+    assert_eq!(problems.len(), 2, "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("canImport")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("macOS 26")), "{problems:?}");
+
+    let no_os_check = "#if canImport(FoundationModels)\nimport FoundationModels\nlet s = LanguageModelSession()\n#endif\n";
+    let problems = swift_framework_problems("B.swift", no_os_check);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("macOS 26"), "{problems:?}");
+
+    // A mention in a comment does not count as a guard.
+    let commented = "// #if canImport(FoundationModels)\n// #available(macOS 26.0, *)\nlet s = LanguageModelSession()\n";
+    assert_eq!(swift_framework_problems("C.swift", commented).len(), 2);
+}
+
+#[test]
+fn framework_guard_accepts_a_guarded_file() {
+    let call = "#if canImport(FoundationModels)\nimport FoundationModels\nif #available(macOS 26.0, *) {\n    let m = SystemLanguageModel.default\n}\n#endif\n";
+    assert_eq!(swift_framework_problems("A.swift", call), Vec::<String>::new());
+
+    let attribute = "#if canImport(FoundationModels)\n@available(macOS 26.0, *)\nfunc run(_ s: LanguageModelSession) {}\n#endif\n";
+    assert_eq!(swift_framework_problems("B.swift", attribute), Vec::<String>::new());
+}
+
+#[test]
+fn framework_guard_ignores_a_file_that_never_names_the_framework() {
+    assert_eq!(swift_framework_problems("A.swift", "import Foundation\nlet x = 1\n"), Vec::<String>::new());
+    // A name inside a comment is not a use.
+    assert_eq!(swift_framework_problems("B.swift", "// SystemLanguageModel is asked elsewhere\nlet x = 1\n"), Vec::<String>::new());
+}
+
+#[test]
+fn swift_guard_reports_a_log_sink() {
+    let source = "func f(_ prompt: String) {\n    print(prompt)\n    NSLog(\"%@\", prompt)\n    os_log(\"x\")\n    let l = Logger(subsystem: \"s\", category: \"c\")\n    dump(prompt)\n    debugPrint(prompt)\n}\n";
+
+    let problems = swift_source_problems("A.swift", source, SWIFT_FORBIDDEN);
+
+    for token in ["print(", "NSLog", "os_log", "Logger(", "dump(", "debugPrint"] {
+        assert!(problems.iter().any(|p| p.contains(token)), "{token} not reported: {problems:?}");
+    }
+    // Words that merely contain a token in a comment are skipped, like for every other token.
+    assert_eq!(swift_source_problems("B.swift", "// print(prompt) would leak\nlet x = 1\n", SWIFT_FORBIDDEN), Vec::<String>::new());
+}
+
+#[test]
+fn swift_guard_reports_a_tool_declaration() {
+    let tools = "let session = LanguageModelSession(model: m, tools: [Shell()])\n";
+    let problems = swift_source_problems("A.swift", tools, SWIFT_FORBIDDEN);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("tools:"), "{problems:?}");
+
+    let generable = "@Generable struct Answer { var text: String }\n";
+    let problems = swift_source_problems("B.swift", generable, SWIFT_FORBIDDEN);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("@Generable"), "{problems:?}");
 }
 
 #[test]
