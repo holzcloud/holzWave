@@ -16,7 +16,7 @@ use holzwave_core::ai::redact::{SourceText, drop_hidden};
 use holzwave_core::ai::store::ConversationId;
 use holzwave_core::ai::tools::{
     Access, Decision, DenyPolicy, FsKind, Grep, ListDir, MAX_RESULT_BYTES, ReadFile, ReadPane, Resolved, Scope, Style,
-    Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput, visible,
+    Inspected, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput, visible,
 };
 use holzwave_core::files::{FileSource, Kind};
 use holzwave_core::layout::PaneId;
@@ -33,7 +33,7 @@ const FOOTER_RESERVE: usize = 128;
 pub const READ_BYTES: usize = MAX_RESULT_BYTES - FOOTER_RESERVE;
 
 /// How many leading bytes of a file are looked at for a NUL, which marks a file as not text.
-const SNIFF_BYTES: usize = 8192;
+pub(crate) const SNIFF_BYTES: usize = 8192;
 
 /// The most characters of one matching line a search shows; the rest of the line is cut.
 const LINE_CHARS: usize = 200;
@@ -45,30 +45,30 @@ const PANE_FETCH_BYTES: usize = 65536;
 const GREP_FILE_BYTES: u64 = 1_048_576;
 
 /// The fixed phrases of a refusal. Each is one English line and holds nothing the model wrote.
-const NOT_TEXT: &str = "that file is not text";
-const NOT_A_FILE: &str = "that path is not a regular file";
-const UNREADABLE: &str = "that path could not be read";
+pub(crate) const NOT_TEXT: &str = "that file is not text";
+pub(crate) const NOT_A_FILE: &str = "that path is not a regular file";
+pub(crate) const UNREADABLE: &str = "that path could not be read";
 const NEEDS_CWD: &str = "give an absolute path, the working directory of that pane is not known";
 const REMOTE_ABSOLUTE: &str = "a path on a remote host must be absolute";
 const NO_HOME: &str = "the home folder is not known";
 const BAD_END: &str = "the path must name a file, not a folder";
-const REMOTE_LINK: &str = "a link on a remote host is not followed";
-const FOLDER_TOO_LARGE: &str = "that folder is too large to check the file";
+pub(crate) const REMOTE_LINK: &str = "a link on a remote host is not followed";
+pub(crate) const FOLDER_TOO_LARGE: &str = "that folder is too large to check the file";
 const NOT_A_FOLDER: &str = "that path is not a folder";
 const PANE_GONE: &str = "that pane is closed";
 const PANE_BUSY: &str = "that pane is busy, try again";
 const PANE_UNREADABLE: &str = "that pane could not be read";
 
-fn host(phrase: &str) -> ToolError {
+pub(crate) fn host(phrase: &str) -> ToolError {
     ToolError::Host(Detail::new(phrase))
 }
 
-fn invalid(phrase: &str) -> ToolError {
+pub(crate) fn invalid(phrase: &str) -> ToolError {
     ToolError::InvalidArguments(Detail::new(phrase))
 }
 
 /// A cancelled turn stops the call before the next file system request.
-fn live(cancel: &CancelToken) -> Result<(), ToolError> {
+pub(crate) fn live(cancel: &CancelToken) -> Result<(), ToolError> {
     if cancel.is_cancelled() { Err(ToolError::Cancelled) } else { Ok(()) }
 }
 
@@ -139,6 +139,28 @@ pub trait Targets: Send + Sync {
     fn read_rows(&self, pane: PaneId, rows: u16, max_bytes: usize) -> Result<Option<TextRead>, RowsFault>;
     /// Whether the user shared the pane for the chat.
     fn shared(&self, conversation: &str, pane: PaneId) -> bool;
+
+    /// Saves `text` as the whole content of `path` in the files of `source` (this computer or a saved connection): the
+    /// one way the agent changes a file. `expected` is the change time the card showed, in whole seconds: a file whose
+    /// change time differs is refused and left alone, and a file that does not exist yet has nothing to conflict with.
+    /// Answers the change time of the file after the save. May do IO. The default saves nothing.
+    fn save_text(&self, _source: &str, _path: &str, _text: &str, _expected: Option<i64>) -> Result<Option<i64>, SaveFault> {
+        Err(SaveFault::Other)
+    }
+
+    /// The files of `source`, made if need be: what undo reads the current text with. The default has none.
+    fn open_source(&self, _source: &str) -> Option<Arc<dyn FileSource>> {
+        None
+    }
+}
+
+/// Why a save did not happen. The library's message is dropped: the model and the page hear a fixed phrase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveFault {
+    /// The file changed since the card was made, or is not what the save expected.
+    Refused,
+    /// Anything else: no connection, no room, no permission.
+    Other,
 }
 
 // ---- the host ---------------------------------------------------------------------------------------------------
@@ -216,8 +238,18 @@ impl ShellTools {
         let _ = self.targets.set(targets);
     }
 
-    fn world(&self) -> Result<&Arc<dyn Targets>, ToolError> {
+    pub(crate) fn world(&self) -> Result<&Arc<dyn Targets>, ToolError> {
         self.targets.get().ok_or(ToolError::Unavailable)
+    }
+
+    /// The world, when it is bound.
+    pub(crate) fn targets(&self) -> Option<&Arc<dyn Targets>> {
+        self.targets.get()
+    }
+
+    /// The deny list the host applies again to a path it resolved itself.
+    pub(crate) fn policy(&self) -> &DenyPolicy {
+        &self.policy
     }
 
     /// What a file tool acts on, in the form the table hashes: the pane, the machine and the absolute path.
@@ -635,7 +667,8 @@ impl ToolHost for ShellTools {
         match tool {
             ToolName::ReadFile | ToolName::ListDir | ToolName::Grep => world.file_target(pane).is_some(),
             ToolName::ReadPane => world.terminal(pane).is_some(),
-            ToolName::WriteFile | ToolName::EditFile | ToolName::RunCommand => false,
+            ToolName::WriteFile => world.file_target(pane).is_some(),
+            ToolName::EditFile | ToolName::RunCommand => false,
         }
     }
 
@@ -645,7 +678,8 @@ impl ToolHost for ShellTools {
             Tool::ListDir(args) => self.file_record(scope, tool, &args.path, Ending::Folder),
             Tool::Grep(args) => self.file_record(scope, tool, &args.path, Ending::Folder),
             Tool::ReadPane(args) => self.pane_record(scope, args),
-            Tool::WriteFile(_) | Tool::EditFile(_) | Tool::RunCommand(_) => Err(ToolError::Unavailable),
+            Tool::WriteFile(args) => self.file_record(scope, tool, &args.path, Ending::File),
+            Tool::EditFile(_) | Tool::RunCommand(_) => Err(ToolError::Unavailable),
         }
     }
 
@@ -655,8 +689,13 @@ impl ToolHost for ShellTools {
             Tool::ListDir(args) => self.list_dir(ticket, args, cancel),
             Tool::Grep(args) => self.grep(ticket, args, cancel),
             Tool::ReadPane(args) => self.read_pane(args, cancel),
-            Tool::WriteFile(_) | Tool::EditFile(_) | Tool::RunCommand(_) => Err(ToolError::Unavailable),
+            Tool::WriteFile(_) => crate::ai_write::run(self, ticket, cancel),
+            Tool::EditFile(_) | Tool::RunCommand(_) => Err(ToolError::Unavailable),
         }
+    }
+
+    fn inspect(&self, resolved: &Resolved) -> Result<Option<Inspected>, ToolError> {
+        crate::ai_write::inspect(self, resolved).map(Some)
     }
 }
 
@@ -721,13 +760,13 @@ fn trim_separators(path: &str, remote: bool) -> String {
 }
 
 /// `folder` and `name` joined with one `/`.
-fn join_remote(folder: &str, name: &str) -> String {
+pub(crate) fn join_remote(folder: &str, name: &str) -> String {
     format!("{}/{name}", folder.trim_end_matches('/'))
 }
 
 /// A remote file path split at its last `/` into the folder and the name; a name directly under the root has the folder
 /// `/`.
-fn split_remote(path: &str) -> (&str, &str) {
+pub(crate) fn split_remote(path: &str) -> (&str, &str) {
     match path.rfind('/') {
         Some(0) => ("/", &path[1..]),
         Some(at) => (&path[..at], &path[at + 1..]),
@@ -841,6 +880,24 @@ impl Targets for CoreTargets {
         let Ok(id) = ConversationId::parse(conversation) else { return false };
         self.0.upgrade().is_some_and(|core| core.ai().service().is_shared(&id, pane))
     }
+
+    fn save_text(&self, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>, SaveFault> {
+        let core = self.0.upgrade().ok_or(SaveFault::Other)?;
+        core.tool_save_text(source, path, text, expected).map_err(|message| fault_of_save(&message))
+    }
+
+    fn open_source(&self, source: &str) -> Option<Arc<dyn FileSource>> {
+        self.0.upgrade()?.tool_open_source(source)
+    }
+}
+
+/// The words `Blocks::save_file` uses for a file that changed since the caller looked at it. A test of the shell pins them
+/// against the real function, so a rewording there fails here and not silently.
+pub(crate) const CONFLICT_WORDS: &str = "changed on disk";
+
+/// A refusal of the save because the file is not what was expected, or any other failure; the message is dropped.
+fn fault_of_save(message: &str) -> SaveFault {
+    if message.contains(CONFLICT_WORDS) { SaveFault::Refused } else { SaveFault::Other }
 }
 
 // ---- the verdict ------------------------------------------------------------------------------------------------
@@ -866,7 +923,7 @@ impl AppCore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::collections::{HashMap, HashSet};
@@ -1122,7 +1179,7 @@ mod tests {
     }
 
     /// Proposes a call, decides on the card's hash and runs it: the whole way a call goes, for a host under test.
-    fn run_call(
+    pub(crate) fn run_call(
         table: &ApprovalTable,
         host: &ShellTools,
         scope: &Scope,
@@ -1165,17 +1222,21 @@ mod tests {
         let offered = |pane: PaneId| -> Vec<&'static str> {
             ToolName::ALL.into_iter().filter(|tool| host.available(*tool, pane)).map(ToolName::as_str).collect()
         };
-        assert_eq!(offered(1), ["read_file", "list_dir", "grep", "read_pane"], "this computer: files and a terminal");
+        assert_eq!(
+            offered(1),
+            ["read_file", "list_dir", "grep", "read_pane", "write_file"],
+            "this computer: files and a terminal"
+        );
         assert_eq!(offered(2), Vec::<&str>::new(), "a pane that is not open");
         assert_eq!(offered(3), ["read_pane"], "a terminal with no file target offers no file tool");
-        assert_eq!(offered(4), ["read_file", "list_dir", "grep"], "a file browser has files and no terminal");
+        assert_eq!(offered(4), ["read_file", "list_dir", "grep", "write_file"], "a file browser has files and no terminal");
         for pane in [1, 3, 4] {
-            for tool in [ToolName::WriteFile, ToolName::EditFile, ToolName::RunCommand] {
+            for tool in [ToolName::EditFile, ToolName::RunCommand] {
                 assert!(!host.available(tool, pane), "{tool:?} is not built");
             }
         }
         let declared: Vec<String> = specs(&host, 1).into_iter().map(|spec| spec.name).collect();
-        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane"]);
+        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file"]);
     }
 
     #[test]

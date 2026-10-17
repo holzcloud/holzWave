@@ -17,6 +17,7 @@ use crate::layout::PaneId;
 use super::super::provider::{CancelToken, Detail};
 use super::super::types::{Size, ToolCall, ToolResult};
 use super::catalog::{Item, hash_items, hex, payload, visible, visible_multiline};
+use super::change::{Diff, diff, plan};
 use super::deny::{Access, DenyPolicy, FsKind, Style};
 use super::{
     Effect, MAX_CALL_ID_BYTES, MAX_OPEN_CALLS, MAX_TAINT_LABELS, MAX_TURNS, Newlines, Resolved, Scope, Tool, ToolError,
@@ -80,6 +81,17 @@ pub struct Pending {
     pub tainted: bool,
     /// What that content was.
     pub taint: Vec<String>,
+    /// For a write: the changes the call would make, built from the text whose digest is in the payload. Absent for a
+    /// call that changes no file and for a host that does not look at files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<Diff>,
+}
+
+impl Pending {
+    /// The diff of a write, when the host looked at the file.
+    pub fn diff(&self) -> Option<&Diff> {
+        self.diff.as_ref()
+    }
 }
 
 impl fmt::Debug for Pending {
@@ -96,6 +108,7 @@ impl fmt::Debug for Pending {
             .field("hash", &self.hash)
             .field("tainted", &self.tainted)
             .field("taint", &self.taint.len())
+            .field("diff", &self.diff)
             .finish()
     }
 }
@@ -379,7 +392,8 @@ impl ApprovalTable {
         if !host.available(tool.name(), tool.pane().unwrap_or(scope.pane)) {
             return Err(ToolError::Unavailable);
         }
-        let (resolved, items, hash) = self.resolve_checked(host, scope, &tool)?;
+        let checked = self.resolve_checked(host, scope, &tool, Moment::Proposal)?;
+        let (resolved, items, hash) = (checked.resolved, checked.items, checked.hash);
         let mut pending = Pending {
             conversation: scope.conversation.clone(),
             call_id: call.id.clone(),
@@ -392,6 +406,7 @@ impl ApprovalTable {
             hash: hex(&hash),
             tainted: false,
             taint: Vec::new(),
+            diff: checked.diff,
         };
         let mut inner = self.lock();
         let key = key(&scope.conversation, &call.id);
@@ -519,8 +534,8 @@ impl ApprovalTable {
             self.remove(&key);
             return Err(ToolError::Cancelled);
         }
-        let (resolved, _, hash) = match self.resolve_checked(host, scope, &tool) {
-            Ok(checked) => checked,
+        let (resolved, hash) = match self.resolve_checked(host, scope, &tool, Moment::Execution) {
+            Ok(checked) => (checked.resolved, checked.hash),
             Err(error) => {
                 self.remove(&key);
                 return Err(error);
@@ -614,18 +629,25 @@ impl ApprovalTable {
         open.into_iter().map(|entry| entry.pending.clone()).collect()
     }
 
-    /// Asks the host what the call acts on, applies the deny list, and hashes the payload.
+    /// Asks the host what the call acts on, applies the deny list, looks at the file a write will change, and hashes the
+    /// payload. Proposal and execution both come through here, so what the card shows and what runs cannot drift.
     fn resolve_checked(
         &self,
         host: &dyn ToolHost,
         scope: &Scope,
         tool: &Tool,
-    ) -> Result<(Resolved, Vec<Item>, [u8; 32]), ToolError> {
+        moment: Moment,
+    ) -> Result<Checked, ToolError> {
         let resolved = host.resolve(scope, tool)?;
         let resolved = self.guard(tool, resolved)?;
-        let items = payload(tool, &resolved);
+        let (resolved, diff) = inspect_step(host, tool, resolved, moment)?;
+        let mut items = payload(tool, &resolved);
+        // The digest of the text the diff is made from is the last row, after the stamp, so the hash covers what the card shows.
+        if let Some(base) = resolved.base() {
+            items.push(Item { name: "base", value: base.digest(), newlines: Newlines::Reject });
+        }
         let hash = hash_items(&items);
-        Ok((resolved, items, hash))
+        Ok(Checked { resolved, items, hash, diff })
     }
 
     /// Applies the deny list to the model's spelling, to what the host resolved, and to the working directory. A local
@@ -689,6 +711,51 @@ impl ApprovalTable {
 impl fmt::Debug for ApprovalTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ApprovalTable").field("open", &self.lock().entries.len()).finish()
+    }
+}
+
+/// When a call is checked: when it is proposed, or right before it runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Moment {
+    Proposal,
+    Execution,
+}
+
+/// What the checks of a call found: what it acts on, the payload, its hash and, for a write, its diff.
+struct Checked {
+    resolved: Resolved,
+    items: Vec<Item>,
+    hash: [u8; 32],
+    diff: Option<Diff>,
+}
+
+/// The one step that looks at the file a write will change. It runs after the walls have passed the path, so the host
+/// never inspects a place that is protected. The host's answer gives the stamp and the base; the planner makes the text
+/// that would be written and the diff is made from the same base, so the card shows what the digest in the hash covers.
+/// A host that does not look at files leaves the call as it was.
+///
+/// A change the planner or the diff cannot make is an error of the call at proposal. When the call runs, the card was
+/// made, so the same error means the file is not what the card showed: the payload changed.
+fn inspect_step(
+    host: &dyn ToolHost,
+    tool: &Tool,
+    resolved: Resolved,
+    moment: Moment,
+) -> Result<(Resolved, Option<Diff>), ToolError> {
+    if tool.effect() != Effect::Write {
+        return Ok((resolved, None));
+    }
+    let Some(inspected) = host.inspect(&resolved)? else { return Ok((resolved, None)) };
+    let mut resolved = resolved;
+    if let Some(stamp) = inspected.stamp() {
+        resolved = resolved.with_stamp(stamp);
+    }
+    let made = plan(tool, inspected.base()).and_then(|change| diff(&change));
+    resolved = resolved.with_base(inspected.base().clone());
+    match (made, moment) {
+        (Ok(diff), _) => Ok((resolved, Some(diff))),
+        (Err(_), Moment::Execution) => Err(ToolError::PayloadChanged),
+        (Err(fault), Moment::Proposal) => Err(ToolError::InvalidArguments(Detail::new(fault.phrase()))),
     }
 }
 

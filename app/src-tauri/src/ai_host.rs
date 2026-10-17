@@ -2222,8 +2222,8 @@ mod tests {
         let requests = provider.requests();
         assert_eq!(requests.len(), 2, "the second request carries the result");
         let declared: Vec<&str> = requests[1].tools.iter().map(|spec| spec.name.as_str()).collect();
-        let read_tools = ["read_file", "list_dir", "grep", "read_pane"];
-        assert_eq!(declared, read_tools, "the four read tools and nothing else");
+        let offered = ["read_file", "list_dir", "grep", "read_pane", "write_file"];
+        assert_eq!(declared, offered, "the four read tools and the write tool, and nothing else");
         let last = requests[1].messages.last().expect("a message");
         assert_eq!(last.role, Role::Tool);
         let returned = last.parts.iter().any(|part| match part {
@@ -2822,5 +2822,163 @@ mod tests {
             on_disk == expected,
             "the recorded run differs from ai_tool_stream.json; review it and run with UPDATE_FIXTURES=1"
         );
+    }
+
+    // ---- write tools ------------------------------------------------------------------------------------------
+
+    /// What the file a write replaces holds, and what the model writes in its place; they appear in test code only.
+    const OLD_TEXT: &str = "zq-old-text-4d2e91";
+    const NEW_TEXT: &str = "zq-new-text-b83f17";
+
+    /// The old text of `proj/todo.txt`: three lines.
+    fn old_todo() -> String {
+        format!("alpha\nbeta {OLD_TEXT}\ngamma\n")
+    }
+
+    /// The new text the model writes over it.
+    fn new_todo() -> String {
+        format!("alpha\nbeta {NEW_TEXT}\ngamma\n")
+    }
+
+    /// `<dir>/proj/todo.txt` with its three lines: the canonical path of the file.
+    fn todo_tree(dir: &Path) -> PathBuf {
+        let proj = dir.join("proj");
+        std::fs::create_dir_all(&proj).expect("a folder");
+        let todo = proj.join("todo.txt");
+        std::fs::write(&todo, old_todo()).expect("a file");
+        todo.canonicalize().expect("a canonical path")
+    }
+
+    /// The text of every file below `dir`, joined: what a store keeps.
+    fn stored_text(dir: &Path) -> String {
+        let mut out = String::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(folder) = stack.pop() {
+            for item in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+                let path = item.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(text) = std::fs::read_to_string(&path) {
+                    out.push_str(&text);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_write_call_shows_its_diff_is_decided_on_its_hash_and_saves_the_file() {
+        let tree = Scratch::new("write-tree");
+        let scratch = Scratch::new("write-trace");
+        let todo = todo_tree(&tree.0);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "write_file", json!({"path": todo, "content": new_todo()})))
+                .with_turn(text_turn("Done.")),
+        );
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        core.ai_send(&chat, "update my todo list".to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+
+        let proposed = event_of(&rec, &chat, "tool_proposed");
+        let card = &proposed["pending"];
+        assert_eq!((card["tool"].as_str(), card["effect"].as_str()), (Some("write_file"), Some("write")));
+        assert_eq!(card["target"], json!("This computer"));
+        assert_eq!(
+            payload_names(card),
+            ["tool", "pane", "target", "remote", "path", "content", "resolved_path", "stamp", "base"]
+        );
+        let field = |name: &str| {
+            let fields = card["payload"].as_array().expect("a payload");
+            fields.iter().find(|f| f["name"] == name).map(|f| f["value"].as_str().expect("a value").to_owned())
+        };
+        assert_eq!(field("resolved_path"), todo.to_str().map(str::to_owned));
+        assert!(field("base").is_some_and(|base| base.starts_with("sha256:") && base.len() == 71), "{:?}", field("base"));
+        let diff = &card["diff"];
+        assert_eq!(diff["kind"], json!("replace"));
+        assert_eq!(
+            diff["rows"],
+            json!([
+                {"op": "ctx", "old": 1, "new": 1, "text": "alpha"},
+                {"op": "del", "old": 2, "new": null, "text": format!("beta {OLD_TEXT}")},
+                {"op": "add", "old": null, "new": 2, "text": format!("beta {NEW_TEXT}")},
+                {"op": "ctx", "old": 3, "new": 3, "text": "gamma"},
+            ])
+        );
+        let hash = card["hash"].as_str().expect("a hash").to_owned();
+        assert!(hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{hash}");
+        assert_eq!(std::fs::read_to_string(&todo).expect("the file"), old_todo(), "nothing is written before the decision");
+
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(
+            (result["tool"].as_str(), result["is_error"].as_bool()),
+            (Some("write_file"), Some(false)),
+            "{result}"
+        );
+        let content = result["content"].as_str().expect("content");
+        assert!(content.starts_with("Saved the file."), "{content}");
+        assert_eq!(std::fs::read_to_string(&todo).expect("the file"), new_todo(), "the file holds the new text");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], json!("done"));
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2, "the second request carries the result");
+        let last = requests[1].messages.last().expect("a message");
+        assert_eq!(last.role, Role::Tool);
+        let returned = last.parts.iter().any(|part| match part {
+            Part::ToolResult(result) => result.call_id == "call_1" && result.content.starts_with("Saved the file."),
+            _ => false,
+        });
+        assert!(returned, "the result of the call is the outcome");
+        let sent = serde_json::to_string(&requests.iter().map(|r| &r.messages).collect::<Vec<_>>()).expect("serialises");
+        assert!(!sent.contains(OLD_TEXT), "the old text of the file reached the provider");
+        assert!(!stored_text(&scratch.0).contains(OLD_TEXT), "the old text of the file reached a stored chat");
+
+        let events: Vec<AiPayload> = rec.ai_events().into_iter().map(|(_, payload)| payload).collect();
+        let mut folded = ChatState::new(&chat);
+        for payload in &events {
+            assert_eq!(folded.apply(&payload.0), ApplyResult::Applied, "{payload:?}");
+        }
+        let idle = core.ai().snapshot(&chat).expect("a snapshot");
+        assert_eq!(as_stored(json_of(&folded)), json_of(&idle), "the fold of the events is the snapshot");
+    }
+
+    #[test]
+    fn a_denied_write_leaves_the_file_alone_and_the_model_is_not_told_the_old_text() {
+        let tree = Scratch::new("write-tree");
+        let scratch = Scratch::new("write-deny");
+        let todo = todo_tree(&tree.0);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "write_file", json!({"path": todo, "content": new_todo()})))
+                .with_turn(text_turn("Understood.")),
+        );
+        let chat = new_chat();
+        let pane = pane_of(&core);
+        core.ai_send(&chat, "update my todo list".to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+        let proposed = event_of(&rec, &chat, "tool_proposed");
+        let hash = proposed["pending"]["hash"].as_str().expect("a hash").to_owned();
+
+        decision(&core, &chat, "call_1", "deny", &hash).expect("a denial");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(result["is_error"], json!(true));
+        assert_eq!(result["content"], json!("The user denied this action."));
+        assert_eq!(std::fs::read_to_string(&todo).expect("the file"), old_todo(), "the file is as it was");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], json!("done"));
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        let sent = serde_json::to_string(&requests.iter().map(|r| &r.messages).collect::<Vec<_>>()).expect("serialises");
+        assert!(sent.contains("The user denied this action."), "the model is told");
+        assert!(!sent.contains(OLD_TEXT), "the old text of the file reached the model after a denial");
+        assert!(!stored_text(&scratch.0).contains(OLD_TEXT), "the old text reached a stored chat");
     }
 }

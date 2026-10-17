@@ -9,10 +9,10 @@
 
 import type { Approvals, CardModel } from "./approval.js";
 import {
-  EFFECT_WORDS, TOOL_WORDS, WORDS, cannotWords, destinationParts, hashWords, moreWords, showText, stateMark, stateWord, targetWords,
-  taintWords, toggleWords,
+  EFFECT_WORDS, TOOL_WORDS, WORDS, cannotWords, destinationParts, diffHead, gapWords, hashWords, moreWords, showText, stateMark, stateWord,
+  targetWords, taintWords, toggleWords,
 } from "./approvalstate.js";
-import type { Destination, ToolRow } from "./approvalstate.js";
+import type { Destination, Diff, ToolRow } from "./approvalstate.js";
 import { sizeWords } from "./consentstate.js";
 import { el } from "./dom.js";
 
@@ -35,6 +35,47 @@ function button(parent: Element, cls: string, key: string, text: string): HTMLBu
   b.dataset.key = key;
   b.textContent = text;
   return b;
+}
+
+/** Numbers the heads of the diff boxes, so each box is named by its own head line. */
+let diffNumber = 0;
+
+/**
+ * The changes of a write as the core sent them: a head line (kind, counts, sizes) and one row for each row of the core, in its
+ * order. A row has the old and the new line number (empty where the core sent none), the sign the page draws from the
+ * operation (`+`, `-` or none) and the text, a text node in its own cell. A gap row says how many unchanged lines it stands for;
+ * a note row says the core's sentence. The page works out nothing from a row's text.
+ */
+function diffBox(parent: Element, diff: Diff): HTMLElement {
+  const box = el("div", "approval-diff", parent);
+  box.tabIndex = 0;
+  box.dataset.field = "diff";
+  box.dataset.key = "diff";
+  box.dataset.kind = diff.kind;
+  box.setAttribute("role", "group");
+  const words = diffHead(diff);
+  const head = el("p", "diff-head", box);
+  head.id = `diff-head-${++diffNumber}`;
+  box.setAttribute("aria-labelledby", head.id);
+  el("span", "diff-kind", head).textContent = words.kind;
+  el("span", "diff-count", head).textContent = words.counts;
+  el("span", "diff-size", head).textContent = words.size;
+  const list = el("ol", "diff-rows", box);
+  for (const row of diff.rows) {
+    const li = el("li", "diff-row", list);
+    li.dataset.op = row.op;
+    if (row.op === "gap") {
+      el("span", "diff-gap", li).textContent = `⋯ ${gapWords(row.skipped)}`;
+    } else if (row.op === "note") {
+      el("span", "diff-note", li).textContent = row.text;
+    } else {
+      el("span", "diff-old", li).textContent = row.old === null ? "" : String(row.old);
+      el("span", "diff-new", li).textContent = row.new === null ? "" : String(row.new);
+      el("span", "diff-sign", li).textContent = row.op === "add" ? "+" : row.op === "del" ? "-" : "";
+      el("span", "diff-text", li).textContent = row.text;
+    }
+  }
+  return box;
 }
 
 /** The title of a card by its mode: the question, or the reason it can only be denied. */
@@ -97,6 +138,8 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
       if (a.remote) el("span", "approval-remote", head).textContent = WORDS.remote;
       const effect = Object.hasOwn(EFFECT_WORDS, a.effect) ? EFFECT_WORDS[a.effect] : undefined;
       if (effect !== undefined) el("p", "approval-effect", section).textContent = effect;
+      // A write shows what it would change before the fields of the request, so the person reads the changes first.
+      if (a.diff !== undefined) diffBox(section, a.diff);
 
       const box = el("div", "approval-payload", section);
       box.tabIndex = 0;
@@ -113,7 +156,7 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
         el("span", "approval-bytes", li).textContent = sizeWords(row.bytes);
       }
       const line = el("p", "approval-dest", section);
-      for (const part of destinationParts(view.destination())) {
+      for (const part of destinationParts(view.destination(), a.effect)) {
         if (part.kind === "text") {
           line.append(document.createTextNode(part.text));
           continue;
@@ -124,7 +167,7 @@ export function mountApprovals(strip: HTMLElement, approvals: Approvals, view: C
       }
       // Text the user did not write is in this turn: the core's labels, in words, and what that text can do.
       if (a.tainted) {
-        const words = taintWords(a.taint);
+        const words = taintWords(a.taint, a.effect);
         const banner = el("div", "approval-taint", section);
         banner.dataset.tone = "warn";
         const mark = el("span", "approval-taint-mark", banner);

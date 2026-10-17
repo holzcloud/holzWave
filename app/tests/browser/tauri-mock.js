@@ -93,6 +93,22 @@
 //                      `message`, the answer, `usage`, the final `message` and `turn_ended`. A stop (`ai_cancel`) gives each
 //                      waiting call `This call did not run: the turn was stopped.` and ends the turn `cancelled`. A snapshot
 //                      of a chat that is not running holds `[tool output not stored]` for every tool result, as the store does.
+//       files          the text of every file the write tools see, as an object from path to text (a copy); a path that is
+//                      not here does not exist
+//       write          the write tools of the core: `write_file` and `edit_file` calls in a script (`path`, `content`,
+//                      `old_text`, `new_text`, `replace_all`, `diff` and `payload` replace what the mock builds). A card is made
+//                      from the file as it is when the turn starts: the eleven members of the core's card, the payload in the
+//                      core's order (`stamp` only for a file that exists, `base` the digest of its text or `none`) and a `diff`
+//                      member of kind `replace`, `create` or `edit` with rows from a plain line diff with the core's context
+//                      rules. A call the core would refuse before a card (no match, several matches, equal texts, no file, the
+//                      same text) has no card: its `tool_result` is an error with the core's sentence. An allow compares the
+//                      digest of the file now with the card's `base`: another text gives the core's changed-payload sentence and
+//                      the file stays; the same text is replaced and the result is `Saved the file.` (or `Created the file.`)
+//                      with the counts.
+//                      seed(path, text)    a file exists with this text
+//                      change(path, text)  the file changes without a call (a text of `null` removes it)
+//                      text(path)          the text of a file, or null
+//                      texts               `{ payload_changed, faults }`: the core's sentences the mock holds
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
 //     `ai_decide`, `ai_turn_snapshot`, `ai_profiles`, `ai_profile_save`, `ai_profile_remove`, `ai_key_set` and `ai_key_clear` have
 //     defaults; a rejection is the object `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input
@@ -290,17 +306,147 @@
     }
     return out;
   };
+  // ---- write tools ----------------------------------------------------------------------------------------------------
+  // The write half of the core, as far as the page can see it: files in memory, the card with its diff, the refusals the core
+  // makes before a card exists and the check at the allow. The sentences are copies of the core's (held to the golden by the
+  // contract case), the line diff is a plain longest-common-subsequence one with the core's rules for the unchanged lines.
+  const wfiles = new Map();
+  const WRITE_STAMP = 1700000000;
+  const PAYLOAD_CHANGED = "The target changed after the approval, so the action was not run.";
+  const FAULTS = {
+    no_file: "the file does not exist; use write_file to create it",
+    no_match: "old_text was not found in the file",
+    ambiguous: "old_text occurs more than once; add surrounding text to make it unique or set replace_all",
+    same: "old_text and new_text are the same",
+    unchanged: "the file already holds that text",
+    too_large: "the result would be larger than the agent may write",
+    not_shown: "the change is too large to show; make smaller changes",
+  };
+  const INVALID = "The arguments of the call are not valid: ";
+  const isWrite = (tool) => tool === "write_file" || tool === "edit_file";
+  /** The characters the card writes out: controls, direction marks, zero-width and format characters, the tag block. */
+  const hiddenCode = (n) =>
+    n <= 0x1f || (n >= 0x7f && n <= 0x9f) || n === 0xad || n === 0x61c || (n >= 0x200b && n <= 0x200f) || (n >= 0x2028 && n <= 0x202e) ||
+    (n >= 0x2060 && n <= 0x2064) || (n >= 0x2066 && n <= 0x2069) || n === 0xfeff || (n >= 0xe0000 && n <= 0xe007f);
+  /** The core's `visible` and `visible_multiline`: hidden characters and backslashes written out. */
+  const visibleText = (text, keepLines) => {
+    let out = "";
+    for (const c of text) {
+      if (c === "\\") out += "\\\\";
+      else if (c === "\n") out += keepLines ? "\n" : "\\n";
+      else if (c === "\t") out += keepLines ? "\t" : "\\t";
+      else if (c === "\r") out += "\\r";
+      else if (hiddenCode(c.codePointAt(0))) out += `\\u{${c.codePointAt(0).toString(16)}}`;
+      else out += c;
+    }
+    return out;
+  };
+  /** The digest a card carries for the text of a file: `none` for no file, else `sha256:` and 64 hexadecimal digits. */
+  const digestText = (text) => (text === undefined ? "none" : `sha256:${digestOf(`file|${text}`)}`);
+  const lineCount = (n) => `${n} ${n === 1 ? "line" : "lines"}`;
+  /** The lines of a text with their line breaks kept. */
+  const piecesOf = (text) => text.match(/[^\n]*\n|[^\n]+/g) ?? [];
+  const countMatches = (text, needle) => {
+    let n = 0;
+    for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length)) n++;
+    return n;
+  };
+  /** What a write call would turn the file into: `{ before, after, kind }`, or `{ fault }` when the core would not make a card. */
+  const planOf = (tool, args, base) => {
+    if (tool === "write_file") {
+      if (base !== undefined && base === args.content) return { fault: "unchanged" };
+      return { before: base, after: args.content, kind: base === undefined ? "create" : "replace" };
+    }
+    if (base === undefined) return { fault: "no_file" };
+    if (args.old_text === args.new_text) return { fault: "same" };
+    const found = countMatches(base, args.old_text);
+    if (found === 0) return { fault: "no_match" };
+    const all = args.replace_all === true;
+    if (found > 1 && !all) return { fault: "ambiguous" };
+    const after = all ? base.split(args.old_text).join(args.new_text) : base.replace(args.old_text, () => args.new_text);
+    return { before: base, after, kind: "edit" };
+  };
+  /** The rows of a change: every changed line and three unchanged lines around each change, longer runs as a gap. */
+  const diffOf = (change, context = 3) => {
+    const oldP = piecesOf(change.before ?? "");
+    const newP = piecesOf(change.after);
+    const n = oldP.length;
+    const m = newP.length;
+    const table = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        table[i][j] = oldP[i] === newP[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+      }
+    }
+    const ops = [];
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+      if (oldP[i] === newP[j]) ops.push(["keep", i++, j++]);
+      else if (table[i + 1][j] >= table[i][j + 1]) ops.push(["del", i++]);
+      else ops.push(["add", j++]);
+    }
+    while (i < n) ops.push(["del", i++]);
+    while (j < m) ops.push(["add", j++]);
+    const shown = (piece) => visibleText(piece.endsWith("\n") ? piece.slice(0, -1) : piece, false);
+    const rows = [];
+    const lineOf = (op) => {
+      const [kind, a, b] = op;
+      if (kind === "keep") rows.push({ op: "ctx", old: a + 1, new: b + 1, text: shown(oldP[a]) });
+      else if (kind === "del") rows.push({ op: "del", old: a + 1, new: null, text: shown(oldP[a]) });
+      else rows.push({ op: "add", old: null, new: a + 1, text: shown(newP[a]) });
+      const piece = kind === "add" ? newP[a] : oldP[a];
+      if (!piece.endsWith("\n")) rows.push({ op: "note", text: "No newline at end of file" });
+    };
+    for (let at = 0; at < ops.length;) {
+      if (ops[at][0] !== "keep") {
+        lineOf(ops[at++]);
+        continue;
+      }
+      const start = at;
+      while (at < ops.length && ops[at][0] === "keep") at++;
+      const length = at - start;
+      const before = start > 0;
+      const after = at < ops.length;
+      if (!before && !after) continue;
+      const folds = before && after ? length > 2 * context + 1 : length > context + 1;
+      const front = !folds ? length : before ? context : 0;
+      const back = !folds ? 0 : after ? context : 0;
+      for (let k = 0; k < front; k++) lineOf(ops[start + k]);
+      if (folds) {
+        rows.push({ op: "gap", skipped: length - front - back });
+        for (let k = length - back; k < length; k++) lineOf(ops[start + k]);
+      }
+    }
+    return {
+      kind: change.kind, added: ops.filter((o) => o[0] === "add").length, removed: ops.filter((o) => o[0] === "del").length,
+      before_bytes: change.before === undefined ? null : bytesOf(change.before), after_bytes: bytesOf(change.after), rows,
+    };
+  };
+  /** The write part of a call: what the card was made from, what an allow would save, and the diff. A fault when there is no card. */
+  const writeOf = (tool, spec) => {
+    const args = tool === "write_file"
+      ? { path: spec.path ?? "", content: spec.content ?? "" }
+      : { path: spec.path ?? "", old_text: spec.old_text ?? "", new_text: spec.new_text ?? "", replace_all: spec.replace_all === true };
+    const base = wfiles.get(args.path);
+    const change = planOf(tool, args, base);
+    if (change.fault !== undefined) return { args, base, fault: change.fault };
+    return { args, base, baseDigest: digestText(base), after: change.after, change, diff: diffOf(change) };
+  };
+
   /** The call of a script entry: its id, tool, arguments, the summary the assistant message carries and its result. */
   const toolCall = (spec, index) => {
     const tool = spec.tool ?? "read_file";
     const id = spec.id ?? `call_${index + 1}`;
+    const write = isWrite(tool) ? writeOf(tool, spec) : null;
     const args =
       tool === "grep" ? { pattern: spec.pattern ?? "", path: spec.path ?? "" }
       : tool === "read_pane" ? { rows: spec.rows ?? 50 }
+      : write !== null ? write.args
       : { path: spec.path ?? "" };
     return {
       id, tool, spec: structuredClone(spec), summary: spec.summary ?? JSON.stringify(args),
-      result: spec.result ?? "ok", error: spec.error === true, decided: null, out: null,
+      result: spec.result ?? "ok", error: spec.error === true, decided: null, out: null, write,
     };
   };
   /** The payload of a card: the fields of the call in the core's order, each with the length of its raw value. */
@@ -309,6 +455,17 @@
     if (Array.isArray(spec.payload)) return structuredClone(spec.payload);
     const path = spec.path ?? "";
     const resolved = spec.resolved ?? path;
+    if (call.write !== null) {
+      const a = call.write.args;
+      const raw = call.tool === "write_file"
+        ? [["path", path], ["content", a.content, true]]
+        : [["path", path], ["old_text", a.old_text, true], ["new_text", a.new_text, true], ["replace_all", String(a.replace_all)]];
+      raw.push(["resolved_path", resolved]);
+      if (call.write.base !== undefined) raw.push(["stamp", String(WRITE_STAMP)]);
+      raw.push(["base", call.write.baseDigest]);
+      const top = [["tool", call.tool], ["pane", String(pane)], ["target", spec.target ?? "This computer"], ["remote", String(spec.remote === true)]];
+      return [...top, ...raw].map(([name, value, lines]) => ({ name, value: visibleText(value, lines === true), bytes: bytesOf(value) }));
+    }
     const head = [["tool", call.tool], ["pane", String(pane)], ["target", spec.target ?? "This computer"], ["remote", String(spec.remote === true)]];
     const rest =
       call.tool === "list_dir" ? [["path", path], ["max_entries", "200"], ["resolved_path", resolved]]
@@ -334,11 +491,13 @@
     const spec = call.spec;
     const payload = payloadOf(call, pane);
     const taint = spec.taint ?? earlier;
-    return {
-      conversation, call_id: call.id, tool: call.tool, effect: "read", pane, target: spec.target ?? "This computer",
+    const card = {
+      conversation, call_id: call.id, tool: call.tool, effect: call.write === null ? "read" : "write", pane, target: spec.target ?? "This computer",
       remote: spec.remote === true, payload, hash: digestOf(`${call.id}|${JSON.stringify(payload)}`),
       tainted: spec.tainted ?? taint.length > 0, taint: structuredClone(taint),
     };
+    if (call.write !== null) card.diff = structuredClone(spec.diff ?? call.write.diff);
+    return card;
   };
   const toolCallMessage = (turn, model, calls) => ({
     id: `m${turn}-1`, role: "assistant", ts: NOW, model, status: "complete", usage: null,
@@ -366,6 +525,17 @@
       { kind: "turn_ended", end: "done", error: null, rounds: 2, usage, saved: true },
     ];
   };
+  /** An allowed write: the file is saved only if it still holds the text the card was made from. */
+  const saveWrite = (conversation, call) => {
+    const w = call.write;
+    if (digestText(wfiles.get(w.args.path)) !== w.baseDigest) return { content: PAYLOAD_CHANGED, is_error: true };
+    wfiles.set(w.args.path, w.after);
+    const created = w.base === undefined;
+    return {
+      content: `${created ? "Created the file." : "Saved the file."} ${lineCount(w.diff.added)} added, ${w.diff.removed} removed.`,
+      is_error: false,
+    };
+  };
   const decide = async ({ conversation, call_id, decision, hash }) => {
     const state = ai.chats.get(conversation);
     if (state === undefined) throw fault("invalid_conversation", "there is no such chat");
@@ -384,9 +554,12 @@
     if (hash !== entry.hash) throw fault("tool", REFUSALS.hash_mismatch, "hash_mismatch");
     appr.decisions.push({ conversation, call_id, decision, hash });
     call.decided = decision;
-    call.out = decision === "allow"
-      ? { content: call.result, is_error: call.error }
-      : { content: "The user denied this action.", is_error: true };
+    if (decision === "allow" && call.write !== null) call.out = saveWrite(conversation, call);
+    else {
+      call.out = decision === "allow"
+        ? { content: call.result, is_error: call.error }
+        : { content: "The user denied this action.", is_error: true };
+    }
     const events = [{ kind: "tool_result", call_id, tool: call.tool, content: call.out.content, is_error: call.out.is_error, redactions: 0 }];
     if (live.calls.every((c) => c.decided !== null)) {
       live.closed = true;
@@ -430,7 +603,20 @@
       const earlier = earlierTaint(conversation);
       out.push({ kind: "usage", input_tokens: 0, output_tokens: 0 });
       out.push({ kind: "message", message: toolCallMessage(turn, route.model, calls) });
-      for (const call of calls) out.push({ kind: "tool_proposed", pending: pendingOf(conversation, call, pane, earlier) });
+      for (const call of calls) {
+        if (call.write?.fault !== undefined) {
+          // The core refuses the change before any card exists: the call has its result at once.
+          call.decided = "refused";
+          call.out = { content: `${INVALID}${FAULTS[call.write.fault]}`, is_error: true };
+          out.push({ kind: "tool_result", call_id: call.id, tool: call.tool, content: call.out.content, is_error: true, redactions: 0 });
+        } else {
+          out.push({ kind: "tool_proposed", pending: pendingOf(conversation, call, pane, earlier) });
+        }
+      }
+      if (calls.every((c) => c.decided !== null)) {
+        appr.live.get(conversation).closed = true;
+        out.push(...afterResults(appr.live.get(conversation), route.model));
+      }
       return out.map((e, i) => ({ conversation, turn, seq: i + 1, ...e }));
     }
     if (script.reasoning) out.push({ kind: "reasoning", text: script.reasoning });
@@ -991,6 +1177,19 @@
         for (const go of ctx.waiting.splice(0)) go();
       },
     },
+    get files() {
+      return Object.fromEntries(wfiles);
+    },
+    write: {
+      seed: (path, text) => void wfiles.set(path, text),
+      change(path, text) {
+        if (text === null) wfiles.delete(path);
+        else wfiles.set(path, text);
+      },
+      text: (path) => wfiles.get(path) ?? null,
+      /** The sentences the mock holds for the core's refusals: copies, held to the golden of the core by the contract case. */
+      texts: { payload_changed: PAYLOAD_CHANGED, faults: structuredClone(FAULTS) },
+    },
     approval: {
       get decisions() {
         return appr.decisions;
@@ -1014,7 +1213,7 @@
       save: () =>
         structuredClone({
           chats: [...ai.chats.entries()], live: [...appr.live.entries()], running: ai.running, turnNo: ai.turnNo, chatNo: ai.chatNo,
-          decisions: appr.decisions,
+          decisions: appr.decisions, files: [...wfiles.entries()],
         }),
       restore(saved) {
         ai.chats = new Map(saved.chats);
@@ -1023,6 +1222,8 @@
         ai.turnNo = saved.turnNo;
         ai.chatNo = saved.chatNo;
         appr.decisions.push(...saved.decisions);
+        wfiles.clear();
+        for (const [path, text] of saved.files ?? []) wfiles.set(path, text);
       },
     },
     script: (turn) => void ai.scripts.push(turn),
@@ -1049,6 +1250,7 @@
       appr.held = false;
       for (const go of appr.waiters.splice(0)) go();
       appr.live.clear();
+      wfiles.clear();
       resetContext();
     },
   };

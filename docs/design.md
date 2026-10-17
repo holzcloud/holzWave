@@ -99,6 +99,7 @@ default.
 | AI providers dialog | the box of the Settings dialog (6.13): groups under `.label` legends, a list of providers as a radio group, a form with a write-only key field, a disclosure card for a gateway or a server of the user's own; on a phone it is the screen |
 | Context card | a flat strip in the chat pane (6.14): a 2 px bar on its left, native checkboxes, one solid action, hairlines above and below, no shadow; it names the pane, the destination and every item that would go out |
 | Approval card | a flat strip entry in the chat pane (6.15): a 2 px bar on its left, mono payload rows, one solid action, hairlines above and below, no shadow; it shows every field of a tool call, where the result goes and what untrusted text is in the turn |
+| Diff box | a hairline box in mono inside an approval card (6.16): a head line with the kind, the counts and the sizes, then the changed lines with their line numbers and a `+` or `-` sign as the cue; no fill, wraps and scrolls inside, at most 16 rem high |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
 No motion in the terminal grid itself. `prefers-reduced-motion` removes all transitions.
@@ -400,8 +401,8 @@ status line and the composer.
   colour, underlined). While a reply streams the label says `ASSISTANT · thinking` (only reasoning so far) or
   `ASSISTANT · writing`. Reasoning text is not shown. A user message that carried context ends with one quiet line in
   mono, `Context sent: Screen of pane 1 (2.4 KiB) → this computer`, from the labels, sizes and place of the message
-  itself, also after a reload; it never shows text. An assistant message ends with one row per tool call it made (6.15), and
-  a message of the role tool draws nothing of its own.
+  itself, also after a reload; it never shows text. An assistant message ends with one row per tool call it made (6.15); the row of a write that
+  ran carries an `Undo` button (6.16). A message of the role tool draws nothing of its own.
 - **End row.** A turn that failed or was cut by a limit has one row with the mark `!`, the class in words and the core's
   one-line text (`! FAILED · overload  The provider is overloaded.`); a limit reads `! STOPPED · step limit`. The danger
   colour and the words are two cues.
@@ -679,16 +680,16 @@ after it). Body text is in the chat text face (Manrope 13 px); field names, valu
 shadow. The strip is at most half the height of the pane and scrolls inside.
 
 **Head.** A `.label` title `Approval needed` with the mark `!`, then the words of the tool (`Read a file`, `List a
-folder`, `Search files`, `Read a pane`), and at the right, in mono, the pane and the target label of the core (`pane 1 ·
+folder`, `Search files`, `Read a pane`, `Write a file`, `Edit a file`), and at the right, in mono, the pane and the target label of the core (`pane 1 ·
 This computer`). When the target is a remote host the chip `remote host` in the warn colour follows; the word is the cue.
-Under the head one line says what the effect is: `Reads only. Nothing is changed.`
+Under the head one line says what the effect is: `Reads only. Nothing is changed.` or, for a write, `Changes one file. Check the changes below.` A write card shows the diff box of 6.16 between this line and the payload.
 
 **Payload.** A hairline box in mono with one row for every field the core sent, in the core's order: the name (dim), the
-value (ink, wrapped, never cut) and the size (dim, at the right, `27 B`). The box is at most 12 rem high, scrolls inside
+value (ink, wrapped, never cut) and the size (dim, at the right, `27 B`). The box is at most 16 rem high, scrolls inside
 and takes the focus with `Tab`, so it can be scrolled by keyboard. Control, bidirectional, zero-width and tag characters
 are written as escapes (`\u{202e}`); nothing is dropped, and a long value scrolls and is never cut in the middle.
 
-**What cannot be shown.** A request with more than 16 rows, a value over 65536 characters, more than 131072 characters
+**What cannot be shown.** A request with more than 16 rows, a value over 393216 characters, more than 524288 characters
 in all, a tool or an effect this page does not know, or a field of a wrong shape is not shown as a card that can be
 allowed: it has the danger bar, the title `Cannot show in full` or `Cannot show this request`, a sentence that says why,
 and only `Deny`. A card without a usable hash has no button and says that stopping the reply ends it.
@@ -725,7 +726,7 @@ request says `The request changed. Nothing ran. Read the card again.` and the ca
 | Key or press | Effect |
 |---|---|
 | a card appears | nothing: it never takes the focus; the status line says `waiting for your decision` |
-| `Tab` | reaches the payload box, `Allow once` and `Deny` in this order; from the message box `Shift+Tab` reaches `Deny` first |
+| `Tab` | reaches the diff box of a write card (6.16), the payload box, `Allow once` and `Deny` in this order; from the message box `Shift+Tab` reaches `Deny` first |
 | `Space`, `Enter` on a button | decides |
 | `Escape` with the focus inside a card | denies that call and returns the focus to the message box |
 | `Escape` in the message box | stops the reply, which ends every waiting call |
@@ -755,10 +756,13 @@ there and in the page's tests in the same change.
 | `list_dir` | List a folder |
 | `grep` | Search files |
 | `read_pane` | Read a pane |
+| `write_file` | Write a file |
+| `edit_file` | Edit a file |
 
 | Effect | Words |
 |---|---|
 | `read` | Reads only. Nothing is changed. |
+| `write` | Changes one file. Check the changes below. |
 
 | Refusal of a decision | The card |
 |---|---|
@@ -805,3 +809,89 @@ at most 60 % of the viewport height and scrolls inside, and the payload box scro
 **Accessibility.** The card is a `group` named by its title, `aria-busy` while sending, the status line is the live region,
 every hairline is `--hw-line` so `contrast-high` holds, and nothing moves. Under forced colours the card, the remote chip
 and the place chip get a system-colour outline.
+
+### 6.16 Changing a file
+
+The card in which the user sees exactly what a write tool will do to a file before it does it, and the button with which
+the user takes a finished write back. The core builds the diff from the very text whose digest is part of the card's hash,
+checks its own script (the unchanged and removed lines joined are the old text, the unchanged and added lines joined are
+the new text) and makes no card when the check fails; the table looks at the file again when the call runs and refuses it
+when the text, the size or the change time differ from what the card showed. The page only draws the rows the core sent. It
+computes no diff, no count, no digest and no sentence from a file's text, and it does not summarise, reorder, merge, shorten
+or classify a row.
+
+**Place.** The diff is a box inside the approval card of 6.15, between the effect line and the payload box; the order in the
+card is head, effect line, diff, payload, destination, banner, hash and buttons. The card keeps every rule of 6.15: a flat
+strip entry, a 2 px bar on its left, mono payload rows, one solid action.
+
+**Heading and effect.** The tool words are `Write a file` and `Edit a file`; the effect line reads `Changes one file. Check
+the changes below.` The head is unchanged: `pane 1 · This computer`, and the chip `remote host` for a remote target. The
+payload keeps every field the core sent, in the core's order, and the digest of the old text is the last row (`base`,
+`sha256:` and 64 hexadecimal digits, or `none` for a file that does not exist yet), so the hash covers what the diff shows.
+
+**Diff box.** A hairline box in mono with no fill. Its head line says the kind (`Replaces the whole file`, `Creates a new
+file`, `Changes parts of the file`), then the counts from the core (`3 lines added, 1 removed`) and, at the right, the sizes
+(`1.2 KiB → 1.3 KiB`, and `new · 80 B` for a new file). Under it are the rows. A row has the old line number and the new
+line number (dim, right aligned, empty where the core sent none), the sign and the text. The sign is `+` for an added line
+and `-` for a removed line, in the `--hw-ok` and `--hw-danger` colours, so the sign is the second cue; an unchanged line has
+no sign. The text is ink, wraps and is never cut. Hidden characters are written as escapes (`\u{202e}`) and a carriage return
+as `\r`, never dropped. A gap row says `⋯ 40 unchanged lines` in the dim colour and stands for a run of unchanged lines the
+core left out (three unchanged lines are kept around every change); a note row says the core's sentence in the dim colour
+(`No newline at end of file`). The box is at most 16 rem high, scrolls inside and takes the focus with `Tab` (the 2 px rose
+ring), so it can be scrolled by keyboard.
+
+**Destination and banner.** For a write the destination line reads `Only the outcome (saved or not) is sent to llama3.2 at
+localhost:11434 (this computer).`, with the place chip as for a read; the model never receives the text of the file. The
+banner of a tainted turn keeps the sentences of 6.15 and adds `A file will be changed. Check the changes below before you
+allow it.`
+
+**What cannot be shown.** A write card without a usable diff, a diff the page cannot show in full (over 4000 rows or 524288
+characters of row text), an unknown row operation, or counts that disagree with the rows can only be denied, with the title
+and the danger bar of 6.15. The caps of the payload are raised for writes to 393216 characters in one value and 524288 in
+all, which is the escaped size of the largest `write_file`; they are held to the core by a golden. The core refuses a change
+it cannot show in full before a card exists, so the page rule is a second wall.
+
+**Tool row of a write.** After a write that ran, its row shows the mark, the tool words, the core's summary, the state word
+`ran` and, at the right, the button `Undo`. A press asks the core to put the old text back, which it does only while the
+file still holds exactly the text the assistant wrote. After a successful undo the state word reads `ran · undone` and the
+button is gone; a refusal puts the core's sentence under the row in the error tone (danger, underlined). Undo asks for no
+second click, because the core refuses unless the file is as the assistant left it. A file the assistant created cannot be
+undone (nothing is ever removed), and a change that is no longer known (after a restart, or when the chat was deleted)
+cannot be undone either; for those two reasons the button is gone as well. The result box shows the core's sentence under
+`Result · untrusted text` as for every tool.
+
+**Keys and focus.**
+
+| Key or press | Effect |
+|---|---|
+| a card appears | nothing: it never takes the focus |
+| `Tab` | reaches the diff box, the payload box, `Allow once` and `Deny` in this order; from the message box `Shift+Tab` reaches `Deny` first |
+| `Escape` with the focus in the diff box | denies that call, as everywhere in the card |
+| a press on `Undo` | one request with the chat and the call; a script's click does nothing |
+
+**Words.** Fixed sentences of the page, held to the core's kinds and operations by tables.
+
+| Tool | Words |
+|---|---|
+| `write_file` | Write a file |
+| `edit_file` | Edit a file |
+
+| Sentence | Where |
+|---|---|
+| Changes one file. Check the changes below. | the effect line of a write |
+| Replaces the whole file | kind `replace` |
+| Creates a new file | kind `create` |
+| Changes parts of the file | kind `edit` |
+| 3 lines added, 1 removed | the counts, from the core; `1 line added` in the singular |
+| 1.2 KiB → 1.3 KiB, new · 80 B | the sizes |
+| ⋯ 40 unchanged lines | a gap row |
+| Only the outcome (saved or not) is sent to llama3.2 at localhost:11434 (this computer). | the destination of a write |
+| Only the outcome (saved or not) is sent to the model of this chat. | the destination when the route is not known |
+| A file will be changed. Check the changes below before you allow it. | the banner of a tainted turn, after the sentences of 6.15 |
+
+**Narrow screens (640 px and narrower).** The diff box is part of the card with the same 44 px targets, its text wraps and it
+scrolls inside its own height. `Undo` is at least 44 px high and wide.
+
+**Accessibility.** The diff box is a group named by its head line. The sign is a character, not a colour, and the line
+numbers are text. Every hairline is `--hw-line`, so `contrast-high` holds, and nothing moves. Under forced colours the box,
+its rows and the `Undo` button get a system-colour outline.

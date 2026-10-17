@@ -12,6 +12,7 @@ import {
 const RUN = JSON.parse(readFileSync(new URL("../fixtures/ai_tool_stream.json", import.meta.url), "utf8"));
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/ai_approval.json", import.meta.url), "utf8"));
 const PROTOCOL = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
+const WRITE = JSON.parse(readFileSync(new URL("../fixtures/ai_write_card.json", import.meta.url), "utf8"));
 const HASH = "9f3a41c2d7be5a60b1c4e8f2d3a7094b6c5d1e0f8a2b3c4d5e6f708192a3b4c5";
 
 /** The eleven members of the core's card, with the payload of a `read_file` call in the core's order. */
@@ -163,12 +164,12 @@ test("a request that cannot be shown in full can only be denied", () => {
   verdict(total, "large");
 
   // A tool and an effect the page does not know.
-  for (const tool of ["write_file", "x"]) {
+  for (const tool of ["run_command", "x"]) {
     const entry = card({ tool });
     entry.payload[0] = { name: "tool", value: tool, bytes: tool.length };
     verdict(entry, "tool");
   }
-  for (const effect of ["write", "exec", "x"]) verdict(card({ effect }), "effect");
+  for (const effect of ["exec", "x", "write"]) verdict(card({ effect }), "effect");
 
   // A field of the wrong shape: a bad name, a bad length, a value that is not a string.
   for (const name of ["Path", "", "a".repeat(41), "a b"]) {
@@ -316,4 +317,50 @@ test("words: sizes, hashes, destinations, targets, banners and sentences", () =>
   assert.ok(sentences.every((t) => t.endsWith("It can only be denied.")));
   assert.equal(sentences[1], sentences[2], "an unknown tool and an unknown effect read the same");
   assert.equal(new Set(sentences).size, 3);
+});
+
+test("a write card is read with its diff row by row and keeps its hash", () => {
+  const sent = WRITE.cards.replace;
+  const seen = readApproval(sent);
+  assert.equal(seen.why, "ok");
+  assert.equal(seen.hash, sent.hash, "the hash is exactly as in the file");
+  assert.equal(seen.approval.hash, sent.hash);
+  assert.deepEqual(seen.approval.rows.map((r) => r.name), sent.payload.map((p) => p.name), "the payload names in the file's order");
+  assert.deepEqual(
+    Object.keys(seen.approval).sort(),
+    ["call_id", "conversation", "diff", "effect", "hash", "pane", "remote", "rows", "taint", "tainted", "target", "tool"],
+    "the eleven members of a read card plus the diff",
+  );
+  const diff = seen.approval.diff;
+  for (const key of ["kind", "added", "removed", "before_bytes", "after_bytes"]) assert.equal(diff[key], sent.diff[key], key);
+  assert.equal(diff.rows.length, sent.diff.rows.length);
+  sent.diff.rows.forEach((row, i) => {
+    // The reader changes no text here (the core's rows are already written out) and copies exactly the members of the shape.
+    assert.deepEqual(diff.rows[i], row, `row ${i}`);
+    assert.deepEqual(Object.keys(diff.rows[i]), Object.keys(row), `row ${i} keeps its members`);
+  });
+  assert.equal(canAllow(seen), true);
+
+  // A read card has no diff member of its own, and a diff on a read card is a card of the wrong shape.
+  const read = RUN.events.find((e) => e.kind === "tool_proposed").pending;
+  const readSeen = readApproval(read);
+  assert.equal(readSeen.why, "ok");
+  assert.ok(!Object.hasOwn(readSeen.approval, "diff"));
+  const withDiff = readApproval({ ...read, diff: sent.diff });
+  assert.equal(withDiff.why, "shape");
+  assert.equal(withDiff.hash, read.hash, "a valid hash is kept");
+
+  // A write card without its diff is of the wrong shape, with the hash kept; the effect has to be the tool's own.
+  const { diff: dropped, ...bare } = sent;
+  assert.ok(dropped);
+  const missing = readApproval(bare);
+  assert.equal(missing.why, "shape");
+  assert.equal(missing.hash, sent.hash);
+  assert.equal(missing.approval, null);
+  assert.equal(canDeny(missing), true);
+  assert.equal(canAllow(missing), false);
+  const wrongEffect = readApproval({ ...sent, effect: "read" });
+  assert.equal(wrongEffect.why, "effect");
+  assert.equal(wrongEffect.hash, sent.hash);
+  for (const name of Object.keys(WRITE.cards)) assert.equal(readApproval(WRITE.cards[name]).why, "ok", name);
 });

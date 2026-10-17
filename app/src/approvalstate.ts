@@ -37,6 +37,29 @@ export interface Approval {
   hash: string;
   tainted: boolean;
   taint: string[];
+  /** The changes of a write, as the core built them; an own member of a write card only. */
+  diff?: Diff;
+}
+
+/** What kind of change a diff shows: the core's three names. */
+export type DiffKind = "replace" | "create" | "edit";
+
+/** One row of a diff, in the five shapes the core sends. A number the core leaves out is `null`. */
+export type DiffRow =
+  | { op: "ctx"; old: number; new: number; text: string }
+  | { op: "del"; old: number; new: null; text: string }
+  | { op: "add"; old: null; new: number; text: string }
+  | { op: "gap"; skipped: number }
+  | { op: "note"; text: string };
+
+/** The changes a write would make: the kind, the counts and sizes the core worked out, and the rows in order. */
+export interface Diff {
+  kind: DiffKind;
+  added: number;
+  removed: number;
+  before_bytes: number | null;
+  after_bytes: number;
+  rows: DiffRow[];
 }
 
 /** A pending call as the page read it: its ids, a valid hash or null, and the card when it can be shown in full. */
@@ -89,6 +112,9 @@ export const MAX_NAME = 40;
 export const MAX_VALUE = 65536;
 /** The most characters of all values of one card. */
 export const MAX_TOTAL = 131072;
+/** The most rows of a diff, and the most characters of its row text; a longer diff can only be denied. */
+export const MAX_DIFF_ROWS = 4000;
+export const MAX_DIFF_CHARS = 524288;
 /** The most taint labels a card shows, and the longest one. */
 export const MAX_LABELS = 8;
 export const MAX_LABEL = 80;
@@ -175,6 +201,92 @@ function readRows(raw: unknown): PayloadRow[] | undefined {
   return rows;
 }
 
+/** A line number: a positive whole number. */
+function lineNumber(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 && raw <= MAX_BYTES ? raw : null;
+}
+
+/** A count or size: a whole number that is not negative. */
+function whole(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0 && raw <= MAX_BYTES ? raw : null;
+}
+
+/** One row of a diff, each member read by name; only the members of its shape are copied. Null when it has no valid shape. */
+function readRow(raw: unknown): DiffRow | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const o = raw as Obj;
+  const op = member(o, "op");
+  const text = member(o, "text");
+  switch (op) {
+    case "ctx": {
+      const old = lineNumber(member(o, "old"));
+      const next = lineNumber(member(o, "new"));
+      if (old === null || next === null || typeof text !== "string") return null;
+      return { op, old, new: next, text: showText(text) };
+    }
+    case "del": {
+      const old = lineNumber(member(o, "old"));
+      if (old === null || member(o, "new") !== null || typeof text !== "string") return null;
+      return { op, old, new: null, text: showText(text) };
+    }
+    case "add": {
+      const next = lineNumber(member(o, "new"));
+      if (next === null || member(o, "old") !== null || typeof text !== "string") return null;
+      return { op, old: null, new: next, text: showText(text) };
+    }
+    case "gap": {
+      const skipped = lineNumber(member(o, "skipped"));
+      return skipped === null ? null : { op, skipped };
+    }
+    case "note":
+      return typeof text === "string" ? { op, text: showText(text) } : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The diff of a write card: every member read by name, every row read by its shape, the counts held against the rows. `large`
+ * when it has more rows or more characters of row text than the page shows (a diff is shown in full or not at all), null when
+ * anything is not as the core's shape says. The page computes nothing from a row's text.
+ */
+function readDiffResult(raw: unknown): Diff | "large" | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const o = raw as Obj;
+  const kind = member(o, "kind");
+  const added = whole(member(o, "added"));
+  const removed = whole(member(o, "removed"));
+  const afterBytes = whole(member(o, "after_bytes"));
+  const sent = member(o, "before_bytes");
+  const beforeBytes = sent === null ? null : whole(sent);
+  const list = member(o, "rows");
+  if (kind !== "replace" && kind !== "create" && kind !== "edit") return null;
+  if (added === null || removed === null || afterBytes === null || (sent !== null && beforeBytes === null)) return null;
+  if (!Array.isArray(list)) return null;
+  if (list.length > MAX_DIFF_ROWS) return "large";
+  const rows: DiffRow[] = [];
+  let chars = 0;
+  let adds = 0;
+  let dels = 0;
+  for (const item of list as unknown[]) {
+    const row = readRow(item);
+    if (row === null) return null;
+    if (row.op === "add") adds += 1;
+    if (row.op === "del") dels += 1;
+    if (row.op !== "gap") chars += row.text.length;
+    rows.push(row);
+  }
+  if (adds !== added || dels !== removed) return null;
+  if (chars > MAX_DIFF_CHARS) return "large";
+  return { kind, added, removed, before_bytes: beforeBytes, after_bytes: afterBytes, rows };
+}
+
+/** The diff of a write card as the page shows it, or null when it cannot be shown in full (malformed, or over the caps). */
+export function readDiff(raw: unknown): Diff | null {
+  const read = readDiffResult(raw);
+  return read === "large" ? null : read;
+}
+
 /** The card of a call with a valid hash, or the first reason it cannot be allowed, in the order shape, tool, effect, large. */
 function readCard(o: Obj, id: string, tool: string, hash: string): Approval | Exclude<Why, "ok"> {
   const conversation = member(o, "conversation");
@@ -190,9 +302,18 @@ function readCard(o: Obj, id: string, tool: string, hash: string): Approval | Ex
   const first = rows[0];
   const raw = member(o, "payload") as Obj[];
   if (first === undefined || first.name !== "tool" || member(raw[0] as Obj, "value") !== tool) return "shape";
+  // A write card carries the changes it would make, and no other card does: what the tool does decides, not what the card says.
+  const expected = Object.hasOwn(TOOL_EFFECT, tool) ? TOOL_EFFECT[tool] : undefined;
+  const sentDiff = member(o, "diff");
+  const diff = expected === "write" ? readDiffResult(sentDiff) : null;
+  if (expected === "write" && diff === null) return "shape";
+  if (expected !== undefined && expected !== "write" && sentDiff !== undefined) return "shape";
   // The page shows the tools and the effects it knows; every other request can only be denied.
   if (!Object.hasOwn(TOOL_WORDS, tool)) return "tool";
-  if (!Object.hasOwn(EFFECT_WORDS, effect)) return "effect";
+  if (!Object.hasOwn(EFFECT_WORDS, effect) || !HANDLED_EFFECTS.includes(effect) || (expected !== undefined && effect !== expected)) {
+    return "effect";
+  }
+  if (diff === "large") return "large";
   // A request is shown in full or not at all: a card that had to be cut could hide the end of what runs.
   if (rows.length > MAX_ROWS) return "large";
   let total = 0;
@@ -203,10 +324,12 @@ function readCard(o: Obj, id: string, tool: string, hash: string): Approval | Ex
   }
   if (total > MAX_TOTAL) return "large";
   const flag = member(o, "tainted");
-  return {
+  const card: Approval = {
     conversation, call_id: id, tool, effect, pane, target: shown(target, MAX_TARGET), remote, rows, hash,
     tainted: flag === true || labels.length > 0, taint: labels,
   };
+  if (diff !== null) card.diff = diff;
+  return card;
 }
 
 /**
@@ -317,11 +440,27 @@ export const TOOL_WORDS: Readonly<Record<string, string>> = Object.freeze({
   list_dir: "List a folder",
   grep: "Search files",
   read_pane: "Read a pane",
+  write_file: "Write a file",
+  edit_file: "Edit a file",
 });
+
+/** What each tool does to the world, by the core's names: the effect a card of that tool has. The core's table, held by a golden. */
+export const TOOL_EFFECT: Readonly<Record<string, string>> = Object.freeze({
+  read_file: "read",
+  list_dir: "read",
+  grep: "read",
+  read_pane: "read",
+  write_file: "write",
+  edit_file: "write",
+});
+
+/** The effects the page handles: a card of any other effect can only be denied. */
+export const HANDLED_EFFECTS: readonly string[] = Object.freeze(["read", "write"]);
 
 /** What each effect does to the world, in words. The page handles the effects named here. */
 export const EFFECT_WORDS: Readonly<Record<string, string>> = Object.freeze({
   read: "Reads only. Nothing is changed.",
+  write: "Changes one file. Check the changes below.",
 });
 
 /** The fixed sentences of the card and of the tool rows. Nothing in them holds a path, a host or a field of a request. */
@@ -348,6 +487,13 @@ export const WORDS = Object.freeze({
   cut: "[cut for display]",
   destinationLead: "The result is sent to ",
   taintTail: "It can try to steer the assistant. Check the target and every field before you allow.",
+  destinationWriteLead: "Only the outcome (saved or not) is sent to ",
+  destinationWriteUnknown: "Only the outcome (saved or not) is sent to the model of this chat.",
+  taintWrite: "A file will be changed. Check the changes below before you allow it.",
+  diffReplace: "Replaces the whole file",
+  diffCreate: "Creates a new file",
+  diffEdit: "Changes parts of the file",
+  diffNew: "new · ",
   stateRan: "ran",
   stateError: "error",
   stateWaiting: "waiting",
@@ -365,10 +511,11 @@ export function hashWords(hash: string): string {
 }
 
 /** The line that says where the result of an approved call goes, as pieces: the place piece is the only one that can leave. */
-export function destinationParts(dest: Destination | null): DestinationPart[] {
-  if (dest === null) return [{ kind: "text", text: WORDS.destinationUnknown, leaves: false }];
+export function destinationParts(dest: Destination | null, effect = "read"): DestinationPart[] {
+  const write = effect === "write";
+  if (dest === null) return [{ kind: "text", text: write ? WORDS.destinationWriteUnknown : WORDS.destinationUnknown, leaves: false }];
   const parts: DestinationPart[] = [
-    { kind: "text", text: WORDS.destinationLead, leaves: false },
+    { kind: "text", text: write ? WORDS.destinationWriteLead : WORDS.destinationLead, leaves: false },
     { kind: "model", text: dest.model, leaves: false },
   ];
   if (dest.host !== null && dest.host !== "") {
@@ -384,9 +531,25 @@ export function destinationParts(dest: Destination | null): DestinationPart[] {
 }
 
 /** The banner of a turn that holds text the user did not write: its title, and a sentence that names the core's labels. */
-export function taintWords(labels: readonly string[]): { title: string; text: string } {
+export function taintWords(labels: readonly string[], effect = "read"): { title: string; text: string } {
   const named = labels.length === 0 ? "" : ` (${labels.join(", ")})`;
-  return { title: WORDS.bannerTitle, text: `This turn contains text you did not write${named}. ${WORDS.taintTail}` };
+  const more = effect === "write" ? ` ${WORDS.taintWrite}` : "";
+  return { title: WORDS.bannerTitle, text: `This turn contains text you did not write${named}. ${WORDS.taintTail}${more}` };
+}
+
+// ---- the diff ---------------------------------------------------------------------------------------------------------
+
+/** The line above the rows of a diff, as three pieces: the kind in words, the counts the core worked out, and the sizes. */
+export function diffHead(diff: Diff): { kind: string; counts: string; size: string } {
+  const kind = diff.kind === "replace" ? WORDS.diffReplace : diff.kind === "create" ? WORDS.diffCreate : WORDS.diffEdit;
+  const counts = `${diff.added} ${diff.added === 1 ? "line" : "lines"} added, ${diff.removed} removed`;
+  const size = diff.before_bytes === null ? `${WORDS.diffNew}${sizeWords(diff.after_bytes)}` : `${sizeWords(diff.before_bytes)} → ${sizeWords(diff.after_bytes)}`;
+  return { kind, counts, size };
+}
+
+/** What a gap row says of the run it stands for: `40 unchanged lines`. */
+export function gapWords(skipped: number): string {
+  return `${skipped} unchanged ${skipped === 1 ? "line" : "lines"}`;
 }
 
 // ---- the rows of tool calls -----------------------------------------------------------------------------------------

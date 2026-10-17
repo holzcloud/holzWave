@@ -1,0 +1,513 @@
+{
+  "cards": {
+    "replace": {
+      "conversation": "chat-1",
+      "call_id": "call_1",
+      "tool": "write_file",
+      "effect": "write",
+      "pane": 3,
+      "target": "build box",
+      "remote": true,
+      "payload": [
+        {
+          "name": "tool",
+          "value": "write_file",
+          "bytes": 10
+        },
+        {
+          "name": "pane",
+          "value": "3",
+          "bytes": 1
+        },
+        {
+          "name": "target",
+          "value": "build box",
+          "bytes": 9
+        },
+        {
+          "name": "remote",
+          "value": "true",
+          "bytes": 4
+        },
+        {
+          "name": "path",
+          "value": "/w/notes.txt",
+          "bytes": 12
+        },
+        {
+          "name": "content",
+          "value": "alpha\nbeta two\ngamma\n",
+          "bytes": 21
+        },
+        {
+          "name": "resolved_path",
+          "value": "/w/notes.txt",
+          "bytes": 12
+        },
+        {
+          "name": "stamp",
+          "value": "1700000000",
+          "bytes": 10
+        },
+        {
+          "name": "base",
+          "value": "sha256:4fdbc441ea7b546100e086ac1e4fc5ae6749b7314311c99db05be450eca12996",
+          "bytes": 71
+        }
+      ],
+      "hash": "ecaba32ac575fb5f73fc0e453eb7fbd7d2b2701d2983109d6c001370b673e0d0",
+      "tainted": false,
+      "taint": [],
+      "diff": {
+        "kind": "replace",
+        "added": 1,
+        "removed": 1,
+        "before_bytes": 17,
+        "after_bytes": 21,
+        "rows": [
+          {
+            "op": "ctx",
+            "old": 1,
+            "new": 1,
+            "text": "alpha"
+          },
+          {
+            "op": "del",
+            "old": 2,
+            "new": null,
+            "text": "beta"
+          },
+          {
+            "op": "add",
+            "old": null,
+            "new": 2,
+            "text": "beta two"
+          },
+          {
+            "op": "ctx",
+            "old": 3,
+            "new": 3,
+            "text": "gamma"
+          }
+        ]
+      }
+    },
+    "create": {
+      "conversation": "chat-1",
+      "call_id": "call_1",
+      "tool": "write_file",
+      "effect": "write",
+      "pane": 3,
+      "target": "build box",
+      "remote": true,
+      "payload": [
+        {
+          "name": "tool",
+          "value": "write_file",
+          "bytes": 10
+        },
+        {
+          "name": "pane",
+          "value": "3",
+          "bytes": 1
+        },
+        {
+          "name": "target",
+          "value": "build box",
+          "bytes": 9
+        },
+        {
+          "name": "remote",
+          "value": "true",
+          "bytes": 4
+        },
+        {
+          "name": "path",
+          "value": "/w/new.txt",
+          "bytes": 10
+        },
+        {
+          "name": "content",
+          "value": "one\ntwo\nthree\n",
+          "bytes": 14
+        },
+        {
+          "name": "resolved_path",
+          "value": "/w/new.txt",
+          "bytes": 10
+        },
+        {
+          "name": "base",
+          "value": "none",
+          "bytes": 4
+        }
+      ],
+      "hash": "00b8f696c98b2448cca11acae6898284dee11142fe46b051fa65a1eeae76eace",
+      "tainted": false,
+      "taint": [],
+      "diff": {
+        "kind": "create",
+        "added": 3,
+        "removed": 0,
+        "before_bytes": null,
+        "after_bytes": 14,
+        "rows": [
+          {
+            "op": "add",
+            "old": null,
+            "new": 1,
+            "text": "one"
+          },
+          {
+            "op": "add",
+            "old": null,
+            "new": 2,
+            "text": "two"
+          },
+          {
+            "op": "add",
+            "old": null,
+            "new": 3,
+            "text": "three"
+          }
+        ]
+      }
+    },
+    "edit": {
+      "conversation": "chat-1",
+      "call_id": "call_1",
+      "tool": "edit_file",
+      "effect": "write",
+      "pane": 3,
+      "target": "build box",
+      "remote": true,
+      "payload": [
+        {
+          "name": "tool",
+          "value": "edit_file",
+          "bytes": 9
+        },
+        {
+          "name": "pane",
+          "value": "3",
+          "bytes": 1
+        },
+        {
+          "name": "target",
+          "value": "build box",
+          "bytes": 9
+        },
+        {
+          "name": "remote",
+          "value": "true",
+          "bytes": 4
+        },
+        {
+          "name": "path",
+          "value": "/w/notes.txt",
+          "bytes": 12
+        },
+        {
+          "name": "old_text",
+          "value": "beta",
+          "bytes": 4
+        },
+        {
+          "name": "new_text",
+          "value": "beta two",
+          "bytes": 8
+        },
+        {
+          "name": "replace_all",
+          "value": "false",
+          "bytes": 5
+        },
+        {
+          "name": "resolved_path",
+          "value": "/w/notes.txt",
+          "bytes": 12
+        },
+        {
+          "name": "stamp",
+          "value": "1700000000",
+          "bytes": 10
+        },
+        {
+          "name": "base",
+          "value": "sha256:4fdbc441ea7b546100e086ac1e4fc5ae6749b7314311c99db05be450eca12996",
+          "bytes": 71
+        }
+      ],
+      "hash": "e2d047b62d8335af8c0985ad6c93d23d0f8560ada4277481b0d4971c37d1f4af",
+      "tainted": false,
+      "taint": [],
+      "diff": {
+        "kind": "edit",
+        "added": 1,
+        "removed": 1,
+        "before_bytes": 17,
+        "after_bytes": 21,
+        "rows": [
+          {
+            "op": "ctx",
+            "old": 1,
+            "new": 1,
+            "text": "alpha"
+          },
+          {
+            "op": "del",
+            "old": 2,
+            "new": null,
+            "text": "beta"
+          },
+          {
+            "op": "add",
+            "old": null,
+            "new": 2,
+            "text": "beta two"
+          },
+          {
+            "op": "ctx",
+            "old": 3,
+            "new": 3,
+            "text": "gamma"
+          }
+        ]
+      }
+    },
+    "edit_all": {
+      "conversation": "chat-1",
+      "call_id": "call_1",
+      "tool": "edit_file",
+      "effect": "write",
+      "pane": 3,
+      "target": "build box",
+      "remote": true,
+      "payload": [
+        {
+          "name": "tool",
+          "value": "edit_file",
+          "bytes": 9
+        },
+        {
+          "name": "pane",
+          "value": "3",
+          "bytes": 1
+        },
+        {
+          "name": "target",
+          "value": "build box",
+          "bytes": 9
+        },
+        {
+          "name": "remote",
+          "value": "true",
+          "bytes": 4
+        },
+        {
+          "name": "path",
+          "value": "/w/notes.txt",
+          "bytes": 12
+        },
+        {
+          "name": "old_text",
+          "value": "the item",
+          "bytes": 8
+        },
+        {
+          "name": "new_text",
+          "value": "an item",
+          "bytes": 7
+        },
+        {
+          "name": "replace_all",
+          "value": "true",
+          "bytes": 4
+        },
+        {
+          "name": "resolved_path",
+          "value": "/w/notes.txt",
+          "bytes": 12
+        },
+        {
+          "name": "stamp",
+          "value": "1700000000",
+          "bytes": 10
+        },
+        {
+          "name": "base",
+          "value": "sha256:b1ab0fbda9af50e21c467ec49706285042ca742255577536b2dd29696d112b07",
+          "bytes": 71
+        }
+      ],
+      "hash": "869b9571e48f500e50386069249f2586b7b07462b0798c02845521bbaeabf969",
+      "tainted": false,
+      "taint": [],
+      "diff": {
+        "kind": "edit",
+        "added": 3,
+        "removed": 3,
+        "before_bytes": 314,
+        "after_bytes": 311,
+        "rows": [
+          {
+            "op": "ctx",
+            "old": 1,
+            "new": 1,
+            "text": "line 1"
+          },
+          {
+            "op": "ctx",
+            "old": 2,
+            "new": 2,
+            "text": "line 2"
+          },
+          {
+            "op": "del",
+            "old": 3,
+            "new": null,
+            "text": "the item"
+          },
+          {
+            "op": "add",
+            "old": null,
+            "new": 3,
+            "text": "an item"
+          },
+          {
+            "op": "ctx",
+            "old": 4,
+            "new": 4,
+            "text": "line 4"
+          },
+          {
+            "op": "ctx",
+            "old": 5,
+            "new": 5,
+            "text": "line 5"
+          },
+          {
+            "op": "ctx",
+            "old": 6,
+            "new": 6,
+            "text": "line 6"
+          },
+          {
+            "op": "gap",
+            "skipped": 10
+          },
+          {
+            "op": "ctx",
+            "old": 17,
+            "new": 17,
+            "text": "line 17"
+          },
+          {
+            "op": "ctx",
+            "old": 18,
+            "new": 18,
+            "text": "line 18"
+          },
+          {
+            "op": "ctx",
+            "old": 19,
+            "new": 19,
+            "text": "line 19"
+          },
+          {
+            "op": "del",
+            "old": 20,
+            "new": null,
+            "text": "the item"
+          },
+          {
+            "op": "add",
+            "old": null,
+            "new": 20,
+            "text": "an item"
+          },
+          {
+            "op": "ctx",
+            "old": 21,
+            "new": 21,
+            "text": "line 21"
+          },
+          {
+            "op": "ctx",
+            "old": 22,
+            "new": 22,
+            "text": "line 22"
+          },
+          {
+            "op": "ctx",
+            "old": 23,
+            "new": 23,
+            "text": "line 23"
+          },
+          {
+            "op": "gap",
+            "skipped": 13
+          },
+          {
+            "op": "ctx",
+            "old": 37,
+            "new": 37,
+            "text": "line 37"
+          },
+          {
+            "op": "ctx",
+            "old": 38,
+            "new": 38,
+            "text": "line 38"
+          },
+          {
+            "op": "ctx",
+            "old": 39,
+            "new": 39,
+            "text": "line 39"
+          },
+          {
+            "op": "del",
+            "old": 40,
+            "new": null,
+            "text": "the item"
+          },
+          {
+            "op": "note",
+            "text": "No newline at end of file"
+          },
+          {
+            "op": "add",
+            "old": null,
+            "new": 40,
+            "text": "an item"
+          },
+          {
+            "op": "note",
+            "text": "No newline at end of file"
+          }
+        ]
+      }
+    }
+  },
+  "limits": {
+    "payload_value_chars": 393216,
+    "payload_total_chars": 401436,
+    "diff_rows": 4000,
+    "diff_chars": 524288,
+    "base_bytes": 1048576
+  },
+  "texts": {
+    "payload_changed": "The target changed after the approval, so the action was not run.",
+    "faults": {
+      "not_a_write": "this tool does not change a file",
+      "no_file": "the file does not exist; use write_file to create it",
+      "no_match": "old_text was not found in the file",
+      "ambiguous": "old_text occurs more than once; add surrounding text to make it unique or set replace_all",
+      "same": "old_text and new_text are the same",
+      "unchanged": "the file already holds that text",
+      "too_large": "the result would be larger than the agent may write",
+      "not_shown": "the change is too large to show; make smaller changes"
+    }
+  }
+}

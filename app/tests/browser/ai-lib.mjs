@@ -47,6 +47,15 @@ export const PANE_KEY = "sk-ant-api03-zqconsent5e90b3aXYZ0123456789";
 export const TOOL_PATH = "/work/zq-approval-path-3f7b02/notes.txt";
 export const TOOL_TEXT = "zq-approval-text-6a41d9";
 
+/**
+ * The file the mock's write tools change, the text it holds before (three lines) and the text the model writes over it. The
+ * two canaries occur only in the files of the tests and in the text nodes of a card; neither may be in any call, attribute or
+ * store of the page.
+ */
+export const TOOL_FILE = "/work/proj/todo.txt";
+export const FILE_OLD = "alpha\nbeta zq-old-text-4d2e91\ngamma\n";
+export const FILE_NEW = "alpha\nbeta zq-new-text-b83f17\ngamma\n";
+
 /** Two terminal panes side by side. */
 export const VIEW = {
   workspaces: [{ name: "main", active: true, panes: 2 }],
@@ -302,3 +311,23 @@ export async function reloadKeeping(page) {
   await page.waitForSelector(".divider");
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_turn_snapshot").length >= 1);
 }
+
+/**
+ * Queue a turn in which the model asks for a write tool. `spec` is a call (`id`, `tool` as `write_file` or `edit_file`,
+ * `path`, `content`, `old_text`, `new_text`, `replace_all`, `target`, `remote`, `tainted`, `taint`, `diff` and `payload` to
+ * replace what the mock builds) or a list of calls in `calls`, and `answer` is the text after the last result.
+ */
+export async function scriptWrite(page, spec) {
+  const { calls: list, answer, ...single } = spec;
+  const tools = (list ?? [single]).map((c) => ({ tool: "write_file", ...c }));
+  await page.evaluate(([queued, text]) => window.__MOCK__.ai.script({ tools: queued, ...(text === undefined ? {} : { answer: text }) }), [tools, answer]);
+}
+
+/** A file exists in the mock with this text. */
+export const seedFile = (page, path, text) => page.evaluate(([p, t]) => window.__MOCK__.ai.write.seed(p, t), [path, text]);
+
+/** The file changes without a call (a text of `null` removes it), as if another program wrote it. */
+export const changeFile = (page, path, text) => page.evaluate(([p, t]) => window.__MOCK__.ai.write.change(p, t), [path, text]);
+
+/** The text of a file in the mock, or null when there is none. */
+export const fileText = (page, path) => page.evaluate((p) => window.__MOCK__.ai.write.text(p), path);

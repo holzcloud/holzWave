@@ -20,6 +20,7 @@
 
 mod ai_host;
 mod ai_tools;
+mod ai_write;
 mod commands;
 mod files_protocol;
 mod menu;

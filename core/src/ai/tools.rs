@@ -15,6 +15,7 @@
 
 mod approval;
 mod catalog;
+mod change;
 mod deny;
 
 use std::error::Error;
@@ -30,6 +31,7 @@ pub use catalog::{
     EditFile, Effect, Field, FieldKind, Grep, HASH_PREFIX, ListDir, Newlines, ReadFile, ReadPane, RunCommand, Tool,
     ToolName, WriteFile, fields_of, payload_hash, visible, visible_multiline,
 };
+pub use change::{Base, Change, ChangeFault, Diff, DiffKind, DiffRow, diff, diff_with, plan};
 pub use deny::{Access, Denied, DenyPolicy, FsKind, Style, canonical_local};
 
 /// The most bytes a tool result carries back to the model.
@@ -44,6 +46,14 @@ pub const MAX_COMMAND_BYTES: usize = 8192;
 pub const MAX_WRITE_BYTES: usize = 128 * 1024;
 /// The most bytes of either side of one `edit_file` call.
 pub const MAX_EDIT_BYTES: usize = 32 * 1024;
+/// The largest file text a write tool looks at or changes, in bytes.
+pub const MAX_BASE_BYTES: usize = 1024 * 1024;
+/// The most rows a diff may have; a change that needs more is refused before a card exists.
+pub const MAX_DIFF_ROWS: usize = 4000;
+/// The most characters of row text a diff may have, counted in UTF-16 units after escaping.
+pub const MAX_DIFF_CHARS: usize = 524_288;
+/// How many unchanged lines a diff keeps around each change.
+pub const DIFF_CONTEXT: usize = 3;
 /// The longest call id.
 pub const MAX_CALL_ID_BYTES: usize = 128;
 /// The most calls open at the same time.
@@ -81,6 +91,7 @@ pub struct Resolved {
     path: Option<String>,
     cwd: Option<String>,
     stamp: Option<i64>,
+    base: Option<Base>,
 }
 
 impl Resolved {
@@ -95,7 +106,7 @@ impl Resolved {
     }
 
     fn new(pane: PaneId, target: String, fs: FsKind) -> Self {
-        Self { pane, target, fs, path: None, cwd: None, stamp: None }
+        Self { pane, target, fs, path: None, cwd: None, stamp: None, base: None }
     }
 
     /// Sets the absolute path the call acts on.
@@ -116,6 +127,13 @@ impl Resolved {
     #[must_use]
     pub fn with_stamp(mut self, stamp: i64) -> Self {
         self.stamp = Some(stamp);
+        self
+    }
+
+    /// Sets what the file a write is based on held when the host looked at it.
+    #[must_use]
+    pub fn with_base(mut self, base: Base) -> Self {
+        self.base = Some(base);
         self
     }
 
@@ -148,6 +166,11 @@ impl Resolved {
     pub fn stamp(&self) -> Option<i64> {
         self.stamp
     }
+
+    /// What the file a write is based on held when the host looked at it.
+    pub fn base(&self) -> Option<&Base> {
+        self.base.as_ref()
+    }
 }
 
 impl fmt::Debug for Resolved {
@@ -159,7 +182,39 @@ impl fmt::Debug for Resolved {
             .field("path", &self.path.as_ref().map(|p| Size(p.len())))
             .field("cwd", &self.cwd.as_ref().map(|c| Size(c.len())))
             .field("stamp", &self.stamp.is_some())
+            .field("base", &self.base.as_ref().map(Base::len).map(Size))
             .finish()
+    }
+}
+
+/// What the host found when it looked at the file a write tool will change: the text now in the file (or that there is no
+/// file) and the stamp of the file. `Debug` prints sizes only.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Inspected {
+    base: Base,
+    stamp: Option<i64>,
+}
+
+impl Inspected {
+    /// The state of a file: its text or its absence, and its stamp when it has one.
+    pub fn new(base: Base, stamp: Option<i64>) -> Self {
+        Self { base, stamp }
+    }
+
+    /// The text now in the file, or that there is no file.
+    pub fn base(&self) -> &Base {
+        &self.base
+    }
+
+    /// The stamp of the file, in the unit the host uses.
+    pub fn stamp(&self) -> Option<i64> {
+        self.stamp
+    }
+}
+
+impl fmt::Debug for Inspected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Inspected").field("base", &self.base).field("stamp", &self.stamp.is_some()).finish()
     }
 }
 
@@ -350,6 +405,7 @@ impl Error for ToolError {}
 /// - `resolve` names the pane, the machine, the absolute path, the working directory and, for a write, the stamp of the
 ///   file. It is called twice for one call (when it is proposed and right before it runs), so it must be cheap and free
 ///   of side effects. A local path may be given unresolved: the table resolves it and hands the host the canonical one.
+/// - `inspect` reads the file a write tool will change, after the walls; the default does not look at files.
 /// - `run` receives the only value that proves an approval and must act on `ticket.resolved()`, never on the string the
 ///   model wrote. It must honour `cancel` and return [`ToolError::Cancelled`] when it is stopped. Nothing the trait
 ///   does may be typed into a terminal.
@@ -362,6 +418,14 @@ pub trait ToolHost: Send + Sync {
 
     /// Does what the user approved.
     fn run(&self, ticket: &Ticket, cancel: &CancelToken) -> Result<ToolOutput, ToolError>;
+
+    /// The state of the file a write tool will change, read only after the deny list has passed the path: the text now
+    /// in the file (or that there is none) and its stamp. The table makes the diff of the card from this text, puts its
+    /// digest into the hash, and asks again right before the call runs, so a file changed meanwhile is refused. `None`
+    /// means the host does not look at files, and the card carries no diff. The default says so.
+    fn inspect(&self, _resolved: &Resolved) -> Result<Option<Inspected>, ToolError> {
+        Ok(None)
+    }
 }
 
 /// The tools the host offers for `pane`, as they are declared to a model, in the order of [`ToolName::ALL`].

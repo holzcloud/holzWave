@@ -2165,6 +2165,18 @@ impl AppCore {
         self.blocks.source(&self.connections, &target.source).ok()
     }
 
+    /// Saves `text` over a file for the agent's write tools: the same `Blocks::save_file` the editor uses, with the change
+    /// time the card showed as `expected`. No lock of this struct is held across the call.
+    pub(crate) fn tool_save_text(&self, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>, String> {
+        self.file_save(source, path, text, expected)
+    }
+
+    /// The files of `source` (`local` or a saved connection), made if need be; none when they cannot be made. Undo reads
+    /// the current text of a file with it.
+    pub(crate) fn tool_open_source(&self, source: &str) -> Option<Arc<dyn FileSource>> {
+        self.blocks.source(&self.connections, source).ok()
+    }
+
     /// What the terminal of `pane` is: the saved connection it runs, or this computer. `None` for a pane that is not
     /// open and for one that shows a block. Reads the tables only.
     pub(crate) fn tool_terminal(&self, pane: PaneId) -> Option<TerminalTarget> {
