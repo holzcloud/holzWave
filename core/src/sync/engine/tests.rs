@@ -1788,3 +1788,204 @@ fn a_file_that_vanishes_between_the_listing_and_the_read_is_written_as_new() {
     assert!(report.errors.is_empty(), "{report:?}");
     assert_eq!(server_plain(&srv, &a, "settings.json"), b"edited");
 }
+
+// ---- the length of a file name -----------------------------------------------------------------------------------------
+
+fn stem_of(length: usize) -> String {
+    // Letters, digits and the two separators, so the test names do not hide behind one repeated character.
+    "abc-DEF_012".chars().cycle().take(length).collect()
+}
+
+#[test]
+fn the_stem_limit_is_derived_from_the_transport() {
+    assert_eq!((max_stem("themes"), max_stem("widgets")), (112, 111));
+    for dir in DIRS {
+        let longest = remote_file(&format!("{dir}/{}.json", stem_of(max_stem(dir))));
+        assert!(safe_segment(&longest) && longest.len() <= MAX_SEGMENT, "{dir}: {longest}");
+        let too_long = remote_file(&format!("{dir}/{}.json", stem_of(max_stem(dir) + 1)));
+        assert!(!safe_segment(&too_long), "{dir}: one more character does not fit");
+    }
+}
+
+#[test]
+fn the_longest_stem_is_accepted_and_one_more_is_not() {
+    assert!(allowed(&format!("themes/{}.json", stem_of(112))) && !allowed(&format!("themes/{}.json", stem_of(113))));
+    assert!(allowed(&format!("widgets/{}.json", stem_of(111))) && !allowed(&format!("widgets/{}.json", stem_of(112))));
+    for bad in ["themes/a b.json", "themes/a.b.json", "themes/a/b.json", "themes/.json", "themes/a%20b.json", "themes/..json", "layouts/a.json"] {
+        assert!(!allowed(bad), "{bad}");
+    }
+    assert!(allowed("themes/a-b_C9.json") && allowed("settings.json"));
+}
+
+/// The version of `name` that the server's blob under `key` holds, opened with the folder's key.
+fn open_blob(d: &Device, srv: &Server, key: &str, name: &str) -> String {
+    let syncer = connect(srv, d, "pw").unwrap();
+    let blob = srv.store.lock().unwrap().files[key].0.clone();
+    String::from_utf8(syncer.key.open(name, &blob).unwrap().1.to_vec()).unwrap()
+}
+
+#[test]
+fn the_longest_theme_and_widget_round_trip_and_lose_a_conflict() {
+    let srv = server();
+    let (a, b) = (device("a-long"), device("b-long"));
+    let names = [format!("themes/{}.json", stem_of(112)), format!("widgets/{}.json", stem_of(111))];
+    for dir in DIRS {
+        fs::create_dir_all(a.dir.join(dir)).unwrap();
+    }
+    for name in &names {
+        put(&a, name, "base");
+    }
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert!(report.errors.is_empty() && report.uploaded.len() == 2, "{report:?}");
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.errors.is_empty() && report.downloaded.len() == 2, "{report:?}");
+    for name in &names {
+        assert_eq!(text(&b, name).as_deref(), Some("base"), "byte for byte");
+    }
+    // Both devices change both files: A first, then B, whose edit has the later stamp and wins.
+    for name in &names {
+        put(&a, name, "from a");
+        put(&b, name, "from b");
+    }
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert!(report.errors.is_empty() && report.uploaded.len() == 2, "{report:?}");
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(report.conflicts.len(), 2, "{report:?}");
+    let backups: Vec<String> = srv.store.lock().unwrap().files.keys().filter(|k| k.starts_with("backups/")).cloned().collect();
+    assert_eq!(backups.len(), 2, "{backups:?}");
+    for key in &backups {
+        let file = key.strip_prefix("backups/").unwrap();
+        assert!(safe_segment(file) && file.len() <= MAX_SEGMENT, "a safe segment of at most 128 characters: {file}");
+        let name = if file.starts_with("themes") { &names[0] } else { &names[1] };
+        assert_eq!(open_blob(&b, &srv, key, name), "from a", "the version that lost");
+    }
+    for name in &names {
+        assert_eq!(server_plain(&srv, &b, name), b"from b");
+    }
+}
+
+#[test]
+fn a_backup_name_that_fits_keeps_its_form_and_one_that_does_not_is_compact_and_unique() {
+    let stamp = |counter: u64, device: u8| Stamp { counter, time: 0, device: [device; 16] };
+    assert_eq!(backup_file("settings.json", &stamp(7, 0xab)), "settings.json.7.abababab.hwx");
+    assert_eq!(backup_file("themes/dark.json", &stamp(7, 0xab)), "themes.dark.json.7.abababab.hwx");
+    for name in [format!("themes/{}.json", stem_of(112)), format!("widgets/{}.json", stem_of(111))] {
+        let flat = name.replace('/', ".");
+        let natural = format!("{flat}.7.abababab.hwx");
+        assert!(natural.len() > MAX_SEGMENT, "the natural name does not fit, which is why there is a compact one");
+        let got = backup_file(&name, &stamp(7, 0xab));
+        assert_eq!(got, format!("{}.{}.hwx", &flat[..64], &sha256_hex(natural.as_bytes())[..16]));
+        assert!(safe_segment(&got), "{got}");
+        let others = [backup_file(&name, &stamp(8, 0xab)), backup_file(&name, &stamp(7, 0xcd))];
+        assert!(others.iter().all(|o| safe_segment(o) && *o != got) && others[0] != others[1], "{others:?}");
+    }
+    // A name just inside the limit keeps its natural form.
+    let inside = format!("themes/{}.json", stem_of(100));
+    assert!(backup_file(&inside, &stamp(7, 0xab)).ends_with(".7.abababab.hwx"));
+}
+
+fn long_file(d: &Device, dir: &str, length: usize) -> String {
+    fs::create_dir_all(d.dir.join(dir)).unwrap();
+    let name = format!("{dir}/{}.json", stem_of(length));
+    write_atomic(&d.dir.join(&name), b"x").unwrap();
+    name
+}
+
+#[test]
+fn a_file_name_over_the_limit_is_reported_with_a_clear_sentence_and_the_others_sync() {
+    let srv = server();
+    let a = device("a-over");
+    let (theme, widget) = (long_file(&a, "themes", 113), long_file(&a, "widgets", 112));
+    write_atomic(&a.dir.join("themes/good.json"), b"{}").unwrap();
+    write_atomic(&a.dir.join("themes/My Theme.json"), b"{}").unwrap();
+    let mut expected = vec![
+        (theme, "the file name is too long to sync: at most 112 characters before .json in themes/, this one has 113".to_owned()),
+        (widget, "the file name is too long to sync: at most 111 characters before .json in widgets/, this one has 112".to_owned()),
+    ];
+    expected.sort();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["themes/good.json"], "{report:?}");
+    let mut errors = report.errors.clone();
+    errors.sort();
+    assert_eq!(errors, expected, "a name with a space is skipped without a word");
+    {
+        let store = srv.store.lock().unwrap();
+        let blobs: Vec<&String> = store.files.keys().filter(|k| k.starts_with("files/")).collect();
+        assert_eq!(blobs, vec!["files/themes.good.json.hwx"], "no blob for the long ones");
+    }
+    // The next run, with nothing else changed, says it again.
+    let mut again = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    again.errors.sort();
+    assert_eq!((again.uploaded.is_empty(), again.errors), (true, expected));
+}
+
+#[test]
+fn at_most_five_names_are_reported_and_the_rest_are_counted() {
+    let srv = server();
+    let a = device("a-eight");
+    fs::create_dir_all(a.dir.join("themes")).unwrap();
+    for i in 0..8 {
+        let stem = format!("{i}{}", stem_of(120));
+        write_atomic(&a.dir.join(format!("themes/{stem}.json")), b"x").unwrap();
+    }
+    write_atomic(&a.dir.join("themes/good.json"), b"{}").unwrap();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["themes/good.json"], "{report:?}");
+    assert_eq!(report.errors.len(), 6, "{report:?}");
+    assert!(report.errors[..5].iter().all(|(name, text)| name.starts_with("themes/") && text.contains("too long to sync")), "{report:?}");
+    assert_eq!(report.errors[5], ("themes".to_owned(), "3 more files in themes/ have names too long to sync".to_owned()));
+}
+
+#[test]
+fn a_hostile_listing_with_an_over_long_remote_name_is_ignored() {
+    let srv = server();
+    let a = device("a-hostile");
+    put(&a, "settings.json", "x");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    {
+        let mut store = srv.store.lock().unwrap();
+        let hostile = format!("files/themes.{}.json.hwx", "a".repeat(125));
+        store.files.insert(hostile, (b"junk".to_vec(), 999));
+    }
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report, Report::default(), "no error, no download");
+    assert!(!a.dir.join("sync-incoming").exists() && !a.dir.join("themes").exists());
+}
+
+#[test]
+fn the_limits_of_the_theme_name_and_the_widget_id_stay_below_the_stem_limit() {
+    assert!(crate::theme::MAX_THEME_NAME <= max_stem("themes"));
+    let longest_id = (1..=200).take_while(|n| crate::widgets::valid_id(&"a".repeat(*n)) || *n == 1).filter(|n| crate::widgets::valid_id(&"a".repeat(*n))).max();
+    assert!(longest_id.is_some_and(|n| n <= max_stem("widgets")), "{longest_id:?}");
+    // And so a file named after its theme name or its widget id always syncs.
+    assert!(allowed(&format!("themes/{}.json", "a".repeat(crate::theme::MAX_THEME_NAME))));
+    assert!(allowed(&format!("widgets/{}.json", "a".repeat(longest_id.unwrap_or(0)))));
+}
+
+#[test]
+fn an_over_limit_file_error_names_the_file_and_not_the_local_path() {
+    let srv = server();
+    let a = device("a-limit");
+    let big = vec![b'x'; 4 * 1024 * 1024 + 100];
+    write_atomic(&a.dir.join("settings.json"), &big).unwrap();
+    write_atomic(&a.dir.join("layout.json"), &big).unwrap();
+    fs::create_dir_all(a.dir.join("sync-incoming")).unwrap();
+    write_atomic(&a.dir.join("sync-incoming/widget_notes.json"), &big).unwrap();
+    write_atomic(&a.dir.join("connections.json"), b"{}").unwrap();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    let folder = a.dir.to_string_lossy().into_owned();
+    for name in ["settings.json", "layout.json", "widget_notes.json"] {
+        let (_, text) = report.errors.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("{name}: {report:?}"));
+        assert!(text.contains("larger than the limit"), "{text}");
+        assert!(text.contains(name) && !text.contains(&folder) && !text.contains("hw-sync"), "names the file, not the path: {text}");
+    }
+    assert!(report.uploaded.contains(&"connections.json".to_owned()), "the other files still sync: {report:?}");
+    // A directory where a file belongs says what it is, again without the path.
+    fs::create_dir_all(a.dir.join("themes/dir.json")).unwrap();
+    fs::create_dir_all(a.dir.join("themes")).unwrap();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    if let Some((_, text)) = report.errors.iter().find(|(n, _)| n == "themes/dir.json") {
+        assert!(text.contains("not a regular file") && !text.contains(&folder), "{text}");
+    }
+}

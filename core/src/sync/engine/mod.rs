@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::crypto::{self, Kdf, Key, Stamp};
-use super::webdav::{Backend, CONFLICT, Cond, safe_segment, sha256_hex};
+use super::webdav::{Backend, CONFLICT, Cond, MAX_SEGMENT, safe_segment, sha256_hex};
 use crate::blocks::{self, BLOCKS_FILE, Block};
 use crate::connections::PANES_FILE;
 use crate::layout::PaneId;
@@ -56,6 +56,8 @@ const CONNECTIONS: &str = "connections.json";
 /// The version of the layout unit, and the most entries one of its two maps may hold.
 const UNIT_VERSION: u32 = 1;
 const MAX_UNIT_ENTRIES: usize = 4096;
+/// The most files of one folder whose names are too long to sync that one run names; the rest are counted.
+const MAX_UNSYNCABLE_SHOWN: usize = 5;
 /// The most a pane file is read at, as everywhere else.
 const PANE_FILE_LIMIT: u64 = 256 * 1024;
 /// The longest connection id or block source a unit may name, and the longest block path.
@@ -112,12 +114,41 @@ fn digest(bytes: &[u8]) -> String {
 
 // ---- names -------------------------------------------------------------------------------------------------------
 
-/// Whether `name` is a file the sync handles: a fixed one, or `themes/<safe>.json`.
+/// What follows the folder name and a dot in the server's file name of a themes or widgets file: `.json` and `.hwx`.
+const REMOTE_TAIL: &str = ".json.hwx";
+
+/// The longest file name stem (the name without `.json`) that a file of the folder `dir` may have: the server's file is
+/// `<dir>.<stem>.json.hwx` and one name on the server is at most [`MAX_SEGMENT`] characters, so this is derived from the
+/// transport's limit (112 for `themes`, 111 for `widgets`) and never typed. Every accepted name can be written, read and
+/// lose a conflict.
+pub fn max_stem(dir: &str) -> usize {
+    MAX_SEGMENT.saturating_sub(dir.len() + 1 + REMOTE_TAIL.len())
+}
+
+/// The characters a file name stem may hold: letters, digits, `-` and `_`.
+fn stem_chars(stem: &str) -> bool {
+    !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Whether `name` is a file the sync handles: a fixed one, or `themes/<stem>.json` and `widgets/<stem>.json` with a stem
+/// of the allowed characters and at most [`max_stem`] of them.
 pub fn allowed(name: &str) -> bool {
     FIXED.contains(&name)
         || name.split_once('/').is_some_and(|(dir, file)| {
-            DIRS.contains(&dir) && file.strip_suffix(".json").is_some_and(|stem| safe_segment(stem) && !stem.contains('.'))
+            DIRS.contains(&dir) && file.strip_suffix(".json").is_some_and(|stem| stem_chars(stem) && stem.len() <= max_stem(dir))
         })
+}
+
+/// Read a synced file of the data folder. An error names the logical file and never the absolute path, which a person
+/// should not have to read in a popover (and which tells a reader of a log where the data folder is).
+fn read_local(path: &Path, name: &str) -> Result<Option<Vec<u8>>> {
+    read_limited(path, MAX_FILE).map_err(|e| {
+        err(match e.kind() {
+            io::ErrorKind::InvalidData => format!("{name} is larger than the limit of {MAX_FILE} bytes"),
+            io::ErrorKind::InvalidInput => format!("{name} is not a regular file"),
+            _ => format!("{name}: {e}"),
+        })
+    })
 }
 
 /// The server's file name for a logical name: `themes/dark.json` is `themes.dark.json.hwx`, `widgets/a.json` is
@@ -148,6 +179,11 @@ pub trait Source: Send {
     fn delete(&self, name: &str) -> Result<()>;
     /// Whether the folder `folder` (`themes` or `widgets`) exists here. A missing folder is not a deletion of its files.
     fn folder_exists(&self, folder: &str) -> bool;
+    /// Local files the sync cannot carry, as a name and a sentence that says why. Reported by every run; the other files
+    /// still sync. The default has none.
+    fn unsyncable(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// Where downloaded files wait until the next start. The running app owns its files (it rewrites the layout, the settings
@@ -471,7 +507,7 @@ fn live_assignments(dir: &Path) -> (BTreeMap<String, String>, BTreeMap<String, B
 /// pane files. `None` when there is no layout. A layout that is not a JSON object is an error that names it: it would
 /// be refused by every other device.
 fn live_unit(dir: &Path) -> Result<Option<Vec<u8>>> {
-    let Some(bytes) = read_limited(&dir.join(LAYOUT), MAX_FILE)? else { return Ok(None) };
+    let Some(bytes) = read_local(&dir.join(LAYOUT), LAYOUT)? else { return Ok(None) };
     let layout: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| err(format!("{LAYOUT} is not valid JSON: {e}")))?;
     if !layout.is_object() {
         return Err(err(format!("{LAYOUT} is not a layout (not a JSON object)")));
@@ -669,13 +705,13 @@ impl Source for ConfigSource {
             }
             return Ok((!map.is_empty()).then(|| serde_json::to_vec(&map).unwrap_or_default()));
         }
-        if let Some(staged) = read_limited(&self.dir.join(INCOMING).join(name), MAX_FILE)? {
+        if let Some(staged) = read_local(&self.dir.join(INCOMING).join(name), name)? {
             return Ok(Some(staged));
         }
         if name == LAYOUT {
             return live_unit(&self.dir);
         }
-        Ok(read_limited(&self.dir.join(name), MAX_FILE)?)
+        read_local(&self.dir.join(name), name)
     }
 
     fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {
@@ -709,7 +745,7 @@ impl Source for ConfigSource {
         }
         let live = self.dir.join(name);
         // The copy comes first: when it cannot be written nothing is removed.
-        if let Some(bytes) = read_limited(&live, MAX_FILE)? {
+        if let Some(bytes) = read_local(&live, name)? {
             if !copy_edit(&self.dir, name, &bytes) {
                 return Err(err("a copy of the file could not be kept in sync-conflicts, so it was not removed"));
             }
@@ -734,6 +770,36 @@ impl Source for ConfigSource {
 
     fn folder_exists(&self, folder: &str) -> bool {
         DIRS.contains(&folder) && fs::metadata(self.dir.join(folder)).is_ok_and(|m| m.is_dir())
+    }
+
+    /// The files of `themes/` and `widgets/` whose names have the right characters but too many of them to be a file on
+    /// the server. At most [`MAX_UNSYNCABLE_SHOWN`] per folder are named; one more entry counts the rest.
+    fn unsyncable(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for dir in DIRS {
+            let Ok(read) = fs::read_dir(self.dir.join(dir)) else { continue };
+            let max = max_stem(dir);
+            let mut long: Vec<(String, usize)> = Vec::new();
+            for entry in read.flatten().take(NOTE_NAMES) {
+                let file = entry.file_name().to_string_lossy().into_owned();
+                let Some(stem) = file.strip_suffix(".json") else { continue };
+                let length = stem.len();
+                if stem_chars(stem) && length > max && entry.path().is_file() {
+                    long.push((file, length));
+                }
+            }
+            long.sort();
+            for (file, length) in long.iter().take(MAX_UNSYNCABLE_SHOWN) {
+                out.push((
+                    format!("{dir}/{file}"),
+                    format!("the file name is too long to sync: at most {max} characters before .json in {dir}/, this one has {length}"),
+                ));
+            }
+            if long.len() > MAX_UNSYNCABLE_SHOWN {
+                out.push(((*dir).to_owned(), format!("{} more files in {dir}/ have names too long to sync", long.len() - MAX_UNSYNCABLE_SHOWN)));
+            }
+        }
+        out
     }
 }
 
@@ -937,6 +1003,8 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                 report.errors.push((name, e.to_string()));
             }
         }
+        // Files the transport cannot carry are told every run, until they are renamed; the others were synced above.
+        report.errors.extend(self.source.unsyncable());
         self.state.save(&self.dir)?;
         // The names a start kept before replacing them come back as conflicts, once.
         for name in kept {
@@ -1228,8 +1296,19 @@ impl<B: Backend, S: Source> Syncer<B, S> {
     }
 }
 
+/// The name of the server's copy of a replaced version: the flat file name, the version's counter and the writer, and
+/// `.hwx`. The longest names the sync accepts would make that longer than a name on the server may be, so then (and only
+/// then) it is the first 64 characters of the flat name, 16 hex characters of the SHA-256 of the long name, and `.hwx`.
 fn backup_file(name: &str, stamp: &Stamp) -> String {
-    format!("{}.{}.{}.hwx", name.replace('/', "."), stamp.counter, hex(&stamp.device[..4]))
+    let flat = name.replace('/', ".");
+    let natural = format!("{flat}.{}.{}.hwx", stamp.counter, hex(&stamp.device[..4]));
+    if natural.len() <= MAX_SEGMENT {
+        return natural;
+    }
+    // A synced name is ASCII, so the cut is on a character boundary.
+    let head = flat.get(..64).unwrap_or(&flat);
+    let tag: String = sha256_hex(natural.as_bytes()).chars().take(16).collect();
+    format!("{head}.{tag}.hwx")
 }
 
 #[cfg(test)]

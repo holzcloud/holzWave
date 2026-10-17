@@ -463,6 +463,22 @@ mod tests {
     }
 
     #[test]
+    fn a_failure_of_the_sync_folder_is_named_in_words() {
+        // A port that refuses connections: bind one, then let it go.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").map(|l| l.local_addr().map_or(0, |a| a.port())).unwrap_or(0);
+        let Ok(dav) = WebDav::new(&format!("http://127.0.0.1:{port}/dav"), "u", "p") else { panic!("a loopback endpoint is accepted") };
+        let Err(ensure) = dav.ensure("") else { panic!("nothing listens on the port") };
+        let Err(list) = dav.list("") else { panic!("nothing listens on the port") };
+        for text in [ensure.to_string(), list.to_string()] {
+            assert!(text.contains("the sync folder"), "{text}");
+            assert!(!text.contains("MKCOL :") && !text.contains("PROPFIND :"), "{text}");
+        }
+        // A path below the folder is shown as it is.
+        let Err(file) = dav.get("files/settings.json.hwx") else { panic!("nothing listens on the port") };
+        assert!(file.to_string().contains("GET files/settings.json.hwx:"), "{file}");
+    }
+
+    #[test]
     fn sha256_hex_is_the_lowercase_digest() {
         assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
