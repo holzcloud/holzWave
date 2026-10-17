@@ -412,6 +412,10 @@ A connection that does not validate is dropped when the file is loaded, with a n
 as `connections.json.bad`. A host key that is not in `known_hosts` is learned on first use; a key that **differs** from a
 known one is always refused and the pane says so.
 
+A WSL connection is kept in the file and in the sync on every OS, so one made on Windows is still there on a Mac, but it
+opens on Windows only: elsewhere opening it is refused with "WSL connections open on Windows only." and the palette does
+not list it.
+
 ## `session.json`
 
 What is restored on the next start, kept apart from `layout.json` because a window position and a directory name do

@@ -5,6 +5,7 @@ import { registerAction, unregisterAction } from "./actions.js";
 import { openBlock } from "./blocks.js";
 import { call } from "./bridge.js";
 import { focusInput } from "./keyboard.js";
+import { state } from "./state.js";
 import { connSummary, paneConns, readConnections, readPaneConns, setPaneConns } from "./connstate.js";
 import type { Connection } from "./connstate.js";
 import type { View } from "./types.js";
@@ -39,8 +40,12 @@ export async function refreshConnections(): Promise<readonly Connection[]> {
   for (const c of saved) {
     const id = `connect.${c.id}`;
     if (dynamicIds.has(id)) continue; // the core's ids are unique; a repeat must not break the others
-    registerAction({ id, title: connectTitle(c), run: () => void connect(c.id) });
-    dynamicIds.add(id);
+    // A WSL connection opens on Windows only: where the platform is known and is not Windows, the palette lacks the
+    // entry (the connection stays in the list and in the sync; the core refuses it with a sentence all the same).
+    if (!(c.kind === "wsl" && state.os !== "" && state.os !== "windows")) {
+      registerAction({ id, title: connectTitle(c), run: () => void connect(c.id) });
+      dynamicIds.add(id);
+    }
     if (c.kind === "ssh") {
       // The files of a host, over SFTP on a connection of their own.
       const filesId = `files.${c.id}`;

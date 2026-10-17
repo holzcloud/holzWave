@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::conn::ConnState;
 use crate::layout::{LoadStatus, PaneId};
 use crate::pane::PaneSpec;
+use crate::platform::Os;
 use crate::persist::{read_limited, write_atomic};
 use crate::profiles::{Kind, Profile, Profiles};
 use crate::secrets::SecretStore;
@@ -85,8 +86,13 @@ impl ConnView {
     }
 }
 
+/// Said when a WSL connection is assigned or started anywhere but on Windows: `wsl.exe` exists there only.
+pub const WSL_ONLY_ON_WINDOWS: &str = "WSL connections open on Windows only.";
+
 pub struct Connections {
     dir: PathBuf,
+    /// The OS the connections open on: a WSL connection is refused unless it is Windows. A field so a test can say it.
+    os: Os,
     home: Option<PathBuf>,
     profiles: Mutex<Profiles>,
     secrets: Arc<dyn SecretStore>,
@@ -107,8 +113,32 @@ impl Connections {
             _ => HashMap::new(),
         };
         panes.retain(|pane, id| live_panes.contains(pane) && profiles.get(id).is_some());
-        let me = Self { dir: dir.to_path_buf(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0) };
+        let me = Self { dir: dir.to_path_buf(), os: Os::current(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0) };
         (me, status)
+    }
+
+    /// The same connections as if they ran on `os` (the seam the tests use; [`load`](Self::load) takes the real OS).
+    #[must_use]
+    pub fn for_os(mut self, os: Os) -> Self {
+        self.os = os;
+        self
+    }
+
+    /// The refusal of a connection that cannot open on this OS: a WSL profile off Windows. The profile stays in the
+    /// list and in the sync (one made on Windows must survive on a Mac); only opening it is refused.
+    fn check_opens_here(&self, profile: &Profile) -> Result<()> {
+        if profile.kind == Kind::Wsl && self.os != Os::Windows {
+            return Err(Error::Unsupported(WSL_ONLY_ON_WINDOWS.into()));
+        }
+        Ok(())
+    }
+
+    /// Whether connection `id` can be opened on this OS, said before a tab is made for it.
+    pub fn ensure_opens_here(&self, id: &str) -> Result<()> {
+        match self.profiles().get(id) {
+            Some(profile) => self.check_opens_here(profile),
+            None => Err(Error::Unsupported(format!("no connection {id}"))),
+        }
     }
 
     fn profiles(&self) -> std::sync::MutexGuard<'_, Profiles> {
@@ -209,9 +239,7 @@ impl Connections {
 
     /// Say that `pane` runs connection `id`. Takes effect when the pane is started.
     pub fn assign(&self, pane: PaneId, id: &str) -> Result<()> {
-        if self.profiles().get(id).is_none() {
-            return Err(Error::Unsupported(format!("no connection {id}")));
-        }
+        self.ensure_opens_here(id)?;
         self.panes().insert(pane, id.to_owned());
         self.save_panes();
         Ok(())
@@ -235,6 +263,7 @@ impl Connections {
     pub fn apply(&self, pane: PaneId, spec: &mut PaneSpec) -> Result<()> {
         let Some(profile) = self.profile_of(pane) else { return Ok(()) };
         let profiles = self.profiles().clone();
+        self.check_opens_here(&profile)?;
         match profile.kind {
             Kind::Ssh => {
                 let known = self.dir.join(KNOWN_HOSTS_FILE);
@@ -418,6 +447,70 @@ mod tests {
         assert_eq!(c.kind_of(&wsl), Some(Kind::Wsl));
         assert_eq!(c.kind_of("nope"), None);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    fn wsl_profile() -> Profile {
+        let mut p = Profile::new("", "Box", "Ubuntu");
+        p.kind = Kind::Wsl;
+        p
+    }
+
+    #[test]
+    fn a_wsl_connection_is_refused_off_windows() {
+        for os in [Os::Macos, Os::Linux] {
+            let d = dir(&format!("wsl-{}", os.name()));
+            let (c, _) = manager(&d, &[3, 4]);
+            let c = c.for_os(os);
+            let id = c.save(wsl_profile(), SecretChange::Keep).unwrap().profile.id;
+            let err = c.assign(3, &id).unwrap_err().to_string();
+            assert!(err.contains(WSL_ONLY_ON_WINDOWS), "{os:?}: {err}");
+            assert!(c.profile_of(3).is_none());
+            assert!(!d.join(PANES_FILE).exists(), "nothing is written for a refused assignment");
+            // The profile itself stays in the list.
+            assert_eq!(c.list().len(), 1);
+
+            // An older file (a profile that was assigned on Windows) is read, and applying it is refused.
+            fs::write(d.join(PANES_FILE), format!("{{\"4\":\"{id}\"}}")).unwrap();
+            let (again, _) = Connections::load(&d, Arc::new(MemoryStore::default()), None, &[3, 4]);
+            let again = again.for_os(os);
+            let mut spec = PaneSpec::new("sh", 80, 24);
+            let err = again.apply(4, &mut spec).unwrap_err().to_string();
+            assert!(err.contains(WSL_ONLY_ON_WINDOWS), "{os:?}: {err}");
+            assert_eq!(spec.program, "sh", "the pane stays a local shell");
+            let _ = fs::remove_dir_all(&d);
+        }
+        let d = dir("wsl-windows");
+        let (c, _) = manager(&d, &[3]);
+        let c = c.for_os(Os::Windows);
+        let id = c.save(wsl_profile(), SecretChange::Keep).unwrap().profile.id;
+        c.assign(3, &id).unwrap();
+        let mut spec = PaneSpec::new("pwsh", 80, 24);
+        c.apply(3, &mut spec).unwrap();
+        assert_eq!(spec.program, "wsl.exe");
+        assert_eq!(spec.args, ["-d", "Ubuntu"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn docker_and_ssh_connections_are_not_gated() {
+        for os in [Os::Macos, Os::Linux, Os::Windows] {
+            let d = dir(&format!("ungated-{}", os.name()));
+            let (c, _) = manager(&d, &[1, 2]);
+            let c = c.for_os(os);
+            let ssh = c.save(profile("Talos"), SecretChange::Set { value: "pw".into() }).unwrap().profile.id;
+            let mut docker = Profile::new("", "Web", "web-1");
+            docker.kind = Kind::Docker;
+            let docker = c.save(docker, SecretChange::Keep).unwrap().profile.id;
+            c.assign(1, &ssh).unwrap();
+            c.assign(2, &docker).unwrap();
+            let mut spec = PaneSpec::new("sh", 80, 24);
+            c.apply(1, &mut spec).unwrap();
+            assert!(spec.ssh.is_some());
+            let mut spec = PaneSpec::new("sh", 80, 24);
+            c.apply(2, &mut spec).unwrap();
+            assert_eq!(spec.program, "docker");
+            let _ = fs::remove_dir_all(&d);
+        }
     }
 
     #[test]

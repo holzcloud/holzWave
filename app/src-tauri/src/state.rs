@@ -1136,6 +1136,8 @@ impl AppCore {
         if !self.connections.contains(id) {
             return Err(format!("no connection {id}"));
         }
+        // Refused before a tab is made for it (a WSL connection off Windows).
+        self.connections.ensure_opens_here(id).map_err(|e| e.to_string())?;
         let view = self.new_tab_in(label)?;
         self.connections.assign(view.focus, id).map_err(|e| e.to_string())?;
         Ok(view)

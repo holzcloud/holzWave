@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
   await listCase(page, url);
+  await wslCase(page, url);
   await stateCase(page, url);
   await dialogCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
@@ -19,13 +20,14 @@ const TALOS = {
 const WEB = { ...TALOS, id: "web", name: "Web", kind: "docker", host: "web-1", has_secret: false };
 
 /** Open the page against the stub; `list` is what `connections_list` answers, `conns` what `pane_connections` answers. */
-async function open(page, url, list = [TALOS, WEB], conns = []) {
+async function open(page, url, list = [TALOS, WEB], conns = [], os = null) {
   await page.addInitScript(
-    ([l, c]) => {
+    ([l, c, o]) => {
+      if (o !== null) window.__MOCK__.on("app_info", () => ({ version: "0.0.1-alpha1", os: o, hostname: "woodbox" }));
       window.__MOCK__.on("connections_list", () => structuredClone(window.__LIST ?? l));
       window.__MOCK__.on("pane_connections", () => structuredClone(window.__CONNS ?? c));
     },
-    [list, conns],
+    [list, conns, os],
   );
   await page.goto(`${url}index.html?renderer=canvas`);
   await page.waitForSelector(".divider");
@@ -45,6 +47,31 @@ async function listCase(page, url) {
   await page.evaluate(() => window.__registry.runAction("connect.talos"));
   const asked = await page.evaluate(() => window.__MOCK__.callsOf("connect"));
   assert.deepEqual(asked, [{ id: "talos" }]);
+}
+
+const BOX = { ...TALOS, id: "box", name: "Box", kind: "wsl", host: "Ubuntu", has_secret: false };
+
+async function wslCase(page, url) {
+  const wslTitle = "Connect: Box (wsl)";
+  const titlesAt = async (os) => {
+    await open(page, url, [TALOS, WEB, BOX], [], os);
+    return page.evaluate(() => window.__registry.listActions().map((a) => a.title));
+  };
+  for (const os of ["macos", "linux"]) {
+    const titles = await titlesAt(os);
+    assert.ok(!titles.includes(wslTitle), `a WSL connection has no connect entry on ${os}`);
+    assert.ok(titles.includes("Connect: Talos (ssh)") && titles.includes("Connect: Web (docker)"), `the others stay on ${os}`);
+    // The dialog still lists it: the profile stays in the list and in the sync.
+    await page.evaluate(() => window.__registry.runAction("connections.open"));
+    await page.waitForSelector(".dlg.conns");
+    const names = await page.locator(".conns .cx-list button .cx-name").allTextContents();
+    assert.deepEqual(names, ["Talos", "Web", "Box"], `the dialog lists the WSL connection on ${os}`);
+  }
+  const win = await titlesAt("windows");
+  assert.ok(win.includes(wslTitle) && win.includes("Connect: Talos (ssh)") && win.includes("Connect: Web (docker)"), "all three on windows");
+  // The platform is not known yet (an empty answer): the entry is offered; it is hidden only when the platform is known.
+  const unknown = await titlesAt("");
+  assert.ok(unknown.includes(wslTitle), "an unknown platform offers the entry");
 }
 
 async function stateCase(page, url) {
