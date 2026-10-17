@@ -2076,6 +2076,7 @@ dependencies = [
 name = "holzwave-app"
 version = "0.0.1-alpha2"
 dependencies = [
+ "holzwave-apple-ai",
  "holzwave-core",
  "holzwave-ipc",
  "serde",

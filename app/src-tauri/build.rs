@@ -5,7 +5,37 @@
 //! names; `tests/acl.rs` fails when the invoke handler of `src/lib.rs` or the permissions of
 //! `capabilities/default.json` disagree with it. Do not add a command to one of the three without the others.
 
+/// Repeats a link argument of the Apple bridge for this crate.
+///
+/// A link argument that a library crate prints does not reach the crates that depend on it. The bridge hands the two it
+/// needs over as build metadata (cargo shows it to a dependent's build script as `DEP_<links>_<key>`), and this script
+/// prints them again for the app. The variables exist only when the bridge is a dependency, which it is only on macOS.
+///
+/// - `WEAK_FRAMEWORK` names Apple's model framework. It is linked weakly: the app starts on a macOS that has no such
+///   framework (below macOS 26), and the framework is used only after the system says it is there.
+/// - `SWIFT_RPATH` is the run path of the Swift runtime libraries, which the operating system keeps in `/usr/lib/swift`;
+///   without it the process dies at start with `Library not loaded: @rpath/libswift_Concurrency.dylib`.
+///
+/// A value that is not a plain word (a framework) or a plain absolute path stops the build, so metadata can never
+/// smuggle another argument to the linker.
+fn repeat_bridge_link_arguments() {
+  if let Ok(framework) = std::env::var("DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK") {
+    if framework.is_empty() || !framework.chars().all(|c| c.is_ascii_alphanumeric()) {
+      panic!("DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK is not a framework name");
+    }
+    println!("cargo:rustc-link-arg=-Wl,-weak_framework,{framework}");
+  }
+  if let Ok(path) = std::env::var("DEP_HOLZWAVE_APPLE_AI_SWIFT_RPATH") {
+    let plain = path.starts_with('/') && path.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'));
+    if !plain {
+      panic!("DEP_HOLZWAVE_APPLE_AI_SWIFT_RPATH is not a plain absolute path");
+    }
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{path}");
+  }
+}
+
 fn main() {
+  repeat_bridge_link_arguments();
   let manifest = tauri_build::AppManifest::new().commands(&[
     "get_layout",
     "start_pane",

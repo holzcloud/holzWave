@@ -108,6 +108,11 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
     (
         "holzwave-app",
         &[
+            (
+                "holzwave-apple-ai",
+                "the on-device model of macOS: a Swift package behind a C ABI; the dependency sits in the macOS target \
+                 table so Windows, Linux and mobile builds never compile it",
+            ),
             ("holzwave-core", "everything the shell shows and controls"),
             ("holzwave-ipc", "server side of the local socket that wsh talks to (lib.rs, state.rs)"),
             ("serde", "arguments of the commands and the events to the page"),
@@ -1477,6 +1482,204 @@ fn gating_guard_accepts_a_macos_target_table() {
 
     let comment = "[dependencies]\n# holzwave-apple-ai = \"1\"\nserde = \"1\"\n";
     assert_eq!(macos_gating_problems(comment), Vec::<String>::new());
+}
+
+/// What is wrong with the build script of a crate that depends on the bridge. The app must start on a Mac that has no
+/// Apple model framework, so the framework is only ever linked weakly, and the run path of the Swift runtime must be there
+/// for the process to start at all. The link arguments that a library crate prints do not reach the crates that depend on
+/// it; the bridge hands them over as build metadata, and the dependent's own build script must read that metadata and print
+/// the same arguments. The text is read without comments; one sentence for each thing that is missing or wrong.
+fn weak_link_problems(build_rs: &str) -> Vec<String> {
+    let code = without_comments(build_rs, Syntax::Rust);
+    let mut problems = Vec::new();
+    for (needle, what) in [
+        ("DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK", "reads the metadata that names the framework the bridge links weakly"),
+        ("cargo:rustc-link-arg=-Wl,-weak_framework,", "prints the weak-framework link argument"),
+        ("DEP_HOLZWAVE_APPLE_AI_SWIFT_RPATH", "reads the metadata that names the run path of the Swift runtime"),
+        ("cargo:rustc-link-arg=-Wl,-rpath,", "prints the run path argument"),
+    ] {
+        if !code.contains(needle) {
+            problems.push(format!(
+                "the build script does not name {needle}: it must repeat what the bridge links, because a library crate's \
+                 link arguments do not reach its dependents (it {what})"
+            ));
+        }
+    }
+    // `-weak_framework` has `weak_` between the dash and the word, so any `-framework` is a strong link, as is the
+    // `framework=` kind of the link library argument.
+    for (needle, what) in [
+        ("cargo:rustc-link-lib=framework=", "a link library argument of the kind framework"),
+        ("-framework", "a -framework argument"),
+    ] {
+        if code.contains(needle) {
+            problems.push(format!(
+                "the build script holds {what} ({needle}): a strong link makes the app fail to start where the framework \
+                 does not exist; link it with -weak_framework only"
+            ));
+        }
+    }
+    problems
+}
+
+#[test]
+fn app_build_script_repeats_the_weak_link_of_the_bridge() {
+    let problems = weak_link_problems(&read("app/src-tauri/build.rs"));
+    assert!(problems.is_empty(), "app/src-tauri/build.rs:\n  {}", problems.join("\n  "));
+}
+
+const GOOD_BUILD_SCRIPT: &str = r#"
+fn main() {
+    if let Ok(framework) = std::env::var("DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK") {
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,{framework}");
+    }
+    if let Ok(path) = std::env::var("DEP_HOLZWAVE_APPLE_AI_SWIFT_RPATH") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{path}");
+    }
+}
+"#;
+
+#[test]
+fn weak_link_guard_accepts_the_metadata_form() {
+    assert_eq!(weak_link_problems(GOOD_BUILD_SCRIPT), Vec::<String>::new());
+    // Comments do not count as code: a name that appears only in a comment is missing.
+    let commented = GOOD_BUILD_SCRIPT.replace("fn main", "// DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK is the name\nfn main");
+    assert_eq!(weak_link_problems(&commented), Vec::<String>::new());
+}
+
+#[test]
+fn weak_link_guard_reports_a_missing_variable() {
+    let without = GOOD_BUILD_SCRIPT.replace("DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK", "DEP_SOMETHING_ELSE");
+    let problems = weak_link_problems(&without);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK"), "{problems:?}");
+    // A name that appears only in a comment is as good as missing.
+    let only_commented = "// DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK\nfn main() {}\n";
+    assert_eq!(weak_link_problems(only_commented).len(), 4);
+}
+
+#[test]
+fn weak_link_guard_reports_a_missing_rpath() {
+    let without = GOOD_BUILD_SCRIPT.replace("cargo:rustc-link-arg=-Wl,-rpath,", "cargo:warning=");
+    let problems = weak_link_problems(&without);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("-Wl,-rpath,"), "{problems:?}");
+    let no_variable = GOOD_BUILD_SCRIPT.replace("DEP_HOLZWAVE_APPLE_AI_SWIFT_RPATH", "DEP_SOMETHING_ELSE");
+    assert_eq!(weak_link_problems(&no_variable).len(), 1);
+}
+
+#[test]
+fn weak_link_guard_reports_a_strong_framework_argument() {
+    let lib = format!("{GOOD_BUILD_SCRIPT}\nfn more() {{ println!(\"cargo:rustc-link-lib=framework=FoundationModels\"); }}\n");
+    let problems = weak_link_problems(&lib);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("strong link"), "{problems:?}");
+    let arg = format!("{GOOD_BUILD_SCRIPT}\nfn more() {{ println!(\"cargo:rustc-link-arg=-Wl,-framework,FoundationModels\"); }}\n");
+    assert_eq!(weak_link_problems(&arg).len(), 1);
+    // The weak argument itself is not a strong one.
+    assert!(!GOOD_BUILD_SCRIPT.contains("-framework"));
+}
+
+/// The text of the string after `key` (a quoted word followed by a colon or an equals sign), if there is one.
+fn quoted_value_after<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let at = text.find(key)? + key.len();
+    let rest = &text[at..];
+    let open = rest.find('"')? + 1;
+    let close = rest[open..].find('"')?;
+    Some(&rest[open..open + close])
+}
+
+/// A dotted version as numbers; `None` for anything that is not digits and dots.
+fn version_numbers(text: &str) -> Option<Vec<u64>> {
+    let parts: Option<Vec<u64>> = text.split('.').map(|part| part.parse().ok()).collect();
+    parts.filter(|numbers| !numbers.is_empty())
+}
+
+/// What is wrong with the minimum macOS of the bundle against the floor of the Swift package. The bridge is built for a
+/// deployment floor, and a bundle that declares a lower minimum would start on a Mac where the Swift code cannot run. The
+/// floor is the string constant `MACOS_FLOOR` of the bridge's build script; the minimum is `minimumSystemVersion` inside the
+/// `macOS` object of the Tauri configuration, which is read as text because this file has no JSON reader for it. The two must
+/// be equal as version numbers (`13` and `13.0` are).
+fn floor_problems(conf: &str, bridge_build_rs: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let floor = quoted_value_after(bridge_build_rs, "MACOS_FLOOR: &str =").and_then(version_numbers);
+    if floor.is_none() {
+        problems.push("the build script of the bridge has no MACOS_FLOOR with a version number".to_owned());
+    }
+    let mac = conf.find("\"macOS\"").map(|at| &conf[at..]);
+    let minimum = mac.and_then(|mac| quoted_value_after(mac, "\"minimumSystemVersion\":")).and_then(version_numbers);
+    if minimum.is_none() {
+        problems.push(
+            "tauri.conf.json has no bundle.macOS.minimumSystemVersion with a version number: the bundle would declare the \
+             default of the tooling, below the floor of the Swift package"
+                .to_owned(),
+        );
+    }
+    if let (Some(floor), Some(minimum)) = (floor, minimum) {
+        let width = floor.len().max(minimum.len());
+        let pad = |numbers: &[u64]| -> Vec<u64> { (0..width).map(|at| numbers.get(at).copied().unwrap_or(0)).collect() };
+        let (floor, minimum) = (pad(&floor), pad(&minimum));
+        if minimum < floor {
+            problems.push(format!(
+                "the bundle's minimum macOS {minimum:?} is lower than the floor {floor:?} of the Swift package: it would \
+                 start on a Mac where the bridge cannot run"
+            ));
+        } else if minimum > floor {
+            problems.push(format!(
+                "the bundle's minimum macOS {minimum:?} is higher than the floor {floor:?} of the Swift package: keep the two \
+                 equal, so the floor has one source"
+            ));
+        }
+    }
+    problems
+}
+
+#[test]
+fn bundle_minimum_macos_equals_the_floor_of_the_bridge() {
+    let problems = floor_problems(&read("app/src-tauri/tauri.conf.json"), &read("plugins/apple-ai/build.rs"));
+    assert!(problems.is_empty(), "the minimum macOS of the bundle:\n  {}", problems.join("\n  "));
+}
+
+const TOY_FLOOR: &str = "const MACOS_FLOOR: &str = \"13.0\";\n";
+
+fn toy_conf(minimum: &str) -> String {
+    format!("{{\n  \"bundle\": {{\n    \"android\": {{}},\n    \"macOS\": {{\n      \"minimumSystemVersion\": \"{minimum}\"\n    }}\n  }}\n}}\n")
+}
+
+#[test]
+fn floor_guard_accepts_equal_versions() {
+    assert_eq!(floor_problems(&toy_conf("13.0"), TOY_FLOOR), Vec::<String>::new());
+    assert_eq!(floor_problems(&toy_conf("13"), TOY_FLOOR), Vec::<String>::new());
+    assert_eq!(floor_problems(&toy_conf("13.0.0"), TOY_FLOOR), Vec::<String>::new());
+}
+
+#[test]
+fn floor_guard_reports_a_lower_bundle_minimum() {
+    for lower in ["12.0", "10.13", "12.6.1"] {
+        let problems = floor_problems(&toy_conf(lower), TOY_FLOOR);
+        assert_eq!(problems.len(), 1, "{lower}: {problems:?}");
+        assert!(problems[0].contains("lower"), "{problems:?}");
+    }
+    // A higher one is told too: the floor has one source.
+    let higher = floor_problems(&toy_conf("14.0"), TOY_FLOOR);
+    assert_eq!(higher.len(), 1, "{higher:?}");
+    assert!(higher[0].contains("higher"), "{higher:?}");
+    // Numbers, not text: 13.10 is not lower than 13.2.
+    assert_eq!(floor_problems(&toy_conf("13.10"), "const MACOS_FLOOR: &str = \"13.2\";").len(), 1);
+}
+
+#[test]
+fn floor_guard_reports_a_missing_key() {
+    let none = "{ \"bundle\": { \"android\": {} } }";
+    let problems = floor_problems(none, TOY_FLOOR);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("minimumSystemVersion"), "{problems:?}");
+    // The key must sit in the macOS object, and the value must be a version.
+    assert_eq!(floor_problems("{ \"minimumSystemVersion\": \"13.0\" }", TOY_FLOOR).len(), 1);
+    assert_eq!(floor_problems(&toy_conf("latest"), TOY_FLOOR).len(), 1);
+    // A build script without the constant is told too.
+    let problems = floor_problems(&toy_conf("13.0"), "fn main() {}");
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("MACOS_FLOOR"), "{problems:?}");
 }
 
 /// Names that must not appear in the Swift sources of the bridge, each with the reason. The Rust scan of this file reads

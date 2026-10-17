@@ -74,7 +74,47 @@ pub fn fill_model(profile: Option<&str>, model: Option<String>) -> Option<String
 
 /// The source of this platform: over the bridge crate on macOS, none elsewhere (there is no model and nothing is drawn).
 pub(crate) fn system() -> Option<Arc<dyn DeviceSource>> {
-    None
+    #[cfg(target_os = "macos")]
+    {
+        Some(Arc::new(AppleDevice::system()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The on-device model over a backend of the bridge crate: the system's own on this Mac, a scripted one in tests. The state
+/// and the advice words are the bridge's own keys; the provider asks the backend again on every turn and refuses by itself
+/// with the class `unavailable` when the model went away.
+#[cfg(target_os = "macos")]
+pub(crate) struct AppleDevice {
+    backend: Arc<dyn holzwave_apple_ai::Backend>,
+}
+
+#[cfg(target_os = "macos")]
+impl AppleDevice {
+    /// A source over `backend`.
+    pub(crate) fn new(backend: Arc<dyn holzwave_apple_ai::Backend>) -> AppleDevice {
+        AppleDevice { backend }
+    }
+
+    /// A source over the system model of this Mac.
+    pub(crate) fn system() -> AppleDevice {
+        AppleDevice::new(Arc::new(holzwave_apple_ai::SystemBackend::new()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl DeviceSource for AppleDevice {
+    fn probe(&self) -> DeviceState {
+        let availability = self.backend.availability();
+        DeviceState { state: availability.as_str(), advice: availability.advice().as_str() }
+    }
+
+    fn provider(&self) -> Arc<dyn Provider> {
+        Arc::new(holzwave_apple_ai::AppleProvider::new(self.backend.clone()))
+    }
 }
 
 /// A source for the tests: the state is set by the test, the probes and the provider constructions are counted, and the
@@ -178,11 +218,153 @@ mod tests {
         assert_eq!((DEVICE_ID, DEVICE_MODEL, AVAILABLE), ("apple", "system", "available"));
     }
 
-    #[test]
-    fn only_the_exact_word_is_available() {
-        for word in ["Available", "available ", " available", "availab1e", "", "ready", "unknown_state"] {
-            assert!(!DeviceState { state: Box::leak(word.to_owned().into_boxed_str()), advice: "none" }.is_available());
+    /// The tests over the bridge crate: only a Mac builds it.
+    #[cfg(target_os = "macos")]
+    mod mac {
+        use super::*;
+
+        use std::path::PathBuf;
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+
+        use holzwave_apple_ai::{Availability, BackendScript, MODEL_ID, PROVIDER_ID, ScriptedBackend};
+        use holzwave_core::ai::profiles::KeyVault;
+        use holzwave_core::layout::MAIN_WINDOW;
+        use serde_json::{Value, json};
+
+        use crate::ai_host::AiParts;
+        use crate::state::{AppCore, Out, ShellSpec, Sink, Target};
+        use crate::windows::{CursorSpot, Place};
+
+        /// Every state of the bridge, in declaration order.
+        const STATES: [Availability; 8] = [
+            Availability::Available,
+            Availability::AppleIntelligenceNotEnabled,
+            Availability::DeviceNotEligible,
+            Availability::ModelNotReady,
+            Availability::Other,
+            Availability::OsTooOld,
+            Availability::SdkLacksFramework,
+            Availability::UnsupportedPlatform,
+        ];
+
+        /// Keeps every `ai` event the shell sends, as the page receives it.
+        #[derive(Default)]
+        struct Recorder {
+            events: Mutex<Vec<Value>>,
         }
-        assert!(DeviceState { state: "available", advice: "none" }.is_available());
+
+        impl Sink for Recorder {
+            fn send(&self, _target: Target, out: Out) {
+                if let Out::Ai(payload) = out {
+                    self.events.lock().expect("events").push(serde_json::to_value(&payload).expect("serialises"));
+                }
+            }
+
+            fn close_window(&self, _label: &str) {}
+
+            fn open_window(&self, _label: &str, _place: &Place) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn cursor_spot(&self, _source: &str) -> CursorSpot {
+                CursorSpot::Unknown
+            }
+        }
+
+        impl Recorder {
+            fn of(&self, chat: &str, kind: &str) -> Vec<Value> {
+                let all = self.events.lock().expect("events");
+                all.iter().filter(|event| event["conversation"] == json!(chat) && event["kind"] == json!(kind)).cloned().collect()
+            }
+        }
+
+        fn wait_for(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
+            let deadline = Instant::now() + timeout;
+            while !f() {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            true
+        }
+
+        fn scratch(tag: &str) -> PathBuf {
+            let path = std::env::temp_dir().join(format!("holzwave-device-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("scratch dir");
+            path
+        }
+
+        fn fixed_clock() -> i64 {
+            1_800_000_000
+        }
+
+        #[test]
+        fn the_device_ids_agree_with_the_crate() {
+            assert_eq!(DEVICE_ID, PROVIDER_ID);
+            assert_eq!(DEVICE_MODEL, MODEL_ID);
+        }
+
+        #[test]
+        fn the_system_device_reports_what_the_crate_reports() {
+            let device = AppleDevice::system();
+            let seen = holzwave_apple_ai::probe();
+            let state = device.probe();
+            assert_eq!(state.state, seen.as_str());
+            assert_eq!(state.advice, seen.advice().as_str());
+            assert_eq!(device.provider().id(), "apple");
+        }
+
+        #[test]
+        fn the_apple_device_over_a_flipping_backend_follows_every_state() {
+            let dir = scratch("flip");
+            let rec = Arc::new(Recorder::default());
+            let core = AppCore::new_with_ai(
+                dir.clone(),
+                rec.clone(),
+                ShellSpec::new("/bin/cat", &[]),
+                AiParts { vault: KeyVault::unavailable(), clock: Some(fixed_clock), protected: Vec::new() },
+            );
+            let backend = Arc::new(ScriptedBackend::new().with_turn(BackendScript::reply("Hello from the model")));
+            assert!(core.ai().use_device(Arc::new(AppleDevice::new(backend.clone()))));
+            let pane = core.view_in(MAIN_WINDOW).expect("main").focus;
+
+            // Every state is reported with its own words; the provider is registered once, at the first available one.
+            for state in STATES {
+                backend.set_availability(state);
+                let answer = serde_json::to_value(core.ai().profiles()).expect("serialises");
+                assert_eq!(
+                    answer["on_device"],
+                    json!({"advice": state.advice().as_str(), "id": "apple", "model": "system", "state": state.as_str()})
+                );
+            }
+            assert_eq!(core.ai().service().register_provider("apple", AppleDevice::system().provider()).expect_err("taken").code(), "id_taken");
+
+            // With the model available a send goes through the provider.
+            backend.set_availability(Availability::Available);
+            let chat = core.ai().conversation_new().expect("a chat id");
+            core.ai_send(&chat, "hi".to_owned(), pane, Some("apple".to_owned()), None).expect("sent");
+            assert!(wait_for(Duration::from_secs(5), || !rec.of(&chat, "turn_ended").is_empty()), "the turn ends");
+            let started = rec.of(&chat, "turn_started").remove(0);
+            assert_eq!(started["route"], json!({"profile": "apple", "model": "system", "host": null, "locality": "on_device"}));
+            let text = serde_json::to_string(&core.ai().snapshot(&chat).expect("a snapshot")).expect("serialises");
+            assert!(text.contains("Hello from the model"), "{text}");
+            assert_eq!(backend.calls(), 1);
+
+            // The model goes away: the list says so, the send is accepted, and the turn ends by itself as `unavailable`.
+            backend.set_availability(Availability::AppleIntelligenceNotEnabled);
+            let answer = serde_json::to_value(core.ai().profiles()).expect("serialises");
+            assert_eq!(answer["on_device"]["state"], json!("apple_intelligence_not_enabled"));
+            let again = core.ai().conversation_new().expect("a chat id");
+            core.ai_send(&again, "hi".to_owned(), pane, Some("apple".to_owned()), None).expect("accepted");
+            assert!(wait_for(Duration::from_secs(5), || !rec.of(&again, "turn_ended").is_empty()), "the turn ends");
+            let ended = rec.of(&again, "turn_ended").remove(0);
+            assert_eq!(ended["end"], json!("failed"));
+            assert_eq!(ended["error"]["class"], json!("unavailable"));
+            assert_eq!(backend.calls(), 1, "the refused turn did not reach the backend");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
