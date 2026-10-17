@@ -7,21 +7,31 @@
 //! source and no decision of any kind; a key is written to the service and never read back.
 
 use std::fmt;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use holzwave_core::ai::profiles::{KeyError, KeySlot, KeyStatus, KeyVault, Preset, ProfileInput, ProfileView, Removal};
+use holzwave_core::ai::gate::OfferId;
 use holzwave_core::ai::provider::Provider;
+use holzwave_core::ai::redact::SourceText;
 use holzwave_core::ai::service::events::{AiEvent, ChatState};
-use holzwave_core::ai::service::{AiService, AiSink, SendRequest, ServiceError, TurnTicket};
+use holzwave_core::ai::service::{
+    AiService, AiSink, ContextRefusal, ContextSource, ContextState, Fetched, OfferView, ReadRefusal, SendRequest,
+    ServiceError, TurnTicket,
+};
 use holzwave_core::ai::store::{ConversationId, ConversationSummary, JsonDirStore, StoreError};
-use holzwave_core::ai::tools::DenyPolicy;
-use holzwave_core::ai::types::ApiKey;
+use holzwave_core::ai::tools::{Access, DenyPolicy, FsKind, Style};
+use holzwave_core::ai::types::{ApiKey, ContextKind};
 use holzwave_core::ai::wire::Wire;
+use holzwave_core::blocks::{Block, BlockKind, LOCAL};
+use holzwave_core::Error as CoreError;
+use holzwave_core::files::{FileSource, Kind as FileKind};
 use holzwave_core::layout::PaneId;
+use holzwave_core::preview::{Content, SNIFF, classify};
 use holzwave_core::secrets::KeychainStore;
 use holzwave_core::settings::Settings;
+use holzwave_core::textread::TextRegion;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::state::{AppCore, Out, Sink, Target};
@@ -268,6 +278,8 @@ impl fmt::Debug for ProfileInputMsg {
 /// the naming of the refusals, and decides nothing.
 pub struct AiHost {
     service: AiService,
+    /// The source of shared content, kept so the core can hand it its weak reference once the core exists.
+    context: Arc<ShellContext>,
 }
 
 impl AiHost {
@@ -275,14 +287,22 @@ impl AiHost {
     /// agent may never touch (the tools that follow add the others). Nothing else happens here: no thread, no socket,
     /// no keychain call.
     pub fn new(dir: &Path, sink: Arc<dyn Sink>, parts: AiParts) -> AiHost {
+        let context = Arc::new(ShellContext::new(dir));
         let mut builder =
             AiService::builder(Arc::new(JsonDirStore::new(dir.join(CHATS_DIR))), Arc::new(ShellAiSink { sink }), dir)
                 .vault(parts.vault)
-                .deny_policy(DenyPolicy::new(vec![dir.to_path_buf()]));
+                .deny_policy(DenyPolicy::new(protected_dirs(dir)))
+                .context_source(context.clone());
         if let Some(clock) = parts.clock {
             builder = builder.clock(clock);
         }
-        AiHost { service: builder.build() }
+        AiHost { service: builder.build(), context }
+    }
+
+    /// Gives the source of shared content the core it reads panes and files through. Held weakly and set once; a call
+    /// after the first changes nothing.
+    pub fn bind(&self, core: Weak<AppCore>) {
+        self.context.bind(core);
     }
 
     /// The service, for the plans that add a gate, a tool host or a decision to the shell.
@@ -307,14 +327,86 @@ impl AiHost {
         profile: Option<String>,
         model: Option<String>,
     ) -> Result<TicketView, AiFault> {
-        let mut request = SendRequest::new(parse_conversation(conversation)?, text, pane);
-        if let Some(profile) = given(profile) {
-            request = request.profile(profile);
-        }
-        if let Some(model) = given(model) {
-            request = request.model(model);
-        }
+        let request = request_of(conversation, text, pane, profile, model)?;
         self.service.send(request).map(TicketView::from).map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// [`AiHost::send`] with an offer that was previewed for this chat, this pane and this route: the page names the
+    /// offer and the numbers of the items it picked, never their text. The service spends the offer, and a refusal of
+    /// it is the fault `context`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn send_with_offer(
+        &self,
+        conversation: &str,
+        text: String,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+        offer: String,
+        picked: Vec<u32>,
+    ) -> Result<TicketView, AiFault> {
+        let offer = OfferId::parse(&offer).ok_or_else(|| context_fault(ContextRefusal::StaleOffer))?;
+        let request = request_of(conversation, text, pane, profile, model)?.offer(offer, picked);
+        self.service.send(request).map(TicketView::from).map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// What `pane` can offer for this chat and where it would go: no text. A blank `profile` or `model` is not given.
+    /// This classifies the destination (a name lookup for a host name) and blocks, so call it from a worker thread.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn context_state(
+        &self,
+        conversation: &str,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+    ) -> Result<ContextState, AiFault> {
+        let id = parse_conversation(conversation)?;
+        let (profile, model) = (given(profile), given(model));
+        self.service
+            .context_state(&id, pane, profile.as_deref(), model.as_deref())
+            .map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// Shares `pane` for the chat on this route, or ends the share. Nothing is read.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn context_share(
+        &self,
+        conversation: &str,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+        shared: bool,
+    ) -> Result<ContextState, AiFault> {
+        let id = parse_conversation(conversation)?;
+        let (profile, model) = (given(profile), given(model));
+        self.service
+            .context_share(&id, pane, profile.as_deref(), model.as_deref(), shared)
+            .map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// Reads the asked kinds from the shared `pane` and offers them: labels, sizes and findings, never text.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn context_preview(
+        &self,
+        conversation: &str,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+        kinds: Vec<ContextKind>,
+    ) -> Result<OfferView, AiFault> {
+        let id = parse_conversation(conversation)?;
+        let (profile, model) = (given(profile), given(model));
+        self.service
+            .context_preview(&id, pane, profile.as_deref(), model.as_deref(), &kinds)
+            .map_err(|e| AiFault::from_service(&e))
+    }
+
+    /// Tells the service that the pane of a chat closed: the shares of the chat end. An id that is not a chat id is
+    /// ignored.
+    pub fn chat_closed(&self, conversation: &str) {
+        if let Ok(id) = ConversationId::parse(conversation) {
+            self.service.chat_closed(&id);
+        }
     }
 
     /// The state of a chat at this moment: what a page that saw every event holds.
@@ -407,6 +499,36 @@ impl AiHost {
     }
 }
 
+/// The places the agent may never touch: the data directory today. The tools that follow add the others. The deny
+/// policy of the service and the one the source of shared content reads files through are built from this one list.
+fn protected_dirs(dir: &Path) -> Vec<PathBuf> {
+    vec![dir.to_path_buf()]
+}
+
+/// The refusal of a context call as the page receives it.
+#[cfg_attr(not(test), allow(dead_code))]
+fn context_fault(refusal: ContextRefusal) -> AiFault {
+    AiFault::from_service(&ServiceError::Context(refusal))
+}
+
+/// The request of a text send: the chat, the typed text, the pane, and the profile and model when they are given.
+fn request_of(
+    conversation: &str,
+    text: String,
+    pane: PaneId,
+    profile: Option<String>,
+    model: Option<String>,
+) -> Result<SendRequest, AiFault> {
+    let mut request = SendRequest::new(parse_conversation(conversation)?, text, pane);
+    if let Some(profile) = given(profile) {
+        request = request.profile(profile);
+    }
+    if let Some(model) = given(model) {
+        request = request.model(model);
+    }
+    Ok(request)
+}
+
 /// The id of a chat, parsed at the boundary: nothing else is ever used as a file name.
 fn parse_conversation(text: &str) -> Result<ConversationId, AiFault> {
     ConversationId::parse(text).map_err(|_| AiFault::invalid_conversation())
@@ -415,6 +537,169 @@ fn parse_conversation(text: &str) -> Result<ConversationId, AiFault> {
 /// `value` unless it is absent or only white space.
 fn given(value: Option<String>) -> Option<String> {
     value.filter(|text| !text.trim().is_empty())
+}
+
+// ---- what a pane or a file gives ------------------------------------------------------------------------------
+
+/// The source of shared content: the text a terminal pane shows, and the file a preview pane shows.
+///
+/// A terminal region is read from the rendered grid on the engine thread of the pane, and the cells the engine drew
+/// hidden travel as byte ranges, so the gate removes and reports them. A file is read as saved on disk, only after the
+/// deny list allows its path. Nothing is cleaned here: the gate is the one cleaner. `Debug` prints nothing of the
+/// content.
+struct ShellContext {
+    core: OnceLock<Weak<AppCore>>,
+    deny: DenyPolicy,
+}
+
+impl fmt::Debug for ShellContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShellContext").finish_non_exhaustive()
+    }
+}
+
+/// A file as the source read it: what it is, its name and its first bytes.
+struct FileRead {
+    kind: ContextKind,
+    name: String,
+    bytes: Vec<u8>,
+}
+
+impl ShellContext {
+    fn new(dir: &Path) -> ShellContext {
+        ShellContext { core: OnceLock::new(), deny: DenyPolicy::new(protected_dirs(dir)) }
+    }
+
+    fn bind(&self, core: Weak<AppCore>) {
+        let _ = self.core.set(core);
+    }
+
+    fn core(&self) -> Option<Arc<AppCore>> {
+        self.core.get().and_then(Weak::upgrade)
+    }
+
+    /// The path of the file of `block` when the deny list lets it be read: the resolved path for this computer, the
+    /// path as spelled for a saved connection. Nothing is opened before this answers.
+    fn readable_path(&self, block: &Block) -> Result<String, ReadRefusal> {
+        if block.source == LOCAL {
+            let local = Path::new(&block.path);
+            let resolved = self.deny.check_local(local, Access::Read).map_err(|_| ReadRefusal::Denied)?;
+            return resolved.to_str().map(str::to_owned).ok_or(ReadRefusal::Denied);
+        }
+        self.deny.check(Style::Posix, FsKind::Remote, &block.path, Access::Read).map_err(|_| ReadRefusal::Denied)?;
+        Ok(block.path.clone())
+    }
+
+    /// Reads at most `limit` bytes of the file a preview pane shows and says what it is: Markdown is a `Preview`, other
+    /// text a `File`, anything else is not text.
+    fn read_file(&self, block: &Block, source: &dyn FileSource, limit: usize) -> Result<FileRead, ReadRefusal> {
+        let path = self.readable_path(block)?;
+        let entry = source.stat(&path).map_err(|_| ReadRefusal::Unreadable)?;
+        if entry.kind != FileKind::File {
+            return Err(ReadRefusal::NotText);
+        }
+        let bytes = source.read_range(&path, 0, limit as u64).map_err(|_| ReadRefusal::Unreadable)?;
+        let kind = match classify(&entry.name, &bytes[..bytes.len().min(SNIFF)]).content {
+            Content::Markdown => ContextKind::Preview,
+            Content::Text => ContextKind::File,
+            _ => return Err(ReadRefusal::NotText),
+        };
+        Ok(FileRead { kind, name: entry.name, bytes })
+    }
+
+    fn read_terminal(
+        &self,
+        core: &AppCore,
+        pane: PaneId,
+        kind: ContextKind,
+        max_bytes: usize,
+    ) -> Result<Option<Fetched>, ReadRefusal> {
+        if core.context_block(pane).is_some() {
+            return Err(ReadRefusal::Unsupported);
+        }
+        let Some(handle) = core.context_pane(pane) else {
+            return Err(if core.pane_is_open(pane) { ReadRefusal::Unsupported } else { ReadRefusal::PaneGone });
+        };
+        let (region, what) = match kind {
+            ContextKind::Selection => (TextRegion::Selection, "Selection"),
+            ContextKind::Screen => (TextRegion::Screen, "Screen"),
+            ContextKind::LastCommand => (TextRegion::LastOutput, "Last command output"),
+            ContextKind::File | ContextKind::Preview => return Err(ReadRefusal::Unsupported),
+        };
+        let read = handle.read_text(region, max_bytes).map_err(|error| refusal_of(&error))?;
+        Ok(read.map(|read| {
+            let cut = read.truncated;
+            Fetched::new(format!("{what} of pane {pane}"), SourceText::with_hidden(read.text, read.hidden), cut)
+        }))
+    }
+
+    fn read_block(
+        &self,
+        core: &AppCore,
+        pane: PaneId,
+        kind: ContextKind,
+        max_bytes: usize,
+    ) -> Result<Option<Fetched>, ReadRefusal> {
+        let (block, source) = core.context_block(pane).ok_or(ReadRefusal::Unsupported)?;
+        if block.kind != BlockKind::Preview {
+            return Err(ReadRefusal::Unsupported);
+        }
+        // One byte more than the bound tells whether the file was cut.
+        let file = self.read_file(&block, source.as_ref(), max_bytes.saturating_add(1))?;
+        if file.kind != kind {
+            return Err(ReadRefusal::Unsupported);
+        }
+        let cut = file.bytes.len() > max_bytes;
+        let mut text = String::from_utf8_lossy(&file.bytes).into_owned();
+        if text.len() > max_bytes {
+            let mut at = max_bytes;
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            text.truncate(at);
+        }
+        let label = if block.source == LOCAL { file.name } else { format!("{} on {}", file.name, source.label()) };
+        Ok(Some(Fetched::new(label, SourceText::plain(text), cut)))
+    }
+}
+
+/// The reason a pane could not be read, from the engine's own words: a closed pane, one that did not answer in time, or
+/// anything else. The library's message is dropped.
+fn refusal_of(error: &CoreError) -> ReadRefusal {
+    match error {
+        CoreError::Pty(message) if message == "the pane is closed" => ReadRefusal::PaneGone,
+        CoreError::Pty(message) if message == "pane busy" => ReadRefusal::Busy,
+        _ => ReadRefusal::Unreadable,
+    }
+}
+
+impl ContextSource for ShellContext {
+    fn kinds(&self, pane: PaneId) -> Vec<ContextKind> {
+        let Some(core) = self.core() else { return Vec::new() };
+        if let Some((block, source)) = core.context_block(pane) {
+            if block.kind != BlockKind::Preview {
+                return Vec::new();
+            }
+            return match self.read_file(&block, source.as_ref(), SNIFF) {
+                Ok(file) => vec![file.kind],
+                Err(_) => Vec::new(),
+            };
+        }
+        if core.context_pane(pane).is_some() {
+            return vec![ContextKind::Selection, ContextKind::Screen, ContextKind::LastCommand];
+        }
+        Vec::new()
+    }
+
+    fn read(&self, pane: PaneId, kind: ContextKind, max_bytes: usize) -> Result<Option<Fetched>, ReadRefusal> {
+        let core = self.core().ok_or(ReadRefusal::PaneGone)?;
+        match kind {
+            ContextKind::Selection | ContextKind::Screen | ContextKind::LastCommand => {
+                self.read_terminal(&core, pane, kind, max_bytes)
+            }
+            ContextKind::File | ContextKind::Preview => self.read_block(&core, pane, kind, max_bytes),
+        }
+    }
 }
 
 impl AppCore {
@@ -429,10 +714,71 @@ impl AppCore {
         profile: Option<String>,
         model: Option<String>,
     ) -> Result<TicketView, AiFault> {
-        if !self.pane_is_open(pane) {
-            return Err(AiFault::no_such_pane());
-        }
+        self.open_pane(pane)?;
         self.ai().send(conversation, text, pane, profile, model)
+    }
+
+    /// [`AppCore::ai_send`] with an offer: the page sends the offer id and the numbers of the picked items. The pane
+    /// is the one whose content was read and the one the chat acts for.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn ai_send_with_context(
+        &self,
+        conversation: &str,
+        text: String,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+        offer: String,
+        picked: Vec<u32>,
+    ) -> Result<TicketView, AiFault> {
+        self.open_pane(pane)?;
+        self.ai().send_with_offer(conversation, text, pane, profile, model, offer, picked)
+    }
+
+    /// [`AiHost::context_state`] for a pane that is open.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn ai_context_state(
+        &self,
+        conversation: &str,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+    ) -> Result<ContextState, AiFault> {
+        self.open_pane(pane)?;
+        self.ai().context_state(conversation, pane, profile, model)
+    }
+
+    /// [`AiHost::context_share`] for a pane that is open.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn ai_context_share(
+        &self,
+        conversation: &str,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+        shared: bool,
+    ) -> Result<ContextState, AiFault> {
+        self.open_pane(pane)?;
+        self.ai().context_share(conversation, pane, profile, model, shared)
+    }
+
+    /// [`AiHost::context_preview`] for a pane that is open.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn ai_context_preview(
+        &self,
+        conversation: &str,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+        kinds: Vec<ContextKind>,
+    ) -> Result<OfferView, AiFault> {
+        self.open_pane(pane)?;
+        self.ai().context_preview(conversation, pane, profile, model, kinds)
+    }
+
+    /// A pane that is not open is refused before anything is stored, read or looked up.
+    fn open_pane(&self, pane: PaneId) -> Result<(), AiFault> {
+        if self.pane_is_open(pane) { Ok(()) } else { Err(AiFault::no_such_pane()) }
     }
 }
 
@@ -1243,4 +1589,394 @@ mod tests {
             "the recorded run differs from ai_stream.json; review it and run with UPDATE_FIXTURES=1"
         );
     }
+
+    // ---- shared content: what a pane or a file gives ---------------------------------------------------------
+
+    use holzwave_core::ai::service::{CUT_NOTE, READ_BYTES};
+    use holzwave_core::blocks::BlockKind;
+    use holzwave_core::layout::PaneId as Pane;
+    use holzwave_core::engine::{SelectMode, SelectOp};
+
+    /// The text a pane shows in these tests; it appears in test code only.
+    const SHELL_TEXT: &str = "zq-shell-text-52c1e8";
+    /// Text drawn with the conceal attribute.
+    const SHELL_HIDDEN: &str = "zq-shell-hidden-b41";
+    /// What a secret file holds.
+    const FILE_SECRET: &str = "zq-envfile-9d03";
+
+    /// A core whose panes run `script` through `/bin/sh -c`, over `dir`, with the keychain unavailable.
+    fn core_with_script(dir: &Path, script: &str) -> (Arc<AppCore>, Arc<AiRecorder>) {
+        let rec = Arc::new(AiRecorder::default());
+        let core = AppCore::new_with_ai(
+            dir.to_path_buf(),
+            rec.clone(),
+            ShellSpec::new("/bin/sh", &["-c", script]),
+            AiParts { vault: KeyVault::unavailable(), clock: Some(fixed_clock) },
+        );
+        (core, rec)
+    }
+
+    /// A core with a running pane that shows the output of `script`, and a scripted on-device provider named
+    /// `scripted` that answers one turn.
+    fn core_showing(dir: &Path, script: &str) -> (Arc<AppCore>, Arc<AiRecorder>, Pane, Arc<ScriptedProvider>) {
+        let (core, rec) = core_with_script(dir, script);
+        let mut double = scripted("scripted", Locality::OnDevice);
+        for _ in 0..4 {
+            double = double.with_turn(Script::reply("ok"));
+        }
+        let provider = register(&core, "scripted", double);
+        let pane = pane_of(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+        (core, rec, pane, provider)
+    }
+
+    fn new_chat() -> String {
+        ConversationId::generate().expect("an id").as_str().to_owned()
+    }
+
+    fn share(core: &AppCore, chat: &str, pane: Pane) -> ContextState {
+        core.ai_context_share(chat, pane, Some("scripted".to_owned()), None, true).expect("a share")
+    }
+
+    /// Previews `kinds` until an item of at least `min_bytes` shows up: the program that draws the pane needs a moment.
+    fn preview_until(core: &AppCore, chat: &str, pane: Pane, kinds: &[ContextKind], min_bytes: u64) -> OfferView {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let answer = core.ai_context_preview(chat, pane, Some("scripted".to_owned()), None, kinds.to_vec());
+            if let Ok(view) = &answer {
+                if view.items.iter().map(|item| item.bytes).sum::<u64>() >= min_bytes {
+                    return view.clone();
+                }
+            }
+            assert!(Instant::now() < deadline, "no preview of {kinds:?} with {min_bytes} bytes: {answer:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Sends with the offer and the first item, and waits for the end of the turn.
+    fn send_offer(core: &AppCore, rec: &AiRecorder, chat: &str, pane: Pane, view: &OfferView, picked: &[u32]) {
+        let before = rec.ended_turns(chat);
+        core.ai_send_with_context(
+            chat,
+            format!("explain {TEXT_CANARY}"),
+            pane,
+            Some("scripted".to_owned()),
+            None,
+            view.offer.clone(),
+            picked.to_vec(),
+        )
+        .expect("the send is accepted");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended_turns(chat) > before), "the turn ends");
+    }
+
+    /// The envelope of the single approved context of request number `index` that `provider` saw.
+    fn envelope_sent(provider: &ScriptedProvider, index: usize) -> String {
+        let requests = provider.requests();
+        assert!(requests.len() > index, "the provider saw {} requests", requests.len());
+        assert_eq!(requests[index].context.len(), 1, "one approved context travels");
+        requests[index].context[0].envelope().to_owned()
+    }
+
+    fn everything_serialised(rec: &AiRecorder, views: &[Value]) -> String {
+        let events: Vec<Value> = rec.ai_events().iter().map(|(_, payload)| json_of(payload)).collect();
+        format!("{}{}", Value::Array(events), Value::Array(views.to_vec()))
+    }
+
+    #[test]
+    fn a_live_pane_screen_is_offered_read_and_only_the_approved_bytes_reach_the_provider() {
+        let scratch = Scratch::new("ctx-live");
+        let hidden = format!("printf '\\033[8m{SHELL_HIDDEN}\\033[0m after\\r\\n'");
+        let script = format!("printf '{SHELL_TEXT}\\r\\n'; {hidden}; sleep 30");
+        let (core, rec, pane, provider) = core_showing(&scratch.0, &script);
+        let chat = new_chat();
+
+        // What the pane offers, before anything is read.
+        let state = core.ai_context_state(&chat, pane, Some("scripted".to_owned()), None).expect("a state");
+        let shown = json_of(&state);
+        assert_eq!(shown["kinds"], json!(["selection", "screen", "last_command"]));
+        assert_eq!(shown["required"], json!(true));
+        assert_eq!(shown["shared"], json!(false));
+        assert_eq!(shown["locality"], json!("on_device"));
+
+        // A pane that is not shared is not read.
+        let refused = core
+            .ai_context_preview(&chat, pane, Some("scripted".to_owned()), None, vec![ContextKind::Screen])
+            .expect_err("not shared");
+        assert_eq!((refused.code, refused.reason), ("context", Some("not_shared")));
+
+        // Shared: the screen is read from the grid, and the hidden cells are reported.
+        assert_eq!(json_of(&share(&core, &chat, pane))["shared"], json!(true));
+        let view = preview_until(&core, &chat, pane, &[ContextKind::Screen], 20);
+        assert_eq!(view.items.len(), 1);
+        assert_eq!(view.items[0].label, format!("Screen of pane {pane}"));
+        assert!(view.items[0].findings.iter().any(|finding| finding.rule == "hidden_text"), "{view:?}");
+
+        send_offer(&core, &rec, &chat, pane, &view, &[1]);
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], json!("done"));
+        assert_eq!(provider.requests().len(), 1, "one send is one request");
+        let envelope = envelope_sent(&provider, 0);
+        assert!(envelope.contains(SHELL_TEXT) && envelope.contains(" after"), "{envelope}");
+        assert!(!envelope.contains(SHELL_HIDDEN), "the hidden text reached the envelope");
+
+        // The turn carries a note with the label and the size, and no view holds text.
+        let started = rec
+            .ai_events()
+            .into_iter()
+            .find(|(_, payload)| payload.0.kind.name() == "turn_started")
+            .map(|(_, payload)| json_of(&payload))
+            .expect("turn_started");
+        let parts = started["message"]["parts"].as_array().expect("parts");
+        let note = parts.iter().find(|part| part["type"] == "context").expect("a context part");
+        assert_eq!(note["items"][0]["label"], json!(format!("Screen of pane {pane}")));
+        assert_eq!(note["items"][0]["bytes"], json!(view.items[0].bytes));
+        let wire = everything_serialised(&rec, &[json_of(&state), json_of(&view)]);
+        for text in [SHELL_TEXT, " after", SHELL_HIDDEN] {
+            assert!(!wire.contains(text), "{text:?} is in an event or a view");
+        }
+        assert!(wire.contains(&format!("Screen of pane {pane}")));
+    }
+
+    #[test]
+    fn a_selection_a_preview_file_and_the_deny_list() {
+        let scratch = Scratch::new("ctx-sel");
+        let files = Scratch::new("ctx-files");
+        let (core, rec, pane, provider) = core_showing(&scratch.0, "printf 'find me\\r\\nother'; sleep 30");
+        let chat = new_chat();
+
+        // A selection made through the core is read as selected, and nothing else.
+        share(&core, &chat, pane);
+        preview_until(&core, &chat, pane, &[ContextKind::Screen], 10);
+        core.select(pane, SelectOp::Begin { x: 0, y: 0, mode: SelectMode::Cell }).expect("select");
+        core.select(pane, SelectOp::Extend { x: 3, y: 0 }).expect("extend");
+        let view = preview_until(&core, &chat, pane, &[ContextKind::Selection], 4);
+        send_offer(&core, &rec, &chat, pane, &view, &[1]);
+        let envelope = envelope_sent(&provider, 0);
+        assert!(envelope.contains(">\nfind\n</holzwave-item>"), "{envelope}");
+
+        // The files: a Markdown file offers a preview, another text file a file, anything else nothing.
+        let long: String = "a line of text\n".repeat(READ_BYTES / 10);
+        let paths: Vec<(&str, PathBuf)> = [
+            ("notes.md", "# Title\nsome notes\n".to_owned()),
+            ("plain.txt", "plain words\n".to_owned()),
+            ("data.bin", "ab\0cd".to_owned()),
+            (".env", format!("TOKEN={FILE_SECRET}\n")),
+            ("big.txt", long),
+        ]
+        .into_iter()
+        .map(|(name, text)| {
+            let path = files.0.join(name);
+            std::fs::write(&path, text).expect("a file");
+            (name, path)
+        })
+        .collect();
+        let inside = scratch.0.join("inside.txt");
+        std::fs::write(&inside, format!("data {FILE_SECRET}\n")).expect("a file in the data directory");
+        let open = |path: &Path| -> Pane {
+            core.block_open_in(MAIN_WINDOW, "right", BlockKind::Preview, "local", path.to_str().expect("utf-8"))
+                .expect("a preview pane")
+                .focus
+        };
+        let panes: Vec<(&str, Pane)> = paths.iter().map(|(name, path)| (*name, open(path))).collect();
+        let inside_pane = open(&inside);
+        let folder = core
+            .block_open_in(MAIN_WINDOW, "right", BlockKind::Files, "local", files.0.to_str().expect("utf-8"))
+            .expect("a browser pane")
+            .focus;
+        let kinds_of = |pane: Pane| {
+            let state = core.ai_context_state(&chat, pane, Some("scripted".to_owned()), None).expect("a state");
+            json_of(&state)["kinds"].clone()
+        };
+        let pane_named = |name: &str| panes.iter().find(|(n, _)| *n == name).map(|(_, pane)| *pane).expect("a pane");
+        assert_eq!(kinds_of(pane_named("notes.md")), json!(["preview"]));
+        assert_eq!(kinds_of(pane_named("plain.txt")), json!(["file"]));
+        assert_eq!(kinds_of(pane_named("data.bin")), json!([]));
+        assert_eq!(kinds_of(pane_named(".env")), json!([]));
+        assert_eq!(kinds_of(inside_pane), json!([]));
+        assert_eq!(kinds_of(folder), json!([]));
+
+        // A direct read of the two places the deny list protects is refused before a byte is read.
+        let source = &core.ai().context;
+        assert_eq!(source.read(pane_named(".env"), ContextKind::File, READ_BYTES).err(), Some(ReadRefusal::Denied));
+        assert_eq!(source.read(inside_pane, ContextKind::File, READ_BYTES).err(), Some(ReadRefusal::Denied));
+        let env_rule = source.deny.check_local(&paths[3].1, Access::Read).expect_err("denied").rule();
+        let dir_rule = source.deny.check_local(&inside, Access::Read).expect_err("denied").rule();
+        assert_eq!((env_rule, dir_rule), ("env_file", "protected_dir"));
+        let refused = |name: &str, kind: ContextKind| source.read(pane_named(name), kind, READ_BYTES).err();
+        assert_eq!(refused("data.bin", ContextKind::File), Some(ReadRefusal::NotText));
+        assert_eq!(refused("notes.md", ContextKind::File), Some(ReadRefusal::Unsupported));
+
+        // The label is the file name and the text is the file as saved.
+        for (at, (name, kind, text)) in
+            [("notes.md", ContextKind::Preview, "some notes"), ("plain.txt", ContextKind::File, "plain words")]
+                .into_iter()
+                .enumerate()
+        {
+            let target = pane_named(name);
+            core.ai_context_share(&chat, target, Some("scripted".to_owned()), None, true).expect("a share");
+            let view = preview_until(&core, &chat, target, &[kind], 5);
+            assert_eq!(view.items[0].label, name);
+            send_offer(&core, &rec, &chat, target, &view, &[1]);
+            let envelope = envelope_sent(&provider, at + 1);
+            assert!(envelope.contains(text) && envelope.contains(&format!("label=\"{name}\"")), "{envelope}");
+        }
+
+        // A file larger than the read limit is cut at it, and the label says so.
+        let big = pane_named("big.txt");
+        core.ai_context_share(&chat, big, Some("scripted".to_owned()), None, true).expect("a share");
+        let view = preview_until(&core, &chat, big, &[ContextKind::File], 5);
+        assert!(view.items[0].label.ends_with(CUT_NOTE), "{}", view.items[0].label);
+
+        // The secret of the protected files is nowhere.
+        let wire = everything_serialised(&rec, &[]);
+        let requests = format!("{:?}", provider.requests());
+        assert!(!wire.contains(FILE_SECRET) && !requests.contains(FILE_SECRET));
+    }
+
+    #[test]
+    fn a_closed_pane_or_chat_pane_ends_the_share_and_the_context_calls_refuse_a_pane_that_is_not_open() {
+        let scratch = Scratch::new("ctx-close");
+        let (core, _rec, pane, provider) = core_showing(&scratch.0, "printf 'text on the screen\\r\\n'; sleep 30");
+        let chat = new_chat();
+        let gone: Pane = 999_999_999;
+        let scripted_id = || Some("scripted".to_owned());
+
+        // A pane that is not open is refused first, by every call, with nothing stored and nothing read.
+        let faults = [
+            core.ai_context_state(&chat, gone, scripted_id(), None).err(),
+            core.ai_context_share(&chat, gone, scripted_id(), None, true).err(),
+            core.ai_context_preview(&chat, gone, scripted_id(), None, vec![ContextKind::Screen]).err(),
+            core.ai_send_with_context(&chat, "x".to_owned(), gone, scripted_id(), None, "0".repeat(32), vec![1]).err(),
+        ];
+        for fault in faults {
+            let fault = fault.expect("refused");
+            let shown = (fault.code, fault.reason, fault.text.as_str());
+            assert_eq!(shown, ("no_such_pane", None, "that pane is not open"));
+        }
+        assert_eq!(provider.calls(), 0);
+        assert!(!scratch.chats().exists(), "nothing was stored");
+        assert!(!core.ai().service().is_shared(&ConversationId::parse(&chat).expect("an id"), gone));
+
+        // A pane that closes ends its share and voids its offer.
+        let second = core.split_in(MAIN_WINDOW, false).expect("a split").focus;
+        core.start_pane(second, 80, 24, 0, 0).expect("the pane starts");
+        let id = ConversationId::parse(&chat).expect("an id");
+        share(&core, &chat, second);
+        preview_until(&core, &chat, second, &[ContextKind::Screen], 1);
+        assert!(core.ai().service().is_shared(&id, second));
+        assert_eq!(core.ai().service().gate().pending(), 1);
+        core.close_pane_in(MAIN_WINDOW, second).expect("the pane closes");
+        assert!(!core.ai().service().is_shared(&id, second));
+        assert_eq!(core.ai().service().gate().pending(), 0, "the offer went with the pane");
+
+        // A chat pane that closes ends the shares of its chat on the other panes, and only of its chat.
+        let other = new_chat();
+        let other_id = ConversationId::parse(&other).expect("an id");
+        share(&core, &chat, pane);
+        share(&core, &other, pane);
+        let chat_pane = core
+            .block_open_in(MAIN_WINDOW, "right", BlockKind::Chat, "local", &chat)
+            .expect("a chat pane")
+            .focus;
+        assert!(core.ai().service().is_shared(&id, pane) && core.ai().service().is_shared(&other_id, pane));
+        core.close_pane_in(MAIN_WINDOW, chat_pane).expect("the chat pane closes");
+        assert!(core.pane_is_open(pane));
+        assert!(!core.ai().service().is_shared(&id, pane), "the chat of the closed pane lost its share");
+        assert!(core.ai().service().is_shared(&other_id, pane), "another chat keeps its share");
+
+        // The hooks are where the plan says: the block is read, forgotten, the chat told, the pane told last.
+        let forget = body_of(include_str!("state.rs"), "fn forget_pane(");
+        let at = |needle: &str| forget.find(needle).unwrap_or_else(|| panic!("{needle} is not in forget_pane"));
+        assert!(at("block_of") < at("blocks.forget") && at("blocks.forget") < at("chat_closed"));
+        assert!(at("chat_closed") < at("self.ai.pane_closed(pane)"));
+        assert!(forget.trim_end().ends_with("self.ai.pane_closed(pane);"), "pane_closed is the last statement");
+    }
+
+    #[test]
+    fn the_last_command_follows_the_engine_verdict() {
+        // The engine was shown to bound the output of a command by its marks, so the kind is offered and read.
+        let scratch = Scratch::new("ctx-last");
+        let mark = |name: &str| format!("printf '\\033]133;{name}\\033\\\\'");
+        let marks = [
+            mark("A"),
+            "printf '$ '".to_owned(),
+            mark("B"),
+            "printf 'echo hi\\r\\n'".to_owned(),
+            mark("C"),
+            "printf 'hi\\r\\n'".to_owned(),
+            mark("D;0"),
+            mark("A"),
+            "printf '$ '".to_owned(),
+            "sleep 30".to_owned(),
+        ]
+        .join("; ");
+        let (core, rec, pane, provider) = core_showing(&scratch.0, &marks);
+        let chat = new_chat();
+        let state = core.ai_context_state(&chat, pane, Some("scripted".to_owned()), None).expect("a state");
+        assert!(state.kinds.contains(&ContextKind::LastCommand), "{state:?}");
+        share(&core, &chat, pane);
+        let view = preview_until(&core, &chat, pane, &[ContextKind::LastCommand], 1);
+        assert_eq!(view.items[0].label, format!("Last command output of pane {pane}"));
+        send_offer(&core, &rec, &chat, pane, &view, &[1]);
+        let envelope = envelope_sent(&provider, 0);
+        assert!(envelope.contains(">\nhi\n</holzwave-item>"), "{envelope}");
+        assert!(!envelope.contains("echo hi"), "the typed command is prompt content, not output");
+
+        // A pane that has written no marks has nothing there: the kind is listed under `empty`.
+        let plain = Scratch::new("ctx-plain");
+        let (core, _rec, pane, _provider) = core_showing(&plain.0, "printf 'plain output\\r\\n'; sleep 30");
+        let chat = new_chat();
+        share(&core, &chat, pane);
+        let kinds = [ContextKind::LastCommand, ContextKind::Screen];
+        let view = loop {
+            let view = preview_until(&core, &chat, pane, &kinds, 5);
+            if !view.items.is_empty() {
+                break view;
+            }
+        };
+        assert_eq!(view.empty, [ContextKind::LastCommand]);
+        assert_eq!(view.items[0].kind, ContextKind::Screen);
+    }
+
+    #[test]
+    fn the_host_has_no_path_to_the_gate_and_the_context_calls_take_ids_only() {
+        let whole = include_str!("ai_host.rs");
+        let host = whole.split("\n#[cfg(test)]\nmod tests").next().expect("a first part");
+        let code: String =
+            host.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+
+        // Nothing here can reach the gate, mint an approval or decide anything.
+        let words = [".gate()", "approve", "ApprovedContext", ".context(", "decide", "Decision", "Allow"];
+        for word in words.into_iter().chain(["Target::Window"]) {
+            assert!(!code.contains(word), "the host has {word:?}");
+        }
+        assert_eq!(code.matches(".offer(").count(), 1, "only the send with an offer attaches one");
+        assert!(code.contains("read_text") && code.contains("with_hidden") && code.matches("DenyPolicy").count() >= 2);
+        assert!(code.contains("LastOutput"), "the last command is read as the last output region");
+
+        // The argument lists: ids, flags and kind names; the only text is the typed text of a send.
+        for name in [
+            "fn context_state(",
+            "fn context_share(",
+            "fn context_preview(",
+            "fn ai_context_state(",
+            "fn ai_context_share(",
+            "fn ai_context_preview(",
+        ] {
+            let at = host.find(name).unwrap_or_else(|| panic!("{name} is gone"));
+            let list = &host[at..at + host[at..].find(')').expect("a signature")];
+            for forbidden in ["text:", "content:", "envelope:", "body:", "context:"] {
+                assert!(!list.contains(forbidden), "{name} takes {forbidden}");
+            }
+        }
+        for name in ["fn send_with_offer(", "fn ai_send_with_context("] {
+            let at = host.find(name).unwrap_or_else(|| panic!("{name} is gone"));
+            let list = &host[at..at + host[at..].find(')').expect("a signature")];
+            assert!(list.contains("text: String,") && list.contains("offer: String,"), "{name}");
+            assert_eq!(list.matches("String,").count(), 2, "{name}: the typed text and the offer id are the strings");
+            for forbidden in ["content:", "envelope:", "body:", "context:"] {
+                assert!(!list.contains(forbidden), "{name} takes {forbidden}");
+            }
+        }
+    }
+
 }

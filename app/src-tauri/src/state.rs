@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, Opened};
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
-use holzwave_core::files::{Entry, Listing};
+use holzwave_core::files::{Entry, FileSource, Listing};
 use holzwave_core::engine::{
     CopyOp, CopyState, DomKey, EngineTheme, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, SearchOp,
     SearchState, SelectOp, WheelEvent,
@@ -793,35 +793,40 @@ impl AppCore {
         });
         let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
         let host = AiHost::new(&dir, sink.clone(), ai);
-        let core = Arc::new_cyclic(|me| AppCore {
-            dir,
-            windows,
-            routes,
-            panes,
-            config,
-            settings_io: Mutex::new(()),
-            last_cwd,
-            last_title: Mutex::new(HashMap::new()),
-            drops: Mutex::new(Drops::default()),
-            hovers: Mutex::new(Hovers::default()),
-            starts: Mutex::new(HashMap::new()),
-            session,
-            session_saver,
-            launcher: Mutex::new(spawn_launch),
-            sink,
-            shell,
-            connections,
-            blocks,
-            sync,
-            ai: host,
-            monitor: holzwave_core::monitor::Monitor::new(),
-            history,
-            ipc: Mutex::new(None),
-            saver,
-            writes,
-            exiting: AtomicBool::new(false),
-            view_rev: AtomicU64::new(0),
-            me: me.clone(),
+        let core = Arc::new_cyclic(|me| {
+            // The source of shared content reaches the panes and the files through the core, so it gets a weak
+            // reference before the core exists: it keeps the core alive for nothing.
+            host.bind(me.clone());
+            AppCore {
+                dir,
+                windows,
+                routes,
+                panes,
+                config,
+                settings_io: Mutex::new(()),
+                last_cwd,
+                last_title: Mutex::new(HashMap::new()),
+                drops: Mutex::new(Drops::default()),
+                hovers: Mutex::new(Hovers::default()),
+                starts: Mutex::new(HashMap::new()),
+                session,
+                session_saver,
+                launcher: Mutex::new(spawn_launch),
+                sink,
+                shell,
+                connections,
+                blocks,
+                sync,
+                ai: host,
+                monitor: holzwave_core::monitor::Monitor::new(),
+                history,
+                ipc: Mutex::new(None),
+                saver,
+                writes,
+                exiting: AtomicBool::new(false),
+                view_rev: AtomicU64::new(0),
+                me: me.clone(),
+            }
         });
         // The settings are read under the config lock and the lock is released before the service is called.
         let settings = lock(&core.config).settings.clone();
@@ -1756,9 +1761,15 @@ impl AppCore {
         lock(&self.last_title).remove(&pane);
         lock(&self.starts).remove(&pane);
         self.connections.forget(pane);
+        // A chat pane that leaves the layout ends the shares of its chat: the block is read before it is forgotten.
+        let chat = self.blocks.block_of(pane).filter(|block| block.kind == BlockKind::Chat).map(|block| block.path);
         self.blocks.forget(pane);
         self.session_saver.touch();
-        // Last, with no guard alive: the calls of the chat turns that act for this pane are voided.
+        if let Some(chat) = chat {
+            self.ai.chat_closed(&chat);
+        }
+        // Last, with no guard alive: the calls of the chat turns that act for this pane are voided, and so are the
+        // shares of the pane.
         self.ai.pane_closed(pane);
     }
 
@@ -2083,6 +2094,20 @@ impl AppCore {
             Some(Slot::Running(handle)) => Some(handle.clone()),
             _ => None,
         }
+    }
+
+    /// The handle of a running terminal pane, for the source of shared content. `None` for an unknown pane, for one
+    /// that is still starting and for one that shows a block.
+    pub(crate) fn context_pane(&self, pane: PaneId) -> Option<PaneHandle> {
+        self.handle(pane)
+    }
+
+    /// What a block pane shows, with the files it reads from: this computer, or a saved connection. `None` when the
+    /// pane shows no block or the source cannot be made.
+    pub(crate) fn context_block(&self, pane: PaneId) -> Option<(Block, Arc<dyn FileSource>)> {
+        let block = self.blocks.block_of(pane)?;
+        let source = self.blocks.source(&self.connections, &block.source).ok()?;
+        Some((block, source))
     }
 
     /// Like [`AppCore::handle`], for the commands that answer with something and so need the pane to exist.
