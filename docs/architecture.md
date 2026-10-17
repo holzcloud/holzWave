@@ -540,15 +540,16 @@ All of it runs locally; GitHub builds only on request.
 
   | AI chat stream path | Limit asserted | Measured |
   |---|---|---|
-  | cost per event through the provider, 100 000 events per wire | at most 10 µs | 0.19 µs (Ollama) to 0.70 µs (Gemini); Apple silicon Mac, release, 2026-10-17 |
-  | time to first delta through the provider, warm, median | at most 2 ms | 0.16 to 0.46 ms; the same Mac |
-  | time to first delta through the provider, cold, median | at most 2 ms | 0.16 to 0.39 ms; the same Mac |
-  | the bare client over loopback: first delta warm (median), per event | at most 10 ms, at most 50 µs | 0.32 ms, 1.17 µs; Linux x86_64 virtual machine, release, 2026-10-16 |
-  | cancel: the call returns, the socket closes | within 250 ms | 8 µs, 60 µs; the same Linux machine, release |
-  | read of a whole screen as text (250 columns, 2000 rows, every cell styled) | at most 100 ms | 20.7 ms and 35.0 ms; a Mac, release |
+  | cost per event through the provider, 100 000 events per wire | at most 10 µs | 0.19 µs (Ollama) to 0.73 µs (Gemini); Apple silicon Mac, release, three runs, 2026-10-17 |
+  | time to first delta through the provider, warm, median | at most 2 ms | 0.16 to 0.48 ms; the same Mac and runs |
+  | time to first delta through the provider, cold, median | at most 2 ms | 0.16 to 0.39 ms; the same Mac and runs |
+  | the bare client over loopback: first delta warm (median), first delta with a fresh client (median), cost per event | at most 10 ms, 50 ms, 50 µs | 0.22 to 0.23 ms, 0.78 to 0.79 ms, 12.0 µs; the same Mac and runs. A Linux x86_64 virtual machine, release, 2026-10-16: 0.32 ms, 0.77 ms, 1.17 µs |
+  | cancel: the call returns, the socket closes | within 250 ms | 5 to 22 µs, 90 to 95 µs; the same Mac and runs. The Linux machine: 8 µs, 60 µs |
+  | read of a whole screen as text: the full budget (250 columns, 2000 rows, every cell styled), a 200 by 50 screen | at most 100 ms for the full budget | 17.5 to 19.8 ms, 0.24 to 0.26 ms; the same Mac and runs |
 
-  The ceilings are asserted in release builds only. The numbers come from one machine each, not from the owner's three runs;
-  the commands that measure them are in Part 1 of [test-plan.md](test-plan.md) and row AI8 records the owner's.
+  The ceilings are asserted in release builds only. The numbers are from the machines named in the rows, not from the
+  owner's machines; the commands that measure them are in Part 1 of [test-plan.md](test-plan.md) and row AI8 records the
+  owner's.
 - **Robustness:** corrupt `layout.json`, closing panes mid-output, and resizing during a flood are explicit tests,
   as are hostile `settings.json`, `session.json` and theme files (size, type, range and name limits).
 - **What no suite here can see** (real window chrome, an input method, a physical layout, the native menu, fonts, the
