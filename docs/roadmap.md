@@ -135,12 +135,14 @@ One plugin schema, "CLI integration": binary detection, context switcher, output
 
 | Integration | Approach |
 |---|---|
-| Kubernetes | `kube-rs`: context and namespace switcher, pod list, logs, "exec in pod" as a terminal block |
-| Talos | gRPC (`tonic`) or a `talosctl` wrapper: node status, logs, dashboard block |
-| Azure CLI | `az` wrapper: subscription switcher, login state in the status bar |
+| Kubernetes | `kubectl` wrapper (`kube-rs` is not used: 34 more crates and exec plugins to rebuild): context and namespace switcher, pod list, logs, "exec in pod" as a terminal block |
+| Talos | `talosctl` wrapper: node status, services, dmesg and dashboard as terminal blocks (no gRPC client) |
+| Azure CLI | `az` wrapper: subscription switcher, login state in the status bar, `az login` as a terminal block |
 | GAM7 | wrapper with profile choice (several domains and configs), output as a table or JSON block |
 
 Connection data goes through the secret store and sync.
+
+Status: planned; the design is in architecture.md section 9.
 
 ## Phase 7 — Mobile
 

@@ -125,7 +125,7 @@ Each boundary is a trait in `holzwave-core` with at least one real implementatio
 | `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service, iOS/Android keystores | secrets never reach a file |
 | `SyncBackend` | `list`, `get`, `put`, `delete` with ETag | WebDAV (`opendal` or `reqwest_dav`) | Nextcloud today, others later |
 | `Provider` ✅ | `id`, `capabilities(model)`, `stream(request, callback, cancel) → completion` (blocking, with a cancel token) | `HttpProvider` ✅ over five wire adapters (local servers, cloud APIs, gateways), `AppleProvider` ✅ (Foundation Models), `ScriptedProvider` (the test double) | consent and context rules live above it: a provider accepts only context the gate approved |
-| `Integration` | `detect`, `context()`, `parse(output)`, `block()` | kubernetes, talos, azure, gam | one schema for four tools |
+| `Integration` (planned) | `spec`, `argv`, `view` (section 9) | kubernetes, talos, azure, gam | one engine and a closed verb catalogue for four tools |
 
 The engine trait is **not `Send`**: `libghostty-vt` objects are `!Send + !Sync`. An engine therefore lives on one
 thread and is driven over a channel (section 5). This shapes the whole concurrency model.
@@ -360,9 +360,72 @@ the person (`confirm_multiline_paste`, D-15) and, on yes, sends the same text ag
 
 ## 9. Integrations and extensions
 
-Integrations (Kubernetes, Talos, Azure, GAM7) are built in. Each implements `Integration`: detect the binary,
-expose a context switcher, parse output into a typed model, and offer a block. They run the tool as a child process
-on the active `Connection`, so they work on remote hosts too, and their credentials come from `SecretStore`.
+### Integrations (planned)
+
+Status: planned. Nothing in this subsection is built yet; it is the design the code will follow, and the policy test
+(`core/tests/project_policy.rs`) holds the code to the rules that can be checked by reading its sources.
+
+**What an integration is.** Kubernetes, Talos, Azure and GAM7 are compiled in. Each is one static `IntegrationSpec`:
+its binary names per system, a version probe, the environment it sets, what it lets you select (a context, a
+namespace, a subscription, a section, a node) and a **closed catalogue of verbs**. A verb has an effect (`Read`,
+`Local` for the tool's own configuration file, `Write` for a cluster or an account, `Exec` for a session with your
+credentials), an output (a table, key-value or text view, a terminal block, or nothing) and typed arguments. One
+generic engine does detection, running, context, approval and the block for every tool and never knows a tool by name.
+Four small modules, one per tool, hold only the argument builders and the parsers: `Integration` has `spec`, `argv`
+and `view`. An unknown verb is refused. This is not a plugin host (non-goal 3). A loadable argument template that
+travelled through sync would be remote command execution on every device that holds the passphrase, so the two
+published JSON documents, the profile file and the block view model, are data with a schema and a parity test (like
+`widget.schema.json`), never code.
+
+**The clients.** `kubectl` and `talosctl`, and `az` and GAM7 as wrappers. In-process clients were measured and left
+out: `kube-rs` adds 34 crates, 5.9 MB and 35 s to a cold release build and would need a hand-built attach,
+exec-credential plugins and the GUI `PATH` handled again; a Talos gRPC client adds 12 crates and a protobuf toolchain,
+and there is no official Rust client. The tools themselves handle plugins, proxies and every auth method.
+
+**Where they run.** On this computer only. A remote host is not planned. A tool is found by, in order, the path you
+set, the process `PATH`, the `PATH` of your login shell (asked once, lazily, absolute existing directories only) and a
+short fixed list per system; the `PATH` of a child is rebuilt from the same places, so a credential plugin is found
+too.
+
+**The runner.** Every child is started with an argument list: no shell, standard input closed, no program named in the
+source. Its environment is the inherited one minus the loader and interpreter variables (`LD_*`, `DYLD_*`, `PYTHON*`,
+`NODE_*`, `GIT_*`, `BASH_ENV`, `ENV`, `IFS`) and minus the app's own `HOLZWAVE_*`, plus the profile's plain variables
+and its secret ones. Credential variables are kept on purpose: the tools need them, and the AI command runner's rule
+of dropping every name that looks like a key would break them. Output is capped and a run that exceeds the cap fails
+and keeps the head, so a table never shows a cut-off document. Each run has a timeout and a process-group kill, and at
+most four children run at once. The one string a shell ever sees is a constant that picks bash or sh inside a pod.
+
+**Connection data.** The tools' own credential stores (kubeconfig, talosconfig, `~/.azure`, `~/.gam`) are referenced
+and never imported: the keychain cannot hold them and a materialised file would break "secrets only in the keychain".
+`integrations.json` is synced and holds names and flags (profiles, a pinned context or subscription or section, a
+production flag, plain environment). Machine-local paths live in `integration_local.json` and never sync. `secret_env`
+values are small, live in the keychain as `int:<profile>:<NAME>`, are read at the moment of a spawn and wiped after
+it, and travel only inside the encrypted `secrets.json`. A synced profile may not set a variable of the deny list,
+`PATH` or a tool's own configuration variable; a file that fails validation is set aside and the app starts without
+profiles.
+
+**Context.** A block passes its selection on every command (`--context=<name>`, `--namespace=<name>`, a subscription
+id, a GAM section), so nothing on disk changes. A shell pane that is isolated gets a small overlay kubeconfig that
+holds names only and no credential, first in `KUBECONFIG`. The tools' own files change only through a confirmed
+`Local` verb that names the file. The tools may still write their own state (a token refresh, a `set-context` you type
+yourself).
+
+**Approval.** A verb that changes something or opens a session returns a card with the exact argument list, the target
+and a hash; `confirm` repeats the hash, the core resolves the request again, hashes again, refuses any difference and
+runs it once. The window is the only decider: nothing of it exists on the `wsh` socket, nothing is remembered, and the
+AI chat reaches no integration. A context that a profile marks as production shows its name and the word production on
+the card and needs a second press, for every verb that has a card.
+
+**Terminal blocks.** Exec in a pod, logs, node messages, the Talos dashboard and `az login` are a pane whose program
+is the tool. A failing start is held on screen until you press Enter, so the error can be read. The pane gets no
+`HOLZWAVE_*` variable and is not restored on restart.
+
+**View model.** A table (at most 64 columns and 2000 rows), a key-value list or a text. Every string from a cluster or
+an account is cleaned of control, direction and zero-width characters, cut, and shown as text only. Stderr is shown
+cleaned and cut and never logged.
+
+**What the integrations never do:** print a raw kubeconfig, pass a verbose flag, ask for an access token, export a
+credential, emit a `save` that rewrites a GAM configuration, or offer anything to the AI chat.
 
 User widgets are data, not code: a JSON document validated against a schema, rendered by the webview from a fixed
 set of widget kinds. There is no arbitrary script execution. The loader (`core/src/widgets.rs`) validates every file field
@@ -600,6 +663,13 @@ All of it runs locally; GitHub builds only on request.
 | A14 | The Apple model is a crate with a Swift package behind a C interface, linked weakly and registered only where it is available, not a plugin, with no silent fallback | Tauri's Swift plugins are iOS-only, an older macOS must start the app, and a request must never go to another provider unasked |
 | A15 | AI events carry a sequence number per turn and a snapshot command, not a channel | the webview can reload at any time |
 | A16 | No remembered approvals | every side effect is decided again, on the exact fields |
+| A17 | `kubectl` and `talosctl` are the clients, `az` and GAM7 wrappers | measured: `kube-rs` adds 34 crates, 5.9 MB and 35 s of build, `tonic` 12 crates and a protobuf toolchain; the tools run exec-credential plugins and every auth method already; no official Rust Talos client exists |
+| A18 | Integration specs are compiled in; the published JSON is data (the profile file and the view model), with parity tests | a loadable argument template that synced would be remote command execution on every device; non-goal 3 stands |
+| A19 | The tools' credential stores are referenced, never imported | the keychain cannot hold a kubeconfig (Windows refuses a blob over 2560 bytes) and a materialised file would break "secrets only in the keychain" |
+| A20 | A block selects per command and a shell pane gets an overlay kubeconfig; the tools' own files change only through a confirmed verb | nothing on disk changes by looking around, and a pane in one cluster cannot move another |
+| A21 | Approval of an integration verb is a ticket resolved again at run time, decided by the window only, with a production guard | what the person saw is what runs, nothing of it exists on `wsh`, and a mistake in a production context costs a second press |
+| A22 | The environment of a child is the inherited one minus loader and interpreter variables and the app's own | the AI command runner's rule would drop the variables credential plugins need; a synced profile must not be able to hijack the next run |
+| A23 | The integrations run on this computer only | the tools hold your credentials on this computer; a remote run would need a second trust decision and is not planned |
 
 ## 15. Open questions
 
@@ -614,5 +684,15 @@ All of it runs locally; GitHub builds only on request.
    goes; the AI chat client stays.
 6. The wire fixtures of the five providers are written from the vendors' documents, and real streams may differ. Rows AI1
    and AI2 of [test-plan.md](test-plan.md) close this; a difference becomes a new fixture and a rule.
+7. The JSON shapes of real Talos output (nodes, services, machine status) and whether `talosctl config context` writes
+   the configuration file. The Talos parsers are written from the tool's documents until a real talosconfig is used.
+8. How `az.cmd` on Windows treats the argument character set the integrations allow, and whether any name passes
+   through a batch file unharmed.
+9. The `PATH` of an app started from the Finder, and the cost of asking a login shell for its `PATH` on fish and nushell.
+10. Whether a fake API server for the real `kubectl` can run in the owner's test run; until then the Kubernetes
+    parsers are tested against recorded output and a fake program.
+
+The rows of the integrations part of [test-plan.md](test-plan.md) close questions 7 to 10; an answer becomes a fixture and
+a rule.
 
 See also: [design.md](design.md) for colour, type, components and the window direction.
