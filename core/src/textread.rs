@@ -47,6 +47,12 @@ pub enum TextRegion {
     /// The last `n` rows of the buffer, scrollback included, ending at the last row that has text. `n` is capped at
     /// [`MAX_READ_ROWS`]; 0 reads nothing.
     LastRows(u16),
+    /// The output of the last command as the engine's command marks bound it, found from the bottom of the buffer
+    /// past the prompt rows: the text above an active prompt, or the output so far of a command that is still
+    /// running. `None` without marks. It exists because the pinned engine was shown to bound command output exactly
+    /// (see the header of `core/tests/semantic.rs`). The marks are written by the program, so the region can be
+    /// forged or hidden by it and the text is untrusted.
+    LastOutput,
 }
 
 /// The text of a region, with the parts of it that the user could not see.

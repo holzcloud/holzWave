@@ -7,7 +7,7 @@ use libghostty_vt::paste::Options as PasteOptions;
 use libghostty_vt::render::{
     CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot,
 };
-use libghostty_vt::screen::{CellWide, GridRef, Screen as VtScreen};
+use libghostty_vt::screen::{CellSemanticContent, CellWide, GridRef, RowSemanticPrompt, Screen as VtScreen};
 use libghostty_vt::search::{MatchBuffer, Scroll, Search};
 use libghostty_vt::selection::{FormatOptions, Order, SelectLineOptions, SelectWordOptions, Selection};
 use libghostty_vt::style::{Palette, PaletteIndex, RgbColor, StyleColor, Underline};
@@ -85,6 +85,9 @@ fn cap_tail(text: String, max_bytes: usize) -> String {
 /// The most code points of one cell's cluster that a read takes. A cell with more (a program can pile combining marks
 /// onto one cell without end) reads as its primary code point, so one hostile cell costs a few bytes, not kilobytes.
 const MAX_CLUSTER_CHARS: usize = 32;
+
+/// The most rows [`GhosttyEngine::last_output_row`] looks at before it gives up.
+const MAX_MARK_SCAN: u32 = 8192;
 
 /// What one cell contributes to a read.
 enum CellText {
@@ -724,6 +727,18 @@ impl GhosttyEngine {
         })
     }
 
+    /// The selection the engine's command marks make of the command output that contains `screen_row`, as a snapshot
+    /// that is not installed as the terminal's selection. `None` for a row past the end and for a row that is not part
+    /// of any command's output (text without marks included).
+    fn output_selection(&self, screen_row: u32) -> Result<Option<Selection<'_>>> {
+        let total = self.terminal.total_rows().map_err(eng)?;
+        if screen_row as usize >= total {
+            return Ok(None);
+        }
+        let at = self.screen_ref((0, screen_row))?;
+        self.terminal.select_output(at).map_err(eng)
+    }
+
     /// The output of the command at `screen_row`, as plain text, at most `max_bytes` bytes (the tail is kept, cut on
     /// a character boundary).
     ///
@@ -738,13 +753,8 @@ impl GhosttyEngine {
         if max_bytes == 0 {
             return Ok(None);
         }
-        let total = self.terminal.total_rows().map_err(eng)?;
-        if screen_row as usize >= total {
-            return Ok(None);
-        }
-        let at = self.screen_ref((0, screen_row))?;
         // A snapshot: it is not installed as the terminal's selection.
-        let Some(sel) = self.terminal.select_output(at).map_err(eng)? else {
+        let Some(sel) = self.output_selection(screen_row)? else {
             return Ok(None);
         };
         let options = FormatOptions::new().with_selection(&sel).with_unwrap(true).with_trim(true);
@@ -955,6 +965,34 @@ impl GhosttyEngine {
         Ok(builder.finish(max_bytes))
     }
 
+    /// The semantic content of the first cell with text on a row; `None` for a blank row.
+    fn first_text_content(&self, y: u32) -> Result<Option<CellSemanticContent>> {
+        for x in 0..self.terminal.cols().map_err(eng)? {
+            if !self.cell_is_blank((x, y))? {
+                return Ok(Some(self.screen_ref((x, y))?.cell().map_err(eng)?.semantic_content().map_err(eng)?));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A row inside the output of the last command: the bottom-most row that is not blank and not part of a prompt
+    /// or of the input line. A prompt of several lines may mark only its first line at row level, so a row whose
+    /// first text is marked as prompt or input does not count either. At most [`MAX_MARK_SCAN`] rows are looked at.
+    fn last_output_row(&self) -> Result<Option<u32>> {
+        let last = self.last_screen_row()?;
+        for y in (last.saturating_sub(MAX_MARK_SCAN)..=last).rev() {
+            let row = self.screen_ref((0, y))?.row().map_err(eng)?;
+            if matches!(row.semantic_prompt().map_err(eng)?, RowSemanticPrompt::Prompt | RowSemanticPrompt::Continuation) {
+                continue;
+            }
+            match self.first_text_content(y)? {
+                None | Some(CellSemanticContent::Prompt | CellSemanticContent::Input) => {}
+                Some(CellSemanticContent::Output) => return Ok(Some(y)),
+            }
+        }
+        Ok(None)
+    }
+
     /// The last row at or above `from` that shows text, looking at most one screenful up; `None` when they are all
     /// blank.
     fn last_text_row(&self, from: u32) -> Result<Option<u32>> {
@@ -1005,6 +1043,17 @@ impl GhosttyEngine {
                 let Some(end) = self.last_text_row(last)? else { return Ok(None) };
                 let start = (end + 1).saturating_sub(n);
                 self.read_cells((0, start), (cols.saturating_sub(1), end), false, Cut::KeepTail, max_bytes)
+            }
+            TextRegion::LastOutput => {
+                let Some(row) = self.last_output_row()? else { return Ok(None) };
+                let Some(selection) = self.output_selection(row)? else { return Ok(None) };
+                let ordered = selection.to_ordered(&self.terminal, Order::Forward).map_err(eng)?;
+                let (Some(from), Some(to)) =
+                    (self.screen_point(&ordered.start())?, self.screen_point(&ordered.end())?)
+                else {
+                    return Ok(None);
+                };
+                self.read_cells(from, to, false, Cut::KeepTail, max_bytes)
             }
         }
     }

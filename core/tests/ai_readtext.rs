@@ -431,4 +431,159 @@ mod engine_reads {
             assert!(pair[0].end <= pair[1].start);
         }
     }
+
+    /// OSC 133 marks: `ESC ] 133 ; payload ST`.
+    fn mark(payload: &str) -> String {
+        format!("\x1b]133;{payload}\x1b\\")
+    }
+
+    /// A prompt, the input, the output lines and the end mark `end`.
+    fn command(input: &str, output: &[&str], end: &str) -> String {
+        let mut s = format!("{}$ {}{input}\r\n{}", mark("A"), mark("B"), mark("C"));
+        for line in output {
+            s += &format!("{line}\r\n");
+        }
+        s + &mark(end)
+    }
+
+    /// The active prompt, with no line break after it.
+    fn active_prompt() -> String {
+        format!("{}$ {}", mark("A"), mark("B"))
+    }
+
+    /// Three commands and an active prompt; the screen row above the prompt is the last output line.
+    fn three_commands() -> (String, u32) {
+        let s = command("echo 1", &["one-a", "one-b"], "D;0")
+            + &command("false", &["two-a"], "D;1")
+            + &command("ls", &["three-a", "three-b", "three-c"], "D;0")
+            + &active_prompt();
+        // Rows: 3 (first), 2 (second), 4 (third); the prompt is row 9 and its output ends on row 8.
+        (s, 8)
+    }
+
+    const THREE: &str = "three-a\nthree-b\nthree-c";
+
+    #[test]
+    fn last_output_is_the_text_above_the_active_prompt() {
+        let (bytes, _) = three_commands();
+        let mut e = fed(20, 6, &bytes);
+        let read = read(&mut e, TextRegion::LastOutput).expect("an output");
+        assert_eq!(read.text, THREE, "without the prompt, the input line or the other commands");
+        assert!(read.hidden.is_empty() && !read.truncated);
+    }
+
+    #[test]
+    fn last_output_follows_the_command_through_scrolling_and_a_scrolled_back_viewport() {
+        let lines: Vec<String> = (1..=9).map(|n| format!("out-{n}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let bytes = command("first", &["early"], "D;0") + &command("big", &refs, "D;0") + &active_prompt();
+        let mut e = fed(20, 4, &bytes);
+        let want = lines.join("\n");
+        assert_eq!(text_of(&mut e, TextRegion::LastOutput).as_deref(), Some(want.as_str()));
+        e.scroll(-3);
+        assert_eq!(text_of(&mut e, TextRegion::LastOutput).as_deref(), Some(want.as_str()), "scrolled back");
+        e.scroll_to_bottom();
+        assert_eq!(text_of(&mut e, TextRegion::LastOutput).as_deref(), Some(want.as_str()), "and back again");
+    }
+
+    #[test]
+    fn last_output_without_marks_is_none() {
+        let plain: String = (0..30).map(|n| format!("plain {n:02}\r\n")).collect();
+        let mut e = fed(20, 6, &plain);
+        assert_eq!(read(&mut e, TextRegion::LastOutput), None);
+        e.feed(b"\x1b[2J\x1b[H");
+        assert_eq!(read(&mut e, TextRegion::LastOutput), None, "a cleared screen");
+    }
+
+    #[test]
+    fn a_two_line_prompt_is_not_taken_for_output() {
+        let bytes = command("ls", &["prev-a", "prev-b"], "D;0") + &format!("{}info line\r\n$ {}", mark("A"), mark("B"));
+        let mut e = fed(20, 6, &bytes);
+        let read = read(&mut e, TextRegion::LastOutput).expect("an output");
+        assert_eq!(read.text, "prev-a\nprev-b", "never the information line of the prompt");
+    }
+
+    #[test]
+    fn last_output_equals_the_spike_primitive_when_nothing_is_hidden() {
+        let (bytes, above) = three_commands();
+        let mut e = fed(20, 6, &bytes);
+        let primitive = e.output_at(above, MAX_READ_BYTES).expect("output_at").expect("an output");
+        let region = text_of(&mut e, TextRegion::LastOutput).expect("an output");
+        assert_eq!(region.trim_matches('\n'), primitive.trim_matches('\n'));
+
+        let lines = ["wrapped line that is longer than the twenty columns", "short"];
+        let bytes = command("cat", &lines, "D;0") + &active_prompt();
+        let mut e = fed(20, 8, &bytes);
+        let above = 1 + 3 + 1 - 1;
+        let primitive = e.output_at(above, MAX_READ_BYTES).expect("output_at").expect("an output");
+        let region = text_of(&mut e, TextRegion::LastOutput).expect("an output");
+        assert_eq!(region.trim_matches('\n'), primitive.trim_matches('\n'), "soft-wrapped lines too");
+    }
+
+    #[test]
+    fn last_output_reports_concealed_text_in_its_region() {
+        let bytes = command("show", &["ok", "pre \x1b[8mSECRET\x1b[28m post"], "D;0") + &active_prompt();
+        let mut e = fed(30, 6, &bytes);
+        let read = read(&mut e, TextRegion::LastOutput).expect("an output");
+        assert_eq!(read.text, "ok\npre SECRET post");
+        assert_eq!(read.hidden, vec![7..13]);
+    }
+
+    #[test]
+    fn a_forged_mark_can_only_select_text_that_is_on_the_screen() {
+        // A program prints its own start mark, some lines and its own end mark after the real output.
+        let forged = format!("{}forged-1\r\nforged-2\r\n{}", mark("C"), mark("D;0"));
+        let bytes = command("cat evil", &["real-1", "real-2"], "D;0")
+            + &format!("{}$ {}", mark("A"), mark("B"))
+            + &forged
+            + &active_prompt();
+        let mut e = fed(20, 10, &bytes);
+        let everything = text_of(&mut e, TextRegion::LastRows(50)).expect("text");
+        if let Some(read) = read(&mut e, TextRegion::LastOutput) {
+            assert!(read.text.len() <= MAX_READ_BYTES);
+            for line in read.text.lines() {
+                // A forged start mark can begin in the middle of a row: the line is a piece of a row.
+                assert!(everything.lines().any(|l| l.contains(line)), "{line:?} is not on the screen");
+            }
+        }
+    }
+
+    #[test]
+    fn the_output_of_a_command_still_running_is_what_it_printed_so_far() {
+        // No end mark and no prompt after the output.
+        let bytes = format!("{}$ {}sleep 5\r\n{}partial-1\r\npartial-2", mark("A"), mark("B"), mark("C"));
+        let mut e = fed(20, 6, &bytes);
+        assert_eq!(text_of(&mut e, TextRegion::LastOutput).as_deref(), Some("partial-1\npartial-2"));
+    }
+
+    #[test]
+    fn a_command_without_output_gives_none() {
+        let bytes = command("true", &[], "D;0") + &active_prompt();
+        let mut e = fed(20, 6, &bytes);
+        assert_eq!(read(&mut e, TextRegion::LastOutput), None);
+    }
+
+    #[test]
+    #[ignore = "release-mode timing, run with --release -- --ignored"]
+    fn a_read_of_the_whole_budget_is_cut_flagged_and_fast() {
+        // A 250x2000 screen with every cell styled and two bytes wide: the largest read the row budget allows, and one that
+        // the byte bound has to cut.
+        let line = format!("\x1b[1;32m{}\x1b[0m", "\u{e9}\u{e0}\u{fc}\u{f6}\u{e4}\u{df}\u{f1}\u{e7}\u{ea}\u{ef}".repeat(25));
+        let rows: Vec<&str> = (0..2000).map(|_| line.as_str()).collect();
+        let mut e = fed(250, 2000, &rows.join("\r\n"));
+        let started = std::time::Instant::now();
+        let big = read(&mut e, TextRegion::LastRows(MAX_READ_ROWS)).expect("text");
+        let full = started.elapsed();
+        println!("full budget read: {full:?}, {} bytes, truncated {}", big.text.len(), big.truncated);
+        assert!(big.truncated, "the byte bound cuts it");
+        assert!(big.text.len() <= MAX_READ_BYTES);
+        assert!(full < Duration::from_millis(100), "{full:?}");
+
+        let mut small = engine(200, 50);
+        let rows: Vec<&str> = (0..50).map(|_| line.as_str()).collect();
+        small.feed(rows.join("\r\n").as_bytes());
+        let started = std::time::Instant::now();
+        let screen = read(&mut small, TextRegion::Screen).expect("text");
+        println!("200x50 screen read: {:?}, {} bytes", started.elapsed(), screen.text.len());
+    }
 }
