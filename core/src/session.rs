@@ -362,6 +362,13 @@ impl Session {
         true
     }
 
+    /// Forget the working directory of every pane. The window frames and everything else stay. Used when a layout from
+    /// another device is adopted: pane ids are small per-device counters, so a start directory kept for an old pane
+    /// must not land on a pane of the new layout.
+    pub fn forget_panes(&mut self) {
+        self.cwds.clear();
+    }
+
     /// Remember the window geometry, clamped into range.
     pub fn set_window(&mut self, window: WindowState) {
         self.window = Some(window.clamped());
@@ -446,5 +453,26 @@ fn placement_of(window: Option<WindowState>, monitors: &[MonitorRect]) -> Placem
         size: (window.width, window.height),
         position: visible.then_some((window.x, window.y)),
         maximized: window.maximized,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forget_panes_clears_the_directories_and_keeps_the_windows() {
+        let mut session = Session::default();
+        assert!(session.set_cwd(1, "/home/a") && session.set_cwd(2, "/srv"));
+        session.set_window(WindowState { x: 10, y: 20, width: 800, height: 600, maximized: true });
+        assert!(session.set_window_for("window-2", WindowState { x: 1, y: 2, width: 640, height: 480, maximized: false }));
+        let (window, windows) = (session.window, session.windows.clone());
+        session.forget_panes();
+        assert!(session.cwds.is_empty());
+        assert!(session.cwd_for(1).is_none() && session.cwd_for(2).is_none());
+        assert_eq!((session.window, session.windows.clone()), (window, windows), "the frames are kept");
+        assert!(window.is_some());
+        // New directories are remembered again afterwards.
+        assert!(session.set_cwd(1, "/home/b"));
     }
 }

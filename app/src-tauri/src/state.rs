@@ -778,10 +778,13 @@ impl AppCore {
     /// hand-edited file is honoured before the first command can run.
     pub fn new_with_ai(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec, ai: AiParts) -> Arc<AppCore> {
         // What the sync downloaded last time is put in place before anything is read.
-        let applied = holzwave_core::sync::engine::promote_incoming(&dir);
+        let applied = holzwave_core::sync::engine::promote_incoming_with_report(&dir).applied;
         if !applied.is_empty() {
             eprintln!("holzwave: applied from sync: {}", applied.join(", "));
         }
+        // An adopted layout replaced the pane files as well (it is one unit), so the working directories kept for the old
+        // panes belong to other panes now: pane ids are small per-device counters.
+        let adopted_layout = applied.iter().any(|name| name == "layout.json");
         let path = dir.join("layout.json");
         let windows = Arc::new(Mutex::new(load_layout(&path)));
         let writes = Arc::new(AtomicUsize::new(0));
@@ -829,12 +832,21 @@ impl AppCore {
         };
         let session = {
             let mut session = load_session(&dir.join(SESSION_FILE));
+            if adopted_layout {
+                session.forget_panes();
+            }
             // A directory of a pane that is not in the layout is of no use and must not be written back, and neither
             // is the frame of a window that is not in it.
             let set = lock(&windows);
             session.sanitise(&set.all_panes());
             session.sanitise_windows(&set.labels());
             drop(set);
+            if adopted_layout {
+                // Written now, so a start that ends before the next save does not bring the old directories back.
+                if let Err(e) = session.save(&dir) {
+                    eprintln!("holzwave: cannot save {SESSION_FILE}: {e}");
+                }
+            }
             Arc::new(Mutex::new(session))
         };
         let session_saver = {
@@ -5239,6 +5251,47 @@ mod tests {
         let path = dir.0.join("sync-incoming").join(name);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("staging dir");
         std::fs::write(path, bytes).expect("staged file");
+    }
+
+    #[test]
+    fn adopting_a_layout_forgets_the_working_directories_of_this_device() {
+        let dir = Scratch::new("adopt");
+        // A first start makes a layout; remember a directory for its pane and a frame for the window.
+        let (first, _rec) = core_in(&dir, "/bin/cat", &[]);
+        first.new_tab();
+        let pane = only_pane(&first);
+        first.flush();
+        first.shutdown();
+        drop(first);
+        let layout: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.layout_file()).expect("layout")).expect("json");
+        let frame = WindowState { x: 10, y: 20, width: 900, height: 700, maximized: false };
+        let remember = || {
+            let mut session = Session::default();
+            assert!(session.set_cwd(pane, "/tmp"));
+            session.set_window(frame);
+            session.save(&dir.0).expect("session file");
+        };
+
+        // Nothing staged: the directory and the frame are kept.
+        remember();
+        let (kept, _rec) = core_in(&dir, "/bin/cat", &[]);
+        assert_eq!(lock(&kept.session).cwds.get(&pane).map(String::as_str), Some("/tmp"));
+        kept.shutdown();
+        drop(kept);
+
+        // A layout unit from another device is applied at the start: no directory survives, the frame does.
+        remember();
+        staged(&dir, "layout.json", serde_json::json!({"unit": 1, "layout": layout, "connections": {}}).to_string().as_bytes());
+        let (adopted, _rec) = core_in(&dir, "/bin/cat", &[]);
+        {
+            let session = lock(&adopted.session);
+            assert!(session.cwds.is_empty(), "{:?}", session.cwds);
+            assert_eq!(session.window, Some(frame), "the window frame is kept");
+        }
+        assert!(!dir.0.join("sync-incoming").exists(), "the unit was applied");
+        // And it is on disk already, so a start that ends before the next save cannot bring them back.
+        let (on_disk, _status) = Session::load(&dir.0);
+        assert!(on_disk.cwds.is_empty() && on_disk.window == Some(frame));
     }
 
     fn theme_json(name: &str) -> String {
