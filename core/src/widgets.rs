@@ -98,6 +98,16 @@ fn valid_url(url: &str) -> bool {
 
 /// Check one widget file's text; `stem` is the file name without `.json`.
 pub fn parse(text: &str, stem: &str) -> std::result::Result<WidgetDef, String> {
+    // Only an object with named members is a widget, and only objects are items: serde would also read a struct from an
+    // array of its member values, which nothing documents and no schema describes. The typed parse below stays as it was.
+    let shape: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("not a valid widget: {e}"))?;
+    let Some(members) = shape.as_object() else {
+        return Err("a widget file is a JSON object with named members".into());
+    };
+    let items = members.get("items").and_then(serde_json::Value::as_array);
+    if items.is_some_and(|items| items.iter().any(|item| !item.is_object())) {
+        return Err("an item is a JSON object with named members".into());
+    }
     let raw: Raw = serde_json::from_str(text).map_err(|e| format!("not a valid widget: {e}"))?;
     if raw.version.is_some_and(|v| v != 1) {
         return Err("a widget of a newer version".into());
