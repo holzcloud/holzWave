@@ -51,7 +51,7 @@ use interprocess::local_socket::{GenericFilePath, GenericNamespaced, ListenerOpt
 use serde::{Deserialize, Serialize};
 
 mod stream;
-pub use stream::{Event, Gone, Outcome, Sink, stream_request};
+pub use stream::{Event, Gone, Outcome, Sink, stream_request, stream_request_at};
 pub use stream::{MAX_CHUNK, MAX_NOTE, MAX_OUTPUT, MAX_REPLY};
 
 /// The longest request line, in bytes.
@@ -230,6 +230,41 @@ fn same(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// Where the app listens, as a client finds it: the folder that holds the socket of this computer (`HOLZWAVE_IPC`), or the path
+/// of one socket (`HOLZWAVE_SOCKET`, the end of a reverse forward on a remote host). This is the one place that decides how a
+/// name is made from either; [`connect`], [`request`] and [`stream_request`] are the folder forms of the `_at` functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Endpoint {
+    /// The folder of the app's socket (`ipc.sock` in it on Unix, a pipe made from the folder on Windows).
+    Dir(PathBuf),
+    /// The path of a Unix socket. A pipe of Windows has no path, so this is not supported there.
+    Socket(PathBuf),
+}
+
+impl From<&Path> for Endpoint {
+    fn from(dir: &Path) -> Self {
+        Endpoint::Dir(dir.to_path_buf())
+    }
+}
+
+/// The longest socket path: `sun_path` is about 104 bytes on macOS and 108 on Linux.
+const MAX_SOCKET_PATH: usize = 100;
+
+fn endpoint_name(endpoint: &Endpoint) -> io::Result<interprocess::local_socket::Name<'static>> {
+    match endpoint {
+        Endpoint::Dir(dir) => name(dir),
+        Endpoint::Socket(_) if cfg!(windows) => {
+            Err(io::Error::new(io::ErrorKind::Unsupported, "a socket path is not supported on Windows"))
+        }
+        Endpoint::Socket(path) => {
+            if path.as_os_str().len() > MAX_SOCKET_PATH {
+                return Err(io::Error::other("the socket path is too long"));
+            }
+            path.as_path().to_fs_name::<GenericFilePath>().map(interprocess::local_socket::Name::into_owned)
+        }
+    }
+}
+
 fn name(dir: &Path) -> io::Result<interprocess::local_socket::Name<'static>> {
     if cfg!(windows) {
         // A named pipe is not in the file system; the directory's last parts make it the user's own.
@@ -238,8 +273,7 @@ fn name(dir: &Path) -> io::Result<interprocess::local_socket::Name<'static>> {
         format!("holzwave-{tag}").to_ns_name::<GenericNamespaced>().map(interprocess::local_socket::Name::into_owned)
     } else {
         let path = dir.join("ipc.sock");
-        // `sun_path` is about 104 bytes on macOS and 108 on Linux.
-        if path.as_os_str().len() > 100 {
+        if path.as_os_str().len() > MAX_SOCKET_PATH {
             return Err(io::Error::other("the socket path is too long; set XDG_RUNTIME_DIR to a shorter one"));
         }
         path.to_fs_name::<GenericFilePath>().map(interprocess::local_socket::Name::into_owned)
@@ -497,15 +531,25 @@ fn make_private_dir(dir: &Path) -> io::Result<()> {
 
 /// Connect to the app whose socket is in `dir`.
 pub fn connect(dir: &Path) -> io::Result<Stream> {
-    Stream::connect(name(dir)?)
+    connect_endpoint(&Endpoint::from(dir))
+}
+
+/// Connect to the app at `endpoint`.
+pub fn connect_endpoint(endpoint: &Endpoint) -> io::Result<Stream> {
+    Stream::connect(endpoint_name(endpoint)?)
 }
 
 /// Send one request and read the answer. A command that streams needs [`stream_request`].
 pub fn request(dir: &Path, request: &Request) -> io::Result<Response> {
+    request_at(&Endpoint::from(dir), request)
+}
+
+/// [`request`] to an [`Endpoint`].
+pub fn request_at(endpoint: &Endpoint, request: &Request) -> io::Result<Response> {
     if request.cmd.is_stream() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "this command streams; use stream_request"));
     }
-    let mut stream = connect(dir)?;
+    let mut stream = connect_endpoint(endpoint)?;
     let mut line = serde_json::to_string(request).map_err(io::Error::other)?;
     line.push('\n');
     stream.write_all(line.as_bytes())?;
