@@ -472,3 +472,157 @@ fn a_fresh_use_resets_the_idle_clock() {
     wait_until("the session to be closed", || server.seen.disconnects.load(Ordering::SeqCst) == 1);
 }
 
+// ---- the host-key rule belongs to the opener --------------------------------------------------------------------
+
+/// What a command on the saved profile `talos` says when it fails.
+fn run_error(exec: &SshExec, command: &str) -> String {
+    exec.exec(command, &ExecLimits::default(), &ExecCancel::new()).unwrap_err().to_string()
+}
+
+#[test]
+fn a_command_runner_never_learns_a_host_key() {
+    let server = ssh_server::start(Options::password());
+    let world = World::new("runner-learns-nothing", &server, false);
+    let before = std::fs::read(world.known()).unwrap();
+    let error = run_error(&world.agent(), "echo hi");
+    assert!(error.contains("not known"), "{error}");
+    assert_eq!(std::fs::read(world.known()).unwrap(), before, "the known hosts file is as it was");
+    assert_eq!(server.seen.logins.load(Ordering::SeqCst), 0, "no login was made on an unknown host");
+    assert!(server.seen.commands().is_empty());
+}
+
+#[test]
+fn a_file_browser_open_learns_the_key_and_the_command_runner_may_then_use_the_session() {
+    let dir = Scratch::new("browser-learns-root");
+    let root = dir.path().join("root").to_owned();
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    std::fs::write(root.join("a.txt"), "alpha").unwrap();
+    let server = ssh_server::start(Options::password().sftp(root.clone()));
+    let world = World::new("browser-learns", &server, false);
+    assert!(std::fs::read(world.known()).unwrap().is_empty());
+
+    let blocks = Blocks::load(world.dir.path(), None, &[]);
+    assert_eq!(blocks.list(&world.connections, "talos", root.to_str().unwrap()).unwrap().entries.len(), 1);
+    assert!(!std::fs::read(world.known()).unwrap().is_empty(), "the person's own open learned the key");
+
+    assert_eq!(run(&world.agent(), "echo hi"), "ran:echo hi");
+    assert_eq!(server.seen.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(server.seen.logins.load(Ordering::SeqCst), 1, "the command runner used the session the browser made");
+}
+
+#[test]
+fn a_changed_host_key_is_refused_for_both_openers_and_loudly() {
+    let dir = Scratch::new("changed-root");
+    let root = dir.path().join("root").to_owned();
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let server = ssh_server::start(Options::password().sftp(root.clone()));
+    let world = World::new("changed", &server, false);
+    // The file holds another key for this host: someone else answers on the address.
+    let other = ssh_server::ed25519();
+    learn_host_key("127.0.0.1", server.addr.port(), other.public_key(), &world.known()).unwrap();
+
+    // The command runner first, so it makes a real attempt; then the file browser, which is never made to wait.
+    let command = run_error(&world.agent(), "echo hi");
+    assert!(command.contains("CHANGED"), "{command}");
+    let blocks = Blocks::load(world.dir.path(), None, &[]);
+    let listing = blocks.list(&world.connections, "talos", root.to_str().unwrap()).unwrap_err().to_string();
+    assert!(listing.contains("CHANGED"), "{listing}");
+    assert_eq!(server.seen.logins.load(Ordering::SeqCst), 0, "no login happened with a changed key");
+    assert_eq!(server.seen.refused_logins.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_target_that_cannot_be_pinned_is_refused_when_the_runner_is_made() {
+    let server = ssh_server::start(Options::password());
+    let dir = Scratch::new("unpinnable");
+    let known = dir.path().join("known_hosts");
+    server.trust(&known);
+
+    // No known hosts file at all.
+    let bare = server.target(SshAuth::Password("pw".into()));
+    let conn = Connection::standalone("Bare", bare.clone()).unwrap();
+    let error = SshExec::on(conn).err().unwrap().to_string();
+    assert!(error.contains("has no known_hosts file"), "{error}");
+
+    // A file, but the host is set to accept any key.
+    let mut any = server.exec_target(SshAuth::Password("pw".into()), &known);
+    any.host_key = HostKeyPolicy::AcceptAny;
+    let error = SshExec::on(Connection::standalone("Any", any.clone()).unwrap()).err().unwrap().to_string();
+    assert!(error.contains("accept any host key"), "{error}");
+
+    // A jump host that cannot be pinned makes the whole target unpinnable.
+    let mut behind = server.exec_target(SshAuth::Password("pw".into()), &known);
+    behind.jump = Some(Box::new(bare));
+    let error = SshExec::on(Connection::standalone("Behind", behind).unwrap()).err().unwrap().to_string();
+    assert!(error.contains("has no known_hosts file"), "{error}");
+
+    // The standalone constructor says the same, and nothing ever connected.
+    assert!(SshExec::new("New", any).is_err());
+    assert_eq!(server.seen.connections.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_command_runner_opening_first_does_not_widen_what_a_pane_may_do_later() {
+    let server = ssh_server::start(Options::password());
+    let world = World::new("runner-then-pane", &server, false);
+    let conn = world.connections.session("talos").unwrap();
+    let t0 = Instant::now();
+    let refused = pollster(conn.session_at(Open::Pinned, t0)).unwrap_err();
+    assert!(refused.fatal && refused.why.contains("not known"), "{refused}");
+    assert!(std::fs::read(world.known()).unwrap().is_empty());
+    assert!(conn.cooldown_left(t0).is_some(), "the background opener now waits");
+
+    // The person's own open, a second later, is not made to wait and learns the key; the refusal poisoned nothing.
+    pollster(conn.session_at(Open::Interactive, t0 + Duration::from_secs(1))).unwrap();
+    assert!(!std::fs::read(world.known()).unwrap().is_empty());
+    assert_eq!(conn.cooldown_left(t0 + Duration::from_secs(1)), None, "a success clears the wait");
+    assert_eq!(server.seen.logins.load(Ordering::SeqCst), 1);
+    // And now the command runner uses that session.
+    assert_eq!(run(&world.agent(), "echo hi"), "ran:echo hi");
+    assert_eq!(server.seen.logins.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn the_error_texts_hold_no_secret() {
+    const SECRET: &str = "s3cret-Pa55word!";
+    let dir = Scratch::new("no-secret-root");
+    let root = dir.path().join("root").to_owned();
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    // The server knows `pw`, so a login with the secret is refused; an unknown host key and a changed one are refused
+    // before that.
+    let server = ssh_server::start(Options::password().sftp(root.clone()));
+    let world = World::new("no-secret", &server, false);
+    world.save(SECRET, server.addr.port());
+    let conn = world.connections.session("talos").unwrap();
+    let mut texts = vec![format!("{conn:?}"), format!("{:?}", conn.target().auth)];
+    let t0 = Instant::now();
+
+    let unknown = pollster(conn.session_at(Open::Pinned, t0)).unwrap_err();
+    texts.extend([format!("{unknown}"), format!("{unknown:?}")]);
+    texts.push(run_error(&world.agent(), "echo hi"));
+    let blocks = Blocks::load(world.dir.path(), None, &[]);
+    // The person's own open learns the key, and the login is refused for the wrong password.
+    let refused = blocks.list(&world.connections, "talos", root.to_str().unwrap()).unwrap_err();
+    texts.extend([refused.to_string(), format!("{refused:?}")]);
+    let again = pollster(conn.session_at(Open::Pinned, t0 + Duration::from_secs(1))).unwrap_err();
+    assert!(again.why.contains("refused the login"), "{again}");
+    texts.extend([format!("{again}"), format!("{again:?}")]);
+    texts.push(run_error(&world.agent(), "echo hi"));
+
+    // A changed key too.
+    let other = ssh_server::ed25519();
+    std::fs::write(world.known(), "").unwrap();
+    learn_host_key("127.0.0.1", server.addr.port(), other.public_key(), &world.known()).unwrap();
+    world.save(SECRET, server.addr.port());
+    let changed = pollster(world.connections.session("talos").unwrap().session_at(Open::Interactive, t0)).unwrap_err();
+    assert!(changed.why.contains("CHANGED"), "{changed}");
+    texts.extend([format!("{changed}"), format!("{changed:?}")]);
+
+    assert!(texts.len() >= 10);
+    for text in &texts {
+        assert!(!text.contains(SECRET), "a message holds the secret: {text}");
+    }
+}
