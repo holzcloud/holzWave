@@ -333,14 +333,22 @@ fn a_sink_that_never_reads_cannot_stall_the_session() {
     let started = Instant::now();
     let mut rounds = 0;
     while !flood.is_finished() && started.elapsed() < Duration::from_secs(15) {
+        // Each listing runs on a thread of its own and is waited for with a bound, so a stalled login fails the test
+        // instead of hanging it.
+        let (done, result) = std::sync::mpsc::channel();
+        let (c, folder) = (connection.clone(), root.clone());
         let begun = Instant::now();
-        let c = connection.clone();
-        let listing = connection.block_on(async move { c.sftp().await.map(|(_, sftp)| sftp) });
-        let sftp = listing.expect("the login is still usable");
-        let folder = root.clone();
-        let names = connection.block_on(async move { sftp.read_dir(folder).await.map(|d| d.count()) });
-        assert!(names.is_ok(), "{names:?}");
-        assert!(begun.elapsed() < Duration::from_secs(2), "a listing took {:?} while a sink was stuck", begun.elapsed());
+        std::thread::spawn(move || {
+            let c2 = c.clone();
+            let listing = c.block_on(async move { c2.sftp().await.map(|(_, sftp)| sftp) });
+            let counted = listing.map_err(|e| e.to_string()).and_then(|sftp| {
+                c.block_on(async move { sftp.read_dir(folder).await.map(|d| d.count()).map_err(|e| e.to_string()) })
+            });
+            let _ = done.send(counted);
+        });
+        let counted = result.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| panic!("a listing took over 2 s while a sink was stuck"));
+        assert_eq!(counted, Ok(1), "the login is still usable");
+        assert!(begun.elapsed() < Duration::from_secs(2));
         rounds += 1;
     }
     let (mut peer, sent) = flood.join().unwrap();

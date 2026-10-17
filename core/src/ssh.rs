@@ -12,6 +12,12 @@
 //! shell's channel is closed and the pane says why, so one pane that is slow or stopped cannot stall the other channels
 //! of the host.
 //!
+//! A pane may also carry a [`Tunnel`] ([`SshLink::attach_with`]): the socket of the app is forwarded back from the host over
+//! the same login ([`crate::pool::Connection::forward`]), and the shell is started by one constant exec line that sets the
+//! three variables `wsh` finds the app by ([`wrapped_shell_command`]). What arrives through the socket is handed to the
+//! sink of the tunnel by [`bridge`], which bounds every connection (count, bytes, silence, life, queue) and never waits for
+//! the sink, so a slow or hostile peer cannot hold up the other channels of the login.
+//!
 //! Secrets (a key's passphrase, a password) are given by the caller in [`SshAuth`] and are never written to disk or
 //! to the screen here. Host keys are checked against a `known_hosts` file ([`HostKeyPolicy`]).
 //!
@@ -33,11 +39,14 @@ use std::time::Duration;
 
 use russh::client::{self, Handle};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, known_hosts, load_secret_key};
-use russh::{Channel, ChannelMsg, ChannelOpenFailure, Sig};
+use russh::{Channel, ChannelMsg, ChannelOpenFailure, ChannelReadHalf, ChannelWriteHalf, Sig};
 use tokio::sync::{mpsc as tmpsc, watch};
 
 use crate::conn::{ConnState, Link, SharedState};
-use crate::pool::{Connection, ForwardError, ForwardGuard, ForwardLimits, ForwardSink, Forwards, Open, Session, bridge};
+use crate::pool::{
+    Admitted, Back, CLOSE_TIMEOUT, Connection, ForwardError, ForwardGuard, ForwardLimits, ForwardSink, ForwardedStream, Forwards, Open,
+    Place, Session, ThreadCount,
+};
 use crate::{Error, Result};
 
 /// The most input kept while the connection is down. More is dropped, so a stuck key cannot fill the memory.
@@ -202,6 +211,137 @@ pub fn wrapped_shell_command(env: &[(String, String)]) -> std::result::Result<St
          exec \"${{SHELL:-/bin/sh}}\" -l'"
     ))
 }
+
+// ---- the bridge of a forwarded socket -----------------------------------------------------------------------------
+
+/// A switch that ends both halves of a bridge.
+struct Stop(watch::Sender<bool>);
+
+impl Stop {
+    fn stop(&self) {
+        self.0.send_replace(true);
+    }
+
+    async fn stopped(&self) {
+        let mut rx = self.0.subscribe();
+        if rx.wait_for(|stopped| *stopped).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+type WriteHalf = ChannelWriteHalf<client::Msg>;
+
+/// Bridge a channel the server opened to the sink: a thread runs the sink, and two tasks on the current runtime move the
+/// bytes. The reading task never waits for the sink: it hands chunks over with `try_send` and closes the channel when the
+/// queue is full, when more than the byte bound was read or when the life of the connection is over. The writing task
+/// waits only for the remote side's window, which never holds anything else.
+pub(crate) fn bridge(channel: Channel<client::Msg>, admitted: Admitted) {
+    let Admitted { sink, limits, place } = admitted;
+    let place = Arc::new(place);
+    let (stream, to_sink, from_sink) = ForwardedStream::pair(&limits);
+    let (read, write) = channel.split();
+    let write = Arc::new(write);
+    let stop = Arc::new(Stop(watch::channel(false).0));
+    let counted = ThreadCount::new();
+    let thread_place = place.clone();
+    let spawned = thread::Builder::new().name("hw-fwd".into()).spawn(move || {
+        let _counted = counted;
+        let _place = thread_place;
+        sink.serve(stream);
+    });
+    if spawned.is_err() {
+        // The sink never ran: close the channel and let the places go.
+        let write = write.clone();
+        drop(tokio::spawn(async move {
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.close()).await;
+        }));
+        return;
+    }
+    drop(tokio::spawn(read_side(read, write.clone(), to_sink, stop.clone(), limits, place)));
+    drop(tokio::spawn(write_side(write, from_sink, stop)));
+}
+
+async fn read_side(
+    mut read: ChannelReadHalf,
+    write: Arc<WriteHalf>,
+    to_sink: mpsc::SyncSender<Vec<u8>>,
+    stop: Arc<Stop>,
+    limits: ForwardLimits,
+    _place: Arc<Place>,
+) {
+    let mut to_sink = Some(to_sink);
+    let mut total = 0usize;
+    let life = tokio::time::sleep(limits.life);
+    tokio::pin!(life);
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.stopped() => break,
+            () = &mut life => break,
+            msg = read.wait() => match msg {
+                Some(ChannelMsg::Data { data }) => {
+                    total = total.saturating_add(data.len());
+                    if total > limits.bytes {
+                        break;
+                    }
+                    if let Some(tx) = &to_sink {
+                        match tx.try_send(data.to_vec()) {
+                            Ok(()) => {}
+                            // The sink cannot keep up: the connection ends and the session goes on.
+                            Err(mpsc::TrySendError::Full(_)) => break,
+                            // The sink stopped reading (it has its request): what follows is dropped, but still counted,
+                            // and the answer that may still be on its way is not cut.
+                            Err(mpsc::TrySendError::Disconnected(_)) => to_sink = None,
+                        }
+                    }
+                }
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    total = total.saturating_add(data.len());
+                    if total > limits.bytes {
+                        break;
+                    }
+                }
+                // The remote side is done sending; it may still wait for the answer.
+                Some(ChannelMsg::Eof) => to_sink = None,
+                Some(ChannelMsg::Close) | None => break,
+                Some(_) => {}
+            },
+        }
+    }
+    stop.stop();
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.close()).await;
+}
+
+async fn write_side(write: Arc<WriteHalf>, mut from_sink: tmpsc::UnboundedReceiver<Back>, stop: Arc<Stop>) {
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.stopped() => return,
+            back = from_sink.recv() => match back {
+                Some(Back::Data(bytes)) => {
+                    tokio::select! {
+                        biased;
+                        () = stop.stopped() => return,
+                        sent = write.data_bytes(bytes) => {
+                            if sent.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Back::Cut) => break,
+                // The sink is finished: what it wrote is sent, then the end.
+                None => {
+                    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.eof()).await;
+                    break;
+                }
+            },
+        }
+    }
+    stop.stop();
+}
+
 
 /// What the connection thread is told.
 enum Cmd {

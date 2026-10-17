@@ -40,10 +40,10 @@ use std::sync::{Arc, Mutex, PoisonError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use russh::client::{self, Handle};
-use russh::{Channel, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect};
+use russh::client::Handle;
+use russh::Disconnect;
 use russh_sftp::client::SftpSession;
-use tokio::sync::{mpsc as tmpsc, watch};
+use tokio::sync::mpsc as tmpsc;
 
 use crate::ssh::{Client, Outcome, SshTarget, channel_text, open, pin_hosts};
 use crate::{Error, Result};
@@ -61,7 +61,7 @@ pub const OPEN_TIMEOUT: Duration = Duration::from_secs(20);
 /// How often the reaper looks for idle sessions.
 const REAP_EVERY: Duration = Duration::from_secs(30);
 /// The bound of closing a session politely.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Who opens the session, which decides the host-key rule (see the module documentation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -578,8 +578,22 @@ impl Read for ForwardReader {
     }
 }
 
+impl ForwardedStream {
+    /// The two ends of a forwarded connection: the stream the sink gets, the sender of what the remote side sent (a queue
+    /// of `limits.queue` chunks) and the receiver of what the sink writes back.
+    pub(crate) fn pair(limits: &ForwardLimits) -> (ForwardedStream, mpsc::SyncSender<Vec<u8>>, tmpsc::UnboundedReceiver<Back>) {
+        let (to_sink, from_channel) = mpsc::sync_channel::<Vec<u8>>(limits.queue.max(1));
+        let (to_channel, from_sink) = tmpsc::unbounded_channel::<Back>();
+        let stream = ForwardedStream {
+            reader: ForwardReader { rx: from_channel, pending: Vec::new(), pos: 0, silence: limits.silence },
+            writer: ForwardWriter { tx: to_channel, written: 0, cap: limits.bytes },
+        };
+        (stream, to_sink, from_sink)
+    }
+}
+
 /// What the sink says back to the channel.
-enum Back {
+pub(crate) enum Back {
     Data(Vec<u8>),
     /// The sink wrote more than it may: end the connection.
     Cut,
@@ -624,7 +638,7 @@ struct Registered {
 
 /// A place among the open connections of one forward, given back when the last owner lets go (the channel's task and the
 /// sink's thread each hold it), so a panic frees it too.
-struct Place(Arc<AtomicUsize>);
+pub(crate) struct Place(Arc<AtomicUsize>);
 
 impl Drop for Place {
     fn drop(&mut self) {
@@ -634,9 +648,9 @@ impl Drop for Place {
 
 /// What a channel that was let in is given.
 pub(crate) struct Admitted {
-    sink: Arc<dyn ForwardSink>,
-    limits: ForwardLimits,
-    place: Place,
+    pub(crate) sink: Arc<dyn ForwardSink>,
+    pub(crate) limits: ForwardLimits,
+    pub(crate) place: Place,
 }
 
 impl Forwards {
@@ -681,10 +695,10 @@ pub fn forward_threads() -> usize {
 }
 
 /// Counts a live bridge thread: made before the thread starts, dropped when it ends or fails to start.
-struct ThreadCount;
+pub(crate) struct ThreadCount;
 
 impl ThreadCount {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         BRIDGE_THREADS.fetch_add(1, Ordering::SeqCst);
         ThreadCount
     }
@@ -694,139 +708,6 @@ impl Drop for ThreadCount {
     fn drop(&mut self) {
         BRIDGE_THREADS.fetch_sub(1, Ordering::SeqCst);
     }
-}
-
-/// A switch that ends both halves of a bridge.
-struct Stop(watch::Sender<bool>);
-
-impl Stop {
-    fn stop(&self) {
-        self.0.send_replace(true);
-    }
-
-    async fn stopped(&self) {
-        let mut rx = self.0.subscribe();
-        if rx.wait_for(|stopped| *stopped).await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
-type WriteHalf = ChannelWriteHalf<client::Msg>;
-
-/// Bridge a channel the server opened to the sink: a thread runs the sink, and two tasks on the current runtime move the
-/// bytes. The reading task never waits for the sink: it hands chunks over with `try_send` and closes the channel when the
-/// queue is full, when more than the byte bound was read or when the life of the connection is over. The writing task
-/// waits only for the remote side's window, which never holds anything else.
-pub(crate) fn bridge(channel: Channel<client::Msg>, admitted: Admitted) {
-    let Admitted { sink, limits, place } = admitted;
-    let place = Arc::new(place);
-    let (to_sink, from_channel) = mpsc::sync_channel::<Vec<u8>>(limits.queue.max(1));
-    let (to_channel, from_sink) = tmpsc::unbounded_channel::<Back>();
-    let stream = ForwardedStream {
-        reader: ForwardReader { rx: from_channel, pending: Vec::new(), pos: 0, silence: limits.silence },
-        writer: ForwardWriter { tx: to_channel, written: 0, cap: limits.bytes },
-    };
-    let (read, write) = channel.split();
-    let write = Arc::new(write);
-    let stop = Arc::new(Stop(watch::channel(false).0));
-    let counted = ThreadCount::new();
-    let thread_place = place.clone();
-    let spawned = thread::Builder::new().name("hw-fwd".into()).spawn(move || {
-        let _counted = counted;
-        let _place = thread_place;
-        sink.serve(stream);
-    });
-    if spawned.is_err() {
-        // The sink never ran: close the channel and let the places go.
-        let write = write.clone();
-        drop(tokio::spawn(async move {
-            let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.close()).await;
-        }));
-        return;
-    }
-    drop(tokio::spawn(read_side(read, write.clone(), to_sink, stop.clone(), limits, place)));
-    drop(tokio::spawn(write_side(write, from_sink, stop)));
-}
-
-async fn read_side(
-    mut read: ChannelReadHalf,
-    write: Arc<WriteHalf>,
-    to_sink: mpsc::SyncSender<Vec<u8>>,
-    stop: Arc<Stop>,
-    limits: ForwardLimits,
-    _place: Arc<Place>,
-) {
-    let mut to_sink = Some(to_sink);
-    let mut total = 0usize;
-    let life = tokio::time::sleep(limits.life);
-    tokio::pin!(life);
-    loop {
-        tokio::select! {
-            biased;
-            () = stop.stopped() => break,
-            () = &mut life => break,
-            msg = read.wait() => match msg {
-                Some(ChannelMsg::Data { data }) => {
-                    total = total.saturating_add(data.len());
-                    if total > limits.bytes {
-                        break;
-                    }
-                    if let Some(tx) = &to_sink {
-                        match tx.try_send(data.to_vec()) {
-                            Ok(()) => {}
-                            // The sink cannot keep up: the connection ends and the session goes on.
-                            Err(mpsc::TrySendError::Full(_)) => break,
-                            // The sink stopped reading (it has its request): what follows is dropped, but still counted,
-                            // and the answer that may still be on its way is not cut.
-                            Err(mpsc::TrySendError::Disconnected(_)) => to_sink = None,
-                        }
-                    }
-                }
-                Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    total = total.saturating_add(data.len());
-                    if total > limits.bytes {
-                        break;
-                    }
-                }
-                // The remote side is done sending; it may still wait for the answer.
-                Some(ChannelMsg::Eof) => to_sink = None,
-                Some(ChannelMsg::Close) | None => break,
-                Some(_) => {}
-            },
-        }
-    }
-    stop.stop();
-    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.close()).await;
-}
-
-async fn write_side(write: Arc<WriteHalf>, mut from_sink: tmpsc::UnboundedReceiver<Back>, stop: Arc<Stop>) {
-    loop {
-        tokio::select! {
-            biased;
-            () = stop.stopped() => return,
-            back = from_sink.recv() => match back {
-                Some(Back::Data(bytes)) => {
-                    tokio::select! {
-                        biased;
-                        () = stop.stopped() => return,
-                        sent = write.data_bytes(bytes) => {
-                            if sent.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                }
-                Some(Back::Cut) => break,
-                // The sink is finished: what it wrote is sent, then the end.
-                None => {
-                    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.eof()).await;
-                    break;
-                }
-            },
-        }
-    }
-    stop.stop();
 }
 
 /// A forward the server agreed to. Dropping it (or [`ForwardGuard::cancel`]) asks the server to stop and forgets the sink.
