@@ -595,6 +595,9 @@
         "y": 12.0
       }
     ],
+    "history-open": {
+      "pane": 3
+    },
     "incoming-drop": [
       {
         "kind": "pane",
@@ -620,7 +623,8 @@
       "drag-hover",
       "drag-end",
       "ai",
-      "ai-ask"
+      "ai-ask",
+      "history-open"
     ],
     "pane-exit": [
       {

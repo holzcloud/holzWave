@@ -1,7 +1,7 @@
 // The history on the page (src/historystate.ts, built into dist/).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ago, meta, pieces, readHits, shortDir } from "../../dist/historystate.js";
+import { ago, meta, pieces, readHits, readOpenPane, shortDir } from "../../dist/historystate.js";
 
 test("hits are read defensively", () => {
   assert.deepEqual(readHits(null), []);
@@ -32,4 +32,13 @@ test("ages and the line under a command", () => {
   assert.equal(shortDir("/home/holzer", "/home/holz"), "/home/holzer");
   assert.equal(meta({ cmd: "x", cwd: "/home/holz/infra", host: "local", last: now - 7200, count: 14, exit: 2, marks: [] }, now, "/home/holz"), "~/infra · 2 h ago · ×14 · exit 2");
   assert.equal(meta({ cmd: "x", cwd: "", host: "local", last: now, count: 1, exit: 0, marks: [] }, now), "now");
+});
+
+test("the_open_event_payload_is_read_defensively", () => {
+  assert.equal(readOpenPane({ pane: 1 }), 1);
+  assert.equal(readOpenPane({ pane: 0 }), 0);
+  assert.equal(readOpenPane({ pane: 1, extra: 2 }), 1, "other members are ignored, the pane is read");
+  for (const bad of [null, undefined, [], "1", 1, true, {}, { pane: "1" }, { pane: -1 }, { pane: 1.5 }, { pane: NaN }, { pane: Infinity }, { pane: 2 ** 60 }, { pane: null }, { pane: [1] }, [{ pane: 1 }]]) {
+    assert.equal(readOpenPane(bad), null, JSON.stringify(bad));
+  }
 });

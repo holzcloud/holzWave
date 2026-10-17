@@ -375,6 +375,9 @@ pub enum Out {
     /// A request from a shell waits for the person, or is over: the page draws or removes a card. `Waiting` goes to the
     /// window of the pane that asked, `Closed` to every window.
     AiAsk(AskEvent),
+    /// The shell of `pane` asked for the history search (the binding added by `wsh init`): the page of the window that has
+    /// the pane opens the dialog for it.
+    HistoryOpen { pane: PaneId },
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -394,6 +397,7 @@ impl Out {
             Out::DragEnd => "drag-end",
             Out::Ai(_) => "ai",
             Out::AiAsk(_) => "ai-ask",
+            Out::HistoryOpen { .. } => "history-open",
             Out::Exit => "exit",
         }
     }
@@ -403,6 +407,11 @@ impl Out {
 struct TitlePayload<'a> {
     pane: PaneId,
     title: &'a str,
+}
+
+#[derive(Serialize)]
+struct HistoryOpenPayload {
+    pane: PaneId,
 }
 
 #[derive(Serialize)]
@@ -441,6 +450,7 @@ impl Serialize for Out {
             Out::DragEnd => serializer.serialize_unit(),
             Out::Ai(payload) => payload.serialize(serializer),
             Out::AiAsk(event) => event.serialize(serializer),
+            Out::HistoryOpen { pane } => HistoryOpenPayload { pane: *pane }.serialize(serializer),
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -733,6 +743,10 @@ pub struct AppCore {
 /// What the single-answer path says to `wsh ai`: the request is answered as a stream (see `ai_ask`), never as one line.
 const WSH_AI_STREAM_ONLY: &str = "wsh ai is answered as a stream, not as one line";
 
+/// What `wsh hist open` is told when its pane is open but is not the one that has the focus of its window: the history opens
+/// for the pane the person types in, so a process of a background pane cannot take the keyboard.
+const HISTORY_NOT_FOCUSED: &str = "this pane is not the one in focus; the history opens for the pane you type in";
+
 impl AppCore {
     /// Load the layouts from `dir/layout.json` (a fresh one-pane window `main` when there is none or it is unusable;
     /// a layout file of before windows is one window) and start nothing: the webview starts each pane once it knows
@@ -989,10 +1003,25 @@ impl AppCore {
             }
             Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
             Cmd::Ai { .. } => return Err(WSH_AI_STREAM_ONLY.into()),
+            Cmd::HistOpen => {
+                self.history_open(pane, &label)?;
+                return Ok(String::new());
+            }
             Cmd::Ping | Cmd::Hist { .. } => return Ok(String::new()),
         };
         self.sink.send(Target::window(&label), Out::Layout(view));
         Ok(String::new())
+    }
+
+    /// Tell the window `label` that the shell of `pane` asked for the history search, when `pane` is the one in focus in
+    /// the tab that window shows. The window is named by the core and the event carries the pane id only.
+    fn history_open(&self, pane: PaneId, label: &str) -> Result<(), String> {
+        let focus = lock(&self.windows).layout(label).map(|layout| layout.tab().focus);
+        if focus != Some(pane) {
+            return Err(HISTORY_NOT_FOCUSED.into());
+        }
+        self.sink.send(Target::window(label), Out::HistoryOpen { pane });
+        Ok(())
     }
 
     /// Find typed commands. An empty query lists the newest.
@@ -4481,6 +4510,32 @@ mod tests {
     }
 
     #[test]
+    fn a_history_request_from_the_focused_pane_opens_the_dialog_in_its_window() {
+        use holzwave_ipc::Cmd;
+        let (core, rec, _dir) = core("sh", &[]);
+        let pane = core.view().focus;
+        assert_eq!(core.ipc_command(Some(pane), Cmd::HistOpen), Ok(String::new()));
+        let opened: Vec<(Target, Out)> = rec.log.lock().unwrap().iter().filter(|(_, o)| matches!(o, Out::HistoryOpen { .. })).cloned().collect();
+        assert_eq!(opened, [(Target::window(MAIN_WINDOW), Out::HistoryOpen { pane })], "one event, for the window of the pane");
+    }
+
+    #[test]
+    fn a_history_request_is_refused_for_no_pane_an_unknown_pane_and_a_pane_out_of_focus() {
+        use holzwave_ipc::Cmd;
+        let (core, rec, _dir) = core("sh", &[]);
+        let first = core.view().focus;
+        let opened = || rec.log.lock().unwrap().iter().filter(|(_, o)| matches!(o, Out::HistoryOpen { .. })).count();
+        assert_eq!(core.ipc_command(None, Cmd::HistOpen), Err("HOLZWAVE_PANE is not set".to_owned()));
+        assert_eq!(core.ipc_command(Some(9999), Cmd::HistOpen), Err("this pane is not open any more".to_owned()));
+        let second = core.split_in(MAIN_WINDOW, true).expect("the window").focus;
+        assert_ne!(core.view().focus, first, "the new pane has the focus now");
+        assert_eq!(core.ipc_command(Some(first), Cmd::HistOpen), Err(HISTORY_NOT_FOCUSED.to_owned()));
+        assert_eq!(opened(), 0, "a refusal sends nothing");
+        assert_eq!(core.ipc_command(Some(second), Cmd::HistOpen), Ok(String::new()));
+        assert_eq!(opened(), 1);
+    }
+
+    #[test]
     fn the_folder_of_wsh_goes_in_front_of_the_path_once() {
         let dir = Scratch::new("wshpath");
         let name = if cfg!(windows) { "wsh.exe" } else { "wsh" };
@@ -7467,6 +7522,7 @@ mod protocol {
                 kind: AiEventKind::Delta { text: "Hel".into() },
             })),
             Out::AiAsk(AskEvent::Waiting { view: sample_ask() }),
+            Out::HistoryOpen { pane: 3 },
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -7513,6 +7569,7 @@ mod protocol {
                 "drag-end": payload(8),
                 "ai": payload(9),
                 "ai-ask": payload(10),
+                "history-open": payload(11),
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {

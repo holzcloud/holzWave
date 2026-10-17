@@ -3,11 +3,11 @@
 // prompt of the focused pane WITHOUT running it, Shift+Delete forgets the command, Escape closes. While it is open it takes
 // every key. Every command goes in with `textContent`; the matched letters are wrapped in elements the page makes.
 import { registerAction } from "./actions.js";
-import { call } from "./bridge.js";
+import { call, listen } from "./bridge.js";
 import { el, loadStyles, setAttr, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
 import { state } from "./state.js";
-import { meta, pieces, readHits } from "./historystate.js";
+import { meta, pieces, readHits, readOpenPane } from "./historystate.js";
 import type { Hit } from "./historystate.js";
 
 export const HISTORY_ACTION = "history.open";
@@ -15,15 +15,16 @@ const LIMIT = 50;
 
 let open: Promise<void> | null = null;
 
-/** Open the history search. A second ask while it is open returns the same promise. */
-export function openHistory(): Promise<void> {
-  open ??= show().finally(() => {
+/** Open the history search. `target` is the pane a pick goes to (the pane whose shell asked for the dialog); without it a pick
+ * goes to the focused pane. A second ask while it is open returns the same promise and adds no second dialog. */
+export function openHistory(target?: number): Promise<void> {
+  open ??= show(target).finally(() => {
     open = null;
   });
   return open;
 }
 
-async function show(): Promise<void> {
+async function show(target?: number): Promise<void> {
   try {
     await loadStyles("./palette.css");
     await loadStyles("./history.css");
@@ -116,7 +117,7 @@ async function show(): Promise<void> {
 
     const choose = (at: number): void => {
       const hit = hits[at];
-      const pane = state.view?.focus;
+      const pane = target ?? state.view?.focus;
       finish();
       // On the prompt, never run: no newline goes with it, and the core brackets it when the program asked.
       if (hit && pane !== undefined) void call("paste", { pane, text: hit.cmd, allow_unsafe: false }).catch(() => {});
@@ -198,4 +199,10 @@ async function show(): Promise<void> {
 /** Register the action. Call once at start-up. */
 export function initHistory(): void {
   registerAction({ id: HISTORY_ACTION, title: "Search the history", run: () => void openHistory() });
+  // The shell of a pane asked for it (the opt-in key binding of `wsh init`): the core names the pane, and sends the event to
+  // the window that has it. A payload that is not a pane id opens nothing.
+  void listen<unknown>("history-open", (payload) => {
+    const pane = readOpenPane(payload);
+    if (pane !== null) void openHistory(pane);
+  }).catch(() => {});
 }

@@ -45,7 +45,9 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open"]);
+  // The shell of a pane asked for the history search: the id of the pane and nothing else.
+  assert.deepEqual(golden.events["history-open"], { pane: 3 });
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
   assert.deepEqual(keys(golden.events.cwd), ["cwd", "pane"]);
   const exits = golden.events["pane-exit"];
@@ -217,7 +219,7 @@ test("the command table has snake_case argument names and no raw input command",
 
 test("the ai events and the nineteen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
-  assert.deepEqual(golden.events.names.slice(-2), ["ai", "ai-ask"]);
+  assert.deepEqual(golden.events.names.slice(-3, -1), ["ai", "ai-ask"]);
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
   assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
   // A request of `wsh ai` that waits for the person: the card for the window of the pane, flat, and nothing but the

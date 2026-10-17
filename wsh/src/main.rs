@@ -7,7 +7,11 @@
 //! wsh ping                    check that holzWave answers
 //! wsh ai [--] <prompt>...      ask the model of this holzWave; text piped in is sent along; the answer is printed
 //! wsh init <bash|zsh|fish>    print the hook that feeds the history and marks where each command's output starts and ends; add `eval "$(wsh init bash)"` to the shell's rc file
+//! wsh init <shell> --ctrl-r   also bind Ctrl+R to open the history dialog; plain Ctrl+R stays with the shell without the flag
 //! ```
+//!
+//! `wsh hist add` and `wsh hist open` are for the hooks and the key binding: the first reports a command the shell ran, the
+//! second asks the app to open its history search for this pane.
 //!
 //! It finds the app through three variables holzWave sets in every pane it starts: `HOLZWAVE_IPC` (the folder of the
 //! socket), `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE`. Outside a holzWave terminal it says so and does nothing.
@@ -20,7 +24,7 @@ use holzwave_ipc::{Cmd, Request, Response};
 mod ai;
 mod clean;
 
-const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | ai [--] <prompt>... | init <bash|zsh|fish>";
+const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | ai [--] <prompt>... | init <bash|zsh|fish> [--ctrl-r]";
 
 /// The hooks that tell holzWave each command a shell ran and mark where its output starts and ends. They are files under
 /// `hooks/` so the shells and the tests can read the very text that `wsh init` prints. They run only inside a holzWave pane
@@ -28,6 +32,10 @@ const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text>
 const BASH: &str = include_str!("../hooks/bash.sh");
 const ZSH: &str = include_str!("../hooks/zsh.zsh");
 const FISH: &str = include_str!("../hooks/fish.fish");
+
+/// The binding of Ctrl+R that `wsh init <shell> --ctrl-r` adds after the hook: a file under `hooks/` for each shell, so the
+/// shells and the tests read the text that `wsh init` prints. Nothing binds a key unless the user asks for it with the flag.
+const BASH_CTRL_R: &str = include_str!("../hooks/bash-ctrl-r.sh");
 
 /// The hook of a shell, or `None`.
 fn hook(shell: &str) -> Option<&'static str> {
@@ -37,6 +45,33 @@ fn hook(shell: &str) -> Option<&'static str> {
         "fish" => Some(FISH),
         _ => None,
     }
+}
+
+/// The text that binds Ctrl+R in a shell, or `None` when the shell has none.
+fn ctrl_r(shell: &str) -> Option<&'static str> {
+    match shell {
+        "bash" => Some(BASH_CTRL_R),
+        _ => None,
+    }
+}
+
+/// The text `wsh init` prints for the arguments after `init`: the hook of a shell, and with `--ctrl-r` (at most once) the
+/// binding of Ctrl+R after it. Anything else is a usage error.
+fn init_text(rest: &[String]) -> Result<String, String> {
+    let (shell, with_key) = match rest {
+        [shell] => (shell, false),
+        [shell, flag] if flag == "--ctrl-r" => (shell, true),
+        _ => return Err(USAGE.into()),
+    };
+    let mut text = hook(shell).ok_or_else(|| USAGE.to_owned())?.to_owned();
+    if with_key {
+        let keys = ctrl_r(shell).ok_or_else(|| USAGE.to_owned())?;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(keys);
+    }
+    Ok(text)
 }
 
 /// The command a command line asks for, with file names made absolute against `cwd` (the app's own directory is not the
@@ -51,6 +86,7 @@ fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
         [c, file] if c == "edit" => Ok(Cmd::Edit { path: absolute(file)? }),
         [c, key, rest @ ..] if c == "setmeta" && !rest.is_empty() => Ok(Cmd::Setmeta { key: key.clone(), value: rest.join(" ") }),
         [c] if c == "ping" => Ok(Cmd::Ping),
+        [c, sub] if c == "hist" && sub == "open" => Ok(Cmd::HistOpen),
         [c, sub, exit, dir, cmd] if c == "hist" && sub == "add" => {
             Ok(Cmd::Hist { line: cmd.clone(), cwd: dir.clone(), exit: exit.parse().ok() })
         }
@@ -73,8 +109,8 @@ fn run() -> Result<String, (u8, String)> {
     if args.is_empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
         return Err((2, USAGE.into()));
     }
-    if let [c, shell] = args.as_slice() && c == "init" {
-        return hook(shell).map(str::to_owned).ok_or((2, USAGE.into()));
+    if args[0] == "init" {
+        return init_text(&args[1..]).map_err(|e| (2, e));
     }
     let cwd = std::env::current_dir().map_err(|e| (1, format!("wsh: no current directory: {e}")))?;
     let cmd = parse(&args, &cwd).map_err(|e| (2, e))?;
@@ -194,6 +230,76 @@ mod tests {
             for bel in [r"\007", r"\a", r"\x07"] {
                 assert!(!h.contains(bel), "{shell}: a mark ends with the string terminator, never BEL");
             }
+        }
+    }
+
+    #[test]
+    fn init_prints_the_hook_and_with_the_flag_the_binding_after_it() {
+        for shell in ["bash"] {
+            let plain = init_text(&args(&[shell])).unwrap();
+            assert_eq!(plain, hook(shell).unwrap(), "{shell}: without the flag nothing changes");
+            let with_key = init_text(&args(&[shell, "--ctrl-r"])).unwrap();
+            let mut expect = plain.clone();
+            if !expect.is_empty() && !expect.ends_with('\n') {
+                expect.push('\n');
+            }
+            expect.push_str(ctrl_r(shell).unwrap());
+            assert_eq!(with_key, expect, "{shell}");
+            assert!(with_key.starts_with(&plain) && with_key.len() > plain.len(), "{shell}");
+        }
+    }
+
+    #[test]
+    fn init_refuses_unknown_shells_flags_and_repeats() {
+        for bad in [&["tcsh"][..], &["bash", "--nope"], &["bash", "--ctrl-r", "--ctrl-r"], &[], &["tcsh", "--ctrl-r"], &["--ctrl-r"]] {
+            assert_eq!(init_text(&args(bad)), Err(USAGE.to_owned()), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn no_hook_text_without_the_flag_binds_a_key() {
+        for shell in ["bash", "zsh", "fish"] {
+            let h = hook(shell).unwrap();
+            for key in ["bind", r"\C-r", r"\cr", "^R", "Ctrl+r"] {
+                assert!(!h.contains(key), "{shell}: the hook binds {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_binding_runs_only_inside_holzwave_and_asks_in_the_background() {
+        for shell in ["bash"] {
+            let b = ctrl_r(shell).unwrap();
+            assert!(b.contains("HOLZWAVE_IPC") && b.contains("wsh hist open"), "{shell}");
+            assert!(b.contains("&"), "{shell}: the key never waits for wsh");
+            assert!(b.contains("__holzwave_ctrl_r") && b.contains("__holzwave_open_history"), "{shell}: a guard and the function");
+            assert!(b.ends_with('\n'), "{shell}: text added after it starts on a line of its own");
+        }
+    }
+
+    #[test]
+    fn no_binding_ends_the_rc_file_or_binds_another_key() {
+        for shell in ["bash"] {
+            let b = ctrl_r(shell).unwrap();
+            for line in b.lines() {
+                let word = line.trim_start();
+                let top = line.len() - word.len() <= 2;
+                assert!(!(top && (word.starts_with("return") || word.starts_with("exit"))), "{shell}: {line}: ends an rc file");
+                for bad in ["|| return", "|| exit", "or return", "or exit", "PS1=", "PROMPT_COMMAND", "PS0", "trap ", "READLINE_LINE"] {
+                    assert!(!line.contains(bad), "{shell}: {line}");
+                }
+            }
+            let keys = b.matches(r"\C-").count();
+            assert!(keys > 0 && keys == b.matches(r"\C-r").count(), "{shell}: only Ctrl+R is bound");
+        }
+    }
+
+    #[test]
+    fn hist_open_takes_no_arguments() {
+        let cwd = Path::new("/");
+        assert_eq!(parse(&args(&["hist", "open"]), cwd).unwrap(), Cmd::HistOpen);
+        for bad in [&["hist", "open", "x"][..], &["hist", "open", "-"], &["hist"], &["hist", "show"]] {
+            assert_eq!(parse(&args(bad), cwd).unwrap_err(), USAGE, "{bad:?}");
         }
     }
 

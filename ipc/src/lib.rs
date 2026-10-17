@@ -82,6 +82,8 @@ pub enum Cmd {
     Setmeta { key: String, value: String },
     /// A command the shell ran, for the history. The app decides whether it is worth keeping.
     Hist { line: String, cwd: String, exit: Option<i32> },
+    /// Ask the app to open its history search for the pane.
+    HistOpen,
     /// Ask the model of the running app. `prompt` is the text as typed; `stdin_bytes` is the length of the text that follows
     /// the request line.
     Ai { prompt: String, stdin_bytes: u32 },
@@ -539,6 +541,35 @@ mod tests {
         assert_eq!(ai(&"x".repeat(MAX_PROMPT), MAX_STDIN as u32).check(), Ok(()));
         assert_eq!(ai("", 1).check(), Ok(()), "the question may be in the input");
         assert_eq!(ai("q", 0).check(), Ok(()));
+    }
+
+    #[test]
+    fn the_history_open_request_names_nothing_but_the_command() {
+        let r = req("t", Some(2), Cmd::HistOpen);
+        let value = serde_json::to_value(&r).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["cmd", "pane", "token"]);
+        assert_eq!(value["cmd"], "hist_open");
+        let back: Request = serde_json::from_value(value).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn history_open_is_a_plain_command_and_passes_the_check() {
+        assert!(!Cmd::HistOpen.is_stream());
+        assert_eq!(Cmd::HistOpen.body_len(), 0);
+        assert_eq!(Cmd::HistOpen.check(), Ok(()));
+    }
+
+    #[test]
+    fn history_open_reaches_the_handler_with_the_pane() {
+        let d = dir("ho");
+        let echo = Arc::new(Echo(Mutex::default()));
+        let _server = serve(&d, "secret".into(), echo.clone()).unwrap();
+        let answer = request(&d, &req("secret", Some(3), Cmd::HistOpen)).unwrap();
+        assert!(answer.ok, "{answer:?}");
+        assert_eq!(echo.0.lock().unwrap().as_slice(), &[(Some(3), Cmd::HistOpen)]);
     }
 
     #[test]

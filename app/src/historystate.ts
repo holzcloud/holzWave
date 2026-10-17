@@ -37,6 +37,14 @@ export function readHits(raw: unknown): Hit[] {
   return out;
 }
 
+/** The pane of a `history-open` event: the shell of that pane asked for the history. Only an object that holds a non-negative
+ * safe integer as `pane` is read; anything else is `null`, so a malformed event opens nothing. Other members are ignored. */
+export function readOpenPane(raw: unknown): number | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const pane = (raw as Record<string, unknown>)["pane"];
+  return typeof pane === "number" && Number.isSafeInteger(pane) && pane >= 0 ? pane : null;
+}
+
 /** The command cut into runs: `[text, matched]`, so the page can wrap the matched runs. Indices count characters. */
 export function pieces(cmd: string, marks: readonly number[]): [string, boolean][] {
   const chars = Array.from(cmd);
