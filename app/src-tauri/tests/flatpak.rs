@@ -20,6 +20,7 @@ const DESKTOP: &str = include_str!("../../../packaging/flatpak/ch.holzcloud.holz
 const SCRIPT: &str = include_str!("../../../scripts/build-flatpak.sh");
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
 const FLATPAK_PAGE: &str = include_str!("../../../docs/flatpak.md");
+const TEST_PLAN: &str = include_str!("../../../docs/test-plan.md");
 
 const HOST_PERMISSION: &str = "--talk-name=org.freedesktop.Flatpak";
 const NETWORK_PERMISSION: &str = "--share=network";
@@ -195,6 +196,17 @@ fn the_page_says_what_connects_and_when() {
             && at("## What connects, and when") + 1 == at("## How the shell is started"),
         "the section on what connects lies between the cost list and the shell: {headings:?}"
     );
+}
+
+#[test]
+fn the_test_plan_row_for_the_flatpak_runs_the_network_checks() {
+    let row = TEST_PLAN.lines().find(|l| l.starts_with("| L10 |")).expect("row L10 of docs/test-plan.md");
+    assert_eq!(row.matches('|').count(), 6, "row L10 has five cells and no pipe character inside one: {row}");
+    assert!(row.trim_end().ends_with("|  |") || row.trim_end().ends_with("| |"), "the Result cell of L10 is not empty: nothing is verified yet");
+    let text = squashed(row);
+    for word in ["ships a flatpak: install it, run it", "flatpak info --show-permissions", "ss -tnp", "holzwave-app", "--unshare=network", "--reset"] {
+        assert!(text.contains(word), "row L10 does not say {word:?}");
+    }
 }
 
 #[test]
