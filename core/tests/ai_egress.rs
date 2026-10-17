@@ -609,7 +609,8 @@ fn a_tool_result_with_secrets_is_cleaned_before_it_goes_back_to_the_model() {
     let declared = first["tools"].as_array().cloned().unwrap_or_default();
     assert!(declared.iter().any(|tool| tool["function"]["name"] == "read_file"), "request 1 does not declare read_file");
     let second = String::from_utf8_lossy(&requests[1].body).into_owned();
-    assert!(leaks(&requests[1].body, &set).is_empty(), "a canary is in the tool result: {:?}", leaks(&requests[1].body, &set));
+    let found = leaks(&requests[1].body, &set);
+    assert!(found.is_empty(), "a canary is in the tool result: {found:?}");
     assert!(!second.contains(&file_value()), "the file value is in the tool result");
     let strings = body_strings(&requests[1]);
     for rule in SECRET_RULES {
