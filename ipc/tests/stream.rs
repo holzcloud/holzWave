@@ -5,6 +5,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -19,8 +20,11 @@ use interprocess::local_socket::{RecvHalf, SendHalf};
 
 const TOKEN: &str = "stream-token";
 
+/// A new socket folder with a short name for each call (a dropped server removes its socket file from a thread of its own,
+/// which must not meet the next server on the same path).
 fn folder(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("hw-ipcs-{tag}-{}", std::process::id()));
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let d = std::env::temp_dir().join(format!("hw-ipcs-{tag}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::SeqCst)));
     let _ = std::fs::remove_dir_all(&d);
     d
 }
