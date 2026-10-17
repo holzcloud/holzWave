@@ -186,7 +186,7 @@ async function listCase(page, url) {
   assert.equal(await dialog(page).getAttribute("aria-modal"), "true");
 
   const rows = dialog(page).locator(".kb-row");
-  assert.equal(await rows.count(), 53, "one row per action of the core");
+  assert.equal(await rows.count(), 55, "one row per action of the core");
   assert.equal(await rowOf(page, "pane.split_right").locator(".kb-title").textContent(), "Split pane right");
   assert.equal(await chordOf(page, "pane.split_right"), "Cmd+D");
   assert.equal(await chordOf(page, "workspace.select_3"), "Cmd+Alt+3");

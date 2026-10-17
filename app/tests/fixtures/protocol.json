@@ -730,6 +730,18 @@
           "title": "Open the AI chat"
         },
         {
+          "action": "ai.explain_error",
+          "chord": "Cmd+Shift+Y",
+          "is_default": true,
+          "title": "Explain error"
+        },
+        {
+          "action": "ai.command_from_description",
+          "chord": "Cmd+Shift+G",
+          "is_default": true,
+          "title": "Command from description"
+        },
+        {
           "action": "font.increase",
           "chord": "Cmd+=",
           "is_default": true,
@@ -1315,6 +1327,18 @@
         "chord": "Cmd+Shift+A",
         "is_default": true,
         "title": "Open the AI chat"
+      },
+      {
+        "action": "ai.explain_error",
+        "chord": "Cmd+Shift+Y",
+        "is_default": true,
+        "title": "Explain error"
+      },
+      {
+        "action": "ai.command_from_description",
+        "chord": "Cmd+Shift+G",
+        "is_default": true,
+        "title": "Command from description"
       },
       {
         "action": "font.increase",

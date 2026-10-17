@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  VIEW_P1, boot, calls, commandNames, draftOf, emitFrame, previewKinds, runAction, sendText, setPrivacy, settle, ctxCalls,
+  VIEW_P1, boot, calls, commandNames, ctxCalls, draftOf, emitFrame, previewKinds, runAction, setPrivacy, settle,
 } from "./ai-lib.mjs";
 
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
@@ -17,6 +17,7 @@ export default async function ({ page, url, errors }) {
   await traceCase(page, url);
   await quietCase(page, url);
   await kindsCase(page, url);
+  await contractCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -166,4 +167,53 @@ async function kindsCase(page, url) {
   assert.deepEqual(await previewKinds(page), []);
   assert.equal(await draftOf(page), EXPLAIN);
   await page.waitForFunction(() => document.querySelector(".chat-status")?.textContent === "Nothing is sent until you press Send.");
+}
+
+/** The key rows of the golden: `[{ action, chord, is_default, title }]`, the table the core sends. */
+function goldenRows() {
+  const lists = [];
+  (function walk(value) {
+    if (Array.isArray(value)) {
+      if (value.length > 0 && value.every((row) => row && typeof row === "object" && "action" in row && "chord" in row)) lists.push(value);
+      value.forEach(walk);
+    } else if (value && typeof value === "object") {
+      Object.values(value).forEach(walk);
+    }
+  })(GOLDEN);
+  return lists[0];
+}
+
+async function contractCase(page, url) {
+  const rows = goldenRows();
+  const wanted = ["ai.explain_error"].map((id) => rows.find((row) => row.action === id));
+  assert.ok(wanted.every((row) => row !== undefined), "the golden has the rows");
+  await boot(page, url, { view: VIEW_P1 });
+
+  const registry = await page.evaluate(() => window.__registry.listActions().map((a) => [a.id, a.title]));
+  for (const row of wanted) {
+    assert.deepEqual(registry.find(([id]) => id === row.action), [row.action, row.title], `${row.action} is registered with the core's title`);
+  }
+
+  // The page's own table and the core's rows give one chord for each id, and each chord leads back to its id.
+  const probe = (rowsToInstall) =>
+    page.evaluate(async ([table, ids, chords]) => {
+      const chordsModule = await import(new URL("chords.js", location.href).href);
+      if (table !== null) chordsModule.setBindingTable(table);
+      const out = { chord: ids.map((id) => chordsModule.chordFor(id)), id: chords.map((c) => chordsModule.actionIdFor(c)) };
+      chordsModule.setBindingTable([]);
+      return out;
+    }, [rowsToInstall, wanted.map((row) => row.action), wanted.map((row) => row.chord)]);
+  for (const table of [null, rows]) {
+    const found = await probe(table);
+    assert.deepEqual(found.chord, wanted.map((row) => row.chord), table === null ? "the page's table" : "the core's rows");
+    assert.deepEqual(found.id, wanted.map((row) => row.action));
+  }
+
+  // With no pane in focus the action refuses and does not throw.
+  await page.evaluate(() => {
+    window.__MOCK__.setView({ ...window.__MOCK__.view(), panes: [], focus: 0 });
+    window.__MOCK__.emit("layout", window.__MOCK__.view());
+  });
+  await runAction(page, "ai.explain_error");
+  await page.waitForFunction(() => document.querySelector("#status .seg.notice")?.textContent === "Focus a terminal pane to explain its error.");
 }

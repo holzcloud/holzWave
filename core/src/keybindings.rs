@@ -11,7 +11,8 @@
 //! plain `Ctrl+letter` or `Alt+letter` (those belong to the shell: `Ctrl+C` is SIGINT, `Ctrl+D` is EOF). They use
 //! `Ctrl+Shift`, the terminal convention, with two exceptions: tab numbers are `Alt+Shift+digit` because `Ctrl+Alt`
 //! is AltGr on Windows and would take typing away on a Swiss or German layout, and nothing is on `Ctrl+Shift+E`
-//! because GNOME's input method (IBus) takes it for the emoji picker. The line-editing actions follow what each
+//! because GNOME's input method (IBus) takes it for the emoji picker (the two inline AI actions use `Y` and `G` on every
+//! platform for that reason). The line-editing actions follow what each
 //! shell binds itself: Linux keeps `Ctrl+Left`, `Ctrl+Right` and `Ctrl+Backspace`; on Windows PSReadLine and cmd
 //! bind those and Home and End already, so none of the six has a default there.
 
@@ -196,7 +197,7 @@ const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
 }
 
 /// The base part of the macOS default table. Order is the order of the editor, and the other tables keep it.
-static BASE_MACOS: [ActionInfo; 47] = [
+static BASE_MACOS: [ActionInfo; 49] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -229,6 +230,8 @@ static BASE_MACOS: [ActionInfo; 47] = [
     action("history.open", "Search the history", "Cmd+Shift+H"),
     action("sidebar.toggle", "Show or hide the sidebar", "Cmd+B"),
     action("ai.open", "Open the AI chat", "Cmd+Shift+A"),
+    action("ai.explain_error", "Explain error", "Cmd+Shift+Y"),
+    action("ai.command_from_description", "Command from description", "Cmd+Shift+G"),
     action("font.increase", "Increase font size", "Cmd+="),
     action("font.decrease", "Decrease font size", "Cmd+-"),
     action("font.reset", "Reset font size", "Cmd+0"),
@@ -247,7 +250,7 @@ static BASE_MACOS: [ActionInfo; 47] = [
 ];
 
 /// The base part for Windows and Linux: the same actions in the same order, on `Ctrl+Shift` (see the module docs).
-static BASE_OTHER: [ActionInfo; 47] = [
+static BASE_OTHER: [ActionInfo; 49] = [
     action("pane.split_right", "Split pane right", "Ctrl+Shift+D"),
     action("pane.split_down", "Split pane down", "Ctrl+Shift+O"),
     action("pane.close", "Close pane", "Ctrl+Shift+W"),
@@ -280,6 +283,8 @@ static BASE_OTHER: [ActionInfo; 47] = [
     action("history.open", "Search the history", "Ctrl+Shift+H"),
     action("sidebar.toggle", "Show or hide the sidebar", "Ctrl+Shift+B"),
     action("ai.open", "Open the AI chat", "Ctrl+Shift+A"),
+    action("ai.explain_error", "Explain error", "Ctrl+Shift+Y"),
+    action("ai.command_from_description", "Command from description", "Ctrl+Shift+G"),
     action("font.increase", "Increase font size", "Ctrl+Shift+="),
     action("font.decrease", "Decrease font size", "Ctrl+Shift+-"),
     action("font.reset", "Reset font size", "Ctrl+Shift+0"),

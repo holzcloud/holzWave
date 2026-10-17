@@ -75,9 +75,9 @@ fn parse_exposes_modifiers_and_key_as_fields() {
 
 /// The action table of `os`, after checking that it is the full set: a loop over an empty table would pass vacuously.
 fn all_actions(os: &str) -> &'static [ActionInfo] {
-    // 15 named defaults, nine tab and nine workspace selections, the history and sidebar actions, the chat action, the
-    // eleven that are unbound until the user binds them, and the six line-editing actions.
-    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 2 + 1 + 11 + 6, "the {os} table holds 53 actions");
+    // 15 named defaults, nine tab and nine workspace selections, the history and sidebar actions, the three chat actions
+    // that have a chord, the eleven that are unbound until the user binds them, and the six line-editing actions.
+    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 2 + 3 + 11 + 6, "the {os} table holds 55 actions");
     actions_for(os)
 }
 
@@ -101,6 +101,8 @@ fn the_default_table_holds_every_action_of_the_decisions() {
         ("copy_mode.enter", "Cmd+Shift+X"),
         ("hints.open", "Cmd+Shift+Space"),
         ("ai.open", "Cmd+Shift+A"),
+        ("ai.explain_error", "Cmd+Shift+Y"),
+        ("ai.command_from_description", "Cmd+Shift+G"),
         ("font.increase", "Cmd+="),
         ("font.decrease", "Cmd+-"),
         ("font.reset", "Cmd+0"),
@@ -221,6 +223,8 @@ fn windows_and_linux_use_ctrl_shift_and_the_decided_chords() {
         ("copy_mode.enter", "Ctrl+Shift+X"),
         ("hints.open", "Ctrl+Shift+Space"),
         ("ai.open", "Ctrl+Shift+A"),
+        ("ai.explain_error", "Ctrl+Shift+Y"),
+        ("ai.command_from_description", "Ctrl+Shift+G"),
         ("font.increase", "Ctrl+Shift+="),
         ("font.decrease", "Ctrl+Shift+-"),
         ("font.reset", "Ctrl+Shift+0"),
@@ -234,6 +238,32 @@ fn windows_and_linux_use_ctrl_shift_and_the_decided_chords() {
     for os in ["windows", "linux"] {
         for (action, chord) in &expected {
             assert_eq!(default_of(os, action), Some(chord.as_str()), "default of {action} on {os}");
+        }
+    }
+}
+
+#[test]
+fn the_inline_ai_actions_follow_ai_open_and_keep_ctrl_shift_e_free() {
+    for os in OSES {
+        let ids: Vec<&str> = all_actions(os).iter().map(|a| a.id).collect();
+        let at = ids.iter().position(|id| *id == "sidebar.toggle").expect("sidebar.toggle is in the table");
+        assert_eq!(
+            &ids[at + 1..at + 5],
+            ["ai.open", "ai.explain_error", "ai.command_from_description", "font.increase"],
+            "the order after sidebar.toggle on {os}"
+        );
+        let title_of = |id: &str| all_actions(os).iter().find(|a| a.id == id).map(|a| a.title);
+        assert_eq!(title_of("ai.explain_error"), Some("Explain error"), "title on {os}");
+        assert_eq!(title_of("ai.command_from_description"), Some("Command from description"), "title on {os}");
+        if os == "macos" {
+            continue;
+        }
+        for a in all_actions(os) {
+            assert_ne!(a.default, Some("Ctrl+Shift+E"), "{} takes the chord GNOME's input method needs on {os}", a.id);
+        }
+        for id in ["ai.explain_error", "ai.command_from_description"] {
+            let d = default_of(os, id).expect("both inline actions have a chord");
+            assert!(chord(d).is_bindable(), "{d} of {id} is refused by the policy on {os}");
         }
     }
 }

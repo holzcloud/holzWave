@@ -762,3 +762,26 @@ test("the ai_undo command and its reasons are pinned", () => {
     assert.deepEqual([...site.keys].sort(), ["call_id", "conversation"], `${site.file}:${site.line}`);
   }
 });
+
+test("the key rows hold the inline AI actions", () => {
+  // Every list of key rows is found by its shape, so the test does not depend on where the golden keeps it.
+  const lists = [];
+  (function walk(value) {
+    if (Array.isArray(value)) {
+      if (value.length > 0 && value.every((row) => row && typeof row === "object" && "action" in row && "chord" in row)) lists.push(value);
+      value.forEach(walk);
+    } else if (value && typeof value === "object") {
+      Object.values(value).forEach(walk);
+    }
+  })(golden);
+  assert.equal(lists.length, 2, "the settings view and the key table");
+  for (const rows of lists) {
+    const at = rows.findIndex((row) => row.action === "ai.open");
+    assert.ok(at >= 0, "ai.open is in the list");
+    assert.deepEqual(rows[at + 1], { action: "ai.explain_error", chord: "Cmd+Shift+Y", is_default: true, title: "Explain error" });
+    assert.deepEqual(rows[at + 2], {
+      action: "ai.command_from_description", chord: "Cmd+Shift+G", is_default: true, title: "Command from description",
+    });
+    for (const row of rows) assert.deepEqual(keys(row), ["action", "chord", "is_default", "title"]);
+  }
+});

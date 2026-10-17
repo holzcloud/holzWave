@@ -295,6 +295,8 @@ GNOME's input method takes for emoji.
 | `history.open` | `Cmd+Shift+H` | `Ctrl+Shift+H` | `Ctrl+Shift+H` |
 | `sidebar.toggle` | `Cmd+B` | `Ctrl+Shift+B` | `Ctrl+Shift+B` |
 | `ai.open` | `Cmd+Shift+A` | `Ctrl+Shift+A` | `Ctrl+Shift+A` |
+| `ai.explain_error` | `Cmd+Shift+Y` | `Ctrl+Shift+Y` | `Ctrl+Shift+Y` |
+| `ai.command_from_description` | `Cmd+Shift+G` | `Ctrl+Shift+G` | `Ctrl+Shift+G` |
 | `font.increase` | `Cmd+=` | `Ctrl+Shift+=` | `Ctrl+Shift+=` |
 | `font.decrease` | `Cmd+-` | `Ctrl+Shift+-` | `Ctrl+Shift+-` |
 | `font.reset` | `Cmd+0` | `Ctrl+Shift+0` | `Ctrl+Shift+0` |
@@ -308,6 +310,15 @@ GNOME's input method takes for emoji.
 `ai.open` shows the AI chat: it focuses the chat pane of the shown tab when there is one, and otherwise opens a new chat as
 a pane to the right of the focused pane. `ai.new_chat` always starts a new conversation in a new pane. Both are also in the
 command palette (`AI chat`, `New AI chat`), and the title bar's `✦ AI` button does what `ai.open` does.
+
+`ai.explain_error` opens the AI chat where you are (the chat pane of the tab, the sidebar column when it is shown, else a new
+pane), writes a fixed message into the composer and opens the context card for the pane you were working in with one item
+chosen: your selection when the pane shows one, else the last command and its output where the shell hook marks command output
+(see [Command marks](#command-marks)), else the visible screen. It shares nothing and sends nothing: you still see the item and
+press Send, and it needs a terminal pane. `ai.command_from_description` opens the chat and writes the start of a message that
+asks for one command; you finish the sentence and press Send, and no terminal content goes with it. A code block of one clean
+line in a reply has the button `Insert at prompt`, which puts the line at the prompt of the pane the chat acts for the way the
+history does and never runs it. `Y` stands for why and `G` for generate; `Ctrl+Shift+E` stays unused.
 
 The line-editing actions send fixed bytes to the shell's line editor (`edit.word_back` and `edit.word_forward` send
 `ESC b` and `ESC f`, `edit.line_start` and `edit.line_end` send `Ctrl+A` and `Ctrl+E`, `edit.delete_word_back` sends
