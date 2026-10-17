@@ -235,6 +235,21 @@ fn no_probe_file_holds_a_home_path() {
 }
 
 #[test]
+fn every_case_named_in_sources_md_has_a_capture() {
+    let problems = sources_problems(&probe_dir());
+    assert!(problems.is_empty(), "SOURCES.md:\n{}", problems.join("\n"));
+}
+
+#[test]
+fn a_capture_with_no_markers_has_an_empty_expected_list() {
+    // The slow startup file case: the shell is stopped before it prints anything.
+    let dir = probe_dir();
+    let capture = read(&dir.join("slow_rc.txt"));
+    assert!(!capture.lines().any(|l| l == BEGIN || l == END), "the slow capture must hold no marker line");
+    assert!(read(&dir.join("slow_rc.expected")).trim().is_empty(), "the slow case keeps no directory");
+}
+
+#[test]
 fn the_rules_fail_for_a_wrong_directory() {
     let dir = common::scratch_dir("path-probe-rules");
     let put = |name: &str, text: &str| fs::write(dir.join(name), text).expect("write");
