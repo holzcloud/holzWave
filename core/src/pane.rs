@@ -53,6 +53,7 @@ use crate::conn::{ConnState, Link, SharedState};
 use crate::pty::{Pty, SpawnOptions, process_cwd};
 use crate::ssh::{SshLink, SshTarget};
 use crate::queue::{PaneQueue, Popped};
+use crate::textread::{MAX_READ_BYTES, TextRead, TextRegion};
 use crate::wire::{FrameEncoder, FrameMsg};
 use crate::winshell::announced_path;
 use crate::{Error, Result};
@@ -248,6 +249,8 @@ enum Control {
     SetOptionAsAlt(bool),
     Select(SelectOp),
     SelectionText(Sender<Result<Option<String>>>),
+    /// Read a region of the text; the engine's answer travels back over `reply`.
+    ReadText { region: TextRegion, max_bytes: usize, reply: Sender<Result<Option<TextRead>>> },
     Search(SearchOp, Sender<Result<SearchState>>),
     CopyMode(CopyOp, Sender<Result<CopyState>>),
     /// The answer of a working-directory lookup, from the short-lived thread that ran it.
@@ -493,6 +496,20 @@ impl PaneHandle {
     /// [`PaneHandle::paste`] does: never call it on the Tauri main thread.
     pub fn selection_text(&self) -> Result<Option<String>> {
         self.request(Control::SelectionText)
+    }
+
+    /// The text of a region of the pane, at most `max_bytes` bytes (and never more than [`MAX_READ_BYTES`]).
+    ///
+    /// `Ok(None)` when there is nothing to read and, without a round trip, for a bound of 0. The engine's own thread
+    /// does the work; this call waits for the answer like [`PaneHandle::paste`] does, at most two seconds and
+    /// `Error::Pty("pane busy")` after that, so it must not be called on the Tauri main thread. The text is untrusted
+    /// program output, neither sanitised nor redacted: whoever passes it on is responsible for that.
+    pub fn read_text(&self, region: TextRegion, max_bytes: usize) -> Result<Option<TextRead>> {
+        if max_bytes == 0 {
+            return Ok(None);
+        }
+        let max_bytes = max_bytes.min(MAX_READ_BYTES);
+        self.request(|reply| Control::ReadText { region, max_bytes, reply })
     }
 
     /// Change the search and return its state. Waits for the answer like [`PaneHandle::paste`] does. Search text
@@ -819,6 +836,10 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             }
             Control::SelectionText(reply) => {
                 let _ = reply.send(self.engine.selection_text());
+            }
+            Control::ReadText { region, max_bytes, reply } => {
+                // A read marks nothing dirty and writes nothing to the PTY.
+                let _ = reply.send(self.engine.read_text(region, max_bytes));
             }
             Control::Search(op, reply) => {
                 let state = self.engine.search(op);

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::platform::Os;
+use crate::textread::{TextRead, TextRegion};
 use crate::{Error, Result};
 
 /// An RGB colour, already resolved against the palette.
@@ -748,6 +749,15 @@ pub trait TerminalEngine {
     /// The selected text, with soft wraps joined and trailing blanks trimmed.
     fn selection_text(&mut self) -> Result<Option<String>> {
         Err(Error::Unsupported("selection_text".into()))
+    }
+
+    /// Read a region as plain text, at most `max_bytes` bytes. `Ok(None)` when there is nothing to read.
+    ///
+    /// The user's selection, the scroll position and the pending frame are never touched. The text is what the grid
+    /// holds: untrusted program output, neither sanitised nor redacted, and the cells the user could not read are
+    /// reported as byte ranges in the result. The call belongs to the engine's own thread.
+    fn read_text(&mut self, _region: TextRegion, _max_bytes: usize) -> Result<Option<TextRead>> {
+        Err(Error::Unsupported("read_text".into()))
     }
 
     /// Take the events the program caused (title, working directory) since the previous call.

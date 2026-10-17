@@ -22,6 +22,7 @@ use crate::engine::{
     Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span, TerminalEngine, Update, WheelEvent, WheelOutcome,
     Width, sanitize_program_text,
 };
+use crate::textread::{Cut, MAX_READ_BYTES, TextBuilder, TextRead, TextRegion, rows_within_budget};
 use crate::{Error, Result};
 
 /// The most bytes of program-controlled replies that may wait for the PTY at once.
@@ -77,6 +78,53 @@ fn cap_tail(text: String, max_bytes: usize) -> String {
         start += 1;
     }
     text[start..].to_owned()
+}
+
+/// The most code points of one cell's cluster that a read takes. A cell with more (a program can pile combining marks
+/// onto one cell without end) reads as its primary code point, so one hostile cell costs a few bytes, not kilobytes.
+const MAX_CLUSTER_CHARS: usize = 32;
+
+/// What one cell contributes to a read.
+enum CellText {
+    /// The spacer half of a wide character: its head cell has the text.
+    Skip,
+    /// Nothing to show.
+    Blank,
+    Text(String),
+}
+
+/// The text of the cell at `at`.
+///
+/// A cluster that does not fit [`MAX_CLUSTER_CHARS`], or whose size the library does not tell, falls back to the
+/// cell's primary code point.
+fn cell_text(at: &GridRef<'_>) -> Result<CellText> {
+    let cell = at.cell().map_err(eng)?;
+    if matches!(cell.wide().map_err(eng)?, CellWide::SpacerTail | CellWide::SpacerHead) {
+        return Ok(CellText::Skip);
+    }
+    if !cell.has_text().map_err(eng)? {
+        return Ok(CellText::Blank);
+    }
+    let mut small = ['\0'; 16];
+    let text: String = match at.graphemes(&mut small) {
+        Ok(n) => small[..n.min(small.len())].iter().collect(),
+        Err(VtError::OutOfSpace { required }) if (1..=MAX_CLUSTER_CHARS).contains(&required) => {
+            let mut big = vec!['\0'; required];
+            match at.graphemes(&mut big) {
+                Ok(n) => big[..n.min(big.len())].iter().collect(),
+                Err(VtError::OutOfSpace { .. }) => primary_char(&cell)?,
+                Err(e) => return Err(eng(e)),
+            }
+        }
+        Err(VtError::OutOfSpace { .. }) => primary_char(&cell)?,
+        Err(e) => return Err(eng(e)),
+    };
+    Ok(if text.is_empty() { CellText::Blank } else { CellText::Text(text) })
+}
+
+/// The primary code point of a cell as text; empty when it is not a valid character.
+fn primary_char(cell: &libghostty_vt::screen::Cell) -> Result<String> {
+    Ok(char::from_u32(cell.codepoint().map_err(eng)?).map(String::from).unwrap_or_default())
 }
 
 fn color(c: libghostty_vt::style::RgbColor) -> Color {
@@ -797,6 +845,82 @@ impl GhosttyEngine {
             return Ok(true);
         }
         Ok(char::from_u32(cell.codepoint().map_err(eng)?).is_none_or(char::is_whitespace))
+    }
+
+    /// The text of the screen cells from `from` to `to` as a bounded read.
+    ///
+    /// A linear read runs from `from` to `to` in reading order, a rectangle takes the columns between the two corners
+    /// on every row. Only `grid_ref` reads are used: the selection, the scroll position and the render state are not
+    /// touched, so the next frame is what it would have been without the read. Rows past the row and cell budget are
+    /// left out (the tail of the range is kept for [`Cut::KeepTail`], the head for [`Cut::KeepHead`]) and the result
+    /// says so.
+    fn read_cells(
+        &self,
+        from: ScreenCell,
+        to: ScreenCell,
+        rectangle: bool,
+        cut: Cut,
+        max_bytes: usize,
+    ) -> Result<Option<TextRead>> {
+        let cols = self.terminal.cols().map_err(eng)?;
+        let to = (to.0, to.1.min(self.last_screen_row()?));
+        if cols == 0 || from.1 > to.1 {
+            return Ok(None);
+        }
+        let last_col = cols - 1;
+        let (mut first_row, mut last_row) = (from.1, to.1);
+        let (mut first_col, mut end_col) = (from.0.min(last_col), to.0.min(last_col));
+        let (rect_left, rect_right) = (first_col.min(end_col), first_col.max(end_col));
+        let wanted = to.1 - from.1 + 1;
+        let allowed = rows_within_budget(cols, wanted);
+        let mut builder = TextBuilder::new(cut);
+        if allowed < wanted {
+            builder.mark_truncated();
+            match cut {
+                Cut::KeepTail => {
+                    first_row = to.1 + 1 - allowed;
+                    first_col = 0;
+                }
+                Cut::KeepHead => {
+                    last_row = from.1 + allowed - 1;
+                    end_col = last_col;
+                }
+            }
+        }
+        for y in first_row..=last_row {
+            let (x0, x1) = if rectangle {
+                (rect_left, rect_right)
+            } else {
+                (if y == first_row { first_col } else { 0 }, if y == last_row { end_col } else { last_col })
+            };
+            for x in x0..=x1 {
+                match cell_text(&self.screen_ref((x, y))?)? {
+                    CellText::Skip => {}
+                    CellText::Blank => builder.blank(),
+                    CellText::Text(text) => builder.cell(&text, false),
+                }
+            }
+            // The last row ends the text; a rectangle never joins rows.
+            let wrapped = !rectangle && y != last_row && self.screen_ref((0, y))?.row().map_err(eng)?.is_wrapped().map_err(eng)?;
+            builder.end_row(wrapped);
+        }
+        Ok(builder.finish(max_bytes))
+    }
+
+    /// The region as text. `max_bytes` is already clamped by the caller.
+    fn read_region(&self, region: TextRegion, max_bytes: usize) -> Result<Option<TextRead>> {
+        match region {
+            TextRegion::Screen => {
+                let bar = self.terminal.scrollbar().map_err(eng)?;
+                if bar.len == 0 {
+                    return Ok(None);
+                }
+                let top = u32::try_from(bar.offset).unwrap_or(u32::MAX);
+                let bottom = u32::try_from(bar.offset + bar.len - 1).unwrap_or(u32::MAX);
+                let last_col = self.terminal.cols().map_err(eng)?.saturating_sub(1);
+                self.read_cells((0, top), (last_col, bottom), false, Cut::KeepTail, max_bytes)
+            }
+        }
     }
 
     /// The copy cursor in screen coordinates: the end of the terminal's selection.
@@ -1533,6 +1657,13 @@ impl TerminalEngine for GhosttyEngine {
             selecting: self.copy.is_some_and(|state| state.selecting),
             yanked,
         })
+    }
+
+    fn read_text(&mut self, region: TextRegion, max_bytes: usize) -> Result<Option<TextRead>> {
+        if max_bytes == 0 {
+            return Ok(None);
+        }
+        self.read_region(region, max_bytes.min(MAX_READ_BYTES))
     }
 
     fn selection_text(&mut self) -> Result<Option<String>> {

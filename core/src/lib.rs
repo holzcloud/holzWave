@@ -27,6 +27,7 @@
 //! - [`queue`]: the bounded per-pane queue between the PTY reader and the engine thread.
 //! - [`wire`]: the frame protocol from engine update to frame message.
 //! - [`pane`]: the pane actor with engine thread, PTY reader and writer, and frame pacing.
+//! - [`textread`]: reading a region of a terminal's text, with the byte ranges of the text the user could not see.
 //! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
 
 pub mod ai;
@@ -52,6 +53,7 @@ pub mod session;
 pub mod settings;
 pub mod ssh;
 pub mod sync;
+pub mod textread;
 pub mod theme;
 pub mod widgets;
 pub mod wire;
