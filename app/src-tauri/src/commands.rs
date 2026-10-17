@@ -847,10 +847,16 @@ pub fn monitor_sample(core: State<Arc<AppCore>>, pane: PaneId) -> Result<holzwav
     core.monitor_sample(pane)
 }
 
-/// Typed commands that match `query` (fuzzy), newest and best first; an empty query lists the newest.
+/// Typed commands that match `query` (fuzzy), newest and best first; an empty query lists the newest. The search is the
+/// history of the host the focused pane of the calling window runs on: the page sends no host.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn history_search(core: State<Arc<AppCore>>, query: String, limit: usize) -> Vec<holzwave_core::history::Hit> {
-    core.history_search(&query, limit)
+pub fn history_search(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    query: String,
+    limit: usize,
+) -> Vec<holzwave_core::history::Hit> {
+    core.history_search_in(window.label(), &query, limit)
 }
 
 /// Forget every use of one command.

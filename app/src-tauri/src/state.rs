@@ -743,6 +743,20 @@ pub struct AppCore {
 /// What the single-answer path says to `wsh ai`: the request is answered as a stream (see `ai_ask`), never as one line.
 const WSH_AI_STREAM_ONLY: &str = "wsh ai is answered as a stream, not as one line";
 
+/// The host of every history entry that comes from a pane without a saved connection.
+const LOCAL_HOST: &str = "local";
+
+/// The host a history entry of a pane that runs `profile` is stored under: the kind of the connection, a colon and
+/// its id (`ssh:web-1`, `wsl:box`, `docker:api`). At most 71 bytes, and never `LOCAL_HOST`.
+fn host_label(profile: &Profile) -> String {
+    let kind = match profile.kind {
+        ConnectionKind::Ssh => "ssh",
+        ConnectionKind::Wsl => "wsl",
+        ConnectionKind::Docker => "docker",
+    };
+    format!("{kind}:{}", profile.id)
+}
+
 /// What `wsh hist open` is told when its pane is open but is not the one that has the focus of its window: the history opens
 /// for the pane the person types in, so a process of a background pane cannot take the keyboard.
 const HISTORY_NOT_FOCUSED: &str = "this pane is not the one in focus; the history opens for the pane you type in";
@@ -987,7 +1001,7 @@ impl AppCore {
         if let Cmd::Hist { line, cwd, exit } = &cmd {
             // Not every command is kept (secrets, a leading space); that is not an error for the shell.
             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-            self.history.add(line, cwd, "local", *exit, ts).map_err(|e| e.to_string())?;
+            self.history.add(line, cwd, &self.history_host(pane), *exit, ts).map_err(|e| e.to_string())?;
             return Ok(String::new());
         }
         let pane = pane.ok_or("HOLZWAVE_PANE is not set")?;
@@ -1024,9 +1038,21 @@ impl AppCore {
         Ok(())
     }
 
-    /// Find typed commands. An empty query lists the newest.
-    pub fn history_search(&self, query: &str, limit: usize) -> Vec<holzwave_core::history::Hit> {
-        self.history.search(query, None, limit)
+    /// Find typed commands of the host the focused pane of window `label` runs on (the commands of a saved connection
+    /// for a pane that runs it, the local ones for every other pane). An empty query lists the newest. An unknown window
+    /// finds nothing. The page names no host: it cannot ask for another one.
+    pub fn history_search_in(&self, label: &str, query: &str, limit: usize) -> Vec<holzwave_core::history::Hit> {
+        // The focus is read without building a view, which would stamp a revision.
+        let Some(focus) = lock(&self.windows).layout(label).map(|layout| layout.tab().focus) else {
+            return Vec::new();
+        };
+        self.history.search(query, Some(&self.history_host(Some(focus))), limit)
+    }
+
+    /// The host a command typed in `pane` is stored under: the label of the saved connection the pane runs, or
+    /// `LOCAL_HOST` for every other pane (and for no pane, and for one the app does not know).
+    fn history_host(&self, pane: Option<PaneId>) -> String {
+        pane.and_then(|pane| self.connections.profile_of(pane)).map_or_else(|| LOCAL_HOST.to_owned(), |p| host_label(&p))
     }
 
     /// Forget one command (every use of it).
@@ -3293,6 +3319,10 @@ mod tests {
             self.view_in(MAIN_WINDOW).expect("main")
         }
 
+        fn history_search(&self, query: &str, limit: usize) -> Vec<holzwave_core::history::Hit> {
+            self.history_search_in(MAIN_WINDOW, query, limit)
+        }
+
         fn split(&self, column: bool) -> View {
             self.split_in(MAIN_WINDOW, column).expect("main")
         }
@@ -4563,6 +4593,79 @@ mod tests {
         assert_eq!(core.history_search("", 10).len(), 1);
         assert_eq!(core.history_clear(), Ok(()));
         assert!(core.history_search("", 10).is_empty());
+    }
+
+    /// A core with the saved connection `web-1` (written before the core starts, so no keychain is touched), a local
+    /// first pane and a second pane, in focus, that runs `web-1`. Returns the two panes in that order.
+    fn core_with_a_connection_pane() -> (Arc<AppCore>, Scratch, PaneId, PaneId) {
+        let dir = Scratch::new("hosts");
+        let mut profiles = holzwave_core::profiles::Profiles::default();
+        let profile = Profile {
+            user: "holz".into(),
+            key_path: "/nonexistent/holzwave-test-key".into(),
+            ..Profile::new("web-1", "Web 1", "web1.example.invalid")
+        };
+        profiles.upsert(profile).unwrap();
+        profiles.save(&dir.0).unwrap();
+        let (core, _rec) = core_in(&dir, "sh", &[]);
+        let local = only_pane(&core);
+        let remote = core.split(true).focus;
+        assert_ne!(remote, local, "the new pane has the focus now");
+        core.connections.assign(remote, "web-1").unwrap();
+        (core, dir, local, remote)
+    }
+
+    #[test]
+    fn history_host_entries_follow_the_pane_that_sent_them() {
+        use holzwave_ipc::Cmd;
+        let (core, _dir, local, remote) = core_with_a_connection_pane();
+        let hist = |line: &str| Cmd::Hist { line: line.into(), cwd: "/home/holz".into(), exit: Some(0) };
+        assert_eq!(core.ipc_command(Some(remote), hist("kubectl get pods")), Ok(String::new()));
+        assert_eq!(core.ipc_command(Some(local), hist("cargo build")), Ok(String::new()));
+        assert_eq!(core.ipc_command(None, hist("git status")), Ok(String::new()));
+        assert_eq!(core.ipc_command(Some(9999), hist("docker ps")), Ok(String::new()));
+        let stored: HashMap<String, String> =
+            core.history.search("", None, 10).into_iter().map(|h| (h.cmd, h.host)).collect();
+        assert_eq!(stored.len(), 4);
+        assert_eq!(stored["kubectl get pods"], "ssh:web-1");
+        for line in ["cargo build", "git status", "docker ps"] {
+            assert_eq!(stored[line], LOCAL_HOST, "{line}");
+        }
+    }
+
+    #[test]
+    fn history_host_search_follows_the_focused_pane() {
+        use holzwave_ipc::Cmd;
+        let (core, _dir, local, remote) = core_with_a_connection_pane();
+        let hist = |line: &str| Cmd::Hist { line: line.into(), cwd: "/home/holz".into(), exit: Some(0) };
+        core.ipc_command(Some(remote), hist("kubectl get pods")).unwrap();
+        core.ipc_command(Some(local), hist("cargo build")).unwrap();
+        core.ipc_command(Some(local), hist("git status")).unwrap();
+        let found = |core: &AppCore| -> Vec<String> {
+            let mut all: Vec<String> = core.history_search("", 10).into_iter().map(|h| h.cmd).collect();
+            all.sort();
+            all
+        };
+        assert_eq!(core.view().focus, remote);
+        assert_eq!(found(&core), ["kubectl get pods"]);
+        core.focus_pane(local);
+        assert_eq!(found(&core), ["cargo build", "git status"]);
+        assert!(core.history_search_in("nope", "", 10).is_empty(), "an unknown window finds nothing");
+    }
+
+    #[test]
+    fn history_host_labels_name_the_kind_and_stay_bounded() {
+        let long = "a".repeat(64);
+        for (kind, word) in [(ConnectionKind::Ssh, "ssh"), (ConnectionKind::Wsl, "wsl"), (ConnectionKind::Docker, "docker")] {
+            let short = host_label(&Profile { kind, ..Profile::new("web-1", "Web", "h") });
+            assert_eq!(short, format!("{word}:web-1"));
+            let label = host_label(&Profile { kind, ..Profile::new(long.clone(), "Web", "h") });
+            assert_eq!(label, format!("{word}:{long}"));
+            assert!(label.len() <= 71, "{label}");
+            assert!(label.len() <= 128, "the history refuses a longer host");
+            assert_ne!(label, LOCAL_HOST);
+            assert!(!label.chars().any(char::is_control));
+        }
     }
 
     fn core_in(dir: &Scratch, program: &str, args: &[&str]) -> (Arc<AppCore>, Arc<Recorder>) {

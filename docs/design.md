@@ -389,7 +389,8 @@ field, the matching commands below it, a foot with the keys. Matches are fuzzy; 
 underlined**. Beside a command: its directory (home as `~`), how long ago, `×n` when it was run more than once, and
 `exit n` in words when it failed. `Enter` puts the command on the prompt of the focused pane and closes; it never
 runs it. `Shift+Delete` forgets the chosen command, `Clear all` (asks with a second click) forgets everything, `Escape`
-closes. `^R` at a shell prompt opens this dialog when the user installed the opt-in binding (`wsh init <shell> --ctrl-r`): it
+closes. The list is the history of the host the focused pane runs on: commands typed in a local pane are found from local
+panes, commands typed on a saved connection from panes that run that connection. `^R` at a shell prompt opens this dialog when the user installed the opt-in binding (`wsh init <shell> --ctrl-r`): it
 opens for the pane that has the focus and a pick goes to that pane's prompt without running it. Plain `Ctrl+R` stays with
 the shell, as section 7 requires, unless the binding is installed. The sidebar's History section (6.11) uses the same search.
 
