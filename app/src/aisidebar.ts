@@ -8,7 +8,7 @@ import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { chatTitles, paneBlocks } from "./blockstate.js";
 import { chatClosed, mountChat, releaseChat } from "./chat.js";
-import type { ChatView } from "./chat.js";
+import type { ChatView, SidebarHandle } from "./chat.js";
 import { isChatId } from "./chatstate.js";
 import { faultText } from "./chatview.js";
 import { LIST_NOTES, armWords, headTitle, listRows, readChatList } from "./chatlist.js";
@@ -121,10 +121,6 @@ export async function initAiSidebar(box: HTMLElement, main: HTMLElement, handed:
   listEl.setAttribute("aria-label", "Chats");
   listBox.addEventListener("keydown", onListKey);
 
-  // The block classes put the chat's buttons and rules to work inside the column: its style sheets are written for a
-  // block root (`.block button` is the reset the chat's controls start from).
-  host = el("div", "block block-chat side-chat", root);
-
   for (const node of [back, titleButton, fresh]) {
     node.addEventListener("keydown", (e) => {
       if (e.key !== "Escape") return;
@@ -162,6 +158,8 @@ function setForm(next: Form): void {
     say("", "note");
     view?.dispose();
     view = null;
+    host?.remove();
+    host = null;
     if (hooks.shown()) hooks.refresh();
   }
   hooks.fit();
@@ -170,9 +168,13 @@ function setForm(next: Form): void {
 
 /** Show `id` in the chat host: mount the chat module the first time, else switch its view. */
 function showChat(id: string): void {
-  if (host === null) return;
-  if (view === null) view = mountChat(host, id, { pane: focusedPane });
-  else if (view.conversation !== id) view.show(id);
+  if (root === null) return;
+  if (view === null) {
+    // The block classes put the chat's buttons and rules to work inside the column: its style sheets are written for a block
+    // root (`.block button` is the reset the chat's controls start from). The host exists only while the chat is mounted.
+    host = el("div", "block block-chat side-chat", root);
+    view = mountChat(host, id, { pane: focusedPane });
+  } else if (view.conversation !== id) view.show(id);
   current = id;
   if (titleText !== null) setText(titleText, headTitle(chatTitles.get(id) ?? ""));
   sweep(id);
@@ -227,8 +229,13 @@ export function openSidebarChat(newChat: boolean): Promise<string | null> {
   return running;
 }
 
-/** The column shows or hides. */
-export function columnChanged(_shown: boolean): void {
+/**
+ * The column shows or hides. It is told before the column is hidden, so the keyboard goes back to the terminal while the focus
+ * is still inside it (a hidden control keeps no focus), and the title-bar button follows.
+ */
+export function columnChanged(shown: boolean): void {
+  if (column === null) return;
+  if (!shown && column.contains(document.activeElement)) focusInput();
   renderOverlay();
 }
 
@@ -241,6 +248,22 @@ export function aiFormShown(): boolean {
 export function sidebarConversation(): string | null {
   return form === "chat" ? current : null;
 }
+
+/** What the chat module's title-bar button reaches the column through. */
+export const sidebarChat: SidebarHandle = {
+  showing: () => form === "chat" && (hooks?.shown() ?? false),
+  columnShown: () => hooks?.shown() ?? false,
+  open: () => openSidebarChat(false),
+  reveal(conversation: string): boolean {
+    // Only the chat the column holds is brought back: a call that waits in it must reach the person in either form, hidden or not.
+    if (hooks === null || current === null || current !== conversation) return false;
+    setForm("chat");
+    hooks.show();
+    showChat(conversation);
+    view?.focus();
+    return true;
+  },
+};
 
 // ---- the list ----------------------------------------------------------------------------------------------------------
 

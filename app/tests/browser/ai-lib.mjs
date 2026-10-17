@@ -436,3 +436,27 @@ export async function pickChat(page, id) {
   await page.locator(`li.ai-side-row[data-id="${id}"] button.ai-side-pick`).click();
   await page.waitForFunction(() => document.querySelector("#ai-side-chats").hidden);
 }
+
+/**
+ * How the column and its strip of cards fit: the scroll sizes of the column and of the strip, the largest right edge of any
+ * descendant of the strip against the strip's own, and the heights of the strip and of the chat host it sits in.
+ */
+export const overflow = (page) =>
+  page.evaluate(() => {
+    const side = document.getElementById("sidebar");
+    const strip = side.querySelector("div.chat-cards");
+    const edge = strip.getBoundingClientRect().right;
+    let reach = 0;
+    for (const node of strip.querySelectorAll("*")) reach = Math.max(reach, node.getBoundingClientRect().right);
+    return {
+      sideScroll: side.scrollWidth, sideClient: side.clientWidth, stripScroll: strip.scrollWidth, stripClient: strip.clientWidth,
+      stripScrollHeight: strip.scrollHeight, stripClientHeight: strip.clientHeight, stripHeight: strip.getBoundingClientRect().height,
+      hostHeight: side.querySelector(".side-chat").getBoundingClientRect().height, overflowY: getComputedStyle(strip).overflowY, reach, edge,
+    };
+  });
+
+/** Type a message into the composer of the sidebar column and press Enter (a chat pane may have a composer of its own). */
+export async function sendSide(page, text) {
+  await page.locator("#sidebar .chat-input").fill(text);
+  await page.locator("#sidebar .chat-input").press("Enter");
+}

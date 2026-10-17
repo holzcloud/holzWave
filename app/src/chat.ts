@@ -162,6 +162,7 @@ const wantFocus = new Set<string>();
 const dirty = new Set<Session>();
 let frame = 0;
 let opener: BlockOpener | null = null;
+let sidebar: SidebarHandle | null = null;
 let button: HTMLButtonElement | null = null;
 /** The profile chosen last in this window: a new chat starts with it. */
 let lastChoice: string | null = null;
@@ -175,10 +176,26 @@ let acting: number | null = null;
 /** The panes an earlier render has shown, so a pane whose block the core has not listed yet is not taken for a terminal. */
 let shownPanes = new Set<number>();
 
-/** What the page offers the chat besides the bridge: the settings watch. */
+/**
+ * The sidebar column as `initChat` sees it: this module never imports the column, so its form hands over an object that says
+ * what the title-bar button needs (`aisidebar.ts` makes it).
+ */
+export interface SidebarHandle {
+  /** The AI form is the form and the column is shown: a chat is on screen in the column. */
+  showing(): boolean;
+  /** The column is shown, in either form. */
+  columnShown(): boolean;
+  /** Turn the shown column into the AI chat and give the composer the keyboard. Answers null, or one sentence. */
+  open(): Promise<string | null>;
+  /** Show the column's own chat when it is `conversation`; false for any other chat. */
+  reveal(conversation: string): boolean;
+}
+
+/** What the page offers the chat besides the bridge: the settings watch and the sidebar column. */
 export interface ChatHost {
   /** Call `fn` after every accepted settings view; the answer stops it. */
   watchSettings(fn: () => void): () => void;
+  sidebar?: SidebarHandle;
 }
 
 // ---- sessions and the core's events -----------------------------------------------------------------------------------
@@ -1378,12 +1395,17 @@ function shownChatPane(): number | null {
 }
 
 /**
- * Open the chat: without `newChat`, focus the chat pane of the shown tab when there is one; otherwise make a new
- * conversation and open it as a pane to the right of the focused pane. Answers null when done, else one sentence.
+ * Open the chat. Without `newChat`, in this order: show the chat of the sidebar column whose tool call waits for a decision
+ * (a decision is brought to the person), focus the chat pane of the shown tab, turn a shown sidebar column into the chat;
+ * otherwise (and always with `newChat`) make a new conversation and open it as a pane to the right of the focused pane.
+ * Answers null when done, else one sentence.
  */
 export async function openChat(newChat: boolean): Promise<string | null> {
   if (opener === null) return "the chat is not started";
   if (!newChat) {
+    for (const s of sessions.values()) {
+      if (s.approvals.waiting() > 0 && sidebar?.reveal(s.id) === true) return null;
+    }
     const pane = shownChatPane();
     if (pane !== null) {
       try {
@@ -1396,6 +1418,7 @@ export async function openChat(newChat: boolean): Promise<string | null> {
       }
       return null;
     }
+    if (sidebar !== null && sidebar.columnShown()) return sidebar.open();
   }
   let id: unknown;
   try {
@@ -1471,6 +1494,7 @@ export function releaseChat(conversation: string): boolean {
 /** Make the button, register the two actions and listen to the core's `ai` events. Call once at start-up. */
 export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void> {
   opener = open;
+  sidebar = host?.sidebar ?? null;
   try {
     await loadStyles("./chat.css");
   } catch {
@@ -1515,9 +1539,9 @@ export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void
       void fetchSnapshot(s);
     }
   });
-  // The button is pressed while the shown tab has a chat pane.
+  // The button is pressed while a chat is on screen: a chat pane of the shown tab or the chat in the sidebar column.
   onOverlayRender(() => {
-    const pressed = shownChatPane() !== null;
+    const pressed = shownChatPane() !== null || sidebar?.showing() === true;
     button?.setAttribute("aria-pressed", pressed ? "true" : "false");
     followActing();
   });

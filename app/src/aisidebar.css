@@ -65,3 +65,12 @@
 .sb-ai .side-chat { position: relative; flex: 1 1 0; min-height: 0; background: none; border-top: 1px solid var(--hw-line); }
 
 .sb-ai button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+
+/* ---- the cards at the column's width ------------------------------------------------------------------------------------ */
+
+/* The cards are the chat pane's own, drawn into the strip of the column. At this width the fields of a request stack: the name with
+   its size at the right on the first line, the value under it on the whole width. Everything else of the cards already wraps. */
+.sb-ai .side-chat .approval-row { grid-template-columns: minmax(0, 1fr) max-content; grid-template-areas: "name bytes" "value value"; gap: 0 .5rem; }
+.sb-ai .side-chat .approval-name { grid-area: name; min-width: 0; overflow-wrap: anywhere; }
+.sb-ai .side-chat .approval-bytes { grid-area: bytes; }
+.sb-ai .side-chat .approval-value { grid-area: value; }
