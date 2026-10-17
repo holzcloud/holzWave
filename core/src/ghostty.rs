@@ -64,6 +64,21 @@ fn degraded<T>(what: &str, result: Result<T>, fallback: impl FnOnce() -> T) -> T
     }
 }
 
+/// The last `max_bytes` bytes of `text`, moved forward to the next character boundary.
+///
+/// The result is valid UTF-8 and may be a few bytes shorter than the bound. The tail is kept on purpose: the end of a
+/// command's output holds the error or the result a reader needs most.
+fn cap_tail(text: String, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut start = text.len() - max_bytes;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_owned()
+}
+
 fn color(c: libghostty_vt::style::RgbColor) -> Color {
     Color { r: c.r, g: c.g, b: c.b }
 }
@@ -616,6 +631,41 @@ impl GhosttyEngine {
             search_memo: None,
             copy: None,
         })
+    }
+
+    /// The output of the command at `screen_row`, as plain text, at most `max_bytes` bytes (the tail is kept, cut on
+    /// a character boundary).
+    ///
+    /// `screen_row` counts from the top of the scrollback and the column is always 0, so the answer does not depend
+    /// on how far the user has scrolled. The region is whatever the program's OSC 133 marks declare: the text is
+    /// untrusted program output and may be forged or hidden by the program. Nothing is sanitised or redacted here;
+    /// that belongs to the context gate of the caller. Soft-wrapped lines are joined and trailing blanks trimmed.
+    /// `None` when `max_bytes` is 0, the row is past the end, or the row is not part of any command's output. The
+    /// user's selection is neither read nor changed. The call belongs to the engine's own thread (the engine is not
+    /// `Send`); the library allocation is bounded by the scrollback limit and the returned string by `max_bytes`.
+    pub fn output_at(&self, screen_row: u32, max_bytes: usize) -> Result<Option<String>> {
+        if max_bytes == 0 {
+            return Ok(None);
+        }
+        let total = self.terminal.total_rows().map_err(eng)?;
+        if screen_row as usize >= total {
+            return Ok(None);
+        }
+        let at = self.screen_ref((0, screen_row))?;
+        // A snapshot: it is not installed as the terminal's selection.
+        let Some(sel) = self.terminal.select_output(at).map_err(eng)? else {
+            return Ok(None);
+        };
+        let options = FormatOptions::new().with_selection(&sel).with_unwrap(true).with_trim(true);
+        let Some(bytes) = self.terminal.format_selection_alloc(None, options).map_err(eng)? else {
+            return Ok(None);
+        };
+        let text = String::from_utf8_lossy(bytes.as_ref());
+        let text = text.trim_end_matches('\n');
+        if text.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(cap_tail(text.to_owned(), max_bytes)))
     }
 }
 
@@ -1499,6 +1549,17 @@ impl TerminalEngine for GhosttyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_tail_keeps_the_tail_on_a_character_boundary() {
+        assert_eq!(cap_tail("abc".into(), 10), "abc");
+        assert_eq!(cap_tail("abc".into(), 3), "abc");
+        assert_eq!(cap_tail("abcdef".into(), 2), "ef");
+        // Bytes of "aéb": a, 0xC3, 0xA9, b. A bound of 2 starts inside the é and drops it whole.
+        assert_eq!(cap_tail("aéb".into(), 2), "b");
+        assert_eq!(cap_tail("aéb".into(), 3), "éb");
+        assert_eq!(cap_tail("abc".into(), 0), "");
+    }
 
     /// The W3C code of a libghostty key: its variant name, with the single letters `A` to `Z` standing for
     /// `KeyA` to `KeyZ`.
