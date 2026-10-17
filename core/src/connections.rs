@@ -135,6 +135,11 @@ impl Connections {
         self.generation.load(Ordering::SeqCst)
     }
 
+    /// The kind of connection `id`: the shell checks with it that a monitor of another computer names an SSH connection.
+    pub fn kind_of(&self, id: &str) -> Option<Kind> {
+        self.profiles().get(id).map(|p| p.kind)
+    }
+
     /// The name of connection `id`.
     pub fn label_of(&self, id: &str) -> Option<String> {
         self.profiles().get(id).map(|p| p.name.clone())
@@ -398,6 +403,20 @@ mod tests {
         assert!(spec.ssh.is_none());
         assert_eq!(spec.program, "docker");
         assert_eq!(spec.args, ["exec", "-it", "web-1", "sh"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_kind_of_a_connection_is_known_by_its_id() {
+        let d = dir("kind");
+        let (c, _) = manager(&d, &[]);
+        let ssh = c.save(profile("Talos"), SecretChange::Set { value: "pw".into() }).unwrap().profile.id;
+        let mut wsl = Profile::new("", "Box", "Ubuntu");
+        wsl.kind = Kind::Wsl;
+        let wsl = c.save(wsl, SecretChange::Keep).unwrap().profile.id;
+        assert_eq!(c.kind_of(&ssh), Some(Kind::Ssh));
+        assert_eq!(c.kind_of(&wsl), Some(Kind::Wsl));
+        assert_eq!(c.kind_of("nope"), None);
         let _ = fs::remove_dir_all(&d);
     }
 

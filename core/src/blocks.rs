@@ -186,6 +186,12 @@ impl Blocks {
         self.panes().get(&pane).cloned()
     }
 
+    /// The saved connections that a monitor pane shows, each once. The shell uses it to keep only the hosts a pane still
+    /// shows.
+    pub fn remote_monitor_sources(&self) -> std::collections::BTreeSet<String> {
+        self.panes().values().filter(|b| b.kind == BlockKind::Monitor && b.source != LOCAL).map(|b| b.source.clone()).collect()
+    }
+
     /// Every block pane, for the page.
     pub fn views(&self, connections: &Connections) -> Vec<BlockView> {
         let panes = self.panes().clone();
@@ -411,6 +417,22 @@ mod tests {
         let again = Blocks::load(&d, None, &[1, 2]);
         assert_eq!(again.block_of(1).unwrap().kind, BlockKind::Monitor, "it survives a restart");
         assert_eq!(again.block_of(2).unwrap().source, "talos");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_hosts_that_have_a_monitor_are_listed_once() {
+        let (d, blocks, _) = setup("hosts");
+        let block = |kind, source: &str, path: &str| Block { kind, source: source.into(), path: path.into() };
+        blocks.assign(1, block(BlockKind::Monitor, "talos", "")).unwrap();
+        blocks.assign(2, block(BlockKind::Monitor, "talos", "")).unwrap();
+        blocks.assign(3, block(BlockKind::Monitor, LOCAL, "")).unwrap();
+        blocks.assign(4, block(BlockKind::Files, "nas", "/")).unwrap();
+        assert_eq!(blocks.remote_monitor_sources().into_iter().collect::<Vec<_>>(), vec!["talos".to_string()]);
+        blocks.forget(1);
+        assert_eq!(blocks.remote_monitor_sources().len(), 1, "one pane still shows it");
+        blocks.forget(2);
+        assert!(blocks.remote_monitor_sources().is_empty());
         let _ = fs::remove_dir_all(&d);
     }
 

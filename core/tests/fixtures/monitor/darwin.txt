@@ -1,0 +1,11 @@
+@@begin
+
+@@uname
+Darwin
+@@uptime
+@@stat
+@@mem
+@@net
+@@page
+16384
+@@end

@@ -214,7 +214,7 @@ fn parse_page(text: &str) -> u64 {
 /// first line is a piece of a line and is dropped.
 fn parse_procs(region: &str) -> Vec<RawProc> {
     let rest = match region.strip_prefix(BEGIN) {
-        Some(rest) => rest,
+        Some(rest) => rest.trim_start_matches(['\r', '\n']),
         // The front was cut: the first line is a piece of a line.
         None => region.split_once('\n').map_or("", |(_, rest)| rest),
     };
@@ -350,5 +350,167 @@ mod tests {
         assert_eq!(cpu(1500), Some(0.0), "a new pid");
         assert_eq!(cpu(7), Some(0.0), "the same pid with another start time");
         assert_eq!(snapshot.procs.iter().map(|p| p.pid).collect::<Vec<_>>(), vec![842, 1, 977, 1500, 7]);
+    }
+
+    fn base_raw() -> Raw {
+        Raw {
+            uptime: 100.0,
+            cpu_total: 1000,
+            cpu_idle: 500,
+            cores: 2,
+            mem_total_kb: 1000,
+            mem_available_kb: 400,
+            rx: 0,
+            tx: 0,
+            page: 4096,
+            procs: Vec::new(),
+        }
+    }
+
+    /// A text with `process` lines in the place of the processes of fixture B.
+    fn with_processes(lines: &str) -> String {
+        let b = fixture("linux_b.txt");
+        let tail = &b[b.find("\n@@uname").expect("the sections follow the processes")..];
+        format!("@@begin\n{lines}{tail}")
+    }
+
+    fn stat_line(pid: u32, name: &str, ticks: &str, pages: &str) -> String {
+        format!("{pid} ({name}) S 0 1 1 0 -1 4194560 12000 400000 30 200 {ticks} {ticks} 0 0 20 0 1 0 10 174587904 {pages} 18446744073709551615\n")
+    }
+
+    #[test]
+    fn the_last_markers_win_so_a_process_name_cannot_forge_a_section() {
+        let b = fixture("linux_b.txt");
+        let honest = linux(&b);
+        // A process whose name holds a marker on a line of its own, in the process region.
+        let forged = b.replacen(
+            "@@begin\n",
+            "@@begin\n1600 (x\n@@uname\nDarwin) S 0 1 1 0 -1 4194560 12000 400000 30 200 1 1 0 0 20 0 1 0 10 1 1 2\n@@end\n@@page\n99999\n@@mem\nMemTotal: 1 kB\n",
+            1,
+        );
+        assert_eq!(linux(&forged), honest, "the same numbers and the same processes");
+    }
+
+    #[test]
+    fn a_cut_answer_is_an_error_and_a_cut_process_list_is_not() {
+        let b = fixture("linux_b.txt");
+        let honest = linux(&b);
+        assert_eq!(parse(b.strip_suffix("@@end\n").expect("ends with the marker")), Err(CUT_SHORT));
+        let at = b.find("@@mem\n").expect("mem") ;
+        let to = b.find("@@net\n").expect("net");
+        assert_eq!(parse(&format!("{}{}", &b[..at], &b[to..])), Err(UNREADABLE));
+        let front_cut = linux(&b[100..]);
+        assert_eq!((front_cut.cpu_total, front_cut.mem_total_kb, front_cut.rx, front_cut.uptime), (honest.cpu_total, honest.mem_total_kb, honest.rx, honest.uptime));
+        assert_eq!(front_cut.procs.iter().map(|p| p.pid).collect::<Vec<_>>(), vec![1500, 7, 842, 977], "the partial first process is dropped");
+        assert_eq!(parse(&b.replace("MemTotal:       16384000 kB", "MemTotal:              0 kB")), Err(UNREADABLE));
+    }
+
+    #[test]
+    fn hostile_numbers_never_overflow_or_divide_by_zero() {
+        let max = u64::MAX.to_string();
+        let big = linux(&with_processes(&stat_line(5, "big", &max, &max)));
+        let p = big.procs.iter().find(|p| p.pid == 5).expect("pid 5");
+        assert_eq!((p.ticks, p.rss_pages), (u64::MAX, u64::MAX), "ticks add with saturation");
+        let mut now = base_raw();
+        now.cpu_total = u64::MAX;
+        now.cpu_idle = u64::MAX;
+        now.mem_total_kb = u64::MAX;
+        now.mem_available_kb = u64::MAX;
+        now.rx = u64::MAX;
+        now.tx = u64::MAX;
+        now.page = u64::MAX;
+        now.uptime = 200.0;
+        now.procs = big.procs.clone();
+        let mut before = base_raw();
+        before.procs = big.procs.clone();
+        let snapshot = derive(Some(&before), &now);
+        assert_eq!(snapshot.mem_used, 0, "available above total is no used memory");
+        assert_eq!(snapshot.procs.iter().find(|p| p.pid == 5).map(|p| p.mem), Some(u64::MAX));
+        assert!(snapshot.net_rx <= u64::MAX && snapshot.cpu <= 100.0);
+        // The same total twice: nothing to divide by.
+        let mut same = base_raw();
+        same.uptime = 200.0;
+        same.procs = big.procs.clone();
+        let snapshot = derive(Some(&before), &same);
+        assert_eq!(snapshot.cpu, 0.0);
+        assert!(snapshot.procs.iter().all(|p| p.cpu == 0.0));
+        // A line of 5000 bytes is skipped; 20001 valid lines are read at most 20000.
+        let long = stat_line(9, &"n".repeat(5000), "1", "1");
+        let many = stat_line(1, "p", "1", "1").repeat(MAX_PROCS + 1);
+        let capped = linux(&with_processes(&format!("{long}{many}")));
+        assert_eq!(capped.procs.len(), MAX_PROCS - 1, "the long line counts as a line read; the rest is not read");
+        assert!(capped.procs.iter().all(|p| p.pid != 9));
+        // A name of 100 characters with control characters is 40 characters without them.
+        let name = format!("{}\u{7}\t\u{1b}{}", "a".repeat(50), "b".repeat(50));
+        let named = linux(&with_processes(&stat_line(6, &name, "1", "1")));
+        let cleaned = &named.procs.iter().find(|p| p.pid == 6).expect("pid 6").name;
+        assert_eq!(cleaned.chars().count(), 40);
+        assert!(!cleaned.chars().any(char::is_control));
+        // Invalid UTF-8 in a name is read lossily and does not fail the reading.
+        let line = stat_line(8, "bad", "1", "1").replace("bad", "b\u{0}d").into_bytes();
+        let mut bytes = b"@@begin\n".to_vec();
+        bytes.extend(line.iter().enumerate().map(|(i, b)| if i == 4 { 0xff } else { *b }));
+        bytes.extend(with_processes("").into_bytes().split_off(b"@@begin\n".len()));
+        let lossy = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(lossy.contains('\u{fffd}'));
+        assert!(linux(&lossy).procs.iter().any(|p| p.pid == 8));
+    }
+
+    #[test]
+    fn network_rates_leave_out_loopback_and_never_go_negative() {
+        let raw = linux(&fixture("linux_b.txt"));
+        assert_eq!((raw.rx, raw.tx), (14_700_000, 3_100_000), "eth0 and wlan0 only");
+        let mut before = base_raw();
+        before.rx = 5000;
+        before.tx = 5000;
+        let mut now = base_raw();
+        now.uptime = 102.0;
+        now.rx = 7000;
+        now.tx = 100;
+        let snapshot = derive(Some(&before), &now);
+        assert_eq!((snapshot.net_rx, snapshot.net_tx), (1000, 0), "a counter that went backwards is a rate of 0");
+    }
+
+    #[test]
+    fn used_memory_is_total_minus_available_with_the_old_kernel_fallback() {
+        let a = fixture("linux_a.txt");
+        let with = linux(&a);
+        assert_eq!(derive(None, &with).mem_used, 6_537_216_000);
+        let without = linux(&a.replace("MemAvailable:   10000000 kB\n", ""));
+        assert_eq!(without.mem_available_kb, 1_000_000 + 200_000 + 5_000_000, "free, buffers and cache");
+        assert_eq!(derive(None, &without).mem_used, (16_384_000 - 6_200_000) * 1024);
+    }
+
+    #[test]
+    fn a_reading_that_went_back_in_time_counts_as_the_first() {
+        let a = linux(&fixture("linux_a.txt"));
+        let b = linux(&fixture("linux_b.txt"));
+        let back = derive(Some(&b), &a);
+        assert_eq!((back.cpu, back.net_rx, back.net_tx), (0.0, 0, 0), "a smaller uptime");
+        assert!(back.procs.iter().all(|p| p.cpu == 0.0));
+        let mut fewer_ticks = b.clone();
+        fewer_ticks.cpu_total = a.cpu_total - 1;
+        let step = derive(Some(&a), &fewer_ticks);
+        assert_eq!((step.cpu, step.net_rx), (0.0, 0), "a smaller tick total");
+    }
+
+    #[test]
+    fn another_system_is_unsupported_and_its_name_is_cleaned() {
+        assert_eq!(parse(&fixture("darwin.txt")), Ok(Parsed::Other("Darwin".into())));
+        let markup = "@@begin\n\n@@uname\nLin<b>ux\n@@uptime\n1.00 1.00\n";
+        assert_eq!(parse(markup), Ok(Parsed::Other("Linbux".into())), "whatever follows the word");
+        let long = format!("@@uname\n{}\n", "x".repeat(40));
+        assert_eq!(parse(&long), Ok(Parsed::Other("x".repeat(24))));
+        assert_eq!(parse("sh: cat: not found\n"), Ok(Parsed::Other(String::new())), "no marker at all");
+        assert_eq!(parse(""), Ok(Parsed::Other(String::new())));
+        assert_eq!(clean_system("a b\u{1b}c.d-e_f"), "abc.d-e_f");
+    }
+
+    #[test]
+    fn the_page_size_is_a_power_of_two_or_4096() {
+        assert_eq!(parse_page("16384\n"), 16384);
+        for bad in ["3000\n", "0\n", "text\n", "", "2097153\n", "512\n", "18446744073709551615\n"] {
+            assert_eq!(parse_page(bad), 4096, "{bad:?}");
+        }
     }
 }
