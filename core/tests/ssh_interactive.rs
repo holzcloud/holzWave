@@ -358,3 +358,251 @@ fn closing_a_pane_while_the_question_waits_does_not_wait_for_the_person() {
     assert_eq!(PROMPT_ROUNDS, 3);
     assert_eq!(PROMPT_LINES, 5);
 }
+
+// ---- the edges: untrusted text, bounds, rounds, echo, cancel, silence, no secret ----------------------------------
+
+/// Wait for the pane's failure line and return it whole.
+fn failure(out: &mut Out, why: &str) {
+    out.until("Press Enter to try again", 10);
+    let line = format!("Connection to 127.0.0.1 failed: {why}. Press Enter to try again.");
+    assert!(out.seen.contains(&line), "wanted {line:?}, the pane shows {:?}", out.seen);
+}
+
+#[test]
+fn server_text_reaches_the_person_cleaned_and_bounded() {
+    let name = format!("{}\x1b[2J\u{202e}", "N".repeat(400));
+    let instructions = format!("first\n\u{202e}second\x1b[31m\u{200b}\n{}", "x".repeat(500));
+    let long = "P".repeat(500);
+    let server = ssh_server::start(Options::keyboard_interactive(vec![round(
+        &name,
+        &instructions,
+        &[(&long, false), ("", true), ("  \u{202e}Code:\x1b[0m\u{0}  ", false)],
+        &["a", "b", "c"],
+    )]));
+    let person = Scripted::typing(&[&["a", "b", "c"]]);
+    let (link, mut out) = pane(&server, person.auth());
+    out.until("welcome 0", 10);
+
+    let asked = &person.rounds()[0];
+    assert_eq!(asked.name, "N".repeat(60), "a name is cut to 60 characters, controls gone");
+    assert!(asked.instructions.chars().count() <= 300, "{}", asked.instructions.chars().count());
+    assert!(asked.instructions.starts_with("first\nsecond [31m"), "{:?}", asked.instructions);
+    assert!(!asked.instructions.chars().any(|c| c.is_control() && c != '\n'));
+    assert!(!asked.instructions.contains('\u{202e}') && !asked.instructions.contains('\u{200b}'));
+    assert_eq!(asked.prompts[0].text, "P".repeat(200));
+    assert_eq!(asked.prompts[1].text, "Answer", "an empty question text becomes Answer");
+    assert_eq!(asked.prompts[2].text, "Code: [0m", "the escape and the NUL became spaces");
+    Box::new(link).close().unwrap();
+}
+
+#[test]
+fn at_most_five_prompts_in_a_round_and_three_rounds() {
+    let six: Vec<(&str, bool)> = vec![("1", false); PROMPT_LINES + 1];
+    let server = ssh_server::start(Options::keyboard_interactive(vec![round("", "", &six, &["a"; 6])]));
+    let person = Scripted::typing(&[&["a", "a", "a", "a", "a", "a"]]);
+    let (link, mut out) = pane(&server, person.auth());
+    failure(&mut out, "the server asked too many questions");
+    assert_eq!(person.calls(), 0, "a round of six is not shown");
+    assert_eq!(count(&server, |s| &s.logins), 0);
+    Box::new(link).close().unwrap();
+
+    // Three rounds with questions are fine, a fourth is not.
+    let rounds = |n: usize| (0..n).map(|i| round("", "", &[("Code:", false)], &[&i.to_string()])).collect::<Vec<_>>();
+    let server = ssh_server::start(Options::keyboard_interactive(rounds(PROMPT_ROUNDS)));
+    let person = Scripted::typing(&[&["0"], &["1"], &["2"]]);
+    let (link, mut out) = pane(&server, person.auth());
+    out.until("welcome 0", 10);
+    assert_eq!(person.calls(), 3);
+    Box::new(link).close().unwrap();
+
+    let server = ssh_server::start(Options::keyboard_interactive(rounds(PROMPT_ROUNDS + 1)));
+    let person = Scripted::typing(&[&["0"], &["1"], &["2"], &["3"]]);
+    let (link, mut out) = pane(&server, person.auth());
+    failure(&mut out, "the server asked too many questions");
+    assert_eq!(person.calls(), 3, "the fourth round is not shown");
+    assert_eq!(count(&server, |s| &s.logins), 0);
+    Box::new(link).close().unwrap();
+}
+
+#[test]
+fn a_round_with_no_prompts_is_answered_without_asking() {
+    let server = ssh_server::start(Options::keyboard_interactive(vec![
+        round("Notice", "Welcome", &[], &[]),
+        round("", "", &[("Code:", false)], &["123456"]),
+    ]));
+    let person = Scripted::typing(&[&["123456"]]);
+    let (link, mut out) = pane(&server, person.auth());
+    out.until("welcome 0", 10);
+    assert_eq!(person.calls(), 1, "only the round with a question was shown");
+    assert_eq!(count(&server, |s| &s.kbd_rounds), 2);
+    Box::new(link).close().unwrap();
+}
+
+#[test]
+fn the_echo_flag_reaches_the_prompter_unchanged() {
+    let server = ssh_server::start(Options::keyboard_interactive(vec![round(
+        "",
+        "",
+        &[("A:", true), ("B:", false), ("C:", true), ("D:", false)],
+        &["1", "2", "3", "4"],
+    )]));
+    let person = Scripted::typing(&[&["1", "2", "3", "4"]]);
+    let (link, mut out) = pane(&server, person.auth());
+    out.until("welcome 0", 10);
+    let flags: Vec<bool> = person.rounds()[0].prompts.iter().map(|p| p.echo).collect();
+    assert_eq!(flags, [true, false, true, false]);
+    Box::new(link).close().unwrap();
+}
+
+#[test]
+fn a_wrong_answer_is_a_refusal_in_words() {
+    let server = ssh_server::start(Options::keyboard_interactive(vec![round("", "", &[("Code:", false)], &["right"])]));
+    let person = Scripted::typing(&[&["wrong"], &["right"]]);
+    let (mut link, mut out) = pane(&server, person.auth());
+    let mut writer = link.take_writer().unwrap();
+    failure(&mut out, "holz@127.0.0.1 refused the login");
+    // The pane does not ask again by itself: a person's own Enter does.
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(person.calls(), 1);
+    assert_eq!(count(&server, |s| &s.kbd_refused), 1);
+    assert_eq!(link.state(), ConnState::Failed);
+    writer.write_all(b"\r").unwrap();
+    // The second connection of the server: the first one never logged in.
+    out.until("welcome 1", 10);
+    assert_eq!(person.calls(), 2);
+    assert_eq!(count(&server, |s| &s.logins), 1);
+    drop(writer);
+    Box::new(link).close().unwrap();
+}
+
+#[test]
+fn a_cancel_ends_the_login() {
+    let server = code_server();
+    let person = Scripted::new(vec![PromptAnswer::Cancelled]);
+    let (link, mut out) = pane(&server, person.auth());
+    failure(&mut out, "the login was cancelled");
+    assert_eq!(count(&server, |s| &s.logins), 0, "no login was completed");
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(person.calls(), 1, "the pane waits for Enter");
+    assert_eq!(link.state(), ConnState::Failed);
+    Box::new(link).close().unwrap();
+}
+
+#[test]
+fn a_wrong_number_of_answers_is_refused_before_it_is_sent() {
+    let server = code_server();
+    let person = Scripted::typing(&[&["only-one"]]);
+    let (link, mut out) = pane(&server, person.auth());
+    failure(&mut out, "the answers do not match the questions");
+    assert_eq!(count(&server, |s| &s.kbd_rounds), 1);
+    assert_eq!(count(&server, |s| &s.kbd_refused), 0, "no answer round went to the server");
+    assert_eq!(count(&server, |s| &s.logins), 0);
+    Box::new(link).close().unwrap();
+}
+
+#[test]
+fn no_message_holds_an_answer_or_a_prompt_text() {
+    let question = "Enter token XJ-49-ZZ";
+    let secret = "s3cr3t-wrong-4711";
+    let dir = Scratch::new("kms");
+    let six: Vec<(&str, bool)> = vec![(question, false); PROMPT_LINES + 1];
+    let cases: Vec<(Options, Vec<PromptAnswer>)> = vec![
+        // refused
+        (Options::keyboard_interactive(vec![round("", "", &[(question, false)], &["right"])]), vec![said(&[secret])]),
+        // cancelled
+        (Options::keyboard_interactive(vec![round("", "", &[(question, false)], &["right"])]), vec![PromptAnswer::Cancelled]),
+        // too many questions
+        (Options::keyboard_interactive(vec![round("", "", &six, &[])]), vec![said(&[secret])]),
+        // the wrong number of answers
+        (Options::keyboard_interactive(vec![round("", "", &[(question, false), (question, true)], &["a", "b"])]), vec![said(&[secret])]),
+    ];
+    for (options, answers) in cases {
+        let server = ssh_server::start(options);
+        let person = Scripted::new(answers);
+        // The pane's own line and the connection's error text.
+        let (link, mut out) = pane(&server, person.auth());
+        out.until("Press Enter to try again", 10);
+        assert!(!out.seen.contains(secret) && !out.seen.contains("XJ-49-ZZ"), "the pane says {:?}", out.seen);
+        Box::new(link).close().unwrap();
+
+        let person = Scripted::new(vec![said(&[secret])]);
+        let connection = Connection::standalone("t", server.target(person.auth())).unwrap();
+        let why = connection.block_on(connection.session(Open::Interactive)).unwrap_err().to_string();
+        assert!(!why.contains(secret) && !why.contains("XJ-49-ZZ"), "{why}");
+        let debug = format!("{connection:?} {:?} {:?}", connection.target(), said(&[secret]));
+        assert!(!debug.contains(secret), "{debug}");
+    }
+    drop(dir);
+}
+
+#[test]
+fn connections_hand_the_prompter_to_every_interactive_target_in_the_chain() {
+    let dir = Scratch::new("kch");
+    let (connections, _) = Connections::load(dir.path(), Arc::new(NoKeychain), None, &[]);
+    for (id, jump) in [("bastion", None), ("inner", Some("bastion"))] {
+        let mut profile = Profile::new(id, id, format!("{id}.example"));
+        profile.user = "holz".into();
+        profile.auth = Auth::Interactive;
+        profile.jump = jump.map(str::to_owned);
+        connections.save(profile, SecretChange::Keep).unwrap();
+    }
+
+    // With none set the target carries none: the login fails with a sentence instead of asking.
+    let target = connections.ssh_target("inner").unwrap();
+    assert!(matches!(target.auth, SshAuth::Interactive { prompter: None }));
+
+    let person = Scripted::typing(&[&["x"], &["y"]]);
+    connections.set_prompter(person.clone());
+    let target = connections.ssh_target("inner").unwrap();
+    let ask = |auth: &SshAuth| match auth {
+        SshAuth::Interactive { prompter: Some(p) } => {
+            let _ = p.ask(PromptRound {
+                connection: "what the server says".into(),
+                host: String::new(),
+                name: String::new(),
+                instructions: String::new(),
+                prompts: Vec::new(),
+            });
+        }
+        other => panic!("no prompter on {other:?}"),
+    };
+    ask(&target.auth);
+    ask(&target.jump.as_ref().expect("the jump host").auth);
+    let ids: Vec<String> = person.rounds().into_iter().map(|r| r.connection).collect();
+    assert_eq!(ids, ["inner", "bastion"], "each round carries the id of the profile its target was made from");
+    assert_eq!(connections.identity_of("bastion"), Some(("bastion".into(), "bastion.example".into())));
+    assert_eq!(connections.identity_of("nobody"), None);
+}
+
+#[test]
+fn an_interactive_connection_without_a_window_fails_in_words() {
+    let dir = Scratch::new("knw");
+    let server = code_server();
+    let connections = saved(&dir, &server, None);
+    let connection = connections.session("talos").unwrap();
+    let error = connection.block_on(connection.session(Open::Interactive)).unwrap_err();
+    assert_eq!(error, OpenError { fatal: true, why: "this connection needs a window to ask in".into() });
+    assert_eq!(count(&server, |s| &s.logins), 0);
+}
+
+#[test]
+fn an_interactive_profile_cannot_carry_a_secret() {
+    let dir = Scratch::new("ksc");
+    let (connections, _) = Connections::load(dir.path(), Arc::new(NoKeychain), None, &[]);
+    let mut profile = Profile::new("talos", "Talos", "talos.example");
+    profile.user = "holz".into();
+    profile.auth = Auth::Interactive;
+
+    for secret in ["a-password", ""] {
+        let error = connections.save(profile.clone(), SecretChange::Set { value: secret.into() }).unwrap_err();
+        assert!(error.to_string().contains("an interactive login has no saved password or code"), "{error}");
+    }
+    assert!(connections.list().is_empty(), "nothing was saved");
+    assert!(!dir.path().join("connections.json").exists(), "nothing was written");
+
+    // Keep and Clear are fine; the keychain is never read (the store panics on a read).
+    let saved = connections.save(profile.clone(), SecretChange::Keep).unwrap();
+    assert!(!saved.has_secret);
+    connections.save(profile, SecretChange::Clear).unwrap();
+    assert!(!connections.list()[0].has_secret);
+}

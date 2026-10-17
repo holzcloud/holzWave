@@ -945,6 +945,16 @@ fn is_fatal(error: &russh::Error) -> bool {
 /// Open a session to `target`, going through its jump host if it has one, and log in. The pane's connection loop uses it
 /// directly; everything else gets its session from a [`crate::pool::Connection`], which calls it.
 pub(crate) async fn open(target: &SshTarget, forwards: &Arc<Forwards>) -> std::result::Result<Handle<Client>, Outcome> {
+    open_waiting(target, forwards, PROMPT_WAIT).await
+}
+
+/// [`open`] with the time a person has for each round of questions as an argument, so that a test can shorten it; the
+/// program passes [`PROMPT_WAIT`] (through [`open`]) and nothing else.
+async fn open_waiting(
+    target: &SshTarget,
+    forwards: &Arc<Forwards>,
+    wait: Duration,
+) -> std::result::Result<Handle<Client>, Outcome> {
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
@@ -965,7 +975,7 @@ pub(crate) async fn open(target: &SshTarget, forwards: &Arc<Forwards>) -> std::r
 
     let mut session = if let Some(jump) = &target.jump {
         // Only the target's own login serves forwards; a jump host's registry stays empty, so it rejects every one.
-        let via = Box::pin(open(jump, &Arc::new(Forwards::default()))).await?;
+        let via = Box::pin(open_waiting(jump, &Arc::new(Forwards::default()), wait)).await?;
         let channel = via
             .channel_open_direct_tcpip(target.host.clone(), target.port as u32, "127.0.0.1", 0)
             .await
@@ -1010,7 +1020,7 @@ pub(crate) async fn open(target: &SshTarget, forwards: &Arc<Forwards>) -> std::r
         }
         // The same: a sentence for every way it can fail, and no answer in any of them.
         SshAuth::Interactive { prompter } => {
-            interactive_login(&mut session, &target.user, &target.host, prompter.as_ref(), PROMPT_WAIT).await?;
+            interactive_login(&mut session, &target.user, &target.host, prompter.as_ref(), wait).await?;
             true
         }
     };
@@ -2110,6 +2120,131 @@ mod tests {
         t.port = addr.port();
         t.reconnect = Reconnect { attempts: 3, delay: Duration::from_millis(100) };
         t
+    }
+
+    #[test]
+    fn server_text_is_cleaned_and_bounded() {
+        let clean = |text: &str| clean_server_text(text, 200);
+        // Control characters (ESC, NUL, tab, DEL) become spaces; nothing of an escape sequence can act.
+        assert_eq!(clean("a\x1b[31mb\0c\td\x7fe"), "a [31mb c d e");
+        // Bidi controls and zero-width characters go, so text cannot be reordered or hidden.
+        assert_eq!(clean("pay \u{202e}0001\u{202c} now"), "pay 0001 now");
+        assert_eq!(clean("a\u{2066}b\u{2069}c\u{200b}d\u{200f}e\u{feff}f\u{e0041}g\u{ad}h\u{2060}i"), "abcdefghi");
+        // Line breaks: one at most between lines, never a leading one, four at most in all.
+        assert_eq!(clean("\n\na\r\nb\n\n\nc \n d"), "a\nb\nc\nd");
+        assert_eq!(clean("1\n2\n3\n4\n5\n6\n7"), "1\n2\n3\n4\n5 6 7");
+        assert_eq!(clean("a\u{2028}b\u{85}c"), "a\nb\nc");
+        // Spaces: no run, none at either end.
+        assert_eq!(clean("   Password:    "), "Password:");
+        assert_eq!(clean("  \u{a0}\u{3000} "), "");
+        // The bound counts characters and cuts at a character boundary.
+        let long = "\u{e9}".repeat(500);
+        assert_eq!(clean_server_text(&long, PROMPT_TEXT).chars().count(), PROMPT_TEXT);
+        assert_eq!(clean_server_text(&long, PROMPT_NAME), "\u{e9}".repeat(PROMPT_NAME));
+        assert_eq!(clean_server_text("abc", 0), "");
+        assert_eq!(clean_server_text("ab cd", 3), "ab");
+        // A name or a question is one line.
+        assert_eq!(clean_line("a\nb\n\nc", PROMPT_NAME), "a b c");
+        assert_eq!(clean_line(&"x".repeat(400), PROMPT_NAME).chars().count(), PROMPT_NAME);
+        // Cleaning twice changes nothing, whatever the input.
+        for text in ["", " \n ", "a\n \nb", "\u{202e}\n x \u{200b}\n y", "1\n2\n3\n4\n5\n6", "\u{1b}[2J\u{7}done  "] {
+            let once = clean(text);
+            assert_eq!(clean(&once), once, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_login_asks_a_person_when_it_or_a_jump_host_is_interactive() {
+        let asks = || SshAuth::Interactive { prompter: None };
+        let plain = SshTarget::new("a.example", "holz", SshAuth::Password("pw".into()));
+        assert!(!plain.asks_a_person());
+        assert!(SshTarget::new("b.example", "holz", asks()).asks_a_person());
+        let mut middle = SshTarget::new("m.example", "holz", asks());
+        middle.jump = Some(Box::new(SshTarget::new("j.example", "holz", SshAuth::Password("pw".into()))));
+        let mut outer = plain.clone();
+        outer.jump = Some(Box::new(middle));
+        assert!(outer.asks_a_person(), "a jump host that asks counts");
+        assert_eq!(format!("{:?}", outer.auth), "Password(<set>)");
+        assert_eq!(format!("{:?}", PromptAnswer::Answers(vec!["hunter2".into()])), "Answers(<1 hidden>)");
+        assert_eq!(format!("{:?}", PromptAnswer::Cancelled), "Cancelled");
+    }
+
+    /// A server that asks one question and goes on to accept whatever is answered.
+    struct AsksOnce;
+
+    impl server::Server for AsksOnce {
+        type Handler = Self;
+        fn new_client(&mut self, _: Option<SocketAddr>) -> Self {
+            Self
+        }
+    }
+
+    impl server::Handler for AsksOnce {
+        type Error = russh::Error;
+
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            _user: &str,
+            _submethods: &str,
+            response: Option<server::Response<'a>>,
+        ) -> std::result::Result<Auth, Self::Error> {
+            Ok(match response {
+                None => Auth::Partial {
+                    name: "".into(),
+                    instructions: "".into(),
+                    prompts: std::borrow::Cow::Owned(vec![("Code:".into(), false)]),
+                },
+                Some(_) => Auth::Accept,
+            })
+        }
+    }
+
+    /// A person who never answers in time.
+    struct Asleep;
+
+    impl Prompter for Asleep {
+        fn ask(&self, _round: PromptRound) -> PromptAnswer {
+            thread::sleep(Duration::from_millis(1500));
+            PromptAnswer::Answers(vec!["late".into()])
+        }
+    }
+
+    #[test]
+    fn no_answer_in_time_ends_the_login() {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let config = Arc::new(server::Config {
+            keys: vec![key],
+            auth_rejection_time: Duration::from_millis(0),
+            auth_rejection_time_initial: Some(Duration::from_millis(0)),
+            ..Default::default()
+        });
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                tx.send(socket.local_addr().unwrap()).unwrap();
+                let _ = AsksOnce.run_on_socket(config, &socket).await;
+            });
+        });
+        let addr = rx.recv().unwrap();
+        let prompter: Arc<dyn Prompter> = Arc::new(Asleep);
+        let target = {
+            let mut t = SshTarget::new("127.0.0.1", "holz", SshAuth::Interactive { prompter: Some(prompter) });
+            t.port = addr.port();
+            t
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let started = Instant::now();
+        let result = rt.block_on(open_waiting(&target, &Arc::new(Forwards::default()), Duration::from_millis(200)));
+        match result {
+            Err(Outcome::Fatal(why)) => assert_eq!(why, PROMPT_TIMED_OUT),
+            Err(Outcome::Lost(why)) => panic!("unexpected: {why}"),
+            Err(_) => panic!("unexpected outcome"),
+            Ok(_) => panic!("a login that nobody answered succeeded"),
+        }
+        // The login ends at the wait, not when the person finally answers.
+        assert!(started.elapsed() < Duration::from_millis(1200), "{:?}", started.elapsed());
     }
 
     /// The link's output, read by one helper thread, so a test can wait for text as often as it likes.
