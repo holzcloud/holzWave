@@ -900,6 +900,21 @@ impl Connection {
             return Err(ForwardError::Failed("the socket path is not valid".into()));
         }
         let session = self.session(Open::Interactive).await.map_err(|e| ForwardError::Failed(e.why))?;
+        self.forward_on(&session, path, sink, limits).await
+    }
+
+    /// The forward on one particular login: the shell that starts on a session asks on that session, never on a newer one.
+    pub(crate) async fn forward_on(
+        self: &Arc<Self>,
+        session: &Arc<Session>,
+        path: &str,
+        sink: Arc<dyn ForwardSink>,
+        limits: ForwardLimits,
+    ) -> std::result::Result<ForwardGuard, ForwardError> {
+        if !valid_forward_path(path) {
+            return Err(ForwardError::Failed("the socket path is not valid".into()));
+        }
+        let session = session.clone();
         let Some(open) = session.forwards.register(path, sink, limits) else {
             return Err(ForwardError::Failed("this socket path is forwarded already".into()));
         };

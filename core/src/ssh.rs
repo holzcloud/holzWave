@@ -37,7 +37,7 @@ use russh::{Channel, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::sync::{mpsc as tmpsc, watch};
 
 use crate::conn::{ConnState, Link, SharedState};
-use crate::pool::{Connection, Forwards, Open, Session, bridge};
+use crate::pool::{Connection, ForwardError, ForwardGuard, ForwardLimits, ForwardSink, Forwards, Open, Session, bridge};
 use crate::{Error, Result};
 
 /// The most input kept while the connection is down. More is dropped, so a stuck key cannot fill the memory.
@@ -137,6 +137,70 @@ impl SshTarget {
             term: "xterm-256color".into(),
         }
     }
+}
+
+/// A pane's tunnel: the Unix socket to forward back, the environment the remote shell gets, and the code that answers what
+/// arrives through the socket. The core knows nothing of what is spoken over it ([`ForwardSink`]).
+#[derive(Clone)]
+pub struct Tunnel {
+    /// The path of the socket on the host (see [`crate::pool::valid_forward_path`]).
+    pub path: String,
+    /// `HOLZWAVE_SOCKET`, `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE`, each once, in any order ([`wrapped_shell_command`]).
+    pub env: Vec<(String, String)>,
+    pub sink: Arc<dyn ForwardSink>,
+}
+
+impl std::fmt::Debug for Tunnel {
+    // The environment holds the token: only the path is printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tunnel").field("path", &self.path).finish_non_exhaustive()
+    }
+}
+
+/// The three names of the environment, in the order the start line sets them.
+const ENV_NAMES: [&str; 3] = ["HOLZWAVE_SOCKET", "HOLZWAVE_TOKEN", "HOLZWAVE_PANE"];
+/// The longest value of one of them, in bytes.
+const MAX_ENV_VALUE: usize = 128;
+
+/// Whether `name` is `HOLZWAVE_` and then capitals and underscores.
+fn is_env_name(name: &str) -> bool {
+    name.strip_prefix("HOLZWAVE_").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
+}
+
+/// The one line that starts a pane's shell on a host with its environment, as an SSH exec request. The text is a constant
+/// with three values in it, and each value is 1 to [`MAX_ENV_VALUE`] bytes of letters, digits and `./_:-` (nothing a
+/// POSIX shell reads as more than a word), so no value can end the quotes or add a command. There is no newline, no `!`
+/// (a C shell reads it) and no backslash, and the only quotes are the two around the script. The environment is set
+/// here and never typed into the shell, so no secret reaches the history file of the host.
+///
+/// `env` must hold exactly `HOLZWAVE_SOCKET`, `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE`, once each, in any order. The error
+/// says what is wrong with the shape and never holds a value.
+pub fn wrapped_shell_command(env: &[(String, String)]) -> std::result::Result<String, String> {
+    let mut values: [Option<&str>; 3] = [None; 3];
+    for (name, value) in env {
+        if !is_env_name(name) {
+            return Err("an environment name is not HOLZWAVE_ and capitals".into());
+        }
+        let Some(index) = ENV_NAMES.iter().position(|known| known == name) else {
+            return Err("an environment name is not one of the three".into());
+        };
+        if values[index].is_some() {
+            return Err("an environment name is given twice".into());
+        }
+        let word = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'_' | b':' | b'-');
+        if value.is_empty() || value.len() > MAX_ENV_VALUE || !value.bytes().all(word) {
+            return Err("an environment value is empty, too long or has a character outside letters, digits and ./_:-".into());
+        }
+        values[index] = Some(value);
+    }
+    let [Some(socket), Some(token), Some(pane)] = values else {
+        return Err("the environment must name exactly HOLZWAVE_SOCKET, HOLZWAVE_TOKEN and HOLZWAVE_PANE".into());
+    };
+    Ok(format!(
+        "exec sh -c 'HOLZWAVE_SOCKET={socket}; HOLZWAVE_TOKEN={token}; HOLZWAVE_PANE={pane}; \
+         PATH=\"$PATH:$HOME/.holzwave/bin\"; export HOLZWAVE_SOCKET HOLZWAVE_TOKEN HOLZWAVE_PANE PATH; \
+         exec \"${{SHELL:-/bin/sh}}\" -l'"
+    ))
 }
 
 /// What the connection thread is told.
@@ -286,6 +350,14 @@ impl SshLink {
     /// share. The shell takes a channel of the connection's one login and never ends the login: closing the pane closes
     /// the channel and leaves the session to the others. Returns at once, like [`SshLink::connect`].
     pub fn attach(connection: Arc<Connection>, cols: u16, rows: u16) -> Result<Self> {
+        Self::attach_with(connection, cols, rows, None)
+    }
+
+    /// [`SshLink::attach`] with a tunnel: the shell starts through one constant exec line that sets `HOLZWAVE_SOCKET`,
+    /// `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE` (see [`wrapped_shell_command`]) after the socket was forwarded back to the
+    /// tunnel's sink. A server that refuses the forward or the line leaves the pane a plain shell with one line that says
+    /// why. The forward is asked for again after a reconnect and cancelled when the pane closes.
+    pub fn attach_with(connection: Arc<Connection>, cols: u16, rows: u16, tunnel: Option<Tunnel>) -> Result<Self> {
         let (backlog, reader) = Backlog::new();
         let queued = backlog.queued.clone();
         let (cmd_tx, cmd_rx) = tmpsc::unbounded_channel::<Cmd>();
@@ -298,7 +370,7 @@ impl SshLink {
         let thread = {
             let (state, exit) = (state.clone(), exit.clone());
             thread::Builder::new().name("ssh".into()).spawn(move || {
-                let code = runtime.block_on(run(&connection, (cols, rows), cmd_rx, backlog, state.clone()));
+                let code = runtime.block_on(run(&connection, (cols, rows), cmd_rx, backlog, state.clone(), tunnel.as_ref()));
                 *exit.lock().unwrap_or_else(PoisonError::into_inner) = Some(code);
                 state.set(ConnState::Closed);
                 // The last owner of a connection (a link made by `connect`) ends its login now, politely, before the
@@ -391,13 +463,14 @@ async fn run(
     mut cmd: tmpsc::UnboundedReceiver<Cmd>,
     out: Backlog,
     state: SharedState,
+    tunnel: Option<&Tunnel>,
 ) -> u32 {
     let target = connection.target();
     let mut size = (size.0, size.1, 0u32, 0u32);
     let mut buffered: Vec<u8> = Vec::new();
     let mut attempt = 0u32;
     loop {
-        let outcome = session(connection, &mut size, &mut cmd, &out, &state, &mut buffered, &mut attempt).await;
+        let outcome = session(connection, &mut size, &mut cmd, &out, &state, &mut buffered, &mut attempt, tunnel).await;
         match outcome {
             Outcome::Exit(code) => return code,
             Outcome::Closed => return 0,
@@ -666,6 +739,7 @@ pub(crate) fn channel_text(error: &russh::Error) -> String {
 
 /// One connected session: take the connection's login (making it when there is none), open the shell on it, and pump
 /// bytes until it ends. The login is the connection's and outlives this shell: only the shell's channel is closed.
+#[allow(clippy::too_many_arguments)]
 async fn session(
     connection: &Arc<Connection>,
     size: &mut (u16, u16, u32, u32),
@@ -674,6 +748,7 @@ async fn session(
     state: &SharedState,
     buffered: &mut Vec<u8>,
     attempt: &mut u32,
+    tunnel: Option<&Tunnel>,
 ) -> Outcome {
     // The shell counts as a use of the connection, so the idle reaper never closes the login under it.
     let _lease = connection.lease();
@@ -682,7 +757,7 @@ async fn session(
         Err(e) if e.fatal => return Outcome::Fatal(e.why),
         Err(e) => return Outcome::Lost(e.why),
     };
-    let outcome = shell(connection, &session, size, cmd, out, state, buffered, attempt).await;
+    let outcome = shell(connection, &session, size, cmd, out, state, buffered, attempt, tunnel).await;
     // A login that ended under the shell is replaced by the next attempt, once for every user of the connection.
     if matches!(outcome, Outcome::Lost(_)) && session.is_closed() {
         connection.invalidate(&session).await;
@@ -693,6 +768,97 @@ async fn session(
 /// Close a shell's channel without waiting for the server for long. Errors do not matter: the channel is gone either way.
 async fn close_channel(channel: &Channel<client::Msg>) {
     let _ = tokio::time::timeout(CHANNEL_CLOSE_TIMEOUT, channel.close()).await;
+}
+
+/// The start of every sentence that says why a pane has no tunnel.
+const NOT_AVAILABLE: &str = "wsh is not available on this host: ";
+/// How long the server may take to answer the start line.
+const START_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A plain shell request.
+async fn plain_shell(channel: &Channel<client::Msg>) -> std::result::Result<(), Outcome> {
+    channel.request_shell(false).await.map_err(|e| Outcome::Lost(channel_text(&e)))
+}
+
+/// How the server answered the start line.
+enum StartReply {
+    Success,
+    Failure,
+    /// The channel ended or the server said nothing in time.
+    Gone,
+}
+
+/// Wait for the answer to the exec request. Output that arrives before it is queued for the pane as usual.
+async fn start_reply(channel: &mut Channel<client::Msg>, out: &Backlog) -> StartReply {
+    let wait = async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => return StartReply::Success,
+                Some(ChannelMsg::Failure) => return StartReply::Failure,
+                Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
+                    let _ = out.push(data.to_vec());
+                }
+                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return StartReply::Gone,
+                Some(_) => {}
+            }
+        }
+    };
+    tokio::time::timeout(START_REPLY_TIMEOUT, wait).await.unwrap_or(StartReply::Gone)
+}
+
+/// Start the remote shell on `channel`, which has its terminal. Without a tunnel that is a shell request. With one the
+/// socket is forwarded back first and the shell is started by the constant exec line that carries the environment; a
+/// refusal at any step leaves a plain shell and one notice that says why, and never the environment. Returns the forward
+/// that must live as long as the shell.
+async fn start_shell(
+    channel: &mut Channel<client::Msg>,
+    connection: &Arc<Connection>,
+    session: &Arc<Session>,
+    tunnel: Option<&Tunnel>,
+    out: &Backlog,
+) -> std::result::Result<Option<ForwardGuard>, Outcome> {
+    let Some(tunnel) = tunnel else {
+        plain_shell(channel).await?;
+        return Ok(None);
+    };
+    let say = |why: &str| out.notice(&format!("{NOT_AVAILABLE}{why}"));
+    // The line is built before anything is asked of the server: a refused environment costs no request.
+    let Ok(command) = wrapped_shell_command(&tunnel.env) else {
+        say("the environment was refused");
+        plain_shell(channel).await?;
+        return Ok(None);
+    };
+    let guard = match connection.forward_on(session, &tunnel.path, tunnel.sink.clone(), ForwardLimits::default()).await {
+        Ok(guard) => guard,
+        Err(ForwardError::Refused) => {
+            say(&ForwardError::Refused.to_string());
+            plain_shell(channel).await?;
+            return Ok(None);
+        }
+        Err(ForwardError::Failed(why)) => {
+            let why: String = why.chars().filter(|c| !c.is_control()).take(120).collect();
+            say(&format!("the forward could not be set up: {why}"));
+            plain_shell(channel).await?;
+            return Ok(None);
+        }
+    };
+    if let Err(e) = channel.exec(true, command).await {
+        guard.cancel().await;
+        return Err(Outcome::Lost(channel_text(&e)));
+    }
+    match start_reply(channel, out).await {
+        StartReply::Success => Ok(Some(guard)),
+        StartReply::Failure => {
+            guard.cancel().await;
+            say("the server did not run the start line");
+            plain_shell(channel).await?;
+            Ok(None)
+        }
+        StartReply::Gone => {
+            guard.cancel().await;
+            Err(Outcome::Lost("the connection was reset".into()))
+        }
+    }
 }
 
 /// The shell itself, on a login that is already made.
@@ -706,6 +872,7 @@ async fn shell(
     state: &SharedState,
     buffered: &mut Vec<u8>,
     attempt: &mut u32,
+    tunnel: Option<&Tunnel>,
 ) -> Outcome {
     let target = connection.target();
     let mut channel = match session.handle().channel_open_session().await {
@@ -717,10 +884,13 @@ async fn shell(
         close_channel(&channel).await;
         return Outcome::Lost(channel_text(&e));
     }
-    if let Err(e) = channel.request_shell(false).await {
-        close_channel(&channel).await;
-        return Outcome::Lost(channel_text(&e));
-    }
+    let guard = match start_shell(&mut channel, connection, session, tunnel, out).await {
+        Ok(guard) => guard,
+        Err(outcome) => {
+            close_channel(&channel).await;
+            return outcome;
+        }
+    };
     // From here on the connection works: the count of failed attempts starts again.
     *attempt = 0;
     state.set(ConnState::Connected);
@@ -769,6 +939,10 @@ async fn shell(
             },
         }
     };
+    // The forward ends with the shell, before its channel goes: the sink is forgotten and the server is asked to cancel.
+    if let Some(guard) = guard {
+        guard.cancel().await;
+    }
     // Only the shell's channel ends here; the login belongs to the connection.
     if matches!(outcome, Outcome::Closed | Outcome::Exit(_) | Outcome::Fatal(_)) {
         close_channel(&channel).await;

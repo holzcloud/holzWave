@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::ssh_server::{self, ForwardedPeer, Options, Server};
+use holzwave_core::conn::Link;
 use holzwave_core::pool::{Connection, ForwardError, ForwardLimits, ForwardSink, ForwardedStream, valid_forward_path};
-use holzwave_core::ssh::SshAuth;
+use holzwave_core::ssh::{SshAuth, SshLink, Tunnel, wrapped_shell_command};
 
 /// The tests share one process and one counter of bridge threads: the ones that open forwarded connections take turns, so
 /// a test that counts threads is not counting another test's.
@@ -426,4 +427,261 @@ fn a_replaced_session_takes_its_forwards_with_it() {
     peer.write_all(b"again\n");
     assert_eq!(peer.read_line().as_deref(), Some("AGAIN\n"));
     drop(again);
+}
+
+// ---- the wrapped shell ------------------------------------------------------------------------------------------
+
+const TOKEN: &str = "00112233445566778899aabbccddeeff";
+
+/// The three values of a pane's environment, in an order the template does not use.
+fn env() -> Vec<(String, String)> {
+    vec![
+        ("HOLZWAVE_PANE".into(), "7".into()),
+        ("HOLZWAVE_TOKEN".into(), TOKEN.into()),
+        ("HOLZWAVE_SOCKET".into(), PATH.into()),
+    ]
+}
+
+fn tunnel(sink: Arc<dyn ForwardSink>) -> Tunnel {
+    Tunnel { path: PATH.into(), env: env(), sink }
+}
+
+/// A pane's link with its output read by a helper thread and its input at hand.
+struct Pane {
+    link: SshLink,
+    out: ssh_server::Out,
+    input: Box<dyn Write + Send>,
+}
+
+impl Pane {
+    fn start(connection: &Arc<Connection>, tunnel: Option<Tunnel>) -> Self {
+        let mut link = SshLink::attach_with(connection.clone(), 80, 24, tunnel).unwrap();
+        let out = ssh_server::Out::new(link.take_reader().unwrap());
+        let input = link.take_writer().unwrap();
+        Pane { link, out, input }
+    }
+
+    fn close(self) {
+        Box::new(self.link).close().unwrap();
+    }
+}
+
+const NOT_AVAILABLE: &str = "wsh is not available on this host: ";
+
+#[test]
+fn a_tunnel_pane_starts_a_wrapped_shell() {
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().forward().wrapped_shell());
+    let connection = connect(&server);
+    let mut pane = Pane::start(&connection, Some(tunnel(Arc::new(Upper))));
+    pane.out.until("welcome 0", 10);
+    assert_eq!(server.seen.events(), ["pty".to_owned(), format!("forward {PATH}"), "exec".to_owned()], "in this order, and no shell request");
+    assert_eq!(server.seen.commands(), [wrapped_shell_command(&env()).unwrap()], "one exec request, exactly the template");
+    assert_eq!(server.seen.shells.load(Ordering::SeqCst), 0);
+    assert_eq!(server.seen.execs_as_shell.load(Ordering::SeqCst), 1);
+    assert!(!pane.out.seen.contains(NOT_AVAILABLE), "{:?}", pane.out.seen);
+
+    let mut peer = server.open_forwarded(PATH).expect("the forwarded channel reaches the sink");
+    peer.write_all(b"hello\n");
+    assert_eq!(peer.read_line().as_deref(), Some("HELLO\n"));
+    // The shell works like any other.
+    pane.input.write_all(b"hi\n").unwrap();
+    pane.out.until("echo:hi", 10);
+    pane.close();
+}
+
+#[test]
+fn the_wrapped_command_is_one_constant_template() {
+    let make = |socket: &str, token: &str, pane: &str| {
+        wrapped_shell_command(&[
+            ("HOLZWAVE_TOKEN".into(), token.into()),
+            ("HOLZWAVE_PANE".into(), pane.into()),
+            ("HOLZWAVE_SOCKET".into(), socket.into()),
+        ])
+        .unwrap()
+    };
+    let one = make(PATH, TOKEN, "7");
+    assert_eq!(
+        one,
+        format!(
+            "exec sh -c 'HOLZWAVE_SOCKET={PATH}; HOLZWAVE_TOKEN={TOKEN}; HOLZWAVE_PANE=7; PATH=\"$PATH:$HOME/.holzwave/bin\"; \
+             export HOLZWAVE_SOCKET HOLZWAVE_TOKEN HOLZWAVE_PANE PATH; exec \"${{SHELL:-/bin/sh}}\" -l'"
+        ),
+        "the exact template"
+    );
+    let sets = [one, make("/tmp/a.sock", "abc", "12"), make("/tmp/holzwave-ffffffffffffffffffffffffffffffff.sock", "0", "999999")];
+    for text in &sets {
+        assert!(!text.contains('\n') && !text.contains('!') && !text.contains('\\'), "{text}");
+        assert_eq!(text.matches('\'').count(), 2, "only the two quotes around the script: {text}");
+        for part in [
+            "exec sh -c '",
+            "export HOLZWAVE_SOCKET HOLZWAVE_TOKEN HOLZWAVE_PANE PATH",
+            "PATH=\"$PATH:$HOME/.holzwave/bin\"",
+            "exec \"${SHELL:-/bin/sh}\" -l",
+        ] {
+            assert!(text.contains(part), "{part} in {text}");
+        }
+    }
+    // Replacing the three values by a placeholder leaves the same text for every set.
+    let shape = |text: &str, values: [&str; 3]| values.iter().fold(text.to_owned(), |t, v| t.replacen(v, "VALUE", 1));
+    let a = shape(&sets[0], [PATH, TOKEN, "7"]);
+    let b = shape(&sets[1], ["/tmp/a.sock", "abc", "12"]);
+    let c = shape(&sets[2], ["/tmp/holzwave-ffffffffffffffffffffffffffffffff.sock", "0", "999999"]);
+    assert_eq!(a, b);
+    assert_eq!(b, c);
+}
+
+#[test]
+fn values_that_could_break_the_command_are_refused() {
+    let names = ["HOLZWAVE_SOCKET", "HOLZWAVE_TOKEN", "HOLZWAVE_PANE"];
+    let with = |index: usize, value: &str| -> Vec<(String, String)> {
+        names.iter().enumerate().map(|(i, n)| ((*n).to_owned(), if i == index { value.to_owned() } else { "ok".to_owned() })).collect()
+    };
+    assert!(wrapped_shell_command(&with(0, "/tmp/a-b_c.d:e")).is_ok());
+    for bad in [
+        "", "a b", "a'b", "a\"b", "a\nb", "a;b", "a$b", "a`b", "a|b", "a&b", "a<b", "a>b", "a\\b", "a(b", "a)b", "a*b", "a?b", "~", "a~b", "caf\u{e9}",
+        "a\tb", "a\0b", "a{b}", "a[b]", "a#b", "a!b", "a=b", &"x".repeat(129),
+    ] {
+        for i in 0..3 {
+            assert!(wrapped_shell_command(&with(i, bad)).is_err(), "{bad:?} in {} must be refused", names[i]);
+        }
+    }
+    assert!(wrapped_shell_command(&with(1, &"x".repeat(128))).is_ok(), "128 bytes are allowed");
+    // Names: anything but exactly the three, once each.
+    for bad in ["holzwave_pane", "HOLZWAVE_pane", "PATH", "HOLZWAVE_", "HOLZWAVE_PANE ", "HOLZWAVE_PA-NE", "HOLZWAVE_TOKEN;x", ""] {
+        let mut env = with(0, "ok");
+        env[2].0 = bad.to_owned();
+        assert!(wrapped_shell_command(&env).is_err(), "{bad:?} is not a name");
+    }
+    assert!(wrapped_shell_command(&with(0, "ok")[..2]).is_err(), "two names");
+    let mut four = with(0, "ok");
+    four.push(("HOLZWAVE_EXTRA".into(), "ok".into()));
+    assert!(wrapped_shell_command(&four).is_err(), "four names");
+    let mut twice = with(0, "ok");
+    twice[2].0 = "HOLZWAVE_TOKEN".into();
+    assert!(wrapped_shell_command(&twice).is_err(), "a name twice");
+    // The words of a refusal never hold a value.
+    let secret = with(1, "secret value");
+    let why = wrapped_shell_command(&secret).unwrap_err();
+    assert!(!why.contains("secret"), "{why}");
+}
+
+#[test]
+fn a_refused_forward_leaves_a_plain_shell_with_one_line_why() {
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().refuse_forward().wrapped_shell());
+    let connection = connect(&server);
+    let mut pane = Pane::start(&connection, Some(tunnel(Arc::new(Upper))));
+    pane.out.until("welcome 0", 10);
+    let line = format!("{NOT_AVAILABLE}the server does not allow Unix socket forwarding");
+    assert_eq!(pane.out.seen.matches(&line).count(), 1, "said once: {:?}", pane.out.seen);
+    assert_eq!(server.seen.events(), ["pty".to_owned(), format!("forward {PATH}"), "shell".to_owned()]);
+    assert_eq!(server.seen.shells.load(Ordering::SeqCst), 1);
+    assert_eq!(server.seen.execs_as_shell.load(Ordering::SeqCst), 0);
+    assert!(server.seen.commands().is_empty(), "no exec request");
+    pane.input.write_all(b"works\n").unwrap();
+    pane.out.until("echo:works", 10);
+    assert!(!pane.out.seen.contains(TOKEN), "the token is never shown");
+    pane.close();
+}
+
+#[test]
+fn a_refused_exec_after_the_forward_cancels_it() {
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().forward().wrapped_shell().refuse_exec_once());
+    let connection = connect(&server);
+    let mut pane = Pane::start(&connection, Some(tunnel(Arc::new(Upper))));
+    pane.out.until("welcome 0", 10);
+    let line = format!("{NOT_AVAILABLE}the server did not run the start line");
+    assert_eq!(pane.out.seen.matches(&line).count(), 1, "{:?}", pane.out.seen);
+    assert_eq!(
+        server.seen.events(),
+        ["pty".to_owned(), format!("forward {PATH}"), "exec".to_owned(), format!("cancel {PATH}"), "shell".to_owned()]
+    );
+    assert!(server.open_forwarded(PATH).is_err(), "the sink is gone");
+    pane.input.write_all(b"works\n").unwrap();
+    pane.out.until("echo:works", 10);
+    pane.close();
+}
+
+#[test]
+fn a_forward_that_cannot_be_set_up_is_said_and_the_pane_is_plain() {
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().forward().wrapped_shell());
+    let connection = connect(&server);
+    let mut bad = tunnel(Arc::new(Upper));
+    bad.path = "/tmp/not-the-rule".into();
+    let mut pane = Pane::start(&connection, Some(bad));
+    pane.out.until("welcome 0", 10);
+    assert!(pane.out.seen.contains(&format!("{NOT_AVAILABLE}the forward could not be set up: the socket path is not valid")), "{:?}", pane.out.seen);
+    assert_eq!(server.seen.events(), ["pty".to_owned(), "shell".to_owned()]);
+    pane.close();
+}
+
+#[test]
+fn an_environment_that_is_refused_never_asks_the_server_for_anything() {
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().forward().wrapped_shell());
+    let connection = connect(&server);
+    let mut broken = tunnel(Arc::new(Upper));
+    broken.env[1].1 = "a b; rm -rf /".into();
+    let mut pane = Pane::start(&connection, Some(broken));
+    pane.out.until("welcome 0", 10);
+    assert!(pane.out.seen.contains(&format!("{NOT_AVAILABLE}the environment was refused")), "{:?}", pane.out.seen);
+    assert!(!pane.out.seen.contains("rm -rf"), "the value is never shown");
+    assert_eq!(server.seen.events(), ["pty".to_owned(), "shell".to_owned()], "no forward, no exec");
+    pane.close();
+}
+
+#[test]
+fn a_lost_session_requests_the_forward_again_with_the_same_path() {
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().forward().wrapped_shell());
+    let connection = connect(&server);
+    let mut pane = Pane::start(&connection, Some(tunnel(Arc::new(Upper))));
+    pane.out.until("welcome 0", 10);
+    server.cut();
+    pane.out.until("welcome 1", 15);
+    assert_eq!(server.seen.forwards(), [PATH, PATH], "the same path, asked for again on the new login");
+    assert_eq!(server.seen.execs_as_shell.load(Ordering::SeqCst), 2);
+    let mut peer = server.open_forwarded(PATH).expect("the new session serves the forward");
+    peer.write_all(b"back\n");
+    assert_eq!(peer.read_line().as_deref(), Some("BACK\n"));
+    pane.close();
+}
+
+#[test]
+fn closing_the_pane_cancels_the_forward() {
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().forward().wrapped_shell());
+    let connection = connect(&server);
+    let mut pane = Pane::start(&connection, Some(tunnel(Arc::new(Upper))));
+    pane.out.until("welcome 0", 10);
+    assert!(server.open_forwarded(PATH).is_ok());
+    pane.close();
+    assert_eq!(server.seen.cancelled_forwards(), [PATH], "the cancel was asked and answered before the pane closed");
+    // The connection is still held by this test, so the session is up: the sink is what is gone.
+    assert!(server.open_forwarded(PATH).is_err(), "a second forwarded channel for it is rejected");
+}
+
+#[test]
+fn a_pane_without_a_tunnel_is_unchanged() {
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().forward().wrapped_shell());
+    let connection = connect(&server);
+    let mut link = SshLink::attach(connection.clone(), 80, 24).unwrap();
+    let mut out = ssh_server::Out::new(link.take_reader().unwrap());
+    out.until("welcome 0", 10);
+    assert_eq!(server.seen.events(), ["pty", "shell"]);
+    assert!(server.seen.forwards().is_empty(), "no forward was asked for");
+    assert!(server.seen.commands().is_empty());
+    assert!(!out.seen.contains(NOT_AVAILABLE));
+    Box::new(link).close().unwrap();
+}
+
+#[test]
+fn the_debug_text_of_a_tunnel_is_its_path_only() {
+    let text = format!("{:?}", tunnel(Arc::new(Upper)));
+    assert!(text.contains(PATH), "{text}");
+    assert!(!text.contains(TOKEN) && !text.contains("HOLZWAVE_TOKEN"), "{text}");
 }

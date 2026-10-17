@@ -52,7 +52,7 @@ use crate::platform::{self, Os, ShellLaunch};
 use crate::conn::{ConnState, Link, SharedState};
 use crate::pty::{Pty, SpawnOptions, process_cwd};
 use crate::pool::Connection;
-use crate::ssh::{SshLink, SshTarget};
+use crate::ssh::{SshLink, SshTarget, Tunnel};
 use crate::queue::{PaneQueue, Popped};
 use crate::textread::{MAX_READ_BYTES, MAX_READ_ROWS, TextRead, TextRegion};
 use crate::wire::{FrameEncoder, FrameMsg};
@@ -144,11 +144,15 @@ pub struct PaneSpec {
     /// the same profile (one login). When it is set the shell takes a channel of it; otherwise `ssh` is connected on a
     /// connection of the pane's own. [`crate::connections::Connections::apply`] sets both.
     pub ssh_connection: Option<Arc<Connection>>,
+    /// The tunnel of an SSH pane that runs on `ssh_connection`: the socket forwarded back from the host and the
+    /// environment its shell gets ([`SshLink::attach_with`]). `None` (the default) starts a plain shell; it is not used
+    /// without `ssh_connection`. Its `Debug` prints the socket path only.
+    pub tunnel: Option<Tunnel>,
     /// No process at all ([`crate::conn::NullLink`]): the page draws this pane's content itself (a file browser, a
     /// preview). The pane is otherwise a pane like any other: it has a header, can be split, moved and closed.
     pub blank: bool,
     /// Extra environment variables of the local shell (`HOLZWAVE_IPC`, `HOLZWAVE_TOKEN`, `HOLZWAVE_PANE`: what `wsh` finds the
-    /// app by). Not used for an SSH pane: a remote host reaches the app through a tunnel, which is not built yet.
+    /// app by). Not used for an SSH pane: a remote host reaches the app through `tunnel`.
     pub env: Vec<(String, String)>,
 }
 
@@ -172,6 +176,7 @@ impl PaneSpec {
             cwd_lookup: true,
             ssh: None,
             ssh_connection: None,
+            tunnel: None,
             blank: false,
             env: Vec::new(),
         }
@@ -1028,7 +1033,7 @@ where
         return Ok((engine, Box::new(crate::conn::NullLink::new())));
     }
     if let Some(connection) = &spec.ssh_connection {
-        let link = SshLink::attach(connection.clone(), spec.cols, spec.rows)?;
+        let link = SshLink::attach_with(connection.clone(), spec.cols, spec.rows, spec.tunnel.clone())?;
         return Ok((engine, Box::new(link)));
     }
     if let Some(target) = &spec.ssh {
