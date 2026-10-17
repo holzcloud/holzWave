@@ -378,7 +378,11 @@ popover under it (a floating layer, 24 rem wide), and so do the palette entries 
 - **Connected:** title `Nextcloud` with a chip (`connected`, `syncing`, `error`), the address and user, then the rows
   `Last sync` (`14:31 · 3 files`), `Encryption` (`end-to-end · passphrase`) and `Conflicts` (`none`, or the count and that
   the other version is kept), the list of what is synced, a line when changes from another computer wait for the next
-  start, and the buttons `Close`, `Turn off` (asks with a second click) and `Sync now`.
+  start, and the buttons `Close`, `Turn off` (asks with a second click) and `Sync now`. When another computer removed
+  files in the last run (a theme or a widget it deleted), one line sits under the list of what is synced, in the dim
+  colour of the other notes of the popover: `Removed on another computer: 2. Copies are kept in sync-conflicts.` It is
+  shown only while the count is above zero, is the count of the last run and not a running total, and its cue is its
+  words.
 
 ### 6.10 History
 

@@ -45,6 +45,8 @@ pub struct SyncView {
     /// A downloaded file still waits for the next start (the files the running app owns, or one that could not be
     /// applied at once).
     pub restart: bool,
+    /// Files another computer removed in the last run (a copy of each is kept in `sync-conflicts`).
+    pub removed: usize,
 }
 
 fn now() -> i64 {
@@ -211,6 +213,7 @@ impl SyncRuntime {
             v.last = Some(now());
             v.files = report.uploaded.len() + report.downloaded.len();
             v.conflicts = report.conflicts.len() + promoted.kept.len();
+            v.removed = report.removed.len();
             v.restart |= report.downloaded.iter().any(|name| !is_unowned(name)) || !promoted.skipped.is_empty();
             v.error = report.errors.first().map(|(name, why)| format!("{name}: {why}"));
             if v.error.is_some() {
@@ -325,6 +328,19 @@ mod tests {
         // The flag stays set until the process ends, as before.
         let view = rt.complete(&report(&[], &["themes/mine.json"], &[]));
         assert!(view.restart);
+    }
+
+    #[test]
+    fn the_view_counts_what_another_computer_removed() {
+        let (rt, _calls, _dir) = applying("rm", Promoted::default());
+        let gone = Report { removed: vec!["themes/a.json".into(), "widgets/b.json".into()], ..Report::default() };
+        assert_eq!(rt.complete(&gone).removed, 2);
+        // The count is of the last run, not a running total.
+        assert_eq!(rt.complete(&Report::default()).removed, 0);
+        let one = Report { removed: vec!["themes/a.json".into()], ..Report::default() };
+        assert_eq!(rt.complete(&one).removed, 1);
+        assert_eq!(rt.complete(&one).removed, 1, "not cumulative");
+        assert_eq!(rt.off().removed, 0, "turned off: nothing to say");
     }
 
     #[test]

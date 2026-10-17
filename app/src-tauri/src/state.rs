@@ -1129,9 +1129,9 @@ impl AppCore {
     /// Move what the last sync run downloaded into place, for the files the running app does not own: the themes, the
     /// widgets and the texts of the notes. The layout, the settings and the connections stay staged until the next
     /// start, because the app rewrites them from memory. A live file the person edited after the download was staged is
-    /// copied to `sync-conflicts/` first. The notes lock is held for the move only; when a theme arrived, the registry is
-    /// reloaded after it is released, which announces `settings` to every window. Blocks on small files: not on the main
-    /// thread.
+    /// copied to `sync-conflicts/` first. The notes lock is held for the move only; the registry is reloaded after it is
+    /// released (a theme may have arrived or been removed), which announces `settings` to every window when it changed.
+    /// Blocks on small files: not on the main thread.
     pub fn apply_synced(&self) -> holzwave_core::sync::engine::Promoted {
         use holzwave_core::sync::engine::{is_unowned, promote_where};
         let promoted = {
@@ -1141,9 +1141,9 @@ impl AppCore {
         if !promoted.applied.is_empty() {
             eprintln!("holzwave: applied from sync: {}", promoted.applied.join(", "));
         }
-        if promoted.applied.iter().any(|name| name.starts_with("themes/")) {
-            self.reload_settings();
-        }
+        // Every time: the run may also have removed a theme, which nothing here staged. A reload compares sizes and
+        // modification times and does nothing when nothing changed.
+        self.reload_settings();
         promoted
     }
 
@@ -5359,6 +5359,28 @@ mod tests {
         assert!(dir.0.join("sync-incoming").join("settings.json").is_file(), "settings.json still waits for a start");
         assert!(!dir.0.join("settings.json").exists());
         assert_ne!(core.get_settings().settings.font_size, 31, "the settings in force are not touched");
+    }
+
+    #[test]
+    fn an_apply_after_a_run_reloads_the_themes_even_when_none_was_downloaded() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        staged(&dir, "themes/mine.json", theme_json("mine").as_bytes());
+        core.apply_synced();
+        assert!(core.get_settings().themes.iter().any(|t| t.name == "mine"));
+        let before = rec.settings_events().len();
+
+        // A run that changed nothing announces nothing.
+        core.apply_synced();
+        assert_eq!(rec.settings_events().len(), before, "nothing changed, nothing announced");
+
+        // A deletion by the sync removed the live file: nothing is staged, and the list still follows, once.
+        std::fs::remove_file(dir.0.join("themes").join("mine.json")).unwrap();
+        let promoted = core.apply_synced();
+        assert!(promoted.applied.is_empty());
+        let events = rec.settings_events();
+        assert_eq!(events.len(), before + 1, "announced once");
+        assert!(events.last().unwrap().themes.iter().all(|t| t.name != "mine"), "the theme list no longer holds it");
+        assert!(core.get_settings().themes.iter().all(|t| t.name != "mine"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ export default async function ({ page, url, errors }) {
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
-const OFF = { configured: false, endpoint: "", user: "", state: "off", last: null, files: 0, conflicts: 0, error: null, restart: false };
+const OFF = { configured: false, endpoint: "", user: "", state: "off", last: null, files: 0, conflicts: 0, error: null, restart: false, removed: 0 };
 const ON = { ...OFF, configured: true, endpoint: "https://cloud.example.org/remote.php/dav/files/holz/holzwave", user: "holz", state: "idle", last: 1760000000, files: 3, conflicts: 1 };
 
 async function open(page, url, first) {
@@ -80,6 +80,25 @@ async function runCase(page, url) {
   assert.match(rows[0], /^Last sync\d\d:\d\d · 3 files$/);
   assert.match(rows[2], /^Conflicts1 · the other version is kept$/);
   assert.match(await page.locator(".sync .sy-sub").first().textContent(), /cloud\.example\.org\/remote\.php\/dav\/files\/holz\/holzwave · holz/);
+
+  // The line about files another computer removed shows only while the count is above zero.
+  assert.equal(await page.locator(".sync .sy-removed").count(), 0, "no line at zero");
+  await page.evaluate(() => { window.__SYNC = { ...window.__SYNC, removed: 2 }; });
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".dlg.sync", { state: "detached" });
+  await page.locator(".sync-btn").click();
+  await page.waitForSelector(".dlg.sync");
+  assert.equal(await page.locator(".sync .sy-removed").count(), 1, "one paragraph");
+  assert.equal(await page.locator(".sync .sy-removed").textContent(), "Removed on another computer: 2. Copies are kept in sync-conflicts.");
+  assert.equal(await page.locator(".sync .sy-removed").getAttribute("role"), null, "not a live region");
+  const under = await page.locator(".sync .sy-group").evaluate((n) => Boolean(n.compareDocumentPosition(document.querySelector(".sync .sy-removed")) & 4));
+  assert.ok(under, "it sits under the list of what is synced");
+  await page.evaluate(() => { window.__SYNC = { ...window.__SYNC, removed: 0 }; });
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".dlg.sync", { state: "detached" });
+  await page.locator(".sync-btn").click();
+  await page.waitForSelector(".dlg.sync");
+  assert.equal(await page.locator(".sync .sy-removed").count(), 0, "gone at zero");
 
   // A run that fails says why, in words, and the button says error.
   await page.evaluate(() => { window.__NOW_FAILS = "the passphrase is wrong for this sync folder"; window.__SYNC = { ...window.__SYNC, state: "error", error: "the passphrase is wrong for this sync folder" }; });
