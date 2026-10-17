@@ -15,7 +15,10 @@
 # starts /usr/sbin/sshd -D -e as the current user (no sudo, no root), learns its host key with ssh-keyscan and runs the
 # ignored tests of core/tests/ssh_live.rs against it. The server and the folder are removed on every way out of the
 # script (normal end, failure, Ctrl-C, a signal). It never reads or writes the user's own ssh folder or their own
-# known hosts file, and it generates nothing that outlives the run.
+# known hosts file, and it generates nothing that outlives the run, with one exception that is not the script's to
+# clean: the tunnel tests make a socket file /tmp/holzwave-<32 hex>.sock through the server, the tests remove theirs when
+# they pass, and a run that failed in the middle may leave an empty, owner-only one (the OpenSSH of this Mac leaves the
+# file after a forward ends; nothing listens on it).
 #
 # Needs: ssh-keygen, ssh-keyscan, /usr/sbin/sshd, an sftp-server binary (/usr/libexec/sftp-server, /usr/lib/openssh/
 # sftp-server or /usr/lib/ssh/sftp-server) and the Rust toolchain. The tests of the SSH client build without the engine;
