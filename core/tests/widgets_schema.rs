@@ -3,12 +3,12 @@
 //! `docs/widget.schema.json` is the published description of a widget file (version 1) and `widgets::parse` is the
 //! validator the app runs. The contract of this file has three sentences. A file that the loader accepts is accepted by
 //! the schema. A file that the schema accepts is accepted by the loader, except the documents named in `GAPS`, which no
-//! JSON Schema can describe. The schema is the published description and the loader is the judge: when they differ, a test
-//! names the document.
+//! JSON Schema can describe. The schema is the published description and the loader is the judge: when they differ, a
+//! test names the document.
 //!
-//! The checker below is a small subset evaluator of JSON Schema 2020-12 and not a schema crate (the dependency budget of
-//! the project). It fails closed: a keyword it does not evaluate is an error and never an accept, and the schema file is
-//! linted keyword by keyword before any verdict is read.
+//! The checker below is a small subset evaluator of JSON Schema 2020-12 and not a schema crate (the dependency budget
+//! of the project). It fails closed: a keyword it does not evaluate is an error and never an accept, and the schema
+//! file is linted keyword by keyword before any verdict is read.
 
 mod common;
 
@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
-use holzwave_core::widgets::{self, WidgetDef};
+use holzwave_core::widgets::{self, Body, WidgetDef, MAX_FILE, MAX_ITEMS, MAX_WIDGETS};
 use regex::Regex;
 use serde_json::{json, Map, Number, Value};
 
@@ -89,13 +89,14 @@ fn regex(pattern: &str) -> Result<Arc<Regex>, Unsupported> {
     if let Some(found) = cache.get(pattern) {
         return Ok(Arc::clone(found));
     }
-    let compiled = Regex::new(pattern).map_err(|e| Unsupported(format!("the pattern {pattern:?} does not compile: {e}")))?;
+    let compiled = Regex::new(pattern)
+        .map_err(|e| Unsupported(format!("the pattern {pattern:?} does not compile: {e}")))?;
     let compiled = Arc::new(compiled);
     cache.insert(pattern.to_owned(), Arc::clone(&compiled));
     Ok(compiled)
 }
 
-/// The `$defs` entry that a reference names. Only `#/$defs/<name>` is followed: no remote, no anchor, no pointer elsewhere.
+/// The `$defs` entry that a reference names. Only `#/$defs/<name>` is followed: no remote, no anchor, no other pointer.
 fn resolve<'a>(root: &'a Value, reference: &Value, at: &str) -> Result<&'a Value, Unsupported> {
     let reference = reference.as_str().ok_or_else(|| unsupported(at, "a $ref must be a string"))?;
     let name = reference
@@ -193,7 +194,7 @@ fn limit(value: &Value, at: &str) -> Result<u64, Unsupported> {
     value.as_u64().ok_or_else(|| unsupported(at, "a limit must be a whole number"))
 }
 
-/// Judge `instance` by `schema` (a subschema of `root`). The keywords of `schema` and everything below it must be known.
+/// Judge `instance` by `schema` (a subschema of `root`). Every keyword of the schema must be known, reached or not.
 fn evaluate(root: &Value, schema: &Value, instance: &Value) -> Outcome {
     lint(root)?;
     eval(root, schema, instance, "#", 0)
@@ -239,7 +240,9 @@ fn eval(root: &Value, schema: &Value, instance: &Value, at: &str, depth: usize) 
             }
             "minimum" | "maximum" => {
                 if let Value::Number(n) = instance {
-                    let Value::Number(bound) = value else { return Err(unsupported(&here, "a bound must be a number")) };
+                    let Value::Number(bound) = value else {
+                        return Err(unsupported(&here, "a bound must be a number"));
+                    };
                     let order = compare(n, bound);
                     let below = key == "minimum" && order == std::cmp::Ordering::Less;
                     let above = key == "maximum" && order == std::cmp::Ordering::Greater;
@@ -421,7 +424,9 @@ fn patterns_in(value: &Value, at: &str, out: &mut Vec<(String, String)>) {
                 }
             }
         }
-        Value::Array(list) => list.iter().enumerate().for_each(|(n, inner)| patterns_in(inner, &format!("{at}/{n}"), out)),
+        Value::Array(list) => {
+            list.iter().enumerate().for_each(|(n, inner)| patterns_in(inner, &format!("{at}/{n}"), out));
+        }
         _ => {}
     }
 }
@@ -443,9 +448,12 @@ fn the_schema_file_is_draft_2020_12_and_uses_only_keywords_the_checker_evaluates
     assert_eq!(names, ["break_min", "id", "items", "kind", "title", "version", "work_min"]);
     assert_eq!(schema["required"], json!(["title", "kind"]));
     assert_eq!(schema["additionalProperties"], json!(false));
-    assert_eq!(schema["$defs"].as_object().expect("$defs").keys().collect::<Vec<_>>(), ["item", "link", "listItem", "text"]);
-    for (name, property) in properties.iter().chain(schema["$defs"]["item"]["properties"].as_object().expect("item properties")) {
-        assert!(property["description"].as_str().is_some_and(|d| !d.is_empty()), "the member {name} has no description");
+    let defs = schema["$defs"].as_object().expect("$defs");
+    assert_eq!(defs.keys().collect::<Vec<_>>(), ["item", "link", "listItem", "text"]);
+    let item_members = schema["$defs"]["item"]["properties"].as_object().expect("item properties");
+    for (name, property) in properties.iter().chain(item_members) {
+        let described = property["description"].as_str().is_some_and(|d| !d.is_empty());
+        assert!(described, "the member {name} has no description");
     }
 
     let mut patterns = Vec::new();
@@ -487,7 +495,9 @@ fn the_schema_file_is_draft_2020_12_and_uses_only_keywords_the_checker_evaluates
     refs_in(schema, &mut refs);
     assert!(refs.len() >= 4, "the file uses references: {refs:?}");
     for reference in &refs {
-        let name = reference.strip_prefix("#/$defs/").unwrap_or_else(|| panic!("{reference} is not a local $defs reference"));
+        let name = reference
+            .strip_prefix("#/$defs/")
+            .unwrap_or_else(|| panic!("{reference} is not a local $defs reference"));
         assert!(schema["$defs"].get(name).is_some(), "{reference} names no $defs entry");
     }
 }
@@ -531,7 +541,11 @@ fn the_checker_evaluates_every_keyword_and_can_reject() {
         (json!({ "items": { "type": "integer" } }), json!([1, 2]), json!([1, "x"])),
         (json!({ "required": ["a"] }), json!({ "a": null }), json!({})),
         (json!({ "properties": { "a": { "type": "integer" } } }), json!({ "a": 1, "b": "x" }), json!({ "a": "x" })),
-        (json!({ "properties": { "a": {} }, "additionalProperties": false }), json!({ "a": 1 }), json!({ "a": 1, "b": 2 })),
+        (
+            json!({ "properties": { "a": {} }, "additionalProperties": false }),
+            json!({ "a": 1 }),
+            json!({ "a": 1, "b": 2 }),
+        ),
         (json!({ "additionalProperties": { "type": "integer" } }), json!({ "b": 1 }), json!({ "b": "x" })),
         (json!({ "allOf": [{ "minimum": 1 }, { "maximum": 3 }] }), json!(2), json!(4)),
         (json!({ "oneOf": [{ "type": "integer" }, { "minimum": 0 }] }), json!(-1), json!(1)),
@@ -601,7 +615,8 @@ fn the_checker_refuses_a_keyword_it_does_not_evaluate() {
     ];
     for name in names {
         let one_line = json!({ name: "x" });
-        assert!(matches!(evaluate_one(&one_line, &json!("x")), Err(Unsupported(_))), "{name} must not be silently accepted");
+        let verdict = evaluate_one(&one_line, &json!("x"));
+        assert!(matches!(verdict, Err(Unsupported(_))), "{name} must not be silently accepted");
         // In branches that no instance reaches.
         let unreached = [
             json!({ "if": { "const": 1 }, "then": { name: "x" } }),
@@ -612,12 +627,23 @@ fn the_checker_refuses_a_keyword_it_does_not_evaluate() {
             json!({ "items": { "items": { name: "x" } } }),
         ];
         for schema in unreached {
-            assert!(matches!(evaluate_one(&schema, &json!(2)), Err(Unsupported(_))), "{name} in {schema} must not be skipped");
+            let verdict = evaluate_one(&schema, &json!(2));
+            assert!(matches!(verdict, Err(Unsupported(_))), "{name} in {schema} must not be skipped");
         }
     }
-    for reference in ["https://example.org/x.json", "#/$defs/missing", "#", "#/properties/a", "#/$defs/", "#/$defs/a/b", "other.json#/$defs/a"] {
+    let references = [
+        "https://example.org/x.json",
+        "#/$defs/missing",
+        "#",
+        "#/properties/a",
+        "#/$defs/",
+        "#/$defs/a/b",
+        "other.json#/$defs/a",
+    ];
+    for reference in references {
         let schema = json!({ "$defs": { "a": {} }, "properties": { "a": {} }, "$ref": reference });
-        assert!(matches!(evaluate_one(&schema, &json!(1)), Err(Unsupported(_))), "{reference} is not a local $defs entry");
+        let verdict = evaluate_one(&schema, &json!(1));
+        assert!(matches!(verdict, Err(Unsupported(_))), "{reference} is not a local $defs entry");
     }
     assert!(matches!(evaluate_one(&json!({ "type": "decimal" }), &json!(1)), Err(Unsupported(_))));
     assert!(matches!(evaluate_one(&json!({ "pattern": "(" }), &json!("x")), Err(Unsupported(_))));
@@ -638,7 +664,8 @@ fn two_items() -> Value {
 #[test]
 fn a_list_widget_gets_the_same_verdict_from_the_schema_and_the_loader() {
     let base = list_of(two_items());
-    assert!(same_verdict("a list with a command and a link", &base.to_string()), "the loader must accept the base list");
+    let accepted = same_verdict("a list with a command and a link", &base.to_string());
+    assert!(accepted, "the loader must accept the base list");
 
     let mut with_extra = base.clone();
     with_extra["extra"] = json!(1);
@@ -691,8 +718,8 @@ struct Case {
 }
 
 const CATEGORIES: &[&str] = &[
-    "shape", "arrays", "required", "unknown", "kind", "version", "id", "title", "timer", "foreign", "list", "label", "command",
-    "url",
+    "shape", "arrays", "required", "unknown", "kind", "version", "id", "title", "timer", "foreign", "list", "label",
+    "command", "url",
 ];
 
 /// A Unicode scalar value from its number, so that no special character is typed into this file.
@@ -769,7 +796,9 @@ fn corpus() -> Vec<Case> {
     c.text("required", "no kind", r#"{"title":"T"}"#);
     c.text("required", "an empty object", "{}");
 
-    for (name, key) in [("extra", "extra"), ("comment", "comment"), ("a schema member", "$schema"), ("an upper-case name", "Title")] {
+    let root_extras =
+        [("extra", "extra"), ("comment", "comment"), ("a schema member", "$schema"), ("a capital", "Title")];
+    for (name, key) in root_extras {
         c.json("unknown", &format!("{name} at the root"), &with(note("Notes"), key, json!("x")));
     }
     for (name, key) in [("extra", "extra"), ("an upper-case name", "Label")] {
@@ -885,7 +914,8 @@ fn corpus() -> Vec<Case> {
     c.json("foreign", "a timer with items", &with(timer(), "items", two_items()));
     c.json("foreign", "a list with work_min 0", &with(n_items(1), "work_min", json!(0)));
     c.json("foreign", "a note with work_min 4294967296", &with(note("N"), "work_min", json!(4294967296u64)));
-    c.json("foreign", "a note whose item has an unknown member", &with(note("N"), "items", json!([{ "label": "a", "x": 1 }])));
+    let unknown_member = json!([{ "label": "a", "x": 1 }]);
+    c.json("foreign", "a note whose item has an unknown member", &with(note("N"), "items", unknown_member));
     c.json("foreign", "a note whose item is a number", &with(note("N"), "items", json!([1])));
     c.json("foreign", "a note with null items", &with(note("N"), "items", json!(null)));
     c.json("foreign", "a note with work_min as a string", &with(note("N"), "work_min", json!("x")));
@@ -935,8 +965,10 @@ fn corpus() -> Vec<Case> {
     ] {
         c.json("command", &format!("the command is {name}"), &one_item(command_item(&command)));
     }
-    c.json("command", "a null command with a valid url", &one_item(json!({ "label": "a", "command": null, "url": "https://x.y" })));
-    c.json("command", "a null url with a valid command", &one_item(json!({ "label": "a", "command": "ls", "url": null })));
+    let null_command = json!({ "label": "a", "command": null, "url": "https://x.y" });
+    c.json("command", "a null command with a valid url", &one_item(null_command));
+    let null_url = json!({ "label": "a", "command": "ls", "url": null });
+    c.json("command", "a null url with a valid command", &one_item(null_url));
     c.json("command", "a command and a url", &one_item(json!({ "label": "a", "command": "ls", "url": "https://x.y" })));
     c.json("command", "both null", &one_item(json!({ "label": "a", "command": null, "url": null })));
     c.json("command", "neither", &one_item(json!({ "label": "a" })));
@@ -1114,7 +1146,13 @@ const BOUNDS: &[Bound] = &[
         wide: true,
         build: |n, f| note(&text_of(n, f)),
     },
-    Bound { name: "text minimum", pointer: "/$defs/text/minLength", upper: false, wide: true, build: |n, f| note(&text_of(n, f)) },
+    Bound {
+        name: "text minimum",
+        pointer: "/$defs/text/minLength",
+        upper: false,
+        wide: true,
+        build: |n, f| note(&text_of(n, f)),
+    },
     Bound {
         name: "id maximum",
         pointer: "/properties/id/maxLength",
@@ -1217,7 +1255,8 @@ const BOUNDS: &[Bound] = &[
 
 /// The whole number at `pointer` of the schema file.
 fn pointer_number(pointer: &str) -> u64 {
-    schema().pointer(pointer).and_then(Value::as_u64).unwrap_or_else(|| panic!("{SCHEMA_PATH} has no number at {pointer}"))
+    let number = schema().pointer(pointer).and_then(Value::as_u64);
+    number.unwrap_or_else(|| panic!("{SCHEMA_PATH} has no number at {pointer}"))
 }
 
 #[test]
@@ -1231,7 +1270,8 @@ fn every_bound_of_the_schema_is_a_bound_of_the_loader() {
             let outside = (bound.build)(beyond, *fill);
             let label = format!("{} ({}), filled with U+{:04X}", bound.name, bound.pointer, u32::from(*fill));
             assert!(same_verdict(&format!("{label} at {n}"), &inside.to_string()), "{label}: {n} must be accepted");
-            assert!(!same_verdict(&format!("{label} at {beyond}"), &outside.to_string()), "{label}: {beyond} must be refused");
+            let refused = !same_verdict(&format!("{label} at {beyond}"), &outside.to_string());
+            assert!(refused, "{label}: {beyond} must be refused");
         }
     }
     // The rows cover every number that the schema file states.
@@ -1242,16 +1282,19 @@ fn every_bound_of_the_schema_is_a_bound_of_the_loader() {
                 for (key, inner) in map {
                     let here = format!("{at}/{key}");
                     match (key.as_str(), inner) {
-                        ("minLength" | "maxLength" | "minimum" | "maximum" | "minItems" | "maxItems", Value::Number(_)) => {
-                            out.push(here);
-                        }
+                        (
+                            "minLength" | "maxLength" | "minimum" | "maximum" | "minItems" | "maxItems",
+                            Value::Number(_),
+                        ) => out.push(here),
                         // A default is a hint for editors; it is tested against the loader in its own test.
                         ("default" | "enum", _) => {}
                         _ => numbers_in(inner, &here, out),
                     }
                 }
             }
-            Value::Array(list) => list.iter().enumerate().for_each(|(n, inner)| numbers_in(inner, &format!("{at}/{n}"), out)),
+            Value::Array(list) => {
+                list.iter().enumerate().for_each(|(n, inner)| numbers_in(inner, &format!("{at}/{n}"), out));
+            }
             _ => {}
         }
     }
@@ -1261,7 +1304,8 @@ fn every_bound_of_the_schema_is_a_bound_of_the_loader() {
         assert!(covered.contains(number.as_str()), "the schema states a number at {number} that no bound row tests");
     }
     for pointer in covered {
-        assert!(numbers.iter().any(|n| n == pointer), "the bound row {pointer} names a number the schema does not state");
+        let stated = numbers.iter().any(|n| n == pointer);
+        assert!(stated, "the bound row {pointer} names a number the schema does not state");
     }
 }
 
@@ -1271,7 +1315,8 @@ fn every_bound_of_the_schema_is_a_bound_of_the_loader() {
 
 fn class_patterns() -> (Arc<Regex>, Arc<Regex>, Arc<Regex>) {
     let text = |pointer: &str| {
-        let pattern = schema().pointer(pointer).and_then(Value::as_str).unwrap_or_else(|| panic!("no pattern at {pointer}"));
+        let found = schema().pointer(pointer).and_then(Value::as_str);
+        let pattern = found.unwrap_or_else(|| panic!("no pattern at {pointer}"));
         regex(pattern).unwrap_or_else(|e| panic!("{pointer}: {e:?}"))
     };
     (text("/$defs/text/allOf/0/pattern"), text("/$defs/text/allOf/1/pattern"), text("/$defs/link/pattern"))
@@ -1287,19 +1332,21 @@ fn character_classes_of_the_schema_match_the_character_predicates_for_every_scal
         checked += 1;
         alone.clear();
         alone.push(c);
-        assert_eq!(no_control.is_match(&alone), !c.is_control(), "the control class and is_control differ at U+{code_point:04X}");
-        assert_eq!(some_non_blank.is_match(&alone), !c.is_whitespace(), "the blank class and is_whitespace differ at U+{code_point:04X}");
+        let at = format!("U+{code_point:04X}");
+        assert_eq!(no_control.is_match(&alone), !c.is_control(), "the control class and is_control differ at {at}");
+        let blank = some_non_blank.is_match(&alone);
+        assert_eq!(blank, !c.is_whitespace(), "the blank class and is_whitespace differ at {at}");
         after_scheme.clear();
         after_scheme.push_str("https://");
         after_scheme.push(c);
         let first_ok = c != '/' && !c.is_whitespace() && !c.is_control();
-        assert_eq!(link.is_match(&after_scheme), first_ok, "the link pattern differs from the loader as a first character at U+{code_point:04X}");
+        assert_eq!(link.is_match(&after_scheme), first_ok, "the link pattern differs as a first character at {at}");
         inside.clear();
         inside.push_str("https://a");
         inside.push(c);
         inside.push('b');
         let later_ok = !c.is_whitespace() && !c.is_control();
-        assert_eq!(link.is_match(&inside), later_ok, "the link pattern differs from the loader inside a link at U+{code_point:04X}");
+        assert_eq!(link.is_match(&inside), later_ok, "the link pattern differs inside a link at {at}");
     }
     assert_eq!(checked, 1_112_064, "the number of Unicode scalar values");
 }
@@ -1342,11 +1389,13 @@ fn the_loader_and_the_schema_agree_at_every_edge_of_the_character_classes() {
         same_verdict(&format!("a title around {at}"), &note(&format!("a{c}b")).to_string());
         same_verdict(&format!("a title of {at} only"), &note(&c.to_string()).to_string());
         same_verdict(&format!("a title that starts with {at}"), &note(&format!("{c}b")).to_string());
-        same_verdict(&format!("a label around {at}"), &one_item(json!({ "label": format!("a{c}b"), "command": "ls" })).to_string());
+        let label = one_item(json!({ "label": format!("a{c}b"), "command": "ls" }));
+        same_verdict(&format!("a label around {at}"), &label.to_string());
         same_verdict(&format!("a command around {at}"), &one_item(command_item(&format!("l{c}s"))).to_string());
         same_verdict(&format!("a command of {at} only"), &one_item(command_item(&c.to_string())).to_string());
         same_verdict(&format!("a link around {at}"), &one_item(url_item(&format!("https://a{c}b"))).to_string());
-        same_verdict(&format!("a link that starts with {at}"), &one_item(url_item(&format!("https://{c}b"))).to_string());
+        let first = one_item(url_item(&format!("https://{c}b")));
+        same_verdict(&format!("a link that starts with {at}"), &first.to_string());
         same_verdict(&format!("a link that ends with {at}"), &one_item(url_item(&format!("https://a{c}"))).to_string());
     }
     // The edges include the characters the schema decides on its own.
@@ -1357,17 +1406,16 @@ fn the_loader_and_the_schema_agree_at_every_edge_of_the_character_classes() {
 
 #[test]
 fn format_characters_are_accepted_by_both_and_stay_pinned() {
-    // This pins today's behaviour and is not an endorsement. A bidirectional override or a zero-width character is not a
-    // control character, so the loader accepts it and the schema describes it. Refusing format characters is a change of
-    // the loader and a new version of the schema, and this test is where that change shows.
+    // This pins today's behaviour and is not an endorsement. A bidirectional override or a zero-width character is not
+    // a control character, so the loader accepts it and the schema describes it. Refusing format characters is a
+    // change of the loader and a new version of the schema, and this test is where that change shows.
     for (name, c) in [("a right-to-left override", 0x202e), ("a zero-width space", 0x200b)] {
         let word = format!("a{}b", ch(c));
         assert!(same_verdict(&format!("a title with {name}"), &note(&word).to_string()), "{name} in a title");
-        assert!(
-            same_verdict(&format!("a label with {name}"), &one_item(json!({ "label": word, "command": "ls" })).to_string()),
-            "{name} in a label"
-        );
-        assert!(same_verdict(&format!("a command with {name}"), &one_item(command_item(&word)).to_string()), "{name} in a command");
+        let label = one_item(json!({ "label": word, "command": "ls" }));
+        assert!(same_verdict(&format!("a label with {name}"), &label.to_string()), "{name} in a label");
+        let command = one_item(command_item(&word));
+        assert!(same_verdict(&format!("a command with {name}"), &command.to_string()), "{name} in a command");
     }
     assert!(same_verdict("a title of the byte order mark alone", &note(&ch(0xfeff).to_string()).to_string()));
 }
@@ -1447,17 +1495,165 @@ fn no_branch_declares_a_member_its_object_does_not_have() {
     let root_members = names(&schema["properties"]);
     for (n, branch) in schema["allOf"].as_array().expect("allOf").iter().enumerate() {
         for member in names(&branch["then"]["properties"]) {
-            assert!(root_members.contains(&member), "/allOf/{n}/then/properties names {member}, which the root does not declare");
+            let declared = root_members.contains(&member);
+            assert!(declared, "/allOf/{n}/then/properties names {member}, which the root does not declare");
         }
     }
     let item_members = names(&schema["$defs"]["item"]["properties"]);
     let list_item = &schema["$defs"]["listItem"];
     for member in names(&list_item["properties"]) {
-        assert!(item_members.contains(&member), "/$defs/listItem/properties names {member}, which an item does not declare");
+        let declared = item_members.contains(&member);
+        assert!(declared, "/$defs/listItem/properties names {member}, which an item does not declare");
     }
     for (n, branch) in list_item["oneOf"].as_array().expect("oneOf").iter().enumerate() {
         for member in names(&branch["properties"]) {
-            assert!(item_members.contains(&member), "/$defs/listItem/oneOf/{n} names {member}, which an item does not declare");
+            let declared = item_members.contains(&member);
+            assert!(declared, "/$defs/listItem/oneOf/{n} names {member}, which an item does not declare");
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The limits outside one document, the defaults and the version, and the document.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn widget_section(doc: &str) -> &str {
+    let start = doc.find(WIDGET_HEADING).unwrap_or_else(|| panic!("{CONFIG_PATH} has no section {WIDGET_HEADING}"));
+    doc[start + WIDGET_HEADING.len()..].split("\n## ").next().expect("a section")
+}
+
+#[test]
+fn the_schema_description_states_the_limits_and_the_gaps_with_the_loaders_numbers() {
+    let description = schema()["description"].as_str().expect("the root has a description");
+    for phrase in [
+        format!("at most {MAX_WIDGETS} widgets are shown"),
+        format!("at most {MAX_FILE} bytes"),
+        format!("1 to {MAX_ITEMS} items"),
+    ] {
+        assert!(description.contains(&phrase), "the schema description lacks {phrase:?}");
+    }
+    for gap in GAPS.iter() {
+        assert!(description.contains(gap.doc_phrase), "the schema description does not name the gap {:?}", gap.name);
+    }
+    assert_eq!(pointer_number("/allOf/1/then/properties/items/maxItems"), MAX_ITEMS as u64);
+}
+
+fn scratch_widgets(tag: &str) -> PathBuf {
+    let dir = common::scratch_dir(tag);
+    fs::create_dir(dir.join(widgets::DIR)).expect("the widgets folder");
+    dir
+}
+
+#[test]
+fn at_most_24_widgets_load_and_a_file_that_replaces_a_builtin_still_loads_at_the_cap() {
+    assert_eq!(MAX_WIDGETS, 24, "the plan and the schema description say 24");
+    let dir = scratch_widgets("widgets-cap");
+    let folder = dir.join(widgets::DIR);
+    // 23 files that sort before notes.json; with the two built-ins that is 25 widgets, one more than the cap.
+    for n in 1..=23 {
+        let document = note(&format!("Widget {n}")).to_string();
+        fs::write(folder.join(format!("a{n:02}.json")), document).expect("a widget file");
+    }
+    fs::write(folder.join("notes.json"), note("Replaced notes").to_string()).expect("the replacing file");
+    let (defs, notes) = widgets::load(&dir);
+    fs::remove_dir_all(&dir).expect("remove the scratch directory");
+
+    assert_eq!(defs.len(), MAX_WIDGETS, "the built-ins count toward the cap");
+    assert_eq!(notes.len(), 1, "exactly one file is left out: {notes:?}");
+    assert!(notes[0].starts_with("widgets/a23.json"), "the 23rd file is the one left out: {}", notes[0]);
+    assert!(defs.iter().any(|d| d.id == "a22"), "the 22nd file still fits under the cap");
+    assert!(!defs.iter().any(|d| d.id == "a23"), "the 23rd file does not");
+    let replaced = defs.iter().find(|d| d.id == "notes").expect("the notes widget stays");
+    assert_eq!(replaced.title, "Replaced notes", "a file with a built-in's id replaces it even at the cap");
+}
+
+#[test]
+fn a_file_of_65536_bytes_loads_and_one_byte_more_is_left_out_with_a_note() {
+    assert_eq!(MAX_FILE, 65536);
+    let padded = |size: u64| {
+        let mut text = note("Padded").to_string();
+        let size = usize::try_from(size).expect("a size");
+        assert!(text.len() < size);
+        text.push_str(&" ".repeat(size - text.len()));
+        text
+    };
+    let (at, over) = (padded(MAX_FILE), padded(MAX_FILE + 1));
+    assert_eq!((at.len() as u64, over.len() as u64), (MAX_FILE, MAX_FILE + 1));
+    // The size rule belongs to the loader of files, not to the parser: both documents are the same widget.
+    assert!(same_verdict("a document of 65536 bytes", &at));
+    assert!(same_verdict("a document of 65537 bytes", &over));
+
+    let dir = scratch_widgets("widgets-size");
+    fs::write(dir.join(widgets::DIR).join("exact.json"), &at).expect("a widget file");
+    fs::write(dir.join(widgets::DIR).join("toolarge.json"), &over).expect("a widget file");
+    let (defs, notes) = widgets::load(&dir);
+    fs::remove_dir_all(&dir).expect("remove the scratch directory");
+    assert!(defs.iter().any(|d| d.id == "exact"), "a file of exactly {MAX_FILE} bytes loads");
+    assert!(!defs.iter().any(|d| d.id == "toolarge"), "a file of one byte more is left out");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let limit_text = format!("is larger than the limit of {MAX_FILE} bytes");
+    assert!(
+        notes[0].starts_with("widgets/toolarge.json") && notes[0].contains(&limit_text),
+        "the note names the file and the limit: {}",
+        notes[0]
+    );
+    assert!(schema()["description"].as_str().is_some_and(|d| d.contains(&format!("at most {MAX_FILE} bytes"))));
+}
+
+#[test]
+fn the_defaults_and_the_version_of_the_schema_are_those_of_the_loader() {
+    let timer_without_minutes = loader_verdict(&timer().to_string()).expect("a timer without minutes loads");
+    let Body::Timer { work_min, break_min } = timer_without_minutes.body else { panic!("a timer is a timer") };
+    assert_eq!(schema().pointer("/properties/work_min/default"), Some(&json!(work_min)), "the work default");
+    assert_eq!(schema().pointer("/properties/break_min/default"), Some(&json!(break_min)), "the break default");
+
+    assert_eq!(schema().pointer("/properties/version/enum"), Some(&json!([1, null])));
+    assert!(same_verdict("version 1", &with(note("T"), "version", json!(1)).to_string()));
+    assert!(same_verdict("no version", &note("T").to_string()));
+    assert!(same_verdict("a null version", &with(note("T"), "version", json!(null)).to_string()));
+    assert!(!same_verdict("version 0", &with(note("T"), "version", json!(0)).to_string()));
+    assert!(!same_verdict("version 2", &with(note("T"), "version", json!(2)).to_string()));
+}
+
+/// The JSON of the fenced block that follows the marker `<!-- example: NAME -->` in `docs/config.md`.
+fn documented_example(name: &str) -> String {
+    let doc = read(CONFIG_PATH);
+    let marker = format!("<!-- example: {name} -->");
+    let after = doc.split_once(&marker).unwrap_or_else(|| panic!("{CONFIG_PATH} has no example {name}")).1;
+    let fence = after.trim_start().strip_prefix("```json\n").unwrap_or_else(|| panic!("no json fence after {name}"));
+    fence.split_once("\n```").unwrap_or_else(|| panic!("the fence of {name} is not closed")).0.to_owned()
+}
+
+#[test]
+fn the_widget_examples_of_config_md_pass_the_loader_and_the_schema() {
+    let examples =
+        [("widgets/focus.json", "focus"), ("widgets/deploy.json", "deploy"), ("widgets/scratch.json", "scratch")];
+    for (name, stem) in examples {
+        let text = documented_example(name);
+        let parsed = widgets::parse(&text, stem);
+        let widget = parsed.unwrap_or_else(|e| panic!("the loader refuses the example {name}: {e}"));
+        assert_eq!(widget.id, stem, "the id of the example {name} is its file name");
+        assert_eq!(schema_verdict(&text), Ok(()), "the schema refuses the example {name}");
+    }
+    let deploy = widgets::parse(&documented_example("widgets/deploy.json"), "deploy").expect("a list");
+    let Body::List { items } = deploy.body else { panic!("the deploy example is a list") };
+    assert_eq!(items.len(), 2, "the list example shows a command and a link");
+}
+
+#[test]
+fn config_md_names_every_gap_and_the_version_policy() {
+    let doc = read(CONFIG_PATH);
+    let section = widget_section(&doc);
+    for gap in GAPS.iter() {
+        assert!(section.contains(gap.doc_phrase), "the widget section does not name the gap {:?}", gap.name);
+    }
+    assert!(section.contains("describes version 1"), "the widget section must say that the schema describes version 1");
+    assert!(section.contains("`$schema`"), "the widget section must say that a $schema member is refused");
+    assert!(section.contains("is refused like any other member"));
+    let mentions = section.matches("widget.schema.json").count();
+    assert!(mentions >= 2, "the section names the file in the link and in the policy");
+    assert!(
+        doc.contains("`core/tests/widgets_schema.rs`"),
+        "the introduction of {CONFIG_PATH} must name the test that parses the widget examples"
+    );
 }

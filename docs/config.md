@@ -2,7 +2,8 @@
 
 Everything holzWave remembers is a plain JSON file that can be read and edited by hand. The files do not depend on how a
 later phase moves them between machines (F25). This document is written from the code of Phase 2 and the examples in
-it are parsed by `core/tests/project_policy.rs`, so a format change that forgets the document fails a test.
+it are parsed by `core/tests/project_policy.rs` (the widget examples by `core/tests/widgets_schema.rs`), so a format
+change that forgets the document fails a test.
 
 - [Where the files live](#where-the-files-live)
 - [`settings.json`](#settingsjson)
@@ -719,15 +720,24 @@ enter them again there.
 
 ## `widgets/*.json` and `widget_notes.json`
 
-Widgets of the sidebar. The files are described by [widget.schema.json](widget.schema.json). `notes` and `pomodoro` exist without a file; a file with the same id replaces them. Fields (no others
+Widgets of the sidebar. `notes` and `pomodoro` exist without a file; a file with the same id replaces them. Fields (no others
 are accepted): `version` (1), `id` (default: the file name; lowercase letters, digits, `-`, `_`, at most 32), `title`
 (1 to 40 characters), `kind`, and by kind:
 
+<!-- example: widgets/focus.json -->
 ```json
 { "title": "Focus", "kind": "timer", "work_min": 50, "break_min": 10 }
+```
+
+<!-- example: widgets/deploy.json -->
+```json
 { "title": "Deploy", "kind": "list", "items": [
   { "label": "Pods", "command": "kubectl get pods" },
   { "label": "Docs", "url": "https://example.org/docs" } ] }
+```
+
+<!-- example: widgets/scratch.json -->
+```json
 { "title": "Scratch", "kind": "note" }
 ```
 
@@ -735,3 +745,19 @@ An item has either a one-line `command` (put on the prompt, never run) or an `ht
 at most 24 widgets are shown, a file is at most 64 KiB. A file that is not valid is left out and the sidebar shows why.
 `widget_notes.json` holds the texts of the note widgets (at most 64 KiB each). Both are synced; a downloaded one is
 applied at the next start.
+
+The files are described by [widget.schema.json](widget.schema.json), a JSON Schema (draft 2020-12) that an editor with a JSON
+Schema setting can map to `widgets/*.json` for completion and checks (in Visual Studio Code, add an entry with the file
+match `widgets/*.json` to `json.schemas`). The schema describes version 1: a later version of the file format gets a new
+schema file next to this one, and `widget.schema.json` keeps describing version 1. Do not add a `$schema` member to a widget
+file: it is refused like any other member the schema does not list, so the schema is set in the editor and not in the file.
+Write whole numbers without a fraction or an exponent (`25`, not `25.0`). A test (`core/tests/widgets_schema.rs`) gives the
+schema and the loader the same documents and fails when they differ, so the schema says what the app accepts.
+
+What a schema cannot say, and the loader still checks:
+
+- a file that names the same key twice is refused;
+- a link of more than 2048 bytes is refused, and the schema counts characters, so it accepts some of them;
+- an id taken from the file name (a file without an `id`) must follow the id rule too;
+- the limits that lie outside one document: at most 24 widgets are shown (the two built-in ones count) and a file is at most
+  64 KiB.
