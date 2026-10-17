@@ -10,6 +10,8 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::time::Duration;
+
 /// Whether the system language model can be used right now.
 ///
 /// The enum is exhaustive on purpose: a new variant forces every `match` on it to be revisited.
@@ -82,17 +84,90 @@ pub fn probe() -> Availability {
     }
 }
 
+/// What [`selftest`] answers when the Swift task called back.
+pub const SELFTEST_VALUE: i32 = 42;
+
+/// Smoke test of the Swift concurrency runtime and of the callback path: starts a Swift task that calls back into Rust
+/// exactly once with [`SELFTEST_VALUE`], and waits for it. `None` off macOS, on a timeout, and when the callback came
+/// more than once.
+///
+/// On a timeout, or after a second callback, the callback's reference to the shared state is leaked on purpose, so a
+/// late call still finds live memory.
+pub fn selftest(timeout: Duration) -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        ffi::selftest(timeout)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = timeout;
+        None
+    }
+}
+
 /// The only place that crosses into Swift, and the only `unsafe` code of the crate.
 #[cfg(target_os = "macos")]
 mod ffi {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
     unsafe extern "C" {
         fn hw_afm_availability() -> i32;
+        fn hw_afm_selftest(callback: extern "C" fn(*mut c_void, i32), user_data: *mut c_void);
     }
 
     pub(crate) fn availability() -> i32 {
         // SAFETY: the function takes no arguments, passes no pointers and returns a plain integer; it is defined by
         // `@_cdecl("hw_afm_availability")` in the Swift package and linked from the static library of build.rs.
         unsafe { hw_afm_availability() }
+    }
+
+    /// Shared between the waiter and the callback.
+    #[derive(Default)]
+    struct State {
+        value: Mutex<Option<i32>>,
+        signal: Condvar,
+        calls: AtomicU32,
+    }
+
+    /// Called by Swift, from a thread of its concurrency pool. It only borrows `user_data`: the waiter owns the
+    /// reference behind it and releases it after it has seen the value.
+    extern "C" fn callback(user_data: *mut c_void, value: i32) {
+        // SAFETY: `user_data` is the pointer `selftest` got from `Arc::into_raw`; that reference is released only after
+        // this call was seen (or leaked), so the state is alive. The callback never frees it.
+        let state = unsafe { &*(user_data as *const State) };
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut slot) = state.value.lock() {
+            *slot = Some(value);
+        }
+        state.signal.notify_all();
+    }
+
+    pub(crate) fn selftest(timeout: Duration) -> Option<i32> {
+        let state = Arc::new(State::default());
+        let raw = Arc::into_raw(Arc::clone(&state)) as *mut c_void;
+        // SAFETY: `callback` has the C signature the Swift side expects (`@convention(c) (UnsafeMutableRawPointer?,
+        // Int32) -> Void`), and `raw` stays valid until the reference it stands for is released below or leaked.
+        unsafe { hw_afm_selftest(callback, raw) };
+
+        let guard = state.value.lock().ok()?;
+        let (guard, result) = state.signal.wait_timeout_while(guard, timeout, |value| value.is_none()).ok()?;
+        let value = *guard;
+        drop(guard);
+        if result.timed_out() {
+            return None; // the callback's reference is leaked, see the doc comment of `selftest`
+        }
+        // Give a second call the chance to show itself while the state is still alive.
+        std::thread::sleep(Duration::from_millis(20));
+        if state.calls.load(Ordering::SeqCst) != 1 {
+            return None; // leaked too: a further call must still find live memory
+        }
+        // SAFETY: `raw` came from `Arc::into_raw` above and has not been released; exactly one callback was seen, and
+        // none can follow, so nothing reads it any more.
+        drop(unsafe { Arc::from_raw(raw as *const State) });
+        value
     }
 }
 

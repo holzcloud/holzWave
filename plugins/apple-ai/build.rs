@@ -9,6 +9,9 @@
 //!    through `cargo:rustc-link-arg`. Link arguments of a library crate do not reach the crates that depend on it, so
 //!    this script also prints `cargo:weak_framework=...` metadata, which a dependent's build script reads and repeats.
 //!
+//! The Swift runtime libraries are found through the run path `/usr/lib/swift`, where the operating system keeps them;
+//! that argument is repeated for dependents in the same way (`cargo:swift_rpath`).
+//!
 //! Off macOS nothing happens here: the crate is plain Rust and no Swift tool is needed.
 
 use std::env;
@@ -24,6 +27,9 @@ const PACKAGE: &str = "AppleAI";
 /// The directory of the Swift package, relative to the crate.
 #[allow(dead_code)]
 const SWIFT_DIR: &str = "swift";
+/// Where the operating system keeps the Swift runtime libraries.
+#[allow(dead_code)]
+const SWIFT_RPATH: &str = "/usr/lib/swift";
 /// The framework that is linked weakly.
 #[allow(dead_code)]
 const FRAMEWORK: &str = "FoundationModels";
@@ -44,6 +50,12 @@ fn main() {
 fn build_for_macos() {
     swift_rs::SwiftLinker::new(MACOS_FLOOR).with_package(PACKAGE, SWIFT_DIR).link();
     link_search_for_current_swiftpm();
+
+    // The Swift runtime libraries (concurrency, core) are named @rpath/... by the linker. The operating system provides
+    // them in /usr/lib/swift (back to macOS 12), so that directory is the run path. Like the weak framework argument,
+    // it is repeated for dependents through metadata, because link arguments of a library crate do not reach them.
+    println!("cargo:swift_rpath={SWIFT_RPATH}");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{SWIFT_RPATH}");
 
     if sdk_has_framework() {
         println!("cargo:rustc-cfg=apple_ai_sdk_foundation_models");
