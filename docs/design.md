@@ -1057,7 +1057,7 @@ button, so a chat is never in the column and in a pane at once. A switch carries
 the draft belong to the chat they were made for, and a chat that is left and idle lets go of its page session, and with it a
 share it held. A chat that is replying keeps streaming and is whole when the user returns.
 
-**Delete is deliberate.** Every other saved row has a delete button `×` at its right. The first press turns it into
+**Delete is deliberate.** Every saved row that no pane holds has a delete button `×` at its right (the chat on screen too, once it has a file; the chat with no file has none). The first press turns it into
 `Delete?` (the word is the cue); the second press on the same button deletes the chat with its file and stops a running
 reply; there is no undo. Any other press, `Escape`, closing the list or reading it again disarms it. Deleting the chat on
 screen shows a new empty chat. A sentence about the list (a refusal in the core's words, `Chat deleted.`) is said in a
