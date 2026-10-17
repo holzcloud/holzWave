@@ -50,7 +50,8 @@
                        border: 0; background: none; color: var(--hw-ink); cursor: pointer; font: inherit; text-align: left; }
 .sb-ai .ai-side-pick:hover { background: var(--hw-rose-wash); }
 /* The delete button: the first press arms it and it says `Delete?` (the word is the cue, the danger colour and the underline back it). */
-.sb-ai .ai-side-del { flex: none; align-self: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); margin-right: .5rem; padding: 0 .5rem;
+.sb-ai .ai-side-del { flex: none; align-self: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); min-width: max(28px, calc(28rem / 12)); margin-right: .5rem;
+                      padding: 0 .5rem;
                       border: 1px solid var(--hw-line); border-radius: .333rem; background: none; color: var(--hw-dim); cursor: pointer;
                       font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: normal; text-transform: none; }
 .sb-ai .ai-side-del:hover { color: var(--hw-ink); }

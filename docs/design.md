@@ -1097,7 +1097,7 @@ place chip, `Providers…`, usage) follows as in 6.12.
 | `＋ New chat` | hairline; makes an id and shows an empty chat; asks the core for no file | the words |
 | Row on screen | rose wash, a 2 px rose bar on its left, `aria-current` | the mark `●` against `○` |
 | Row of a chat in a pane | says `in pane 3` instead of the age; no `×` | the words |
-| `×` | 28 px high; the first press arms it | it turns into `Delete?`, underlined, in the danger colour |
+| `×` | 28 px high and wide; the first press arms it | it turns into `Delete?`, underlined, in the danger colour |
 
 **Chat list.** The list opens under the head inside the column: flat, a hairline above and below, at most 40 % of the height
 of the column, scrolling inside. The list is read from the core when it opens and nowhere else. There is one row per chat
