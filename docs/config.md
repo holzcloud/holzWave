@@ -573,6 +573,33 @@ changes the exit status shows that status in the mark `D`. The marks are text th
 program or a file shown with `cat` can fake or hide the boundary of an output: text taken from between marks is untrusted
 wherever it is used.
 
+## `wsh ai`
+
+`wsh ai [--] prompt...` asks the model of the running holzWave a question from a shell. The words are joined with single
+spaces. A word that starts with a dash before the first ordinary word is reserved for options that do not exist yet and
+is refused; `--` ends them, so `wsh ai -- --model x` asks `--model x`. Text piped into the command is sent along with
+the prompt, but only when standard input is not a terminal, at most 1 MiB, as UTF-8 without a NUL byte, and never cut:
+more than that is refused with exit status 2. `wsh` works only in a holzWave pane and does nothing elsewhere. The exit
+status is 0 for an answer, 1 for a refusal or an app that does not answer, and 2 for a mistake in the command line or
+in the input (the exit status of a mistake never means that something was sent). The answer is printed after the
+characters a terminal could act on are removed, and standard error says how many were.
+
+Nothing leaves this computer until you answer in the window. A card appears in the window of the pane that asked: it
+shows the prompt in full, the piped text by counts and by what the secret filter hid (never the text itself), and where
+the request goes, with the words `leaves this computer` when it does. Only `Send once`, pressed by a person after half a
+second, sends this one request; `Don't send` and `Esc` refuse. A process in a pane can send a request but cannot answer
+it: the local socket has no command for that. The card is skipped only when the destination is on this computer or on
+the device and the setting `ai_local_context` is `auto`. `ai_local_only` refuses a destination that leaves the device
+before any card is shown.
+
+The provider is the one of the last chat turn in this run, else the only provider that is set up, else `wsh ai` says
+what is missing: no flag chooses one yet. The piped text gets the same cleaning and secret filter as chat context,
+which is best effort and no guarantee. An unanswered request ends after 120 seconds and nothing is sent; a request that
+was refused or ended unanswered makes the same pane wait 10 seconds before it may ask again. At most two requests run
+and four wait for an answer at the same time. The model gets no tool, so nothing can be read, written or run because of
+a `wsh ai` request. Nothing is kept: the request is not saved as a chat and holzWave keeps no copy of it. While a card
+waits, the command palette has the entry `Answer the wsh ai request`, which moves the keyboard to the card.
+
 ## `ai.json`
 
 The AI providers you set up: for each one a name, the kind of provider, the wire it speaks, a base address and a model. The

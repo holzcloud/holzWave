@@ -118,7 +118,7 @@ async function check(file) {
   const failures = [...problems];
   const views = await page.$$eval('#views button', (bs) => bs.map((b) => b.dataset.v));
   if (views.length === 0) failures.push('the view picker has no buttons');
-  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiapprove', 'kiapprovestates', 'kiwrite', 'kiwritestates', 'kicommand', 'kicommandstates', 'kiset', 'kichats', 'kisidecards', 'kiactions', 'kiexplain', 'kidescribe']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
+  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiapprove', 'kiapprovestates', 'kiwrite', 'kiwritestates', 'kicommand', 'kicommandstates', 'kiset', 'kichats', 'kisidecards', 'kiactions', 'kiexplain', 'kidescribe', 'kiwsh', 'kiwshstates']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
   for (const view of views) {
     await show(page, view);
     const stage = await page.$eval('#stage .m', (m) => m.children.length).catch(() => 0);
@@ -126,6 +126,13 @@ async function check(file) {
     if (stage === 0) failures.push(`the view ${view} drew nothing`);
     if (note === 0) failures.push(`the view ${view} has no note`);
   }
+  // The card of a `wsh ai` request: the two buttons and the words that say the destination leaves this computer, and four cards in the states view.
+  await show(page, 'kiwsh');
+  const wshText = await page.$eval('#stage', (n) => n.textContent);
+  for (const words of ['Send once', "Don't send", 'leaves this computer']) if (!wshText.includes(words)) failures.push(`the view kiwsh does not show ${words}`);
+  await show(page, 'kiwshstates');
+  const wshCards = await page.$$eval('#stage .aw-card', (n) => n.length);
+  if (wshCards !== 4) failures.push(`the view kiwshstates holds ${wshCards} cards, not 4`);
   // The chords of the AI actions follow the platform switch: the symbols on macOS, the words on Windows and Linux.
   const keysOf = { mac: ['⇧⌘Y', '⇧⌘G'], win: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'], lin: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'] };
   for (const [os, wanted] of Object.entries(keysOf)) {
@@ -152,9 +159,11 @@ async function check(file) {
   if (sidePhones !== 2) failures.push(`#phones-side holds ${sidePhones} phones, not 2`);
   const actionPhones = await page.$$eval('#phones-actions .ph1', (n) => n.length);
   if (actionPhones !== 2) failures.push(`#phones-actions holds ${actionPhones} phones, not 2`);
+  const wshPhones = await page.$$eval('#phones-wsh .ph1', (n) => n.length);
+  if (wshPhones !== 2) failures.push(`#phones-wsh holds ${wshPhones} phones, not 2`);
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);

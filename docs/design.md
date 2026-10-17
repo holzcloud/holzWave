@@ -234,8 +234,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | AI chat: palette actions | ![](design/ai-actions.png) | the palette with the AI entries and the chord of the running platform (6.19): `Explain error` (`⇧⌘Y`) and `Command from description` (`⇧⌘G`) beside `AI chat`, `New AI chat`, `AI chat in the sidebar` and `AI providers…`, each with the section word `ai` |
 | AI chat: explain an error | ![](design/ai-explain.png) | the chat after `Explain error` (6.19): the failed command in the pane at the left, the message written in the composer, the context card open on one item (the last command and its output, read), and the status line `Nothing is sent until you press Send.` |
 | AI chat: command from a description | ![](design/ai-describe.png) | a reply to `Command from description` (6.19): the button `Insert at prompt` under a one-line block, the warn line under a block that holds characters that are not shown, the line at the prompt of pane 1 with the cursor after it, and the status line `Inserted at the prompt of pane 1. It was not run.` |
-| wsh ai request | – | a program in a terminal asked the model a question (6.20): the card at the top right with the prompt, the piped text by counts and findings, the destination with the place chip and the buttons; nothing has left this computer yet |
-| wsh ai states | – | the card in four states (6.20): asking for a cloud provider, asking for a model on this computer, after `Send once`, and after a refusal from holzWave with a second request waiting |
+| wsh ai request | ![](design/ai-wsh.png) | a program in a terminal asked the model a question (6.20): the card at the top right with the prompt, the piped text by counts and findings, the destination with the place chip and the buttons; nothing has left this computer yet |
+| wsh ai states | ![](design/ai-wsh-states.png) | the card in four states (6.20): asking for a cloud provider, asking for a model on this computer, after `Send once`, and after a refusal from holzWave with a second request waiting |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -1224,7 +1224,7 @@ on while a card waits, and the terminal stays usable around it.
 | Part | Words |
 |---|---|
 | Head | a `.label` `wsh ai · pane 3`, and `1 of 2` at the right when more than one request waits |
-| Title | `Send this to the model?` |
+| Title | `Send this to the model?`; when the destination leaves this computer it starts with the mark `!` in the warn colour |
 | Lead | `A program in pane 3 asked this. Nothing has left this computer yet.` |
 | `Prompt` | the cleaned prompt in full, in a box that scrolls after about six lines, hidden characters written as `\u{...}` escapes; below it the findings of its cleaning in words; the words `none: the piped text is the question` when it is empty |
 | `Piped text` | the counts (`142 lines · 6.1 KiB, 5.8 KiB after cleaning`), the findings of the gate in the words of 6.14 and the sentence of 6.14 that it is best effort and no guarantee; the word `none` when nothing was piped in. The text itself is never shown: an excerpt would put the text into the page |
@@ -1237,6 +1237,8 @@ The card shows what is sent: the prompt after cleaning is the text that goes out
 worked out, and every card carries a seal of what it shows. The press names the request and the seal and nothing else, so a
 request that changed since it was shown is refused (`This request changed since it was shown; look at it again.`) and the
 card is read again.
+
+![A wsh ai request](design/ai-wsh.png)
 
 **Behaviour.**
 
@@ -1264,6 +1266,8 @@ card is read again.
 | refused | the fault line with the core's sentence | the mark `!` and the underline |
 | several waiting | `1 of 2` in the head | the count |
 
+![The states of the card](design/ai-wsh-states.png) The picture draws the four cards a little narrower than the 24 rem of the app so that they fit side by side.
+
 **Sentences.**
 
 | Sentence | Where |
@@ -1285,6 +1289,8 @@ requests. `Send once` sends this one request.
 
 **Narrow screens (640 px and narrower).** The card is a bottom sheet over the full width; both buttons are at least 44 px
 high and the text is at least 16 px.
+
+![On a phone](design/ai-wsh-phone.png)
 
 **Accessibility.** The card is an `alertdialog` named by its title, the prompt and the findings are text, the place chip says
 where the request goes in words, hairlines are `--hw-line` so `contrast-high` holds (`--hw-ink-3` on the card), nothing moves,

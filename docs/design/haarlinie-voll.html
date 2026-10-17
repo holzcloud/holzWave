@@ -311,6 +311,38 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ph1 .c-status.ia-st{min-height:24px;white-space:normal}
 .ph1 .ia-btn{min-height:22px;padding:0 8px;font-size:8px}
 .ph1 .ia-bar{margin:0 0 5px}.ph1 .ia-note{margin:0 0 5px;font-size:7.5px}.ph1 .c-md pre.ia-pre{margin-bottom:3px}
+/* A request of wsh ai (docs/design.md 6.20): a floating layer at the top right that never takes the keyboard. Flat and hairline; the shadow is the one of the floating layers (.float). */
+.aw-card{width:288px;padding:10px;border-radius:8px;color:var(--ink);font:400 12px/1.4 var(--mono);text-align:left}
+.aw-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:2px 8px;margin-bottom:4px}
+.aw-who,.aw-count{color:var(--ink3)}
+.aw-title{margin:0 0 4px;font:700 13px/1.3 var(--mono)}
+.aw-card[data-leaves=true] .aw-title::before{content:"! ";color:var(--warn)}
+.aw-lead{margin:0 0 6px;color:var(--ink2);font:400 13px/1.4 var(--sans)}
+.aw-row{margin:0 0 6px;padding:4px 0 0;border-top:1px solid var(--edge)}
+.aw-nm{display:block;margin:0 0 2px;color:var(--ink3)}
+.aw-text{max-height:100px;overflow:hidden;padding:2px 8px;border:1px solid var(--edge);border-radius:4px;white-space:pre-wrap;overflow-wrap:anywhere}
+.aw-text.none{color:var(--ink3)}
+.aw-ct{margin:0 0 2px}
+.aw-fn{margin:2px 0 0;padding:0;list-style:none;color:var(--ink3);font-size:11px}
+.aw-best{margin:2px 0 0;color:var(--ink3);font:400 11px/1.4 var(--sans)}
+.aw-route,.aw-host,.aw-place{display:inline-block;margin:0 8px 2px 0}
+.aw-host{color:var(--ink3)}
+.aw-place{padding:0 8px;border:1px solid var(--edge);border-radius:999px}
+.aw-place.leaves{border-color:var(--warn);color:var(--warn);text-decoration:underline}
+.aw-foot,.aw-fault{margin:0 0 6px;font:400 11px/1.4 var(--sans)}
+.aw-foot{color:var(--ink3)}
+.aw-fault{color:var(--warn);text-decoration:underline}
+.aw-acts{display:flex;justify-content:space-between;gap:8px}
+.aw-acts .btn{display:inline-flex;align-items:center;min-height:28px;padding:0 10px;border-radius:5px;font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.aw-acts .btn.p.off{background:none;border-color:var(--edge);color:var(--ink3);font-weight:500}
+.aw-acts .btn.off{color:var(--ink3)}
+.aw-grid{display:grid;grid-template-columns:repeat(4,264px);gap:16px;justify-content:center;align-content:start;padding:18px 12px;flex:1;background:var(--ground)}
+.aw-cell .cap{margin:0 0 6px}.aw-cell .aw-card{width:264px;box-shadow:none}
+.aw-sheet.float{position:absolute;z-index:6;left:0;right:0;bottom:0;width:auto;border-radius:12px 12px 0 0;padding:8px;font-size:8px}
+.ph1 .aw-sheet .aw-who{font-size:7px}.ph1 .aw-sheet .aw-title{margin:0 0 3px;font-size:9px}.ph1 .aw-sheet .aw-lead{margin:0 0 4px;font-size:8px}
+.ph1 .aw-sheet .aw-row{margin:0 0 4px;padding-top:3px}.ph1 .aw-sheet .aw-nm{font-size:7px}.ph1 .aw-sheet .aw-text,.ph1 .aw-sheet .aw-ct,.ph1 .aw-sheet .aw-route,.ph1 .aw-sheet .aw-host,.ph1 .aw-sheet .aw-place{font-size:8px}
+.ph1 .aw-sheet .aw-text{padding:1px 6px}.ph1 .aw-sheet .aw-fn,.ph1 .aw-sheet .aw-best,.ph1 .aw-sheet .aw-foot{font-size:7px}.ph1 .aw-sheet .aw-foot{margin:0 0 4px}
+.ph1 .aw-sheet .aw-place{padding:0 6px}.ph1 .aw-sheet .aw-acts .btn{min-height:22px;min-width:22px;padding:0 8px;font-size:8px}
 /* Handys */
 .phones{display:flex;gap:16px;flex-wrap:wrap;width:fit-content;max-width:100%}
 .ph1{width:200px;height:400px;border:1px solid var(--edge);border-radius:22px;overflow:hidden;background:var(--ground);display:flex;flex-direction:column;font:400 10px/1.5 var(--mono);position:relative}
@@ -381,6 +413,10 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <h2>Explain error and Command from description on a phone</h2>
   <p class="lead">The chat is the screen. After Explain error the prepared message is in the composer at 16 px and the context card is open with 44 px buttons; under a one-line code block of a reply Insert at prompt is a 44 px target, and a block that holds characters that are not shown has a warn line instead. Left, the chat after Explain error; right, the reply. Shown at the scale of the mock (about half).</p>
   <div class="phones" id="phones-actions"></div>
+
+  <h2>wsh ai request on a phone</h2>
+  <p class="lead">The request card is a bottom sheet over the full width: both buttons are 44 px targets and the text is at least 16 px, and the terminal behind it is dimmed but stays where it is. Left, the request that waits (the answer cannot have left yet); right, the same sheet after Send once, with the foot Sending… and both buttons disabled until holzWave closes the card. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-wsh"></div>
 
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
@@ -483,7 +519,7 @@ function base(v){
     <span class="fill"></span>
     <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
   <div class="tabrow row">${tabs(v==='blocks'?1:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?chatArea(v):`<div class="area">
+  <div class="body">${v==='preview'?previewArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -491,7 +527,7 @@ function base(v){
       ${P('in','◧','notes.md','preview',md)}
       ${P('','◔','system','local · 1 s',sysmon)}
     </div>${searchBar}
-  </div>`}${v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||status()}`;
+  </div>`}${v==='kiwsh'?side:v==='kiwshstates'?'':v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||status()}${awOver(v)}`;
 }
 /* The chat pane (docs/design.md 6.12). Two states of one conversation: `kipane` streams a reply, `kistates` shows the picker, a stopped
    reply, a failed turn and a long draft. The words are the ones of the page: the status words, the end row, the count. */
@@ -630,6 +666,27 @@ cBody.kisidecards=`<div class="c-chat">${saBar}
  <div class="c-status">waiting for your decision</div>
  ${saComp('Ask a question',cStop)}</div>`;
 const sideAI=v=>`<div class="side sa-side" style="width:280px">${v==='kichats'?saTop(1,'Chat deleted.')+saList:saTop(0,'')}<div class="sa-chat">${cBody[v]}</div></div>`;
+/* A request of wsh ai (docs/design.md 6.20). `kiwsh` is the window with a terminal that asked: the card at the top right under the title bar, the piped text by counts and
+   findings, the destination with the place chip, and the two buttons; the terminal behind it stays usable. `kiwshstates` is the same card in four states. One function draws the
+   card for the three places that show it (the view, the states and the phone). */
+const awBest='Best effort, not a guarantee: holzWave hides the secrets it recognises and cannot promise that none are left.';
+const awCard=(o,cls='')=>`<div class="aw-card float ${cls}" role="alertdialog" aria-label="Send this to the model?" data-leaves="${o.leaves?'true':'false'}">
+ <div class="aw-head"><span class="aw-who lbl">wsh ai · pane ${o.pane}</span>${o.count?`<span class="aw-count lbl">${o.count}</span>`:''}</div>
+ <div class="aw-title">Send this to the model?</div>
+ <p class="aw-lead">A program in pane ${o.pane} asked this. Nothing has left this computer yet.</p>
+ <div class="aw-row"><span class="aw-nm lbl">Prompt</span><div class="aw-text">${o.prompt}</div></div>
+ <div class="aw-row"><span class="aw-nm lbl">Piped text</span><p class="aw-ct">${o.input||'none'}</p>${o.finds?`<ul class="aw-fn">${o.finds.map(f=>`<li>${f}</li>`).join('')}</ul>`:''}${o.input?`<p class="aw-best">${awBest}</p>`:''}</div>
+ <div class="aw-row"><span class="aw-nm lbl">To</span><span class="aw-route">${o.route}</span><span class="aw-host">${o.host}</span><span class="aw-place ${o.leaves?'leaves':''}">${o.leaves?o.place+' · leaves this computer':o.place}</span></div>
+ <p class="aw-foot">${o.sending?'Sending…':`The answer is printed in pane ${o.pane}. holzWave does not keep this request. Esc refuses.`}</p>${o.fault?`<p class="aw-fault">! ${o.fault}</p>`:''}
+ <div class="aw-acts"><span class="btn ${o.sending?'off':''}">Don't send</span><span class="btn p ${o.sending?'off':''}">Send once</span></div></div>`;
+const awCloud={pane:1,prompt:'which of these look wrong',input:'38 lines · 1.9 KiB, 1.8 KiB after cleaning',finds:['Anthropic key hidden'],route:'anthropic · claude-sonnet',host:'api.anthropic.com',place:'cloud',leaves:1};
+const awLocal={pane:2,prompt:'explain the last error',input:'',route:'ollama · llama3.2',host:'localhost',place:'this computer',leaves:0};
+const awShellWait=`<div class="term pre"><span class="ro">❯</span> env | wsh ai which of these look wrong
+<span class="dim">wsh: waiting for your answer in holzWave (pane 1)</span>
+<span class="ro">❯</span> <span class="cur"></span></div>`;
+const awArea=()=>`<div class="area" style="grid-template-columns:1fr 1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',awShellWait,{f:1,s:'grid-row:1/2'})}${P('','❯','shell','pane 2 · ~/holzWave',shell(''),{s:'grid-row:1/2'})}</div>`;
+const awStates=()=>`<div class="aw-grid">${[['Asking: a model in the cloud',awCard(awCloud)],['Asking: a model on this computer',awCard(awLocal)],['After Send once',awCard({...awCloud,sending:1})],['After a refusal from holzWave',awCard({...awCloud,count:'1 of 2',fault:'this request changed since it was shown; look at it again'})]].map(([cap,card])=>`<div class="aw-cell"><div class="cap">${cap}</div>${card}</div>`).join('')}</div>`;
+const awOver=v=>v==='kiwsh'?`<div class="ov" style="right:12px;top:68px">${awCard(awCloud)}</div>`:'';
 /* Palette and inline actions (docs/design.md 6.19). `kiactions` is the palette with the AI entries and the chord of the platform switch; `kiexplain` is the chat
    that Explain error leaves behind (the message written, the card open on one item, nothing sent); `kidescribe` is the chat after Command from description, a reply
    with its button under a one-line block, a warn line under a block that holds characters that are not shown, and the line at the prompt of pane 1, not run. */
@@ -747,12 +804,14 @@ const views=[
  ['kiactions','AI actions in the palette','The palette lists the AI actions beside the others, with the chord of the running platform (use the platform switch): Explain error and Command from description prepare a message and never send it. Both can be changed or unbound in the key binding editor.'],
  ['kiexplain','AI chat: explain an error','One chord opens the chat where you are with the message written and the item chosen: here the last command and its output, ticked and read, because the core lists it (else the selection, else the screen). The card is the one of 6.14, so a pane that is not shared yet still asks first. Nothing is sent until you press Send.'],
  ['kidescribe','AI chat: command from a description','A command in a reply reaches the prompt only when you press Insert at prompt, and is never run: the line sits at the prompt of pane 1 with the cursor after it. A block that holds characters that are not shown has no button and says so, with the mark ! and in words.'],
+ ['kiwsh','wsh ai asks','A program in a terminal asked the model a question: the pane that asked says it waits, and the card at the top right asks the person. Nothing leaves the computer until you press Send once in the window; the card never takes the keyboard, so typing in the terminal goes on. It shows the prompt in full, the piped text by counts and findings (never as text), and where it goes with the place chip: cloud in the warn colour with the words leaves this computer.'],
+ ['kiwshstates','wsh ai request states','The card in four states: asking for a model in the cloud, asking for a model on this computer (no warn colour, nothing piped in), after Send once (the foot says Sending and both buttons are disabled), and after a refusal from holzWave with a second request waiting (the fault line has the mark ! and is underlined, and the head counts 1 of 2). Every state has words besides its colour. The four cards are drawn a little narrower than the 24 rem of the app so that they fit side by side.'],
  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kiwsh'||cur==='kiwshstates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }
@@ -857,6 +916,12 @@ $('#phones-actions').innerHTML=iaPhone(`<div class="c-chat"><div class="c-bar"><
  <div class="c-status ia-st">Inserted at the prompt of pane 1. It was not run.</div>
  <div class="c-comp"><div class="c-in">Ask a question</div><div class="c-foot">${cxBtn()}<span class="keys">⏎ send</span>${cSend}</div></div></div>`);
 
+/* wsh ai request on a phone: the sheet that waits over a dimmed terminal, and the same sheet after Send once. */
+const awPhone=(sending)=>ph('<span class="wd">◆</span> main <span class="dim">· 1 shell</span>',`<span class="ro">❯</span> env | wsh ai which of these look wrong
+<span class="dim">wsh: waiting for your answer in holzWave (pane 1)</span>
+<span class="ro">❯</span> <span class="cur"></span>`,'',{over:`<div class="scrim" style="border-radius:22px"></div>${awCard({...awCloud,sending},'aw-sheet')}`});
+$('#phones-wsh').innerHTML=awPhone(0)+awPhone(1);
+
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
 const rows=[
@@ -867,7 +932,7 @@ const rows=[
 ['SSH with reconnect','Pane header, sidebar, connections',pl(3)],['WSL, Docker','Connections, block picker',pl(3)],['Keychain','Connections',pl(3)],
 ['Nextcloud sync, end-to-end','Title bar ☁, sync popover, settings',pl('3b')],
 ['File previews (Markdown, image, video, PDF)','Previews view and Daily',pl(4)],['Editor with SFTP','Editor block',pl(4)],
-['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['Explain error, command from description','Palette and chat, ⇧⌘Y, ⇧⌘G',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Sharing a pane with the chat','Chat › Context…',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['Running a command','Chat › approval card',B],['AI chat in the sidebar','Palette, title bar ✦ AI, replaces the sidebar',B],
+['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['Explain error, command from description','Palette and chat, ⇧⌘Y, ⇧⌘G',B],['wsh ai','Terminal, request card in the window',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Sharing a pane with the chat','Chat › Context…',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['Running a command','Chat › approval card',B],['AI chat in the sidebar','Palette, title bar ✦ AI, replaces the sidebar',B],
 ['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['iOS and Android','One pane per screen, sheet, key row',pl(7)]
 ];
 $('#cov').innerHTML='<tr><th>Feature</th><th>Where</th><th>Status</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');
