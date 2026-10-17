@@ -164,3 +164,137 @@ fn a_session_made_on_one_runtime_outlives_that_runtime() {
     assert_eq!(rig.logins(), 1, "still one login");
 }
 
+// ---- the pool and the saved profile ----------------------------------------------------------------------------
+
+/// The saved connection `talos` for the server, over an in-memory keychain.
+struct World {
+    dir: Scratch,
+    connections: Connections,
+}
+
+impl World {
+    /// Save `talos` (password `pw`); `learn` puts the server's key into the known hosts file, as a pane would have.
+    fn new(tag: &str, server: &Server, learn: bool) -> Self {
+        let dir = Scratch::new(tag);
+        let known = dir.path().join(KNOWN_HOSTS_FILE);
+        if learn {
+            server.trust(&known);
+        } else {
+            std::fs::write(&known, "").unwrap();
+        }
+        let (connections, _) = Connections::load(dir.path(), Arc::new(MemoryStore::default()), None, &[]);
+        let world = World { dir, connections };
+        world.save("pw", server.addr.port());
+        world
+    }
+
+    fn save(&self, password: &str, port: u16) {
+        let profile = Profile { port, user: "holz".into(), auth: Auth::Password, ..Profile::new("talos", "Talos", "127.0.0.1") };
+        self.connections.save(profile, SecretChange::Set { value: password.into() }).unwrap();
+    }
+
+    fn known(&self) -> PathBuf {
+        self.dir.path().join(KNOWN_HOSTS_FILE)
+    }
+
+    /// The agent's command on the connection of the saved profile.
+    fn agent(&self) -> SshExec {
+        SshExec::on(self.connections.session("talos").unwrap()).unwrap()
+    }
+}
+
+#[test]
+fn a_saved_profile_gets_one_connection_per_generation() {
+    let server = ssh_server::start(Options::password());
+    let world = World::new("generation", &server, true);
+    let one = world.connections.session("talos").unwrap();
+    let again = world.connections.session("talos").unwrap();
+    assert!(Arc::ptr_eq(&one, &again), "the same version of the list gives the same connection");
+    assert_eq!(one.label(), "Talos");
+
+    world.save("pw", server.addr.port());
+    let next = world.connections.session("talos").unwrap();
+    assert!(!Arc::ptr_eq(&one, &next), "a save gives a new connection");
+    assert!(Arc::ptr_eq(&next, &world.connections.session("talos").unwrap()));
+
+    world.connections.delete("talos").unwrap();
+    let missing = world.connections.session("talos").unwrap_err().to_string();
+    assert!(missing.contains("no connection talos"), "{missing}");
+
+    let wsl = Profile { kind: Kind::Wsl, ..Profile::new("box", "Box", "Ubuntu") };
+    world.connections.save(wsl, SecretChange::Keep).unwrap();
+    let not_ssh = world.connections.session("box").unwrap_err().to_string();
+    assert!(not_ssh.contains("Box is not an SSH connection"), "{not_ssh}");
+    assert!(world.connections.session("nope").unwrap_err().to_string().contains("no connection nope"));
+}
+
+#[test]
+fn the_file_browser_the_monitor_and_the_agent_share_one_login() {
+    let dir = Scratch::new("share-root");
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    std::fs::write(root.join("a.txt"), "alpha").unwrap();
+    let reading = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/monitor/linux_a.txt")).unwrap();
+    let server = ssh_server::start(Options::password().sftp(root.clone()).exec_reply(reading));
+    let world = World::new("share", &server, true);
+
+    // The file browser: a listing through `Blocks::source`.
+    let blocks = Blocks::load(world.dir.path(), None, &[]);
+    let listing = blocks.list(&world.connections, "talos", root.to_str().unwrap()).unwrap();
+    assert_eq!(listing.entries.len(), 1);
+    // The monitor of the host: its fixed command, answered with a Linux reading.
+    let monitors = RemoteMonitors::new();
+    assert!(matches!(monitors.sample(&world.connections, "talos"), Ok(Reading::Live(_))));
+    // The agent's command: the same connection of the same profile.
+    let agent = SshExec::on(world.connections.session("talos").unwrap()).unwrap();
+    assert!(!run(&agent, "echo agent").is_empty(), "the server prints its fixed reply");
+
+    assert_eq!(server.seen.connections.load(Ordering::SeqCst), 1, "one TCP connection");
+    assert_eq!(server.seen.logins.load(Ordering::SeqCst), 1, "one login");
+    assert_eq!(server.seen.sftp_sessions.load(Ordering::SeqCst), 1);
+    let commands = server.seen.commands();
+    assert_eq!(commands.len(), 2, "the monitor's command and the agent's");
+    assert_eq!(commands[1], "echo agent");
+}
+
+#[test]
+fn at_most_sixteen_connections_are_kept() {
+    let pool = SessionPool::new();
+    let make = |id: &str, generation: u64| {
+        pool.connection(id, generation, || Ok((id.to_owned(), SshTarget::new("127.0.0.1", "holz", SshAuth::Password("pw".into())))))
+    };
+    // Seventeen ids, none in use: the least recently used is evicted for the newest and the pool stays at the bound.
+    let mut kept = Vec::new();
+    for n in 0..=MAX_CONNECTIONS {
+        kept.push(make(&format!("id{n}"), n as u64).unwrap());
+        assert!(pool.len() <= MAX_CONNECTIONS);
+    }
+    assert_eq!(pool.len(), MAX_CONNECTIONS);
+
+    // With every one in use the next fails in words.
+    let pool = SessionPool::new();
+    let leased: Vec<_> = (0..MAX_CONNECTIONS)
+        .map(|n| {
+            let connection = make_in(&pool, &format!("id{n}"));
+            let lease = connection.lease();
+            (connection, lease)
+        })
+        .collect();
+    let refused = pool
+        .connection("one-more", 1, || Ok(("x".into(), SshTarget::new("127.0.0.1", "holz", SshAuth::Password("pw".into())))))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("too many connections are open"), "{refused}");
+    assert_eq!(pool.len(), MAX_CONNECTIONS);
+    // Letting one go makes room again.
+    let mut leased = leased;
+    leased.pop();
+    pool.connection("one-more", 1, || Ok(("x".into(), SshTarget::new("127.0.0.1", "holz", SshAuth::Password("pw".into()))))).unwrap();
+    assert_eq!(pool.len(), MAX_CONNECTIONS);
+}
+
+fn make_in(pool: &SessionPool, id: &str) -> Arc<Connection> {
+    pool.connection(id, 1, || Ok((id.to_owned(), SshTarget::new("127.0.0.1", "holz", SshAuth::Password("pw".into()))))).unwrap()
+}
+

@@ -19,6 +19,7 @@ use crate::conn::ConnState;
 use crate::layout::{LoadStatus, PaneId};
 use crate::pane::PaneSpec;
 use crate::platform::Os;
+use crate::pool::{Connection, SessionPool};
 use crate::persist::{read_limited, write_atomic};
 use crate::profiles::{Kind, Profile, Profiles};
 use crate::secrets::SecretStore;
@@ -99,6 +100,8 @@ pub struct Connections {
     panes: Mutex<HashMap<PaneId, String>>,
     /// Counts the saves and deletes, so what was made from a connection (a file source) knows when it is out of date.
     generation: AtomicU64,
+    /// The SSH connection of each saved profile, shared by the file browser, the monitor and the agent's commands.
+    pool: Arc<SessionPool>,
 }
 
 impl Connections {
@@ -113,7 +116,7 @@ impl Connections {
             _ => HashMap::new(),
         };
         panes.retain(|pane, id| live_panes.contains(pane) && profiles.get(id).is_some());
-        let me = Self { dir: dir.to_path_buf(), os: Os::current(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0) };
+        let me = Self { dir: dir.to_path_buf(), os: Os::current(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0), pool: SessionPool::new() };
         (me, status)
     }
 
@@ -179,6 +182,16 @@ impl Connections {
     pub fn ssh_target(&self, id: &str) -> Result<crate::ssh::SshTarget> {
         let profiles = self.profiles().clone();
         profiles.ssh_target(id, self.secrets.as_ref(), self.home.as_deref(), &self.dir.join(KNOWN_HOSTS_FILE))
+    }
+
+    /// The shared SSH connection of profile `id` for the current version of the connection list: the one login that the
+    /// file browser, the monitor and the agent's commands use. A save or delete makes the next call build a new one.
+    /// The keychain is read only when the pool has none for this version yet.
+    pub fn session(&self, id: &str) -> Result<Arc<Connection>> {
+        self.pool.connection(id, self.generation(), || {
+            let label = self.label_of(id).unwrap_or_else(|| id.to_owned());
+            Ok((label, self.ssh_target(id)?))
+        })
     }
 
     /// Every saved connection.

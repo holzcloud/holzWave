@@ -242,9 +242,7 @@ impl Blocks {
                 return Ok(source.clone());
             }
         }
-        let target = connections.ssh_target(id)?;
-        let label = connections.label_of(id).unwrap_or_else(|| id.to_owned());
-        let source: Arc<dyn FileSource> = Arc::new(crate::files::SftpSource::new(label, target)?);
+        let source: Arc<dyn FileSource> = Arc::new(crate::files::SftpSource::on(connections.session(id)?));
         sources.insert(id.to_owned(), (generation, source.clone()));
         Ok(source)
     }

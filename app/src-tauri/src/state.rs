@@ -2317,9 +2317,11 @@ impl AppCore {
         let exec = self
             .remote_execs
             .get_or_build(connection, generation, || {
-                let label = self.connections.label_of(connection).ok_or_else(|| "there is no such connection".to_owned())?;
-                let target = self.connections.ssh_target(connection).map_err(|error| error.to_string())?;
-                SshExec::new(label, target).map(Arc::new).map_err(|error| error.to_string())
+                if !self.connections.contains(connection) {
+                    return Err("there is no such connection".to_owned());
+                }
+                let shared = self.connections.session(connection).map_err(|error| error.to_string())?;
+                SshExec::on(shared).map(Arc::new).map_err(|error| error.to_string())
             })
             .map_err(|why| scrubbed(&why))?;
         exec.exec(command, limits, cancel).map_err(|error| scrubbed(&error.to_string()))

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use super::{MIN_INTERVAL, Reading};
 use super::procfs::{self, Parsed, Raw, derive};
 use crate::connections::Connections;
+use crate::pool::Connection;
 use crate::ssh::{ExecCancel, ExecEnd, ExecLimits, MAX_EXEC_OUTPUT, SshExec, SshTarget};
 
 /// The longest a sample may take on the host.
@@ -155,6 +156,13 @@ pub fn ssh_monitor_with(label: &str, target: SshTarget, limits: ExecLimits) -> R
     Ok(RemoteMonitor::new(Box::new(ExecProbe { exec, limits })))
 }
 
+/// A monitor for the host of a shared connection (the one of a saved profile), with the limits of the caller. Opens no
+/// connection: the first sample logs in, or finds the login the file browser or the agent already made.
+pub fn ssh_monitor_on(connection: Arc<Connection>, limits: ExecLimits) -> Result<RemoteMonitor, String> {
+    let exec = SshExec::on(connection).map_err(|e| fault_text(&e.to_string()))?;
+    Ok(RemoteMonitor::new(Box::new(ExecProbe { exec, limits })))
+}
+
 struct Entry {
     id: String,
     generation: u64,
@@ -247,9 +255,8 @@ impl RemoteMonitors {
     pub fn sample_with(&self, connections: &Connections, id: &str, clock: &dyn Fn() -> Instant) -> Result<Reading, String> {
         let generation = connections.generation();
         let monitor = self.get_or_build(id, generation, || {
-            let target = connections.ssh_target(id).map_err(|e| fault_text(&e.to_string()))?;
-            let label = connections.label_of(id).unwrap_or_else(|| id.to_owned());
-            ssh_monitor(&label, target)
+            let connection = connections.session(id).map_err(|e| fault_text(&e.to_string()))?;
+            ssh_monitor_on(connection, ExecLimits { max_output: MAX_EXEC_OUTPUT, timeout: SAMPLE_TIMEOUT })
         })?;
         monitor.sample_with(clock)
     }
