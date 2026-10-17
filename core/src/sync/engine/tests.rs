@@ -332,6 +332,173 @@ fn a_local_edit_made_after_a_download_is_kept_before_the_download_is_applied() {
     assert!(report.conflicts.is_empty(), "{report:?}");
 }
 
+/// B has `name` live with `first`, A uploads it and B's next run stages it. Returns the two devices.
+fn staged_over(srv: &Server, tag: &str, name: &str, first: &str, then: &str) -> (Device, Device) {
+    let (a, b) = (device(&format!("a{tag}")), device(&format!("b{tag}")));
+    put(&a, name, first);
+    connect(srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(text(&b, name).as_deref(), Some(first));
+    put(&a, name, then);
+    connect(srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(connect(srv, &b, "pw").unwrap().sync_once().unwrap().downloaded, vec![name.to_owned()]);
+    (a, b)
+}
+
+#[test]
+fn a_download_over_an_unedited_file_keeps_no_copy() {
+    let srv = server();
+    let (_a, b) = staged_over(&srv, "13", "settings.json", "v1", "v2");
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "v2");
+    assert!(!b.dir.join("sync-conflicts").exists() && !b.dir.join("sync-kept.json").exists());
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.conflicts.is_empty(), "{report:?}");
+}
+
+#[test]
+fn a_second_download_before_the_start_keeps_the_first_base() {
+    let srv = server();
+    let (a, b) = staged_over(&srv, "14", "settings.json", "v1", "v2");
+    put(&a, "settings.json", "v3");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().downloaded, vec!["settings.json"]);
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!((promoted.applied.len(), promoted.kept.len()), (1, 0), "the live file still was v1: {promoted:?}");
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "v3");
+    assert!(!b.dir.join("sync-conflicts").exists());
+    // With an edit between the two downloads the first base still stands, so the edit is copied.
+    put(&a, "settings.json", "v4");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    write_atomic(&b.dir.join("settings.json"), b"edit").unwrap();
+    put(&a, "settings.json", "v5");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted.kept, vec!["settings.json"], "{promoted:?}");
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "v5");
+    let copies = kept_copies(&b);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert_eq!(copies[0].1, "edit");
+}
+
+#[test]
+fn a_name_in_a_folder_is_copied_under_a_flat_name() {
+    let srv = server();
+    let (a, b) = (device("a15"), device("b15"));
+    put(&a, "themes/dark.json", "{\"name\":\"dark\"}");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    write_atomic(&b.dir.join("themes").join("dark.json"), b"mine").unwrap();
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted.kept, vec!["themes/dark.json"], "{promoted:?}");
+    let copies = kept_copies(&b);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert!(copies[0].0.starts_with("themes.dark.json."), "{copies:?}");
+    assert_eq!(copies[0].1, "mine");
+    assert_eq!(fs::read_to_string(b.dir.join("themes").join("dark.json")).unwrap(), "{\"name\":\"dark\"}");
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.conflicts, vec!["themes/dark.json"], "{report:?}");
+}
+
+#[test]
+fn a_copy_that_cannot_be_written_leaves_the_download_staged_and_the_live_file_alone() {
+    let srv = server();
+    let (a, b) = (device("a16"), device("b16"));
+    put(&a, "settings.json", "from a");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    write_atomic(&b.dir.join("settings.json"), b"my edit").unwrap();
+    fs::write(b.dir.join("sync-conflicts"), "in the way").unwrap();
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted, Promoted { applied: vec![], kept: vec![], skipped: vec!["settings.json".into()] });
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "my edit", "the live file is untouched");
+    assert!(b.dir.join("sync-incoming").join("settings.json").is_file(), "the download waits");
+    assert!(b.dir.join("sync-incoming").join(".live-at-stage.json").is_file(), "its base waits with it");
+    assert!(!b.dir.join("sync-kept.json").exists(), "nothing was kept, so nothing is reported");
+    // The next start, with the way free, applies the download and keeps the copy.
+    fs::remove_file(b.dir.join("sync-conflicts")).unwrap();
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted, Promoted { applied: vec!["settings.json".into()], kept: vec!["settings.json".into()], skipped: vec![] });
+    assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), "from a");
+    assert_eq!(kept_copies(&b).iter().map(|c| c.1.as_str()).collect::<Vec<_>>(), vec!["my edit"]);
+    assert!(!b.dir.join("sync-incoming").exists());
+}
+
+#[test]
+fn a_file_that_only_exists_after_staging_counts_as_edited() {
+    let srv = server();
+    let (a, b) = (device("a17"), device("b17"));
+    put(&a, "settings.json", "from a");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    let base: serde_json::Value = serde_json::from_slice(&fs::read(b.dir.join("sync-incoming").join(".live-at-stage.json")).unwrap()).unwrap();
+    assert_eq!(base, serde_json::json!({"settings.json": null}), "no live file at staging is a null");
+    write_atomic(&b.dir.join("settings.json"), b"appeared later").unwrap();
+    assert_eq!(promote_incoming_with_report(&b.dir).kept, vec!["settings.json"]);
+}
+
+#[test]
+fn the_secrets_are_never_staged_copied_or_noticed() {
+    let srv = server();
+    let d = device("a18");
+    let source = ConfigSource::new(&d.dir, d.secrets.clone());
+    source.write(SECRETS, br#"{"ssh:ok":"hunter2hunter2"}"#).unwrap();
+    assert!(!d.dir.join("sync-incoming").exists(), "the secrets never become a staged file");
+    // Whatever is planted, a promote applies and copies nothing for them.
+    fs::create_dir_all(d.dir.join("sync-incoming")).unwrap();
+    fs::write(d.dir.join("sync-incoming").join("secrets.json"), "{\"ssh:ok\":\"planted\"}").unwrap();
+    fs::write(d.dir.join("secrets.json"), "live").unwrap();
+    let promoted = promote_incoming_with_report(&d.dir);
+    assert_eq!(promoted, Promoted::default());
+    assert_eq!(fs::read_to_string(d.dir.join("secrets.json")).unwrap(), "live");
+    assert!(!d.dir.join("sync-conflicts").exists() && !d.dir.join("sync-kept.json").exists() && !d.dir.join("sync-incoming").exists());
+    // A notice that names them reports nothing.
+    fs::write(d.dir.join("sync-kept.json"), r#"{"kept":["secrets.json"]}"#).unwrap();
+    let report = connect(&srv, &d, "pw").unwrap().sync_once().unwrap();
+    assert!(report.conflicts.is_empty(), "{report:?}");
+}
+
+#[test]
+fn a_damaged_or_oversized_sidecar_and_notice_are_ignored() {
+    let srv = server();
+    let (a, b) = (device("a19"), device("b19"));
+    put(&a, "settings.json", "from a");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    write_atomic(&b.dir.join("settings.json"), b"my edit").unwrap();
+    let sidecar = b.dir.join("sync-incoming").join(".live-at-stage.json");
+    // Every damaged form means "no base": the differing live file is copied, nothing panics, the promote goes on.
+    let big = format!("{{\"settings.json\":\"{}\"}}", "a".repeat(300 * 1024));
+    for (i, damaged) in ["not json at all".to_owned(), r#"{"settings.json": 5}"#.to_owned(), r#"["settings.json"]"#.to_owned(), big].into_iter().enumerate() {
+        let incoming = b.dir.join("sync-incoming");
+        fs::create_dir_all(&incoming).unwrap();
+        fs::write(incoming.join("settings.json"), format!("download {i}")).unwrap();
+        fs::write(&sidecar, damaged).unwrap();
+        fs::write(b.dir.join("settings.json"), format!("edit {i}")).unwrap();
+        let promoted = promote_incoming_with_report(&b.dir);
+        assert_eq!(promoted.kept, vec!["settings.json"], "case {i}: {promoted:?}");
+        assert_eq!(fs::read_to_string(b.dir.join("settings.json")).unwrap(), format!("download {i}"));
+        assert!(kept_copies(&b).iter().any(|c| c.1 == format!("edit {i}")), "case {i}");
+    }
+    // A sidecar that names things that are not synced does not make them synced.
+    fs::create_dir_all(b.dir.join("sync-incoming")).unwrap();
+    fs::write(&sidecar, r#"{"../x":null,"secrets.json":null,"other.json":"x"}"#).unwrap();
+    assert_eq!(promote_incoming_with_report(&b.dir), Promoted::default());
+    // A damaged notice never blocks a run and never names a file that is not synced.
+    for damaged in ["garbage".to_owned(), r#"{"kept":5}"#.to_owned(), format!("{{\"kept\":[\"settings.json\"],\"pad\":\"{}\"}}", "a".repeat(300 * 1024))] {
+        fs::write(b.dir.join("sync-kept.json"), damaged).unwrap();
+        let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+        assert!(report.conflicts.is_empty(), "{report:?}");
+        assert!(!b.dir.join("sync-kept.json").exists());
+    }
+    fs::write(b.dir.join("sync-kept.json"), r#"{"kept":["../x","secrets.json","other.json","themes/a.b.json","settings.json","settings.json"]}"#).unwrap();
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.conflicts, vec!["settings.json"], "{report:?}");
+}
+
 #[test]
 fn promoting_ignores_names_that_are_not_synced() {
     let d = device("a11");
