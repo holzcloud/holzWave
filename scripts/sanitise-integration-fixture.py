@@ -4,7 +4,8 @@
 Reads standard input and writes standard output. It never touches a file.
 
 JSON input is walked and keeps its keys and structure:
-  * every GUID becomes a synthetic one (00000000-0000-4000-8000-000000000001, ...) in order of first appearance;
+  * every GUID becomes a synthetic one (00000000-0000-4000-8000-000000000001, ...) in order of first appearance; a GUID
+    that is already in the synthetic range stays;
   * a string under the key name, displayName, tenantDisplayName or domain becomes "Item N" of that key, except a few
     well-known values of the tools (for example the name of a public cloud);
   * a string that holds an at sign becomes user@example.com;
@@ -28,6 +29,7 @@ import re
 import sys
 
 GUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+SYNTHETIC_GUID = re.compile(r"00000000-0000-4000-8000-0000000000[0-9a-f]{2}")
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 LONG_WORD = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
 HEX_DIGEST = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -60,6 +62,8 @@ class Sanitiser:
 
     def guid(self, match):
         key = match.group(0).lower()
+        if SYNTHETIC_GUID.fullmatch(key):
+            return key
         if key not in self.guids:
             self.guids[key] = "00000000-0000-4000-8000-%012d" % (len(self.guids) + 1)
         return self.guids[key]

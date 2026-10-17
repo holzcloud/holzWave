@@ -389,3 +389,214 @@ fn config_view_of_the_canary_kubeconfig_matches_the_recorded_fixture() {
     assert_eq!(with_exec_env_values_redacted(real), recorded, "the real output differs from the recorded fixture");
     fs::remove_dir_all(&scratch).ok();
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The shape of the recorded kubectl fixtures (runs everywhere).
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn fixture_json(relative: &str) -> Value {
+    serde_json::from_str(&read_fixture(relative)).unwrap_or_else(|e| panic!("{relative} is not JSON: {e}"))
+}
+
+#[test]
+fn the_version_fixture_holds_the_client_members() {
+    let version = fixture_json("kubectl/version_client.json");
+    for member in ["major", "minor", "gitVersion", "buildDate", "platform"] {
+        assert!(version.pointer(&format!("/clientVersion/{member}")).is_some_and(Value::is_string), "clientVersion.{member} is missing");
+    }
+}
+
+#[test]
+fn the_list_fixtures_are_kubectl_lists_with_the_members_a_parser_reads() {
+    for file in ["kubectl/namespaces.json", "kubectl/pods.json", "kubectl/pods_hostile.json"] {
+        let list = fixture_json(file);
+        assert_eq!(list["kind"], "List", "{file}: kubectl wraps the items of a get in a List");
+        assert!(list["items"].as_array().is_some_and(|items| items.len() >= 3), "{file}: fewer than three items");
+    }
+    let pods = fixture_json("kubectl/pods.json");
+    let waiting: Vec<&str> = pods["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .filter_map(|pod| pod.pointer("/status/containerStatuses/0/state/waiting/reason").and_then(Value::as_str))
+        .collect();
+    assert_eq!(waiting, ["ContainerCreating", "CrashLoopBackOff"], "the pending and the back-off pod are in the list");
+    let hostile = fixture_json("kubectl/pods_hostile.json");
+    let name = hostile.pointer("/items/0/metadata/name").and_then(Value::as_str).expect("first pod name");
+    assert_eq!(name.len(), 253, "the first hostile pod has a name of the longest legal length");
+    assert!(read_fixture("kubectl/pods_hostile.json").contains("\\u202e"), "the right-to-left override is written as a JSON escape");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The overlay kubeconfig behaviour the context design rests on (gated, real kubectl, scratch files only).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const BASE_KUBECONFIG: &str = "apiVersion: v1
+kind: Config
+current-context: alpha
+clusters:
+- name: c1
+  cluster:
+    server: https://c1.example.com
+- name: c2
+  cluster:
+    server: https://c2.example.com
+contexts:
+- name: alpha
+  context:
+    cluster: c1
+    user: u1
+    namespace: base-ns
+- name: beta
+  context:
+    cluster: c2
+    user: u1
+users:
+- name: u1
+  user:
+    token: HW-CANARY-TOKEN-0001
+";
+
+/// A scratch directory with a base kubeconfig (the user's own file) and the closed environment of a run.
+struct Rig {
+    kubectl: PathBuf,
+    dir: PathBuf,
+    base: PathBuf,
+    overlay: PathBuf,
+}
+
+impl Rig {
+    fn new(kubectl: PathBuf, tag: &str) -> Rig {
+        let dir = common::scratch_dir(tag);
+        let base = dir.join("base-config");
+        fs::write(&base, BASE_KUBECONFIG).expect("write base");
+        Rig { kubectl, overlay: dir.join("overlay-config"), dir, base }
+    }
+
+    /// `KUBECONFIG` as the host's list: the overlay first, then the base file.
+    fn list(&self) -> PathBuf {
+        PathBuf::from(std::env::join_paths([&self.overlay, &self.base]).expect("join KUBECONFIG"))
+    }
+
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        run_tool(&self.kubectl, args, &[("KUBECONFIG", &self.list()), ("HOME", &self.dir)])
+    }
+
+    fn run_ok(&self, args: &[&str]) -> String {
+        let out = self.run(args);
+        assert!(out.status.success(), "kubectl {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).expect("utf-8")
+    }
+
+    fn view(&self) -> Value {
+        serde_json::from_str(&self.run_ok(&["--request-timeout=5s", "config", "view", "-o", "json"])).expect("config view prints JSON")
+    }
+
+    fn base_bytes(&self) -> Vec<u8> {
+        fs::read(&self.base).expect("read base")
+    }
+
+    fn done(self) {
+        fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
+fn overlay_json(current: Option<&str>, contexts: Value) -> String {
+    let mut overlay = serde_json::json!({"apiVersion": "v1", "kind": "Config", "contexts": contexts});
+    if let Some(current) = current {
+        overlay["current-context"] = Value::String(current.to_owned());
+    }
+    serde_json::to_string_pretty(&overlay).expect("serialise overlay")
+}
+
+fn context_named<'a>(view: &'a Value, name: &str) -> &'a Value {
+    view["contexts"].as_array().expect("contexts").iter().find(|c| c["name"] == name).unwrap_or_else(|| panic!("no context {name}"))
+}
+
+#[test]
+fn an_overlay_in_front_overrides_current_context_and_namespace_and_leaves_the_file_alone() {
+    let Some(kubectl) = real_tool("kubectl") else { return };
+    let rig = Rig::new(kubectl, "ovl-view");
+    let overlay = overlay_json(Some("beta"), serde_json::json!([{"name": "alpha", "context": {"cluster": "c1", "user": "u1", "namespace": "overlay-ns"}}]));
+    fs::write(&rig.overlay, overlay).expect("write overlay");
+    let before = rig.base_bytes();
+    let view = rig.view();
+    assert_eq!(view["current-context"], "beta", "the overlay's current-context wins");
+    assert_eq!(context_named(&view, "alpha")["context"]["namespace"], "overlay-ns", "the overlay's namespace for a redefined context wins");
+    assert_eq!(context_named(&view, "beta")["context"]["cluster"], "c2", "a context only the base file has is still there");
+    assert_eq!(rig.base_bytes(), before, "the base file is byte-identical after a read");
+    rig.done();
+}
+
+#[test]
+fn use_context_in_an_overlay_pane_changes_only_the_overlay() {
+    let Some(kubectl) = real_tool("kubectl") else { return };
+    let rig = Rig::new(kubectl, "ovl-use");
+    let overlay = overlay_json(Some("beta"), serde_json::json!([{"name": "alpha", "context": {"cluster": "c1", "user": "u1", "namespace": "overlay-ns"}}]));
+    fs::write(&rig.overlay, overlay).expect("write overlay");
+    let before = rig.base_bytes();
+    rig.run_ok(&["config", "use-context", "alpha"]);
+    assert_eq!(rig.base_bytes(), before, "use-context left the base file alone");
+    let overlay_text = fs::read_to_string(&rig.overlay).expect("read overlay");
+    assert!(overlay_text.contains("alpha"), "the overlay holds the new current-context: {overlay_text}");
+    assert_eq!(rig.view()["current-context"], "alpha");
+    rig.done();
+}
+
+/// The hazard, pinned as observed: `set-context --current --namespace=` edits the file that defines the current context.
+/// When the overlay does not define it, that is the user's own file. This is why the product writes a tool's own files
+/// only through a verb the user confirmed, and why the isolation is for the current context and the contexts the overlay
+/// redefines.
+#[test]
+fn set_context_current_namespace_rewrites_the_original_when_the_context_lives_there() {
+    let Some(kubectl) = real_tool("kubectl") else { return };
+    let rig = Rig::new(kubectl, "ovl-set");
+    // The overlay names no current context and defines no context: the base file's `alpha` is the current one.
+    fs::write(&rig.overlay, overlay_json(None, serde_json::json!([]))).expect("write overlay");
+    let before = rig.base_bytes();
+    rig.run_ok(&["config", "set-context", "--current", "--namespace=zzz"]);
+    let after = rig.base_bytes();
+    assert_ne!(after, before, "the base file was rewritten");
+    assert!(String::from_utf8_lossy(&after).contains("namespace: zzz"), "the base file now holds the new namespace");
+    assert_eq!(context_named(&rig.view(), "alpha")["context"]["namespace"], "zzz");
+    rig.done();
+}
+
+#[test]
+fn an_overlay_written_as_json_is_read_like_yaml() {
+    let Some(kubectl) = real_tool("kubectl") else { return };
+    let rig = Rig::new(kubectl, "ovl-yaml");
+    let json = overlay_json(Some("beta"), serde_json::json!([{"name": "alpha", "context": {"cluster": "c1", "user": "u1", "namespace": "overlay-ns"}}]));
+    fs::write(&rig.overlay, &json).expect("write JSON overlay");
+    let from_json = rig.view();
+    let yaml = "apiVersion: v1
+kind: Config
+current-context: beta
+contexts:
+- name: alpha
+  context:
+    cluster: c1
+    user: u1
+    namespace: overlay-ns
+";
+    fs::write(&rig.overlay, yaml).expect("write YAML overlay");
+    let from_yaml = rig.view();
+    assert_eq!(from_json, from_yaml, "a JSON overlay and a YAML overlay of the same content give the same config view");
+    rig.done();
+}
+
+#[test]
+fn a_context_name_with_colons_slashes_and_an_at_sign_survives_the_overlay() {
+    let Some(kubectl) = real_tool("kubectl") else { return };
+    let rig = Rig::new(kubectl, "ovl-name");
+    let names = ["arn:aws:eks:eu-central-1:000000000000:cluster/demo", "ops@demo.example.com:443/prod"];
+    for name in names {
+        let overlay = overlay_json(Some(name), serde_json::json!([{"name": name, "context": {"cluster": "c1", "user": "u1", "namespace": "ns-1"}}]));
+        fs::write(&rig.overlay, overlay).expect("write overlay");
+        let view = rig.view();
+        assert_eq!(view["current-context"], name, "the current-context round-trips");
+        assert_eq!(context_named(&view, name)["context"]["namespace"], "ns-1");
+        assert_eq!(rig.run_ok(&["config", "current-context"]).trim(), name, "kubectl prints the name back as written");
+    }
+    rig.done();
+}
