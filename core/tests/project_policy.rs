@@ -278,6 +278,12 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
          and asks the system resolver for the addresses of a host name; it opens no socket and listens on none",
     ),
     (
+        "core/src/integrate/args.rs",
+        "std::net",
+        "`IpAddr` only as the standard library's own address parser, to tell a node given as an IP literal from a host \
+         name; the file opens no socket and resolves nothing",
+    ),
+    (
         "core/src/ai/profiles.rs",
         "https://",
         "the preset table holds the default addresses of the providers and gateways; the file connects to none of them, \
