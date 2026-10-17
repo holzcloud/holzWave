@@ -171,6 +171,23 @@ fn the_pane_shows_a_notice_line_that_never_reaches_the_shell() {
 }
 
 #[test]
+fn committed_text_reaches_the_shell_whatever_its_length() {
+    let probe = Probe::default();
+    let pane = spawn(PaneSpec::new("/bin/cat", 80, 24), &probe);
+    // An IME commit or a dead-key result is whole text as input, not a paste. The encoder's first buffer is small: text of
+    // more than 16 bytes, and text in a script that takes three bytes a character, must not be dropped.
+    let texts = ["hello world", "ab cd ef gh ij kl", "printf 'Z=[%s]\\n' 99", "日本語のテキストを入力します", &"x".repeat(300)];
+    for (n, text) in texts.iter().enumerate() {
+        pane.text((*text).into()).expect("the text is accepted");
+        pane.key(key("Enter", "Enter")).expect("Enter");
+        let wanted: String = text.chars().take(70).collect();
+        assert!(wait_until(WAIT, || probe.has_text(&wanted)), "text {n} ({} bytes) came back as echo: {:?}", text.len(), probe.events());
+    }
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
 fn a_notice_is_bounded() {
     let probe = Probe::default();
     let pane = spawn(spec_sh("sleep 3"), &probe);
