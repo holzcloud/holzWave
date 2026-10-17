@@ -49,6 +49,7 @@ function checkSpec(scope, options) {
     forbidden: loadCorpus().forbidden,
     uiElements: UI_ELEMENTS,
     uiAttributes: UI_ATTRIBUTES,
+    textAttributes: TEXT_ATTRIBUTES,
   };
 }
 
@@ -95,7 +96,7 @@ async function ensureChecker(page) {
             if (s.forbidden.attribute_prefixes.some((p) => n.startsWith(p))) add("handler-attribute", n);
             if (n.startsWith("xlink:") || n.startsWith("xmlns")) add("namespace-attribute", n);
             if (n === "href" && name !== "a") add("href-on-non-anchor", name);
-            if (text && hostileValue.test(attribute.value)) add("attribute-value", `${n}=${attribute.value.slice(0, 40)}`);
+            if (text && !s.textAttributes.includes(n) && hostileValue.test(attribute.value)) add("attribute-value", `${n}=${attribute.value.slice(0, 40)}`);
           }
           if (name === "a") {
             const href = el.getAttribute("href");
@@ -172,7 +173,16 @@ export const readWatch = (page) =>
  * name of a control are its own. The value check still reads every one of them.
  */
 export const UI_ELEMENTS = ["textarea", "select", "form", "dialog"];
-export const UI_ATTRIBUTES = ["id", "name", "tabindex", "autofocus", "accesskey"];
+export const UI_ATTRIBUTES = ["id", "name", "tabindex", "autofocus", "accesskey", "style"];
+
+/**
+ * The two attributes that carry a person-readable name of a control and nothing else: a tooltip (`title`) and an accessible name
+ * (`aria-label`). The page sets them with `setAttribute`, so the text in them is never parsed, and the header of a pane and the
+ * block of a chat repeat the title of the chat there on purpose (the tooltip shows what the header cuts, the name is what a
+ * screen reader reads). Every other attribute must not carry a string of the attack, and an attribute breaker would still show
+ * as a new attribute (a handler, `autofocus`), which is checked on its own.
+ */
+export const TEXT_ATTRIBUTES = ["title", "aria-label"];
 
 /** The names of the problem classes `domProblems` reports (the first word of a line). */
 export const PROBLEM_CLASSES = [
@@ -361,4 +371,124 @@ export async function dropRawReports(page, errors) {
   await page.waitForTimeout(150);
   const expected = /^csp violation: (style-src-(elem|attr)|script-src-attr|base-uri) blocked .* \(.*safehtml\.js\)$/;
   errors.splice(0, errors.length, ...errors.filter((e) => !expected.test(e)));
+}
+
+// ---- the surfaces: one set of hostile strings, every place the page draws text that is not its own ---------------------------
+
+/** The pollution of a prototype as the JSON a hostile answer would carry: an own `__proto__` member and a `constructor.prototype` one. */
+export const POLLUTION_JSON = '{"__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}}}';
+
+const WORD = "q";
+
+/**
+ * The fourteen hostile strings every surface is fed. `shows` is the part that must be visible when the surface shows the value
+ * (for the string of hidden characters the word between them, for the long line its last 64 letters), `head` is the start that a
+ * surface which cuts a value must still show, and `markup` marks the strings that must never be found in an attribute.
+ */
+export const HOSTILE = [
+  { id: "img-onerror", text: '<img src=x onerror="window.__XSS=1">', markup: true },
+  { id: "script-tag", text: "<script>window.__XSS=1</script>", markup: true },
+  { id: "svg-onload", text: '<svg onload="window.__XSS=1"></svg>', markup: true },
+  { id: "js-scheme", text: "javascript:window.__XSS=1", markup: false },
+  { id: "textarea-break", text: '</textarea><img src=x onerror="window.__XSS=1">', markup: true },
+  { id: "quote-break", text: '" onfocus="window.__XSS=1" autofocus="', markup: true },
+  { id: "template", text: "{{constructor.constructor('window.__XSS=1')()}}", markup: true },
+  { id: "anchor-js", text: '<a href="javascript:window.__XSS=1">x</a>', markup: true },
+  {
+    id: "hidden-run",
+    text: `${HIDDEN.bidi}${HIDDEN.zeroWidthSpace}hidden-word${HIDDEN.zeroWidthJoiner}${HIDDEN.tag}${HIDDEN.nul}${HIDDEN.escape}${HIDDEN.c1}${HIDDEN.lineSeparator}`,
+    shows: "hidden-word",
+    head: "hidden-word",
+    markup: false,
+  },
+  { id: "long-line", text: `${WORD.repeat(4995)}__XSS`, shows: `${WORD.repeat(59)}__XSS`, markup: false },
+  { id: "proto-key", text: "__proto__", markup: false },
+  { id: "data-host", text: 'data:text/html,<script>window.__XSS=1</script>', markup: true },
+  { id: "style-tag", text: "<style>*{display:none}</style>", markup: true },
+  { id: "double-escape", text: "&lt;img src=x onerror=window.__XSS=1&gt; &amp;lt;", markup: true },
+].map((h) => ({ ...h, shows: h.shows ?? h.text, head: h.head ?? Array.from(h.text).slice(0, 32).join("") }));
+
+/** The strings by id. */
+export const hostile = (id) => HOSTILE.find((h) => h.id === id);
+
+/**
+ * Run one surface against the hostile strings. `run(probe)` boots what it needs (the committed helpers, with the options of the
+ * surface), puts the strings where the surface draws them and answers `{ scope, shown }` or calls `probe` itself when the surface
+ * shows its strings one after the other. A probe checks, for the nodes that match `scope`:
+ *   - `domProblems` in text mode finds nothing and `pageClean` finds nothing;
+ *   - every string of `put` (all of them by default) that is in `shown` (`true`: all of `put`) occurs in the text of the scope
+ *     by its `shows` part, and every one in `cut` by its `head`;
+ *   - no attribute value anywhere in the scope contains a markup string;
+ *   - the guards are quiet and the page is responsive.
+ * A failure is a line `name: ...` in `ctx.failures`; `finish` throws all of them together.
+ */
+export async function surface(ctx, name, run) {
+  const probe = async ({ scope, put = HOSTILE.map((h) => h.id), shown = true, cut = [], label = "", options = {} }) => {
+    const here = label === "" ? name : `${name} (${label})`;
+    const fail = (line) => ctx.failures.push(`${here}: ${line}`);
+    const { page } = ctx;
+    const found = await domProblems(page, scope, { mode: "text", ...options });
+    for (const line of found) fail(line);
+    for (const line of await pageClean(page)) fail(line);
+    const text = (await page.locator(scope).allTextContents()).join("\n");
+    const expected = shown === true ? put : shown;
+    for (const id of expected) {
+      const h = hostile(id);
+      if (!text.includes(h.shows)) fail(`the string ${id} is not shown (${JSON.stringify(h.shows.slice(0, 60))})`);
+    }
+    for (const id of cut) {
+      const h = hostile(id);
+      if (!text.includes(h.head)) fail(`the start of the string ${id} is not shown (${JSON.stringify(h.head.slice(0, 40))})`);
+    }
+    const carried = await page.evaluate(
+      ([sel, words, names]) =>
+        [...document.querySelectorAll(sel)].flatMap((root) =>
+          [root, ...root.querySelectorAll("*")].flatMap((n) =>
+            [...n.attributes].filter((a) => !names.includes(a.name) && words.some((w) => a.value.includes(w))).map((a) => `${n.localName}[${a.name}]`),
+          ),
+        ),
+      [scope, put.map(hostile).filter((h) => h.markup).map((h) => h.shows), TEXT_ATTRIBUTES],
+    );
+    for (const holder of new Set(carried)) fail(`an attribute carries the text: ${holder}`);
+    for (const address of ctx.guards.foreign()) fail(`a request went to another origin: ${address}`);
+    for (const address of ctx.guards.popups()) fail(`a window opened: ${address}`);
+    try {
+      await responsive(page, 5000);
+    } catch (e) {
+      fail(e.message);
+    }
+    ctx.probes += 1;
+    ctx.scanned.push([name, text.length, put.length]);
+    return found.length;
+  };
+  probe.fail = (line) => ctx.failures.push(`${name}: ${line}`);
+  try {
+    const result = await run(probe);
+    if (result !== undefined && result !== null) await probe(result);
+  } catch (e) {
+    ctx.failures.push(`${name}: exception: ${String(e?.message ?? e).split("\n")[0].slice(0, 300)}`);
+  }
+  ctx.surfaces.push(name);
+}
+
+/** The state of one page run of the surfaces: the page, the guards, the failures so far and the surfaces that ran. */
+export function surfaceContext(page, url, guards) {
+  return { page, url, guards, failures: [], surfaces: [], probes: 0, scanned: [], corpus: loadCorpus() };
+}
+
+/** Throw one error that lists every failure of every surface, or nothing when there is none. */
+export function finish(ctx, expected) {
+  const per = {};
+  for (const [name, length, strings] of ctx.scanned) {
+    per[name] ??= { probes: 0, characters: 0, strings: 0 };
+    per[name].probes += 1;
+    per[name].characters += length;
+    per[name].strings += strings;
+  }
+  console.log(`aigate surfaces: ${expected.map((n) => `${n} ${per[n]?.probes ?? 0} probes, ${per[n]?.strings ?? 0} strings, ${per[n]?.characters ?? 0} characters`).join("; ")}`);
+  if (ctx.failures.length > 0) {
+    throw new Error(`${ctx.failures.length} problems in the surfaces:\n${ctx.failures.slice(0, 60).join("\n")}`);
+  }
+  assert.deepEqual(ctx.surfaces, expected, "every surface of the file ran");
+  assert.ok(ctx.probes >= expected.length, "every surface was probed");
 }
