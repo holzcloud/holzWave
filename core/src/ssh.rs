@@ -2040,6 +2040,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn no_agent_is_told_in_words() {
+        // The environment is an argument, so no test changes the process's own.
+        let none = agent_endpoint(None, None);
+        let empty = agent_endpoint(None, Some(std::ffi::OsString::new()));
+        let set = agent_endpoint(None, Some("/run/user/1000/agent.sock".into()));
+        let given = agent_endpoint(Some(Path::new("/x/a.sock")), None);
+        #[cfg(not(windows))]
+        {
+            assert_eq!(none, Err("no ssh-agent is running (SSH_AUTH_SOCK is not set)"));
+            assert_eq!(empty, Err("no ssh-agent is running (SSH_AUTH_SOCK is not set)"), "an empty variable is no agent");
+            assert_eq!(set, Ok(PathBuf::from("/run/user/1000/agent.sock")));
+        }
+        #[cfg(windows)]
+        {
+            let pipe = Ok(PathBuf::from(r"\\.\pipe\openssh-ssh-agent"));
+            assert_eq!((none, empty, set), (pipe.clone(), pipe.clone(), pipe), "Windows has one well-known pipe");
+        }
+        // A socket that a test or a tool names wins over the environment.
+        assert_eq!(given, Ok(PathBuf::from("/x/a.sock")));
+    }
+
+    #[test]
+    fn a_certificate_is_never_offered() {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let other = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let authority = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let mut builder =
+            russh::keys::ssh_key::certificate::Builder::new(vec![1u8; 16], key.public_key().key_data().clone(), 0, u64::MAX).unwrap();
+        builder.valid_principal("holz").unwrap();
+        let certificate = builder.sign(&authority).unwrap();
+        let listed = vec![
+            AgentIdentity::Certificate { certificate, comment: "cert".into() },
+            AgentIdentity::PublicKey { key: other.public_key().clone(), comment: "plain".into() },
+            AgentIdentity::PublicKey { key: key.public_key().clone(), comment: String::new() },
+        ];
+        let kept = plain_keys(listed);
+        assert_eq!(kept.len(), 2, "only the plain keys are kept");
+        assert_eq!(kept[0].key_data(), other.public_key().key_data(), "in the order the agent listed them");
+        assert_eq!(kept[1].key_data(), key.public_key().key_data());
+    }
+
+    #[test]
+    fn a_public_key_file_is_read_and_a_private_key_never_is() {
+        let dir = std::env::temp_dir().join(format!("holzwave-ssh-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let public = dir.join("id.pub");
+        std::fs::write(&public, key.public_key().to_openssh().unwrap() + "\n").unwrap();
+        assert_eq!(read_identity(&public).unwrap().key_data(), key.public_key().key_data());
+        // A private key, a file of nonsense, a short file, a folder and a missing file are all not a public key.
+        let private = dir.join("id");
+        std::fs::write(&private, key.to_openssh(russh::keys::ssh_key::LineEnding::LF).unwrap().to_string()).unwrap();
+        assert!(read_identity(&private).is_none());
+        std::fs::write(dir.join("junk"), "hello world, this is not a key").unwrap();
+        std::fs::write(dir.join("short"), "ssh").unwrap();
+        for name in ["junk", "short", "missing"] {
+            assert!(read_identity(&dir.join(name)).is_none(), "{name}");
+        }
+        assert!(read_identity(&dir).is_none());
+        // More than the bound is cut, so a huge file cannot fill the memory.
+        std::fs::write(dir.join("huge"), "ssh-ed25519 ".to_owned() + &"A".repeat(1 << 20)).unwrap();
+        assert!(read_identity(&dir.join("huge")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The error of really decoding `text` as a key file, for the variants a hand cannot build.
     fn decode_error(text: &str, passphrase: Option<&str>) -> russh::keys::Error {
         russh::keys::decode_secret_key(text, passphrase).expect_err("the text is not a usable key")
