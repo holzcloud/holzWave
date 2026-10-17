@@ -6,7 +6,13 @@
 //! kept: a lost server version in `backups/` on the server, a lost local version in `sync-conflicts/` next to the files
 //! (never for the secrets, which are never written to a file). A download is staged and applied at the next start; a
 //! live file the person changed after the download was staged is copied to `sync-conflicts/` first, and the first run
-//! after that start lists it among the conflicts. Deletions are not synced yet; a deleted file comes back.
+//! after that start lists it among the conflicts.
+//!
+//! A deletion is a version like any other: the device that deleted a theme or a widget uploads a *tombstone*, the sealed
+//! payload [`TOMBSTONE`], and a device that finds one over a file it has not changed copies the file to `sync-conflicts/`
+//! and removes it. Tombstones exist for the folders that hold one file per item (`themes/`, `widgets/`) and nowhere else;
+//! an edit beats a delete on either side; a file that is merely not found counts as deleted, an error or a missing
+//! folder never does; and a run sends at most [`MAX_DELETES_SENT`] and applies at most [`MAX_DELETES_APPLIED`].
 //!
 //! The name `layout.json` carries a *layout unit*: the layout together with the pane assignments that make sense on
 //! another computer (see [`Unit`]). Pane ids are small per-device counters, so a layout adopted without the assignments
@@ -54,6 +60,27 @@ const PANE_FILE_LIMIT: u64 = 256 * 1024;
 /// The longest connection id or block source a unit may name, and the longest block path.
 const MAX_ID: usize = 64;
 const MAX_BLOCK_PATH: usize = 4096;
+/// The plaintext of a deleted file: a NUL byte and a fixed word. It is sealed like any file, so the blob format does not
+/// change, and it is not valid JSON, so a client that does not know it sees an invalid theme or widget file and ignores it.
+pub const TOMBSTONE: &[u8] = b"\0holzwave:deleted";
+/// The most tombstones one run sends, and the most files one run removes because another device deleted them.
+pub const MAX_DELETES_SENT: usize = 5;
+pub const MAX_DELETES_APPLIED: usize = 20;
+
+/// Whether a payload is the marker of a deleted file.
+fn is_tombstone(plain: &[u8]) -> bool {
+    plain == TOMBSTONE
+}
+
+/// Whether a deletion can be synced for `name`: only the folders that hold one file per item.
+fn deletable(name: &str) -> bool {
+    allowed(name) && name.split_once('/').is_some_and(|(dir, _)| DIRS.contains(&dir))
+}
+
+/// The folder (`themes` or `widgets`) of a deletable name.
+fn folder_of(name: &str) -> &str {
+    name.split_once('/').map_or(name, |(dir, _)| dir)
+}
 
 fn err(m: impl Into<String>) -> Error {
     Error::Io(io::Error::other(m.into()))
@@ -115,6 +142,11 @@ pub trait Source: Send {
     fn names(&self) -> Result<Vec<String>>;
     fn read(&self, name: &str) -> Result<Option<Vec<u8>>>;
     fn write(&self, name: &str, bytes: &[u8]) -> Result<()>;
+    /// Remove the local file of `name` (a name under `themes/` or `widgets/`) after a copy of it was kept; fails without
+    /// removing anything when the copy cannot be written.
+    fn delete(&self, name: &str) -> Result<()>;
+    /// Whether the folder `folder` (`themes` or `widgets`) exists here. A missing folder is not a deletion of its files.
+    fn folder_exists(&self, folder: &str) -> bool;
 }
 
 /// Where downloaded files wait until the next start. The running app owns its files (it rewrites the layout, the settings
@@ -632,6 +664,39 @@ impl Source for ConfigSource {
         self.record_live(name);
         Ok(write_atomic(&self.dir.join(INCOMING).join(name), bytes)?)
     }
+
+    fn delete(&self, name: &str) -> Result<()> {
+        if !deletable(name) {
+            return Err(err("the sync never deletes this file"));
+        }
+        let live = self.dir.join(name);
+        // The copy comes first: when it cannot be written nothing is removed.
+        if let Some(bytes) = read_limited(&live, MAX_FILE)? {
+            if !copy_edit(&self.dir, name, &bytes) {
+                return Err(err("a copy of the file could not be kept in sync-conflicts, so it was not removed"));
+            }
+        }
+        match fs::remove_file(&live) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let root = self.dir.join(INCOMING);
+        match fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let mut bases = load_bases(&root);
+        if bases.remove(name).is_some() {
+            save_bases(&root, &bases);
+        }
+        Ok(())
+    }
+
+    fn folder_exists(&self, folder: &str) -> bool {
+        DIRS.contains(&folder) && fs::metadata(self.dir.join(folder)).is_ok_and(|m| m.is_dir())
+    }
 }
 
 // ---- what the last run left behind -------------------------------------------------------------------------------
@@ -640,7 +705,15 @@ impl Source for ConfigSource {
 struct Seen {
     counter: u64,
     etag: String,
+    /// The hash of the content last in agreement; empty for a deleted name.
     hash: String,
+    /// The name was deleted (the server holds a tombstone) and the local file is gone.
+    #[serde(default, skip_serializing_if = "is_false")]
+    deleted: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -701,6 +774,10 @@ pub struct Report {
     pub conflicts: Vec<String>,
     /// A name and why it could not be synced; the others were.
     pub errors: Vec<(String, String)>,
+    /// Files this device removed because another device deleted them (a copy is in `sync-conflicts/`).
+    pub removed: Vec<String>,
+    /// Files this device deleted, whose tombstones were sent.
+    pub deleted: Vec<String>,
 }
 
 pub struct Syncer<B: Backend, S: Source> {
@@ -778,6 +855,8 @@ impl<B: Backend, S: Source> Syncer<B, S> {
             .collect();
         let mut names: Vec<String> = self.source.names()?;
         names.extend(remote.keys().cloned());
+        // A local deletion is noticed even when the name is no longer among the local files.
+        names.extend(self.state.files.iter().filter(|(n, s)| !s.deleted && deletable(n)).map(|(n, _)| n.clone()));
         names.sort();
         names.dedup();
         let kept = load_kept(&self.dir);
@@ -805,6 +884,28 @@ impl<B: Backend, S: Source> Syncer<B, S> {
         let local_changed = local_hash.is_some() && local_hash.as_deref() != seen.as_ref().map(|s| s.hash.as_str());
         for _ in 0..3 {
             let remote_changed = remote_etag.is_some() && remote_etag.as_deref() != seen.as_ref().map(|s| s.etag.as_str());
+            // The file is not found here, it was in agreement before and nobody changed it on the server: a deletion.
+            if local.is_none() && !remote_changed && deletable(name) && seen.as_ref().is_some_and(|s| !s.deleted) {
+                let Some(etag) = remote_etag.clone() else {
+                    // The server has no such file any more either: nothing to keep in step.
+                    self.state.files.remove(name);
+                    return Ok(());
+                };
+                let base = seen.as_ref().map_or(0, |s| s.counter);
+                match self.upload(name, TOMBSTONE, base + 1, Some(&etag)) {
+                    Ok(new_etag) => {
+                        self.remember_deleted(name, base + 1, &new_etag);
+                        report.deleted.push(name.to_owned());
+                        report.uploaded.push(name.to_owned());
+                        return Ok(());
+                    }
+                    Err(e) if e.to_string().contains(CONFLICT) => {
+                        remote_etag = self.fresh_etag(name)?;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
             if !local_changed && !remote_changed {
                 return Ok(());
             }
@@ -825,6 +926,23 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                 continue;
             }
             let base = seen.as_ref().map_or(0, |s| s.counter);
+            if let Some((_, etag, stamp, plain)) = &fetched {
+                if is_tombstone(plain) {
+                    // Another device deleted the file. A device that has none records it and creates nothing; one that has
+                    // an unchanged file removes it after a copy.
+                    if !deletable(name) {
+                        return Err(err("a deletion for a file the sync never deletes"));
+                    }
+                    if local.is_some() && !local_changed {
+                        self.source.delete(name)?;
+                        report.removed.push(name.to_owned());
+                    } else if local.is_some() {
+                        return Err(err("a deletion met a changed file"));
+                    }
+                    self.remember_deleted(name, stamp.counter, etag);
+                    return Ok(());
+                }
+            }
             match (&local, &fetched, local_changed) {
                 // Only the server changed (or the local file is gone): take its version.
                 (_, Some((_, etag, stamp, plain)), false) | (None, Some((_, etag, stamp, plain)), _) => {
@@ -900,7 +1018,12 @@ impl<B: Backend, S: Source> Syncer<B, S> {
     }
 
     fn remember(&mut self, name: &str, counter: u64, etag: &str, hash: &str) {
-        self.state.files.insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: hash.to_owned() });
+        self.state.files.insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: hash.to_owned(), deleted: false });
+    }
+
+    /// Note that `name` is deleted at the version `counter`/`etag`: no hash, the local file is gone.
+    fn remember_deleted(&mut self, name: &str, counter: u64, etag: &str) {
+        self.state.files.insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: String::new(), deleted: true });
     }
 
     /// Keep a local version that lost. Never for the secrets: they must not be written to a file.

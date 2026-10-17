@@ -989,3 +989,80 @@ fn a_layout_edited_after_the_download_was_staged_is_copied_before_the_unit_repla
     connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
     assert!(promote_incoming_with_report(&b.dir).kept.is_empty());
 }
+
+// ---- deletions: a tombstone is a version like any other --------------------------------------------------------------
+
+/// The plaintext the server's blob for `name` opens to, as device `d` (which holds the key) reads it.
+fn server_plain(srv: &Server, d: &Device, name: &str) -> Vec<u8> {
+    let syncer = connect(srv, d, "pw").unwrap();
+    let blob = srv.store.lock().unwrap().files[&format!("files/{}", remote_file(name))].0.clone();
+    syncer.key.open(name, &blob).unwrap().1.to_vec()
+}
+
+/// The `deleted` flag and the hash the device remembers for `name`.
+fn remembered(d: &Device, name: &str) -> (bool, String) {
+    let state = json(d, "sync_state.json");
+    (state["files"][name]["deleted"].as_bool().unwrap_or(false), state["files"][name]["hash"].as_str().unwrap_or("?").to_owned())
+}
+
+/// Two devices that hold `themes/dark.json` after a sync, and the server.
+fn with_theme(tag: &str) -> (Server, Device, Device) {
+    let srv = server();
+    let (a, b) = (device(&format!("a-{tag}")), device(&format!("b-{tag}")));
+    fs::create_dir_all(a.dir.join("themes")).unwrap();
+    put(&a, "themes/dark.json", "{\"name\":\"dark\"}");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(text(&b, "themes/dark.json").as_deref(), Some("{\"name\":\"dark\"}"));
+    (srv, a, b)
+}
+
+#[test]
+fn a_theme_deleted_on_one_device_is_removed_on_the_other_and_stays_deleted() {
+    let (srv, a, b) = with_theme("del");
+    fs::remove_file(a.dir.join("themes/dark.json")).unwrap();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.deleted, vec!["themes/dark.json"], "{report:?}");
+    assert_eq!(server_plain(&srv, &a, "themes/dark.json"), TOMBSTONE);
+    assert_eq!(remembered(&a, "themes/dark.json"), (true, String::new()));
+
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.removed, vec!["themes/dark.json"], "{report:?}");
+    assert!(!b.dir.join("themes/dark.json").exists(), "the file is gone");
+    let copies = kept_copies(&b);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    assert!(copies[0].0.starts_with("themes.dark.json."), "{copies:?}");
+    assert_eq!(copies[0].1, "{\"name\":\"dark\"}");
+    assert_eq!(remembered(&b, "themes/dark.json"), (true, String::new()));
+
+    // Nothing is left to do on either side, and the file does not come back.
+    let puts = srv.store.lock().unwrap().puts;
+    for d in [&a, &b, &a, &b] {
+        let report = connect(&srv, d, "pw").unwrap().sync_once().unwrap();
+        assert_eq!(report, Report::default());
+    }
+    assert_eq!(srv.store.lock().unwrap().puts, puts, "nothing is sent again");
+    assert!(text(&a, "themes/dark.json").is_none() && text(&b, "themes/dark.json").is_none());
+}
+
+#[test]
+fn the_marker_is_not_a_valid_theme_or_widget_file() {
+    assert!(is_tombstone(TOMBSTONE));
+    assert_eq!(TOMBSTONE, b"\0holzwave:deleted");
+    assert!(!is_tombstone(b"holzwave:deleted") && !is_tombstone(b"{}") && !is_tombstone(b""));
+    assert!(serde_json::from_slice::<serde_json::Value>(TOMBSTONE).is_err());
+    // An old client stages the marker as an ordinary file; the loaders leave it out with a note and the rest still loads.
+    let d = device("marker");
+    fs::create_dir_all(d.dir.join("themes")).unwrap();
+    fs::create_dir_all(d.dir.join("widgets")).unwrap();
+    fs::write(d.dir.join("themes/gone.json"), TOMBSTONE).unwrap();
+    fs::write(d.dir.join("widgets/gone.json"), TOMBSTONE).unwrap();
+    let good = r#"{"title":"T","kind":"list","items":[{"label":"a","command":"ls"}]}"#;
+    fs::write(d.dir.join("widgets/good.json"), good).unwrap();
+    let (registry, warnings) = crate::theme::ThemeRegistry::load(&d.dir);
+    assert!(warnings.iter().any(|w| w.contains("themes/gone.json")), "{warnings:?}");
+    assert!(!registry.contains("gone"));
+    let (defs, notes) = crate::widgets::load(&d.dir);
+    assert!(notes.iter().any(|n| n.contains("widgets/gone.json")), "{notes:?}");
+    assert!(defs.iter().any(|w| w.id == "good"), "the valid widget still loads");
+}
