@@ -1004,6 +1004,18 @@ pub fn ai_decide(
     core.ai_decide(&conversation, &call_id, &decision, &hash)
 }
 
+/// The person's press on `Undo` for one finished write: the chat and the call. It answers nothing. The core puts the old text
+/// of the file back only while the file still holds exactly what the assistant wrote, and outside the deny list; a refusal
+/// is the fault object with the code `undo` and a stable reason (`unknown_change`, `created`, `file_changed`, `denied`,
+/// `unreadable`) and a fixed sentence.
+///
+/// This command exists for the webview only and is not a verdict on a tool call: it never reaches the approval table, and it
+/// carries two ids and no text.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn ai_undo(core: State<Arc<AppCore>>, conversation: String, call_id: String) -> Result<(), AiFault> {
+    core.ai_undo(&conversation, &call_id)
+}
+
 /// The profiles with the state of each key (never a key). This reads the keychain, so the settings dialog calls it
 /// when it opens and not before.
 #[tauri::command(async, rename_all = "snake_case")]

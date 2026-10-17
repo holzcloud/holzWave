@@ -7207,6 +7207,32 @@ mod protocol {
         )
     }
 
+    /// The reasons an undo is refused and the fixed sentence of each, from the real fault. The match has no wildcard arm, so a
+    /// reason that is added to the shell does not compile here until the golden (and with it the page) knows it.
+    fn undo_reasons() -> Value {
+        use crate::ai_write::UndoFault;
+        let position = |fault: UndoFault| match fault {
+            UndoFault::UnknownChange => 0,
+            UndoFault::Created => 1,
+            UndoFault::FileChanged => 2,
+            UndoFault::Denied => 3,
+            UndoFault::Unreadable => 4,
+        };
+        let all = [
+            UndoFault::UnknownChange,
+            UndoFault::Created,
+            UndoFault::FileChanged,
+            UndoFault::Denied,
+            UndoFault::Unreadable,
+        ];
+        let mut out = serde_json::Map::new();
+        for (at, fault) in all.into_iter().enumerate() {
+            assert_eq!(position(fault), at, "the list holds every reason, in order");
+            out.insert(fault.reason().to_owned(), Value::String(fault.to_string()));
+        }
+        Value::Object(out)
+    }
+
     fn samples() -> Value {
         let frame = FrameMsg {
             pane: 3,
@@ -7358,6 +7384,7 @@ mod protocol {
                     ContextKind::Preview,
                 ]),
                 "ai_decision": ops(vec![Decision::Allow, Decision::Deny]),
+                "ai_undo": undo_reasons(),
             },
             "paste": [
                 to_value(&PasteOutcomeMsg::from(PasteOutcome::Written)),

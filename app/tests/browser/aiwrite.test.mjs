@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  FILE_NEW, FILE_OLD, OTHER_PROFILE, PROFILE, TOOL_FILE, VIEW_P1, addRows, boot, calls, changeFile, chars, decisionCalls, diffOf, fileText,
-  openAi, openCard, payloadOf, scriptWrite, seedFile, sendText, tickClock,
+  FILE_NEW, FILE_OLD, OTHER_PROFILE, PROFILE, TOOL_FILE, TOOL_PATH, VIEW_P1, addRows, boot, calls, changeFile, chars, decisionCalls, diffOf,
+  fileText, openAi, openCard, payloadOf, reloadKeeping, scriptTool, scriptWrite, seedFile, sendText, tickClock, undoCalls,
 } from "./ai-lib.mjs";
 
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
@@ -23,10 +23,16 @@ export default async function ({ engine, page, url, errors }) {
       throw e;
     }
   }
-  await keysCase(page, url, engine).catch((e) => {
-    e.message = `keysCase: ${e.message}`;
-    throw e;
-  });
+  const more = { keysCase: () => keysCase(page, url, engine), undoCase: () => undoCase(page, url), undoRefusalCase: () => undoRefusalCase(page, url),
+    rowsCase: () => rowsCase(page, url, engine) };
+  for (const [name, run] of Object.entries(more)) {
+    try {
+      await run();
+    } catch (e) {
+      e.message = `${name}: ${e.message}`;
+      throw e;
+    }
+  }
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -508,4 +514,206 @@ async function keysCase(page, url, engine) {
   assert.equal((await calls(page, "ai_cancel")).length, 0, "the reply was not stopped");
   await page.waitForFunction(() => document.querySelector("section.chat-approval") === null);
   assert.equal(await fileText(page, TOOL_FILE), FILE_OLD, "a denied write leaves the file alone");
+}
+
+/** A page where the model changed a file, the person allowed it and the turn finished: the row of the write that ran. */
+async function finishedWrite(page, url, spec = {}, before = FILE_OLD) {
+  await chatBesidePane1(page, url);
+  await seedFile(page, TOOL_FILE, before);
+  await scriptWrite(page, { id: "call_1", tool: "write_file", path: TOOL_FILE, content: FILE_NEW, answer: "Done.", ...spec });
+  await sendText(page, "update my todo list");
+  const card = await openCard(page, "call_1");
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await finished(page);
+  const row = page.locator('div.chat-tool[data-call="call_1"]');
+  await row.locator(".tool-state").waitFor();
+  return row;
+}
+
+async function undoCase(page, url) {
+  let row = await finishedWrite(page, url);
+  assert.equal(await row.getAttribute("data-state"), "ran");
+  assert.equal(await row.locator("button.tool-undo").textContent(), "Undo");
+  assert.equal(await row.locator("button.tool-undo").getAttribute("data-field") !== null, true, "every control carries data-field");
+
+  // Nothing is asked before a press: not after a redraw, not after a reload.
+  assert.deepEqual(await undoCalls(page), []);
+  await row.locator("button.tool-toggle").click();
+  await row.locator("button.tool-toggle").click();
+  assert.deepEqual(await undoCalls(page), [], "a redraw makes no call");
+  await reloadKeeping(page);
+  row = page.locator('div.chat-tool[data-call="call_1"]');
+  await row.locator("button.tool-undo").waitFor();
+  assert.deepEqual(await undoCalls(page), [], "a reload makes no call");
+
+  // A click that a script made does nothing.
+  await page.evaluate(() => document.querySelector(".tool-undo").click());
+  await page.evaluate(() => document.querySelector(".tool-undo").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  assert.deepEqual(await undoCalls(page), [], "a script's click makes no call");
+
+  // A real press: one call with the two ids, and the old text is back.
+  await row.locator("button.tool-undo").click();
+  await page.waitForFunction(() => document.querySelector(".chat-tool[data-call='call_1'] .tool-undone") !== null);
+  const made = await undoCalls(page);
+  assert.deepEqual(made, [{ conversation: "chat-mock-1", call_id: "call_1" }]);
+  assert.deepEqual(Object.keys(made[0]), ["conversation", "call_id"], "exactly two keys");
+  const sentText = JSON.stringify(made);
+  for (const canary of ["zq-old-text-4d2e91", "zq-new-text-b83f17"]) assert.ok(!sentText.includes(canary), `${canary} is in the call`);
+  assert.equal(await fileText(page, TOOL_FILE), FILE_OLD, "the old text is back");
+  assert.equal(await row.locator(".tool-state").textContent(), "ran \u00b7 undone");
+  assert.equal(await row.locator("button.tool-undo").count(), 0, "the button is gone");
+
+  // A double click on a fresh row makes one call.
+  row = await finishedWrite(page, url);
+  await row.locator("button.tool-undo").dblclick();
+  await page.waitForFunction(() => document.querySelector(".chat-tool[data-call='call_1'] .tool-undone") !== null);
+  assert.equal((await undoCalls(page)).length, 1, "a double click makes one call");
+
+  // An edit: the whole old text comes back.
+  const before = "foo one\nbar\nfoo two\n";
+  row = await finishedWrite(page, url, { tool: "edit_file", content: undefined, old_text: "bar", new_text: "BAR" }, before);
+  assert.equal(await fileText(page, TOOL_FILE), before.replace("bar", "BAR"));
+  await row.locator("button.tool-undo").click();
+  await page.waitForFunction(() => document.querySelector(".chat-tool[data-call='call_1'] .tool-undone") !== null);
+  assert.equal(await fileText(page, TOOL_FILE), before, "the whole old text is back");
+}
+
+async function undoRefusalCase(page, url) {
+  const texts = GOLDEN.ops.ai_undo;
+  const refuse = (reason) => page.evaluate((r) => window.__MOCK__.ai.write.undoRefuse(r), reason);
+
+  // The file changed: the core's sentence is shown, the button stays and a second press is a second call.
+  let row = await finishedWrite(page, url);
+  await refuse("file_changed");
+  await row.locator("button.tool-undo").click();
+  await row.locator("p.tool-fault").waitFor();
+  assert.equal(await row.locator("p.tool-fault").getAttribute("data-kind"), "error");
+  assert.equal(await row.locator("p.tool-fault").textContent(), texts.file_changed);
+  assert.equal(await row.locator("button.tool-undo").count(), 1, "the button stays");
+  assert.equal((await undoCalls(page)).length, 1, "nothing is sent again by itself");
+  await row.locator("button.tool-undo").click();
+  await page.waitForFunction(() => document.querySelector(".chat-tool[data-call='call_1'] .tool-undone") !== null);
+  assert.equal((await undoCalls(page)).length, 2, "a second press is a second call");
+  assert.equal(await row.locator("p.tool-fault").count(), 0, "the refusal is gone after a success");
+
+  // A change that is no longer known and a file the assistant made: the sentence is shown and the button is gone.
+  for (const reason of ["unknown_change", "created"]) {
+    row = await finishedWrite(page, url);
+    await refuse(reason);
+    await row.locator("button.tool-undo").click();
+    await row.locator("p.tool-fault").waitFor();
+    assert.equal(await row.locator("p.tool-fault").textContent(), texts[reason], reason);
+    assert.equal(await row.locator("button.tool-undo").count(), 0, `${reason}: the button is gone`);
+    assert.equal(await row.locator(".tool-state").textContent(), "ran");
+  }
+
+  // The file is in a protected place or cannot be read: the button stays.
+  for (const reason of ["denied", "unreadable"]) {
+    row = await finishedWrite(page, url);
+    await refuse(reason);
+    await row.locator("button.tool-undo").click();
+    await row.locator("p.tool-fault").waitFor();
+    assert.equal(await row.locator("p.tool-fault").textContent(), texts[reason], reason);
+    assert.equal(await row.locator("button.tool-undo").count(), 1, `${reason}: the button stays`);
+  }
+
+  // An answer that is not the core's refusal is the fixed sentence.
+  row = await finishedWrite(page, url);
+  await page.evaluate(() => window.__MOCK__.ai.write.undoBare());
+  await row.locator("button.tool-undo").click();
+  await row.locator("p.tool-fault").waitFor();
+  assert.equal(await row.locator("p.tool-fault").textContent(), "The undo could not be sent.");
+  assert.equal(await row.locator("button.tool-undo").count(), 1);
+
+  // After a reload the row of an undone write shows Undo again; the press is refused as a change nobody knows.
+  row = await finishedWrite(page, url);
+  await row.locator("button.tool-undo").click();
+  await page.waitForFunction(() => document.querySelector(".chat-tool[data-call='call_1'] .tool-undone") !== null);
+  await reloadKeeping(page);
+  row = page.locator('div.chat-tool[data-call="call_1"]');
+  await row.locator("button.tool-undo").waitFor();
+  await row.locator("button.tool-undo").click();
+  await row.locator("p.tool-fault").waitFor();
+  assert.equal(await row.locator("p.tool-fault").textContent(), texts.unknown_change);
+  assert.equal(await row.locator("button.tool-undo").count(), 0);
+}
+
+async function rowsCase(page, url, engine) {
+  const mac = engine === "webkit" && process.platform === "darwin";
+  const rowOf = (id = "call_1") => page.locator(`div.chat-tool[data-call="${id}"]`);
+  const undoButtons = () => page.locator("button.tool-undo").count();
+
+  // A read that ran has no Undo.
+  await chatBesidePane1(page, url);
+  await scriptTool(page, { id: "call_1", tool: "read_file", path: TOOL_PATH, answer: "Done." });
+  await sendText(page, "read my notes");
+  let card = await openCard(page, "call_1");
+  assert.equal(await undoButtons(), 0, "a waiting read has none");
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await finished(page);
+  assert.equal(await rowOf().getAttribute("data-state"), "ran");
+  assert.equal(await undoButtons(), 0, "a read that ran has none");
+
+  // A write that waits for a decision has none; a denied write has none.
+  await chatBesidePane1(page, url);
+  await seedFile(page, TOOL_FILE, FILE_OLD);
+  await scriptWrite(page, { id: "call_1", tool: "write_file", path: TOOL_FILE, content: FILE_NEW, answer: "Done." });
+  await sendText(page, "update my todo list");
+  card = await openCard(page, "call_1");
+  assert.equal(await rowOf().getAttribute("data-state"), "waiting");
+  assert.equal(await undoButtons(), 0, "a waiting write has none");
+  await card.locator("button.approval-deny").click();
+  await finished(page);
+  assert.equal(await rowOf().getAttribute("data-state"), "error");
+  assert.equal(await undoButtons(), 0, "a denied write has none");
+
+  // A stopped write has none; a write refused as a changed payload has none.
+  await chatBesidePane1(page, url);
+  await seedFile(page, TOOL_FILE, FILE_OLD);
+  await scriptWrite(page, { id: "call_1", tool: "write_file", path: TOOL_FILE, content: FILE_NEW, answer: "Done." });
+  await sendText(page, "update my todo list");
+  await openCard(page, "call_1");
+  await page.locator(".chat-input").press("Escape");
+  await page.waitForFunction(() => window.__MOCK__.ai.chat("chat-mock-1").ended?.end === "cancelled");
+  await page.waitForFunction(() => document.querySelector("section.chat-approval") === null);
+  assert.equal(await rowOf().getAttribute("data-state"), "error");
+  assert.equal(await undoButtons(), 0, "a stopped write has none");
+
+  await chatBesidePane1(page, url);
+  card = await (async () => {
+    await seedFile(page, TOOL_FILE, FILE_OLD);
+    await scriptWrite(page, { id: "call_1", tool: "write_file", path: TOOL_FILE, content: FILE_NEW, answer: "Done." });
+    await sendText(page, "update my todo list");
+    return openCard(page, "call_1");
+  })();
+  await changeFile(page, TOOL_FILE, FILE_OLD.replace("old", "oth"));
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await finished(page);
+  assert.equal(await rowOf().getAttribute("data-state"), "error");
+  assert.equal(await undoButtons(), 0, "a write refused as changed has none");
+
+  // A row with no result has none.
+  const call = { type: "tool_call", id: "call_9", name: "write_file", summary: "{}" };
+  const lost = { id: "m9-1", role: "assistant", ts: 1800000000, model: "llama3.2", status: "complete", usage: null, parts: [call] };
+  await boot(page, url, { view: VIEW_P1, settings: true, clock: true, states: { "chat-mock-1": { turn: 9, seq: 3, messages: [lost] } } });
+  await openAi(page);
+  await page.waitForSelector('div.chat-tool[data-call="call_9"]');
+  assert.equal(await rowOf("call_9").getAttribute("data-state"), "none");
+  assert.equal(await undoButtons(), 0, "a row with no result has none");
+
+  // In a row that ran, the keys reach the toggle and then Undo; every control carries data-field; no call is made by looking.
+  const row = await finishedWrite(page, url);
+  assert.equal(await undoButtons(), 1, "only the write that ran");
+  const loose = await page.evaluate(() => [...document.querySelectorAll(".chat-tool button")].filter((b) => !b.hasAttribute("data-field")).length);
+  assert.equal(loose, 0, "every control of a row carries data-field");
+  await row.locator("button.tool-toggle").focus();
+  await page.keyboard.press(mac ? "Alt+Tab" : "Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "tool-undo");
+  assert.deepEqual(await undoCalls(page), [], "no call until a press");
+  const shown = await page.locator(".chat-msg").count();
+  const messages = await page.evaluate(() => window.__MOCK__.ai.chat("chat-mock-1").messages.filter((m) => m.role !== "tool").length);
+  assert.equal(shown, messages, "the log holds a message for each user and assistant message");
 }

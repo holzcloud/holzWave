@@ -108,7 +108,14 @@
 //                      seed(path, text)    a file exists with this text
 //                      change(path, text)  the file changes without a call (a text of `null` removes it)
 //                      text(path)          the text of a file, or null
-//                      texts               `{ payload_changed, faults }`: the core's sentences the mock holds
+//                      texts               `{ payload_changed, faults, undo }`: the core's sentences the mock holds
+//                      undoRefuse(reason)  the next `ai_undo` rejects with `{code: "undo", reason, text}` and the sentence the shell
+//                                          gives that reason; `undoRefuse(null)` stops it
+//                      undoBare()          the next `ai_undo` rejects with a bare string, as an error of the shell itself
+//                      undos               the argument object of every `ai_undo` call, oldest first
+//                      An allowed write keeps what an undo needs: `ai_undo(conversation, call_id)` puts the old text back only while the
+//                      file still holds the text the write saved, once; a file the write made is refused as `created`, a text that
+//                      changed as `file_changed` and a change nobody knows as `unknown_change`.
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
 //     `ai_decide`, `ai_turn_snapshot`, `ai_profiles`, `ai_profile_save`, `ai_profile_remove`, `ai_key_set` and `ai_key_clear` have
 //     defaults; a rejection is the object `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input
@@ -323,6 +330,17 @@
     not_shown: "the change is too large to show; make smaller changes",
   };
   const INVALID = "The arguments of the call are not valid: ";
+  /** The sentences the shell gives for an undo it refuses, by reason: copies, held to the shell's golden by a case. */
+  const UNDO_TEXTS = {
+    created: "The assistant created this file. Undo cannot remove it.",
+    denied: "That file is in a protected place. Nothing was restored.",
+    file_changed: "The file changed after the assistant saved it. Nothing was restored.",
+    unknown_change: "That change can no longer be undone here.",
+    unreadable: "The file could not be read or saved. Nothing was restored.",
+  };
+  /** What an undo can still do, by chat and call: the file, the text it held before (undefined for a made file) and what was saved. */
+  const undoable = new Map();
+  const undone = { refuse: null, bare: false, calls: [] };
   const isWrite = (tool) => tool === "write_file" || tool === "edit_file";
   /** The characters the card writes out: controls, direction marks, zero-width and format characters, the tag block. */
   const hiddenCode = (n) =>
@@ -531,6 +549,7 @@
     if (digestText(wfiles.get(w.args.path)) !== w.baseDigest) return { content: PAYLOAD_CHANGED, is_error: true };
     wfiles.set(w.args.path, w.after);
     const created = w.base === undefined;
+    undoable.set(`${conversation}|${call.id}`, { path: w.args.path, old: w.base, written: w.after });
     return {
       content: `${created ? "Created the file." : "Saved the file."} ${lineCount(w.diff.added)} added, ${w.diff.removed} removed.`,
       is_error: false,
@@ -937,7 +956,10 @@
     ...contextCommands,
     ai_conversation_new: () => `chat-mock-${++ai.chatNo}`,
     ai_conversation_list: () => ({ chats: [], notes: [] }),
-    ai_conversation_delete: ({ conversation }) => ai.chats.delete(conversation),
+    ai_conversation_delete: ({ conversation }) => {
+      for (const key of [...undoable.keys()]) if (key.startsWith(`${conversation}|`)) undoable.delete(key);
+      return ai.chats.delete(conversation);
+    },
     ai_profiles: () => ({ profiles: listed(), notes: structuredClone(noteLines()) }),
     ai_profile_save: ({ input }) => {
       if (input === null || typeof input !== "object" || Object.keys(input).some((name) => !SAVE_MEMBERS.includes(name))) {
@@ -1029,6 +1051,26 @@
       return copy;
     },
     ai_decide: decide,
+    ai_undo: ({ conversation, call_id }) => {
+      undone.calls.push({ conversation, call_id });
+      if (undone.bare) {
+        undone.bare = false;
+        throw "the undo could not be done";
+      }
+      if (undone.refuse !== null) {
+        const reason = undone.refuse;
+        undone.refuse = null;
+        throw fault("undo", UNDO_TEXTS[reason], reason);
+      }
+      const key = `${conversation}|${call_id}`;
+      const record = undoable.get(key);
+      if (record === undefined) throw fault("undo", UNDO_TEXTS.unknown_change, "unknown_change");
+      if (record.old === undefined) throw fault("undo", UNDO_TEXTS.created, "created");
+      if (wfiles.get(record.path) !== record.written) throw fault("undo", UNDO_TEXTS.file_changed, "file_changed");
+      wfiles.set(record.path, record.old);
+      undoable.delete(key);
+      return null;
+    },
     // The core's renderer of Markdown: here the text as one escaped paragraph, unless a test scripts it with `on`.
     markdown_render: ({ text }) =>
       `<p>${String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;")}</p>`,
@@ -1188,7 +1230,16 @@
       },
       text: (path) => wfiles.get(path) ?? null,
       /** The sentences the mock holds for the core's refusals: copies, held to the golden of the core by the contract case. */
-      texts: { payload_changed: PAYLOAD_CHANGED, faults: structuredClone(FAULTS) },
+      texts: { payload_changed: PAYLOAD_CHANGED, faults: structuredClone(FAULTS), undo: structuredClone(UNDO_TEXTS) },
+      undoRefuse(reason) {
+        undone.refuse = reason;
+      },
+      undoBare() {
+        undone.bare = true;
+      },
+      get undos() {
+        return structuredClone(undone.calls);
+      },
     },
     approval: {
       get decisions() {
@@ -1213,7 +1264,7 @@
       save: () =>
         structuredClone({
           chats: [...ai.chats.entries()], live: [...appr.live.entries()], running: ai.running, turnNo: ai.turnNo, chatNo: ai.chatNo,
-          decisions: appr.decisions, files: [...wfiles.entries()],
+          decisions: appr.decisions, files: [...wfiles.entries()], undoable: [...undoable.entries()], undos: undone.calls,
         }),
       restore(saved) {
         ai.chats = new Map(saved.chats);
@@ -1224,6 +1275,9 @@
         appr.decisions.push(...saved.decisions);
         wfiles.clear();
         for (const [path, text] of saved.files ?? []) wfiles.set(path, text);
+        undoable.clear();
+        for (const [key, record] of saved.undoable ?? []) undoable.set(key, record);
+        undone.calls.push(...(saved.undos ?? []));
       },
     },
     script: (turn) => void ai.scripts.push(turn),
@@ -1251,6 +1305,9 @@
       for (const go of appr.waiters.splice(0)) go();
       appr.live.clear();
       wfiles.clear();
+      undoable.clear();
+      Object.assign(undone, { refuse: null, bare: false });
+      undone.calls.length = 0;
       resetContext();
     },
   };

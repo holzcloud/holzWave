@@ -100,6 +100,7 @@
     "allow-ai-context-share",
     "allow-ai-context-preview",
     "allow-ai-decide",
-    "allow-markdown-render"
+    "allow-markdown-render",
+    "allow-ai-undo"
   ]
 }

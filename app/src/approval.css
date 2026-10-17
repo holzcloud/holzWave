@@ -116,12 +116,19 @@
 .chat-tool[data-state="error"] .tool-mark, .chat-tool[data-state="error"] .tool-state { color: var(--hw-danger); }
 .chat-tool[data-state="error"] .tool-state { text-decoration: underline; }
 .chat-tool[data-state="waiting"] .tool-state { color: var(--hw-warn); }
-.chat-tool .tool-toggle { display: inline-flex; align-items: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); margin-left: 1.5rem;
+.chat-tool .tool-toggle, .chat-tool .tool-undo { display: inline-flex; align-items: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12));
                           padding: 0 .667rem; border: 1px solid var(--hw-line); border-radius: .333rem; background: none; color: var(--hw-ink);
                           cursor: pointer; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: normal;
                           text-transform: none; }
-.chat-tool .tool-toggle:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
-.chat-tool .tool-toggle:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.chat-tool .tool-toggle { margin-left: 1.5rem; }
+.chat-tool .tool-undo { margin-left: .5rem; }
+.chat-tool .tool-toggle:hover, .chat-tool .tool-undo:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.chat-tool .tool-toggle:focus-visible, .chat-tool .tool-undo:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.chat-tool .tool-undo:disabled { border-color: var(--hw-line); color: var(--hw-dim); cursor: default; }
+.tool-undone { color: var(--hw-ink); }
+/* A refusal of Undo: the core's own sentence under the row, in the error tone and underlined, so colour is never the only cue. */
+.tool-fault[data-kind="error"] { flex: 0 0 calc(100% - 1.5rem); margin: .167rem 0 0 1.5rem; color: var(--hw-danger); text-decoration: underline;
+                                 font-family: "Manrope", system-ui, sans-serif; font-size: 1.083rem; line-height: 1.45; overflow-wrap: anywhere; }
 .tool-untrusted { flex: 0 0 calc(100% - 1.5rem); margin: .167rem 0 0 1.5rem; color: var(--hw-dim); }
 .tool-result { flex: 0 0 calc(100% - 1.5rem); box-sizing: border-box; max-height: 14rem; margin: 0 0 0 1.5rem; overflow: auto; padding: .333rem .5rem;
                border: 1px solid var(--hw-line); border-radius: .333rem; color: var(--hw-ink); font-family: "JetBrains Mono", ui-monospace, monospace;
@@ -132,7 +139,7 @@
 /* The card is part of the screen: every target is at least 44 px, and the payload box scrolls inside the card. The strip that
    holds the cards keeps the bound of the consent sheet (at most 60 % of the height, scrolling), which is the strip's own rule. */
 @media (max-width: 640px) {
-  .chat-approval button, .chat-tool .tool-toggle { min-height: max(44px, calc(44rem / 12)); min-width: max(44px, calc(44rem / 12)); }
+  .chat-approval button, .chat-tool .tool-toggle, .chat-tool .tool-undo { min-height: max(44px, calc(44rem / 12)); min-width: max(44px, calc(44rem / 12)); }
   .approval-actions { gap: .667rem; }
 }
 

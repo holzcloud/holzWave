@@ -203,7 +203,7 @@ test("the command table has snake_case argument names and no raw input command",
 
 // ---- the AI chat --------------------------------------------------------------------------------------------------
 
-test("the ai event and the sixteen ai commands are pinned", () => {
+test("the ai event and the seventeen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
   assert.equal(golden.events.names.at(-1), "ai");
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
@@ -219,6 +219,7 @@ test("the ai event and the sixteen ai commands are pinned", () => {
     ai_context_share: ["conversation", "pane", "profile", "model", "shared"],
     ai_context_preview: ["conversation", "pane", "profile", "model", "kinds"],
     ai_decide: ["conversation", "call_id", "decision", "hash"],
+    ai_undo: ["conversation", "call_id"],
     ai_cancel: ["conversation"],
     ai_turn_snapshot: ["conversation"],
     ai_profiles: [],
@@ -726,9 +727,12 @@ test("the ai_decide command and its verdict values are pinned", () => {
   assert.deepEqual(golden.commands.ai_decide, ["conversation", "call_id", "decision", "hash"]);
   assert.deepEqual(golden.ops.ai_decision, ["allow", "deny"]);
   for (const arg of ["text", "path", "content", "command"]) assert.ok(!golden.commands.ai_decide.includes(arg), arg);
+  // Only `ai_decide` names a verdict or a hash, and only `ai_decide` and `ai_undo` name a call.
   const others = Object.entries(golden.commands).filter(([name]) => name.startsWith("ai_") && name !== "ai_decide");
   for (const [name, args] of others) {
-    for (const arg of ["call_id", "decision", "hash"]) assert.ok(!args.includes(arg), `${name} takes ${arg}`);
+    for (const arg of name === "ai_undo" ? ["decision", "hash"] : ["call_id", "decision", "hash"]) {
+      assert.ok(!args.includes(arg), `${name} takes ${arg}`);
+    }
   }
   // A call site in the page, when there is one, sends exactly those four names.
   const sites = sources(srcDir).flatMap((file) =>
@@ -736,5 +740,25 @@ test("the ai_decide command and its verdict values are pinned", () => {
   );
   for (const site of sites.filter((s) => s.command === "ai_decide")) {
     assert.deepEqual([...site.keys].sort(), ["call_id", "conversation", "decision", "hash"], `${site.file}:${site.line}`);
+  }
+});
+
+test("the ai_undo command and its reasons are pinned", () => {
+  // The page takes a finished write back with the chat and the call, and nothing else: no text, no path, no verdict.
+  assert.deepEqual(golden.commands.ai_undo, ["conversation", "call_id"]);
+  for (const arg of ["text", "path", "content", "command", "decision", "hash"]) assert.ok(!golden.commands.ai_undo.includes(arg), arg);
+  const reasons = golden.ops.ai_undo;
+  assert.deepEqual(Object.keys(reasons).sort(), ["created", "denied", "file_changed", "unknown_change", "unreadable"]);
+  for (const [reason, sentence] of Object.entries(reasons)) {
+    assert.equal(typeof sentence, "string", reason);
+    assert.ok(sentence.length > 0, `${reason} has a sentence`);
+    assert.ok(!sentence.includes("\n") && !sentence.includes("://"), `${reason}: one line without an address`);
+  }
+  // A call site in the page, when there is one, sends exactly the two ids.
+  const sites = sources(srcDir).flatMap((file) =>
+    callSites(readFileSync(file, "utf8")).map((site) => ({ ...site, file: file.slice(srcDir.length + 1) })),
+  );
+  for (const site of sites.filter((s) => s.command === "ai_undo")) {
+    assert.deepEqual([...site.keys].sort(), ["call_id", "conversation"], `${site.file}:${site.line}`);
   }
 });

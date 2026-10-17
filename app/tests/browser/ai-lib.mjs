@@ -351,3 +351,6 @@ export const chars = (count) => "q".repeat(count);
 /** The payload of a scripted card: the tool row and the fields `rest` (a list of `[name, value]`), each with its length. */
 export const payloadOf = (tool, rest) =>
   [["tool", tool], ...rest].map(([name, value]) => ({ name, value, bytes: new TextEncoder().encode(value).length }));
+
+/** The argument object of every `ai_undo` call the page made, oldest first. */
+export const undoCalls = (page) => page.evaluate(() => structuredClone(window.__MOCK__.callsOf("ai_undo")));

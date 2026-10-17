@@ -501,6 +501,10 @@ export const WORDS = Object.freeze({
   stateError: "error",
   stateWaiting: "waiting",
   stateNone: "no result",
+  stateUndone: "ran · undone",
+  undo: "Undo",
+  undoing: "Undoing…",
+  undoCouldNot: "The undo could not be sent.",
 });
 
 /** `pane 1 · This computer`: the core's pane number and target label. */
@@ -623,11 +627,11 @@ export function rowsOf(
   return rows;
 }
 
-/** The state word at the right of a tool row; the word is the cue. */
-export function stateWord(state: ToolState): string {
+/** The state word at the right of a tool row; the word is the cue. `undone` is true for a write that was taken back. */
+export function stateWord(state: ToolState, undone = false): string {
   switch (state) {
     case "ran":
-      return WORDS.stateRan;
+      return undone ? WORDS.stateUndone : WORDS.stateRan;
     case "error":
       return WORDS.stateError;
     case "waiting":
@@ -654,4 +658,31 @@ export function stateMark(state: ToolState): string {
 /** The text of the toggle of a result: `Show result (1.2 KiB)` while it is closed, `Hide result` while it is open. */
 export function toggleWords(open: boolean, bytes: number): string {
   return open ? WORDS.hide : `Show result (${sizeWords(bytes)})`;
+}
+
+// ---- undo -------------------------------------------------------------------------------------------------------------
+
+/** The reasons the core gives for an undo it refused, by their stable names. Held to the core by a golden. */
+export const UNDO_REASONS: readonly string[] = Object.freeze(["created", "denied", "file_changed", "unknown_change", "unreadable"]);
+
+/** The reasons that mean the change cannot be undone here any more: the button is gone and the sentence stays. */
+export const UNDO_GONE: ReadonlySet<string> = new Set(["unknown_change", "created"]);
+
+/** Whether the row of a tool call offers Undo: a write that ran. The core says whether it can still be done. */
+export function canUndo(row: ToolRow): boolean {
+  return row.state === "ran" && Object.hasOwn(TOOL_EFFECT, row.name) && TOOL_EFFECT[row.name] === "write";
+}
+
+/**
+ * A refusal of `ai_undo`. The core answers `{code: "undo", reason, text}`: the text is its own fixed sentence, cleaned and cut by
+ * the chat's rule, and the reason is one of `UNDO_REASONS`. Anything else is the fixed sentence `The undo could not be sent.`
+ * with no reason.
+ */
+export function undoFault(raw: unknown): { reason: string | null; text: string } {
+  if (typeof raw !== "object" || raw === null || (raw as { code?: unknown }).code !== "undo") {
+    return { reason: null, text: WORDS.undoCouldNot };
+  }
+  const named = (raw as { reason?: unknown }).reason;
+  const reason = typeof named === "string" && UNDO_REASONS.includes(named) ? named : null;
+  return { reason, text: faultText(raw) };
 }

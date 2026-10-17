@@ -35,6 +35,7 @@ use holzwave_core::textread::TextRegion;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ai_tools::{CoreTargets, ShellTools};
+use crate::ai_write::UndoFault;
 use crate::state::{AppCore, Out, Sink, Target};
 
 /// The folder of the data directory that holds one file per chat.
@@ -161,6 +162,11 @@ impl AiFault {
     /// The table's refusal of a verdict or a call: the stable code of the error and its fixed sentence.
     pub fn from_tool(error: &ToolError) -> AiFault {
         AiFault { code: "tool", reason: Some(error.code()), text: error.to_string() }
+    }
+
+    /// A change that could not be taken back: the code `undo`, the stable name of the reason and its fixed sentence.
+    pub(crate) fn from_undo(fault: &UndoFault) -> AiFault {
+        AiFault { code: "undo", reason: Some(fault.reason()), text: fault.to_string() }
     }
 
     /// A profile id that no profile has.
@@ -344,6 +350,11 @@ impl AiHost {
         &self.service
     }
 
+    /// The host of the agent's tools, which keeps what a person may still take back.
+    pub(crate) fn tools(&self) -> &ShellTools {
+        &self.tools
+    }
+
     /// Registers a provider that does not come from a profile (the on-device model).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn register_provider(&self, id: &str, provider: Arc<dyn Provider>) -> Result<(), AiFault> {
@@ -458,7 +469,10 @@ impl AiHost {
     /// Deletes a chat and stops its turn. Answers whether a file was removed.
     pub fn conversation_delete(&self, conversation: &str) -> Result<bool, AiFault> {
         let id = parse_conversation(conversation)?;
-        self.service.delete_conversation(&id).map_err(|e| AiFault::from_service(&e))
+        let removed = self.service.delete_conversation(&id).map_err(|e| AiFault::from_service(&e))?;
+        // What the chat could still take back goes with it.
+        self.tools.forget_conversation(id.as_str());
+        Ok(removed)
     }
 
     /// Stops the turn of a chat. Answers whether the chat had a turn.
@@ -3150,5 +3164,56 @@ mod tests {
         let sent: String =
             provider.requests().iter().map(|r| serde_json::to_string(&r.messages).expect("serialises")).collect();
         assert!(!sent.contains(SECRET_TEXT), "the secret reached the model");
+    }
+
+    #[test]
+    fn an_undo_through_the_whole_shell_restores_the_file_and_a_second_press_is_unknown() {
+        let tree = Scratch::new("undo-tree");
+        let scratch = Scratch::new("undo-trace");
+        let todo = todo_tree(&tree.0);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "write_file", json!({"path": todo, "content": new_todo()})))
+                .with_turn(text_turn("Done."))
+                .with_turn(tool_call_turn("call_2", "write_file", json!({"path": todo, "content": new_todo()})))
+                .with_turn(text_turn("Done again.")),
+        );
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        start(&core, &chat, pane, "update my todo list");
+        let hash = event_of(&rec, &chat, "tool_proposed")["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)));
+        assert_eq!(std::fs::read_to_string(&todo).expect("the file"), new_todo());
+
+        // The press puts the old text back exactly; a second press is a change nobody knows any more.
+        core.ai_undo(&chat, "call_1").expect("undone");
+        assert_eq!(std::fs::read_to_string(&todo).expect("the file"), old_todo(), "the old text is back");
+        let again = core.ai_undo(&chat, "call_1").expect_err("used once");
+        assert_eq!((again.code, again.reason), ("undo", Some("unknown_change")));
+        assert_eq!(again.text, "That change can no longer be undone here.");
+        let bad = core.ai_undo("../x", "call_1").expect_err("a bad chat id");
+        assert_eq!(bad.code, "invalid_conversation");
+        assert!(core.ai_undo(&chat, &"x".repeat(129)).is_err());
+
+        // A second write, and then another program changes the file: nothing is restored and the file is left as it was.
+        start(&core, &chat, pane, "again");
+        let hash = nth_event(&rec, &chat, "tool_proposed", 1)["pending"]["hash"].as_str().expect("a hash").to_owned();
+        decision(&core, &chat, "call_2", "allow", &hash).expect("the decision is accepted");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended_turns(&chat) == 2));
+        let by_hand = format!("{}edited by hand\n", new_todo());
+        std::fs::write(&todo, &by_hand).expect("another program writes");
+        let refused = core.ai_undo(&chat, "call_2").expect_err("the file changed");
+        assert_eq!((refused.code, refused.reason), ("undo", Some("file_changed")));
+        assert_eq!(std::fs::read_to_string(&todo).expect("the file"), by_hand, "the file is left as it was");
+
+        // Deleting the chat takes what it could still undo.
+        core.ai().conversation_delete(&chat).expect("deleted");
+        let gone = core.ai_undo(&chat, "call_2").expect_err("forgotten");
+        assert_eq!((gone.code, gone.reason), ("undo", Some("unknown_change")));
     }
 }

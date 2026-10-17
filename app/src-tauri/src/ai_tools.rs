@@ -24,6 +24,7 @@ use holzwave_core::textread::{TextRead, TextRegion};
 use holzwave_core::Error as CoreError;
 
 use crate::ai_host::AiFault;
+use crate::ai_write::{UndoLog, undo};
 use crate::state::AppCore;
 
 /// What a result keeps free for the line that says where to continue.
@@ -171,6 +172,7 @@ pub struct ShellTools {
     policy: DenyPolicy,
     targets: OnceLock<Arc<dyn Targets>>,
     limits: Option<GrepLimits>,
+    undo: UndoLog,
 }
 
 impl fmt::Debug for ShellTools {
@@ -215,7 +217,7 @@ enum Ending {
 impl ShellTools {
     /// A host with nothing bound: it offers no tool.
     pub fn new(policy: DenyPolicy) -> ShellTools {
-        ShellTools { policy, targets: OnceLock::new(), limits: None }
+        ShellTools { policy, targets: OnceLock::new(), limits: None, undo: UndoLog::new() }
     }
 
     /// The same host with the limits of a search replaced, for both kinds of machine. For tests.
@@ -250,6 +252,16 @@ impl ShellTools {
     /// The deny list the host applies again to a path it resolved itself.
     pub(crate) fn policy(&self) -> &DenyPolicy {
         &self.policy
+    }
+
+    /// The changes the agent made that can still be taken back.
+    pub(crate) fn undo_log(&self) -> &UndoLog {
+        &self.undo
+    }
+
+    /// Forgets what a deleted chat could still undo.
+    pub(crate) fn forget_conversation(&self, conversation: &str) {
+        self.undo.forget_conversation(conversation);
     }
 
     /// What a file tool acts on, in the form the table hashes: the pane, the machine and the absolute path.
@@ -904,6 +916,14 @@ fn fault_of_save(message: &str) -> SaveFault {
 // ---- the verdict ------------------------------------------------------------------------------------------------
 
 impl AppCore {
+    /// The person's press on `Undo` for one finished write: the chat and the call. It answers nothing. The old text of the
+    /// file is put back only while the file still holds exactly what the assistant wrote; a refusal is the fault object with
+    /// the code `undo` and a stable reason. This is not a verdict about a tool call: it never reaches the approval table.
+    pub fn ai_undo(&self, conversation: &str, call_id: &str) -> Result<(), AiFault> {
+        let id = ConversationId::parse(conversation).map_err(|_| AiFault::invalid_conversation())?;
+        undo(self.ai().tools(), id.as_str(), call_id).map_err(|fault| AiFault::from_undo(&fault))
+    }
+
     /// The page's verdict on one approval card: the chat, the call, `allow` or `deny`, and the hash of the card the
     /// person was shown. The table compares the hash and refuses any other; an answer of a call that is not waiting is
     /// refused too. This is the one place the approval table is decided, and the command of the webview is its only
@@ -1871,6 +1891,21 @@ pub(crate) mod rig {
         args: Value,
     ) -> Result<ToolOutput, ToolError> {
         run_call_between(table, host, scope, name, args, &|| {})
+    }
+
+    /// [`run_call`] for the call named `id`, so that several calls of one chat can be told apart.
+    pub(crate) fn run_call_as(
+        table: &ApprovalTable,
+        host: &ShellTools,
+        scope: &Scope,
+        id: &str,
+        name: &str,
+        args: Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let call = ToolCall { id: id.to_owned(), name: name.to_owned(), args };
+        let pending = table.propose(host, scope, &call)?;
+        table.decide(&scope.conversation, id, Decision::Allow, &pending.hash)?;
+        table.run(host, scope, id, &CancelToken::new())
     }
 
     /// [`run_call`] with a step between the decision and the run, in which a test changes the world: a file that another

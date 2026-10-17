@@ -17,7 +17,7 @@
 import { registerAction } from "./actions.js";
 import { onProfilesChanged, openProviders } from "./aisettings.js";
 import { Approvals } from "./approval.js";
-import { indexResults, rowsOf, waitingLabel, waitingName } from "./approvalstate.js";
+import { canUndo, indexResults, rowsOf, waitingLabel, waitingName } from "./approvalstate.js";
 import type { ToolResult } from "./approvalstate.js";
 import { mountApprovals, toolRowNode } from "./approvalcard.js";
 import type { CardView as ApprovalView } from "./approvalcard.js";
@@ -44,6 +44,7 @@ import { appendSafe } from "./safehtml.js";
 import { applyView } from "./scene.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
+import { Undos } from "./undo.js";
 import type { View } from "./types.js";
 
 /** Opens a block pane; `blocks.ts` hands its `openBlock` to `initChat`. Answers null when done, else one sentence. */
@@ -128,6 +129,8 @@ interface Session {
   pendingSeen: readonly PendingCall[] | null;
   /** The calls whose result the person opened. */
   readonly openResults: Set<string>;
+  /** The presses of Undo on finished writes (`undo.ts`); making it asks the core nothing. */
+  readonly undos: Undos;
 }
 
 /** The rendered HTML of finished replies by message id, with the text it was made from; the oldest goes first. */
@@ -218,10 +221,14 @@ function sessionFor(conversation: string): Session {
       }),
       pendingSeen: null,
       openResults: new Set(),
+      undos: new Undos({ invoke: (cmd, args) => call(cmd, args), conversation: () => conversation }),
     };
     sessions.set(conversation, s);
     // The number on the title-bar button follows every chat of this window.
     s.approvals.subscribe(updateBadge);
+    // A press of Undo, its answer and its refusal draw the rows again.
+    const made = s;
+    s.undos.subscribe(() => schedule(made));
   }
   return s;
 }
@@ -969,8 +976,9 @@ class Mounted implements ChatView {
       for (const part of m.parts) {
         if (part.type !== "tool_call") continue;
         const r = results.get(part.id);
+        const undo = r === undefined || r.is_error ? null : this.session.undos.model(part.id);
         key += `${part.id}|${part.name}|${part.summary.length}|${r === undefined ? "-" : `${r.is_error ? "e" : "r"}${r.content.length}`}|${
-          waiting.has(part.id) ? "w" : ""}${open.has(part.id) ? "o" : ""}\n`;
+          waiting.has(part.id) ? "w" : ""}${open.has(part.id) ? "o" : ""}|${undo === null ? "" : JSON.stringify([undo.state, undo.fault])}\n`;
       }
       if (key !== "") key += running ? "running" : "idle";
     }
@@ -982,13 +990,19 @@ class Mounted implements ChatView {
     old?.remove();
     if (key === "") return;
     const box = el("div", "chat-tools", a.node);
+    const undos = this.session.undos;
     for (const row of rowsOf(m, results, waiting, running)) {
       box.append(
-        toolRowNode(row, open.has(row.id), () => {
-          if (open.has(row.id)) open.delete(row.id);
-          else open.add(row.id);
-          schedule(this.session);
-        }),
+        toolRowNode(
+          row,
+          open.has(row.id),
+          () => {
+            if (open.has(row.id)) open.delete(row.id);
+            else open.add(row.id);
+            schedule(this.session);
+          },
+          canUndo(row) ? { model: undos.model(row.id), press: () => void undos.undo(row.id) } : undefined,
+        ),
       );
     }
     if (had !== undefined) {
@@ -1419,6 +1433,7 @@ export function chatClosed(conversation: string): void {
     dirty.delete(s);
     s.consent?.dispose();
     s.approvals.dispose();
+    s.undos.dispose();
     if (s.feed.state.running) void call("ai_cancel", { conversation }).catch(() => {});
   }
   sessions.delete(conversation);

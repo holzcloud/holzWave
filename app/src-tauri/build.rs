@@ -98,6 +98,7 @@ fn main() {
     "ai_context_share",
     "ai_context_preview",
     "ai_decide",
+    "ai_undo",
     "markdown_render",
   ]);
   tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)).expect("tauri build failed");

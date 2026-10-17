@@ -204,6 +204,10 @@
     "ai_turn_snapshot": [
       "conversation"
     ],
+    "ai_undo": [
+      "conversation",
+      "call_id"
+    ],
     "app_info": [],
     "attach_pane": [
       "pane",
@@ -982,6 +986,13 @@
         "wire": "openai_chat"
       }
     ],
+    "ai_undo": {
+      "created": "The assistant created this file. Undo cannot remove it.",
+      "denied": "That file is in a protected place. Nothing was restored.",
+      "file_changed": "The file changed after the assistant saved it. Nothing was restored.",
+      "unknown_change": "That change can no longer be undone here.",
+      "unreadable": "The file could not be read or saved. Nothing was restored."
+    },
     "context_kind": [
       "selection",
       "screen",

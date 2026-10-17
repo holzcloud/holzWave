@@ -360,7 +360,7 @@ fn the_global_tauri_object_stays_and_nothing_points_at_the_network() {
 /// manifest with an `ai_` name fails `the_ai_commands_are_exactly_the_reviewed_list` until someone has asked of it:
 /// can it return a key, return terminal or file text, accept consent for terminal content, or decide a tool call? If
 /// yes, it does not belong here.
-const AI_COMMANDS: [&str; 16] = [
+const AI_COMMANDS: [&str; 17] = [
     "ai_cancel",
     "ai_context_preview",
     "ai_context_share",
@@ -377,6 +377,7 @@ const AI_COMMANDS: [&str; 16] = [
     "ai_profiles",
     "ai_send",
     "ai_turn_snapshot",
+    "ai_undo",
 ];
 
 #[test]
@@ -645,7 +646,8 @@ pub fn ai_send(core: State<Arc<AppCore>>, conversation: String, text: String, pa
 // ---- the one command that decides a tool call -----------------------------------------------------------------------
 
 /// What is wrong with the way the commands in `names` could decide a tool call, as sentences: `ai_decide` takes the chat,
-/// the call, the verdict and the hash, as strings and in that order, and answers nothing; no other `ai_` command takes a
+/// the call, the verdict and the hash, as strings and in that order, and answers nothing; `ai_undo` takes the chat and the
+/// call and answers nothing (it is no verdict: it puts back a file the assistant changed); no other `ai_` command takes a
 /// call, a verdict or a hash.
 fn decision_problems(commands_rs: &str, names: &BTreeSet<String>) -> Vec<String> {
     const OWN: [&str; 3] = ["call_id", "decision", "hash"];
@@ -664,6 +666,18 @@ fn decision_problems(commands_rs: &str, names: &BTreeSet<String>) -> Vec<String>
             let answer = return_type(commands_rs, name).unwrap_or_default();
             if answer != "Result<(), AiFault>" {
                 problems.push(format!("ai_decide answers `{answer}`: it answers nothing"));
+            }
+            continue;
+        }
+        if name == "ai_undo" {
+            let shown: Vec<(&str, &str)> = args.iter().map(|(arg, ty)| (arg.as_str(), ty.as_str())).collect();
+            let expected = [("conversation", "String"), ("call_id", "String")];
+            if shown != expected {
+                problems.push(format!("ai_undo takes {shown:?}, not the reviewed list {expected:?}"));
+            }
+            let answer = return_type(commands_rs, name).unwrap_or_default();
+            if answer != "Result<(), AiFault>" {
+                problems.push(format!("ai_undo answers `{answer}`: it answers nothing"));
             }
             continue;
         }
@@ -691,10 +705,9 @@ fn ai_decide_takes_ids_and_a_verdict_and_answers_nothing() {
     }
     for name in manifest.iter().filter(|name| name.starts_with("ai_") && *name != "ai_decide") {
         let others = arguments(COMMANDS_RS, name).expect("a command function");
-        assert!(
-            others.iter().all(|(arg, _)| !["call_id", "decision", "hash"].contains(&arg.as_str())),
-            "{name} names a call, a verdict or a hash"
-        );
+        // Only `ai_decide` names a verdict or a hash; `ai_undo` names a call, as the press on a finished write does.
+        let forbidden: &[&str] = if name == "ai_undo" { &["decision", "hash"] } else { &["call_id", "decision", "hash"] };
+        assert!(others.iter().all(|(arg, _)| !forbidden.contains(&arg.as_str())), "{name} names a call, a verdict or a hash");
     }
 
     // The scanner flags a decision that answers data and a second command that names a call, and accepts the real one.
@@ -709,6 +722,29 @@ pub fn ai_note(core: State<Arc<AppCore>>, conversation: String) -> Result<(), Ai
     assert!(!flagged.iter().any(|problem| problem.contains("ai_note")), "{flagged:?}");
     let real = "pub fn ai_decide(core: State<Arc<AppCore>>, conversation: String, call_id: String, decision: String, hash: String) -> Result<(), AiFault> {\n    todo()\n}\n";
     assert_eq!(decision_problems(real, &set(&["ai_decide"])), Vec::<String>::new());
+}
+
+#[test]
+fn ai_undo_takes_two_ids_and_answers_nothing() {
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    assert!(manifest.contains("ai_undo"), "ai_undo is not a command");
+    let args = arguments(COMMANDS_RS, "ai_undo").expect("a command function");
+    let shown: Vec<(&str, &str)> = args.iter().map(|(arg, ty)| (arg.as_str(), ty.as_str())).collect();
+    assert_eq!(shown, [("conversation", "String"), ("call_id", "String")], "ai_undo takes the two ids and nothing else");
+    assert_eq!(return_type(COMMANDS_RS, "ai_undo").as_deref(), Some("Result<(), AiFault>"));
+    // Nothing that carries a path, a text or a verdict.
+    for forbidden in ["text", "path", "content", "command", "decision", "hash"] {
+        assert!(!args.iter().any(|(arg, _)| arg == forbidden), "ai_undo takes {forbidden}");
+    }
+    // The scanner flags an undo that answers data or takes more than the two ids, and accepts the real one.
+    let source = "\
+pub fn ai_undo(core: State<Arc<AppCore>>, conversation: String, call_id: String) -> Result<String, AiFault> {\n    todo()\n}\n";
+    let flagged = decision_problems(source, &set(&["ai_undo"]));
+    assert!(flagged.iter().any(|problem| problem.contains("ai_undo answers `Result<String, AiFault>`")), "{flagged:?}");
+    let wider = "pub fn ai_undo(core: State<Arc<AppCore>>, conversation: String, call_id: String, text: String) -> Result<(), AiFault> {\n    todo()\n}\n";
+    assert!(!decision_problems(wider, &set(&["ai_undo"])).is_empty());
+    let real = "pub fn ai_undo(core: State<Arc<AppCore>>, conversation: String, call_id: String) -> Result<(), AiFault> {\n    todo()\n}\n";
+    assert_eq!(decision_problems(real, &set(&["ai_undo"])), Vec::<String>::new());
 }
 
 /// The part of `source` that ships: up to the test module, without comment lines.

@@ -888,6 +888,21 @@ cannot be undone either; for those two reasons the button is gone as well. The r
 | Only the outcome (saved or not) is sent to llama3.2 at localhost:11434 (this computer). | the destination of a write |
 | Only the outcome (saved or not) is sent to the model of this chat. | the destination when the route is not known |
 | A file will be changed. Check the changes below before you allow it. | the banner of a tainted turn, after the sentences of 6.15 |
+| Undo | the button on the row of a write that ran |
+| Undoing… | the button while the press travels (it is disabled) |
+| ran · undone | the state word of a row whose write was taken back; the button is gone |
+| The undo could not be sent. | an answer to the press that is not the core's refusal |
+
+| Reason of a refused undo | Sentence under the row (the core's own) | Button |
+|---|---|---|
+| `unknown_change` | That change can no longer be undone here. | gone |
+| `created` | The assistant created this file. Undo cannot remove it. | gone |
+| `file_changed` | The file changed after the assistant saved it. Nothing was restored. | stays |
+| `denied` | That file is in a protected place. Nothing was restored. | stays |
+| `unreadable` | The file could not be read or saved. Nothing was restored. | stays |
+
+A refusal is never retried: the next press is a new request of the person. The sentences are the core's and the page holds the
+names of the reasons only, held to the core by a golden.
 
 **Narrow screens (640 px and narrower).** The diff box is part of the card with the same 44 px targets, its text wraps and it
 scrolls inside its own height. `Undo` is at least 44 px high and wide.

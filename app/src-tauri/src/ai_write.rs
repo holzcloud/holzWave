@@ -6,9 +6,14 @@
 //! ticket, holds no card, hash or ticket constructor, and never removes, renames or cuts a file: the text it saves is the
 //! whole new text. Every refusal is a fixed phrase that holds no path and no file text.
 
+use std::fmt;
+use std::path::Path;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use holzwave_core::ai::provider::CancelToken;
 use holzwave_core::ai::tools::{
-    Access, Base, Diff, FsKind, Inspected, MAX_BASE_BYTES, Resolved, Style, Ticket, ToolError, ToolOutput, diff, plan,
+    Access, Base, Diff, FsKind, Inspected, MAX_BASE_BYTES, MAX_CALL_ID_BYTES, Resolved, Style, Ticket, ToolError, ToolOutput,
+    diff, plan,
 };
 use holzwave_core::files::{FileSource, Kind};
 
@@ -20,6 +25,10 @@ use crate::ai_tools::{
 /// The change time a file must have for a save that makes a new file: no file has it, so the save is refused when the file
 /// appeared after the card was made and goes ahead while the file is still absent.
 pub(crate) const CREATE_ONLY: i64 = i64::MIN;
+
+/// The most changes whose old text the shell keeps for an undo, and the most bytes of old text in all.
+pub(crate) const UNDO_RECORDS: usize = 32;
+pub(crate) const UNDO_BYTES: usize = 8 * 1024 * 1024;
 
 /// What the model hears after a file was replaced, followed by the counts.
 pub(crate) const SAVED: &str = "Saved the file.";
@@ -140,7 +149,18 @@ pub(crate) fn run(tools: &ShellTools, ticket: &Ticket, cancel: &CancelToken) -> 
         Base::Text(_) => record.stamp(),
     };
     live(cancel)?;
-    world.save_text(&target.source, path, &change.after, expected).map_err(|_| host(SAVE_REFUSED))?;
+    let modified = world.save_text(&target.source, path, &change.after, expected).map_err(|_| host(SAVE_REFUSED))?;
+    // What the person may take back: the old text, kept in memory, and what the file holds now.
+    tools.undo_log().record(UndoRecord::new(
+        &ticket.scope().conversation,
+        ticket.call_id(),
+        &target.source,
+        path,
+        record.fs() == FsKind::Remote,
+        base.text().map(str::to_owned),
+        Base::Text(change.after.clone()).digest(),
+        modified,
+    ));
     Ok(ToolOutput::new(outcome(matches!(base, Base::Absent), &counts)))
 }
 
@@ -150,12 +170,276 @@ fn outcome(created: bool, diff: &Diff) -> String {
     format!("{} {} {lines} added, {} removed.", if created { CREATED } else { SAVED }, diff.added, diff.removed)
 }
 
+// ---- undo ---------------------------------------------------------------------------------------------------------
+
+/// What an undo needs to put a file back: whose change it was, where the file is, the text it held before and the digest of
+/// the text the agent wrote, and the change time of the file after the agent's own save. `Debug` prints sizes only.
+pub(crate) struct UndoRecord {
+    conversation: String,
+    call_id: String,
+    source: String,
+    path: String,
+    remote: bool,
+    old: Option<String>,
+    written: String,
+    modified: Option<i64>,
+}
+
+impl UndoRecord {
+    /// A record of a change; `old` is none for a file that the agent made.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        conversation: &str,
+        call_id: &str,
+        source: &str,
+        path: &str,
+        remote: bool,
+        old: Option<String>,
+        written: String,
+        modified: Option<i64>,
+    ) -> UndoRecord {
+        UndoRecord {
+            conversation: conversation.to_owned(),
+            call_id: call_id.to_owned(),
+            source: source.to_owned(),
+            path: path.to_owned(),
+            remote,
+            old,
+            written,
+            modified,
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.old.as_ref().map_or(0, String::len)
+    }
+}
+
+impl Clone for UndoRecord {
+    fn clone(&self) -> UndoRecord {
+        UndoRecord {
+            conversation: self.conversation.clone(),
+            call_id: self.call_id.clone(),
+            source: self.source.clone(),
+            path: self.path.clone(),
+            remote: self.remote,
+            old: self.old.clone(),
+            written: self.written.clone(),
+            modified: self.modified,
+        }
+    }
+}
+
+impl fmt::Debug for UndoRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UndoRecord")
+            .field("call_id", &self.call_id)
+            .field("remote", &self.remote)
+            .field("path", &format_args!("<{} bytes>", self.path.len()))
+            .field("old", &self.old.as_ref().map(|old| format!("<{} bytes>", old.len())))
+            .finish_non_exhaustive()
+    }
+}
+
+/// One record in the log, and whether an undo of it is under way. The log is in the order the changes were made.
+struct Held {
+    busy: bool,
+    record: UndoRecord,
+}
+
+#[derive(Default)]
+struct LogInner {
+    records: Vec<Held>,
+}
+
+/// The changes the agent made that the person may still take back: at most [`UNDO_RECORDS`] records and [`UNDO_BYTES`] bytes of
+/// old text, in memory only. A record is dropped with its chat, is used once, and is gone at restart. Nothing here is
+/// written to disk or synced.
+#[derive(Default)]
+pub(crate) struct UndoLog {
+    inner: Mutex<LogInner>,
+}
+
+impl UndoLog {
+    /// An empty log.
+    pub(crate) fn new() -> UndoLog {
+        UndoLog::default()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, LogInner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Keeps `record`; the oldest records go until the log is within its bounds. A record for the same call replaces the
+    /// older one.
+    pub(crate) fn record(&self, record: UndoRecord) {
+        let mut inner = self.lock();
+        let (conversation, call_id) = (record.conversation.clone(), record.call_id.clone());
+        inner.records.retain(|held| !(held.record.conversation == conversation && held.record.call_id == call_id));
+        inner.records.push(Held { busy: false, record });
+        while inner.records.len() > UNDO_RECORDS || inner.records.iter().map(|held| held.record.bytes()).sum::<usize>() > UNDO_BYTES {
+            inner.records.remove(0);
+        }
+    }
+
+    /// Removes and answers the record of a call.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn take(&self, conversation: &str, call_id: &str) -> Option<UndoRecord> {
+        let mut inner = self.lock();
+        let at = inner.records.iter().position(|held| held.record.conversation == conversation && held.record.call_id == call_id)?;
+        Some(inner.records.remove(at).record)
+    }
+
+    /// Starts an undo: a copy of the record, which stays in the log and cannot be started again until [`UndoLog::finish`].
+    fn begin(&self, conversation: &str, call_id: &str) -> Option<UndoRecord> {
+        let mut inner = self.lock();
+        let held = inner.records.iter_mut().find(|held| held.record.conversation == conversation && held.record.call_id == call_id)?;
+        if held.busy {
+            return None;
+        }
+        held.busy = true;
+        Some(held.record.clone())
+    }
+
+    /// Ends an undo: the record is used up when it worked, and can be used again when it did not.
+    fn finish(&self, conversation: &str, call_id: &str, done: bool) {
+        let mut inner = self.lock();
+        if done {
+            inner.records.retain(|held| !(held.record.conversation == conversation && held.record.call_id == call_id));
+        } else if let Some(held) =
+            inner.records.iter_mut().find(|held| held.record.conversation == conversation && held.record.call_id == call_id)
+        {
+            held.busy = false;
+        }
+    }
+
+    /// Drops every record of a chat that was deleted.
+    pub(crate) fn forget_conversation(&self, conversation: &str) {
+        self.lock().records.retain(|held| held.record.conversation != conversation);
+    }
+
+    /// How many records the log holds.
+    pub(crate) fn len(&self) -> usize {
+        self.lock().records.len()
+    }
+
+    /// How many bytes of old text the log holds.
+    pub(crate) fn bytes(&self) -> usize {
+        self.lock().records.iter().map(|held| held.record.bytes()).sum()
+    }
+}
+
+impl fmt::Debug for UndoLog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UndoLog").field("records", &self.len()).field("bytes", &self.bytes()).finish()
+    }
+}
+
+/// Why a change could not be taken back. Each has a stable name for the page and one fixed sentence; none holds a path or text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UndoFault {
+    /// No such change, or it was used already, or the chat is gone.
+    UnknownChange,
+    /// The assistant made the file; nothing here can remove a file.
+    Created,
+    /// The file is not what the assistant left.
+    FileChanged,
+    /// The file is in a protected place.
+    Denied,
+    /// The file could not be read or saved.
+    Unreadable,
+}
+
+impl UndoFault {
+    /// The stable name of the fault.
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::UnknownChange => "unknown_change",
+            Self::Created => "created",
+            Self::FileChanged => "file_changed",
+            Self::Denied => "denied",
+            Self::Unreadable => "unreadable",
+        }
+    }
+}
+
+impl fmt::Display for UndoFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::UnknownChange => "That change can no longer be undone here.",
+            Self::Created => "The assistant created this file. Undo cannot remove it.",
+            Self::FileChanged => "The file changed after the assistant saved it. Nothing was restored.",
+            Self::Denied => "That file is in a protected place. Nothing was restored.",
+            Self::Unreadable => "The file could not be read or saved. Nothing was restored.",
+        })
+    }
+}
+
+impl fmt::Debug for UndoFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason())
+    }
+}
+
+/// Puts the old text of a change back, once, and only while the file still holds exactly what the assistant wrote. It stops
+/// at the first refusal and a refusal keeps the record. Nothing is deleted and nothing is read before the deny list has
+/// been asked again.
+pub(crate) fn undo(tools: &ShellTools, conversation: &str, call_id: &str) -> Result<(), UndoFault> {
+    if call_id.len() > MAX_CALL_ID_BYTES {
+        return Err(UndoFault::UnknownChange);
+    }
+    let Some(record) = tools.undo_log().begin(conversation, call_id) else { return Err(UndoFault::UnknownChange) };
+    let result = put_back(tools, &record);
+    tools.undo_log().finish(conversation, call_id, result.is_ok());
+    result
+}
+
+fn put_back(tools: &ShellTools, record: &UndoRecord) -> Result<(), UndoFault> {
+    let Some(old) = record.old.as_deref() else { return Err(UndoFault::Created) };
+    // The deny list is asked again, before anything is looked at.
+    if record.remote {
+        tools
+            .policy()
+            .check(Style::Posix, FsKind::Remote, &record.path, Access::Write)
+            .map_err(|_| UndoFault::Denied)?;
+    } else {
+        let canonical = tools.policy().check_local(Path::new(&record.path), Access::Write).map_err(|_| UndoFault::Denied)?;
+        if canonical.to_str() != Some(record.path.as_str()) {
+            return Err(UndoFault::FileChanged);
+        }
+    }
+    let world = tools.targets().ok_or(UndoFault::Unreadable)?;
+    let source = world.open_source(&record.source).ok_or(UndoFault::Unreadable)?;
+    let found = if record.remote {
+        inspect_remote(tools, source.as_ref(), &record.path)
+    } else {
+        inspect_local(source.as_ref(), &record.path)
+    };
+    let current = match found {
+        Ok(inspected) => inspected,
+        Err(ToolError::Denied(_)) => return Err(UndoFault::Denied),
+        Err(error) if error == host(UNREADABLE) => return Err(UndoFault::Unreadable),
+        Err(ToolError::Host(_)) => return Err(UndoFault::FileChanged),
+        Err(_) => return Err(UndoFault::Unreadable),
+    };
+    // The file has to hold exactly the text the assistant wrote.
+    match current.base() {
+        Base::Text(_) if current.base().digest() == record.written => {}
+        Base::Text(_) | Base::Absent => return Err(UndoFault::FileChanged),
+    }
+    world.save_text(&record.source, &record.path, old, record.modified).map(|_| ()).map_err(|fault| match fault {
+        crate::ai_tools::SaveFault::Refused => UndoFault::FileChanged,
+        crate::ai_tools::SaveFault::Other => UndoFault::Unreadable,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use std::collections::{BTreeMap, BTreeSet, HashSet};
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::ops::Add;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, PoisonError};
 
     use holzwave_core::ai::tools::{ApprovalTable, DenyPolicy, Scope, specs};
@@ -165,7 +449,7 @@ mod tests {
     use holzwave_core::{Error, Result as CoreResult};
     use serde_json::{Value, json};
 
-    use crate::ai_tools::rig::{run_call, run_call_between};
+    use crate::ai_tools::rig::{run_call, run_call_as, run_call_between};
     use crate::ai_tools::{FileTarget, RowsFault, SaveFault, TerminalTarget, Targets};
 
     use holzwave_core::ai::tools::{ToolHost, ToolName};
@@ -191,6 +475,7 @@ mod tests {
         listings: Mutex<BTreeMap<String, Listing>>,
         reads: AtomicUsize,
         stats: AtomicUsize,
+        broken: AtomicBool,
     }
 
     impl Mem {
@@ -230,6 +515,11 @@ mod tests {
 
         fn stat_count(&self) -> usize {
             self.stats.load(Ordering::SeqCst)
+        }
+
+        /// Every read fails from now on.
+        fn break_reads(&self) {
+            self.broken.store(true, Ordering::SeqCst);
         }
     }
 
@@ -273,6 +563,9 @@ mod tests {
 
         fn read_range(&self, path: &str, offset: u64, len: u64) -> CoreResult<Vec<u8>> {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.broken.load(Ordering::SeqCst) {
+                return Err(Error::Unsupported("the files cannot be read".into()));
+            }
             let files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
             let held = files.get(path).ok_or_else(|| Error::Unsupported("no such file".into()))?;
             let start = usize::try_from(offset).unwrap_or(usize::MAX).min(held.bytes.len());
@@ -306,6 +599,7 @@ mod tests {
         refuse: Mutex<Option<SaveFault>>,
         appear: Mutex<Option<(String, String)>>,
         sources: AtomicUsize,
+        no_open: AtomicBool,
     }
 
     impl Stage {
@@ -332,6 +626,11 @@ mod tests {
         /// The next save finds `text` at `path`, as if another program made the file just before.
         fn appear_before_save(&self, path: &str, text: &str) {
             *self.appear.lock().unwrap_or_else(PoisonError::into_inner) = Some((path.to_owned(), text.to_owned()));
+        }
+
+        /// The files of a source can no longer be opened.
+        fn close_sources(&self) {
+            self.no_open.store(true, Ordering::SeqCst);
         }
 
         fn sources_made(&self) -> usize {
@@ -394,6 +693,9 @@ mod tests {
         }
 
         fn open_source(&self, source: &str) -> Option<Arc<dyn FileSource>> {
+            if self.no_open.load(Ordering::SeqCst) {
+                return None;
+            }
             self.mem_of(source).map(|mem| mem as Arc<dyn FileSource>)
         }
     }
@@ -690,5 +992,206 @@ mod tests {
         assert_eq!((mem.stat_count(), mem.read_count(), stage.sources_made()), (0, 0, 0), "nothing was looked at");
         assert!(stage.saves().is_empty());
         let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// The log of `host` as a count of records.
+    fn remembered(host: &ShellTools) -> usize {
+        host.undo_log().len()
+    }
+
+    #[test]
+    fn undo_restores_the_old_text_while_the_file_still_holds_what_the_agent_wrote() {
+        let mem = Arc::new(Mem::default());
+        mem.put("/w/notes.txt", format!("alpha {OLD_TEXT}\n").as_bytes(), 1_700_000_000);
+        let (host, stage) = this_computer(&mem);
+        let table = table();
+        run_call(&table, &host, &scope(1), "write_file", write_args("/w/notes.txt", &format!("alpha {NEW_TEXT}\n"))).expect("saved");
+        assert_eq!(remembered(&host), 1, "one record");
+        let agent_time = mem.modified("/w/notes.txt");
+
+        undo(&host, "chat-1", "call").expect("undone");
+        let saves = stage.saves();
+        assert_eq!(saves.len(), 2, "the agent's save and the undo's");
+        assert_eq!(saves[1].text, format!("alpha {OLD_TEXT}\n"), "the old text goes back");
+        assert_eq!(saves[1].expected, agent_time, "with the change time the agent's own save returned");
+        assert_eq!(mem.text("/w/notes.txt").as_deref(), Some(format!("alpha {OLD_TEXT}\n").as_str()));
+        assert_eq!(undo(&host, "chat-1", "call"), Err(UndoFault::UnknownChange), "a record is used once");
+        assert_eq!(remembered(&host), 0);
+
+        // An undone `edit_file` restores the whole old text.
+        let original = "fn main() {\r\n\tlet x = 1;\r\n}";
+        mem.put("/w/main.rs", original.as_bytes(), 1_700_000_001);
+        run_call_as(&table, &host, &scope(1), "edit", "edit_file", edit_args("/w/main.rs", "x = 1", "x = 2", false)).expect("edited");
+        assert_ne!(mem.text("/w/main.rs").as_deref(), Some(original));
+        undo(&host, "chat-1", "edit").expect("undone");
+        assert_eq!(mem.text("/w/main.rs").as_deref(), Some(original), "byte for byte");
+
+        // The same over a remote host: the record names the source and the folder lookup runs again and passes.
+        let remote = Arc::new(Mem::default());
+        remote.put("/srv/app/notes.txt", b"remote old\n", 1_700_000_050);
+        remote.list_as("/srv/app", "/srv/app", vec![entry("notes.txt", Kind::File, false, 11, Some(1_700_000_050))], false);
+        let (rhost, rstage) = remote_host(&remote);
+        run_call(&table, &rhost, &scope(1), "write_file", write_args("/srv/app/notes.txt", "remote new\n")).expect("saved");
+        // The listing the server gives now shows the file as the agent left it.
+        let now = remote.modified("/srv/app/notes.txt");
+        remote.list_as("/srv/app", "/srv/app", vec![entry("notes.txt", Kind::File, false, 11, now)], false);
+        undo(&rhost, "chat-1", "call").expect("undone remotely");
+        assert_eq!(remote.text("/srv/app/notes.txt").as_deref(), Some("remote old\n"));
+        assert_eq!(rstage.saves().len(), 2);
+    }
+
+    #[test]
+    fn undo_refuses_when_the_file_changed_by_text_or_by_time_and_keeps_the_record() {
+        let mem = Arc::new(Mem::default());
+        mem.put("/w/notes.txt", b"old\n", 100);
+        let (host, stage) = this_computer(&mem);
+        let table = table();
+        run_call(&table, &host, &scope(1), "write_file", write_args("/w/notes.txt", "agent\n")).expect("saved");
+        let agent_time = mem.modified("/w/notes.txt").expect("a time");
+
+        // Another program changed the text: nothing is restored and the record stays.
+        mem.put("/w/notes.txt", b"somebody else\n", agent_time);
+        assert_eq!(undo(&host, "chat-1", "call"), Err(UndoFault::FileChanged));
+        assert_eq!(stage.saves().len(), 1, "no second save was attempted");
+        assert_eq!(remembered(&host), 1, "the record stays");
+        mem.put("/w/notes.txt", b"agent\n", agent_time);
+        // The same text with another change time is refused by the save and is the same reason.
+        mem.put("/w/notes.txt", b"agent\n", agent_time + 5);
+        assert_eq!(undo(&host, "chat-1", "call"), Err(UndoFault::FileChanged));
+        assert_eq!(remembered(&host), 1);
+        mem.put("/w/notes.txt", b"agent\n", agent_time);
+        undo(&host, "chat-1", "call").expect("undone once the text is put back");
+        assert_eq!(mem.text("/w/notes.txt").as_deref(), Some("old\n"));
+
+        // A remote file that became a link is not the file the assistant wrote.
+        let remote = Arc::new(Mem::default());
+        remote.put("/srv/app/a.txt", b"old\n", 100);
+        remote.list_as("/srv/app", "/srv/app", vec![entry("a.txt", Kind::File, false, 4, Some(100))], false);
+        let (rhost, _) = remote_host(&remote);
+        run_call(&table, &rhost, &scope(1), "write_file", write_args("/srv/app/a.txt", "agent\n")).expect("saved");
+        remote.list_as("/srv/app", "/srv/app", vec![entry("a.txt", Kind::File, true, 6, Some(100))], false);
+        assert_eq!(undo(&rhost, "chat-1", "call"), Err(UndoFault::FileChanged));
+        assert_eq!(remembered(&rhost), 1);
+
+        // A source that cannot be read, one that cannot be opened and a save that fails are not the file's fault.
+        let mem = Arc::new(Mem::default());
+        mem.put("/w/n.txt", b"old\n", 100);
+        let (host, stage) = this_computer(&mem);
+        run_call(&table, &host, &scope(1), "write_file", write_args("/w/n.txt", "agent\n")).expect("saved");
+        stage.refuse_with(Some(SaveFault::Other));
+        assert_eq!(undo(&host, "chat-1", "call"), Err(UndoFault::Unreadable));
+        stage.refuse_with(None);
+        mem.break_reads();
+        assert_eq!(undo(&host, "chat-1", "call"), Err(UndoFault::Unreadable));
+        stage.close_sources();
+        assert_eq!(undo(&host, "chat-1", "call"), Err(UndoFault::Unreadable));
+        assert_eq!(remembered(&host), 1, "the record stays after every one of them");
+    }
+
+    #[test]
+    fn undo_of_a_created_file_is_refused_with_its_own_reason_and_nothing_is_deleted() {
+        let mem = Arc::new(Mem::default());
+        let (host, stage) = this_computer(&mem);
+        run_call(&table(), &host, &scope(1), "write_file", write_args("/w/new.txt", "made\n")).expect("created");
+        assert_eq!(undo(&host, "chat-1", "call"), Err(UndoFault::Created));
+        assert_eq!(mem.text("/w/new.txt").as_deref(), Some("made\n"), "the file is still there");
+        assert_eq!(stage.saves().len(), 1, "only the agent's own save");
+        assert_eq!(remembered(&host), 1, "the record stays, so the reason is the same on the next press");
+        assert_eq!(undo(&host, "chat-1", "call"), Err(UndoFault::Created));
+    }
+
+    #[test]
+    fn the_log_is_bounded_forgets_a_deleted_chat_and_each_record_is_used_once() {
+        let table = table();
+        let mem = Arc::new(Mem::default());
+        let (host, _) = this_computer(&mem);
+        for n in 0..40 {
+            let path = format!("/w/f{n}.txt");
+            mem.put(&path, b"old\n", 100);
+            run_call_as(&table, &host, &scope(1), &format!("c{n}"), "write_file", write_args(&path, "new\n")).expect("saved");
+        }
+        assert!(host.undo_log().len() <= UNDO_RECORDS && host.undo_log().len() == UNDO_RECORDS, "{}", host.undo_log().len());
+        for old in 0..8 {
+            assert_eq!(undo(&host, "chat-1", &format!("c{old}")), Err(UndoFault::UnknownChange), "the oldest are gone: {old}");
+        }
+        undo(&host, "chat-1", "c39").expect("the newest is still there");
+        assert_eq!(undo(&host, "chat-1", "c39"), Err(UndoFault::UnknownChange), "a record is consumed by a successful undo");
+
+        // Old texts that add up to more than the byte bound leave the bytes within it.
+        let big = Arc::new(Mem::default());
+        let (bhost, _) = this_computer(&big);
+        for n in 0..12 {
+            let path = format!("/w/big{n}.txt");
+            // About 900 KB in lines of 100 bytes, with one word to change: the diff stays small and the old text is large.
+            let text = format!("marker\n{}", "a".repeat(99).add("\n").repeat(9000));
+            big.put(&path, text.as_bytes(), 100);
+            run_call_as(&table, &bhost, &scope(1), &format!("b{n}"), "edit_file", edit_args(&path, "marker", "MARKER", false)).expect("edited");
+        }
+        assert!(bhost.undo_log().bytes() <= UNDO_BYTES, "{}", bhost.undo_log().bytes());
+        assert!(bhost.undo_log().bytes() > UNDO_BYTES - 900_000, "the log keeps as much as it may");
+
+        // A deleted chat takes its records and no other chat's.
+        let other = Arc::new(Mem::default());
+        let (ohost, _) = this_computer(&other);
+        other.put("/w/a.txt", b"old\n", 100);
+        other.put("/w/b.txt", b"old\n", 100);
+        run_call_as(&table, &ohost, &scope(1), "a", "write_file", write_args("/w/a.txt", "new\n")).expect("saved");
+        let second = Scope { conversation: "chat-2".to_owned(), turn: 1, pane: 1 };
+        run_call_as(&table, &ohost, &second, "b", "write_file", write_args("/w/b.txt", "new\n")).expect("saved");
+        ohost.forget_conversation("chat-1");
+        assert_eq!(undo(&ohost, "chat-1", "a"), Err(UndoFault::UnknownChange));
+        undo(&ohost, "chat-2", "b").expect("the other chat keeps its record");
+
+        // A call id over 128 bytes is no id.
+        assert_eq!(undo(&ohost, "chat-2", &"x".repeat(129)), Err(UndoFault::UnknownChange));
+    }
+
+    #[test]
+    fn undo_checks_the_deny_list_again_and_reads_nothing_when_it_refuses() {
+        let tree = std::env::temp_dir().join(format!("holzwave-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        std::fs::create_dir_all(tree.join("data")).expect("a folder");
+        let root = tree.canonicalize().expect("canonical");
+        let mem = Arc::new(Mem::default());
+        let stage = Arc::new(Stage::default().with_files(1, target("local", "This computer", false), mem.clone()));
+        let host = ShellTools::with_targets(DenyPolicy::new(vec![root.join("data")]), stage.clone());
+        let path = root.join("data/settings.json").to_str().expect("utf-8").to_owned();
+        host.undo_log().record(UndoRecord::new("chat-1", "p", "local", &path, false, Some("old".to_owned()), "sha256:x".to_owned(), Some(1)));
+        assert_eq!(undo(&host, "chat-1", "p"), Err(UndoFault::Denied));
+        assert_eq!((mem.stat_count(), mem.read_count(), stage.sources_made(), stage.saves().len()), (0, 0, 0, 0));
+        assert_eq!(remembered(&host), 1, "the record stays");
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    #[test]
+    fn no_debug_output_of_the_log_the_records_or_the_faults_shows_a_path_or_text() {
+        let log = UndoLog::new();
+        let record = UndoRecord::new(
+            "chat-1",
+            "call_1",
+            "local",
+            &format!("/w/{PATH_CANARY}.txt"),
+            false,
+            Some(format!("alpha {OLD_TEXT}")),
+            format!("sha256:{NEW_TEXT}"),
+            Some(7),
+        );
+        let shown = format!("{record:?} {record:#?}");
+        log.record(record);
+        let logged = format!("{log:?} {log:#?}");
+        let faults = [UndoFault::UnknownChange, UndoFault::Created, UndoFault::FileChanged, UndoFault::Denied, UndoFault::Unreadable]
+            .iter()
+            .map(|fault| format!("{fault:?} {fault}"))
+            .collect::<String>();
+        let saves = format!("{:?} {:?}", SaveFault::Refused, SaveFault::Other);
+        for text in [&shown, &logged, &faults, &saves] {
+            for canary in [OLD_TEXT, NEW_TEXT, PATH_CANARY] {
+                assert!(!text.contains(canary), "{canary} in {text}");
+            }
+        }
+        assert!(logged.contains("records") && logged.contains("bytes"), "the log shows its counts: {logged}");
+        assert_eq!(log.len(), 1);
+        assert!(log.take("chat-1", "call_1").is_some());
+        assert_eq!(log.len(), 0);
     }
 }

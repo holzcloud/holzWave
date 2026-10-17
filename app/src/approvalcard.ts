@@ -15,6 +15,7 @@ import {
 import type { Destination, Diff, ToolRow } from "./approvalstate.js";
 import { sizeWords } from "./consentstate.js";
 import { el } from "./dom.js";
+import type { UndoModel } from "./undo.js";
 
 /** What the card needs to know of the page around it. */
 export interface CardView {
@@ -79,6 +80,12 @@ function diffBox(parent: Element, diff: Diff): HTMLElement {
     }
   }
   return box;
+}
+
+/** What the tool row of a write that ran needs to offer Undo: the model of its undo and the press that makes the one call. */
+export interface UndoSlot {
+  model: UndoModel;
+  press(): void;
 }
 
 /** The title of a card by its mode: the question, or the reason it can only be denied. */
@@ -295,7 +302,7 @@ let resultNumber = 0;
  * there is a result, a toggle that opens it as text in a box labelled untrusted. The summary and the result are text nodes:
  * they are never parsed, linked or turned into elements. `toggle` is called by a press on the toggle.
  */
-export function toolRowNode(row: ToolRow, open: boolean, toggle: () => void): HTMLElement {
+export function toolRowNode(row: ToolRow, open: boolean, toggle: () => void, undo?: UndoSlot): HTMLElement {
   const node = el("div", "chat-tool");
   node.dataset.call = row.id;
   node.dataset.state = row.state;
@@ -305,21 +312,38 @@ export function toolRowNode(row: ToolRow, open: boolean, toggle: () => void): HT
   mark.setAttribute("aria-hidden", "true");
   el("span", "tool-words", node).textContent = toolWords(row.name);
   el("span", "tool-summary", node).textContent = row.summary;
-  el("span", "tool-state", node).textContent = stateWord(row.state);
+  const done = undo !== undefined && undo.model.state === "done";
+  const word = el("span", done ? "tool-state tool-undone" : "tool-state", node);
+  word.textContent = stateWord(row.state, done);
+  let toggler: HTMLButtonElement | null = null;
   if (row.content !== null) {
-    const toggler = button(node, "tool-toggle", `result-${row.id}`, toggleWords(open, row.bytes));
+    toggler = button(node, "tool-toggle", `result-${row.id}`, toggleWords(open, row.bytes));
     toggler.setAttribute("aria-expanded", open ? "true" : "false");
     toggler.addEventListener("click", (e) => {
       if (e.isTrusted) toggle();
     });
-    if (open) {
-      const id = `tool-result-${++resultNumber}`;
-      toggler.setAttribute("aria-controls", id);
-      el("div", "tool-untrusted label", node).textContent = WORDS.resultLabel;
-      const box = el("pre", "tool-result", node);
-      box.id = id;
-      box.textContent = row.content;
-    }
+  }
+  // Undo follows the toggle, so the keys reach the toggle first and Undo next. Only a person's press asks the core.
+  if (undo !== undefined && undo.model.state !== "gone" && !done) {
+    const sending = undo.model.state === "sending";
+    const b = button(node, "tool-undo", `undo-${row.id}`, sending ? WORDS.undoing : WORDS.undo);
+    b.disabled = sending;
+    b.addEventListener("click", (e) => {
+      if (e.isTrusted) undo.press();
+    });
+  }
+  if (row.content !== null && toggler !== null && open) {
+    const id = `tool-result-${++resultNumber}`;
+    toggler.setAttribute("aria-controls", id);
+    el("div", "tool-untrusted label", node).textContent = WORDS.resultLabel;
+    const box = el("pre", "tool-result", node);
+    box.id = id;
+    box.textContent = row.content;
+  }
+  if (undo !== undefined && undo.model.fault !== null) {
+    const fault = el("p", "tool-fault", node);
+    fault.dataset.kind = "error";
+    fault.textContent = undo.model.fault.text;
   }
   return node;
 }
