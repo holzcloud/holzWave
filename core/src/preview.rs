@@ -137,13 +137,15 @@ fn sanitize(raw: &str) -> String {
         .tags(tags)
         .url_schemes(["http", "https", "mailto"].into_iter().collect())
         .link_rel(Some("noopener noreferrer"))
-        // `class` is kept on code (the language of a fenced block) and nowhere else; a task list's checkbox is kept
-        // as a disabled input and nothing else about an input.
+        // `class` is kept on code (the language of a fenced block) and nowhere else. An input is a task list's checkbox and
+        // nothing else: every input comes out as a disabled checkbox, so one written by hand (no type, another type) is
+        // never a field the person could fill or press.
         .add_tag_attributes("code", ["class"])
         .add_tag_attributes("input", ["type", "checked", "disabled"])
+        .set_tag_attribute_value("input", "type", "checkbox")
+        .set_tag_attribute_value("input", "disabled", "")
         .attribute_filter(|element, attribute, value| match (element, attribute) {
             ("code", "class") => value.starts_with("language-").then_some(value.into()),
-            ("input", "type") => (value == "checkbox").then_some(value.into()),
             _ => Some(value.into()),
         });
     builder.clean(raw).to_string()
@@ -246,6 +248,27 @@ mod tests {
         assert!(html.contains("type=\"checkbox\""), "{html}");
         let other = render_markdown("<code class=\"evil\">x</code>").unwrap();
         assert!(!other.contains("evil"), "{other}");
+    }
+
+    #[test]
+    fn a_stray_input_is_a_disabled_checkbox_and_nothing_else() {
+        // A task list's box is the only input a reply may have. An input written by hand, with no type or with another one,
+        // must not come out as a field the person could fill or press.
+        for source in [
+            "<input>",
+            "<input type=\"text\" value=\"x\" name=\"q\">",
+            "<input type=\"image\" src=\"https://example.org/f.png\">",
+            "<input autofocus onfocus=\"x()\">",
+            "- [ ] todo\n",
+        ] {
+            let html = render_markdown(source).unwrap();
+            assert!(html.contains("<input"), "{source}: {html}");
+            assert!(html.contains("type=\"checkbox\""), "{source}: {html}");
+            assert!(html.contains("disabled"), "{source}: {html}");
+            for bad in ["value=", "name=", "src=", "autofocus", "onfocus", "type=\"text\"", "type=\"image\""] {
+                assert!(!html.contains(bad), "{source}: {bad} survived: {html}");
+            }
+        }
     }
 
     #[test]
