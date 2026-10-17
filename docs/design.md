@@ -218,7 +218,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history |
 | Search | ![](design/search.png) | scrollback search bar in the pane, hits marked, the current hit solid |
 | Copy mode | ![](design/copy-mode.png) | keyboard selection, hint letters on hashes and paths, a solid status line with the keys |
-| Connections | ![](design/connections.png) | list and form: host, user, login (`Key file`, `Password` or `Agent`), secret from the OS keychain, jump host, reconnect policy, startup command, use wsh on this host |
+| Connections | ![](design/connections.png) | list and form: host, user, login (`Key file`, `Password`, `Agent` or `Code or password prompt`), secret from the OS keychain, jump host, reconnect policy, startup command, use wsh on this host |
+| Login prompt | ![](design/login-prompt.png) | the question of a server that asks for a one-time code or a password prompt (6.22): the title and host of your own saved connection, the fixed sentence that the text comes from the server, its words in a bordered block with one field per question, `Cancel` and `Send` |
 | Settings | ![](design/settings.png) | themes (built-in and custom), font, UI scale, accessibility as `System / On / Off` |
 | Shortcuts | ![](design/shortcuts.png) | the key binding editor, see 6.4 |
 | Previews | ![](design/previews.png) | file browser (local and SFTP) with image, PDF and video panes, see 6.5 |
@@ -332,12 +333,15 @@ While a connection is down the pane screen says why on a line of its own, in the
 key) leaves the pane open with the reason; Enter tries again. Every connection has an entry in the palette
 (`Connect: Name (ssh)`) and in the connection manager (`Connections…`), which is the Connections view of 6.3.
 
-The Login choice of an SSH connection has three radio options, in this order: `Key file`, `Password` and `Agent`. `Agent`
-means that the person's ssh-agent signs the login: the form shows no passphrase field and no removal row, the key row is
-labelled `Public key (optional)` and names a public key file that picks one of the agent's keys, and the hint under the
-form says "The ssh-agent signs the login. Nothing is stored. The public key file picks one of its keys." The choice is
-always explicit, never a fallback from a key file or a password. The selected option has a filled mark and the others a
-hollow one, so the choice does not rest on colour.
+The Login choice of an SSH connection has four radio options, in this order: `Key file`, `Password`, `Agent` and `Code or
+password prompt`. `Agent` means that the person's ssh-agent signs the login: the form shows no passphrase field and no
+removal row, the key row is labelled `Public key (optional)` and names a public key file that picks one of the agent's keys,
+and the hint under the form says "The ssh-agent signs the login. Nothing is stored. The public key file picks one of its
+keys." `Code or password prompt` means that the server asks the questions when the person connects (a one-time code, a
+password prompt of PAM, a token's challenge) and the person answers them in the dialog of 6.22: the form shows no key row, no
+passphrase field and no removal row, and the hint says "The server asks for your answer when you connect. Nothing is
+stored." The choice is always explicit, never a fallback from a key file or a password. The selected option has a filled
+mark and the others a hollow one, so the choice does not rest on colour.
 
 The Connections form of an SSH connection ends with one checkbox row, `Use wsh on this host`, unchecked by default, and
 under it a dim note in the form's hint style: "A program on this host can then open files and rename this pane in
@@ -1430,3 +1434,52 @@ colours the row gets a system-colour outline. Nothing moves.
 
 **Not drawn.** A model list, a download button, a switch for Apple Intelligence and a link into System Settings: holzWave
 cannot switch the model on, and says where the person can.
+
+### 6.22 Login prompt
+
+A server that logs a person in with a question (a one-time code, a password prompt of PAM, the challenge of a hardware
+token) is reached through the `Code or password prompt` login of 6.8. When such a server asks, the page shows this dialog.
+It is the page's own dialog (the floating layer of 6.3, the title style of the Settings dialog, the buttons of every
+dialog); nothing in it is new except the bordered block that holds the server's words.
+
+**When it appears.** Only when a person opened a pane or a file browser on the connection. A monitor, a command of the
+assistant or any other background use of the connection never raises it: they say that the connection asks for a login code
+and that a pane must be opened on it first. One login serves the pane, the files and the commands of a connection, so a
+person answers once.
+
+**What it holds, top to bottom.**
+
+1. The title `Login prompt from NAME`, and under it the line `Host: HOST`. Both come from the person's own saved connection,
+   looked up by its id in the core. The server never writes either.
+2. The fixed sentence `This text comes from the server, not from holzWave.` in the dim note style. It is always there.
+3. A hairline block with the legend `The server says`. In it, in this order: the server's name for the round in bold, its
+   instructions as plain text with the line breaks the core kept, and one row per question: the question's text as the label
+   and a field. A question whose server flag says that the answer is not echoed is a masked field (`type="password"`) with
+   the word `hidden` after it; one that echoes is a plain field with the word `shown`. The words are the second cue; the
+   field's look does not depend on colour. At most five questions are shown, and every text is already cleaned and bounded by
+   the core (at most 60, 300 and 200 characters; control, direction and zero-width characters removed).
+4. The line `Your answer goes to this login only. Nothing is stored.`
+5. The buttons `Cancel` and `Send` (the solid one), at the right.
+
+**The server's text is untrusted.** It is set as text, never as markup, and it is never a title. holzWave asks for no other
+secret in this dialog: a text that says it is a holzWave question is the server's, and the fixed sentence above it says so.
+The dialog never remembers an answer, offers no `remember` choice and never fills a field in.
+
+**Keys.** The first field has the focus when the dialog opens. `Tab` and `Shift+Tab` move through the fields and the
+buttons and stay in the dialog. `Enter` in the last field sends, in an earlier field it moves on to the next. `Escape`
+cancels, and so does `Cancel`. The dialog has `role="dialog"`, `aria-modal`, a label that names the title and fields whose
+labels are tied to them. When the dialog closes, the focus returns to where it was.
+
+**How it ends.** `Send` gives the answers, in the order of the questions, to the core and the dialog goes. `Cancel` and
+`Escape` end the login and the pane says so and waits for `Enter`. When no answer comes in two minutes the core ends the
+login the same way and tells every window, and the dialog goes without being asked. A second question that arrives while one
+is open waits and is shown after the first has ended. The fields are emptied and removed whenever the dialog goes.
+
+**Accessibility.** Hairlines use `--hw-line` and the dim text `--hw-ink-2` under `contrast-high`; the 2 px focus ring holds
+for every field and button; nothing moves under `motion-reduce`; under forced colours the block and the fields keep their
+borders. Every size is in `rem`.
+
+![Login prompt](design/login-prompt.png)
+
+**Not drawn.** A `remember this code` choice, a countdown, a second dialog for a second question at once, and any way to
+answer a question without the dialog.

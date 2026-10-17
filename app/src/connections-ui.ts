@@ -8,6 +8,7 @@ import { connect, connections, refreshConnections } from "./connections.js";
 import type { Connection } from "./connstate.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
+import { INTERACTIVE_HINT } from "./loginpromptstate.js";
 
 let opened: Promise<void> | null = null;
 
@@ -125,7 +126,7 @@ async function show(): Promise<void> {
     const host = textRow("cx-host", "Host", "ssh wsl docker");
     const port = textRow("cx-port", "Port", "ssh", "number");
     const user = textRow("cx-user", "User", "ssh");
-    const auth = choiceRow("cx-auth", "Login", "ssh", [["key", "Key file"], ["password", "Password"], ["agent", "Agent"]]);
+    const auth = choiceRow("cx-auth", "Login", "ssh", [["key", "Key file"], ["password", "Password"], ["agent", "Agent"], ["interactive", "Code or password prompt"]]);
     const keyPath = textRow("cx-key", "Key file", "ssh");
     const secret = textRow("cx-secret", "Passphrase", "ssh", "password");
     const clearRow = el("div", "cx-row-choice", form);
@@ -163,7 +164,7 @@ async function show(): Promise<void> {
     const kindValue = (): Connection["kind"] => (kind.radios.find((r) => r.checked)?.value ?? "ssh") as Connection["kind"];
     const authValue = (): Connection["auth"] => {
       const value = auth.radios.find((r) => r.checked)?.value;
-      return value === "password" ? "password" : value === "agent" ? "agent" : "key";
+      return value === "password" || value === "agent" || value === "interactive" ? value : "key";
     };
 
     // The row below the login holds a private key file for a key or a password login and an optional public key file for
@@ -188,19 +189,22 @@ async function show(): Promise<void> {
       const login = authValue();
       const password = login === "password";
       const agent = login === "agent";
-      keyPath.input.parentElement!.hidden = k !== "ssh" || password;
+      // The agent and the prompt hold no secret of the connection: no passphrase row and nothing to remove.
+      const noSecret = agent || login === "interactive";
+      keyPath.input.parentElement!.hidden = k !== "ssh" || password || login === "interactive";
       setText(keyPath.label, agent ? "Public key (optional)" : "Key file");
-      // The agent holds the key and nothing is stored, so there is no secret row and nothing to remove.
-      secret.input.parentElement!.hidden = k !== "ssh" || agent;
+      secret.input.parentElement!.hidden = k !== "ssh" || noSecret;
       setText(secret.label, password ? "Password" : "Passphrase");
       setText(clearText, password ? "Remove the saved password" : "Remove the saved passphrase");
-      clearRow.hidden = k !== "ssh" || !current.has_secret || agent;
+      clearRow.hidden = k !== "ssh" || !current.has_secret || noSecret;
       setText(
         hint,
         k === "ssh"
-          ? agent
-            ? AGENT_HINT
-            : current.has_secret
+          ? login === "interactive"
+            ? INTERACTIVE_HINT
+            : agent
+              ? AGENT_HINT
+              : current.has_secret
               ? "A secret is saved in the system keychain. Type a new one to replace it, or leave the field empty."
               : "The password or passphrase goes to the system keychain, never to a file."
           : k === "wsl"
@@ -310,9 +314,9 @@ async function show(): Promise<void> {
       del.textContent = armed ? "Click again to delete" : "Delete";
     };
 
-    // An agent login has no secret: whatever was typed before the login was chosen is not sent.
+    // An agent or an interactive login has no secret: whatever was typed before the login was chosen is not sent.
     const secretChange = (): { kind: string; value?: string } =>
-      authValue() === "agent"
+      authValue() === "agent" || authValue() === "interactive"
         ? { kind: "keep" }
         : secret.input.value !== ""
           ? { kind: "set", value: secret.input.value }

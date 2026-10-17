@@ -1,0 +1,21 @@
+/* The login prompt (loginprompt.ts, docs/design.md 6.22). Loaded after dialogs.css and settings.css, whose backdrop, box and
+   buttons it uses. Every colour is a `--hw-*` token and every size is in rem. The state of a field is a word after it
+   (hidden or shown), never colour alone. */
+.dlg.loginprompt { width: min(34rem, calc(100vw - 4rem)); font-size: 1rem; line-height: 1.4; }
+.loginprompt .set-title { margin: 0 0 .25rem; font-size: 1rem; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
+.loginprompt .lp-host { margin: 0 0 .5rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.loginprompt .lp-source, .loginprompt .lp-note { margin: 0 0 .667rem; color: var(--hw-dim); }
+.loginprompt .lp-block { min-width: 0; margin: 0 0 .333rem; padding: .5rem .833rem .667rem; border: 1px solid var(--hw-line);
+                         border-radius: .333rem; }
+.loginprompt .lp-legend { padding: 0 .333rem; color: var(--hw-dim); font-size: calc(11rem / 12); letter-spacing: .1em;
+                          text-transform: uppercase; }
+.loginprompt .lp-name { margin: 0 0 .167rem; font-weight: 700; overflow-wrap: anywhere; }
+.loginprompt .lp-instructions { margin: 0 0 .667rem; color: var(--hw-ink-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.loginprompt .lp-row { display: flex; align-items: center; gap: .667rem; min-height: 2rem; }
+.loginprompt .lp-label { flex: 0 0 9rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.loginprompt .lp-row input { box-sizing: border-box; flex: 1 1 auto; min-width: 0; margin: 0; padding: .25rem .5rem; font: inherit;
+                             color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line);
+                             border-radius: .333rem; }
+.loginprompt .lp-row input:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.loginprompt .lp-tag { flex: none; color: var(--hw-dim); font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase; }
+.dlg.loginprompt button { font-size: calc(11rem / 12); }

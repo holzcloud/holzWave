@@ -23,8 +23,11 @@ export interface Connection {
   host: string;
   port: number;
   user: string;
-  /** `agent`: the person's ssh-agent signs the login, nothing is stored, `key_path` may name a public key file. */
-  auth: "key" | "password" | "agent";
+  /**
+   * `agent`: the person's ssh-agent signs the login, nothing is stored, `key_path` may name a public key file.
+   * `interactive`: the server asks the questions (a one-time code, a password prompt) and the person answers them.
+   */
+  auth: "key" | "password" | "agent" | "interactive";
   key_path: string;
   jump: string | null;
   startup: string;
@@ -94,7 +97,7 @@ export function readConnections(raw: unknown): Connection[] {
       host: text(o.host),
       port: typeof o.port === "number" ? o.port : 22,
       user: text(o.user),
-      auth: o.auth === "password" ? "password" : o.auth === "agent" ? "agent" : "key",
+      auth: o.auth === "password" || o.auth === "agent" || o.auth === "interactive" ? o.auth : "key",
       key_path: text(o.key_path),
       jump: typeof o.jump === "string" ? o.jump : null,
       startup: text(o.startup),

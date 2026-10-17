@@ -11,6 +11,7 @@ export default async function ({ page, url, errors }) {
   await dialogCase(page, url);
   await wshCase(page, url);
   await agentCase(page, url);
+  await interactiveCase(page, url);
   await installCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -198,7 +199,7 @@ async function agentCase(page, url) {
   await page.waitForSelector(".dlg.conns");
 
   const login = page.locator('.conns [role="radiogroup"][aria-label="Login"]');
-  assert.deepEqual(await login.locator("label.cx-option").allTextContents(), ["Key file", "Password", "Agent"], "three logins in this order");
+  assert.deepEqual(await login.locator("label.cx-option").allTextContents(), ["Key file", "Password", "Agent", "Code or password prompt"], "four logins in this order");
   const keyLabel = page.locator("label[for=cx-key]");
   const hint = page.locator(".conns .cx-hint:not(#cx-wsh-note)");
   assert.equal(await keyLabel.textContent(), "Key file");
@@ -362,6 +363,47 @@ async function wshCase(page, url) {
   await page.keyboard.press("Tab");
   const after = await page.evaluate(() => document.activeElement?.textContent);
   assert.equal(after, "Delete", "the next stop is the first button");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".dlg.conns", { state: "detached" });
+}
+
+async function interactiveCase(page, url) {
+  await open(page, url);
+  const CODE = { ...TALOS, id: "code", name: "Code host", auth: "interactive", key_path: "", has_secret: false };
+  await page.evaluate((l) => { window.__LIST = l; }, [TALOS, WEB, CODE]);
+  await page.evaluate(() => {
+    window.__MOCK__.on("connection_save", ({ profile }) => ({ ...profile, has_secret: false }));
+  });
+  await page.evaluate(() => window.__registry.runAction("connections.open"));
+  await page.waitForSelector(".dlg.conns");
+  const hint = page.locator(".conns .cx-hint:not(#cx-wsh-note)");
+
+  // Choosing the prompt hides the key, passphrase and removal rows and says nothing is stored.
+  await page.fill("#cx-secret", "typed-before-the-switch");
+  await page.check('input[name="cx-auth"][value="interactive"]');
+  assert.equal(await page.locator("#cx-key").isVisible(), false, "no key row");
+  assert.equal(await page.locator("#cx-secret").isVisible(), false, "no passphrase row");
+  assert.equal(await page.locator("#cx-clear").isVisible(), false, "no removal row");
+  assert.equal(await hint.textContent(), "The server asks for your answer when you connect. Nothing is stored.");
+  assert.doesNotMatch(await hint.textContent(), /keychain|passphrase/i);
+  assert.equal(await page.locator('input[name="cx-auth"][value="interactive"]').isChecked(), true);
+
+  await page.getByRole("button", { name: "Save" }).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("connection_save").length === 1);
+  const sent = (await page.evaluate(() => window.__MOCK__.callsOf("connection_save")))[0];
+  assert.equal(sent.profile.auth, "interactive");
+  assert.deepEqual(sent.secret, { kind: "keep" }, "a prompt login never sends a secret");
+
+  // A saved connection of this kind shows the radio; the others bring their rows back.
+  await page.locator(".conns .cx-list button", { hasText: "Code host" }).click();
+  assert.equal(await page.locator('input[name="cx-auth"][value="interactive"]').isChecked(), true);
+  assert.equal(await hint.textContent(), "The server asks for your answer when you connect. Nothing is stored.");
+  await page.check('input[name="cx-auth"][value="key"]');
+  assert.equal(await page.locator("#cx-key").isVisible(), true);
+  assert.equal(await page.locator("#cx-secret").isVisible(), true);
+  await page.check('input[name="cx-auth"][value="agent"]');
+  await page.check('input[name="cx-auth"][value="interactive"]');
+  assert.equal(await page.locator("#cx-key").isVisible(), false);
   await page.keyboard.press("Escape");
   await page.waitForSelector(".dlg.conns", { state: "detached" });
 }

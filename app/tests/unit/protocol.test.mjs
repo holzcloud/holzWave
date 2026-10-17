@@ -45,7 +45,7 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open", "login-prompt", "login-prompt-end"]);
   // The shell of a pane asked for the history search: the id of the pane and nothing else.
   assert.deepEqual(golden.events["history-open"], { pane: 3 });
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
@@ -215,11 +215,28 @@ test("the command table has snake_case argument names and no raw input command",
   assert.deepEqual(golden.commands.start_pane, ["pane", "cols", "rows", "cell_w", "cell_h"]);
 });
 
+// ---- the questions of a login ----------------------------------------------------------------------------------
+
+test("the login question has its events and its two commands pinned", () => {
+  // The question: the person's own connection (name and host), the server's words as text, and the echo flag of each field.
+  const prompt = golden.events["login-prompt"];
+  assert.deepEqual(keys(prompt), ["connection", "host", "id", "instructions", "name", "prompts"]);
+  assert.match(prompt.id, /^[0-9a-f]{32}$/);
+  assert.deepEqual(prompt.prompts.map((p) => keys(p)), [["echo", "text"], ["echo", "text"]]);
+  assert.deepEqual(prompt.prompts.map((p) => p.echo), [false, true]);
+  // The end: the id and how it ended; every outcome the shell has.
+  assert.deepEqual(golden.events["login-prompt-end"].map((e) => e.outcome), ["answered", "cancelled", "timed_out"]);
+  for (const end of golden.events["login-prompt-end"]) assert.deepEqual(keys(end), ["id", "outcome"]);
+  // The answer carries the id and the answers and nothing else; the cancel carries the id.
+  assert.deepEqual(golden.commands.login_prompt_answer, ["id", "answers"]);
+  assert.deepEqual(golden.commands.login_prompt_cancel, ["id"]);
+});
+
 // ---- the AI chat --------------------------------------------------------------------------------------------------
 
 test("the ai events and the nineteen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
-  assert.deepEqual(golden.events.names.slice(-3, -1), ["ai", "ai-ask"]);
+  assert.deepEqual(golden.events.names.slice(-5, -3), ["ai", "ai-ask"]);
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
   assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
   // A request of `wsh ai` that waits for the person: the card for the window of the pane, flat, and nothing but the

@@ -84,8 +84,18 @@ test("readConnections reads wsh as a strict boolean", () => {
 test("readConnections reads agent as a login", () => {
   const login = (auth) => readConnections([{ id: "a", name: "A", kind: "ssh", ...(auth === undefined ? {} : { auth }) }])[0].auth;
   assert.equal(login("agent"), "agent");
+  assert.equal(login("interactive"), "interactive");
   assert.equal(login("password"), "password");
   assert.equal(login("key"), "key");
   assert.equal(login(undefined), "key", "absent is the key file, as before");
-  for (const odd of ["Agent", "interactive", "", 1, null, true, {}]) assert.equal(login(odd), "key", `${JSON.stringify(odd)} falls back to key`);
+  for (const odd of ["Agent", "Interactive", "", 1, null, true, {}]) assert.equal(login(odd), "key", `${JSON.stringify(odd)} falls back to key`);
+});
+
+test("readConnections_reads_interactive_as_a_login", () => {
+  const login = (auth) => readConnections([{ id: "a", name: "A", kind: "ssh", auth }])[0].auth;
+  assert.equal(login("interactive"), "interactive");
+  // Only the exact word: anything else is the key file, as before.
+  for (const odd of ["INTERACTIVE", "interactive ", "keyboard-interactive", "code", 2, [], {}]) {
+    assert.equal(login(odd), "key", `${JSON.stringify(odd)} falls back to key`);
+  }
 });
