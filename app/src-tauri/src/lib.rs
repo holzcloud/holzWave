@@ -18,6 +18,7 @@
 //! user typed.
 
 mod ai_host;
+mod ai_tools;
 mod commands;
 mod files_protocol;
 mod menu;

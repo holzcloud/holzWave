@@ -21,7 +21,7 @@ use holzwave_core::ai::service::{
     ServiceError, TurnTicket,
 };
 use holzwave_core::ai::store::{ConversationId, ConversationSummary, JsonDirStore, StoreError};
-use holzwave_core::ai::tools::{Access, DenyPolicy, FsKind, Style};
+use holzwave_core::ai::tools::{Access, DenyPolicy, FsKind, Style, ToolError};
 use holzwave_core::ai::types::{ApiKey, ContextKind};
 use holzwave_core::ai::wire::Wire;
 use holzwave_core::blocks::{Block, BlockKind, LOCAL};
@@ -34,6 +34,7 @@ use holzwave_core::settings::Settings;
 use holzwave_core::textread::TextRegion;
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::ai_tools::{CoreTargets, ShellTools};
 use crate::state::{AppCore, Out, Sink, Target};
 
 /// The folder of the data directory that holds one file per chat.
@@ -138,6 +139,19 @@ impl AiFault {
     /// An offer without picked items, or picked items without an offer.
     pub fn bad_pick() -> AiFault {
         context_fault(ContextRefusal::BadPick)
+    }
+
+    /// The verdict of a card is neither of the two the page may send.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn invalid_decision() -> AiFault {
+        let text = "the decision must be allow or deny".to_owned();
+        AiFault { code: "tool", reason: Some("invalid_decision"), text }
+    }
+
+    /// The table's refusal of a verdict or a call: the stable code of the error and its fixed sentence.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn from_tool(error: &ToolError) -> AiFault {
+        AiFault { code: "tool", reason: Some(error.code()), text: error.to_string() }
     }
 
     /// A profile id that no profile has.
@@ -285,32 +299,36 @@ pub struct AiHost {
     service: AiService,
     /// The source of shared content, kept so the core can hand it its weak reference once the core exists.
     context: Arc<ShellContext>,
+    /// The host of the agent's tools, kept for the same reason.
+    tools: Arc<ShellTools>,
 }
 
 impl AiHost {
     /// Builds the service over the chats folder and `ai.json` of `dir`. The data directory is the first place the
-    /// agent may never touch (the tools that follow add the others). Nothing else happens here: no thread, no socket,
-    /// no keychain call.
+    /// agent may never touch. Nothing else happens here: no thread, no socket, no keychain call.
     pub fn new(dir: &Path, sink: Arc<dyn Sink>, parts: AiParts) -> AiHost {
         let context = Arc::new(ShellContext::new(dir));
+        let tools = Arc::new(ShellTools::new(DenyPolicy::new(protected_dirs(dir))));
         let mut builder =
             AiService::builder(Arc::new(JsonDirStore::new(dir.join(CHATS_DIR))), Arc::new(ShellAiSink { sink }), dir)
                 .vault(parts.vault)
                 .deny_policy(DenyPolicy::new(protected_dirs(dir)))
+                .tool_host(tools.clone())
                 .context_source(context.clone());
         if let Some(clock) = parts.clock {
             builder = builder.clock(clock);
         }
-        AiHost { service: builder.build(), context }
+        AiHost { service: builder.build(), context, tools }
     }
 
-    /// Gives the source of shared content the core it reads panes and files through. Held weakly and set once; a call
-    /// after the first changes nothing.
+    /// Gives the source of shared content and the host of the tools the core they read panes and files through. Held
+    /// weakly and set once; a call after the first changes nothing.
     pub fn bind(&self, core: Weak<AppCore>) {
-        self.context.bind(core);
+        self.context.bind(core.clone());
+        self.tools.bind(Arc::new(CoreTargets::new(core)));
     }
 
-    /// The service, for the plans that add a gate, a tool host or a decision to the shell.
+    /// The service, for the calls the shell makes on it directly.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn service(&self) -> &AiService {
         &self.service
@@ -2036,4 +2054,230 @@ mod tests {
         assert!(requests[0].context.is_empty(), "no context travels with a typed message");
     }
 
+    // ---- tools ------------------------------------------------------------------------------------------------
+
+    use holzwave_core::ai::types::{Role, StopReason};
+
+    /// What a file the tools read holds; it appears in test code only.
+    const TOOL_TEXT: &str = "zq-tool-text-7e21c4";
+
+    /// `<dir>/proj/notes.txt`, holding `alpha beta ` and the canary: the canonical path of the file.
+    fn tool_tree(dir: &Path) -> PathBuf {
+        let proj = dir.join("proj");
+        std::fs::create_dir_all(&proj).expect("a folder");
+        let notes = proj.join("notes.txt");
+        std::fs::write(&notes, format!("alpha beta {TOOL_TEXT}\n")).expect("a file");
+        notes.canonicalize().expect("a canonical path")
+    }
+
+    /// An on-device provider whose model can call tools.
+    fn scripted_tools(id: &str) -> ScriptedProvider {
+        let capabilities = Capabilities { tools: true, ..Capabilities::conservative(Locality::OnDevice) };
+        ScriptedProvider::new(id).with_capabilities(capabilities)
+    }
+
+    /// One response of the model: a call of a tool, which ends the response for tool use.
+    fn tool_call_turn(call_id: &str, name: &str, args: Value) -> Script {
+        Script::new().tool_call(call_id, name, args).stop(StopReason::ToolUse)
+    }
+
+    /// One response of the model: a final text.
+    fn text_turn(text: &str) -> Script {
+        Script::reply(text)
+    }
+
+    /// The events of `kind` for `chat` that were sent so far, in order, as the page receives them.
+    fn events_of(rec: &AiRecorder, chat: &str, kind: &str) -> Vec<Value> {
+        rec.ai_events()
+            .iter()
+            .filter(|(_, payload)| payload.0.conversation == chat && payload.0.kind.name() == kind)
+            .map(|(_, payload)| json_of(payload))
+            .collect()
+    }
+
+    /// The `nth` (from 0) event of `kind` for `chat`, waited for.
+    fn nth_event(rec: &AiRecorder, chat: &str, kind: &str, nth: usize) -> Value {
+        assert!(
+            wait_for(Duration::from_secs(5), || events_of(rec, chat, kind).len() > nth),
+            "no event number {nth} of kind {kind}"
+        );
+        events_of(rec, chat, kind).remove(nth)
+    }
+
+    /// The first event of `kind` for `chat`, waited for.
+    fn event_of(rec: &AiRecorder, chat: &str, kind: &str) -> Value {
+        nth_event(rec, chat, kind, 0)
+    }
+
+    /// The page's verdict on a card.
+    fn decision(core: &AppCore, chat: &str, call_id: &str, verdict: &str, hash: &str) -> Result<(), AiFault> {
+        core.ai_decide(chat, call_id, verdict, hash)
+    }
+
+    /// `state` as a chat that was saved holds it: the output of every tool is the fixed marker, because the store keeps
+    /// no tool output as text unless the setting asks for it. A snapshot of a chat that is not running is read from the
+    /// store, so it equals the fold of the events only after this.
+    fn as_stored(mut state: Value) -> Value {
+        if let Some(messages) = state["messages"].as_array_mut() {
+            for part in messages.iter_mut().flat_map(|message| message["parts"].as_array_mut().into_iter().flatten()) {
+                if part["type"] == "tool_result" {
+                    part["content"] = json!(holzwave_core::ai::store::NOT_STORED);
+                }
+            }
+        }
+        state
+    }
+
+    /// The names of the fields of a card, in order.
+    fn payload_names(card: &Value) -> Vec<String> {
+        card["payload"]
+            .as_array()
+            .expect("a payload")
+            .iter()
+            .map(|field| field["name"].as_str().expect("a name").to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_read_call_is_proposed_decided_on_its_hash_and_its_result_reaches_the_model() {
+        let tree = Scratch::new("tool-tree");
+        let scratch = Scratch::new("tool-trace");
+        let notes = tool_tree(&tree.0);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "read_file", json!({"path": notes})))
+                .with_turn(text_turn("Done.")),
+        );
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        core.ai_send(&chat, "read my notes".to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+
+        // The card reaches every window as one flat event.
+        let proposed = event_of(&rec, &chat, "tool_proposed");
+        let mut members: Vec<&str> = proposed.as_object().expect("an object").keys().map(String::as_str).collect();
+        members.sort_unstable();
+        assert_eq!(members, ["conversation", "kind", "pending", "seq", "turn"]);
+        let card = &proposed["pending"];
+        assert_eq!((card["tool"].as_str(), card["effect"].as_str()), (Some("read_file"), Some("read")));
+        let header = (card["pane"].as_u64(), card["target"].as_str(), card["remote"].as_bool());
+        assert_eq!(header, (Some(pane), Some("This computer"), Some(false)));
+        assert_eq!(
+            payload_names(card),
+            ["tool", "pane", "target", "remote", "path", "offset", "limit", "resolved_path"]
+        );
+        let field = |name: &str| {
+            let fields = card["payload"].as_array().expect("a payload");
+            fields.iter().find(|f| f["name"] == name).map(|f| f["value"].as_str().expect("a value").to_owned())
+        };
+        assert_eq!(field("resolved_path"), notes.to_str().map(str::to_owned));
+        let hash = card["hash"].as_str().expect("a hash").to_owned();
+        assert!(hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{hash}");
+        assert_eq!((card["tainted"].as_bool(), card["taint"].as_array().map(Vec::len)), (Some(false), Some(0)));
+        for (target, _) in rec.ai_events() {
+            assert_eq!(target, Target::All, "every ai event is for every window");
+        }
+
+        // A snapshot taken while the card waits holds the same card.
+        let waiting = json_of(&core.ai().snapshot(&chat).expect("a snapshot"));
+        assert_eq!(waiting["running"], json!(true));
+        assert_eq!(waiting["pending"], json!([card]), "the snapshot holds the card the event carried");
+
+        // Nothing runs before a decision.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(events_of(&rec, &chat, "tool_result").is_empty(), "a result before the decision");
+        assert_eq!(provider.calls(), 1, "the model waits for the result");
+
+        // The page decides on the card's hash: the host reads the file and the result reaches the model.
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(result["call_id"], json!("call_1"));
+        let facts = (result["tool"].as_str(), result["is_error"].as_bool(), result["redactions"].as_u64());
+        assert_eq!(facts, (Some("read_file"), Some(false), Some(0)));
+        let content = result["content"].as_str().expect("content");
+        assert!(content.starts_with("alpha beta ") && content.contains(TOOL_TEXT), "{content}");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], json!("done"));
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2, "the second request carries the result");
+        let declared: Vec<&str> = requests[1].tools.iter().map(|spec| spec.name.as_str()).collect();
+        assert_eq!(declared, ["read_file"], "no other tool is offered yet");
+        let last = requests[1].messages.last().expect("a message");
+        assert_eq!(last.role, Role::Tool);
+        let returned = last.parts.iter().any(|part| match part {
+            Part::ToolResult(result) => result.call_id == "call_1" && result.content.contains(TOOL_TEXT),
+            _ => false,
+        });
+        assert!(returned, "the file text is the result of the call");
+
+        // The events fold to the snapshot, and `seq` has no hole.
+        let events: Vec<AiPayload> = rec.ai_events().into_iter().map(|(_, payload)| payload).collect();
+        let mut folded = ChatState::new(&chat);
+        for payload in &events {
+            assert_eq!(folded.apply(&payload.0), ApplyResult::Applied, "{payload:?}");
+        }
+        let seqs: Vec<u64> = events.iter().map(|p| p.0.seq).collect();
+        assert_eq!(seqs, (1..=events.len() as u64).collect::<Vec<_>>());
+        let idle = core.ai().snapshot(&chat).expect("a snapshot");
+        assert_eq!(as_stored(json_of(&folded)), json_of(&idle), "the fold of the events is the snapshot");
+        assert!(idle.pending.is_empty());
+
+        // The card is spent.
+        let again = decision(&core, &chat, "call_1", "allow", &hash).expect_err("a second decision");
+        assert_eq!((again.code, again.reason), ("tool", Some("unknown_call")));
+    }
+
+    #[test]
+    fn a_wrong_hash_an_odd_verdict_and_a_deny_are_answered_without_the_file_reaching_the_model() {
+        let tree = Scratch::new("tool-tree");
+        let scratch = Scratch::new("tool-verdict");
+        let notes = tool_tree(&tree.0);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "read_file", json!({"path": notes})))
+                .with_turn(text_turn("Understood.")),
+        );
+        let chat = new_chat();
+        let pane = pane_of(&core);
+        core.ai_send(&chat, "read my notes".to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+        let proposed = event_of(&rec, &chat, "tool_proposed");
+        let hash = proposed["pending"]["hash"].as_str().expect("a hash").to_owned();
+
+        let refused = [
+            (decision(&core, &chat, "call_1", "allow", &"0".repeat(64)), ("tool", Some("hash_mismatch"))),
+            (decision(&core, &chat, "call_1", "allow", &hash.to_uppercase()), ("tool", Some("hash_mismatch"))),
+            (decision(&core, &chat, "call_1", "maybe", &hash), ("tool", Some("invalid_decision"))),
+            (decision(&core, "../x", "call_1", "allow", &hash), ("invalid_conversation", None)),
+        ];
+        for (answer, (code, reason)) in refused {
+            let fault = answer.expect_err("refused");
+            assert_eq!((fault.code, fault.reason), (code, reason));
+            let shown = printed(&fault);
+            assert!(!shown.contains(&hash) && !shown.contains(&"0".repeat(64)), "a fault shows a hash");
+        }
+        let snapshot = json_of(&core.ai().snapshot(&chat).expect("a snapshot"));
+        assert_eq!(snapshot["pending"], json!([proposed["pending"]]), "the card stays after every refusal");
+        assert_eq!(provider.calls(), 1);
+
+        // A denial is a verdict like the other: the model is told, and the file text never reaches it.
+        decision(&core, &chat, "call_1", "deny", &hash).expect("a denial");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(result["is_error"], json!(true));
+        assert_eq!(result["content"], json!("The user denied this action."));
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], json!("done"));
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        let sent = serde_json::to_string(&requests[1].messages).expect("serialises");
+        assert!(sent.contains("The user denied this action."), "the model is told");
+        assert!(!sent.contains(TOOL_TEXT), "the file text reached the model after a denial");
+        assert!(!everything_serialised(&rec, &[]).contains(TOOL_TEXT), "the file text reached an event");
+    }
 }

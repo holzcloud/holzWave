@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, Opened};
+use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened};
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
 use holzwave_core::files::{Entry, FileSource, Listing};
 use holzwave_core::engine::{
@@ -26,7 +26,7 @@ use holzwave_core::layout::{
 };
 use holzwave_core::pane::{EditAction, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::persist::{self, Debounced};
-use holzwave_core::profiles::Profile;
+use holzwave_core::profiles::{Kind as ConnectionKind, Profile};
 use holzwave_core::secrets::SecretStore;
 use holzwave_core::platform::{
     Os, ProgramCheck, ShellLaunch, ShellResolved, host_shell_launch, in_flatpak, resolve_shell,
@@ -40,6 +40,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::ai_host::{AiHost, AiParts, AiPayload};
+use crate::ai_tools::{FileTarget, TerminalTarget};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
@@ -582,6 +583,13 @@ impl Default for ShellSpec {
     fn default() -> Self {
         Self::System
     }
+}
+
+/// The folder a file path is in: the path up to its last separator, `/` for a name directly under the root, `None` for
+/// a bare name.
+fn parent_folder(path: &str) -> Option<String> {
+    let cut = path.rfind(['/', '\\'])?;
+    Some(if cut == 0 { path[..1].to_owned() } else { path[..cut].to_owned() })
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -2108,6 +2116,65 @@ impl AppCore {
         let block = self.blocks.block_of(pane)?;
         let source = self.blocks.source(&self.connections, &block.source).ok()?;
         Some((block, source))
+    }
+
+    /// What the files of `pane` are, for the tools that read files: whose they are, where a relative path starts and
+    /// whether the machine is another one. Reads the tables only: no file system, no connection, no lock held across a
+    /// call into another table. `None` for a pane that is not open, one that shows a block other than a file browser or
+    /// a preview, and one that runs a WSL or Docker connection: no file tool reaches those.
+    pub(crate) fn tool_file_target(&self, pane: PaneId) -> Option<FileTarget> {
+        if !self.pane_is_open(pane) {
+            return None;
+        }
+        if let Some(block) = self.blocks.block_of(pane) {
+            let cwd = match block.kind {
+                BlockKind::Files => Some(block.path.clone()),
+                BlockKind::Preview => parent_folder(&block.path),
+                BlockKind::Monitor | BlockKind::Chat => return None,
+            };
+            let remote = block.source != LOCAL;
+            let label = if remote {
+                self.connections.label_of(&block.source).unwrap_or_else(|| block.source.clone())
+            } else {
+                "This computer".to_owned()
+            };
+            let home = (!remote).then(|| self.blocks.home());
+            return Some(FileTarget { source: block.source, label, remote, home, cwd });
+        }
+        let cwd = lock(&self.last_cwd).get(&pane).cloned();
+        match self.connections.profile_of(pane) {
+            None => Some(FileTarget {
+                source: LOCAL.to_owned(),
+                label: "This computer".to_owned(),
+                remote: false,
+                home: Some(self.blocks.home()),
+                cwd,
+            }),
+            Some(profile) if profile.kind == ConnectionKind::Ssh => {
+                Some(FileTarget { source: profile.id, label: profile.name, remote: true, home: None, cwd })
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// The files `tool_file_target` describes, made if need be: this computer, or the SFTP files of a saved
+    /// connection, which can open a connection. Only a tool that is about to run calls this.
+    pub(crate) fn tool_file_source(&self, pane: PaneId) -> Option<Arc<dyn FileSource>> {
+        let target = self.tool_file_target(pane)?;
+        self.blocks.source(&self.connections, &target.source).ok()
+    }
+
+    /// What the terminal of `pane` is: the saved connection it runs, or this computer. `None` for a pane that is not
+    /// open and for one that shows a block. Reads the tables only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn tool_terminal(&self, pane: PaneId) -> Option<TerminalTarget> {
+        if !self.pane_is_open(pane) || self.blocks.block_of(pane).is_some() {
+            return None;
+        }
+        Some(match self.connections.profile_of(pane) {
+            Some(profile) => TerminalTarget { label: profile.name, remote: true },
+            None => TerminalTarget { label: "This computer".to_owned(), remote: false },
+        })
     }
 
     /// Like [`AppCore::handle`], for the commands that answer with something and so need the pane to exist.
