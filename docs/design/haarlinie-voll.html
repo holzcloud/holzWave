@@ -133,6 +133,35 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .c-foot .keys{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .c-send{display:inline-flex;align-items:center;justify-content:center;min-height:28px;padding:0 12px;border-radius:5px;font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
 .c-send.stop{background:none;border-color:var(--edge);color:var(--ink)}
+/* Sharing context (docs/design.md 6.14): the button Context… in the composer, the chip local only in the bar, the card between the transcript and the status line. Flat, hairline, no shadow. */
+.cx-btn{display:inline-flex;align-items:center;flex:none;height:24px;padding:0 10px;border:1px solid var(--edge);border-radius:999px;color:var(--ink);white-space:nowrap;font-size:11px}
+.cx-btn.on{background:var(--wash);border-color:var(--rose)}
+.cx-local{display:inline-flex;align-items:center;height:20px;padding:0 8px;border:1px solid var(--ok);border-radius:999px;color:var(--ok);font-size:11px;white-space:nowrap}
+.cx-card{flex:none;padding:8px 12px 10px;border-top:1px solid var(--edge);border-bottom:1px solid var(--edge);border-left:2px solid var(--edge);color:var(--ink);font:400 12px/1.45 var(--mono)}
+.cx-card.ask{border-left-color:var(--warn)}.cx-card.blocked{border-left-color:var(--danger)}
+.cx-head{display:flex;flex-wrap:wrap;align-items:center;gap:2px 10px;margin-bottom:5px}
+.cx-title{font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.cx-card.ask .cx-title{color:var(--warn);text-decoration:underline}
+.cx-dest{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--ink3);font-size:11px}
+.cx-place{padding:0 8px;border:1px solid var(--edge);border-radius:999px;color:var(--ink3)}
+.cx-place.leaves{border-color:var(--warn);color:var(--warn);text-decoration:underline}
+.cx-t{margin:0 0 4px;font:400 12.5px/1.45 var(--sans)}
+.cx-t.dim,.cx-small{color:var(--ink3);font-size:11px;line-height:1.4}
+.cx-small{margin:0 0 3px;font-family:var(--sans)}
+.cx-item{display:flex;align-items:center;gap:8px;min-height:24px;font-size:12px}
+.cx-item .lb{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cx-item .sz{color:var(--ink3)}
+.cx-box{width:13px;height:13px;flex:none;border:1px solid var(--rose);border-radius:2px;background:var(--rose-deep);color:var(--ink);font-size:10px;line-height:11px;text-align:center}
+.cx-find{margin:0 0 3px 21px;font-size:11px;color:var(--ink3)}
+.cx-find .wa{text-decoration:underline}
+.cx-total{margin:3px 0 4px;font-size:12px}
+.cx-acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:5px}
+.ph1 .cx-btn{height:22px;padding:0 7px;font-size:8px}
+.ph1 .cx-card{padding:5px 7px 6px;font-size:8px}
+.ph1 .cx-title{font-size:8px}.ph1 .cx-dest{font-size:7.5px}.ph1 .cx-place{padding:0 5px}
+.ph1 .cx-t{font-size:8px;margin:0 0 3px}.ph1 .cx-t.dim,.ph1 .cx-small{font-size:7.5px}
+.ph1 .cx-item{min-height:22px;font-size:8px;gap:5px}.ph1 .cx-find{margin-left:16px;font-size:7.5px}
+.ph1 .cx-total{font-size:8px}.ph1 .cx-acts{gap:5px}.ph1 .cx-acts .btn{min-height:22px;padding:2px 8px;border-radius:5px;font-size:8px}
+.ph1 .cx-local{height:16px;padding:0 6px;font-size:8px}
 /* AI providers dialog (docs/design.md 6.13): the box of the Settings dialog with its three groups, drawn with the variables above */
 .c-setup{display:inline-flex;align-items:center;height:24px;padding:0 10px;border:1px solid var(--edge);border-radius:999px;color:var(--ink);white-space:nowrap}
 .ap{display:flex;flex-direction:column;padding:10px 16px 8px;font:400 12px/1.4 var(--mono);color:var(--ink)}
@@ -230,6 +259,10 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <h2>AI providers on a phone</h2>
   <p class="lead">The dialog is the screen: full width and height, the fields stack, rows, options, inputs and buttons are at least 44 px high and input text at least 16 px. Left, the top of the dialog with the privacy switches and the list; right, the form scrolled to the key field, the key word, the card and Save. Shown at the scale of the mock (about half).</p>
   <div class="phones" id="phones-aiset"></div>
+
+  <h2>Sharing context on a phone</h2>
+  <p class="lead">The card is part of the screen: Context…, every button and every row are at least 44 px high and the card is at most 60 % of the height, scrolling inside. Left, the question before a pane is shared; right, the items that go out with the next message. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-consent"></div>
 
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
@@ -330,9 +363,9 @@ function base(v){
   return `<div class="titlebar row">${wcL}
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span></div><div class="ws">◇ docs <span class="n">1</span></div><div class="ws plus">＋</div>
     <span class="fill"></span>
-    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='ki'||v==='kipane'||v==='kistates'||v==='kiset'?'on':''}">✦ AI</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'?'on':''}">⌘K</div>${wcR}</div>
+    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='ki'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'?'on':''}">✦ AI</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'?'on':''}">⌘K</div>${wcR}</div>
   <div class="tabrow row">${tabs(v==='blocks'?1:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kipane'||v==='kistates'||v==='kiset'?chatArea(v):`<div class="area">
+  <div class="body">${v==='preview'?previewArea():v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -350,7 +383,8 @@ const kiPanel=`<div class="side" style="width:280px"><div class="sec"><div class
 /* The chat pane (docs/design.md 6.12). Two states of one conversation: `kipane` streams a reply, `kistates` shows the picker, a stopped
    reply, a failed turn and a long draft. The words are the ones of the page: the status words, the end row, the count. */
 const cMsg=(who,html,o={})=>`<div class="c-msg ${o.u?'u':''}"><div class="c-who">${who}${o.stat?` · <span class="c-stat ${o.run?'run':''}">${o.stat}</span>`:''}</div><div class="${o.md?'c-md':''}">${html}</div></div>`;
-const cFoot=(count,btn)=>`<div class="c-foot"><span>${count}</span><span class="keys">⏎ send · ⇧⏎ new line · Esc stop</span>${btn}</div>`;
+const cxBtn=(text='Context…',on=0)=>`<span class="cx-btn ${on?'on':''}">${text}</span>`;
+const cFoot=(count,btn,ctx=cxBtn())=>`<div class="c-foot">${ctx}<span>${count}</span><span class="keys">⏎ send · ⇧⏎ new line · Esc stop</span>${btn}</div>`;
 const cSend=`<span class="btn p c-send">Send</span>`,cStop=`<span class="btn c-send stop">Stop</span>`;
 const cRow=(on,name,model,host)=>`<div class="c-row ${on?'on':''}"><span class="mk">${on?'●':'○'}</span><span>${name}</span><span class="m2">${model}</span><span class="m2">${host}</span></div>`;
 const cBody={
@@ -364,6 +398,33 @@ const cBody={
  <div class="c-status">reply failed</div>
  <div class="c-comp"><div class="c-in fo">Here is the whole output of <span class="pre">talosctl health</span> from all three nodes, pasted:<br>talos-1 ok · talos-2 ok · talos-3 …<span class="cur"></span></div>${cFoot('≈ 1.2k tokens',cSend)}</div></div>`
 };
+/* Sharing context (docs/design.md 6.14). `kiask` is the card asking for consent after a provider change; `kioffer` is what goes out with
+   the next message. The last command is drawn because the engine can bound command output, so the core lists it. */
+const cxDest=(host,place,leaves)=>`<span class="cx-dest"><span>${host}</span><span class="cx-place ${leaves?'leaves':''}">${place}</span></span>`;
+const cxItem=(label,size,finds)=>`<div class="cx-item"><span class="cx-box">✓</span><span class="lb">${label}</span><span class="sz">${size}</span></div>${finds?`<div class="cx-find">${finds}</div>`:''}`;
+const cxAsk=`<div class="cx-card ask" role="group" aria-label="Share context"><div class="cx-head"><span class="cx-title">! Consent needed</span>${cxDest('api.anthropic.com','cloud',1)}</div>
+ <p class="cx-t">Terminal content is only sent when you share it.</p>
+ <p class="cx-t">Share pane 1 · shell with Claude · claude-sonnet-5-5? It goes to api.anthropic.com (cloud).</p>
+ <p class="cx-t dim">You still see every item before a message is sent.</p>
+ <div class="cx-acts"><span class="btn p">Share pane 1</span><span class="btn">No</span></div></div>`;
+const cxOffer=(compact)=>`<div class="cx-card" role="group" aria-label="Share context"><div class="cx-head"><span class="cx-title">Goes out with your next message</span>${cxDest('localhost:11434','this computer',0)}</div>
+ ${cxItem('Screen of pane 1','2.4 KiB','<span class="wa">! hidden text removed (15 characters)</span> · Anthropic key hidden')}
+ ${cxItem('Last command output of pane 1','0.9 KiB','')}
+ ${compact?'':'<p class="cx-small">Nothing there: Selection.</p>'}
+ <div class="cx-total">2 items · 3.3 KiB · ≈ 1.1k tokens</div>
+ ${compact?'':'<p class="cx-small">This chat keeps a note of what was sent (labels and sizes), not the text.</p><p class="cx-small">Valid for 5 minutes.</p>'}
+ <p class="cx-small">Best effort, not a guarantee: holzWave hides the secrets it recognises and cannot promise that none are left.</p>
+ <div class="cx-acts"><span class="btn">Read again</span><span class="btn">Discard</span></div></div>`;
+cBody.kiask=`<div class="c-chat"><div class="c-bar"><span class="c-chip">Claude · claude-sonnet-5-5 → api.anthropic.com</span><span class="c-where leaves">cloud</span><span class="c-usage">in 412 · out 96</span><span class="c-setup">Providers…</span></div>
+ <div class="c-log">${cMsg('you','Why is talos-3 NotReady?',{u:1})}${cMsg('assistant','<p>Check its health first, then the kubelet log.</p>',{md:1})}</div>
+ ${cxAsk}
+ <div class="c-status">Sharing ended because the provider changed. Share again to attach context.</div>
+ <div class="c-comp"><div class="c-in fo">Explain the error above<span class="cur"></span></div>${cFoot('≈ 6 tokens',cSend,cxBtn('Context…',1))}</div></div>`;
+cBody.kioffer=`<div class="c-chat"><div class="c-bar"><span class="c-chip">Local · llama3.2 → localhost:11434</span><span class="c-where">this computer</span><span class="cx-local">local only</span><span class="c-usage">in 1.1k · out 96</span><span class="c-setup">Providers…</span></div>
+ <div class="c-log">${cMsg('you','What failed here?<div class="cx-small" style="margin:3px 0 0;font-family:var(--mono)">Context sent: Screen of pane 1 (2.1 KiB) → this computer</div>',{u:1})}${cMsg('assistant','The build stopped at the linker step.',{})}</div>
+ ${cxOffer(0)}
+ <div class="c-status"></div>
+ <div class="c-comp"><div class="c-in fo">Explain the error above<span class="cur"></span></div>${cFoot('≈ 6 tokens',cSend,cxBtn('Context · 2 items',1))}</div></div>`;
 function chatArea(v){return `<div class="area" style="grid-template-columns:1fr 1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',shell(''),{s:'grid-row:1/2'})}${P('','✦','chat','Why is talos-3 NotReady?',cBody[v==='kiset'?'kipane':v],{f:1,s:'grid-row:1/2'})}</div>`}
 
 /* The AI providers dialog (docs/design.md 6.13): three groups (privacy, providers, the provider shown) and the buttons. The chosen
@@ -436,13 +497,15 @@ const views=[
  ['ki','AI sidebar','The sidebar form of the chat: it replaces the sidebar when opened. This column and its consent card are drawn ahead of the work that builds them; the chat pane (the next views) is the first built form. Terminal content is sent only with explicit consent per pane.'],
  ['kipane','AI chat','The chat as a pane beside the shell, opened by the ✦ AI button. The bar says where the next request goes (provider, model, host) and, once a turn has told it, the place. A finished reply is Markdown, the reply that streams is plain text with its status word, and Stop takes the place of Send.'],
  ['kistates','AI chat states','The provider picker (a radio group, the chosen row marked), a reply that was stopped, a turn that failed with its class and the core’s line, and a long draft with the core’s token estimate. Every state has a word besides its colour.'],
+ ['kiask','AI chat: share a pane','The card that asks before a pane is shared with the chat, here after the provider changed: it names the pane, the provider and where the text would go (the host and the place, cloud in the warn colour), says that every item is shown before a message is sent, and offers Share pane 1 or No. Context… in the composer opens it; nothing is asked of the core before the press.'],
+ ['kioffer','AI chat: what goes out','The card after the pane was shared and its content read: one row per item with its label and size, what the redactor hid (hidden text is in the warn colour, underlined, with a mark), what read empty, the total, how long the offer is good, and the sentence that the redaction is best effort and not a guarantee. The page shows labels, sizes and findings, never the text. Context · 2 items says in the composer what will go out; local only in the bar says that requests which leave this computer are refused.'],
  ['kiset','AI providers','The dialog that the chat bar button Providers… opens (also the palette entry AI providers… and a button in Settings): the two privacy switches, the list of providers with the key state in words, the form of the chosen provider with its write-only key field, and the card that a gateway or a server of your own shows before its first use. Nothing is probed; the Allow button is the only way to allow an address.'],
  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):ovl[cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kipane'||cur==='kistates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):ovl[cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }
@@ -471,7 +534,7 @@ talos-3 <span class="wa">NotReady</span>`,`<div class="acc"><span>esc</span><spa
 const cPhone=(over)=>ph('<span class="ro">✦</span> chat <span class="dim">· talos-3</span>',`<div class="c-chat"><div class="c-bar"><span class="c-chip btn1">Cloud · large-model</span><span class="c-where leaves">cloud</span><span class="c-setup">Providers…</span></div>
  <div class="c-log">${cMsg('you','Why is talos-3 NotReady?',{u:1})}${cMsg('assistant','<p><b>talos-3 joined two days ago</b>, check its health:</p><pre><code>talosctl health</code></pre>',{md:1})}${cMsg('you','Show me the kubelet log',{u:1})}</div>
  <div class="c-status">reply finished</div>
- <div class="c-comp"><div class="c-in">Ask a question<span class="cur"></span></div><div class="c-foot"><span class="keys">⏎ send</span>${cSend}</div></div></div>`,'',{raw:1,over});
+ <div class="c-comp"><div class="c-in">Ask a question<span class="cur"></span></div><div class="c-foot">${cxBtn()}<span class="keys">⏎ send</span>${cSend}</div></div></div>`,'',{raw:1,over});
 $('#phones-chat').innerHTML=cPhone('')+cPhone(`<div class="scrim" style="border-radius:22px"></div><div class="c-sheet float" style="border-radius:12px 12px 0 0">${cRow(0,'Local','llama3.2','')}${cRow(1,'Cloud','large-model','')}${cRow(0,'Office','qwen2.5','')}</div>`);
 
 /* AI providers on a phone: the dialog is the screen. The top of it, and the form scrolled to the key, the card and Save. */
@@ -479,6 +542,19 @@ const aPhone=(top,body)=>ph(top,`<div class="ap"><div class="ap-t">AI providers<
 $('#phones-aiset').innerHTML=
  aPhone('<span class="ro">✦</span> chat <span class="dim">· talos-3</span>',`<div class="ap-s">Saved.</div>${apG('Privacy',`<div class="ap-f"><span class="ap-l">☐ Local only</span><span class="ap-h">Refuse every request whose destination is not this computer. A server on your local network counts as not this computer.</span></div><div class="ap-f"><span class="ap-l">Models on this computer</span><span>● Ask first &nbsp; ○ Do not ask</span></div>`)}${apG('Providers',`${apRow(0,'Local','Ollama','127.0.0.1','no key')}${apRow(0,'Claude','Anthropic','api.anthropic.com','key saved',{ok:1})}${apRow(1,'Router','OpenRouter','openrouter.ai','key saved',{ok:1,review:1})}<div class="row" style="padding:3px 0 2px"><span class="btn">Add provider</span></div>`)}`)
 +aPhone('<span class="ro">✦</span> chat <span class="dim">· talos-3</span>',`${apG('Provider',`${apF('API key','Enter a new key to replace it',{cls:'hole',hint:'<span class="ok">key saved</span> · Never shown again; enter a new one to replace it.'})}${apCard}`)}<div class="ap-acts"><span class="btn">Remove provider</span><span class="btn p">Save</span></div><div class="ap-acts"><span class="btn">Close</span></div>`);
+
+/* Sharing context on a phone: the question before a pane is shared, and the items that go out. */
+const xPhone=(card,note,btn)=>ph('<span class="ro">✦</span> chat <span class="dim">· talos-3</span>',`<div class="c-chat"><div class="c-bar"><span class="c-chip btn1">Claude · claude-sonnet-5-5</span><span class="c-where leaves">cloud</span><span class="c-setup">Providers…</span></div>
+ <div class="c-log">${cMsg('you','Why is talos-3 NotReady?',{u:1})}</div>
+ ${card}
+ <div class="c-status">${note}</div>
+ <div class="c-comp"><div class="c-in">Explain the error above<span class="cur"></span></div><div class="c-foot">${btn}<span class="keys">⏎ send</span>${cSend}</div></div></div>`,'',{raw:1});
+const xItem=(label,size,finds)=>cxItem(label,size,finds);
+$('#phones-consent').innerHTML=xPhone(cxAsk,'Choose what to share',cxBtn('Context…',1))
++xPhone(`<div class="cx-card" role="group" aria-label="Share context"><div class="cx-head"><span class="cx-title">Goes out with your next message</span>${cxDest('api.anthropic.com','cloud',1)}</div>
+ ${xItem('Screen of pane 1','2.4 KiB','<span class="wa">! hidden text removed (15 characters)</span> · Anthropic key hidden')}${xItem('Last command output of pane 1','0.9 KiB','')}
+ <div class="cx-total">2 items · 3.3 KiB · ≈ 1.1k tokens</div><p class="cx-small">Best effort, not a guarantee: holzWave hides the secrets it recognises and cannot promise that none are left.</p>
+ <div class="cx-acts"><span class="btn">Read again</span><span class="btn">Discard</span></div></div>`,'Valid for 5 minutes.',cxBtn('Context · 2 items',1));
 
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
@@ -490,7 +566,7 @@ const rows=[
 ['SSH with reconnect','Pane header, sidebar, connections',pl(3)],['WSL, Docker','Connections, block picker',pl(3)],['Keychain','Connections',pl(3)],
 ['Nextcloud sync, end-to-end','Title bar ☁, sync popover, settings',pl('3b')],
 ['File previews (Markdown, image, video, PDF)','Previews view and Daily',pl(4)],['Editor with SFTP','Editor block',pl(4)],
-['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['AI chat in the sidebar','Title bar ✦, replaces the sidebar',pl(6)],
+['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Sharing a pane with the chat','Chat › Context…',B],['AI chat in the sidebar','Title bar ✦, replaces the sidebar',pl(6)],
 ['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['iOS and Android','One pane per screen, sheet, key row',pl(7)]
 ];
 $('#cov').innerHTML='<tr><th>Feature</th><th>Where</th><th>Status</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');

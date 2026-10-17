@@ -24,6 +24,8 @@ export default async function ({ engine, page, url, errors }) {
   await localOnlyCase(page, url);
   await reportCase(page, url);
   await noteCase(page, url);
+  await narrowCase(page, url);
+  await modesCase(page, url, engine);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -863,4 +865,188 @@ async function noteCase(page, url) {
   assert.equal(await page.locator('.chat-msg[data-id="m2-user"] p.chat-ctxnote').count(), 0);
   assert.equal(await page.locator('.chat-msg[data-id="m1-1"] p.chat-ctxnote').count(), 0);
   assert.equal((notes[0]).includes("ab".repeat(8)), false, "no hash");
+}
+
+/** A terminal strip above a chat that takes the rest of the window: the shape of a phone, with a pane the chat can act for. */
+const VIEW_STACK = {
+  ...VIEW3,
+  tabs: [{ title: "shell", active: true, focus: 1, panes: 2 }],
+  workspaces: [{ name: "main", active: true, panes: 2 }],
+  focus: 1,
+  panes: [[1, { x: 0, y: 0, w: 1, h: 0.08 }], [3, { x: 0, y: 0.08, w: 1, h: 0.92 }]],
+  dividers: [{ split: 10, axis: "Column", area: { x: 0, y: 0, w: 1, h: 1 }, ratio: 0.08 }],
+};
+
+/** A chat that fills the window below a terminal strip; `size` is the window. */
+async function openSized(page, url, size, extra = {}) {
+  await page.setViewportSize(size);
+  await boot(page, url, {
+    view: VIEW_STACK,
+    blocks: [chatBlock("chat-x")],
+    states: { "chat-x": { title: "Earlier question", profile: "local-1", model: "llama3.2" } },
+    starts: 2,
+    ...extra,
+  });
+  await page.waitForSelector(".block-chat");
+  await page.locator(".chat-input").focus();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profiles").length >= 1);
+}
+
+/** The heights of the controls of the card and of the composer. */
+const targets = (page) =>
+  page.evaluate(() => {
+    const heights = (sel) => [...document.querySelectorAll(sel)].map((n) => n.getBoundingClientRect().height);
+    const strip = document.querySelector(".chat-cards");
+    const block = document.querySelector(".block-chat");
+    const input = document.querySelector(".chat-input").getBoundingClientRect();
+    return {
+      ctx: heights("button.chat-ctx"),
+      buttons: heights(".chat-consent button"),
+      kinds: heights("label.consent-kind"),
+      items: heights("li.consent-item"),
+      strip: strip.getBoundingClientRect().height,
+      block: block.getBoundingClientRect().height,
+      scrolls: getComputedStyle(strip).overflowY,
+      inside: input.bottom <= innerHeight && input.top >= 0,
+      font: parseFloat(getComputedStyle(document.querySelector(".chat-input")).fontSize),
+      view: innerHeight,
+    };
+  });
+
+/** Walk the card through its four modes and measure each. */
+async function everyMode(page, check) {
+  await page.evaluate(() => window.__MOCK__.ai.context.fail("ai_context_state", "denied"));
+  await page.locator("button.chat-ctx").click();
+  await page.waitForSelector('.chat-consent[data-mode="blocked"]');
+  await check("blocked", await targets(page));
+  await page.locator(".consent-close").click();
+  await page.evaluate(() => window.__MOCK__.ai.context.fail("ai_context_state", null));
+  await page.locator("button.chat-ctx").click();
+  await page.waitForSelector('.chat-consent[data-mode="ask"]');
+  await check("ask", await targets(page));
+  await page.locator(".consent-share").click();
+  await page.waitForSelector('.chat-consent[data-mode="pick"]');
+  await check("pick", await targets(page));
+  await page.locator('label.consent-kind[data-kind="screen"] input').check();
+  await page.locator(".consent-preview").click();
+  await page.waitForSelector('.chat-consent[data-mode="offer"]');
+  await check("offer", await targets(page));
+  await page.locator(".consent-discard").click();
+  await page.locator(".consent-close").click();
+}
+
+async function narrowCase(page, url) {
+  const findings = [{ rule: "hidden_text", count: 15 }, { rule: "anthropic_key", count: 1 }];
+  const screen = { label: "Screen of pane 1", bytes: 2457, findings, text: "t" };
+  const context = { panes: { 1: { kinds: ["selection", "screen", "last_command"], items: { screen } } } };
+
+  // A phone: every target is at least 44 px, the card is at most 60 % of the window and scrolls, the composer stays in view.
+  await openSized(page, url, { width: 390, height: 780 }, { context });
+  await everyMode(page, (mode, t) => {
+    for (const [name, list] of [["ctx", t.ctx], ["buttons", t.buttons], ["kinds", t.kinds], ["items", t.items]]) {
+      for (const h of list) assert.ok(h >= 44 - 0.5, `${mode}: ${name} is ${h} px high at 390 px`);
+    }
+    assert.ok(t.strip <= t.view * 0.6 + 1, `${mode}: the card is ${t.strip} of ${t.view}`);
+    assert.equal(t.scrolls, "auto", `${mode}: the card scrolls inside`);
+    assert.equal(t.inside, true, `${mode}: the composer is in the window`);
+    assert.ok(t.font >= 16, `${mode}: composer text is ${t.font} px`);
+  });
+  // A tall offer scrolls inside the card, and the composer is still on the screen.
+  const many = Array.from({ length: 8 }, (_, i) => ({ label: `File ${i + 1}`, bytes: 100, findings, text: "t" }));
+  await page.evaluate((items) => {
+    const pane = window.__MOCK__.ai.context.panes[1];
+    pane.kinds = ["file"];
+    pane.items.file = items;
+  }, many);
+  await attachKinds(page, ["file"]);
+  const tall = await page.locator(".chat-cards").evaluate((n) => ({ scroll: n.scrollHeight, client: n.clientHeight }));
+  assert.ok(tall.scroll > tall.client, `the card scrolls (${tall.scroll} in ${tall.client})`);
+  assert.equal((await targets(page)).inside, true);
+  await page.locator(".consent-discard").click();
+  await page.locator(".consent-close").click();
+
+  // A desktop window: 28 px targets that keep the desktop size, and the card is at most half the pane.
+  await openSized(page, url, { width: 1000, height: 640 }, { context });
+  await everyMode(page, (mode, t) => {
+    for (const [name, list] of [["ctx", t.ctx], ["buttons", t.buttons], ["kinds", t.kinds], ["items", t.items]]) {
+      for (const h of list) {
+        assert.ok(h >= 28 - 0.5, `${mode}: ${name} is ${h} px high on the desktop`);
+        // A row of items also holds its findings, so only the controls keep the desktop size.
+        if (name !== "items") assert.ok(h < 44, `${mode}: ${name} keeps the desktop size (${h})`);
+      }
+    }
+    assert.ok(t.strip <= t.block * 0.5 + 1, `${mode}: the card is ${t.strip} of the pane's ${t.block}`);
+  });
+  await page.setViewportSize({ width: 1000, height: 640 });
+}
+
+async function modesCase(page, url, engine) {
+  // WebKit on macOS visits buttons with Option+Tab only, as Safari does by default.
+  const back = () => page.keyboard.press(engine === "webkit" && process.platform === "darwin" ? "Shift+Alt+Tab" : "Shift+Tab");
+  await openSized(page, url, { width: 1000, height: 640 });
+  await page.locator("button.chat-ctx").click();
+  await page.waitForSelector('.chat-consent[data-mode="ask"]');
+  const root = (add, name) => page.evaluate(([a, n]) => document.documentElement.classList[a ? "add" : "remove"](n), [add, name]);
+  const edge = () => page.locator(".chat-consent").evaluate((n) => getComputedStyle(n).borderTopColor);
+  const duration = (sel) => page.locator(sel).evaluate((n) => getComputedStyle(n).transitionDuration);
+
+  // Higher contrast: the hairline follows `--hw-line`, which that mode swaps.
+  const normal = await edge();
+  await root(true, "contrast-high");
+  assert.notEqual(await edge(), normal, "the card's hairline follows the token");
+  await root(false, "contrast-high");
+  assert.equal(await edge(), normal);
+
+  // The card has no motion, with and without the setting.
+  for (const reduced of [false, true]) {
+    await root(reduced, "motion-reduce");
+    for (const sel of ["button.chat-ctx", ".consent-share", ".consent-no"]) assert.equal(await duration(sel), "0s", `${sel} reduced ${reduced}`);
+  }
+  await root(false, "motion-reduce");
+  await page.locator(".consent-share").click();
+  await page.waitForSelector('.chat-consent[data-mode="pick"]');
+  assert.equal(await duration(".consent-preview"), "0s");
+
+  // Forced colours: the style sheet outlines the card, the place chip and the local-only chip with a system colour.
+  const css = await (await fetch(`${url}consent.css`)).text();
+  const forced = css.slice(css.indexOf("@media (forced-colors: active)"));
+  assert.ok(forced.startsWith("@media"), "consent.css has a forced-colors block");
+  assert.match(forced, /\.chat-consent[^{]*\{[^}]*outline[^}]*(CanvasText|Highlight)/);
+  assert.match(forced, /\.consent-place[^{]*\{[^}]*outline[^}]*Highlight/);
+  assert.match(forced, /\.chat-local[^{]*\{[^}]*outline[^}]*Highlight/);
+
+  // The keyboard ring is 2 px on a button, and a checkbox uses the rose token for its ring.
+  const rose = await page.evaluate(() => {
+    const probe = document.createElement("i");
+    probe.style.color = "var(--hw-rose)";
+    document.body.append(probe);
+    const c = getComputedStyle(probe).color;
+    probe.remove();
+    return c;
+  });
+  await page.locator(".chat-input").focus();
+  await back();
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "consent-close", "the keyboard walks back into the card");
+  assert.equal(await page.locator(".consent-close").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "a button: a 2 px ring");
+  await back();
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "consent-unshare");
+  await back();
+  assert.equal(await page.evaluate(() => document.activeElement?.matches(".consent-kind input")), true, "then the last checkbox");
+  const ring = await page.evaluate(() => ({ w: getComputedStyle(document.activeElement).outlineWidth, c: getComputedStyle(document.activeElement).outlineColor }));
+  assert.equal(ring.w, "2px");
+  assert.equal(ring.c, rose, "a checkbox: the rose ring");
+
+  // Nothing in the card or on its button has a gradient, a filter or a shadow.
+  await page.locator('label.consent-kind[data-kind="screen"] input').check();
+  await page.locator(".consent-preview").click();
+  await page.waitForSelector('.chat-consent[data-mode="offer"]');
+  const flat = await page.evaluate(() =>
+    [...document.querySelectorAll(".chat-cards, .chat-cards *, .chat-ctx, .chat-ctxnote")]
+      .filter((n) => {
+        const css = getComputedStyle(n);
+        return css.backgroundImage !== "none" || css.filter !== "none" || css.boxShadow !== "none";
+      })
+      .map((n) => n.className),
+  );
+  assert.deepEqual(flat, []);
 }

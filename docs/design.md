@@ -217,8 +217,9 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Previews | ![](design/previews.png) | file browser (local and SFTP) with image, PDF and video panes, see 6.5 |
 | Sync | ![](design/sync.png) | Nextcloud endpoint, last sync, end-to-end encryption, conflicts with their backup |
 | AI chat | ![](design/ai-chat-pane.png) ![](design/ai-chat-states.png) | the chat as a pane beside the shell (6.12): the bar with the provider chip and the place word, Markdown replies, a reply that streams with `Stop`; then the picker, a stopped reply, a failed turn and a long draft |
+| AI chat: sharing context | ![](design/ai-consent-ask.png) ![](design/ai-consent-offer.png) | the consent card and the items that go out (6.14): the question before a pane is shared, the destination and its place, the findings of the redactor, the total and the best-effort sentence |
 | AI providers | ![](design/ai-providers.png) | the dialog for providers, keys, the two privacy settings and the gateway disclosure (6.13) |
-| AI chat (sidebar) | ![](design/ai-chat.png) | the column form, which replaces the sidebar; the column and its consent card are drawn ahead of the work that builds them |
+| AI chat (sidebar) | ![](design/ai-chat.png) | the column form, which replaces the sidebar; the column is drawn ahead of the work that builds it, while the consent card is built and described in 6.14 |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -253,7 +254,7 @@ the bottom bar holds the tabs of the shown workspace. Tokens are the ones above;
 
 ![Phone](design/7-phone.png)
 
-A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12). The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text.
+A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) sits inside the screen with the same 44 px targets. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text.
 
 ### 6.7 Platforms
 
@@ -570,6 +571,9 @@ every item is unticked), so what will go out is visible next to `Send`.
 | `blocked` | `Cannot share` | danger | the mark `!`, the reason in words (underlined), `Providers…` for `local_only` and `destination`, `Close` |
 | `busy` | `Asking…` or `Reading…` | hairline | `aria-busy`, no buttons |
 
+![Sharing a pane](design/ai-consent-ask.png)
+![What goes out](design/ai-consent-offer.png)
+
 **Card.** A flat strip between the transcript and the status line, a hairline above and below, a 2 px bar on its left
 (warn while consent is needed, danger when it cannot go on, hairline otherwise), a `.label` title, body text like the chat
 text (Manrope 13 px), labels and numbers in mono, no shadow, at most half the height of the pane and scrolling inside.
@@ -581,6 +585,53 @@ bound command output; the card offers exactly the kinds the core lists. The reda
 the sentence "Best effort, not a guarantee: holzWave hides the secrets it recognises and cannot promise that none are
 left.", and no text of the page says that secrets are never sent. The same content cannot be sent twice in one chat; the
 page says so when the core refuses it.
+
+**Words of the findings.** One line per rule the redactor reports, in the core's order; a rule the page has no words for reads `other change`, so nothing is dropped. `characters` rules show their count in brackets, `times` rules show `×N` from two, and the cut shows no count.
+
+| Rule | Words | Count | Tone |
+|---|---|---|---|
+| `hidden_text` | hidden text removed | chars | warn |
+| `escape_sequence` | terminal escape sequences removed | times | plain |
+| `control_chars` | control characters removed | chars | plain |
+| `bidi_control` | text direction controls removed | chars | warn |
+| `zero_width` | invisible characters removed | chars | warn |
+| `tag_chars` | hidden tag characters removed | chars | warn |
+| `private_key` | private key hidden | times | plain |
+| `anthropic_key` | Anthropic key hidden | times | plain |
+| `openai_key` | OpenAI key hidden | times | plain |
+| `google_api_key` | Google API key hidden | times | plain |
+| `github_token` | GitHub token hidden | times | plain |
+| `aws_access_key` | AWS access key hidden | times | plain |
+| `slack_token` | Slack token hidden | times | plain |
+| `jwt` | JSON web token hidden | times | plain |
+| `authorization` | authorization header hidden | times | plain |
+| `bearer_token` | bearer token hidden | times | plain |
+| `cookie` | cookie hidden | times | plain |
+| `url_credentials` | password in an address hidden | times | plain |
+| `secret_assignment` | secret assignment hidden | times | plain |
+| `high_entropy` | random-looking string hidden | times | plain |
+| `marker_escaped` | look-alike markers defused | times | plain |
+| `truncated` | cut to fit the size limit | none | plain |
+
+**Words of the refusals.** One sentence for each of the thirteen reasons of the core; the page holds them as a table that a golden file written by the core's tests keeps equal to the core's names. A reason the page does not know shows the core's own text. The same content sent twice in one chat reads: "This content was already sent in this chat. Change it, or ask again after it changed."
+
+| Reason | Sentence |
+|---|---|
+| `not_shared` | This pane is not shared with the chat yet. Share it first. |
+| `stale_offer` | The attached context is no longer valid. Read it again. |
+| `bad_pick` | The chosen items do not match what was read. Read the context again. |
+| `bad_kinds` | That choice of content cannot be read. Tick one to five kinds. |
+| `unsupported_kind` | This pane cannot offer that kind of content. |
+| `nothing_to_share` | There is nothing in this pane that can be shared. |
+| `pane_gone` | The pane is closed or no longer shows what was shared. |
+| `denied` | This place may not be shared. |
+| `not_text` | This file is not text, so it cannot be shared. |
+| `unreadable` | The pane or file could not be read. Try again. |
+| `busy` | The pane did not answer within two seconds. Try again. |
+| `destination` | The address of this provider cannot be checked or is not allowed. Nothing was sent. |
+| `local_only` | Local only is on, and this provider is not on this computer. |
+
+**Places.** The place of a destination is one of the core's four names, written `on device`, `this computer`, `local network` or `cloud`, and `unknown place` for anything else; `local network` and `cloud` are in the warn colour and underlined.
 
 **After a send.** The offer is spent and the card closes; the sent message ends with the quiet line `Context sent:` and the
 labels, sizes and place. The share stays in the core, so the next `Context…` opens the pick list at once.
@@ -600,6 +651,8 @@ control carries `data-field`, so a typed character reaches no terminal.
 
 **Narrow screens (640 px and narrower).** `Context…`, every button, every checkbox row and every item row are at least
 44 px high, the card is at most 60 % of the viewport height and scrolls inside, and the composer text stays at least 16 px.
+
+![Sharing context on a phone](design/ai-consent-phone.png)
 
 **Accessibility.** The card is a `group` named `Share context`, each checkbox has its visible label, the mode word is text,
 the status line is the live region, every hairline is `--hw-line` so `contrast-high` holds, and nothing moves. Under forced

@@ -107,7 +107,7 @@ async function check() {
   const failures = [...problems];
   const views = await page.$$eval('#views button', (bs) => bs.map((b) => b.dataset.v));
   if (views.length === 0) failures.push('the view picker has no buttons');
-  for (const view of ['kipane', 'kistates', 'kiset']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
+  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiset']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
   for (const view of views) {
     await show(page, view);
     const stage = await page.$eval('#stage .m', (m) => m.children.length).catch(() => 0);
@@ -121,9 +121,11 @@ async function check() {
   if (chatPhones !== 2) failures.push(`#phones-chat holds ${chatPhones} phones, not 2`);
   const providerPhones = await page.$$eval('#phones-aiset .ph1', (n) => n.length);
   if (providerPhones !== 2) failures.push(`#phones-aiset holds ${providerPhones} phones, not 2`);
+  const consentPhones = await page.$$eval('#phones-consent .ph1', (n) => n.length);
+  if (consentPhones !== 2) failures.push(`#phones-consent holds ${consentPhones} phones, not 2`);
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);
