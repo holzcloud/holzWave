@@ -32,6 +32,8 @@
 //!   subsystem in order (`open`, `mkdir`, `rename`, `remove`, `setstat`) with paths relative to the served root.
 //!   [`Options::sftp_refuse_overwrite`] makes a rename onto an existing file fail, as OpenSSH's does; [`Options::sftp_fail_writes`]
 //!   and [`Options::sftp_deny_upload`] fail a write and refuse to open a file for writing.
+//! - **Stale sockets.** With [`Options::stale_sockets`] a forward request for a path that is still bound is refused, and a
+//!   path is freed by its cancel only: a login that is cut leaves its paths bound, as a real `sshd` does until it notices.
 //! - **Cuts and counts.** [`Server::cut`] ends every connection that is open now; `Seen::disconnects` counts the
 //!   connections that ended, whoever ended them.
 //!
@@ -91,6 +93,9 @@ pub struct Options {
     pub sftp_fail_writes: bool,
     /// Opening a file for writing is refused.
     pub sftp_deny_upload: bool,
+    /// A forward request for a socket path that is still bound is refused, as `sshd` does without `StreamLocalBindUnlink`:
+    /// a path stays bound until its forward is cancelled, also after a login that ended without a goodbye.
+    pub stale_sockets: bool,
 }
 
 impl Options {
@@ -122,6 +127,7 @@ impl Options {
             sftp_refuse_overwrite: false,
             sftp_fail_writes: false,
             sftp_deny_upload: false,
+            stale_sockets: false,
         }
     }
 
@@ -196,6 +202,13 @@ impl Options {
         self
     }
 
+    /// The same server, and a forward request for a socket path that is still bound is refused (a path is bound by its
+    /// forward and freed by the cancel of it, not by the end of the login that made it).
+    pub fn stale_sockets(mut self) -> Self {
+        self.stale_sockets = true;
+        self
+    }
+
     /// The same server, and every write to an open file fails.
     pub fn sftp_fail_writes(mut self) -> Self {
         self.sftp_fail_writes = true;
@@ -248,6 +261,8 @@ pub struct Seen {
     script_calls: Mutex<HashMap<String, usize>>,
     /// The operations of the SFTP subsystem in order, paths relative to the served root.
     pub sftp_ops: Mutex<Vec<String>>,
+    /// The socket paths that are bound now, for [`Options::stale_sockets`].
+    bound_sockets: Mutex<HashSet<String>>,
     /// Exec requests that were refused by [`Options::refuse_exec_once`].
     refused_execs: AtomicUsize,
     /// The handles of the connections that logged in, for [`Server::cut`].
@@ -734,12 +749,17 @@ impl server::Handler for Handler {
     async fn streamlocal_forward(&mut self, socket_path: &str, _session: &mut Session) -> Result<bool, Self::Error> {
         self.seen.forwards.lock().unwrap().push(socket_path.to_string());
         self.seen.event(format!("forward {socket_path}"));
+        if self.options.forward && self.options.stale_sockets && !self.seen.bound_sockets.lock().unwrap().insert(socket_path.to_string()) {
+            // Address already in use: the socket of a login that was lost is still there.
+            return Ok(false);
+        }
         Ok(self.options.forward)
     }
 
     async fn cancel_streamlocal_forward(&mut self, socket_path: &str, _session: &mut Session) -> Result<bool, Self::Error> {
         self.seen.cancelled_forwards.lock().unwrap().push(socket_path.to_string());
         self.seen.event(format!("cancel {socket_path}"));
+        self.seen.bound_sockets.lock().unwrap().remove(socket_path);
         Ok(true)
     }
 

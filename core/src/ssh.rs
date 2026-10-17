@@ -45,7 +45,7 @@ use tokio::sync::{mpsc as tmpsc, watch};
 use crate::conn::{ConnState, Link, SharedState};
 use crate::pool::{
     Admitted, Back, CLOSE_TIMEOUT, Connection, ForwardError, ForwardGuard, ForwardLimits, ForwardSink, ForwardedStream, Forwards, Open,
-    Place, Session, ThreadCount,
+    Place, Session, ThreadCount, valid_forward_path,
 };
 use crate::{Error, Result};
 
@@ -152,7 +152,8 @@ impl SshTarget {
 /// arrives through the socket. The core knows nothing of what is spoken over it ([`ForwardSink`]).
 #[derive(Clone)]
 pub struct Tunnel {
-    /// The path of the socket on the host (see [`crate::pool::valid_forward_path`]).
+    /// The path of the socket on the host (see [`crate::pool::valid_forward_path`]) for the first start of the shell. A start
+    /// after a lost login or a failure asks for a new path of the same form, and `HOLZWAVE_SOCKET` of that shell names it.
     pub path: String,
     /// `HOLZWAVE_SOCKET`, `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE`, each once, in any order ([`wrapped_shell_command`]).
     pub env: Vec<(String, String)>,
@@ -610,8 +611,12 @@ async fn run(
     let mut size = (size.0, size.1, 0u32, 0u32);
     let mut buffered: Vec<u8> = Vec::new();
     let mut attempt = 0u32;
+    // How many times a shell was tried for. A start after the first asks for a socket path that was never asked for.
+    let mut starts = 0u32;
     loop {
-        let outcome = session(connection, &mut size, &mut cmd, &out, &state, &mut buffered, &mut attempt, tunnel).await;
+        let retry = starts > 0;
+        starts = starts.saturating_add(1);
+        let outcome = session(connection, &mut size, &mut cmd, &out, &state, &mut buffered, &mut attempt, tunnel, retry).await;
         match outcome {
             Outcome::Exit(code) => return code,
             Outcome::Closed => return 0,
@@ -890,6 +895,7 @@ async fn session(
     buffered: &mut Vec<u8>,
     attempt: &mut u32,
     tunnel: Option<&Tunnel>,
+    retry: bool,
 ) -> Outcome {
     // The shell counts as a use of the connection, so the idle reaper never closes the login under it.
     let _lease = connection.lease();
@@ -898,7 +904,7 @@ async fn session(
         Err(e) if e.fatal => return Outcome::Fatal(e.why),
         Err(e) => return Outcome::Lost(e.why),
     };
-    let outcome = shell(connection, &session, size, cmd, out, state, buffered, attempt, tunnel).await;
+    let outcome = shell(connection, &session, size, cmd, out, state, buffered, attempt, tunnel, retry).await;
     // A login that ended under the shell is replaced by the next attempt, once for every user of the connection.
     if matches!(outcome, Outcome::Lost(_)) && session.is_closed() {
         connection.invalidate(&session).await;
@@ -947,6 +953,37 @@ async fn start_reply(channel: &mut Channel<client::Msg>, out: &Backlog) -> Start
     tokio::time::timeout(START_REPLY_TIMEOUT, wait).await.unwrap_or(StartReply::Gone)
 }
 
+/// A socket path of the form [`valid_forward_path`] accepts, from 128 fresh random bits, or `None` when the system has no
+/// random numbers.
+fn fresh_forward_path() -> Option<String> {
+    use std::fmt::Write as _;
+    let mut raw = [0u8; 16];
+    getrandom::fill(&mut raw).ok()?;
+    let mut path = String::from("/tmp/holzwave-");
+    for byte in raw {
+        let _ = write!(path, "{byte:02x}");
+    }
+    path.push_str(".sock");
+    valid_forward_path(&path).then_some(path)
+}
+
+/// The socket path and the environment of one start of the shell. The first start uses the tunnel as it was made. A start
+/// after that (a reconnect, or Enter after a failure) uses a path nobody asked for before, and the new shell's environment
+/// names it: after a login that was lost without a goodbye the host may still hold the old socket, `sshd` does not unlink
+/// an existing socket path unless it is told to, and so it would refuse the same path with the old login still counted. A
+/// shell that started after a reconnect is a new process, so nothing running sees its `HOLZWAVE_SOCKET` change, and the
+/// path keeps its 128 random bits. The token and the pane are the same: the sink of the tunnel knows them, not the path.
+fn start_values(tunnel: &Tunnel, retry: bool) -> (String, Vec<(String, String)>) {
+    let same = || (tunnel.path.clone(), tunnel.env.clone());
+    // A path that is not the rule is refused as it was the first time: a retry does not make it valid.
+    if !retry || !valid_forward_path(&tunnel.path) {
+        return same();
+    }
+    let Some(path) = fresh_forward_path() else { return same() };
+    let env = tunnel.env.iter().map(|(name, value)| if name == ENV_NAMES[0] { (name.clone(), path.clone()) } else { (name.clone(), value.clone()) }).collect();
+    (path, env)
+}
+
 /// Start the remote shell on `channel`, which has its terminal. Without a tunnel that is a shell request. With one the
 /// socket is forwarded back first and the shell is started by the constant exec line that carries the environment; a
 /// refusal at any step leaves a plain shell and one notice that says why, and never the environment. Returns the forward
@@ -956,6 +993,7 @@ async fn start_shell(
     connection: &Arc<Connection>,
     session: &Arc<Session>,
     tunnel: Option<&Tunnel>,
+    retry: bool,
     out: &Backlog,
 ) -> std::result::Result<Option<ForwardGuard>, Outcome> {
     let Some(tunnel) = tunnel else {
@@ -964,12 +1002,13 @@ async fn start_shell(
     };
     let say = |why: &str| out.notice(&format!("{NOT_AVAILABLE}{why}"));
     // The line is built before anything is asked of the server: a refused environment costs no request.
-    let Ok(command) = wrapped_shell_command(&tunnel.env) else {
+    let (path, env) = start_values(tunnel, retry);
+    let Ok(command) = wrapped_shell_command(&env) else {
         say("the environment was refused");
         plain_shell(channel).await?;
         return Ok(None);
     };
-    let guard = match connection.forward_on(session, &tunnel.path, tunnel.sink.clone(), ForwardLimits::default()).await {
+    let guard = match connection.forward_on(session, &path, tunnel.sink.clone(), ForwardLimits::default()).await {
         Ok(guard) => guard,
         Err(ForwardError::Refused) => {
             say(&ForwardError::Refused.to_string());
@@ -1014,6 +1053,7 @@ async fn shell(
     buffered: &mut Vec<u8>,
     attempt: &mut u32,
     tunnel: Option<&Tunnel>,
+    retry: bool,
 ) -> Outcome {
     let target = connection.target();
     let mut channel = match session.handle().channel_open_session().await {
@@ -1025,7 +1065,7 @@ async fn shell(
         close_channel(&channel).await;
         return Outcome::Lost(channel_text(&e));
     }
-    let guard = match start_shell(&mut channel, connection, session, tunnel, out).await {
+    let guard = match start_shell(&mut channel, connection, session, tunnel, retry, out).await {
         Ok(guard) => guard,
         Err(outcome) => {
             close_channel(&channel).await;

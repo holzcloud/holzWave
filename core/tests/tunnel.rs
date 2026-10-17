@@ -641,8 +641,15 @@ fn an_environment_that_is_refused_never_asks_the_server_for_anything() {
     pane.close();
 }
 
+/// The value of `HOLZWAVE_SOCKET` in the exec line the server saw as its `n`th.
+fn socket_in_command(server: &Server, n: usize) -> String {
+    let command = server.seen.commands().get(n).cloned().expect("the exec line");
+    let after = command.split("HOLZWAVE_SOCKET=").nth(1).expect("the line sets the socket");
+    after.split(';').next().unwrap().to_owned()
+}
+
 #[test]
-fn a_lost_session_requests_the_forward_again_with_the_same_path() {
+fn a_lost_session_requests_the_forward_again_on_a_new_path() {
     let _serial = serial();
     let server = ssh_server::start(Options::password().forward().wrapped_shell());
     let connection = connect(&server);
@@ -650,12 +657,68 @@ fn a_lost_session_requests_the_forward_again_with_the_same_path() {
     pane.out.until("welcome 0", 10);
     server.cut();
     pane.out.until("welcome 1", 15);
-    assert_eq!(server.seen.forwards(), [PATH, PATH], "the same path, asked for again on the new login");
+    let forwards = server.seen.forwards();
+    assert_eq!(forwards.len(), 2, "{forwards:?}");
+    assert_eq!(forwards[0], PATH, "the first start asks for the path the tunnel was made with");
+    assert_ne!(forwards[1], PATH, "the start after a lost login asks for a path nobody asked for before");
+    assert!(valid_forward_path(&forwards[1]), "{}", forwards[1]);
     assert_eq!(server.seen.execs_as_shell.load(Ordering::SeqCst), 2);
-    let mut peer = server.open_forwarded(PATH).expect("the new session serves the forward");
+    // The new shell's environment names the new path, and only the path changed: the token is the same.
+    assert_eq!(socket_in_command(&server, 0), PATH);
+    assert_eq!(socket_in_command(&server, 1), forwards[1]);
+    let (first, second) = (server.seen.commands()[0].clone(), server.seen.commands()[1].clone());
+    assert_eq!(first.replace(PATH, "SOCKET"), second.replace(&forwards[1], "SOCKET"), "nothing else of the line differs");
+    assert!(second.contains(TOKEN));
+    let mut peer = server.open_forwarded(&forwards[1]).expect("the new session serves the forward");
     peer.write_all(b"back\n");
     assert_eq!(peer.read_line().as_deref(), Some("BACK\n"));
     pane.close();
+}
+
+#[test]
+fn a_stale_socket_after_an_unclean_loss_does_not_refuse_the_new_forward() {
+    let _serial = serial();
+    // A server that behaves as `sshd` does without `StreamLocalBindUnlink`: a path stays bound after a login was lost.
+    let server = ssh_server::start(Options::password().forward().wrapped_shell().stale_sockets());
+    let connection = connect(&server);
+    let mut pane = Pane::start(&connection, Some(tunnel(Arc::new(Upper))));
+    pane.out.until("welcome 0", 10);
+    assert!(server.seen.cancelled_forwards().is_empty());
+    server.cut();
+    pane.out.until("welcome 1", 15);
+    assert!(!pane.out.seen.contains(NOT_AVAILABLE), "no refusal line: {:?}", pane.out.seen);
+    let forwards = server.seen.forwards();
+    assert_eq!(forwards.len(), 2);
+    assert_eq!(server.seen.execs_as_shell.load(Ordering::SeqCst), 2, "the new shell was started through the wrapped line");
+    // A second loss: a third path, still served.
+    server.cut();
+    pane.out.until("welcome 2", 15);
+    let forwards = server.seen.forwards();
+    assert_eq!(forwards.len(), 3);
+    let distinct: std::collections::HashSet<_> = forwards.iter().collect();
+    assert_eq!(distinct.len(), 3, "every start asks for its own path: {forwards:?}");
+    assert!(forwards.iter().all(|p| valid_forward_path(p)));
+    assert_eq!(server.seen.execs_as_shell.load(Ordering::SeqCst), 3);
+    let mut peer = server.open_forwarded(&forwards[2]).expect("the newest path is served");
+    peer.write_all(b"again\n");
+    assert_eq!(peer.read_line().as_deref(), Some("AGAIN\n"));
+    pane.close();
+}
+
+#[test]
+fn the_model_of_a_stale_socket_refuses_the_same_path() {
+    // The control of the test above: this server does refuse a path that is still bound, so a pane that asked again for
+    // the same path would have been left with a plain shell.
+    let _serial = serial();
+    let server = ssh_server::start(Options::password().forward().wrapped_shell().stale_sockets());
+    let connection = connect(&server);
+    let guard = forward(&connection, Arc::new(Upper)).expect("the first forward of the path");
+    server.cut();
+    // The login ended without a goodbye: the guard is never dropped, so no cancel is sent for the path.
+    std::mem::forget(guard);
+    // A new client after the loss (the old one has not noticed it yet) asks for the same path.
+    let again = forward(&connect(&server), Arc::new(Upper)).map(|_| ());
+    assert!(matches!(again, Err(ForwardError::Refused)), "the path is still bound: {again:?}");
 }
 
 #[test]
