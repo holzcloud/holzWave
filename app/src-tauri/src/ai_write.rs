@@ -747,9 +747,10 @@ mod tests {
         assert!(!host.available(ToolName::WriteFile, 2), "a pane that is not open");
         assert!(host.available(ToolName::EditFile, 1) && host.available(ToolName::EditFile, 4));
         assert!(!host.available(ToolName::EditFile, 3) && !host.available(ToolName::EditFile, 2));
-        assert!(!host.available(ToolName::RunCommand, 1), "run_command is not built yet");
+        assert!(host.available(ToolName::RunCommand, 1), "a terminal with files on this computer runs commands");
+        assert!(!host.available(ToolName::RunCommand, 3) && !host.available(ToolName::RunCommand, 4));
         let declared: Vec<String> = specs(&host, 1).into_iter().map(|spec| spec.name).collect();
-        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file"]);
+        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file", "run_command"]);
     }
 
     #[test]

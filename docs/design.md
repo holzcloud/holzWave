@@ -681,13 +681,13 @@ after it). Body text is in the chat text face (Manrope 13 px); field names, valu
 shadow. The strip is at most half the height of the pane and scrolls inside.
 
 **Head.** A `.label` title `Approval needed` with the mark `!`, then the words of the tool (`Read a file`, `List a
-folder`, `Search files`, `Read a pane`, `Write a file`, `Edit a file`), and at the right, in mono, the pane and the target label of the core (`pane 1 ·
+folder`, `Search files`, `Read a pane`, `Write a file`, `Edit a file`, `Run a command`), and at the right, in mono, the pane and the target label of the core (`pane 1 ·
 This computer`). When the target is a remote host the chip `remote host` in the warn colour follows; the word is the cue.
-Under the head one line says what the effect is: `Reads only. Nothing is changed.` or, for a write, `Changes one file. Check the changes below.` A write card shows the diff box of 6.16 between this line and the payload.
+Under the head one line says what the effect is: `Reads only. Nothing is changed.` or, for a write, `Changes one file. Check the changes below.` or, for a command, `Runs one command in a separate process with your account's rights. Check the command below.` A write card shows the diff box of 6.16 between this line and the payload.
 
 **Payload.** A hairline box in mono with one row for every field the core sent, in the core's order: the name (dim), the
 value (ink, wrapped, never cut) and the size (dim, at the right, `27 B`). The box is at most 16 rem high, scrolls inside
-and takes the focus with `Tab`, so it can be scrolled by keyboard. Control, bidirectional, zero-width and tag characters
+and takes the focus with `Tab`, so it can be scrolled by keyboard. A command card is the one place where the payload box has no height limit and no scroll of its own (6.17): the card grows and the strip scrolls, so the end of the command is never hidden. Control, bidirectional, zero-width and tag characters
 are written as escapes (`\u{202e}`); nothing is dropped, and a long value scrolls and is never cut in the middle.
 
 **What cannot be shown.** A request with more than 16 rows, a value over 393216 characters, more than 524288 characters
@@ -695,13 +695,13 @@ in all, a tool or an effect this page does not know, or a field of a wrong shape
 allowed: it has the danger bar, the title `Cannot show in full` or `Cannot show this request`, a sentence that says why,
 and only `Deny`. A card without a usable hash has no button and says that stopping the reply ends it.
 
-**Destination.** A line under the payload: `The result is sent to llama3.2 at localhost:11434 (this computer).` The place
+**Destination.** A line under the payload: `The result is sent to llama3.2 at localhost:11434 (this computer).` (for a command: `The command's output is sent to llama3.2 at localhost:11434 (this computer).`) The place
 is a chip, in the warn colour and underlined when the place leaves the computer, and the place word is the core's (6.12).
-When the route is not known, for example after a reload, the line reads `The result is sent to the model of this chat.`
+When the route is not known, for example after a reload, the line reads `The result is sent to the model of this chat.` (for a command: `The command's output is sent to the model of this chat.`)
 
 **Banner.** When the turn holds text the user did not write, a block with a 2 px warn bar, the mark `!` and the label
 `Untrusted text in this turn` says so, with the core's labels (`output of list_dir`, `attached context`) in brackets and
-the sentence that this text can try to steer the assistant. The banner follows the core's taint flag or its list of
+the sentence that this text can try to steer the assistant. The banner of a tainted command adds `A command will run. Read all of it before you allow it.` The banner follows the core's taint flag or its list of
 labels, whichever says so. It does not claim that anything is safe.
 
 **Hash and buttons.** The line `hash 9f3a41c2d7be` (the first 12 characters, dim, mono), then `Allow once` (solid
@@ -740,7 +740,9 @@ No key allows a call without the focus on its button.
 waiting, `–` no result), the words of the tool, the core's one-line summary in mono and, at the right, the state word
 (`ran`, `error`, `waiting`, `no result`); the word is the cue. A toggle `Show result (1.2 KiB)` opens the result in a mono
 box under the label `Result · untrusted text`; it is text only (no Markdown, no link, no image), at most 20000
-characters, and a longer result ends with `[cut for display]`. A message of the role tool draws nothing of its own.
+characters, and a longer result ends with `[cut for display]`. Line feeds and tabs of the result stay, so a result of
+several lines (the report of a command, the lines of a file) is drawn in lines; every other hidden character is written as an
+escape. A message of the role tool draws nothing of its own.
 
 **Waiting.** While calls wait, the status line of the chat says `waiting for your decision` and the title-bar button reads
 `✦ AI · 2` (the number in the warn colour; the number is the cue) with the accessible name `AI chat, 2 calls wait for your
@@ -759,11 +761,13 @@ there and in the page's tests in the same change.
 | `read_pane` | Read a pane |
 | `write_file` | Write a file |
 | `edit_file` | Edit a file |
+| `run_command` | Run a command |
 
 | Effect | Words |
 |---|---|
 | `read` | Reads only. Nothing is changed. |
 | `write` | Changes one file. Check the changes below. |
+| `exec` | Runs one command in a separate process with your account's rights. Check the command below. |
 
 | Refusal of a decision | The card |
 |---|---|
@@ -916,3 +920,74 @@ scrolls inside its own height. `Undo` is at least 44 px high and wide.
 **Accessibility.** The diff box is a group named by its head line. The sign is a character, not a colour, and the line
 numbers are text. Every hairline is `--hw-line`, so `contrast-high` holds, and nothing moves. Under forced colours the box
 and the `Undo` button get a system-colour outline and the signs stay characters.
+
+### 6.17 Running a command
+
+The card in which the user sees exactly what a command will do, where and for how long before it runs, and the rows in
+which the transcript tells how it ended. The core enforces the rule: the host runs only the command and the working
+directory of the approval ticket, through a fixed interpreter and in a separate process with a scrubbed environment, no
+input, bounded output and a timeout, and a stop ends the command and everything it started. The page only draws what the
+core sent and relays a person's press. It does not summarise, shorten, reorder, merge, translate or classify a command,
+and it sends the chat, the call, the verdict and the hash of the card, never the command.
+
+**Place.** Nothing new is added to the card. A command card is the approval card of 6.15 with the document order head,
+effect line, payload, destination, banner, hash and buttons, and it keeps every rule of that card: a flat strip entry, a 2
+px bar on its left, mono payload rows and one solid action.
+
+**Heading and effect.** The tool words are `Run a command`; the effect line reads `Runs one command in a separate process
+with your account's rights. Check the command below.` The head is unchanged: `pane 1 · This computer`, and the chip
+`remote host` for a command on a saved connection.
+
+**Payload.** One row for every field the core sent, in the core's order: `tool`, `pane`, `target`, `remote`, `command`,
+`cwd` (only when the call named one), `timeout_secs` and `resolved_cwd`. The command is the core's escaped text (`\n`,
+`\t` and `\u{202e}` are visible), wrapped and never cut. On a command card the payload box has no height limit and no
+scroll of its own: the card grows and the strip scrolls, so the end of the command is the last thing above the
+destination line, the banner, the hash and the buttons. The box keeps its place in the keyboard order, and a command
+card is the one place where it has no height limit (6.15 limits it everywhere else).
+
+**Destination.** The line reads `The command's output is sent to llama3.2 at localhost:11434 (this computer).`, with the
+place chip as for a read; when the route is not known it reads `The command's output is sent to the model of this chat.`
+
+**Banner.** The banner of a tainted command keeps the sentences of 6.15 and adds `A command will run. Read all of it
+before you allow it.`
+
+**Modes.** Unchanged. After `Allow once` the card says `Allowed · running…` until the result arrives. A stop (the `Stop`
+button, or `Escape` in the message box) ends the command and everything it started, and the row then reads `error` with the
+core's sentence for a stopped call.
+
+**Tool row of a command.** The mark, `Run a command`, the core's one-line summary and the state word. A command that exits
+with status 0 is `ran`; any other end (a non-zero status, a time out, a lost connection, a stop, a denial) is `error` with
+the mark `!`, so colour is never the only cue. The result box shows the core's report under `Result · untrusted text`:
+the first line is `Exit status: N.` or a `Stopped: ...` line, then the sections `Standard output:` and `Standard error:`
+or `No output.`, with `[earlier output omitted]` where the start of a stream was cut. The model hears the same text.
+
+**Keys and focus.** Those of 6.15: a card never takes the focus, `Tab` reaches the payload box, `Allow once` and `Deny` in
+this order, `Escape` with the focus inside a card denies that call, and a press on `Allow once` within half a second of the
+card appearing is ignored.
+
+**Words.** Fixed sentences of the page, held to the core's tool and effect tables by a golden.
+
+| Tool | Words |
+|---|---|
+| `run_command` | Run a command |
+
+| Effect | Words |
+|---|---|
+| `exec` | Runs one command in a separate process with your account's rights. Check the command below. |
+
+| Sentence | Where |
+|---|---|
+| The command's output is sent to llama3.2 at localhost:11434 (this computer). | the destination of a command |
+| The command's output is sent to the model of this chat. | the destination when the route is not known |
+| A command will run. Read all of it before you allow it. | the banner of a tainted turn, after the sentences of 6.15 |
+| Exit status: 0. | first line of the result of a command that ended by itself |
+| Stopped: the command ran longer than 60 seconds and was ended. | first line of the result of a command that timed out |
+| Stopped: the command was ended before it finished. | first line of the result of a command that was stopped |
+| ran, error | the state words of a finished command |
+
+**Narrow screens (640 px and narrower).** `Allow once`, `Deny` and the result toggle are at least 44 px high and wide, the
+strip is at most 60 % of the viewport height and scrolls inside, and the command wraps, so the payload box never scrolls
+sideways.
+
+**Accessibility.** As in 6.15: the card is a group named by its title, every hairline is `--hw-line` so `contrast-high`
+holds, and nothing moves. A failed command is told by the mark `!` and the word `error` as well as by colour.

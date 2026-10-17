@@ -16,6 +16,7 @@
 mod approval;
 mod catalog;
 mod change;
+pub mod command;
 mod deny;
 
 use std::error::Error;
@@ -32,6 +33,11 @@ pub use catalog::{
     ToolName, WriteFile, fields_of, payload_hash, visible, visible_multiline,
 };
 pub use change::{Base, Change, ChangeFault, Diff, DiffKind, DiffRow, diff, diff_with, plan};
+pub use command::{
+    CANCELLED_LINE, CAPTURE_BYTES, CWD_MISSING, CWD_REMOTE_RELATIVE, CWD_UNKNOWN, LOST_LINE, NO_OUTPUT, OMITTED, REMOTE_FAILED,
+    REMOTE_TOO_LONG, SHOWN_BYTES, START_FAILED, STDERR_HEAD, STDOUT_HEAD, Shown, UNKNOWN_EXIT, exit_line, fit, quote,
+    remote_command, report, timed_out_line,
+};
 pub use deny::{Access, Denied, DenyPolicy, FsKind, Style, canonical_local};
 
 /// The most bytes a tool result carries back to the model.
@@ -223,6 +229,7 @@ impl fmt::Debug for Inspected {
 pub struct ToolOutput {
     text: String,
     omitted: usize,
+    failure: bool,
 }
 
 /// The room the marker line takes: two line breaks, the words, and a number of up to twenty digits.
@@ -233,8 +240,19 @@ impl ToolOutput {
     ///
     /// Both cuts fall on character boundaries, so the result is valid text and never longer than the limit.
     pub fn new(text: String) -> Self {
+        Self::cut(text, false)
+    }
+
+    /// Like [`ToolOutput::new`], for the result of a call that ran and did not succeed, such as a command that exited
+    /// with a status other than 0. The text is the same kind of text; the flag tells the loop to hand it to the model as an
+    /// error result with its whole text.
+    pub fn failed(text: String) -> Self {
+        Self::cut(text, true)
+    }
+
+    fn cut(text: String, failure: bool) -> Self {
         if text.len() <= MAX_RESULT_BYTES {
-            return Self { text, omitted: 0 };
+            return Self { text, omitted: 0, failure };
         }
         let side = (MAX_RESULT_BYTES - MARKER_ROOM) / 2;
         let head_end = floor_boundary(&text, side);
@@ -244,7 +262,12 @@ impl ToolOutput {
         cut.push_str(&text[..head_end]);
         cut.push_str(&format!("\n[... {omitted} bytes omitted ...]\n"));
         cut.push_str(&text[tail_start..]);
-        Self { text: cut, omitted }
+        Self { text: cut, omitted, failure }
+    }
+
+    /// Whether the call ran and did not succeed (see [`ToolOutput::failed`]).
+    pub fn is_failure(&self) -> bool {
+        self.failure
     }
 
     /// The text.
@@ -286,7 +309,11 @@ fn ceil_boundary(text: &str, mut at: usize) -> usize {
 
 impl fmt::Debug for ToolOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ToolOutput").field("text", &Size(self.text.len())).field("omitted", &self.omitted).finish()
+        f.debug_struct("ToolOutput")
+            .field("text", &Size(self.text.len()))
+            .field("omitted", &self.omitted)
+            .field("failure", &self.failure)
+            .finish()
     }
 }
 

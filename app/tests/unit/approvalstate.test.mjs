@@ -7,13 +7,14 @@ import { readFileSync } from "node:fs";
 import {
   CHANGED, EFFECT_WORDS, ENDED, HANDLED_EFFECTS, MAX_DIFF_CHARS, MAX_DIFF_ROWS, MAX_TOTAL, MAX_VALUE, TOOL_EFFECT, TOOL_WORDS, VERDICTS,
   WORDS, canAllow, canDeny, cannotWords, destinationParts, diffHead, gapWords, hashWords, indexResults, outcomeOf, readApproval, rowsOf,
-  showText, targetWords, taintWords,
+  showResult, showText, targetWords, taintWords,
 } from "../../dist/approvalstate.js";
 
 const RUN = JSON.parse(readFileSync(new URL("../fixtures/ai_tool_stream.json", import.meta.url), "utf8"));
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/ai_approval.json", import.meta.url), "utf8"));
 const PROTOCOL = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
 const WRITE = JSON.parse(readFileSync(new URL("../fixtures/ai_write_card.json", import.meta.url), "utf8"));
+const COMMAND = JSON.parse(readFileSync(new URL("../fixtures/ai_command_card.json", import.meta.url), "utf8"));
 const HASH = "9f3a41c2d7be5a60b1c4e8f2d3a7094b6c5d1e0f8a2b3c4d5e6f708192a3b4c5";
 
 /** The eleven members of the core's card, with the payload of a `read_file` call in the core's order. */
@@ -165,7 +166,7 @@ test("a request that cannot be shown in full can only be denied", () => {
   verdict(total, "large");
 
   // A tool and an effect the page does not know.
-  for (const tool of ["run_command", "x"]) {
+  for (const tool of ["rm_rf", "x"]) {
     const entry = card({ tool });
     entry.payload[0] = { name: "tool", value: tool, bytes: tool.length };
     verdict(entry, "tool");
@@ -258,6 +259,12 @@ test("tool rows pair a call with its result by call id and say what happened", (
   assert.equal(long.bytes, 30002, "the size is the whole result");
   const control = indexResults([message("tool", [result("call_9", "a\u0001b")])]);
   assert.equal(rowsOf(hostile, control, new Set(), false)[0].content, "a\\u{1}b");
+  assert.equal(showResult("a\nb"), "a\nb");
+  assert.equal(showText("a\nb"), "a\\nb");
+  // A result of several lines is drawn in lines (the report of a command): the line feed and the tab stay, every other hidden
+  // character is still an escape.
+  const lines = indexResults([message("tool", [result("call_9", "Exit status: 0.\n\nStandard output:\na\tb\r\u202e")])]);
+  assert.equal(rowsOf(hostile, lines, new Set(), false)[0].content, "Exit status: 0.\n\nStandard output:\na\tb\\r\\u{202e}");
 
   // A tool the table does not know still gets a row; a result for a call that nobody asked for is ignored.
   const odd = message("assistant", [call("call_5", "write_file")]);
@@ -444,13 +451,16 @@ test("the words and caps of write cards are the core's", () => {
   assert.equal(MAX_DIFF_ROWS, limits.diff_rows);
   assert.equal(MAX_DIFF_CHARS, limits.diff_chars);
 
-  // The tools and the effects are the golden's.
-  const shown = Object.keys(GOLDEN.tools).filter((tool) => GOLDEN.tools[tool] === "read" || GOLDEN.tools[tool] === "write");
-  assert.deepEqual(Object.keys(TOOL_WORDS).sort(), shown.sort());
+  // The tools and the effects are the golden's: all seven tools and the three effects.
+  const shown = Object.keys(GOLDEN.tools);
+  assert.equal(shown.length, 7);
+  assert.deepEqual(Object.keys(TOOL_WORDS).sort(), shown.slice().sort());
+  assert.deepEqual(Object.keys(TOOL_WORDS), ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file", "run_command"], "the catalog's order");
   assert.deepEqual(Object.keys(TOOL_EFFECT).sort(), shown.sort());
   for (const tool of shown) assert.equal(TOOL_EFFECT[tool], GOLDEN.tools[tool], tool);
   for (const effect of Object.keys(EFFECT_WORDS)) assert.ok(GOLDEN.effects.includes(effect), effect);
   assert.deepEqual([...HANDLED_EFFECTS].sort(), Object.keys(EFFECT_WORDS).sort());
+  assert.deepEqual([...HANDLED_EFFECTS].sort(), [...GOLDEN.effects].sort(), "read, write and exec");
 
   // The head of a diff: the kind in words, the core's counts and the sizes.
   const diff = (kind, added, removed, before, after) => ({ kind, added, removed, before_bytes: before, after_bytes: after, rows: [] });
@@ -480,6 +490,69 @@ test("the words and caps of write cards are the core's", () => {
 
   // Every sentence is plain, and none says that anything is kept or allowed in advance.
   for (const [name, text] of Object.entries(WORDS)) {
+    assert.ok(text.length >= 3, name);
+    assert.ok(!text.includes("://") && !text.includes("<") && !text.includes(">"), name);
+    assert.ok(!/\b(always|remember(ed)?|auto-?approve|in advance|for the session)\b/i.test(text), `${name}: ${text}`);
+  }
+});
+
+test("a command card is read with its rows and keeps its hash", () => {
+  const sent = COMMAND.cards.local;
+  const seen = readApproval(sent);
+  assert.equal(seen.why, "ok");
+  assert.equal(seen.hash, sent.hash, "the hash is exactly as sent");
+  assert.equal(seen.tool, "run_command");
+  const approval = seen.approval;
+  assert.deepEqual(approval.rows.map((row) => row.name), sent.payload.map((row) => row.name), "the core's order");
+  assert.equal(approval.effect, "exec");
+  assert.equal(Object.hasOwn(approval, "diff"), false, "a command card carries no diff");
+  // The members of a command card are the members of a read card.
+  assert.deepEqual(Object.keys(approval), Object.keys(readApproval(card()).approval));
+  assert.equal(approval.rows.find((row) => row.name === "command").value, sent.payload.find((row) => row.name === "command").value);
+  assert.equal(canAllow(seen), true);
+
+  // A command card whose effect is `read` is not the card of that tool: it can only be denied.
+  const wrong = readApproval({ ...sent, effect: "read" });
+  assert.equal(wrong.why, "effect");
+  assert.equal(canAllow(wrong), false);
+  assert.equal(canDeny(wrong), true);
+  // A diff on a command card is a card of the wrong shape.
+  assert.equal(readApproval({ ...sent, diff: WRITE.cards.replace.diff }).why, "shape");
+});
+
+test("the tables and words of command cards are the core's", () => {
+  assert.deepEqual(Object.keys(TOOL_WORDS).sort(), Object.keys(GOLDEN.tools).sort(), "all seven tools of the golden");
+  for (const [tool, effect] of Object.entries(GOLDEN.tools)) assert.equal(TOOL_EFFECT[tool], effect, tool);
+  assert.deepEqual([...HANDLED_EFFECTS], ["read", "write", "exec"]);
+  assert.deepEqual([...HANDLED_EFFECTS].sort(), [...GOLDEN.effects].sort());
+  assert.equal(TOOL_WORDS.run_command, "Run a command");
+  assert.equal(EFFECT_WORDS.exec, "Runs one command in a separate process with your account's rights. Check the command below.");
+
+  // The destination of a command: the output, not the result; the other effects keep their words.
+  const route = { model: "llama3.2", host: "localhost:11434", place: "this computer", leaves: false };
+  assert.equal(destinationParts(route, "exec")[0].text, "The command's output is sent to ");
+  assert.equal(
+    destinationParts(route, "exec").map((p) => p.text).join(""),
+    "The command's output is sent to llama3.2 at localhost:11434 (this computer).",
+  );
+  assert.deepEqual(destinationParts(null, "exec"), [{ kind: "text", text: "The command's output is sent to the model of this chat.", leaves: false }]);
+  assert.equal(destinationParts(route, "read")[0].text, "The result is sent to ");
+  assert.equal(destinationParts(route, "write")[0].text, "Only the outcome (saved or not) is sent to ");
+
+  // The banner of a tainted command adds one sentence; the other effects are unchanged.
+  const sentence = "A command will run. Read all of it before you allow it.";
+  assert.ok(taintWords(["output of read_file"], "exec").text.endsWith(sentence));
+  assert.ok(!taintWords(["output of read_file"], "read").text.includes("A command will run"));
+  assert.ok(!taintWords(["output of read_file"], "write").text.includes("A command will run"));
+  assert.deepEqual(taintWords(["a"]), taintWords(["a"], "read"));
+
+  // The caps hold the largest legal command card.
+  assert.ok(COMMAND.limits.command_value_chars <= MAX_VALUE, "the longest escaped command fits one value");
+  assert.ok(COMMAND.limits.payload_total_chars <= MAX_TOTAL, "the largest command card fits the total");
+
+  // Every new sentence is plain, and none says that anything is kept or allowed in advance.
+  for (const name of ["destinationCommandLead", "destinationCommandUnknown", "taintCommand"]) {
+    const text = WORDS[name];
     assert.ok(text.length >= 3, name);
     assert.ok(!text.includes("://") && !text.includes("<") && !text.includes(">"), name);
     assert.ok(!/\b(always|remember(ed)?|auto-?approve|in advance|for the session)\b/i.test(text), `${name}: ${text}`);

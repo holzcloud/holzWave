@@ -902,7 +902,8 @@ impl Run<'_> {
             Ok(Decision::Deny) if timed_out => Answer::timed_out(),
             Ok(Decision::Deny) => Answer::denied(&call.id),
             Ok(_) => match self.table.run(self.host, &self.scope, &call.id, self.cancel) {
-                Ok(output) => Answer::success(output.into_text()),
+                // A tool that ran and did not succeed (a command with a status other than 0) is an error result, not a failure.
+                Ok(output) => Answer { is_error: output.is_failure(), ..Answer::success(output.into_text()) },
                 Err(error) => Answer::refused(&error),
             },
         }

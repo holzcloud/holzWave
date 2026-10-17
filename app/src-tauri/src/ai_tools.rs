@@ -18,8 +18,10 @@ use holzwave_core::ai::tools::{
     Access, Decision, DenyPolicy, FsKind, Grep, ListDir, MAX_RESULT_BYTES, ReadFile, ReadPane, Resolved, Scope, Style,
     Inspected, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput, visible,
 };
+use holzwave_core::exec::LocalExec;
 use holzwave_core::files::{FileSource, Kind};
 use holzwave_core::layout::PaneId;
+use holzwave_core::ssh::{ExecCancel, ExecLimits, ExecResult};
 use holzwave_core::textread::{TextRead, TextRegion};
 use holzwave_core::Error as CoreError;
 
@@ -123,6 +125,28 @@ pub enum RowsFault {
     Other,
 }
 
+/// Why a command could not be run on a remote host. `Debug` prints the variant and nothing else; the reason a remote run
+/// failed has been scrubbed before it is kept.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ExecFault {
+    /// The world has no way to run a command on a remote host.
+    NoRunner,
+    /// The command could not be started.
+    Start,
+    /// The remote host or the connection to it failed; the reason is scrubbed text.
+    Remote(String),
+}
+
+impl fmt::Debug for ExecFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NoRunner => "NoRunner",
+            Self::Start => "Start",
+            Self::Remote(_) => "Remote",
+        })
+    }
+}
+
 /// The world the tools read through. The shell implements it over the core; tests implement it over tables.
 ///
 /// `is_open`, `file_target`, `terminal` and `shared` look at tables only. `file_source` may make a source, which can
@@ -153,6 +177,18 @@ pub trait Targets: Send + Sync {
     fn open_source(&self, _source: &str) -> Option<Arc<dyn FileSource>> {
         None
     }
+
+    /// Runs `command` on the host of the saved connection `source` through its exec channel, with no terminal, and waits
+    /// for it. Blocks, may open a connection, and ends promptly when `cancel` is raised. The default has no way to.
+    fn run_remote(
+        &self,
+        _source: &str,
+        _command: &str,
+        _limits: &ExecLimits,
+        _cancel: &ExecCancel,
+    ) -> Result<ExecResult, ExecFault> {
+        Err(ExecFault::NoRunner)
+    }
 }
 
 /// Why a save did not happen. The library's message is dropped: the model and the page hear a fixed phrase.
@@ -173,6 +209,7 @@ pub struct ShellTools {
     targets: OnceLock<Arc<dyn Targets>>,
     limits: Option<GrepLimits>,
     undo: UndoLog,
+    exec: LocalExec,
 }
 
 impl fmt::Debug for ShellTools {
@@ -209,7 +246,7 @@ impl GrepLimits {
 
 /// How a path ends: a file tool wants a name, a folder tool takes a folder.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Ending {
+pub(crate) enum Ending {
     File,
     Folder,
 }
@@ -217,13 +254,20 @@ enum Ending {
 impl ShellTools {
     /// A host with nothing bound: it offers no tool.
     pub fn new(policy: DenyPolicy) -> ShellTools {
-        ShellTools { policy, targets: OnceLock::new(), limits: None, undo: UndoLog::new() }
+        ShellTools { policy, targets: OnceLock::new(), limits: None, undo: UndoLog::new(), exec: LocalExec::from_process() }
     }
 
     /// The same host with the limits of a search replaced, for both kinds of machine. For tests.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_limits(mut self, limits: GrepLimits) -> ShellTools {
         self.limits = Some(limits);
+        self
+    }
+
+    /// The same host with the runner of local commands replaced. For tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_local_exec(mut self, exec: LocalExec) -> ShellTools {
+        self.exec = exec;
         self
     }
 
@@ -252,6 +296,11 @@ impl ShellTools {
     /// The deny list the host applies again to a path it resolved itself.
     pub(crate) fn policy(&self) -> &DenyPolicy {
         &self.policy
+    }
+
+    /// The runner of commands on this computer: it holds only the variables a command may see.
+    pub(crate) fn local_exec(&self) -> &LocalExec {
+        &self.exec
     }
 
     /// The changes the agent made that can still be taken back.
@@ -680,7 +729,7 @@ impl ToolHost for ShellTools {
             ToolName::ReadFile | ToolName::ListDir | ToolName::Grep => world.file_target(pane).is_some(),
             ToolName::ReadPane => world.terminal(pane).is_some(),
             ToolName::WriteFile | ToolName::EditFile => world.file_target(pane).is_some(),
-            ToolName::RunCommand => false,
+            ToolName::RunCommand => crate::ai_exec::offers(world.as_ref(), pane),
         }
     }
 
@@ -692,7 +741,7 @@ impl ToolHost for ShellTools {
             Tool::ReadPane(args) => self.pane_record(scope, args),
             Tool::WriteFile(args) => self.file_record(scope, tool, &args.path, Ending::File),
             Tool::EditFile(args) => self.file_record(scope, tool, &args.path, Ending::File),
-            Tool::RunCommand(_) => Err(ToolError::Unavailable),
+            Tool::RunCommand(args) => crate::ai_exec::resolve(self, scope, args),
         }
     }
 
@@ -703,7 +752,7 @@ impl ToolHost for ShellTools {
             Tool::Grep(args) => self.grep(ticket, args, cancel),
             Tool::ReadPane(args) => self.read_pane(args, cancel),
             Tool::WriteFile(_) | Tool::EditFile(_) => crate::ai_write::run(self, ticket, cancel),
-            Tool::RunCommand(_) => Err(ToolError::Unavailable),
+            Tool::RunCommand(_) => crate::ai_exec::run(self, ticket, cancel),
         }
     }
 
@@ -736,7 +785,7 @@ fn after_tilde(raw: &str) -> Option<&str> {
 /// read against the working directory of the pane, and a remote path is absolute or relative to the working directory.
 /// The `..` parts stay as the model wrote them: the table normalises them for its check and a remote host resolves
 /// them itself. The errors are fixed phrases that hold none of the path.
-fn absolute_path(raw: &str, target: &FileTarget, ending: Ending) -> Result<String, ToolError> {
+pub(crate) fn absolute_path(raw: &str, target: &FileTarget, ending: Ending) -> Result<String, ToolError> {
     if ending == Ending::File && ends_like_a_folder(raw, target.remote) {
         return Err(invalid(BAD_END));
     }
@@ -1232,7 +1281,7 @@ mod tests {
         };
         assert_eq!(
             offered(1),
-            ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file"],
+            ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file", "run_command"],
             "this computer: files and a terminal"
         );
         assert_eq!(offered(2), Vec::<&str>::new(), "a pane that is not open");
@@ -1242,11 +1291,11 @@ mod tests {
             ["read_file", "list_dir", "grep", "write_file", "edit_file"],
             "a file browser has files and no terminal"
         );
-        for pane in [1, 3, 4] {
-            assert!(!host.available(ToolName::RunCommand, pane), "run_command is not built");
+        for pane in [3, 4] {
+            assert!(!host.available(ToolName::RunCommand, pane), "a command needs a terminal and files together");
         }
         let declared: Vec<String> = specs(&host, 1).into_iter().map(|spec| spec.name).collect();
-        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file"]);
+        assert_eq!(declared, ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file", "run_command"]);
     }
 
     #[test]

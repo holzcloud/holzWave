@@ -116,6 +116,16 @@
 //                      An allowed write keeps what an undo needs: `ai_undo(conversation, call_id)` puts the old text back only while the
 //                      file still holds the text the write saved, once; a file the write made is refused as `created`, a text that
 //                      changed as `file_changed` and a change nobody knows as `unknown_change`.
+//       exec           the command tool of the core, as far as the page can see it: `run_command` calls in a script (`command`, `cwd`,
+//                      `timeout_secs`, `target`, `remote`, `tainted`, `taint`, `output`, `failed`, `overrides` and `payload` replace what
+//                      the mock builds). The card has the eleven members of the core's card with the effect `exec`, the payload in the
+//                      core's order (`tool`, `pane`, `target`, `remote`, `command` with the core's escapes, `cwd` only when the call gave
+//                      one, `timeout_secs`, `resolved_cwd`), and its hash is made from the call id and the payload. An allow "runs" the
+//                      command: it is recorded in `runs` and its `tool_result` is the scripted `output` (an error result when `failed`).
+//                      runs         every command the mock ran, oldest first
+//                      hold(), release()  an allowed command keeps running (no result) until `release()`; a stop ends it with the
+//                                   sentence of the loop for a stopped call
+//                      output(text, failed)  the next command that is allowed answers this text instead of the scripted one
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
 //     `ai_decide`, `ai_turn_snapshot`, `ai_profiles`, `ai_profile_save`, `ai_profile_remove`, `ai_key_set` and `ai_key_clear` have
 //     defaults; a rejection is the object `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input
@@ -290,6 +300,8 @@
   // members of the core's card, the payload in the core's field order for the four read tools, a 64-character hash), the
   // decision command with the core's refusals, the result of an allow or a deny, and the end of the turn.
   const appr = { decisions: [], refuse: null, held: false, waiters: [], live: new Map() };
+  /** The command tool: the commands that were run, a held run, the runs that wait for `release()`, and the next scripted answer. */
+  const ran = { runs: [], held: false, waiting: [], next: null };
   const STORED = "[tool output not stored]";
   const REFUSALS = {
     unknown_call: "No open call has this id.",
@@ -457,14 +469,17 @@
     const tool = spec.tool ?? "read_file";
     const id = spec.id ?? `call_${index + 1}`;
     const write = isWrite(tool) ? writeOf(tool, spec) : null;
+    const command = tool === "run_command" ? { command: spec.command ?? "", cwd: spec.cwd, timeout_secs: spec.timeout_secs ?? 60 } : null;
     const args =
-      tool === "grep" ? { pattern: spec.pattern ?? "", path: spec.path ?? "" }
+      command !== null ? { command: command.command, ...(command.cwd === undefined ? {} : { cwd: command.cwd }), timeout_secs: command.timeout_secs }
+      : tool === "grep" ? { pattern: spec.pattern ?? "", path: spec.path ?? "" }
       : tool === "read_pane" ? { rows: spec.rows ?? 50 }
       : write !== null ? write.args
       : { path: spec.path ?? "" };
     return {
       id, tool, spec: structuredClone(spec), summary: spec.summary ?? JSON.stringify(args),
-      result: spec.result ?? "ok", error: spec.error === true, decided: null, out: null, write,
+      result: spec.output ?? spec.result ?? "ok", error: spec.failed === true || spec.error === true, decided: null, out: null, write, command,
+      running: false,
     };
   };
   /** The payload of a card: the fields of the call in the core's order, each with the length of its raw value. */
@@ -473,6 +488,18 @@
     if (Array.isArray(spec.payload)) return structuredClone(spec.payload);
     const path = spec.path ?? "";
     const resolved = spec.resolved ?? path;
+    if (call.command !== null) {
+      const c = call.command;
+      const top = [["tool", call.tool], ["pane", String(pane)], ["target", spec.target ?? "This computer"], ["remote", String(spec.remote === true)]];
+      const rest = [["command", c.command]];
+      if (c.cwd !== undefined) rest.push(["cwd", c.cwd]);
+      rest.push(["timeout_secs", String(c.timeout_secs)], ["resolved_cwd", spec.resolved ?? c.cwd ?? "/work/proj"]);
+      const changed = spec.overrides ?? {};
+      return [...top, ...rest].map(([name, value]) => {
+        const raw = Object.hasOwn(changed, name) ? changed[name] : value;
+        return { name, value: visibleText(raw, false), bytes: bytesOf(raw) };
+      });
+    }
     if (call.write !== null) {
       const a = call.write.args;
       const raw = call.tool === "write_file"
@@ -510,7 +537,7 @@
     const payload = payloadOf(call, pane);
     const taint = spec.taint ?? earlier;
     const card = {
-      conversation, call_id: call.id, tool: call.tool, effect: call.write === null ? "read" : "write", pane, target: spec.target ?? "This computer",
+      conversation, call_id: call.id, tool: call.tool, effect: call.command !== null ? "exec" : call.write === null ? "read" : "write", pane, target: spec.target ?? "This computer",
       remote: spec.remote === true, payload, hash: digestOf(`${call.id}|${JSON.stringify(payload)}`),
       tainted: spec.tainted ?? taint.length > 0, taint: structuredClone(taint),
     };
@@ -568,24 +595,41 @@
     const entry = state.pending.find((p) => p.call_id === call_id);
     const live = appr.live.get(conversation);
     const call = live?.calls.find((c) => c.id === call_id);
-    if (call?.decided) throw fault("tool", REFUSALS.not_pending, "not_pending");
+    if (call?.decided || call?.running) throw fault("tool", REFUSALS.not_pending, "not_pending");
     if (entry === undefined || call === undefined) throw fault("tool", REFUSALS.unknown_call, "unknown_call");
     if (hash !== entry.hash) throw fault("tool", REFUSALS.hash_mismatch, "hash_mismatch");
     appr.decisions.push({ conversation, call_id, decision, hash });
+    if (decision === "allow" && call.command !== null) {
+      // The command "runs": it is recorded now, and its result comes at once or, while the run is held, with `release()`.
+      ran.runs.push(call.command.command);
+      if (ran.held) {
+        call.running = true;
+        ran.waiting.push({ conversation, call });
+        return null;
+      }
+    }
+    settle(conversation, state, live, call, decision);
+    return null;
+  };
+  /** The result of a decided call, and what follows it when it was the last call of the round. */
+  const settle = (conversation, state, live, call, decision) => {
+    call.running = false;
     call.decided = decision;
     if (decision === "allow" && call.write !== null) call.out = saveWrite(conversation, call);
     else {
       call.out = decision === "allow"
-        ? { content: call.result, is_error: call.error }
+        ? ran.next !== null && call.command !== null
+          ? { content: ran.next.text, is_error: ran.next.failed }
+          : { content: call.result, is_error: call.error }
         : { content: "The user denied this action.", is_error: true };
+      if (decision === "allow" && call.command !== null) ran.next = null;
     }
-    const events = [{ kind: "tool_result", call_id, tool: call.tool, content: call.out.content, is_error: call.out.is_error, redactions: 0 }];
+    const events = [{ kind: "tool_result", call_id: call.id, tool: call.tool, content: call.out.content, is_error: call.out.is_error, redactions: 0 }];
     if (live.calls.every((c) => c.decided !== null)) {
       live.closed = true;
       events.push(...afterResults(live, state.model));
     }
     queueMore(conversation, events);
-    return null;
   };
   /** A stop: every call without a result gets the fixed sentence, then the round's tool message. */
   const stopTools = (conversation, state) => {
@@ -599,7 +643,11 @@
       out.push({ kind: "tool_result", call_id: call.id, tool: call.tool, content: call.out.content, is_error: true, redactions: 0 });
     }
     live.closed = true;
-    for (const call of live.calls) call.out ??= { content: "This call did not run: the turn was stopped.", is_error: true };
+    ran.waiting = ran.waiting.filter((w) => w.conversation !== conversation);
+    for (const call of live.calls) {
+      call.running = false;
+      call.out ??= { content: "This call did not run: the turn was stopped.", is_error: true };
+    }
     out.push({ kind: "message", message: toolResultMessage(live.turn, live.calls) });
     return out;
   };
@@ -1241,6 +1289,26 @@
         return structuredClone(undone.calls);
       },
     },
+    exec: {
+      get runs() {
+        return structuredClone(ran.runs);
+      },
+      hold() {
+        ran.held = true;
+      },
+      release() {
+        ran.held = false;
+        for (const { conversation, call } of ran.waiting.splice(0)) {
+          const state = ai.chats.get(conversation);
+          const live = appr.live.get(conversation);
+          if (state === undefined || live === undefined || live.closed) continue;
+          settle(conversation, state, live, call, "allow");
+        }
+      },
+      output(text, failed = false) {
+        ran.next = { text, failed };
+      },
+    },
     approval: {
       get decisions() {
         return appr.decisions;
@@ -1264,7 +1332,7 @@
       save: () =>
         structuredClone({
           chats: [...ai.chats.entries()], live: [...appr.live.entries()], running: ai.running, turnNo: ai.turnNo, chatNo: ai.chatNo,
-          decisions: appr.decisions, files: [...wfiles.entries()], undoable: [...undoable.entries()], undos: undone.calls,
+          decisions: appr.decisions, files: [...wfiles.entries()], undoable: [...undoable.entries()], undos: undone.calls, runs: ran.runs,
         }),
       restore(saved) {
         ai.chats = new Map(saved.chats);
@@ -1278,6 +1346,7 @@
         undoable.clear();
         for (const [key, record] of saved.undoable ?? []) undoable.set(key, record);
         undone.calls.push(...(saved.undos ?? []));
+        ran.runs.push(...(saved.runs ?? []));
       },
     },
     script: (turn) => void ai.scripts.push(turn),
@@ -1308,6 +1377,8 @@
       undoable.clear();
       Object.assign(undone, { refuse: null, bare: false });
       undone.calls.length = 0;
+      Object.assign(ran, { held: false, waiting: [], next: null });
+      ran.runs.length = 0;
       resetContext();
     },
   };

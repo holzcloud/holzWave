@@ -154,12 +154,23 @@ const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202
  * dropped, so two different texts never look the same.
  */
 export function showText(text: string): string {
-  return text.replace(HIDDEN, (c) => {
-    if (c === "\n") return "\\n";
-    if (c === "\r") return "\\r";
-    if (c === "\t") return "\\t";
-    return `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`;
-  });
+  return text.replace(HIDDEN, escaped);
+}
+
+/** One hidden character as its escape: `\n`, `\r`, `\t` or `\u{hex}`. */
+function escaped(c: string): string {
+  if (c === "\n") return "\\n";
+  if (c === "\r") return "\\r";
+  if (c === "\t") return "\\t";
+  return `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`;
+}
+
+/**
+ * `text` as the result of a tool is shown: like {@link showText}, but a line feed and a tab stay as they are, so a result of
+ * several lines (the report of a command, the lines of a file) is drawn in lines. Every other hidden character is an escape.
+ */
+export function showResult(text: string): string {
+  return text.replace(HIDDEN, (c) => (c === "\n" || c === "\t" ? c : escaped(c)));
 }
 
 type Obj = Record<string, unknown>;
@@ -437,7 +448,7 @@ export function cannotWords(why: Why): string {
 
 // ---- the words ------------------------------------------------------------------------------------------------------
 
-/** The words of each tool of the read set, keyed by the name the core uses. A tool that is not here cannot be allowed. */
+/** The words of each tool the page knows, keyed by the name the core uses. A tool that is not here cannot be allowed. */
 export const TOOL_WORDS: Readonly<Record<string, string>> = Object.freeze({
   read_file: "Read a file",
   list_dir: "List a folder",
@@ -445,6 +456,7 @@ export const TOOL_WORDS: Readonly<Record<string, string>> = Object.freeze({
   read_pane: "Read a pane",
   write_file: "Write a file",
   edit_file: "Edit a file",
+  run_command: "Run a command",
 });
 
 /** What each tool does to the world, by the core's names: the effect a card of that tool has. The core's table, held by a golden. */
@@ -455,15 +467,17 @@ export const TOOL_EFFECT: Readonly<Record<string, string>> = Object.freeze({
   read_pane: "read",
   write_file: "write",
   edit_file: "write",
+  run_command: "exec",
 });
 
 /** The effects the page handles: a card of any other effect can only be denied. */
-export const HANDLED_EFFECTS: readonly string[] = Object.freeze(["read", "write"]);
+export const HANDLED_EFFECTS: readonly string[] = Object.freeze(["read", "write", "exec"]);
 
 /** What each effect does to the world, in words. The page handles the effects named here. */
 export const EFFECT_WORDS: Readonly<Record<string, string>> = Object.freeze({
   read: "Reads only. Nothing is changed.",
   write: "Changes one file. Check the changes below.",
+  exec: "Runs one command in a separate process with your account's rights. Check the command below.",
 });
 
 /** The fixed sentences of the card and of the tool rows. Nothing in them holds a path, a host or a field of a request. */
@@ -493,6 +507,9 @@ export const WORDS = Object.freeze({
   destinationWriteLead: "Only the outcome (saved or not) is sent to ",
   destinationWriteUnknown: "Only the outcome (saved or not) is sent to the model of this chat.",
   taintWrite: "A file will be changed. Check the changes below before you allow it.",
+  destinationCommandLead: "The command's output is sent to ",
+  destinationCommandUnknown: "The command's output is sent to the model of this chat.",
+  taintCommand: "A command will run. Read all of it before you allow it.",
   diffReplace: "Replaces the whole file",
   diffCreate: "Creates a new file",
   diffEdit: "Changes parts of the file",
@@ -519,10 +536,12 @@ export function hashWords(hash: string): string {
 
 /** The line that says where the result of an approved call goes, as pieces: the place piece is the only one that can leave. */
 export function destinationParts(dest: Destination | null, effect = "read"): DestinationPart[] {
-  const write = effect === "write";
-  if (dest === null) return [{ kind: "text", text: write ? WORDS.destinationWriteUnknown : WORDS.destinationUnknown, leaves: false }];
+  const unknown =
+    effect === "write" ? WORDS.destinationWriteUnknown : effect === "exec" ? WORDS.destinationCommandUnknown : WORDS.destinationUnknown;
+  const lead = effect === "write" ? WORDS.destinationWriteLead : effect === "exec" ? WORDS.destinationCommandLead : WORDS.destinationLead;
+  if (dest === null) return [{ kind: "text", text: unknown, leaves: false }];
   const parts: DestinationPart[] = [
-    { kind: "text", text: write ? WORDS.destinationWriteLead : WORDS.destinationLead, leaves: false },
+    { kind: "text", text: lead, leaves: false },
     { kind: "model", text: dest.model, leaves: false },
   ];
   if (dest.host !== null && dest.host !== "") {
@@ -540,7 +559,7 @@ export function destinationParts(dest: Destination | null, effect = "read"): Des
 /** The banner of a turn that holds text the user did not write: its title, and a sentence that names the core's labels. */
 export function taintWords(labels: readonly string[], effect = "read"): { title: string; text: string } {
   const named = labels.length === 0 ? "" : ` (${labels.join(", ")})`;
-  const more = effect === "write" ? ` ${WORDS.taintWrite}` : "";
+  const more = effect === "write" ? ` ${WORDS.taintWrite}` : effect === "exec" ? ` ${WORDS.taintCommand}` : "";
   return { title: WORDS.bannerTitle, text: `This turn contains text you did not write${named}. ${WORDS.taintTail}${more}` };
 }
 
@@ -588,8 +607,8 @@ function utf8Length(text: string): number {
  * `text` made visible and cut at `max` characters of what is shown, never in the middle of a character; `tail` is added when
  * it was cut. Only the first `max` characters of a long text are looked at, so a huge result costs no more than a long one.
  */
-function cutShown(text: string, max: number, tail: string): string {
-  const visible = showText(text.length > max ? text.slice(0, max) : text);
+function cutShown(text: string, max: number, tail: string, show: (text: string) => string = showText): string {
+  const visible = show(text.length > max ? text.slice(0, max) : text);
   if (text.length <= max && visible.length <= max) return visible;
   let end = max;
   const last = visible.charCodeAt(end - 1);
@@ -620,7 +639,7 @@ export function rowsOf(
       name: part.name,
       summary: cutShown(part.summary, MAX_SUMMARY, "…"),
       state,
-      content: result === undefined ? null : cutShown(result.content, MAX_SHOWN, `\n${WORDS.cut}`),
+      content: result === undefined ? null : cutShown(result.content, MAX_SHOWN, `\n${WORDS.cut}`, showResult),
       bytes: result === undefined ? 0 : utf8Length(result.content),
     });
   }

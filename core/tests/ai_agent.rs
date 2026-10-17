@@ -51,6 +51,7 @@ struct HostState {
     failing: BTreeSet<String>,
     available: BTreeSet<ToolName>,
     block: bool,
+    command_failed: bool,
     ran: Vec<Ran>,
 }
 
@@ -70,6 +71,7 @@ impl FakeHost {
                 failing: BTreeSet::new(),
                 available,
                 block: false,
+                command_failed: false,
                 ran: Vec::new(),
             }),
         }
@@ -94,6 +96,12 @@ impl FakeHost {
     #[allow(dead_code)]
     fn all_tools(self) -> Self {
         self.state().available = ToolName::ALL.into_iter().collect();
+        self
+    }
+
+    /// A `run_command` call runs and fails: the output is marked as a failure, as for a status other than 0.
+    fn failing_commands(self) -> Self {
+        self.state().command_failed = true;
         self
     }
 
@@ -152,6 +160,9 @@ impl ToolHost for FakeHost {
                 }
             }
             Tool::WriteFile(args) => Ok(ToolOutput::new(format!("wrote {} bytes", args.content.len()))),
+            Tool::RunCommand(_) if state.command_failed => {
+                Ok(ToolOutput::failed("Exit status: 2.\n\nStandard error:\nboom".to_owned()))
+            }
             _ => Ok(ToolOutput::new("ok".to_owned())),
         }
     }
@@ -919,6 +930,38 @@ fn consecutive_tool_failures_stop_the_turn_and_a_success_resets_the_count() {
     assert_eq!(played.outcome.rounds, 3);
     assert!(played.cards().is_empty());
     assert_consistent(&history, &played);
+}
+
+#[test]
+fn a_failed_command_output_is_an_error_result_with_its_whole_text_and_is_no_tool_failure() {
+    let history = vec![user("u1", "run the checks")];
+    let command = |id: &str, text: &str| call_script(id, "run_command", json!({ "command": text }));
+    let world = World::new(
+        FakeHost::new().all_tools().failing_commands(),
+        ScriptedProvider::new("scripted")
+            .with_turn(command("call_1", "make one"))
+            .with_turn(command("call_2", "make two"))
+            .with_turn(command("call_3", "make three"))
+            .with_turn(Script::reply("The checks fail.")),
+    );
+    let played = play(&world, request("t1", history.clone()), &CancelToken::new(), &mut allow_all);
+
+    // Each command ran on its own card and came back as an error result that holds the whole text.
+    assert_eq!(played.cards().len(), 3);
+    let results = played.result_events();
+    assert_eq!(results.len(), 3);
+    for (call_id, content, is_error) in &results {
+        assert!(*is_error, "{call_id} is an error result");
+        assert!(content.contains("Exit status: 2.") && content.contains("boom"), "{call_id}: {content}");
+    }
+    // Three in a row did not stop the turn: a command that ran is no tool failure.
+    assert_eq!(played.outcome.end, TurnEnd::Done(StopReason::EndTurn));
+    assert_eq!(played.outcome.rounds, 4);
+    assert_eq!(world.host.runs(), ["call_1", "call_2", "call_3"]);
+    assert_consistent(&history, &played);
+    let messages = transcript(&history, &played.outcome);
+    let flags: Vec<bool> = messages.iter().flat_map(tool_result_of).map(|result| result.is_error).collect();
+    assert_eq!(flags, [true, true, true], "the transcript holds the flag too");
 }
 
 #[test]

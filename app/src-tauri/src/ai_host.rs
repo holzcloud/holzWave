@@ -2236,8 +2236,8 @@ mod tests {
         let requests = provider.requests();
         assert_eq!(requests.len(), 2, "the second request carries the result");
         let declared: Vec<&str> = requests[1].tools.iter().map(|spec| spec.name.as_str()).collect();
-        let offered = ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file"];
-        assert_eq!(declared, offered, "the four read tools and the two write tools, and nothing else");
+        let offered = ["read_file", "list_dir", "grep", "read_pane", "write_file", "edit_file", "run_command"];
+        assert_eq!(declared, offered, "the four read tools, the two write tools and the command tool, and nothing else");
         let last = requests[1].messages.last().expect("a message");
         assert_eq!(last.role, Role::Tool);
         let returned = last.parts.iter().any(|part| match part {
@@ -2322,6 +2322,125 @@ mod tests {
         };
         let fault = spent.expect("the blocking thread ends").expect_err("a card that was decided");
         assert_eq!((fault.code, fault.reason), ("tool", Some("unknown_call")));
+    }
+
+    // ---- the command tool --------------------------------------------------------------------------------------
+
+    /// Text a command prints, and the two halves of a key-shaped value that a command assembles when it runs, so that the
+    /// command text itself never holds the key; they appear in test code only.
+    const CMD_OUT: &str = "zq-cmd-out-6a1f40";
+    const KEY_HEAD: &str = "sk-ant-api03-";
+    const KEY_TAIL: &str = "CANARY7f3aQ0123456789abcdefABCDEF";
+
+    /// The canonical folder `<dir>/proj` that `tool_tree` made.
+    fn proj_of(notes: &Path) -> PathBuf {
+        notes.parent().expect("a folder").to_path_buf()
+    }
+
+    /// The `run_command` arguments for `command` in `cwd`.
+    fn command_args(command: &str, cwd: &Path) -> Value {
+        json!({"command": command, "cwd": cwd})
+    }
+
+    /// A core whose live pane runs `exec cat > <dir>/typed.txt`: whatever is typed into the pane lands in that file.
+    #[cfg(unix)]
+    fn core_with_typed_file(dir: &Path) -> (Arc<AppCore>, Arc<AiRecorder>, PathBuf) {
+        let typed = dir.join("typed.txt");
+        let (core, rec) = core_with_script(dir, &format!("exec cat > '{}'", typed.display()));
+        core.start_pane(pane_of(&core), 80, 24, 0, 0).expect("the pane starts");
+        (core, rec, typed)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_call_shows_its_exact_text_is_decided_on_its_hash_and_runs_in_a_separate_process() {
+        let tree = Scratch::new("cmd-tree");
+        let scratch = Scratch::new("cmd-trace");
+        let notes = tool_tree(&tree.0);
+        let proj = proj_of(&notes);
+        let (core, rec, typed) = core_with_typed_file(&scratch.0);
+        let pid_file = scratch.0.join("sh.pid");
+        let command = format!(
+            "printf '%s\\n' '{CMD_OUT}'; printf '%s%s\\n' '{KEY_HEAD}' '{KEY_TAIL}'; echo $$ > '{}'",
+            pid_file.display()
+        );
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "run_command", command_args(&command, &proj)))
+                .with_turn(text_turn("Done.")),
+        );
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        core.ai_send(&chat, "run the checks".to_owned(), pane, Some("scripted".to_owned()), None).expect("sent");
+
+        // The card: the effect, the machine, every field in order, the folder the command will run in and a hash.
+        let proposed = event_of(&rec, &chat, "tool_proposed");
+        let card = &proposed["pending"];
+        assert_eq!((card["tool"].as_str(), card["effect"].as_str()), (Some("run_command"), Some("exec")));
+        let header = (card["pane"].as_u64(), card["target"].as_str(), card["remote"].as_bool());
+        assert_eq!(header, (Some(u64::from(pane)), Some("This computer"), Some(false)));
+        assert_eq!(
+            payload_names(card),
+            ["tool", "pane", "target", "remote", "command", "cwd", "timeout_secs", "resolved_cwd"]
+        );
+        let field = |name: &str| {
+            let fields = card["payload"].as_array().expect("a payload");
+            fields.iter().find(|f| f["name"] == name).map(|f| f["value"].as_str().expect("a value").to_owned())
+        };
+        assert_eq!(field("resolved_cwd"), proj.to_str().map(str::to_owned));
+        assert!(field("command").is_some_and(|shown| shown.contains(CMD_OUT)), "the command is shown");
+        let hash = card["hash"].as_str().expect("a hash").to_owned();
+        assert!(hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{hash}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!pid_file.exists(), "the command ran before it was approved");
+        assert!(events_of(&rec, &chat, "tool_result").is_empty(), "a result before the decision");
+
+        // The page decides on the card's hash: the host runs exactly that command in a process of its own.
+        decision(&core, &chat, "call_1", "allow", &hash).expect("the decision is accepted");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(result["call_id"], json!("call_1"));
+        assert_eq!((result["tool"].as_str(), result["is_error"].as_bool()), (Some("run_command"), Some(false)));
+        let content = result["content"].as_str().expect("content").to_owned();
+        assert!(content.starts_with("Exit status: 0."), "{content}");
+        assert!(content.contains(CMD_OUT), "{content}");
+        assert!(content.contains("[REDACTED:"), "the key-shaped text was not redacted: {content}");
+        assert!(!content.contains("CANARY7f3a"), "the key reached the result: {content}");
+        let pid: u32 = std::fs::read_to_string(&pid_file).expect("the command wrote its pid").trim().parse().expect("a number");
+        assert_ne!(pid, std::process::id(), "the command ran in a process of its own");
+
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        assert_eq!(rec.end_of(&chat).expect("an end")["end"], json!("done"));
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2, "the second request carries the result");
+        let last = requests[1].messages.last().expect("a message");
+        assert_eq!(last.role, Role::Tool);
+        let returned = last.parts.iter().any(|part| match part {
+            Part::ToolResult(result) => result.call_id == "call_1" && result.content == content && !result.is_error,
+            _ => false,
+        });
+        assert!(returned, "the cleaned text is the result of the call");
+        let key = format!("{KEY_HEAD}{KEY_TAIL}");
+        for request in &requests {
+            let sent = serde_json::to_string(&request.messages).expect("serialises");
+            assert!(!sent.contains(&key), "the key reached a request");
+        }
+
+        // The events fold to the snapshot, and the key is in no event.
+        let events: Vec<AiPayload> = rec.ai_events().into_iter().map(|(_, payload)| payload).collect();
+        let mut folded = ChatState::new(&chat);
+        for payload in &events {
+            assert_eq!(folded.apply(&payload.0), ApplyResult::Applied, "{payload:?}");
+        }
+        let idle = core.ai().snapshot(&chat).expect("a snapshot");
+        assert_eq!(as_stored(json_of(&folded)), json_of(&idle), "the fold of the events is the snapshot");
+        assert!(!everything_serialised(&rec, &[json_of(&idle)]).contains(&key), "the key reached an event");
+
+        // Nothing was typed into the live pane.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&typed).expect("the file the pane writes"), b"", "something was typed into the pane");
     }
 
     // ---- the walls, the lifecycle and the recorded run --------------------------------------------------------

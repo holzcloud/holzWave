@@ -354,3 +354,30 @@ export const payloadOf = (tool, rest) =>
 
 /** The argument object of every `ai_undo` call the page made, oldest first. */
 export const undoCalls = (page) => page.evaluate(() => structuredClone(window.__MOCK__.callsOf("ai_undo")));
+
+/** The golden of the command card (written by the core's tests): the cards, the limits and the texts the page is held to. */
+export const COMMAND_GOLDEN = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/ai_command_card.json"), "utf8"));
+
+/** The command the mock's command turns run unless the spec names another: it holds a real line break, which the card writes as `\n`. */
+export const COMMAND_TEXT = "printf 'build ok\n'";
+
+/**
+ * Queue a turn in which the model asks for a command. `spec` is a call (`id`, `command`, `cwd`, `timeout_secs`, `target`, `remote`,
+ * `tainted`, `taint`, `output` (the result of an allow, the golden's `ok` report by default), `failed` (the result is an error),
+ * `overrides` (a payload value by name, to replace what the mock builds) and `payload`) or a list of calls in `calls`, and `answer`
+ * is the text after the last result.
+ */
+export async function scriptCommand(page, spec) {
+  const { calls: list, answer, ...single } = spec;
+  const tools = (list ?? [single]).map((c) => ({ tool: "run_command", command: COMMAND_TEXT, output: COMMAND_GOLDEN.texts.report.ok, ...c }));
+  await page.evaluate(([queued, text]) => window.__MOCK__.ai.script({ tools: queued, ...(text === undefined ? {} : { answer: text }) }), [tools, answer]);
+}
+
+/** From now on an allowed command keeps running until `releaseCommand`: the card says `Allowed · running…`. */
+export const holdCommand = (page) => page.evaluate(() => window.__MOCK__.ai.exec.hold());
+
+/** Let the held commands finish with their scripted result. */
+export const releaseCommand = (page) => page.evaluate(() => window.__MOCK__.ai.exec.release());
+
+/** Every command the mock ran, oldest first. */
+export const commandRuns = (page) => page.evaluate(() => window.__MOCK__.ai.exec.runs);

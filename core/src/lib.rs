@@ -28,6 +28,7 @@
 //! - [`wire`]: the frame protocol from engine update to frame message.
 //! - [`pane`]: the pane actor with engine thread, PTY reader and writer, and frame pacing.
 //! - [`textread`]: reading a region of a terminal's text, with the byte ranges of the text the user could not see.
+//! - [`exec`]: the local runner of the agent's command tool: a separate process, a scrubbed environment, bounded output.
 //! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
 
 pub mod ai;
@@ -36,6 +37,7 @@ pub mod conn;
 pub mod connections;
 pub mod engine;
 mod error;
+pub mod exec;
 pub mod files;
 pub mod history;
 pub mod keybindings;
