@@ -624,3 +624,55 @@ fn the_unowned_names_are_themes_widgets_and_the_notes_and_nothing_the_app_rewrit
         assert!(!is_unowned(no), "{no}");
     }
 }
+
+// ---- the layout and the pane assignments that belong to it --------------------------------------------------------
+
+/// Save connections with these ids (key login, no secret) in the folder of `d`.
+fn save_connections(d: &Device, ids: &[&str]) {
+    let mut profiles = Profiles::default();
+    for id in ids {
+        let mut p = crate::profiles::Profile::new(*id, *id, "host.example");
+        p.user = "u".into();
+        p.key_path = "~/.ssh/id_ed25519".into();
+        profiles.upsert(p).unwrap();
+    }
+    profiles.save(&d.dir).unwrap();
+}
+
+/// REPRODUCTION OF A DEFECT, asserting the wrong behaviour on purpose. Pane ids are small per-device counters, so the
+/// pane files (`pane_connections.json`, `pane_blocks.json`) of two devices speak about different panes with the same
+/// numbers. Device A runs the saved connection `web-1` in its pane 2; device B shows a local preview in its pane 2 and
+/// runs `db` in its pane 3. After B has taken over A's layout, B's own assignments stay where they were, whatever the
+/// panes of A's layout are, and A's connected pane does not come up on B. The test that replaces this one describes the
+/// behaviour once the layout travels together with its assignments.
+#[test]
+fn reproduction_a_layout_adopted_from_another_device_keeps_this_devices_pane_assignments() {
+    let srv = server();
+    let (a, b) = (device("a-layout"), device("b-layout"));
+    // Both devices know the same saved connections (they were synced earlier).
+    save_connections(&a, &["web-1", "db"]);
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(promote_incoming(&b.dir), vec!["connections.json"]);
+    // B has its own panes: a local preview in pane 2 and the connection `db` in pane 3.
+    write_atomic(&b.dir.join(crate::connections::PANES_FILE), br#"{"3":"db"}"#).unwrap();
+    write_atomic(&b.dir.join(crate::blocks::BLOCKS_FILE), br#"{"2":{"kind":"preview","source":"local","path":"/tmp/b-notes.md"}}"#).unwrap();
+    // A has a layout with the panes 1, 2 and 3 and runs `web-1` in pane 2.
+    write_atomic(&a.dir.join("layout.json"), br#"{"panes":[1,2,3]}"#).unwrap();
+    write_atomic(&a.dir.join(crate::connections::PANES_FILE), br#"{"2":"web-1"}"#).unwrap();
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["layout.json"]);
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().downloaded, vec!["layout.json"]);
+    assert_eq!(promote_incoming(&b.dir), vec!["layout.json"]);
+    assert_eq!(fs::read_to_string(b.dir.join("layout.json")).unwrap(), r#"{"panes":[1,2,3]}"#);
+
+    let panes = [1, 2, 3];
+    let (connections, _) = crate::connections::Connections::load(&b.dir, b.secrets.clone(), None, &panes);
+    let blocks = crate::blocks::Blocks::load(&b.dir, None, &panes);
+    // A's pane 2 ran `web-1`; that assignment never reached B ...
+    assert!(connections.profile_of(2).is_none(), "A's connected pane did not come up on B");
+    // ... B's own pane 3 still runs `db`, although A's layout holds no such assignment ...
+    assert_eq!(connections.profile_of(3).map(|p| p.id), Some("db".to_owned()));
+    // ... and B's own local preview sits on the pane 2 of A's layout.
+    let block = blocks.block_of(2).expect("B's preview survives on pane 2");
+    assert_eq!((block.kind, block.source.as_str(), block.path.as_str()), (crate::blocks::BlockKind::Preview, "local", "/tmp/b-notes.md"));
+}
