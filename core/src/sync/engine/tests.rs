@@ -1536,7 +1536,6 @@ fn same_second_overwrite(srv: &Server, tag: &str) -> (Device, Device) {
 }
 
 #[test]
-#[ignore = "fails until the fix of the next commit"]
 fn a_write_in_the_same_second_as_the_last_seen_version_is_a_conflict_not_an_overwrite() {
     let srv = server_coarse(true);
     let (a, _b) = same_second_overwrite(&srv, "ss1");
@@ -1558,10 +1557,118 @@ fn same_second_second_writer(srv: &Server, tag: &str) -> (Device, Device) {
 }
 
 #[test]
-#[ignore = "fails until the fix of the next commit"]
 fn a_version_written_in_the_same_second_as_the_last_seen_one_is_downloaded() {
     let srv = server_coarse(true);
     let (a, _b) = same_second_second_writer(&srv, "ss2");
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["settings.json"], "{report:?}");
+    assert_eq!(text(&a, "settings.json").as_deref(), Some("v2"));
+}
+
+#[test]
+fn every_put_carries_the_sha256_of_the_blob() {
+    let srv = server_coarse(true);
+    let (a, b) = same_second_overwrite(&srv, "ss3");
+    // An upload, an overwrite, a conflict (the backup is a write too) and the creation of meta.json all went through.
+    let counts = srv.counts();
+    assert!(counts.puts >= 5, "{counts:?}");
+    assert_eq!(counts.bad_sums, 0, "{counts:?}");
+    assert!(srv.store.lock().unwrap().files.keys().any(|k| k.starts_with("backups/")));
+    // The checksum the server keeps for a file is the digest of the blob it holds, which a device can compare.
+    let (blob, sum) = {
+        let store = srv.store.lock().unwrap();
+        (store.files["files/settings.json.hwx"].0.clone(), store.sums["files/settings.json.hwx"].clone())
+    };
+    assert_eq!(sum, format!("sha256:{}", sha256_hex(&blob)));
+    drop((a, b));
+}
+
+#[test]
+fn a_listing_reports_a_checksum_only_when_the_server_has_one() {
+    let listed = |srv: &Server, tag: &str| {
+        let a = device(tag);
+        put(&a, "settings.json", "x");
+        connect(srv, &a, "pw").unwrap().sync_once().unwrap();
+        WebDav::new(&srv.url, "u", "p").unwrap().list("files").unwrap()
+    };
+    let with = listed(&server_coarse(true), "ls1");
+    assert!(!with.is_empty());
+    for entry in &with {
+        let sum = entry.checksum.as_deref().expect("a checksum");
+        assert!(sum.len() == 64 && sum.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{sum}");
+    }
+    for (srv, tag) in [(server_coarse(false), "ls2"), (server(), "ls3")] {
+        let plain = listed(&srv, tag);
+        assert!(!plain.is_empty() && plain.iter().all(|e| e.checksum.is_none()), "{plain:?}");
+    }
+}
+
+#[test]
+fn a_quiet_run_reads_no_blob_and_writes_nothing() {
+    for (tag, srv) in [("qr1", server_coarse(true)), ("qr2", server_coarse(false)), ("qr3", server())] {
+        let (a, b) = level_pair(&srv, tag);
+        let counts = srv.counts();
+        for d in [&a, &b, &a, &b] {
+            assert_eq!(connect(&srv, d, "pw").unwrap().sync_once().unwrap(), Report::default());
+        }
+        assert_eq!(srv.counts(), counts, "{tag}: a quiet run reads no blob and writes nothing");
+    }
+}
+
+#[test]
+fn a_wrong_reported_checksum_with_an_equal_blob_is_no_change() {
+    let srv = server_coarse(true);
+    let (a, b) = level_pair(&srv, "wc");
+    srv.store.lock().unwrap().sums.insert("files/settings.json.hwx".into(), format!("sha256:{}", "0".repeat(64)));
+    let counts = srv.counts();
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report, Report::default(), "the blob is the one this device holds");
+    let after = srv.counts();
+    assert_eq!(after.blob_gets - counts.blob_gets, 1, "one read of that blob");
+    assert_eq!(after.puts, counts.puts);
+    assert_eq!(text(&b, "settings.json").as_deref(), Some("base"));
+    // A's own edit still goes through.
+    put(&a, "settings.json", "later");
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["settings.json"]);
+}
+
+/// Blank the blob digest in a device's `sync_state.json`, as the record of an older build has none.
+fn blank_blob_records(d: &Device) {
+    let path = d.dir.join("sync_state.json");
+    let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for (_, record) in state["files"].as_object_mut().unwrap() {
+        record.as_object_mut().unwrap().remove("blob");
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+}
+
+#[test]
+fn a_record_of_an_older_build_loads_and_trusts_the_etag_alone() {
+    let srv = server_coarse(true);
+    let (a, b) = level_pair(&srv, "old");
+    blank_blob_records(&b);
+    assert_eq!(json(&b, "sync_state.json")["files"]["settings.json"].get("blob"), None, "the record has no blob digest");
+    let counts = srv.counts();
+    // Nothing is suspect without a digest to compare with: a quiet run downloads nothing and reads no blob.
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(srv.counts(), counts);
+    // After the next change of that name the record holds a digest again.
+    put(&b, "settings.json", "b edit");
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().uploaded, vec!["settings.json"]);
+    assert!(!json(&b, "sync_state.json")["files"]["settings.json"]["blob"].as_str().unwrap_or("").is_empty());
+    drop(a);
+}
+
+#[test]
+fn a_change_in_a_later_second_is_seen_by_its_etag_alone() {
+    let srv = server_coarse(false);
+    let (a, b) = (device("a-later"), device("b-later"));
+    put(&a, "settings.json", "v1");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    srv.set_second(1001);
+    put(&b, "settings.json", "v2");
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().uploaded, vec!["settings.json"]);
     let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
     assert_eq!(report.downloaded, vec!["settings.json"], "{report:?}");
     assert_eq!(text(&a, "settings.json").as_deref(), Some("v2"));

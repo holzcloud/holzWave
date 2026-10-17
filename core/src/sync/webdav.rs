@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
+use sha2::{Digest, Sha256};
 use ureq::config::Config;
 use ureq::http::{Request, StatusCode};
 use ureq::tls::{RootCerts, TlsConfig};
@@ -35,6 +36,21 @@ pub const CONFLICT: &str = "precondition failed";
 pub struct Entry {
     pub name: String,
     pub etag: String,
+    /// The SHA-256 the server holds for the file, 64 lowercase hex characters; `None` when the server reports none (or only
+    /// other algorithms). A hint: the sync reads the file when it differs from what it recorded, and the file decides.
+    pub checksum: Option<String>,
+}
+
+/// The longest a path segment may be (see [`safe_segment`]); every name on the server is made to fit.
+pub const MAX_SEGMENT: usize = 128;
+
+/// The SHA-256 of `bytes` as lowercase hex.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    Sha256::digest(bytes).iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// What the sync needs from a server. `path` is relative to the sync folder and made of safe segments.
@@ -80,7 +96,7 @@ fn is_loopback(host: &str) -> bool {
 
 /// A path segment is letters, digits and `._-` only: nothing a server or a file name can use to leave the folder.
 pub fn safe_segment(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 128 && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    !s.is_empty() && s.len() <= MAX_SEGMENT && s != "." && s != ".." && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
 fn safe_path(path: &str) -> Result<()> {
@@ -146,11 +162,13 @@ impl WebDav {
             req = req.header(*k, v.as_str());
         }
         let req = req.body(body.to_vec()).map_err(|e| err(format!("request: {e}")))?;
-        let mut resp = self.agent.run(req).map_err(|e| err(format!("{method} {path}: {e}")))?;
+        // The folder itself has an empty path: name it in words instead of leaving a gap in the text.
+        let shown = if path.is_empty() { "the sync folder" } else { path };
+        let mut resp = self.agent.run(req).map_err(|e| err(format!("{method} {shown}: {e}")))?;
         let status = resp.status();
         let etag = resp.headers().get("ETag").or_else(|| resp.headers().get("OC-ETag")).and_then(|v| v.to_str().ok()).map(clean_etag);
         let mut bytes = Vec::new();
-        resp.body_mut().as_reader().take(limit + 1).read_to_end(&mut bytes).map_err(|e| err(format!("{method} {path}: {e}")))?;
+        resp.body_mut().as_reader().take(limit + 1).read_to_end(&mut bytes).map_err(|e| err(format!("{method} {shown}: {e}")))?;
         if bytes.len() as u64 > limit {
             return Err(err("the server's answer is larger than the sync accepts"));
         }
@@ -199,7 +217,8 @@ impl Backend for WebDav {
         if !dir.is_empty() {
             safe_path(dir)?;
         }
-        const BODY: &[u8] = br#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getetag/><d:resourcetype/></d:prop></d:propfind>"#;
+        // `oc:checksums` is the content hash a Nextcloud-like server keeps; a server that does not know it leaves it out.
+        const BODY: &[u8] = br#"<?xml version="1.0"?><d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><d:getetag/><d:resourcetype/><oc:checksums/></d:prop></d:propfind>"#;
         let (status, _, bytes) =
             self.send("PROPFIND", dir, &[("Depth", "1".into()), ("Content-Type", "application/xml".into())], BODY, 4 * 1024 * 1024)?;
         if status.as_u16() == 404 {
@@ -223,7 +242,10 @@ impl Backend for WebDav {
 
     fn put(&self, path: &str, bytes: &[u8], cond: &Cond) -> Result<String> {
         safe_path(path)?;
-        let mut headers = vec![("Content-Type", "application/octet-stream".to_owned())];
+        // The checksum of the sealed blob (never of a plaintext) lets a server that keeps it tell two versions apart that
+        // share an ETag, because the ETag of such a server moves once per second.
+        let mut headers =
+            vec![("Content-Type", "application/octet-stream".to_owned()), ("OC-Checksum", format!("sha256:{}", sha256_hex(bytes)))];
         match cond {
             Cond::Absent => headers.push(("If-None-Match", "*".into())),
             Cond::Match(etag) => headers.push(("If-Match", format!("\"{etag}\""))),
@@ -256,19 +278,37 @@ fn parse_multistatus(xml: &[u8]) -> Result<Vec<Entry>> {
     let (mut href, mut etag, mut collection) = (String::new(), String::new(), false);
     let mut field: Option<&'static str> = None;
     let mut text = String::new();
+    // The text inside `checksums` and `checksum` elements of the current response, and how deep inside them the reader is.
+    let (mut sums, mut in_sums) = (String::new(), 0u32);
     let mut out = Vec::new();
     loop {
-        match reader.read_event().map_err(|e| bad(&e))? {
+        let event = reader.read_event().map_err(|e| bad(&e))?;
+        // An empty element has no end event: it must not leave the reader "inside" it.
+        let empty = matches!(event, Event::Empty(_));
+        match event {
             Event::Start(e) | Event::Empty(e) => {
                 match e.local_name().as_ref() {
-                    "response" => (href, etag, collection) = (String::new(), String::new(), false),
+                    "response" => {
+                        (href, etag, collection) = (String::new(), String::new(), false);
+                        (sums, in_sums) = (String::new(), 0);
+                    }
                     "href" => (field, text) = (Some("href"), String::new()),
                     "getetag" => (field, text) = (Some("etag"), String::new()),
+                    "checksums" | "checksum" if !empty => {
+                        in_sums += 1;
+                        sums.push(' ');
+                    }
                     "collection" => collection = true,
                     _ => {}
                 }
             }
-            Event::Text(t) => text.push_str(&t.xml_content(XmlVersion::Implicit1_0)),
+            Event::Text(t) => {
+                let content = t.xml_content(XmlVersion::Implicit1_0);
+                if in_sums > 0 {
+                    sums.extend(content.chars().take(MAX_CHECKSUM_TEXT.saturating_sub(sums.len())));
+                }
+                text.push_str(&content);
+            }
             Event::GeneralRef(r) => match &*r {
                 "quot" => text.push('"'),
                 "amp" => text.push('&'),
@@ -281,13 +321,17 @@ fn parse_multistatus(xml: &[u8]) -> Result<Vec<Entry>> {
                 match (e.local_name().as_ref(), field.take()) {
                     ("href", Some("href")) => href = std::mem::take(&mut text),
                     ("getetag", Some("etag")) => etag = clean_etag(&std::mem::take(&mut text)),
+                    ("checksums" | "checksum", _) => {
+                        in_sums = in_sums.saturating_sub(1);
+                        sums.push(' ');
+                    }
                     _ => {}
                 }
                 if e.local_name().as_ref() == "response" && !collection && !etag.is_empty() {
                     let last = href.trim_end_matches('/').rsplit('/').next().unwrap_or("");
                     let name = percent_decode(last);
                     if safe_segment(&name) {
-                        out.push(Entry { name, etag: etag.clone() });
+                        out.push(Entry { name, etag: etag.clone(), checksum: sha256_of(&sums) });
                     }
                 }
             }
@@ -296,6 +340,21 @@ fn parse_multistatus(xml: &[u8]) -> Result<Vec<Entry>> {
         }
     }
     Ok(out)
+}
+
+/// The most text of `checksums` elements that is kept for one file: a hostile server cannot make the reader hold more.
+const MAX_CHECKSUM_TEXT: usize = 4096;
+
+/// The SHA-256 a `oc:checksums` text names, as 64 lowercase hex characters. The text is a space separated list of
+/// `<algorithm>:<hex>` (`SHA1:… sha256:… MD5:…`); the algorithm is compared ignoring case, a token over 200 characters or
+/// one whose hex is not exactly 64 characters is not a checksum, and only the first 16 tokens are looked at. Anything
+/// else is `None`: a bad checksum is no reason to drop the file.
+fn sha256_of(text: &str) -> Option<String> {
+    text.split_whitespace().take(16).filter(|t| t.len() <= 200).find_map(|token| {
+        let (algorithm, hex) = token.split_once(':')?;
+        (algorithm.eq_ignore_ascii_case("sha256") && hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| hex.to_ascii_lowercase())
+    })
 }
 
 fn percent_decode(s: &str) -> String {
@@ -362,6 +421,51 @@ mod tests {
         let names: Vec<_> = got.iter().map(|e| (e.name.as_str(), e.etag.as_str())).collect();
         assert_eq!(names, vec![("settings.json.hwx", "abc123"), ("layout.json.hwx", "l9")]);
         assert!(parse_multistatus(b"<a><b></a>").is_err());
+    }
+
+    #[test]
+    fn a_multistatus_checksum_is_read_leniently_and_bounded() {
+        let hex = "0123456789abcdef".repeat(4);
+        let upper = hex.to_ascii_uppercase();
+        let entry = |props: &str| {
+            let xml = format!(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/files/a.hwx</d:href><d:propstat><d:prop><d:getetag>"e1"</d:getetag><d:resourcetype/>{props}</d:prop></d:propstat></d:response></d:multistatus>"#
+            );
+            let got = parse_multistatus(xml.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(got.len(), 1, "the entry is listed whatever its checksum looks like");
+            assert_eq!((got[0].name.as_str(), got[0].etag.as_str()), ("a.hwx", "e1"));
+            got[0].checksum.clone()
+        };
+        let wrap = |inner: &str| format!("<oc:checksums><oc:checksum>{inner}</oc:checksum></oc:checksums>");
+        assert_eq!(entry(&wrap(&format!("sha256:{hex}"))), Some(hex.clone()));
+        assert_eq!(entry(&wrap(&format!("SHA256:{upper}"))), Some(hex.clone()), "returned lowercase");
+        assert_eq!(entry(&wrap(&format!("SHA1:{} sha256:{hex} MD5:{}", "a".repeat(40), "b".repeat(32)))), Some(hex.clone()));
+        assert_eq!(entry(""), None);
+        assert_eq!(entry("<oc:checksums/>"), None);
+        assert_eq!(entry("<oc:checksums></oc:checksums>"), None);
+        assert_eq!(entry(&wrap(&format!("SHA1:{} MD5:{}", "a".repeat(40), "b".repeat(32)))), None, "only other algorithms");
+        assert_eq!(entry(&wrap(&format!("sha256:{}", &hex[..63]))), None, "too short");
+        assert_eq!(entry(&wrap(&format!("sha256:{hex}0"))), None, "too long");
+        assert_eq!(entry(&wrap(&format!("sha256:{}", "g".repeat(64)))), None, "not hex");
+        assert_eq!(entry(&wrap(&format!("sha256:{}", "a".repeat(5000)))), None, "hostile length");
+        assert_eq!(entry(&wrap(&format!("{} sha256:{hex}", "x".repeat(5000)))), None, "the work is bounded");
+        assert_eq!(entry(&wrap(&format!("{} sha256:{hex}", "a ".repeat(40)))), None, "only the first tokens are looked at");
+        assert_eq!(entry(&format!("<oc:checksums>sha256:{hex}</oc:checksums>")), Some(hex.clone()), "text inside checksums");
+        assert_eq!(entry(&format!("<oc:checksums><x:other xmlns:x=\"urn:x\">1</x:other><oc:checksum>sha256:{hex}</oc:checksum></oc:checksums>")), Some(hex.clone()));
+        assert_eq!(entry(&wrap("")), None);
+        // A checksum belongs to its own file: the next file has none.
+        let xml = format!(
+            r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/files/a.hwx</d:href><d:propstat><d:prop><d:getetag>"1"</d:getetag>{}</d:prop></d:propstat></d:response><d:response><d:href>/dav/files/b.hwx</d:href><d:propstat><d:prop><d:getetag>"2"</d:getetag></d:prop></d:propstat></d:response></d:multistatus>"#,
+            wrap(&format!("sha256:{hex}"))
+        );
+        let got = parse_multistatus(xml.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(got.iter().map(|e| e.checksum.clone()).collect::<Vec<_>>(), vec![Some(hex), None]);
+    }
+
+    #[test]
+    fn sha256_hex_is_the_lowercase_digest() {
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
 
     #[test]

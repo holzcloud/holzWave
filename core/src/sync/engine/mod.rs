@@ -26,10 +26,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::crypto::{self, Kdf, Key, Stamp};
-use super::webdav::{Backend, CONFLICT, Cond, safe_segment};
+use super::webdav::{Backend, CONFLICT, Cond, safe_segment, sha256_hex};
 use crate::blocks::{self, BLOCKS_FILE, Block};
 use crate::connections::PANES_FILE;
 use crate::layout::PaneId;
@@ -108,7 +107,7 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
+    sha256_hex(bytes)
 }
 
 // ---- names -------------------------------------------------------------------------------------------------------
@@ -746,6 +745,10 @@ struct Seen {
     etag: String,
     /// The hash of the content last in agreement; empty for a deleted name.
     hash: String,
+    /// The SHA-256 of the sealed blob this device last wrote to the server or read from it: the identity of a server
+    /// version (an ETag alone is not, see [`Remote`]). Empty in the record of an older build.
+    #[serde(default)]
+    blob: String,
     /// The name was deleted (the server holds a tombstone) and the local file is gone.
     #[serde(default, skip_serializing_if = "is_false")]
     deleted: bool,
@@ -803,6 +806,15 @@ struct Meta {
 const CHECK_TEXT: &[u8] = b"holzwave sync";
 
 // ---- a run -------------------------------------------------------------------------------------------------------
+
+/// What the listing says about one server file. The ETag of a server like Nextcloud moves once per second, so two
+/// writes of one name inside a second share it: it is a hint. The checksum (when the server reports one) is another
+/// hint. What a server version *is* is the SHA-256 of its sealed blob ([`Seen::blob`]), which only a read can tell.
+#[derive(Clone, Debug)]
+struct Remote {
+    etag: String,
+    checksum: Option<String>,
+}
 
 /// What one run did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -895,11 +907,11 @@ impl<B: Backend, S: Source> Syncer<B, S> {
 
     /// Bring both sides level.
     pub fn sync_once(&mut self) -> Result<Report> {
-        let remote: BTreeMap<String, String> = self
+        let remote: BTreeMap<String, Remote> = self
             .backend
             .list(FILES)?
             .into_iter()
-            .filter_map(|e| logical_name(&e.name).map(|n| (n, e.etag)))
+            .filter_map(|e| logical_name(&e.name).map(|n| (n, Remote { etag: e.etag, checksum: e.checksum })))
             .collect();
         let mut names: Vec<String> = self.source.names()?;
         names.extend(remote.keys().cloned());
@@ -931,13 +943,13 @@ impl<B: Backend, S: Source> Syncer<B, S> {
     /// is an error of that name, found later, and never a deletion). The deletions of a folder that does not exist are
     /// not sent (a missing folder is a mistake, reported once), and a run that would send more than
     /// [`MAX_DELETES_SENT`] sends none of them (reported once per folder), so a mass deletion stops whole.
-    fn plan_deletions(&mut self, remote: &BTreeMap<String, String>, names: &[String], report: &mut Report) {
+    fn plan_deletions(&mut self, remote: &BTreeMap<String, Remote>, names: &[String], report: &mut Report) {
         self.sendable.clear();
         self.removed_now = 0;
         self.removal_limit_told = false;
         let mut gone: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
         for name in names.iter().filter(|n| deletable(n)) {
-            let agreed = self.state.files.get(name.as_str()).is_some_and(|s| !s.deleted && remote.get(name.as_str()) == Some(&s.etag));
+            let agreed = self.state.files.get(name.as_str()).is_some_and(|s| !s.deleted && remote.get(name.as_str()).is_some_and(|r| r.etag == s.etag));
             if agreed && matches!(self.source.read(name), Ok(None)) {
                 gone.entry(folder_of(name)).or_default().push(name);
             }
@@ -965,13 +977,20 @@ impl<B: Backend, S: Source> Syncer<B, S> {
         self.sendable = gone.values().flatten().map(|n| (*n).clone()).collect();
     }
 
-    fn one(&mut self, name: &str, mut remote_etag: Option<String>, report: &mut Report) -> Result<()> {
+    fn one(&mut self, name: &str, mut remote: Option<Remote>, report: &mut Report) -> Result<()> {
         let seen = self.state.files.get(name).cloned();
         let local = self.source.read(name)?;
         let local_hash = local.as_deref().map(digest);
         let local_changed = local_hash.is_some() && local_hash.as_deref() != seen.as_ref().map(|s| s.hash.as_str());
         for _ in 0..3 {
-            let remote_changed = remote_etag.is_some() && remote_etag.as_deref() != seen.as_ref().map(|s| s.etag.as_str());
+            let remote_etag = remote.as_ref().map(|r| r.etag.clone());
+            let mut remote_changed = remote_etag.is_some() && remote_etag.as_deref() != seen.as_ref().map(|s| s.etag.as_str());
+            // The ETag is the same but the server reports another content than this device last wrote or read: the ETag
+            // of a server like Nextcloud moves once per second, so another write can share it. The blob decides.
+            let suspect = !remote_changed
+                && seen.as_ref().zip(remote.as_ref()).is_some_and(|(s, r)| {
+                    !s.blob.is_empty() && r.checksum.as_deref().is_some_and(|sum| sum != s.blob)
+                });
             // The file is not found here, it was in agreement before and nobody changed it on the server: a deletion.
             if local.is_none() && !remote_changed && deletable(name) && seen.as_ref().is_some_and(|s| !s.deleted) {
                 let Some(etag) = remote_etag.clone() else {
@@ -985,40 +1004,52 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                 }
                 let base = seen.as_ref().map_or(0, |s| s.counter);
                 match self.upload(name, TOMBSTONE, base + 1, Some(&etag)) {
-                    Ok(new_etag) => {
-                        self.remember_deleted(name, base + 1, &new_etag);
+                    Ok((new_etag, sum)) => {
+                        self.remember_deleted(name, base + 1, &new_etag, &sum);
                         report.deleted.push(name.to_owned());
                         report.uploaded.push(name.to_owned());
                         return Ok(());
                     }
                     Err(e) if e.to_string().contains(CONFLICT) => {
-                        remote_etag = self.fresh_etag(name)?;
+                        remote = self.fresh_remote(name)?;
                         continue;
                     }
                     Err(e) => return Err(e),
                 }
             }
-            if !local_changed && !remote_changed {
+            if !local_changed && !remote_changed && !suspect {
                 return Ok(());
             }
             // Fetch the server's version when it is needed to decide or to apply.
-            let fetched = if remote_etag.is_some() && (remote_changed || local.is_none()) {
+            let mut fetched = if remote_etag.is_some() && (remote_changed || suspect || local.is_none()) {
                 match self.backend.get(&format!("{FILES}/{}", remote_file(name)))? {
                     Some((blob, etag)) => {
                         let (stamp, plain) = self.key.open(name, &blob)?;
-                        Some((blob, etag, stamp, plain))
+                        let blob_digest = sha256_hex(&blob);
+                        Some((blob, etag, stamp, plain, blob_digest))
                     }
                     None => None,
                 }
             } else {
                 None
             };
-            if remote_changed && fetched.is_none() {
-                remote_etag = None; // gone between the listing and now: treat as absent
+            if (remote_changed || suspect) && fetched.is_none() {
+                remote = None; // gone between the listing and now: treat as absent
                 continue;
             }
+            if suspect {
+                // A server that reported a wrong checksum costs this one read and never a false change.
+                if fetched.as_ref().is_some_and(|f| seen.as_ref().is_some_and(|s| s.blob == f.4)) {
+                    fetched = None;
+                } else {
+                    remote_changed = true;
+                }
+            }
+            if fetched.is_none() && !local_changed {
+                return Ok(());
+            }
             let base = seen.as_ref().map_or(0, |s| s.counter);
-            if let Some((_, etag, stamp, plain)) = &fetched {
+            if let Some((_, etag, stamp, plain, fsum)) = &fetched {
                 if is_tombstone(plain) {
                     // Another device deleted the file.
                     if !deletable(name) {
@@ -1048,21 +1079,21 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                             report.conflicts.push(name.to_owned());
                             let counter = stamp.counter.max(base) + 1;
                             match self.upload(name, bytes, counter, Some(etag)) {
-                                Ok(new_etag) => {
-                                    self.remember(name, counter, &new_etag, &digest(bytes));
+                                Ok((new_etag, sum)) => {
+                                    self.remember(name, counter, &new_etag, &sum, &digest(bytes));
                                     report.uploaded.push(name.to_owned());
                                     return Ok(());
                                 }
                                 Err(e) if e.to_string().contains(CONFLICT) => {
                                     report.conflicts.pop();
-                                    remote_etag = self.fresh_etag(name)?;
+                                    remote = self.fresh_remote(name)?;
                                     continue;
                                 }
                                 Err(e) => return Err(e),
                             }
                         }
                     }
-                    self.remember_deleted(name, stamp.counter, etag);
+                    self.remember_deleted(name, stamp.counter, etag, fsum);
                     return Ok(());
                 }
             }
@@ -1072,55 +1103,55 @@ impl<B: Backend, S: Source> Syncer<B, S> {
             }
             match (&local, &fetched, local_changed) {
                 // Only the server changed (or the local file is gone): take its version.
-                (_, Some((_, etag, stamp, plain)), false) | (None, Some((_, etag, stamp, plain)), _) => {
+                (_, Some((_, etag, stamp, plain, sum)), false) | (None, Some((_, etag, stamp, plain, sum)), _) => {
                     self.source.write(name, plain)?;
-                    self.remember(name, stamp.counter, etag, &digest(plain));
+                    self.remember(name, stamp.counter, etag, sum, &digest(plain));
                     report.downloaded.push(name.to_owned());
                     return Ok(());
                 }
                 // Only the local file changed: send it.
                 (Some(bytes), None, true) => {
                     match self.upload(name, bytes, base + 1, remote_etag.as_deref()) {
-                        Ok(etag) => {
-                            self.remember(name, base + 1, &etag, &digest(bytes));
+                        Ok((etag, sum)) => {
+                            self.remember(name, base + 1, &etag, &sum, &digest(bytes));
                             report.uploaded.push(name.to_owned());
                             return Ok(());
                         }
                         Err(e) if e.to_string().contains(CONFLICT) => {
                             // Somebody wrote in between: look at the server again.
-                            remote_etag = self.fresh_etag(name)?;
+                            remote = self.fresh_remote(name)?;
                             continue;
                         }
                         Err(e) => return Err(e),
                     }
                 }
                 // Both changed: the higher stamp wins, the other version is kept.
-                (Some(bytes), Some((_, etag, stamp, plain)), true) if *bytes == **plain => {
+                (Some(bytes), Some((_, etag, stamp, plain, sum)), true) if *bytes == **plain => {
                     // Both changed to the very same content (two devices that moved to the same unit): nothing to keep.
-                    self.remember(name, stamp.counter, etag, &digest(plain));
+                    self.remember(name, stamp.counter, etag, sum, &digest(plain));
                     return Ok(());
                 }
-                (Some(bytes), Some((blob, etag, stamp, plain)), true) => {
+                (Some(bytes), Some((blob, etag, stamp, plain, sum)), true) => {
                     let mine = Stamp { counter: base + 1, time: now(), device: self.state.device() };
                     let theirs_wins = (stamp.counter, stamp.time) > (mine.counter, mine.time);
                     report.conflicts.push(name.to_owned());
                     if theirs_wins {
                         self.keep_local(name, bytes);
                         self.source.write(name, plain)?;
-                        self.remember(name, stamp.counter, etag, &digest(plain));
+                        self.remember(name, stamp.counter, etag, sum, &digest(plain));
                         report.downloaded.push(name.to_owned());
                         return Ok(());
                     }
                     self.backend.put(&format!("{BACKUPS}/{}", backup_file(name, stamp)), blob, &Cond::Any)?;
                     let counter = stamp.counter.max(base) + 1;
                     match self.upload(name, bytes, counter, Some(etag)) {
-                        Ok(new_etag) => {
-                            self.remember(name, counter, &new_etag, &digest(bytes));
+                        Ok((new_etag, sum)) => {
+                            self.remember(name, counter, &new_etag, &sum, &digest(bytes));
                             report.uploaded.push(name.to_owned());
                             return Ok(());
                         }
                         Err(e) if e.to_string().contains(CONFLICT) => {
-                            remote_etag = self.fresh_etag(name)?;
+                            remote = self.fresh_remote(name)?;
                             continue;
                         }
                         Err(e) => return Err(e),
@@ -1132,25 +1163,33 @@ impl<B: Backend, S: Source> Syncer<B, S> {
         Err(err("the server kept changing while syncing; try again"))
     }
 
-    fn upload(&self, name: &str, bytes: &[u8], counter: u64, etag: Option<&str>) -> Result<String> {
+    /// Seal and write `bytes`. The new ETag, and the SHA-256 of the blob that was written (the identity of that version).
+    fn upload(&self, name: &str, bytes: &[u8], counter: u64, etag: Option<&str>) -> Result<(String, String)> {
         let stamp = Stamp { counter, time: now(), device: self.state.device() };
         let blob = self.key.seal(name, stamp, bytes)?;
         let cond = etag.map_or(Cond::Absent, |e| Cond::Match(e.to_owned()));
-        self.backend.put(&format!("{FILES}/{}", remote_file(name)), &blob, &cond)
+        let new_etag = self.backend.put(&format!("{FILES}/{}", remote_file(name)), &blob, &cond)?;
+        Ok((new_etag, sha256_hex(&blob)))
     }
 
-    fn fresh_etag(&self, name: &str) -> Result<Option<String>> {
+    /// The listing's view of `name` now.
+    fn fresh_remote(&self, name: &str) -> Result<Option<Remote>> {
         let file = remote_file(name);
-        Ok(self.backend.list(FILES)?.into_iter().find(|e| e.name == file).map(|e| e.etag))
+        Ok(self.backend.list(FILES)?.into_iter().find(|e| e.name == file).map(|e| Remote { etag: e.etag, checksum: e.checksum }))
     }
 
-    fn remember(&mut self, name: &str, counter: u64, etag: &str, hash: &str) {
-        self.state.files.insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: hash.to_owned(), deleted: false });
+    /// Note that `name` is in agreement at the version `counter`/`etag`, whose blob has the digest `blob`.
+    fn remember(&mut self, name: &str, counter: u64, etag: &str, blob: &str, hash: &str) {
+        self.state
+            .files
+            .insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: hash.to_owned(), blob: blob.to_owned(), deleted: false });
     }
 
     /// Note that `name` is deleted at the version `counter`/`etag`: no hash, the local file is gone.
-    fn remember_deleted(&mut self, name: &str, counter: u64, etag: &str) {
-        self.state.files.insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: String::new(), deleted: true });
+    fn remember_deleted(&mut self, name: &str, counter: u64, etag: &str, blob: &str) {
+        self.state
+            .files
+            .insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: String::new(), blob: blob.to_owned(), deleted: true });
     }
 
     /// Keep a local version that lost. Never for the secrets: they must not be written to a file.
