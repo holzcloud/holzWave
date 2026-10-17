@@ -5,7 +5,7 @@
 //! wsh edit <file>             open a file in the editor beside this pane
 //! wsh setmeta title <text>    name this pane
 //! wsh ping                    check that holzWave answers
-//! wsh init <bash|zsh|fish>    print the hook that feeds the history; add `eval "$(wsh init bash)"` to the shell's rc file
+//! wsh init <bash|zsh|fish>    print the hook that feeds the history and marks where each command's output starts and ends; add `eval "$(wsh init bash)"` to the shell's rc file
 //! ```
 //!
 //! It finds the app through three variables holzWave sets in every pane it starts: `HOLZWAVE_IPC` (the folder of the
@@ -18,40 +18,12 @@ use holzwave_ipc::{Cmd, Request};
 
 const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | init <bash|zsh|fish>";
 
-/// The hooks that tell holzWave each command a shell ran. They run only inside a holzWave pane (`HOLZWAVE_IPC` is set), in the
-/// background so the prompt never waits, and say nothing when holzWave is not there.
-const BASH: &str = r#"[ -n "$HOLZWAVE_IPC" ] || return 0 2>/dev/null
-__holzwave_hist() {
-  local s=$? c
-  c=$(HISTTIMEFORMAT= builtin history 1 | sed 's/^ *[0-9]*[* ] *//')
-  if [ -n "$c" ] && [ "$c" != "$__holzwave_last" ]; then
-    __holzwave_last=$c
-    (wsh hist add "$s" "$PWD" "$c" >/dev/null 2>&1 &)
-  fi
-  return $s
-}
-PROMPT_COMMAND="__holzwave_hist${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
-"#;
-const ZSH: &str = r#"[[ -n "$HOLZWAVE_IPC" ]] || return 0
-__holzwave_preexec() { __holzwave_cmd=$1 }
-__holzwave_precmd() {
-  local s=$?
-  if [[ -n "$__holzwave_cmd" ]]; then
-    (wsh hist add "$s" "$PWD" "$__holzwave_cmd" >/dev/null 2>&1 &)
-    __holzwave_cmd=
-  fi
-  return $s
-}
-autoload -Uz add-zsh-hook
-add-zsh-hook preexec __holzwave_preexec
-add-zsh-hook precmd __holzwave_precmd
-"#;
-const FISH: &str = r#"test -n "$HOLZWAVE_IPC"; or exit 0
-function __holzwave_postexec --on-event fish_postexec
-  set -l s $status
-  wsh hist add $s $PWD "$argv[1]" >/dev/null 2>&1 &
-end
-"#;
+/// The hooks that tell holzWave each command a shell ran and mark where its output starts and ends. They are files under
+/// `hooks/` so the shells and the tests can read the very text that `wsh init` prints. They run only inside a holzWave pane
+/// (`HOLZWAVE_IPC` is set), report history in the background so the prompt never waits, and do nothing elsewhere.
+const BASH: &str = include_str!("../hooks/bash.sh");
+const ZSH: &str = include_str!("../hooks/zsh.zsh");
+const FISH: &str = include_str!("../hooks/fish.fish");
 
 /// The hook of a shell, or `None`.
 fn hook(shell: &str) -> Option<&'static str> {
@@ -150,6 +122,22 @@ mod tests {
             assert!(h.contains("&"), "{shell}: the prompt does not wait for wsh");
         }
         assert!(hook("tcsh").is_none());
+    }
+
+    #[test]
+    fn the_bash_hook_is_guarded_and_marks_four_points() {
+        let h = hook("bash").unwrap();
+        assert!(h.contains("__holzwave_hook"), "an idempotence guard");
+        for mark in [r"133;A\033\\", r"133;B\033\\", r"133;C\033\\", r"133;D;%d\033\\"] {
+            assert!(h.contains(mark), "{mark}: a mark ends with the string terminator");
+        }
+        for line in h.lines() {
+            let top = line.len() - line.trim_start().len() <= 2;
+            let word = line.trim_start();
+            assert!(!(top && (word.starts_with("return") || word.starts_with("exit"))), "{line}: ends an rc file");
+            assert!(!line.contains("|| return") && !line.contains("|| exit"), "{line}");
+        }
+        assert!(!h.contains("PS1"), "the prompt is never read or written");
     }
 
     #[test]
