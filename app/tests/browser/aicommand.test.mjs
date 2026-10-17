@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  COMMAND_GOLDEN, COMMAND_TEXT, OTHER_PROFILE, PROFILE, TOOL_FILE, TOOL_PATH, VIEW_P1, boot, calls, commandRuns, decisionCalls, holdCommand,
+  COMMAND_GOLDEN, COMMAND_TEXT, OTHER_PROFILE, PROFILE, TOOL_FILE, TOOL_PATH, VIEW3, VIEW_P1, boot, chatBlock, calls, commandRuns, decisionCalls, holdCommand,
   openAi, openCard, releaseCommand, reloadKeeping, scriptCommand, sendText, tickClock,
 } from "./ai-lib.mjs";
 
@@ -13,7 +13,7 @@ const PROTOCOL = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", im
 export default async function ({ engine, page, url, errors }) {
   page.setDefaultTimeout(5000);
   // A failing case names itself.
-  const cases = { traceCase, contractCase, idsCase, commandCase, resultCase, runningCase, remoteCase, bannerCase };
+  const cases = { traceCase, contractCase, idsCase, commandCase, resultCase, runningCase, remoteCase, bannerCase, narrowCase, modesCase };
   for (const [name, run] of Object.entries(cases)) {
     try {
       await run(page, url, engine);
@@ -448,4 +448,158 @@ async function bannerCase(page, url) {
   card = await askForCommand(page, { tainted: false, taint: [] });
   assert.equal(await card.getAttribute("data-tainted"), "false");
   assert.equal(await card.locator(".approval-taint").count(), 0);
+}
+
+/** A terminal strip above a chat that takes the rest of the window: the shape of a phone, with a pane the chat can act for. */
+const VIEW_STACK = {
+  ...VIEW3,
+  tabs: [{ title: "shell", active: true, focus: 1, panes: 2 }],
+  workspaces: [{ name: "main", active: true, panes: 2 }],
+  focus: 1,
+  panes: [[1, { x: 0, y: 0, w: 1, h: 0.08 }], [3, { x: 0, y: 0.08, w: 1, h: 0.92 }]],
+  dividers: [{ split: 10, axis: "Column", area: { x: 0, y: 0, w: 1, h: 1 }, ratio: 0.08 }],
+};
+
+/** A chat that fills the window below a terminal strip; `size` is the window. */
+async function openSized(page, url, size) {
+  await page.setViewportSize(size);
+  await boot(page, url, {
+    view: VIEW_STACK,
+    blocks: [chatBlock("chat-x")],
+    states: { "chat-x": { title: "Earlier question", profile: "local-1", model: "llama3.2" } },
+    starts: 2,
+    clock: true,
+  });
+  await page.waitForSelector(".block-chat");
+  await page.locator(".chat-input").focus();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profiles").length >= 1);
+}
+
+/** The sizes of the controls of the cards, of the strip and of the composer, and whether the payload box scrolls sideways. */
+const measure = (page) =>
+  page.evaluate(() => {
+    const boxes = (sel) => [...document.querySelectorAll(sel)].map((n) => n.getBoundingClientRect());
+    const strip = document.querySelector(".chat-cards");
+    const payload = document.querySelector(".approval-payload");
+    const input = document.querySelector(".chat-input").getBoundingClientRect();
+    return {
+      buttons: boxes(".chat-approval button").map((r) => ({ h: r.height, w: r.width })),
+      toggles: boxes("button.tool-toggle").map((r) => ({ h: r.height, w: r.width })),
+      strip: strip.getBoundingClientRect().height,
+      stripScroll: [strip.scrollHeight, strip.clientHeight],
+      block: document.querySelector(".block-chat").getBoundingClientRect().height,
+      payload: payload === null ? null : { across: [payload.scrollWidth, payload.clientWidth] },
+      inside: input.bottom <= innerHeight && input.top >= 0,
+      font: parseFloat(getComputedStyle(document.querySelector(".chat-input")).fontSize),
+      view: innerHeight,
+    };
+  });
+
+/** A command long enough to need the whole strip, with a word that cannot break. */
+const LONG_COMMAND = `echo ok${"\n".repeat(300)}${"w".repeat(120)}`;
+
+async function narrowCase(page, url) {
+  // A phone: every target is at least 44 px, the strip is at most 60 % of the window and scrolls, the command wraps so the box does
+  // not scroll sideways, the buttons can be reached at the end of the strip and the composer stays on the screen.
+  await openSized(page, url, { width: 390, height: 780 });
+  await scriptCommand(page, { id: "call_1", command: LONG_COMMAND, answer: "Done." });
+  await sendText(page, "run it");
+  await page.waitForSelector('section[data-call="call_1"]');
+  let t = await measure(page);
+  assert.equal(t.buttons.length, 2);
+  for (const b of t.buttons) assert.ok(b.h >= 44 - 0.5 && b.w >= 44 - 0.5, `a button is ${b.w} by ${b.h} at 390 px`);
+  assert.ok(t.strip <= t.view * 0.6 + 1, `the strip is ${t.strip} of ${t.view}`);
+  assert.ok(t.stripScroll[0] > t.stripScroll[1], `the strip scrolls (${t.stripScroll})`);
+  assert.ok(t.payload.across[0] <= t.payload.across[1], `the payload box scrolls sideways (${t.payload.across})`);
+  assert.equal(t.inside, true, "the composer is on the screen");
+  assert.ok(t.font >= 16, `the composer text is ${t.font} px`);
+  const reach = await page.evaluate(() => {
+    const strip = document.querySelector(".chat-cards");
+    strip.scrollTop = strip.scrollHeight;
+    const allow = document.querySelector("button.approval-allow").getBoundingClientRect();
+    return allow.top >= 0 && allow.bottom <= innerHeight;
+  });
+  assert.equal(reach, true, "the button is on the screen at the end of the strip");
+  await tickClock(page, 1000);
+  await page.locator("button.approval-allow").click();
+  await page.waitForFunction(() => !window.__MOCK__.ai.chat("chat-x").running);
+  await page.waitForSelector("button.tool-toggle");
+  t = await measure(page);
+  assert.ok(t.toggles.length >= 1);
+  for (const b of t.toggles) assert.ok(b.h >= 44 - 0.5 && b.w >= 44 - 0.5, `a toggle is ${b.w} by ${b.h}`);
+
+  // A desktop window: 28 px targets that keep the desktop size, and the strip is at most half the pane.
+  await openSized(page, url, { width: 1000, height: 640 });
+  await scriptCommand(page, { id: "call_1", command: LONG_COMMAND, answer: "Done." });
+  await sendText(page, "run it");
+  await page.waitForSelector('section[data-call="call_1"]');
+  t = await measure(page);
+  for (const b of t.buttons) assert.ok(b.h >= 28 - 0.5 && b.h < 44, `a button is ${b.h} px high on the desktop`);
+  assert.ok(t.strip <= t.block * 0.5 + 1, `the strip is ${t.strip} of the pane's ${t.block}`);
+  assert.equal(t.inside, true);
+  await tickClock(page, 1000);
+  await page.locator("button.approval-allow").click();
+  await page.waitForSelector("button.tool-toggle");
+  t = await measure(page);
+  for (const b of t.toggles) assert.ok(b.h >= 28 - 0.5 && b.h < 44, `a toggle is ${b.h} px high on the desktop`);
+  await page.setViewportSize({ width: 1000, height: 640 });
+}
+
+async function modesCase(page, url, engine) {
+  // WebKit on macOS visits buttons with Option+Tab only, as Safari does by default.
+  const back = () => page.keyboard.press(engine === "webkit" && process.platform === "darwin" ? "Shift+Alt+Tab" : "Shift+Tab");
+  await openSized(page, url, { width: 1000, height: 640 });
+  await scriptCommand(page, { id: "call_1", output: COMMAND_GOLDEN.texts.report.failed, failed: true, answer: "Done." });
+  await sendText(page, "run it");
+  const card = await openCard(page, "call_1");
+  const root = (add, name) => page.evaluate(([a, n]) => document.documentElement.classList[a ? "add" : "remove"](n), [add, name]);
+  const edge = () => card.locator("div.approval-payload").evaluate((n) => getComputedStyle(n).borderTopColor);
+  const duration = (sel) => page.locator(sel).first().evaluate((n) => getComputedStyle(n).transitionDuration);
+
+  // Higher contrast: the hairline of the payload box follows `--hw-line`, which that mode swaps, and the box keeps its 1 px border.
+  const normal = await edge();
+  await root(true, "contrast-high");
+  assert.notEqual(await edge(), normal, "the box's hairline follows the token");
+  assert.equal(await card.locator("div.approval-payload").evaluate((n) => getComputedStyle(n).borderTopWidth), "1px");
+  await root(false, "contrast-high");
+  assert.equal(await edge(), normal);
+
+  // The card has no motion, with and without the setting.
+  for (const reduced of [false, true]) {
+    await root(reduced, "motion-reduce");
+    assert.equal(await duration("button.approval-allow"), "0s", `reduced ${reduced}`);
+  }
+  await root(false, "motion-reduce");
+
+  // Forced colours: the style sheet outlines the payload box of a command with a system colour.
+  const css = await (await fetch(`${url}approval.css`)).text();
+  const forced = css.slice(css.indexOf("@media (forced-colors: active)"));
+  assert.ok(forced.startsWith("@media"), "approval.css has a forced-colors block");
+  assert.match(forced, /\.approval-payload[^{]*\{[^}]*outline[^}]*(CanvasText|Highlight)/);
+
+  // The keyboard ring is 2 px on a button.
+  await page.locator(".chat-input").focus();
+  await back();
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "approval-deny");
+  assert.equal(await page.locator(".approval-deny").evaluate((n) => getComputedStyle(n).outlineWidth), "2px", "a button: a 2 px ring");
+
+  // No element of the card has a gradient, a filter or a shadow.
+  const flat = await page.evaluate(() =>
+    [...document.querySelectorAll(".chat-cards, .chat-cards *")]
+      .filter((n) => {
+        const css = getComputedStyle(n);
+        return css.backgroundImage !== "none" || css.filter !== "none" || css.boxShadow !== "none";
+      })
+      .map((n) => n.className),
+  );
+  assert.deepEqual(flat, []);
+
+  // A failed command is told by the mark and the word as well as by colour.
+  await tickClock(page, 1000);
+  await page.locator(".approval-allow").click();
+  await page.waitForSelector('.chat-tool[data-call="call_1"][data-state="error"]');
+  const row = page.locator('.chat-tool[data-call="call_1"]');
+  assert.equal(await row.locator(".tool-mark").textContent(), "!");
+  assert.equal(await row.locator(".tool-state").textContent(), "error");
+  assert.equal(await row.locator(".tool-state").evaluate((n) => getComputedStyle(n).textDecorationLine), "underline", "the word is underlined too");
 }

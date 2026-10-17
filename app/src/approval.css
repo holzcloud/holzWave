@@ -146,11 +146,11 @@ section.chat-approval[data-effect="exec"] .approval-payload { max-height: none; 
   .approval-actions { gap: .667rem; }
 }
 
-/* ---- forced colours: system colours outline the card, the diff box, the remote chip, the place chip, the banner and Undo ------ */
+/* ---- forced colours: system colours outline the card, the payload and diff boxes, the remote chip, the place chip, the banner and Undo ------ */
 
 @media (forced-colors: active) {
   :root .chat-approval { outline: 2px solid CanvasText; outline-offset: -2px; }
   :root .approval-remote, :root .approval-place, :root .approval-taint { outline: 2px solid Highlight; outline-offset: -2px; }
-  :root .approval-diff { outline: 2px solid CanvasText; outline-offset: -2px; }
+  :root .approval-diff, :root .approval-payload { outline: 2px solid CanvasText; outline-offset: -2px; }
   :root .tool-undo { outline: 2px solid Highlight; outline-offset: -2px; }
 }

@@ -107,7 +107,7 @@ async function check() {
   const failures = [...problems];
   const views = await page.$$eval('#views button', (bs) => bs.map((b) => b.dataset.v));
   if (views.length === 0) failures.push('the view picker has no buttons');
-  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiapprove', 'kiapprovestates', 'kiwrite', 'kiwritestates', 'kiset']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
+  for (const view of ['kipane', 'kistates', 'kiask', 'kioffer', 'kiapprove', 'kiapprovestates', 'kiwrite', 'kiwritestates', 'kicommand', 'kicommandstates', 'kiset']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
   for (const view of views) {
     await show(page, view);
     const stage = await page.$eval('#stage .m', (m) => m.children.length).catch(() => 0);
@@ -127,9 +127,11 @@ async function check() {
   if (approvalPhones !== 2) failures.push(`#phones-approval holds ${approvalPhones} phones, not 2`);
   const writePhones = await page.$$eval('#phones-write .ph1', (n) => n.length);
   if (writePhones !== 2) failures.push(`#phones-write holds ${writePhones} phones, not 2`);
+  const commandPhones = await page.$$eval('#phones-command .ph1', (n) => n.length);
+  if (commandPhones !== 2) failures.push(`#phones-command holds ${commandPhones} phones, not 2`);
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);
