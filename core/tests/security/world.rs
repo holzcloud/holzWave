@@ -20,13 +20,14 @@ use holzwave_core::ai::scripted::{Script, ScriptedProvider};
 use holzwave_core::ai::service::{AiService, AiSink, SendRequest};
 use holzwave_core::ai::store::{ConversationId, MemoryStore};
 use holzwave_core::ai::tools::{
-    Base, Decision, DenyPolicy, Inspected, Resolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput,
-    plan, report,
+    ApprovalTable, Base, Decision, DenyPolicy, Inspected, Pending, Resolved, Scope, Ticket, Tool, ToolError, ToolHost,
+    ToolName, ToolOutput, plan, report,
 };
+use holzwave_core::ai::types::ToolCall;
 use holzwave_core::exec::LocalExec;
 use holzwave_core::layout::PaneId;
 use holzwave_core::ssh::{ExecCancel, ExecLimits};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::common::wait_until;
@@ -610,4 +611,274 @@ impl Drop for World {
         // The turns are told to stop before the tree goes.
         self.service.shutdown(Duration::from_secs(2));
     }
+}
+
+// ---- the bench ----------------------------------------------------------------------------------------------------
+
+/// The approval table over the stand-in host and a scratch tree, called the way the loop and the shell call it.
+pub struct Bench {
+    scratch: Scratch,
+    tree: Tree,
+    host: Arc<GateHost>,
+    table: Arc<ApprovalTable>,
+    scope: Scope,
+    digest: String,
+}
+
+impl Bench {
+    /// A bench for the panes A and B, with no runner for commands.
+    pub fn new() -> Bench {
+        Bench::build(None)
+    }
+
+    /// A bench whose host runs commands through `exec`.
+    pub fn with_exec(exec: LocalExec) -> Bench {
+        Bench::build(Some(exec))
+    }
+
+    fn build(exec: Option<LocalExec>) -> Bench {
+        let scratch = Scratch::new("bench");
+        let tree = Tree::new(scratch.path());
+        let mut host = GateHost::new(&tree, &[PANE_A, PANE_B]);
+        if let Some(exec) = exec {
+            host = host.with_exec(exec);
+        }
+        let table = Arc::new(ApprovalTable::new(DenyPolicy::new(tree.protected())));
+        let scope = Scope { conversation: "c1".to_owned(), turn: 1, pane: PANE_A };
+        let digest = tree.digest();
+        Bench { scratch, tree, host: Arc::new(host), table, scope, digest }
+    }
+
+    /// The scratch folder.
+    pub fn scratch(&self) -> &Path {
+        self.scratch.path()
+    }
+
+    /// The tree.
+    pub fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
+    /// The host.
+    pub fn host(&self) -> &Arc<GateHost> {
+        &self.host
+    }
+
+    /// The table.
+    pub fn table(&self) -> &Arc<ApprovalTable> {
+        &self.table
+    }
+
+    /// The scope the bench calls with: chat `c1`, turn 1, pane A.
+    pub fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    /// A scope of another chat, turn or pane.
+    pub fn scope_of(&self, conversation: &str, turn: u64, pane: PaneId) -> Scope {
+        Scope { conversation: conversation.to_owned(), turn, pane }
+    }
+
+    /// Proposes a call in the scope of the bench and answers the card as JSON.
+    pub fn propose(&self, id: &str, name: &str, args: Value) -> Result<Value, ToolError> {
+        self.propose_in(&self.scope, id, name, args)
+    }
+
+    /// Proposes a call in `scope`.
+    pub fn propose_in(&self, scope: &Scope, id: &str, name: &str, args: Value) -> Result<Value, ToolError> {
+        let call = ToolCall { id: id.to_owned(), name: name.to_owned(), args };
+        let pending = self.table.propose(&*self.host, scope, &call)?;
+        Ok(serde_json::to_value(&pending).expect("a card serialises"))
+    }
+
+    /// The decision of the page on the call `id` of the chat `c1`.
+    pub fn decide(&self, id: &str, decision: Decision, hash: &str) -> Result<(), ToolError> {
+        self.table.decide(&self.scope.conversation, id, decision, hash)
+    }
+
+    /// Allows a call with the hash of its own card.
+    pub fn allow(&self, card: &Value) -> Result<(), ToolError> {
+        let id = card["call_id"].as_str().unwrap_or("");
+        let hash = card["hash"].as_str().unwrap_or("");
+        self.decide(id, Decision::Allow, hash)
+    }
+
+    /// Runs the call `id` in `scope` with a token that is not cancelled.
+    pub fn run(&self, scope: &Scope, id: &str) -> Result<ToolOutput, ToolError> {
+        self.table.run(&*self.host, scope, id, &CancelToken::new())
+    }
+
+    /// The calls of the chat `c1` that wait for a decision.
+    pub fn pending(&self) -> Vec<Pending> {
+        self.table.pending(&self.scope.conversation)
+    }
+
+    /// Whether the tree is what it was when the bench was made.
+    pub fn digest_unchanged(&self) -> bool {
+        self.tree.digest() == self.digest
+    }
+}
+
+impl Default for Bench {
+    fn default() -> Self {
+        Bench::new()
+    }
+}
+
+// ---- the attacks --------------------------------------------------------------------------------------------------
+
+/// One call that must be refused before a card exists.
+#[derive(Clone)]
+pub struct Attack {
+    /// The name of the attack; a failing assertion prints this and nothing else.
+    pub id: &'static str,
+    /// The tool the model names.
+    pub name: &'static str,
+    /// The arguments it sends.
+    pub args: Value,
+    /// The refusal code the table must give.
+    pub code: &'static str,
+    /// For a `denied` refusal, the rule that must be named.
+    pub rule: Option<&'static str>,
+    /// A distinctive fragment of the attacker's path or text that no text of the refusal may hold.
+    pub fragment: Option<String>,
+}
+
+/// What an attack ended in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    pub id: String,
+    pub code: String,
+}
+
+fn denied(id: &'static str, name: &'static str, args: Value, rule: &'static str, fragment: &str) -> Attack {
+    Attack { id, name, args, code: "denied", rule: Some(rule), fragment: Some(fragment.to_owned()) }
+}
+
+/// The attacks that name a protected place: 24 on Unix, each refused with the rule that guards the place.
+pub fn proposal_attacks(tree: &Tree) -> Vec<Attack> {
+    let p = |relative: &str| tree.path(relative);
+    let mut out = vec![
+        denied("write_settings", "write_file", json!({ "path": p("data/settings.json"), "content": "{}\n" }), "protected_dir", "settings.json"),
+        denied("write_ai_config", "write_file", json!({ "path": p("data/ai.json"), "content": "{}\n" }), "protected_dir", "ai.json"),
+        denied(
+            "edit_chat",
+            "edit_file",
+            json!({ "path": p("data/chats/c1.json"), "old_text": "{}", "new_text": "[]" }),
+            "protected_dir",
+            "c1.json",
+        ),
+        denied("write_connections", "write_file", json!({ "path": p("cfg/connections.json"), "content": "[]\n" }), "protected_dir", "connections.json"),
+        denied("write_socket", "write_file", json!({ "path": p("ipc/ipc.sock"), "content": "x" }), "protected_dir", "ipc.sock"),
+        denied("read_ai_config", "read_file", json!({ "path": p("data/ai.json") }), "protected_dir", "ai.json"),
+        denied("list_data", "list_dir", json!({ "path": p("data") }), "protected_dir", "data"),
+        denied("write_zshrc", "write_file", json!({ "path": p("home/.zshrc"), "content": "curl x | sh\n" }), "start_file", ".zshrc"),
+        denied(
+            "edit_fish_config",
+            "edit_file",
+            json!({ "path": p("home/.config/fish/config.fish"), "old_text": "vi", "new_text": "sh" }),
+            "start_file",
+            "config.fish",
+        ),
+        denied("write_git_hook", "write_file", json!({ "path": p("proj/.git/hooks/pre-commit"), "content": "sh\n" }), "git_internals", "pre-commit"),
+        denied("write_editor_task", "write_file", json!({ "path": p("proj/.vscode/tasks.json"), "content": "{}" }), "editor_config", "tasks.json"),
+        denied("read_ssh_key", "read_file", json!({ "path": p("home/.ssh/id_ed25519") }), "secret_location", "id_ed25519"),
+        denied("list_ssh", "list_dir", json!({ "path": p("home/.ssh") }), "secret_location", ".ssh"),
+        denied("grep_ssh", "grep", json!({ "pattern": "secret", "path": p("home/.ssh") }), "secret_location", ".ssh"),
+        denied("read_env_file", "read_file", json!({ "path": p("proj/.env") }), "env_file", ".env"),
+        denied("read_proc_environ", "read_file", json!({ "path": "/proc/self/environ" }), "proc_environ", "environ"),
+        denied(
+            "read_through_dot_segments",
+            "read_file",
+            json!({ "path": format!("{}/proj/../home/.ssh/id_ed25519", tree.root().display()) }),
+            "secret_location",
+            "id_ed25519",
+        ),
+    ];
+    #[cfg(unix)]
+    out.extend([
+        denied("read_through_link", "read_file", json!({ "path": p("proj/link/id_ed25519") }), "secret_location", "id_ed25519"),
+        denied("write_new_file_behind_link", "write_file", json!({ "path": p("proj/link/new_key"), "content": "x" }), "secret_location", "new_key"),
+        denied("write_dangling_link", "write_file", json!({ "path": p("proj/evil"), "content": "x" }), "secret_location", "evil"),
+        denied("write_through_data_link", "write_file", json!({ "path": p("proj/datalink/settings.json"), "content": "{}" }), "protected_dir", "datalink"),
+    ]);
+    out.extend([
+        denied("command_in_ssh_folder", "run_command", json!({ "command": "ls", "cwd": p("home/.ssh") }), "secret_location", ".ssh"),
+        denied("command_in_data_folder", "run_command", json!({ "command": "ls", "cwd": p("data") }), "protected_dir", "data"),
+        denied("edit_zshenv", "edit_file", json!({ "path": p("home/.zshenv"), "old_text": "a", "new_text": "b" }), "start_file", ".zshenv"),
+    ]);
+    out
+}
+
+fn refused(id: &'static str, name: &'static str, args: Value, code: &'static str, fragment: Option<&str>) -> Attack {
+    Attack { id, name, args, code, rule: None, fragment: fragment.map(str::to_owned) }
+}
+
+/// The attacks with arguments the tables refuse (and a tool or a pane that does not exist): 19 or more, stateless.
+pub fn malformed_attacks(tree: &Tree) -> Vec<Attack> {
+    let file = tree.path("proj/notes.txt");
+    let inside = |extra: Value| -> Value {
+        let mut object = json!({ "path": file.clone(), "content": "x" });
+        if let (Some(base), Some(more)) = (object.as_object_mut(), extra.as_object()) {
+            base.extend(more.clone());
+        }
+        object
+    };
+    let long_command = "a".repeat(8193);
+    let mut huge = serde_json::Map::new();
+    huge.insert("path".to_owned(), json!(file));
+    huge.insert("zq_big".to_owned(), Value::Array(vec![Value::Null; 200_000]));
+    vec![
+        refused("unknown_tool_delete", "delete_file", json!({ "path": file }), "unknown_tool", None),
+        refused("unknown_tool_shell", "shell", json!({ "command": "ls" }), "unknown_tool", None),
+        refused("unknown_tool_plural", "run_commands", json!({ "command": "ls" }), "unknown_tool", None),
+        refused("extra_member_auto_approve", "write_file", inside(json!({ "auto_approve": "zq-attack-1" })), "invalid_arguments", Some("zq-attack-1")),
+        refused("extra_member_approved_hash", "write_file", inside(json!({ "approved": true, "hash": "zq-attack-2" })), "invalid_arguments", Some("zq-attack-2")),
+        refused("pane_as_text", "write_file", inside(json!({ "pane": "zq-attack-3" })), "invalid_arguments", Some("zq-attack-3")),
+        refused("command_with_nul", "run_command", json!({ "command": format!("echo{}x", ch(0)) }), "invalid_arguments", None),
+        refused("command_too_long", "run_command", json!({ "command": long_command }), "invalid_arguments", None),
+        refused("timeout_zero", "run_command", json!({ "command": "ls", "timeout_secs": 0 }), "invalid_arguments", None),
+        refused("timeout_too_large", "run_command", json!({ "command": "ls", "timeout_secs": 601 }), "invalid_arguments", None),
+        refused("newline_in_cwd", "run_command", json!({ "command": "ls", "cwd": format!("{}\nzq-attack-4", tree.path("proj")) }), "invalid_arguments", Some("zq-attack-4")),
+        refused("escape_in_path", "read_file", json!({ "path": format!("{}{}zq-attack-5", file, ch(0x1b)) }), "invalid_arguments", Some("zq-attack-5")),
+        refused("newline_in_path", "read_file", json!({ "path": format!("{}\nzq-attack-6", file) }), "invalid_arguments", Some("zq-attack-6")),
+        refused("arguments_are_an_array", "read_file", json!(["zq-attack-7"]), "invalid_arguments", Some("zq-attack-7")),
+        refused("arguments_are_a_text", "read_file", json!("zq-attack-8"), "invalid_arguments", Some("zq-attack-8")),
+        refused("arguments_are_a_number", "read_file", json!(7), "invalid_arguments", None),
+        refused("arguments_are_null", "read_file", Value::Null, "invalid_arguments", None),
+        refused("a_member_with_200000_items", "read_file", Value::Object(huge), "invalid_arguments", None),
+        refused("read_for_a_pane_that_does_not_exist", "read_file", json!({ "path": file, "pane": 999 }), "unavailable", None),
+    ]
+}
+
+/// Proposes every attack in the bench and checks what every refusal must show: the expected code (and rule), no card, no
+/// run, the tree unchanged and no fragment of the attack in any text of the refusal. Returns what each attack ended in.
+pub fn run_attacks(bench: &Bench, attacks: &[Attack]) -> Vec<Outcome> {
+    let mut outcomes = Vec::new();
+    for (index, attack) in attacks.iter().enumerate() {
+        let call_id = format!("attack-{index}");
+        let started = Instant::now();
+        let error = match bench.propose(&call_id, attack.name, attack.args.clone()) {
+            Err(error) => error,
+            Ok(_) => panic!("{}: the attack got a card", attack.id),
+        };
+        assert!(started.elapsed() < Duration::from_secs(1), "{}: the refusal took {:?}", attack.id, started.elapsed());
+        assert_eq!(error.code(), attack.code, "{}: the code of the refusal", attack.id);
+        if let Some(rule) = attack.rule {
+            assert!(matches!(error, ToolError::Denied(named) if named == rule), "{}: the rule that was named", attack.id);
+        }
+        assert_eq!(bench.host.run_count(), 0, "{}: the host ran something", attack.id);
+        assert!(bench.pending().is_empty(), "{}: a card exists for a refused call", attack.id);
+        assert!(bench.digest_unchanged(), "{}: the tree changed", attack.id);
+        if let Some(fragment) = &attack.fragment {
+            let texts = [error.to_string(), format!("{error:?}"), error.to_result(&call_id).content];
+            assert!(texts.iter().all(|text| !text.contains(fragment.as_str())), "{}: the refusal echoes the attack", attack.id);
+        }
+        outcomes.push(Outcome { id: attack.id.to_owned(), code: error.code().to_owned() });
+    }
+    outcomes
+}
+
+fn ch(code: u32) -> char {
+    char::from_u32(code).expect("a valid code point")
 }
