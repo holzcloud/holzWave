@@ -393,6 +393,13 @@ impl Blocks {
     }
 }
 
+/// Whether a block makes sense on another computer, so the sync may share it with a layout: a block whose source is a
+/// saved connection, and the monitor (of this computer, whichever it is). A local folder, a local preview and a chat
+/// are tied to this computer and are not shared.
+pub fn portable(block: &Block) -> bool {
+    block.source != LOCAL || block.kind == BlockKind::Monitor
+}
+
 fn valid(block: &Block) -> bool {
     match block.kind {
         // The monitor looks at this computer or at a saved SSH connection and has no path. Whether the connection exists
@@ -415,6 +422,17 @@ fn valid(block: &Block) -> bool {
 mod tests {
     use super::*;
     use crate::secrets::MemoryStore;
+
+    #[test]
+    fn portable_blocks_are_the_ones_with_a_saved_connection_or_the_monitor() {
+        let block = |kind, source: &str| Block { kind, source: source.into(), path: String::new() };
+        for kind in [BlockKind::Files, BlockKind::Preview, BlockKind::Monitor, BlockKind::Chat] {
+            // A saved connection is the same saved connection on every computer.
+            assert!(portable(&block(kind, "web-1")), "{kind:?} of a saved connection");
+            // On this computer only the monitor makes sense elsewhere: it looks at whichever computer runs it.
+            assert_eq!(portable(&block(kind, LOCAL)), kind == BlockKind::Monitor, "{kind:?} of this computer");
+        }
+    }
 
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("holzwave-blocks-{name}-{}", std::process::id()));

@@ -7,6 +7,10 @@
 //! (never for the secrets, which are never written to a file). A download is staged and applied at the next start; a
 //! live file the person changed after the download was staged is copied to `sync-conflicts/` first, and the first run
 //! after that start lists it among the conflicts. Deletions are not synced yet; a deleted file comes back.
+//!
+//! The name `layout.json` carries a *layout unit*: the layout together with the pane assignments that make sense on
+//! another computer (see [`Unit`]). Pane ids are small per-device counters, so a layout adopted without the assignments
+//! that belong to it would meet the other device's own pane files; an adoption replaces them as one step.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,6 +24,9 @@ use sha2::{Digest, Sha256};
 
 use super::crypto::{self, Kdf, Key, Stamp};
 use super::webdav::{Backend, CONFLICT, Cond, safe_segment};
+use crate::blocks::{self, BLOCKS_FILE, Block};
+use crate::connections::PANES_FILE;
+use crate::layout::PaneId;
 use crate::persist::{read_limited, write_atomic};
 use crate::profiles::Profiles;
 use crate::secrets::SecretStore;
@@ -37,6 +44,16 @@ const FIXED: [&str; 5] = ["layout.json", "settings.json", "connections.json", "w
 /// The folders whose `<name>.json` files are synced one by one.
 const DIRS: [&str; 2] = ["themes", "widgets"];
 const STATE: &str = "sync_state.json";
+/// The synced name whose payload is a layout unit.
+const LAYOUT: &str = "layout.json";
+/// The version of the layout unit, and the most entries one of its two maps may hold.
+const UNIT_VERSION: u32 = 1;
+const MAX_UNIT_ENTRIES: usize = 4096;
+/// The most a pane file is read at, as everywhere else.
+const PANE_FILE_LIMIT: u64 = 256 * 1024;
+/// The longest connection id or block source a unit may name, and the longest block path.
+const MAX_ID: usize = 64;
+const MAX_BLOCK_PATH: usize = 4096;
 
 fn err(m: impl Into<String>) -> Error {
     Error::Io(io::Error::other(m.into()))
@@ -175,6 +192,21 @@ pub fn promote_where(dir: &Path, wanted: &dyn Fn(&str) -> bool) -> Promoted {
             waiting.push(name);
             continue;
         }
+        if name == LAYOUT {
+            match adopt_layout(dir, &path, bases.get(&name)) {
+                Adopted::Applied { edited } => {
+                    if edited {
+                        out.kept.push(name.clone());
+                    }
+                    out.applied.push(name);
+                }
+                Adopted::Skipped => out.skipped.push(name),
+                Adopted::Refused => {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+            continue;
+        }
         let live_path = dir.join(&name);
         let incoming = read_limited(&path, MAX_FILE).ok().flatten().map(|b| digest(&b));
         let edited = match read_limited(&live_path, MAX_FILE) {
@@ -283,6 +315,211 @@ fn promote_names(root: &Path) -> Vec<String> {
     out
 }
 
+// ---- the layout unit ---------------------------------------------------------------------------------------------
+
+/// The payload of the name `layout.json`. A layout names panes by small per-device counters, and what runs in a pane
+/// (a saved connection, a file browser, the monitor) is kept in two machine-local files keyed by the same numbers. So the
+/// layout travels with the part of those files that makes sense on another computer, and an adoption replaces both as
+/// one step. The unit is built from the live files without changing them.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Unit {
+    unit: u32,
+    layout: serde_json::Value,
+    /// Pane id to the id of a saved connection.
+    #[serde(default)]
+    connections: BTreeMap<String, String>,
+    /// Pane id to its block; only blocks that [`blocks::portable`] accepts.
+    #[serde(default)]
+    blocks: BTreeMap<String, Block>,
+}
+
+/// What a downloaded `layout.json` is: a unit, or the plain layout an older build uploaded.
+enum Download {
+    Unit(Unit),
+    Plain(serde_json::Value),
+}
+
+/// A connection id or a block source that names a saved connection.
+fn named_id(s: &str) -> bool {
+    s.len() <= MAX_ID && safe_segment(s)
+}
+
+/// A block the unit may hold: a source (this computer or a saved connection) and a bounded path.
+fn block_fits(block: &Block) -> bool {
+    !block.source.is_empty()
+        && (block.source == blocks::LOCAL || named_id(&block.source))
+        && block.path.len() <= MAX_BLOCK_PATH
+        && !block.path.contains('\0')
+}
+
+/// A pane id as the app writes it: decimal digits without a sign or a leading zero, so one pane has one spelling.
+fn is_pane_key(key: &str) -> bool {
+    key.parse::<PaneId>().is_ok_and(|pane| pane.to_string() == key)
+}
+
+/// The value with every object's keys in sorted order, so the same content always gives the same bytes.
+fn sorted(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let ordered: BTreeMap<String, Value> = map.into_iter().map(|(k, v)| (k, sorted(v))).collect();
+            Value::Object(ordered.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        other => other,
+    }
+}
+
+/// The two pane files of the data folder, each as the entries that are fit for a unit: a numeric pane key and a value
+/// that passes the bounds. A missing or unreadable file is empty; one entry that does not fit is left out.
+fn live_assignments(dir: &Path) -> (BTreeMap<String, String>, BTreeMap<String, Block>) {
+    let read = |file: &str| -> serde_json::Map<String, serde_json::Value> {
+        match read_limited(&dir.join(file), PANE_FILE_LIMIT).ok().flatten().and_then(|b| serde_json::from_slice(&b).ok()) {
+            Some(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        }
+    };
+    let mut connections = BTreeMap::new();
+    for (key, value) in read(PANES_FILE) {
+        let (true, Some(id)) = (is_pane_key(&key), value.as_str().filter(|id| named_id(id))) else { continue };
+        if connections.len() < MAX_UNIT_ENTRIES {
+            connections.insert(key, id.to_owned());
+        }
+    }
+    let mut shared = BTreeMap::new();
+    for (key, value) in read(BLOCKS_FILE) {
+        let (true, Ok(block)) = (is_pane_key(&key), serde_json::from_value::<Block>(value)) else { continue };
+        if blocks::portable(&block) && block_fits(&block) && shared.len() < MAX_UNIT_ENTRIES {
+            shared.insert(key, block);
+        }
+    }
+    (connections, shared)
+}
+
+/// The unit of this device, as its canonical bytes (sorted keys, no whitespace), built from `layout.json` and the two
+/// pane files. `None` when there is no layout. A layout that is not a JSON object is an error that names it: it would
+/// be refused by every other device.
+fn live_unit(dir: &Path) -> Result<Option<Vec<u8>>> {
+    let Some(bytes) = read_limited(&dir.join(LAYOUT), MAX_FILE)? else { return Ok(None) };
+    let layout: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| err(format!("{LAYOUT} is not valid JSON: {e}")))?;
+    if !layout.is_object() {
+        return Err(err(format!("{LAYOUT} is not a layout (not a JSON object)")));
+    }
+    let (connections, blocks) = live_assignments(dir);
+    let unit = Unit { unit: UNIT_VERSION, layout: sorted(layout), connections, blocks };
+    Ok(Some(serde_json::to_vec(&unit).map_err(|e| err(e.to_string()))?))
+}
+
+/// Check the bytes of a downloaded `layout.json` before anything is staged or applied: a unit of this version with
+/// nothing but the members it names, a layout that is an object, numeric pane keys, safe connection ids and bounded
+/// maps; or a plain layout object (no `unit` member). Anything else is refused.
+fn check_download(bytes: &[u8]) -> Result<Download> {
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(err("the synced layout is too large"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| err(format!("the synced layout is not valid JSON: {e}")))?;
+    let Some(object) = value.as_object() else { return Err(err("the synced layout is not a JSON object")) };
+    if !object.contains_key("unit") {
+        return Ok(Download::Plain(value));
+    }
+    let unit: Unit = serde_json::from_value(value).map_err(|e| err(format!("the synced layout unit is not valid: {e}")))?;
+    if unit.unit != UNIT_VERSION {
+        return Err(err("the synced layout unit is of another version; update holzWave"));
+    }
+    if !unit.layout.is_object() {
+        return Err(err("the synced layout unit holds a layout that is not an object"));
+    }
+    if unit.connections.len() > MAX_UNIT_ENTRIES || unit.blocks.len() > MAX_UNIT_ENTRIES {
+        return Err(err("the synced layout unit holds too many pane assignments"));
+    }
+    for (pane, id) in &unit.connections {
+        if !is_pane_key(pane) || !named_id(id) {
+            return Err(err("the synced layout unit names a pane or a connection that is not valid"));
+        }
+    }
+    for (pane, block) in &unit.blocks {
+        if !is_pane_key(pane) || !block_fits(block) {
+            return Err(err("the synced layout unit holds a block that is not valid"));
+        }
+    }
+    Ok(Download::Unit(unit))
+}
+
+/// How the promote of `layout.json` ended.
+enum Adopted {
+    /// Applied; whether the live unit had been changed since the download was staged (its layout was copied first).
+    Applied { edited: bool },
+    /// Left staged, nothing live touched: a backup copy could not be written, or a write failed.
+    Skipped,
+    /// Not a unit or layout (a planted file): removed, not applied.
+    Refused,
+}
+
+/// Whether the live pane file `file` holds something a replacement would lose: it exists, is not an empty object and
+/// does not say what `target` says. `Err` when it cannot be read (so it cannot be copied either).
+fn pane_file_needs_copy(dir: &Path, file: &str, target: &serde_json::Value) -> io::Result<Option<Vec<u8>>> {
+    let Some(live) = read_limited(&dir.join(file), PANE_FILE_LIMIT)? else { return Ok(None) };
+    let same = serde_json::from_slice::<serde_json::Value>(&live).is_ok_and(|v| v == *target || v.as_object().is_some_and(serde_json::Map::is_empty));
+    Ok((!same).then_some(live))
+}
+
+/// Adopt the staged `layout.json` at `staged` as one step: copy what is replaced to `sync-conflicts/`, write the two pane
+/// files, then the layout, then remove the staged file. The order makes a crash in between repeat the whole step at the
+/// next start. A backup that cannot be written stops the adoption before anything live is touched.
+fn adopt_layout(dir: &Path, staged: &Path, base: Option<&Option<String>>) -> Adopted {
+    let Ok(Some(bytes)) = read_limited(staged, MAX_FILE) else { return Adopted::Refused };
+    let Ok(download) = check_download(&bytes) else { return Adopted::Refused };
+    let (layout, connections, blocks) = match download {
+        Download::Unit(unit) => {
+            // What a unit shares is what `portable` accepts, whoever built it.
+            let shared: BTreeMap<String, Block> = unit.blocks.into_iter().filter(|(_, b)| blocks::portable(b)).collect();
+            (unit.layout, unit.connections, shared)
+        }
+        Download::Plain(layout) => (layout, BTreeMap::new(), BTreeMap::new()),
+    };
+    let (Ok(connections_target), Ok(blocks_target)) = (serde_json::to_value(&connections), serde_json::to_value(&blocks)) else {
+        return Adopted::Skipped;
+    };
+    // The live layout counts as edited like any synced file (see `promote_where`), judged on the unit it makes.
+    let live_layout = match read_limited(&dir.join(LAYOUT), MAX_FILE) {
+        Ok(live) => live,
+        Err(_) => return Adopted::Skipped,
+    };
+    let live_hash = match live_layout {
+        Some(_) => live_unit(dir).ok().flatten().map(|u| digest(&u)),
+        None => None,
+    };
+    let edited = live_hash.as_deref().is_some_and(|hash| {
+        hash != digest(&bytes) && !matches!(base, Some(Some(recorded)) if recorded == hash)
+    });
+    // Backups first: nothing live changes unless every copy is written.
+    let mut copies: Vec<(String, Vec<u8>)> = Vec::new();
+    for (file, target) in [(PANES_FILE, &connections_target), (BLOCKS_FILE, &blocks_target)] {
+        match pane_file_needs_copy(dir, file, target) {
+            Ok(Some(live)) => copies.push((file.to_owned(), live)),
+            Ok(None) => {}
+            Err(_) => return Adopted::Skipped,
+        }
+    }
+    if edited {
+        if let Some(live) = live_layout {
+            copies.push((LAYOUT.to_owned(), live));
+        }
+    }
+    for (name, live) in &copies {
+        if !copy_edit(dir, name, live) {
+            return Adopted::Skipped;
+        }
+    }
+    let pretty = |v: &serde_json::Value| serde_json::to_vec_pretty(v).unwrap_or_default();
+    let written = write_atomic(&dir.join(PANES_FILE), &pretty(&connections_target))
+        .and_then(|()| write_atomic(&dir.join(BLOCKS_FILE), &pretty(&blocks_target)))
+        .and_then(|()| write_atomic(&dir.join(LAYOUT), &pretty(&layout)))
+        .and_then(|()| fs::remove_file(staged));
+    if written.is_ok() { Adopted::Applied { edited } } else { Adopted::Skipped }
+}
+
 /// The configuration folder, plus the connection secrets as the virtual file [`SECRETS`]. Downloads are staged, see
 /// [`promote_incoming`]; what is staged counts as the local version, and the live hash at staging is recorded.
 pub struct ConfigSource {
@@ -304,7 +541,12 @@ impl ConfigSource {
         if bases.contains_key(name) || bases.len() >= NOTE_NAMES {
             return;
         }
-        let live = read_limited(&self.dir.join(name), MAX_FILE).ok().flatten();
+        // The layout is judged as the unit it makes with the pane files, like everything the sync reads of it.
+        let live = if name == LAYOUT {
+            live_unit(&self.dir).ok().flatten()
+        } else {
+            read_limited(&self.dir.join(name), MAX_FILE).ok().flatten()
+        };
         bases.insert(name.to_owned(), live.as_deref().map(digest));
         save_bases(&root, &bases);
     }
@@ -360,6 +602,9 @@ impl Source for ConfigSource {
         if let Some(staged) = read_limited(&self.dir.join(INCOMING).join(name), MAX_FILE)? {
             return Ok(Some(staged));
         }
+        if name == LAYOUT {
+            return live_unit(&self.dir);
+        }
         Ok(read_limited(&self.dir.join(name), MAX_FILE)?)
     }
 
@@ -379,6 +624,10 @@ impl Source for ConfigSource {
                 self.secrets.set(&account, &secret)?;
             }
             return Ok(());
+        }
+        if name == LAYOUT {
+            // Staged verbatim, so it counts as the local version; refused before anything is staged when it is not a layout.
+            check_download(bytes)?;
         }
         self.record_live(name);
         Ok(write_atomic(&self.dir.join(INCOMING).join(name), bytes)?)
@@ -601,6 +850,11 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                     }
                 }
                 // Both changed: the higher stamp wins, the other version is kept.
+                (Some(bytes), Some((_, etag, stamp, plain)), true) if *bytes == **plain => {
+                    // Both changed to the very same content (two devices that moved to the same unit): nothing to keep.
+                    self.remember(name, stamp.counter, etag, &digest(plain));
+                    return Ok(());
+                }
                 (Some(bytes), Some((blob, etag, stamp, plain)), true) => {
                     let mine = Stamp { counter: base + 1, time: now(), device: self.state.device() };
                     let theirs_wins = (stamp.counter, stamp.time) > (mine.counter, mine.time);

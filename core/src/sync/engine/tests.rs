@@ -536,7 +536,7 @@ fn a_file_swapped_on_the_server_for_another_names_blob_is_not_applied() {
     let srv = server();
     let (a, b) = (device("a9"), device("b9"));
     put(&a, "settings.json", "s");
-    put(&a, "layout.json", "l");
+    put(&a, "layout.json", "{}");
     connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
     {
         let mut store = srv.store.lock().unwrap();
@@ -546,7 +546,7 @@ fn a_file_swapped_on_the_server_for_another_names_blob_is_not_applied() {
     let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
     assert!(report.errors.iter().any(|(n, e)| n == "settings.json" && e.contains("could not be decrypted")), "{report:?}");
     assert!(text(&b, "settings.json").is_none());
-    assert_eq!(text(&b, "layout.json").as_deref(), Some("l"), "the other files still sync");
+    assert_eq!(text(&b, "layout.json").as_deref(), Some("{}"), "the other files still sync");
 }
 
 /// Stage `name` with `text` in the staging folder of `d`, the way a download does (no record of a live hash).
@@ -639,40 +639,353 @@ fn save_connections(d: &Device, ids: &[&str]) {
     profiles.save(&d.dir).unwrap();
 }
 
-/// REPRODUCTION OF A DEFECT, asserting the wrong behaviour on purpose. Pane ids are small per-device counters, so the
-/// pane files (`pane_connections.json`, `pane_blocks.json`) of two devices speak about different panes with the same
-/// numbers. Device A runs the saved connection `web-1` in its pane 2; device B shows a local preview in its pane 2 and
-/// runs `db` in its pane 3. After B has taken over A's layout, B's own assignments stay where they were, whatever the
-/// panes of A's layout are, and A's connected pane does not come up on B. The test that replaces this one describes the
-/// behaviour once the layout travels together with its assignments.
-#[test]
-fn reproduction_a_layout_adopted_from_another_device_keeps_this_devices_pane_assignments() {
-    let srv = server();
-    let (a, b) = (device("a-layout"), device("b-layout"));
-    // Both devices know the same saved connections (they were synced earlier).
+/// Two devices that know the same saved connections `web-1` and `db` (synced earlier), each with its own pane files.
+/// A runs `web-1` in its pane 2 and has a layout with the panes 1, 2 and 3; B shows a local preview in its pane 2 and
+/// runs `db` in its pane 3 and has no layout yet. A has synced, B has not synced the layout.
+fn pair(srv: &Server, tag: &str) -> (Device, Device) {
+    let (a, b) = (device(&format!("a-{tag}")), device(&format!("b-{tag}")));
     save_connections(&a, &["web-1", "db"]);
-    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
-    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    connect(srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(srv, &b, "pw").unwrap().sync_once().unwrap();
     assert_eq!(promote_incoming(&b.dir), vec!["connections.json"]);
-    // B has its own panes: a local preview in pane 2 and the connection `db` in pane 3.
-    write_atomic(&b.dir.join(crate::connections::PANES_FILE), br#"{"3":"db"}"#).unwrap();
-    write_atomic(&b.dir.join(crate::blocks::BLOCKS_FILE), br#"{"2":{"kind":"preview","source":"local","path":"/tmp/b-notes.md"}}"#).unwrap();
-    // A has a layout with the panes 1, 2 and 3 and runs `web-1` in pane 2.
+    write_atomic(&b.dir.join(PANES_FILE), br#"{"3":"db"}"#).unwrap();
+    write_atomic(&b.dir.join(BLOCKS_FILE), br#"{"2":{"kind":"preview","source":"local","path":"/tmp/b-notes.md"}}"#).unwrap();
     write_atomic(&a.dir.join("layout.json"), br#"{"panes":[1,2,3]}"#).unwrap();
-    write_atomic(&a.dir.join(crate::connections::PANES_FILE), br#"{"2":"web-1"}"#).unwrap();
+    write_atomic(&a.dir.join(PANES_FILE), br#"{"2":"web-1"}"#).unwrap();
+    (a, b)
+}
+
+fn json(d: &Device, file: &str) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(d.dir.join(file)).unwrap()).unwrap()
+}
+
+/// The unit a device would send now, as JSON.
+fn unit_of(d: &Device) -> serde_json::Value {
+    serde_json::from_slice(&live_unit(&d.dir).unwrap().expect("a layout exists")).unwrap()
+}
+
+/// The counter the device remembers for `name`.
+fn counter(d: &Device, name: &str) -> u64 {
+    json(d, "sync_state.json")["files"][name]["counter"].as_u64().unwrap()
+}
+
+/// The defect of the old behaviour, turned around: a layout adopted from another device brings that device's pane
+/// assignments that make sense here (the pane that runs `web-1`) and drops this device's own, in one step, and the
+/// replaced files are kept. Before the unit existed the same two directories gave the opposite on every line: B's pane 2
+/// stayed a local preview, B's pane 3 stayed on `db` and `profile_of(2)` was `None`.
+#[test]
+fn an_adopted_layout_brings_its_own_pane_assignments_and_drops_this_devices() {
+    let srv = server();
+    let (a, b) = pair(&srv, "adopt");
     assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["layout.json"]);
     assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().downloaded, vec!["layout.json"]);
-    assert_eq!(promote_incoming(&b.dir), vec!["layout.json"]);
-    assert_eq!(fs::read_to_string(b.dir.join("layout.json")).unwrap(), r#"{"panes":[1,2,3]}"#);
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted, Promoted { applied: vec!["layout.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(json(&b, "layout.json"), serde_json::json!({"panes": [1, 2, 3]}));
 
     let panes = [1, 2, 3];
     let (connections, _) = crate::connections::Connections::load(&b.dir, b.secrets.clone(), None, &panes);
     let blocks = crate::blocks::Blocks::load(&b.dir, None, &panes);
-    // A's pane 2 ran `web-1`; that assignment never reached B ...
-    assert!(connections.profile_of(2).is_none(), "A's connected pane did not come up on B");
-    // ... B's own pane 3 still runs `db`, although A's layout holds no such assignment ...
-    assert_eq!(connections.profile_of(3).map(|p| p.id), Some("db".to_owned()));
-    // ... and B's own local preview sits on the pane 2 of A's layout.
-    let block = blocks.block_of(2).expect("B's preview survives on pane 2");
-    assert_eq!((block.kind, block.source.as_str(), block.path.as_str()), (crate::blocks::BlockKind::Preview, "local", "/tmp/b-notes.md"));
+    assert_eq!(connections.profile_of(2).map(|p| p.id), Some("web-1".to_owned()), "A's connected pane comes up on B");
+    assert!(connections.profile_of(3).is_none(), "B's own pane-3 assignment is gone");
+    assert!(blocks.block_of(2).is_none(), "B's local preview is gone");
+    assert_eq!(json(&b, PANES_FILE), serde_json::json!({"2": "web-1"}));
+    assert_eq!(json(&b, BLOCKS_FILE), serde_json::json!({}));
+    // A's files are untouched.
+    assert_eq!(fs::read_to_string(a.dir.join(PANES_FILE)).unwrap(), r#"{"2":"web-1"}"#);
+    assert_eq!(fs::read_to_string(a.dir.join("layout.json")).unwrap(), r#"{"panes":[1,2,3]}"#);
+    // What was replaced is kept, under the file name and the time.
+    let copies = kept_copies(&b);
+    assert_eq!(copies.len(), 2, "{copies:?}");
+    assert!(copies[0].0.starts_with("pane_blocks.json.") && copies[0].1.contains("/tmp/b-notes.md"), "{copies:?}");
+    assert!(copies[1].0.starts_with("pane_connections.json.") && copies[1].1 == r#"{"3":"db"}"#, "{copies:?}");
+    // The adoption leaves B level with the server: a run sends nothing and finds no conflict.
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report, Report::default());
+}
+
+#[test]
+fn a_device_that_never_adopts_keeps_its_assignments_and_building_the_unit_changes_nothing() {
+    let srv = server();
+    let (a, _b) = pair(&srv, "keep");
+    write_atomic(&a.dir.join(BLOCKS_FILE), br#"{"1":{"kind":"files","source":"local","path":"/home/a"}}"#).unwrap();
+    let before: Vec<Vec<u8>> = ["layout.json", PANES_FILE, BLOCKS_FILE].iter().map(|f| fs::read(a.dir.join(f)).unwrap()).collect();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    let after: Vec<Vec<u8>> = ["layout.json", PANES_FILE, BLOCKS_FILE].iter().map(|f| fs::read(a.dir.join(f)).unwrap()).collect();
+    assert_eq!(before, after, "the files of the sending device are byte for byte as they were");
+    assert!(!a.dir.join("sync-conflicts").exists() && !a.dir.join("sync-incoming").exists());
+}
+
+#[test]
+fn a_local_only_block_is_not_shared() {
+    let srv = server();
+    let (a, b) = pair(&srv, "local");
+    write_atomic(
+        &a.dir.join(BLOCKS_FILE),
+        br#"{
+            "1": {"kind":"files","source":"local","path":"/home/a-secret-folder"},
+            "2": {"kind":"preview","source":"local","path":"/home/a-secret-folder/notes.md"},
+            "3": {"kind":"chat","source":"local","path":"a-chat-id"},
+            "4": {"kind":"monitor","source":"local","path":""},
+            "5": {"kind":"files","source":"web-1","path":"/srv/www"}
+        }"#,
+    )
+    .unwrap();
+    let unit = unit_of(&a);
+    assert_eq!(unit["blocks"].as_object().unwrap().keys().cloned().collect::<Vec<_>>(), vec!["4", "5"], "{unit}");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    {
+        // The server holds an encrypted blob only; the unit bytes themselves hold nothing local.
+        let bytes = ConfigSource::new(&a.dir, a.secrets.clone()).read("layout.json").unwrap().unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("a-secret-folder") && !String::from_utf8_lossy(&bytes).contains("a-chat-id"));
+    }
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    promote_incoming(&b.dir);
+    let blocks = crate::blocks::Blocks::load(&b.dir, None, &[1, 2, 3, 4, 5]);
+    assert!((1..=3).all(|pane| blocks.block_of(pane).is_none()), "no local block arrives");
+    assert_eq!(blocks.block_of(4).map(|b| (b.kind, b.source)), Some((crate::blocks::BlockKind::Monitor, "local".to_owned())));
+    assert_eq!(blocks.block_of(5).map(|b| (b.kind, b.source, b.path)), Some((crate::blocks::BlockKind::Files, "web-1".to_owned(), "/srv/www".to_owned())));
+    // Even a unit that carries a local block does not bring it in: what is shared is what `portable` accepts.
+    let hostile = br#"{"unit":1,"layout":{},"blocks":{"1":{"kind":"files","source":"local","path":"/etc"},"2":{"kind":"files","source":"web-1","path":"/srv"}}}"#;
+    ConfigSource::new(&b.dir, b.secrets.clone()).write("layout.json", hostile).unwrap();
+    promote_incoming(&b.dir);
+    assert_eq!(json(&b, BLOCKS_FILE).as_object().unwrap().keys().cloned().collect::<Vec<_>>(), vec!["2"]);
+}
+
+#[test]
+fn a_change_of_the_assignments_alone_is_a_change() {
+    let srv = server();
+    let (a, b) = pair(&srv, "change");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    promote_incoming(&b.dir);
+    let first = counter(&a, "layout.json");
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap(), Report::default(), "nothing changed, nothing sent");
+    // Only `pane_connections.json` of A changes: the layout file is untouched.
+    write_atomic(&a.dir.join(PANES_FILE), br#"{"1":"db","2":"web-1"}"#).unwrap();
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap().uploaded, vec!["layout.json"]);
+    assert_eq!(counter(&a, "layout.json"), first + 1);
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().downloaded, vec!["layout.json"]);
+    promote_incoming(&b.dir);
+    assert_eq!(json(&b, PANES_FILE), serde_json::json!({"1": "db", "2": "web-1"}));
+}
+
+#[test]
+fn the_staged_unit_counts_as_the_local_version() {
+    let srv = server();
+    let (a, b) = pair(&srv, "staged");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    let sent = ConfigSource::new(&a.dir, a.secrets.clone()).read("layout.json").unwrap().unwrap();
+    let staged = fs::read(b.dir.join("sync-incoming").join("layout.json")).unwrap();
+    assert_eq!(staged, sent, "the staged unit is stored verbatim");
+    assert_eq!(ConfigSource::new(&b.dir, b.secrets.clone()).read("layout.json").unwrap().unwrap(), sent, "and read back as the local version");
+    let puts = srv.store.lock().unwrap().puts;
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default(), "nothing goes back");
+    assert_eq!(srv.store.lock().unwrap().puts, puts);
+    // After the apply B's live state builds the same canonical unit as A's, so it is still level with the server.
+    promote_incoming(&b.dir);
+    assert_eq!(live_unit(&b.dir).unwrap().unwrap(), sent);
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(srv.store.lock().unwrap().puts, puts);
+}
+
+#[test]
+fn the_same_content_on_both_sides_is_not_a_conflict() {
+    let srv = server();
+    let (a, b) = (device("a-same"), device("b-same"));
+    for d in [&a, &b] {
+        write_atomic(&d.dir.join("layout.json"), br#"{"panes":[1]}"#).unwrap();
+    }
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    // B changed the same file in the same way before it ever synced: both sides are "changed" and equal.
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report, Report::default(), "{report:?}");
+    assert!(!b.dir.join("sync-conflicts").exists());
+    assert!(!srv.store.lock().unwrap().files.keys().any(|k| k.starts_with("backups/")));
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default());
+}
+
+#[test]
+fn a_legacy_plain_layout_is_accepted_and_clears_the_local_assignments() {
+    let d = device("legacy");
+    write_atomic(&d.dir.join("layout.json"), br#"{"old":true}"#).unwrap();
+    write_atomic(&d.dir.join(PANES_FILE), br#"{"3":"db"}"#).unwrap();
+    write_atomic(&d.dir.join(BLOCKS_FILE), br#"{"2":{"kind":"preview","source":"local","path":"/tmp/n.md"}}"#).unwrap();
+    // What an older build uploaded: the layout alone, no `unit` member.
+    ConfigSource::new(&d.dir, d.secrets.clone()).write("layout.json", br#"{"panes":[7,8]}"#).unwrap();
+    let promoted = promote_incoming_with_report(&d.dir);
+    assert_eq!(promoted.applied, vec!["layout.json"]);
+    assert_eq!(json(&d, "layout.json"), serde_json::json!({"panes": [7, 8]}));
+    assert_eq!((json(&d, PANES_FILE), json(&d, BLOCKS_FILE)), (serde_json::json!({}), serde_json::json!({})));
+    let names: Vec<String> = kept_copies(&d).into_iter().map(|c| c.0.split('.').next().unwrap_or_default().to_owned()).collect();
+    assert!(names.contains(&"pane_connections".to_owned()) && names.contains(&"pane_blocks".to_owned()), "{names:?}");
+}
+
+#[test]
+fn a_hostile_unit_is_refused_before_it_is_staged() {
+    let d = device("hostile");
+    let source = ConfigSource::new(&d.dir, d.secrets.clone());
+    let many = |n: usize| (0..n).map(|i| format!("\"{i}\":\"db\"")).collect::<Vec<_>>().join(",");
+    let many_blocks = |n: usize| (0..n).map(|i| format!("\"{i}\":{{\"kind\":\"files\",\"source\":\"db\",\"path\":\"/\"}}")).collect::<Vec<_>>().join(",");
+    let huge = format!("{{\"unit\":1,\"layout\":{{\"x\":\"{}\"}}}}", "a".repeat(MAX_FILE as usize));
+    let bad: Vec<(&str, String)> = vec![
+        ("not json", "layout".into()),
+        ("not an object", "[1,2]".into()),
+        ("layout is an array", r#"{"unit":1,"layout":[1]}"#.into()),
+        ("layout is a number", r#"{"unit":1,"layout":5}"#.into()),
+        ("layout missing", r#"{"unit":1}"#.into()),
+        ("unit 2", r#"{"unit":2,"layout":{}}"#.into()),
+        ("unit is text", r#"{"unit":"1","layout":{}}"#.into()),
+        ("unknown member", r#"{"unit":1,"layout":{},"extra":1}"#.into()),
+        ("pane key is text", r#"{"unit":1,"layout":{},"connections":{"x":"db"}}"#.into()),
+        ("pane key is negative", r#"{"unit":1,"layout":{},"connections":{"-1":"db"}}"#.into()),
+        ("block pane key is text", r#"{"unit":1,"layout":{},"blocks":{"x":{"kind":"files","source":"db","path":"/"}}}"#.into()),
+        ("connection id with a slash", r#"{"unit":1,"layout":{},"connections":{"1":"a/b"}}"#.into()),
+        ("connection id is dots", r#"{"unit":1,"layout":{},"connections":{"1":".."}}"#.into()),
+        ("connection id escapes", r#"{"unit":1,"layout":{},"connections":{"1":"../x"}}"#.into()),
+        ("connection id over 64 bytes", format!("{{\"unit\":1,\"layout\":{{}},\"connections\":{{\"1\":\"{}\"}}}}", "a".repeat(65))),
+        ("connection id is a number", r#"{"unit":1,"layout":{},"connections":{"1":5}}"#.into()),
+        ("block with an empty source", r#"{"unit":1,"layout":{},"blocks":{"1":{"kind":"files","source":"","path":"/"}}}"#.into()),
+        ("block source over 64 bytes", format!("{{\"unit\":1,\"layout\":{{}},\"blocks\":{{\"1\":{{\"kind\":\"files\",\"source\":\"{}\",\"path\":\"/\"}}}}}}", "a".repeat(65))),
+        ("block path with a NUL", r#"{"unit":1,"layout":{},"blocks":{"1":{"kind":"files","source":"db","path":"/a\u0000b"}}}"#.into()),
+        ("block path over 4096 bytes", format!("{{\"unit\":1,\"layout\":{{}},\"blocks\":{{\"1\":{{\"kind\":\"files\",\"source\":\"db\",\"path\":\"/{}\"}}}}}}", "a".repeat(4096))),
+        ("block of an unknown kind", r#"{"unit":1,"layout":{},"blocks":{"1":{"kind":"shell","source":"db","path":"/"}}}"#.into()),
+        ("4097 connections", format!("{{\"unit\":1,\"layout\":{{}},\"connections\":{{{}}}}}", many(4097))),
+        ("4097 blocks", format!("{{\"unit\":1,\"layout\":{{}},\"blocks\":{{{}}}}}", many_blocks(4097))),
+        ("over the file limit", huge),
+    ];
+    for (what, bytes) in &bad {
+        assert!(source.write("layout.json", bytes.as_bytes()).is_err(), "{what} must be refused");
+        assert!(!d.dir.join("sync-incoming").exists(), "{what}: nothing is staged");
+    }
+    // The bounds are exact: 4096 entries and a 64-byte id still pass, a plain layout object passes.
+    for good in [
+        format!("{{\"unit\":1,\"layout\":{{}},\"connections\":{{{}}}}}", many(4096)),
+        format!("{{\"unit\":1,\"layout\":{{}},\"blocks\":{{{}}}}}", many_blocks(4096)),
+        format!("{{\"unit\":1,\"layout\":{{}},\"connections\":{{\"1\":\"{}\"}}}}", "a".repeat(64)),
+        r#"{"unit":1,"layout":{"a":1}}"#.to_owned(),
+        r#"{"anything":"as a plain layout"}"#.to_owned(),
+    ] {
+        source.write("layout.json", good.as_bytes()).unwrap();
+        assert_eq!(fs::read(d.dir.join("sync-incoming").join("layout.json")).unwrap(), good.as_bytes(), "staged verbatim");
+    }
+}
+
+#[test]
+fn a_planted_staged_layout_that_is_not_one_is_removed_and_not_applied() {
+    let d = device("planted");
+    write_atomic(&d.dir.join("layout.json"), br#"{"mine":1}"#).unwrap();
+    write_atomic(&d.dir.join(PANES_FILE), br#"{"3":"db"}"#).unwrap();
+    for planted in ["not json", r#"{"unit":1,"layout":5}"#, r#"{"unit":1,"layout":{},"connections":{"1":"../x"}}"#] {
+        stage(&d, "layout.json", planted);
+        assert_eq!(promote_incoming_with_report(&d.dir), Promoted::default(), "{planted}");
+        assert_eq!(json(&d, "layout.json"), serde_json::json!({"mine": 1}));
+        assert_eq!(json(&d, PANES_FILE), serde_json::json!({"3": "db"}), "the live pane file is untouched");
+        assert!(!d.dir.join("sync-incoming").exists());
+    }
+}
+
+#[test]
+fn a_failed_backup_stops_the_adoption() {
+    let d = device("nobackup");
+    write_atomic(&d.dir.join("layout.json"), br#"{"mine":1}"#).unwrap();
+    write_atomic(&d.dir.join(PANES_FILE), br#"{"3":"db"}"#).unwrap();
+    write_atomic(&d.dir.join(BLOCKS_FILE), br#"{"2":{"kind":"preview","source":"local","path":"/tmp/n.md"}}"#).unwrap();
+    let unit = br#"{"unit":1,"layout":{"theirs":1},"connections":{"2":"web-1"}}"#;
+    ConfigSource::new(&d.dir, d.secrets.clone()).write("layout.json", unit).unwrap();
+    fs::write(d.dir.join("sync-conflicts"), "in the way").unwrap();
+    let live: Vec<Vec<u8>> = ["layout.json", PANES_FILE, BLOCKS_FILE].iter().map(|f| fs::read(d.dir.join(f)).unwrap()).collect();
+    let promoted = promote_incoming_with_report(&d.dir);
+    assert_eq!(promoted, Promoted { applied: vec![], kept: vec![], skipped: vec!["layout.json".into()] });
+    let after: Vec<Vec<u8>> = ["layout.json", PANES_FILE, BLOCKS_FILE].iter().map(|f| fs::read(d.dir.join(f)).unwrap()).collect();
+    assert_eq!(live, after, "every live file is untouched");
+    assert_eq!(fs::read(d.dir.join("sync-incoming").join("layout.json")).unwrap(), unit, "the unit stays staged");
+    // With the way free the next start applies it.
+    fs::remove_file(d.dir.join("sync-conflicts")).unwrap();
+    let promoted = promote_incoming_with_report(&d.dir);
+    assert_eq!(promoted.applied, vec!["layout.json"]);
+    assert_eq!(json(&d, PANES_FILE), serde_json::json!({"2": "web-1"}));
+    assert_eq!(json(&d, "layout.json"), serde_json::json!({"theirs": 1}));
+    assert!(!d.dir.join("sync-incoming").exists());
+}
+
+#[test]
+fn the_unit_is_applied_in_one_order() {
+    let unit = br#"{"unit":1,"layout":{"theirs":[1,2]},"connections":{"2":"web-1"},"blocks":{"1":{"kind":"monitor","source":"local","path":""}}}"#;
+    let adopt = |tag: &str, prepare: &dyn Fn(&Device)| -> Device {
+        let d = device(tag);
+        write_atomic(&d.dir.join("layout.json"), br#"{"mine":1}"#).unwrap();
+        write_atomic(&d.dir.join(PANES_FILE), br#"{"3":"db"}"#).unwrap();
+        prepare(&d);
+        ConfigSource::new(&d.dir, d.secrets.clone()).write("layout.json", unit).unwrap();
+        promote_incoming_with_report(&d.dir);
+        d
+    };
+    let files = |d: &Device| -> Vec<serde_json::Value> { ["layout.json", PANES_FILE, BLOCKS_FILE].iter().map(|f| json(d, f)).collect() };
+    let once = adopt("order-1", &|_| {});
+    assert_eq!(files(&once), vec![serde_json::json!({"theirs": [1, 2]}), serde_json::json!({"2": "web-1"}), serde_json::json!({"1": {"kind": "monitor", "source": "local", "path": ""}})]);
+    // The same input again leaves the same files and keeps no new copy: the step can be repeated.
+    let copies = kept_copies(&once).len();
+    ConfigSource::new(&once.dir, once.secrets.clone()).write("layout.json", unit).unwrap();
+    let again = promote_incoming_with_report(&once.dir);
+    assert_eq!(again, Promoted { applied: vec!["layout.json".into()], kept: vec![], skipped: vec![] });
+    assert_eq!(files(&once), files(&adopt("order-2", &|_| {})));
+    assert_eq!(kept_copies(&once).len(), copies);
+    // A crash after the pane files were written and before the layout was: the next start finishes the step.
+    let crashed = adopt("order-3", &|d| {
+        // The state the crash leaves: the staged unit is still there, the pane files are already the new ones.
+        write_atomic(&d.dir.join(PANES_FILE), br#"{"2": "web-1"}"#).unwrap();
+        write_atomic(&d.dir.join(BLOCKS_FILE), br#"{"1": {"kind": "monitor", "source": "local", "path": ""}}"#).unwrap();
+    });
+    assert_eq!(files(&crashed), files(&once));
+}
+
+#[test]
+fn a_layout_that_is_not_json_is_reported_by_name_and_the_other_files_still_sync() {
+    let srv = server();
+    let a = device("a-bad-layout");
+    put(&a, "layout.json", "not a layout");
+    put(&a, "settings.json", "{}");
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert!(report.errors.iter().any(|(n, e)| n == "layout.json" && e.contains("layout.json is not valid JSON")), "{report:?}");
+    assert_eq!(report.uploaded, vec!["settings.json"]);
+}
+
+#[test]
+fn the_unit_is_canonical_whatever_the_order_of_the_files() {
+    let d = device("canonical");
+    write_atomic(&d.dir.join("layout.json"), br#"{"z": 1, "a": {"y": [3, {"q": 1, "b": 2}], "b": null}}"#).unwrap();
+    write_atomic(&d.dir.join(PANES_FILE), br#"{"10": "db", "2": "web-1", "02": "db", "+3": "db", "x": "db"}"#).unwrap();
+    let bytes = live_unit(&d.dir).unwrap().unwrap();
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(text.contains(r#""layout":{"a":{"b":null,"y":[3,{"b":2,"q":1}]},"z":1}"#), "{text}");
+    assert!(text.contains(r#""connections":{"10":"db","2":"web-1"}"#), "only the one spelling of a pane id goes: {text}");
+    // The same files in another order and another spelling give the same bytes.
+    write_atomic(&d.dir.join("layout.json"), br#"{"a":{"b":null,"y":[3,{"b":2,"q":1}]},"z":1}"#).unwrap();
+    write_atomic(&d.dir.join(PANES_FILE), br#"{"2":"web-1","10":"db"}"#).unwrap();
+    assert_eq!(live_unit(&d.dir).unwrap().unwrap(), bytes);
+}
+
+#[test]
+fn a_layout_edited_after_the_download_was_staged_is_copied_before_the_unit_replaces_it() {
+    let srv = server();
+    let (a, b) = pair(&srv, "edited");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    // The person arranged panes after the download was staged and before the app was started again.
+    write_atomic(&b.dir.join("layout.json"), br#"{"arranged":"by hand"}"#).unwrap();
+    let promoted = promote_incoming_with_report(&b.dir);
+    assert_eq!(promoted, Promoted { applied: vec!["layout.json".into()], kept: vec!["layout.json".into()], skipped: vec![] });
+    let copies = kept_copies(&b);
+    assert!(copies.iter().any(|c| c.0.starts_with("layout.json.") && c.1 == r#"{"arranged":"by hand"}"#), "{copies:?}");
+    assert_eq!(json(&b, "layout.json"), serde_json::json!({"panes": [1, 2, 3]}));
+    // The first run after the start lists it among the conflicts, as for any other file.
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap().conflicts, vec!["layout.json"]);
+    // A download over an unedited layout keeps no copy of the layout.
+    write_atomic(&a.dir.join("layout.json"), br#"{"panes":[1,2,3,4]}"#).unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(promote_incoming_with_report(&b.dir).kept.is_empty());
 }
