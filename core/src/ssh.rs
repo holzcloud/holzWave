@@ -30,6 +30,7 @@ use russh::{Channel, ChannelMsg, Disconnect, Sig};
 use tokio::sync::{mpsc as tmpsc, watch};
 
 use crate::conn::{ConnState, Link, SharedState};
+use crate::pool::{Connection, Open};
 use crate::{Error, Result};
 
 /// The most input kept while the connection is down. More is dropped, so a stuck key cannot fill the memory.
@@ -132,7 +133,7 @@ enum Cmd {
 }
 
 /// How one connected session ended.
-enum Outcome {
+pub(crate) enum Outcome {
     /// The remote shell ended with this code.
     Exit(u32),
     /// The user closed the pane.
@@ -424,18 +425,9 @@ fn is_fatal(error: &russh::Error) -> bool {
     matches!(error, russh::Error::UnknownKey | russh::Error::NotAuthenticated | russh::Error::KeyChanged { .. })
 }
 
-/// Open a session to `target`, going through its jump host if it has one, and log in. The reason a connection cannot be
-/// made is the text of the error. Used by [`crate::files::SftpSource`], which has its own connection.
-pub(crate) async fn open_session(target: &SshTarget) -> std::result::Result<Handle<Client>, String> {
-    match open(target).await {
-        Ok(handle) => Ok(handle),
-        Err(Outcome::Lost(why) | Outcome::Fatal(why)) => Err(why),
-        Err(Outcome::Exit(_) | Outcome::Closed) => Err("the connection ended".into()),
-    }
-}
-
-/// Open a session to `target`, going through its jump host if it has one, and log in.
-async fn open(target: &SshTarget) -> std::result::Result<Handle<Client>, Outcome> {
+/// Open a session to `target`, going through its jump host if it has one, and log in. The pane's connection loop uses it
+/// directly; everything else gets its session from a [`crate::pool::Connection`], which calls it.
+pub(crate) async fn open(target: &SshTarget) -> std::result::Result<Handle<Client>, Outcome> {
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
@@ -639,8 +631,6 @@ pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
 pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest a command may run, whatever the caller asks for.
 pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// Connect and log in: the bound [`crate::files::SftpSource`] uses too.
-const EXEC_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Open the channel and write the request.
 const EXEC_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// The shortest time limit; a smaller one is raised to it, so a zero cannot end every command before it starts.
@@ -807,12 +797,17 @@ impl Tail {
 /// the first contact with a host. A host can therefore be used by exec only after the user's own pane or file
 /// browser learned its key.
 fn require_pinned_hosts(target: &SshTarget) -> Result<SshTarget> {
-    fn pin(target: &mut SshTarget) -> Result<()> {
+    pin_hosts(target).map_err(exec_error)
+}
+
+/// [`require_pinned_hosts`] with the reason as plain text, for the pool's [`crate::pool::Open::Pinned`] opener.
+pub(crate) fn pin_hosts(target: &SshTarget) -> std::result::Result<SshTarget, String> {
+    fn pin(target: &mut SshTarget) -> std::result::Result<(), String> {
         if target.known_hosts.is_none() {
-            return Err(exec_error(format!("{} has no known_hosts file, so its host key cannot be checked", target.host)));
+            return Err(format!("{} has no known_hosts file, so its host key cannot be checked", target.host));
         }
         if target.host_key == HostKeyPolicy::AcceptAny {
-            return Err(exec_error(format!("{} is set to accept any host key", target.host)));
+            return Err(format!("{} is set to accept any host key", target.host));
         }
         target.host_key = HostKeyPolicy::Strict;
         match target.jump.as_deref_mut() {
@@ -825,7 +820,7 @@ fn require_pinned_hosts(target: &SshTarget) -> Result<SshTarget> {
     Ok(pinned)
 }
 
-/// A refusal or failure of an exec: a fixed phrase or the reason `open_session` gave, never the command or a credential.
+/// A refusal or failure of an exec: a fixed phrase or the reason the login gave, never the command or a credential.
 fn exec_error(text: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("ssh exec: {text}"))
 }
@@ -880,103 +875,80 @@ async fn stop(channel: &Channel<client::Msg>) {
 
 /// Run commands on the host of a saved connection, one channel per command, without a terminal.
 ///
-/// The connection is made on the first [`SshExec::exec`] by the same function the SFTP source uses
-/// ([`open_session`]), so jump hosts, authentication and the host key check are not repeated here. It never learns a host
-/// key (see [`require_pinned_hosts`]), is bounded in output and time, and reports how a command ended. The connection is
-/// kept for the next call.
+/// The commands run on the session of a [`Connection`] (see [`crate::pool`]), so a host that a file browser or a monitor
+/// already logged in to costs no second login. The session is opened as [`Open::Pinned`]: jump hosts, authentication and
+/// the host key check are `open`'s, and a key is never learned (see [`require_pinned_hosts`]); a session that a person's
+/// own open made serves the commands too. Output and time are bounded, and the result says how a command ended. The
+/// connection is kept for the next call.
 pub struct SshExec {
-    label: String,
-    /// The pinned copy of the target the caller gave.
-    target: SshTarget,
-    runtime: tokio::runtime::Runtime,
-    conn: tokio::sync::Mutex<Option<Arc<Handle<Client>>>>,
+    conn: Arc<Connection>,
 }
 
 impl SshExec {
-    /// Prepare an exec primitive for `target`. Opens no socket: nothing connects before the first call of
-    /// [`SshExec::exec`].
+    /// Prepare an exec primitive for `target` on a connection of its own. Opens no socket: nothing connects before the
+    /// first call of [`SshExec::exec`].
     ///
     /// Fails for a host (or jump host) without a known hosts file and for one set to accept any key: the host key of an
     /// exec connection is always checked and never learned.
     pub fn new(label: impl Into<String>, target: SshTarget) -> Result<Self> {
-        let target = require_pinned_hosts(&target)?;
-        // One worker thread drives keepalives and replies between calls (as in `SftpSource`); callers only wait.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .thread_name("hw-exec")
-            .build()
-            .map_err(|e| Error::Pty(format!("ssh exec runtime: {e}")))?;
-        Ok(Self { label: label.into(), target, runtime, conn: tokio::sync::Mutex::new(None) })
+        require_pinned_hosts(&target)?;
+        Self::on(Connection::standalone(label, target)?)
+    }
+
+    /// Prepare an exec primitive on a connection that others share (the one of a saved profile).
+    ///
+    /// Fails at once, as [`SshExec::new`] does, for a target that cannot be pinned.
+    pub fn on(conn: Arc<Connection>) -> Result<Self> {
+        require_pinned_hosts(conn.target())?;
+        Ok(Self { conn })
     }
 
     /// The name the caller gave, for its own messages.
     pub fn label(&self) -> &str {
-        &self.label
+        self.conn.label()
     }
 
     /// Run `command` on the host and return its output, its exit status and how it ended.
     ///
-    /// This blocks: never call it from an async task or from the UI thread, and never drop an `SshExec` inside an async
-    /// context (the rules of `SftpSource`). `reconnect` and `startup` of the target are ignored. The command runs in the
-    /// account's login shell exactly as given: nothing is quoted or interpreted here, and a caller that builds a command
-    /// from data quotes it for a POSIX shell itself. The run is bounded by `limits.timeout`, measured from the
-    /// moment the request was written; connecting and opening the channel have their own bounds.
+    /// This blocks: never call it from an async task or from the UI thread. `reconnect` and `startup` of the target are
+    /// ignored. The command runs in the account's login shell exactly as given: nothing is quoted or interpreted here,
+    /// and a caller that builds a command from data quotes it for a POSIX shell itself. The run is bounded by
+    /// `limits.timeout`, measured from the moment the request was written; connecting and opening the channel have
+    /// their own bounds.
     ///
     /// A command is written at most once. [`ExecEnd::Lost`] means the connection broke while it ran: it may or may not
     /// have finished, and this code never runs it again.
     pub fn exec(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
         check_command(command)?;
         let limits = limits.clamped();
-        self.runtime.block_on(self.run(command, &limits, cancel))
-    }
-
-    /// The cached connection, or a new one. The `bool` says the connection was made by this call.
-    async fn connection(&self) -> Result<(Arc<Handle<Client>>, bool)> {
-        let mut slot = self.conn.lock().await;
-        if let Some(handle) = slot.as_ref().filter(|handle| !handle.is_closed()) {
-            return Ok((handle.clone(), false));
-        }
-        let handle = tokio::time::timeout(EXEC_CONNECT_TIMEOUT, open_session(&self.target))
-            .await
-            .map_err(|_| exec_error("the connection timed out"))?
-            .map_err(exec_error)?;
-        let handle = Arc::new(handle);
-        *slot = Some(handle.clone());
-        Ok((handle, true))
-    }
-
-    /// Forget `stale` if it is still the cached connection. Compared by identity, so the connection a parallel call made
-    /// in the meantime is never thrown away.
-    async fn invalidate(&self, stale: &Arc<Handle<Client>>) {
-        let mut slot = self.conn.lock().await;
-        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, stale)) {
-            *slot = None;
-        }
+        // The connection counts this run as a use, so the idle reaper never closes it under the command.
+        let _lease = self.conn.lease();
+        self.conn.block_on(self.run(command, &limits, cancel))
     }
 
     /// The whole run of one command.
     ///
-    /// A command is written at most once. A cached connection that cannot open a channel, or cannot take the
-    /// request, is replaced once; the same failure on a connection this call just made, a refused request, and every
+    /// A command is written at most once. A cached session that cannot open a channel, or cannot take the
+    /// request, is replaced once; the same failure on a session this call just made, a refused request, and every
     /// failure after the request was written are final. A connection lost while the command runs gives
     /// [`ExecEnd::Lost`], and nothing is ever tried again after that.
     async fn run(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
         let nothing = |end| ExecResult { stdout: Vec::new(), stderr: Vec::new(), status: None, end, truncated: false, dropped: 0 };
         let mut replaced = false;
         loop {
-            // Connect and open the channel. A cancel here ends the run before anything is written, and the abandoned
-            // connect leaves nothing half-made in the cache.
+            // Connect and open the channel. A cancel here ends the run before anything is written; the login itself
+            // belongs to the connection and finishes for whoever asks next.
             let opening = async {
-                let (handle, fresh) = self.connection().await?;
-                let channel = match tokio::time::timeout(EXEC_OPEN_TIMEOUT, handle.channel_open_session()).await {
+                let session = self.conn.session(Open::Pinned).await.map_err(exec_error)?;
+                let fresh = session.first_use();
+                let channel = match tokio::time::timeout(EXEC_OPEN_TIMEOUT, session.handle().channel_open_session()).await {
                     Ok(Ok(channel)) => Ok(channel),
                     Ok(Err(e)) => Err(exec_error(e)),
                     Err(_) => Err(exec_error("opening a channel timed out")),
                 };
-                Ok::<_, Error>((handle, fresh, channel))
+                Ok::<_, Error>((session, fresh, channel))
             };
-            let (handle, fresh, channel) = tokio::select! {
+            let (session, fresh, channel) = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Ok(nothing(ExecEnd::Cancelled)),
                 opening = opening => opening?,
@@ -990,7 +962,7 @@ impl SshExec {
                         // From here the command is written: no failure below is tried again.
                         let result = pump(channel, limits, cancel).await?;
                         if result.end == ExecEnd::Lost {
-                            self.invalidate(&handle).await;
+                            self.conn.invalidate(&session).await;
                         }
                         return Ok(result);
                     }
@@ -999,13 +971,13 @@ impl SshExec {
                 },
                 Err(why) => why,
             };
-            // The request was not written. A connection this call just made is not tried again, and a cached one is
+            // The request was not written. A session this call just made is not tried again, and a cached one is
             // replaced once.
             if fresh || replaced {
                 return Err(why);
             }
             replaced = true;
-            self.invalidate(&handle).await;
+            self.conn.invalidate(&session).await;
         }
     }
 }
@@ -2217,9 +2189,7 @@ mod tests {
         let result = run_default(&exec, "bye");
         assert_eq!(result.stdout, b"bye\n");
         assert_eq!(result.end, ExecEnd::Finished);
-        wait_until("the cached connection to be closed", || {
-            exec.runtime.block_on(async { exec.conn.lock().await.as_ref().is_some_and(|handle| handle.is_closed()) })
-        });
+        wait_until("the cached connection to be closed", || !exec.conn.is_connected());
         // No attempt on the dead handle: the next command goes straight to a new connection.
         assert_eq!(run_default(&exec, "conn").stdout, b"conn 1\n");
         assert_eq!(server.seen.connections.load(Ordering::SeqCst), 2);

@@ -1,8 +1,8 @@
 //! Files, local and over SFTP: what the file browser and the previews read, and the editor writes.
 //!
 //! [`FileSource`] is the one interface. [`LocalSource`] is this machine's files; [`SftpSource`] is the files of a
-//! saved SSH connection over SFTP on a connection of its own (so a file read never waits behind a terminal's output
-//! and a terminal never waits behind a file). Everything is bounded: a listing holds at most [`MAX_ENTRIES`] entries,
+//! saved SSH connection over SFTP, on the connection that profile shares with the command runner ([`crate::pool`]), one
+//! channel of its own, which is drained at once so a file read never holds up another channel. Everything is bounded: a listing holds at most [`MAX_ENTRIES`] entries,
 //! a read at most the limit it is given, a path at most [`MAX_PATH`] bytes, and nothing is ever executed or
 //! interpreted here.
 
@@ -10,16 +10,16 @@ use std::cmp::Ordering;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use russh::client::Handle;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileType, OpenFlags};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::ssh::{Client, SshTarget, open_session};
+use crate::pool::{Connection, Session};
+use crate::ssh::SshTarget;
 use crate::{Error, Result};
 
 /// The most entries a listing holds; the rest is cut and the listing says so.
@@ -233,70 +233,56 @@ impl FileSource for LocalSource {
 
 // ---- SFTP --------------------------------------------------------------------------------------------------------
 
-struct Conn {
-    /// Kept so the connection lives as long as the SFTP session on it.
-    _handle: Handle<Client>,
-    sftp: SftpSession,
-}
-
-/// The files of an SSH connection, over SFTP, on a connection of its own.
+/// The files of an SSH connection, over SFTP, on the connection of the saved profile (see [`crate::pool`]).
 pub struct SftpSource {
     label: String,
-    target: SshTarget,
-    runtime: tokio::runtime::Runtime,
-    conn: Mutex<Option<std::sync::Arc<Conn>>>,
+    conn: Arc<Connection>,
 }
 
 impl SftpSource {
-    /// Prepare a source for `target`; nothing connects until the first request, and a lost connection is made again by
-    /// the next request.
+    /// Prepare a source on a connection of its own for `target`; nothing connects until the first request, and a lost
+    /// connection is made again by the next request.
     pub fn new(label: impl Into<String>, target: SshTarget) -> Result<Self> {
-        // One worker thread drives the SSH and SFTP tasks between requests (keepalives, replies); the calling threads
-        // only wait on the result.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .thread_name("hw-sftp")
-            .build()
-            .map_err(|e| Error::Pty(format!("sftp runtime: {e}")))?;
-        Ok(Self { label: label.into(), target, runtime, conn: Mutex::new(None) })
+        Ok(Self::on(Connection::standalone(label, target)?))
     }
 
-    fn connection(&self) -> Result<std::sync::Arc<Conn>> {
-        if let Some(conn) = self.conn.lock().unwrap_or_else(PoisonError::into_inner).clone() {
-            return Ok(conn);
-        }
-        let made = self.runtime.block_on(async {
-            let handle = tokio::time::timeout(Duration::from_secs(20), open_session(&self.target))
-                .await
-                .map_err(|_| "the connection timed out".to_string())??;
-            let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
-            channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
-            let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())?;
-            Ok::<_, String>(std::sync::Arc::new(Conn { _handle: handle, sftp }))
+    /// Prepare a source on a connection that others share (the one of a saved profile). Nothing connects until the
+    /// first request.
+    pub fn on(conn: Arc<Connection>) -> Self {
+        Self { label: conn.label().to_owned(), conn }
+    }
+
+    /// Forget the SFTP session that failed, and the connection under it when that ended too, so the next request
+    /// starts afresh. A connection that is still alive is left to the others that use it.
+    fn forget(&self, session: &Arc<Session>, sftp: &Arc<SftpSession>) {
+        self.conn.block_on(async {
+            self.conn.drop_sftp(session, sftp).await;
+            if session.is_closed() {
+                self.conn.invalidate(session).await;
+            }
         });
-        let conn = made.map_err(|e| Error::Unsupported(format!("sftp: {e}")))?;
-        *self.conn.lock().unwrap_or_else(PoisonError::into_inner) = Some(conn.clone());
-        Ok(conn)
     }
 
     /// Run one request. A request that fails because the connection is gone is tried once more on a new connection.
     fn run<T, F, Fut>(&self, f: F) -> Result<T>
     where
-        F: Fn(std::sync::Arc<Conn>) -> Fut,
+        F: Fn(Arc<SftpSession>) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, russh_sftp::client::error::Error>>,
     {
+        // The connection counts the request as a use, so the idle reaper never closes it under the request.
+        let _lease = self.conn.lease();
         for attempt in 0..2 {
-            let conn = self.connection()?;
-            let outcome = self.runtime.block_on(async { tokio::time::timeout(REQUEST_TIMEOUT, f(conn)).await });
+            let (session, sftp) = self
+                .conn
+                .block_on(self.conn.sftp())
+                .map_err(|e| Error::Unsupported(format!("sftp: {e}")))?;
+            let outcome = self.conn.block_on(async { tokio::time::timeout(REQUEST_TIMEOUT, f(sftp.clone())).await });
             match outcome {
                 Ok(Ok(value)) => return Ok(value),
-                Ok(Err(e)) if attempt == 0 && is_connection_error(&e) => {
-                    *self.conn.lock().unwrap_or_else(PoisonError::into_inner) = None;
-                }
+                Ok(Err(e)) if attempt == 0 && is_connection_error(&e) => self.forget(&session, &sftp),
                 Ok(Err(e)) => return Err(Error::Unsupported(format!("sftp: {e}"))),
                 Err(_) => {
-                    *self.conn.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                    self.forget(&session, &sftp);
                     return Err(Error::Unsupported("sftp: the request timed out".into()));
                 }
             }
@@ -316,7 +302,7 @@ impl FileSource for SftpSource {
     }
 
     fn home(&self) -> Result<String> {
-        self.run(|c| async move { c.sftp.canonicalize(".").await })
+        self.run(|c| async move { c.canonicalize(".").await })
     }
 
     fn list(&self, path: &str) -> Result<Listing> {
@@ -325,10 +311,10 @@ impl FileSource for SftpSource {
         let (dir, mut entries, truncated) = self.run(|c| {
             let path = path.clone();
             async move {
-                let dir = c.sftp.canonicalize(path).await?;
+                let dir = c.canonicalize(path).await?;
                 let mut entries = Vec::new();
                 let mut truncated = false;
-                for item in c.sftp.read_dir(dir.clone()).await? {
+                for item in c.read_dir(dir.clone()).await? {
                     if entries.len() >= MAX_ENTRIES {
                         truncated = true;
                         break;
@@ -338,7 +324,7 @@ impl FileSource for SftpSource {
                     let link = item.file_type() == FileType::Symlink;
                     let (kind, size, modified) = if link {
                         // A link shows what it points to; one that points nowhere is an other entry.
-                        match c.sftp.metadata(item.path()).await {
+                        match c.metadata(item.path()).await {
                             Ok(target) => (kind_of(target.file_type()), target.len(), target.modified().ok().and_then(secs)),
                             Err(_) => (Kind::Other, 0, None),
                         }
@@ -361,7 +347,7 @@ impl FileSource for SftpSource {
         let (name, meta) = self.run(|c| {
             let path = path.clone();
             async move {
-                let meta = c.sftp.metadata(path.clone()).await?;
+                let meta = c.metadata(path.clone()).await?;
                 Ok((path, meta))
             }
         })?;
@@ -383,7 +369,7 @@ impl FileSource for SftpSource {
         self.run(|c| {
             let path = path.clone();
             async move {
-                let mut file = c.sftp.open(path).await?;
+                let mut file = c.open(path).await?;
                 let size = file.metadata().await?.len();
                 if size > limit {
                     return Ok(Err(too_large(size, limit)));
@@ -406,7 +392,7 @@ impl FileSource for SftpSource {
         self.run(|c| {
             let path = path.clone();
             async move {
-                let mut file = c.sftp.open(path).await?;
+                let mut file = c.open(path).await?;
                 file.seek(std::io::SeekFrom::Start(offset)).await?;
                 let mut bytes = Vec::new();
                 (&mut file).take(len).read_to_end(&mut bytes).await?;
@@ -425,9 +411,9 @@ impl FileSource for SftpSource {
         self.run(|c| {
             let (path, aside, old) = (path.clone(), aside.clone(), old.clone());
             async move {
-                let existing = c.sftp.metadata(path.clone()).await.ok();
+                let existing = c.metadata(path.clone()).await.ok();
                 let wrote = async {
-                    let mut file = c.sftp.open_with_flags(aside.clone(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE).await?;
+                    let mut file = c.open_with_flags(aside.clone(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE).await?;
                     file.write_all(bytes).await?;
                     file.flush().await?;
                     file.shutdown().await?;
@@ -436,15 +422,15 @@ impl FileSource for SftpSource {
                 .await;
                 if let Err(e) = wrote {
                     // Whatever was written is not wanted: nothing stays behind, the old file was never touched.
-                    let _ = c.sftp.remove_file(aside.clone()).await;
+                    let _ = c.remove_file(aside.clone()).await;
                     return Err(e);
                 }
                 let Some(meta) = existing else {
                     // A new file: one rename, nothing to swap.
-                    return match c.sftp.rename(aside.clone(), path).await {
+                    return match c.rename(aside.clone(), path).await {
                         Ok(()) => Ok(Ok(())),
                         Err(e) => {
-                            let _ = c.sftp.remove_file(aside).await;
+                            let _ = c.remove_file(aside).await;
                             Err(e)
                         }
                     };
@@ -452,26 +438,26 @@ impl FileSource for SftpSource {
                 // Keep the permissions of the file that is replaced.
                 let mut keep = russh_sftp::protocol::FileAttributes::empty();
                 keep.permissions = meta.permissions;
-                let _ = c.sftp.set_metadata(aside.clone(), keep).await;
-                if c.sftp.rename(aside.clone(), path.clone()).await.is_ok() {
+                let _ = c.set_metadata(aside.clone(), keep).await;
+                if c.rename(aside.clone(), path.clone()).await.is_ok() {
                     return Ok(Ok(()));
                 }
                 // A server that does not rename over an existing file (OpenSSH's does not): the old file is moved aside,
                 // the new one put in its place and the old one removed. The old file is never removed before the new
                 // one is in place, and it is put back when the middle step fails.
-                let _ = c.sftp.remove_file(old.clone()).await; // a copy left by an earlier failure
-                if let Err(e) = c.sftp.rename(path.clone(), old.clone()).await {
-                    let _ = c.sftp.remove_file(aside).await;
+                let _ = c.remove_file(old.clone()).await; // a copy left by an earlier failure
+                if let Err(e) = c.rename(path.clone(), old.clone()).await {
+                    let _ = c.remove_file(aside).await;
                     return Err(e);
                 }
-                if let Err(e) = c.sftp.rename(aside.clone(), path.clone()).await {
-                    if c.sftp.rename(old.clone(), path.clone()).await.is_ok() {
-                        let _ = c.sftp.remove_file(aside).await;
+                if let Err(e) = c.rename(aside.clone(), path.clone()).await {
+                    if c.rename(old.clone(), path.clone()).await.is_ok() {
+                        let _ = c.remove_file(aside).await;
                         return Err(e);
                     }
                     return Ok(Err(format!("the file could not be replaced ({e}); the new text is in {aside} and the old file is in {old}")));
                 }
-                let _ = c.sftp.remove_file(old).await; // the new file is in place: a copy that stays is harmless
+                let _ = c.remove_file(old).await; // the new file is in place: a copy that stays is harmless
                 Ok(Ok(()))
             }
         })?

@@ -19,6 +19,7 @@
 //! - [`files`]: the file browser's source of files, local and over SFTP, with bounded reads and atomic writes.
 //! - [`preview`]: the kind of a file and Markdown as sanitised HTML.
 //! - [`ssh`]: a shell on another machine over SSH, with reconnect.
+//! - [`pool`]: one SSH connection per saved connection, shared by the file browser and the command runner.
 //! - [`persist`]: atomic file writes, bounded reads and the debounced saver.
 //! - [`settings`]: `settings.json`, typed, versioned and validated.
 //! - [`theme`]: built-in and user themes, terminal palette and chrome tokens.
@@ -46,6 +47,7 @@ pub mod layout;
 pub mod pane;
 pub mod persist;
 pub mod platform;
+pub mod pool;
 pub mod preview;
 pub mod profiles;
 pub mod pty;
