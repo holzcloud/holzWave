@@ -51,6 +51,7 @@ use crate::layout::PaneId;
 use crate::platform::{self, Os, ShellLaunch};
 use crate::conn::{ConnState, Link, SharedState};
 use crate::pty::{Pty, SpawnOptions, process_cwd};
+use crate::pool::Connection;
 use crate::ssh::{SshLink, SshTarget};
 use crate::queue::{PaneQueue, Popped};
 use crate::textread::{MAX_READ_BYTES, MAX_READ_ROWS, TextRead, TextRegion};
@@ -139,6 +140,10 @@ pub struct PaneSpec {
     /// Run the pane on another machine over SSH instead of a local shell. `program`, `args`, `cwd` and `host_spawn`
     /// are then not used. The pane's own thread reconnects when the connection is lost.
     pub ssh: Option<SshTarget>,
+    /// The connection of a saved SSH profile that this pane runs on, shared with the file browser and the commands of
+    /// the same profile (one login). When it is set the shell takes a channel of it; otherwise `ssh` is connected on a
+    /// connection of the pane's own. [`crate::connections::Connections::apply`] sets both.
+    pub ssh_connection: Option<Arc<Connection>>,
     /// No process at all ([`crate::conn::NullLink`]): the page draws this pane's content itself (a file browser, a
     /// preview). The pane is otherwise a pane like any other: it has a header, can be split, moved and closed.
     pub blank: bool,
@@ -166,6 +171,7 @@ impl PaneSpec {
             host_spawn: false,
             cwd_lookup: true,
             ssh: None,
+            ssh_connection: None,
             blank: false,
             env: Vec::new(),
         }
@@ -1020,6 +1026,10 @@ where
     }
     if spec.blank {
         return Ok((engine, Box::new(crate::conn::NullLink::new())));
+    }
+    if let Some(connection) = &spec.ssh_connection {
+        let link = SshLink::attach(connection.clone(), spec.cols, spec.rows)?;
+        return Ok((engine, Box::new(link)));
     }
     if let Some(target) = &spec.ssh {
         let link = SshLink::connect(target.clone(), spec.cols, spec.rows)?;

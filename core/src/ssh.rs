@@ -6,6 +6,12 @@
 //! [`Reconnect::attempts`] times. A shell that ends on its own, a refused login and a changed host key end the pane
 //! at once, because trying again cannot change them.
 //!
+//! The shell runs on the session of a [`Connection`] (see [`crate::pool`]): a pane, a file browser and a command runner
+//! of one saved connection share one login. Closing a pane closes its channel and leaves the session to the others. The
+//! output of the shell is handed to the pane through a counted queue that is capped at [`MAX_BACKLOG`]: past the cap the
+//! shell's channel is closed and the pane says why, so one pane that is slow or stopped cannot stall the other channels
+//! of the host.
+//!
 //! Secrets (a key's passphrase, a password) are given by the caller in [`SshAuth`] and are never written to disk or
 //! to the screen here. Host keys are checked against a `known_hosts` file ([`HostKeyPolicy`]).
 //!
@@ -19,6 +25,7 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -26,15 +33,22 @@ use std::time::Duration;
 
 use russh::client::{self, Handle};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, known_hosts, load_secret_key};
-use russh::{Channel, ChannelMsg, Disconnect, Sig};
+use russh::{Channel, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::sync::{mpsc as tmpsc, watch};
 
 use crate::conn::{ConnState, Link, SharedState};
-use crate::pool::{Connection, Open};
+use crate::pool::{Connection, Open, Session};
 use crate::{Error, Result};
 
 /// The most input kept while the connection is down. More is dropped, so a stuck key cannot fill the memory.
 pub const MAX_BUFFERED: usize = 64 * 1024;
+
+/// The most shell output that may wait for the pane to read it, in bytes. Past it the shell's channel is closed (the
+/// connection's other channels go on) and the pane says that the output piled up faster than it could be shown.
+pub const MAX_BACKLOG: usize = 16 * 1024 * 1024;
+
+/// How long closing a shell channel may take before it is let go of.
+const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long one attempt to connect and log in may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -144,11 +158,71 @@ pub(crate) enum Outcome {
     Fatal(String),
 }
 
+/// The hand-over of the shell's output to the pane: a standard channel (the pane's reader blocks on it) and the count of
+/// the bytes that are queued in it and not yet read.
+///
+/// The loop that owns the shell's channel is the only sender and never waits for the pane: a push that would take the
+/// queue past [`MAX_BACKLOG`] is refused instead, and the loop ends the shell. So the session task of the connection is
+/// never held by a slow pane.
+struct Backlog {
+    tx: mpsc::Sender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
+
+/// What became of a chunk of shell output.
+enum Pushed {
+    Queued,
+    /// The queue would pass [`MAX_BACKLOG`]; nothing was queued.
+    Full,
+    /// The pane no longer reads.
+    Gone,
+}
+
+/// Whether `add` more bytes on top of `queued` pass `cap`.
+fn passes_cap(queued: usize, add: usize, cap: usize) -> bool {
+    queued.saturating_add(add) > cap
+}
+
+impl Backlog {
+    fn new() -> (Self, ChanReader) {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        (Self { tx, queued: queued.clone() }, ChanReader { rx, pending: Vec::new(), pos: 0, queued })
+    }
+
+    /// Queue a chunk of the shell's output, unless it would pass the cap.
+    fn push(&self, chunk: Vec<u8>) -> Pushed {
+        // The loop is the only one that adds, so the check and the add cannot race; the reader only subtracts.
+        if passes_cap(self.queued.load(Ordering::SeqCst), chunk.len(), MAX_BACKLOG) {
+            return Pushed::Full;
+        }
+        self.queue(chunk)
+    }
+
+    fn queue(&self, chunk: Vec<u8>) -> Pushed {
+        let n = chunk.len();
+        self.queued.fetch_add(n, Ordering::SeqCst);
+        if self.tx.send(chunk).is_err() {
+            self.queued.fetch_sub(n, Ordering::SeqCst);
+            return Pushed::Gone;
+        }
+        Pushed::Queued
+    }
+
+    /// Show the pane a line of the connection's own. It is a few bytes and the pane must be told even when the queue is
+    /// full, so it is not held to the cap. `false` when the pane no longer reads.
+    fn notice(&self, text: &str) -> bool {
+        matches!(self.queue(notice(text)), Pushed::Queued)
+    }
+}
+
 /// The ends the pane reads and writes.
 struct ChanReader {
     rx: mpsc::Receiver<Vec<u8>>,
     pending: Vec<u8>,
     pos: usize,
+    /// The bytes in the queue that this reader has not handed on yet.
+    queued: Arc<AtomicUsize>,
 }
 
 impl Read for ChanReader {
@@ -166,6 +240,8 @@ impl Read for ChanReader {
         let n = buf.len().min(self.pending.len() - self.pos);
         buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
         self.pos += n;
+        // What was handed on is no longer waiting. Every byte was counted before it was queued, so this cannot underflow.
+        self.queued.fetch_sub(n, Ordering::SeqCst);
         Ok(n)
     }
 }
@@ -195,13 +271,23 @@ pub struct SshLink {
     state: SharedState,
     exit: Arc<Mutex<Option<u32>>>,
     thread: Option<JoinHandle<()>>,
+    queued: Arc<AtomicUsize>,
 }
 
 impl SshLink {
-    /// Start connecting to `target` with a grid of `cols` x `rows`. Returns at once; the connection is made on a
-    /// thread of its own and its progress is in [`SshLink::state`] and on the pane's screen.
+    /// Start connecting to `target` with a grid of `cols` x `rows`, on a connection of its own. Returns at once; the
+    /// connection is made on a thread of its own and its progress is in [`SshLink::state`] and on the pane's screen.
     pub fn connect(target: SshTarget, cols: u16, rows: u16) -> Result<Self> {
-        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+        let label = target.host.clone();
+        Self::attach(Connection::standalone(label, target)?, cols, rows)
+    }
+
+    /// Start a shell on `connection`, the connection of a saved profile that the file browser and the command runner
+    /// share. The shell takes a channel of the connection's one login and never ends the login: closing the pane closes
+    /// the channel and leaves the session to the others. Returns at once, like [`SshLink::connect`].
+    pub fn attach(connection: Arc<Connection>, cols: u16, rows: u16) -> Result<Self> {
+        let (backlog, reader) = Backlog::new();
+        let queued = backlog.queued.clone();
         let (cmd_tx, cmd_rx) = tmpsc::unbounded_channel::<Cmd>();
         let state = SharedState::new(ConnState::Connecting);
         let exit = Arc::new(Mutex::new(None));
@@ -212,18 +298,24 @@ impl SshLink {
         let thread = {
             let (state, exit) = (state.clone(), exit.clone());
             thread::Builder::new().name("ssh".into()).spawn(move || {
-                let code = runtime.block_on(run(target, (cols, rows), cmd_rx, out_tx, state.clone()));
+                let code = runtime.block_on(run(&connection, (cols, rows), cmd_rx, backlog, state.clone()));
                 *exit.lock().unwrap_or_else(PoisonError::into_inner) = Some(code);
                 state.set(ConnState::Closed);
+                // The last owner of a connection (a link made by `connect`) ends its login now, politely, before the
+                // runtime that carries it goes. A shared connection is left to the others and to the idle reaper.
+                if Arc::strong_count(&connection) == 1 {
+                    connection.block_on(connection.close_session());
+                }
             })?
         };
         Ok(Self {
-            reader: Some(Box::new(ChanReader { rx: out_rx, pending: Vec::new(), pos: 0 })),
+            reader: Some(Box::new(reader)),
             writer: Some(Box::new(ChanWriter { tx: cmd_tx.clone() })),
             cmd: cmd_tx,
             state,
             exit,
             thread: Some(thread),
+            queued,
         })
     }
 
@@ -235,6 +327,12 @@ impl SshLink {
     /// A handle on the state that outlives the link, for the code that shows it.
     pub fn shared_state(&self) -> SharedState {
         self.state.clone()
+    }
+
+    /// How many bytes of the shell's output wait for the pane to read them. For tests and diagnostics; never above
+    /// [`MAX_BACKLOG`] plus the few bytes of a notice.
+    pub fn backlog_bytes(&self) -> usize {
+        self.queued.load(Ordering::SeqCst)
     }
 }
 
@@ -286,19 +384,20 @@ fn notice(text: &str) -> Vec<u8> {
     format!("\r\n\x1b[33m{clean}\x1b[0m\r\n").into_bytes()
 }
 
-/// The whole life of a connection: connect, run, and connect again while that makes sense. Returns the exit code.
+/// The whole life of a pane's connection: connect, run, and connect again while that makes sense. Returns the exit code.
 async fn run(
-    target: SshTarget,
+    connection: &Arc<Connection>,
     size: (u16, u16),
     mut cmd: tmpsc::UnboundedReceiver<Cmd>,
-    out: mpsc::Sender<Vec<u8>>,
+    out: Backlog,
     state: SharedState,
 ) -> u32 {
+    let target = connection.target();
     let mut size = (size.0, size.1, 0u32, 0u32);
     let mut buffered: Vec<u8> = Vec::new();
     let mut attempt = 0u32;
     loop {
-        let outcome = session(&target, &mut size, &mut cmd, &out, &state, &mut buffered, &mut attempt).await;
+        let outcome = session(connection, &mut size, &mut cmd, &out, &state, &mut buffered, &mut attempt).await;
         match outcome {
             Outcome::Exit(code) => return code,
             Outcome::Closed => return 0,
@@ -322,9 +421,9 @@ async fn run(
                 let of = target.reconnect.attempts;
                 let in_secs = target.reconnect.delay.as_secs();
                 state.set(ConnState::Reconnecting { attempt, of, in_secs });
-                let _ = out.send(notice(&format!(
+                let _ = out.notice(&format!(
                     "Connection lost: {why}. Retrying {attempt}/{of} in {in_secs} s. What you type is kept."
-                )));
+                ));
                 // Wait, and keep listening: input is kept, a resize is remembered, a close ends it.
                 let sleep = tokio::time::sleep(target.reconnect.delay);
                 tokio::pin!(sleep);
@@ -348,13 +447,13 @@ async fn run(
 async fn wait_for_enter(
     text: &str,
     cmd: &mut tmpsc::UnboundedReceiver<Cmd>,
-    out: &mpsc::Sender<Vec<u8>>,
+    out: &Backlog,
     state: &SharedState,
     size: &mut (u16, u16, u32, u32),
     buffered: &mut Vec<u8>,
 ) -> bool {
     state.set(ConnState::Failed);
-    let _ = out.send(notice(&format!("{text} Press Enter to try again.")));
+    let _ = out.notice(&format!("{text} Press Enter to try again."));
     buffered.clear();
     loop {
         match cmd.recv().await {
@@ -531,30 +630,75 @@ fn key_error_text(passphrase_given: bool, error: &russh::keys::Error) -> String 
     }
 }
 
-/// One connected session: log in, open the shell, and pump bytes until it ends.
+/// The sentence for a refused channel, and the text of every other error as it is.
+///
+/// A server that limits how many channels one connection may have open (OpenSSH's `MaxSessions`) refuses the next one
+/// with a bare protocol reason; the person is told what that means. The text holds no host name and no credential.
+pub(crate) fn channel_text(error: &russh::Error) -> String {
+    match error {
+        russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited | ChannelOpenFailure::ResourceShortage) => {
+            "the server refuses another channel on this connection; it limits how many can be open at once".into()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// One connected session: take the connection's login (making it when there is none), open the shell on it, and pump
+/// bytes until it ends. The login is the connection's and outlives this shell: only the shell's channel is closed.
 async fn session(
-    target: &SshTarget,
+    connection: &Arc<Connection>,
     size: &mut (u16, u16, u32, u32),
     cmd: &mut tmpsc::UnboundedReceiver<Cmd>,
-    out: &mpsc::Sender<Vec<u8>>,
+    out: &Backlog,
     state: &SharedState,
     buffered: &mut Vec<u8>,
     attempt: &mut u32,
 ) -> Outcome {
-    let handle = match open(target).await {
-        Ok(handle) => handle,
-        Err(outcome) => return outcome,
+    // The shell counts as a use of the connection, so the idle reaper never closes the login under it.
+    let _lease = connection.lease();
+    let session = match connection.session(Open::Interactive).await {
+        Ok(session) => session,
+        Err(e) if e.fatal => return Outcome::Fatal(e.why),
+        Err(e) => return Outcome::Lost(e.why),
     };
-    let mut channel = match handle.channel_open_session().await {
+    let outcome = shell(connection, &session, size, cmd, out, state, buffered, attempt).await;
+    // A login that ended under the shell is replaced by the next attempt, once for every user of the connection.
+    if matches!(outcome, Outcome::Lost(_)) && session.is_closed() {
+        connection.invalidate(&session).await;
+    }
+    outcome
+}
+
+/// Close a shell's channel without waiting for the server for long. Errors do not matter: the channel is gone either way.
+async fn close_channel(channel: &Channel<client::Msg>) {
+    let _ = tokio::time::timeout(CHANNEL_CLOSE_TIMEOUT, channel.close()).await;
+}
+
+/// The shell itself, on a login that is already made.
+#[allow(clippy::too_many_arguments)]
+async fn shell(
+    connection: &Arc<Connection>,
+    session: &Arc<Session>,
+    size: &mut (u16, u16, u32, u32),
+    cmd: &mut tmpsc::UnboundedReceiver<Cmd>,
+    out: &Backlog,
+    state: &SharedState,
+    buffered: &mut Vec<u8>,
+    attempt: &mut u32,
+) -> Outcome {
+    let target = connection.target();
+    let mut channel = match session.handle().channel_open_session().await {
         Ok(channel) => channel,
-        Err(e) => return Outcome::Lost(e.to_string()),
+        Err(e) => return Outcome::Lost(channel_text(&e)),
     };
     let (cols, rows, px_w, px_h) = *size;
     if let Err(e) = channel.request_pty(false, &target.term, cols as u32, rows as u32, px_w, px_h, &[]).await {
-        return Outcome::Lost(e.to_string());
+        close_channel(&channel).await;
+        return Outcome::Lost(channel_text(&e));
     }
     if let Err(e) = channel.request_shell(false).await {
-        return Outcome::Lost(e.to_string());
+        close_channel(&channel).await;
+        return Outcome::Lost(channel_text(&e));
     }
     // From here on the connection works: the count of failed attempts starts again.
     *attempt = 0;
@@ -571,10 +715,7 @@ async fn session(
     let outcome = loop {
         tokio::select! {
             msg = cmd.recv() => match msg {
-                None | Some(Cmd::Close) => {
-                    let _ = channel.close().await;
-                    break Outcome::Closed;
-                }
+                None | Some(Cmd::Close) => break Outcome::Closed,
                 Some(Cmd::Data(bytes)) => {
                     if let Err(e) = channel.data_bytes(bytes).await {
                         break Outcome::Lost(e.to_string());
@@ -588,16 +729,13 @@ async fn session(
                 }
             },
             msg = channel.wait() => match msg {
-                Some(ChannelMsg::Data { data }) => {
-                    if out.send(data.to_vec()).is_err() {
-                        break Outcome::Closed;
-                    }
-                }
-                Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    if out.send(data.to_vec()).is_err() {
-                        break Outcome::Closed;
-                    }
-                }
+                Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => match out.push(data.to_vec()) {
+                    Pushed::Queued => {}
+                    Pushed::Gone => break Outcome::Closed,
+                    // The pane cannot keep up. Ending the shell keeps the connection's other channels moving, and trying
+                    // again would only restart the flood, so the pane fails and waits for Enter.
+                    Pushed::Full => break Outcome::Fatal("the output arrived faster than the pane could show it".into()),
+                },
                 Some(ChannelMsg::ExitStatus { exit_status }) => exit = Some(exit_status),
                 Some(ChannelMsg::ExitSignal { .. }) => exit = Some(128),
                 Some(ChannelMsg::Eof | ChannelMsg::Close) => break Outcome::Exit(exit.unwrap_or(0)),
@@ -610,7 +748,10 @@ async fn session(
             },
         }
     };
-    let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+    // Only the shell's channel ends here; the login belongs to the connection.
+    if matches!(outcome, Outcome::Closed | Outcome::Exit(_) | Outcome::Fatal(_)) {
+        close_channel(&channel).await;
+    }
     outcome
 }
 
@@ -943,7 +1084,7 @@ impl SshExec {
                 let fresh = session.first_use();
                 let channel = match tokio::time::timeout(EXEC_OPEN_TIMEOUT, session.handle().channel_open_session()).await {
                     Ok(Ok(channel)) => Ok(channel),
-                    Ok(Err(e)) => Err(exec_error(e)),
+                    Ok(Err(e)) => Err(exec_error(channel_text(&e))),
                     Err(_) => Err(exec_error("opening a channel timed out")),
                 };
                 Ok::<_, Error>((session, fresh, channel))
@@ -1036,7 +1177,7 @@ mod tests {
     use super::*;
     use russh::keys::{Algorithm, PrivateKey};
     use russh::server::{self, Auth, Msg, Server as _, Session};
-    use russh::{Channel, ChannelId};
+    use russh::{Channel, ChannelId, Disconnect};
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
@@ -1412,6 +1553,56 @@ mod tests {
         }
         // Anything that is none of the above is the error's own text.
         assert_eq!(key_error_text(true, &KeyError::NoHomeDir), KeyError::NoHomeDir.to_string());
+    }
+
+    #[test]
+    fn the_cap_decision_is_exact_at_the_limit() {
+        assert!(!passes_cap(0, 0, 10));
+        assert!(!passes_cap(4, 6, 10), "exactly the cap is allowed");
+        assert!(passes_cap(4, 7, 10), "one byte over is not");
+        assert!(passes_cap(10, 1, 10));
+        assert!(!passes_cap(10, 0, 10));
+        assert!(passes_cap(usize::MAX, 1, usize::MAX - 1), "the sum saturates instead of wrapping");
+        assert!(!passes_cap(0, MAX_BACKLOG, MAX_BACKLOG));
+        assert!(passes_cap(1, MAX_BACKLOG, MAX_BACKLOG));
+    }
+
+    #[test]
+    fn the_backlog_counts_what_is_queued_and_what_is_read() {
+        let (backlog, mut reader) = Backlog::new();
+        assert!(matches!(backlog.push(vec![1; 100]), Pushed::Queued));
+        assert!(matches!(backlog.push(vec![2; 50]), Pushed::Queued));
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 150);
+        let mut buf = [0u8; 30];
+        assert_eq!(reader.read(&mut buf).unwrap(), 30);
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 120, "a partly read chunk still waits for the rest");
+        let mut rest = vec![0u8; 200];
+        assert_eq!(reader.read(&mut rest).unwrap(), 70);
+        assert_eq!(reader.read(&mut rest).unwrap(), 50);
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 0);
+        // A notice is counted too, and is not held to the cap.
+        assert!(backlog.queued.fetch_add(MAX_BACKLOG, Ordering::SeqCst) == 0);
+        assert!(matches!(backlog.push(vec![0; 1]), Pushed::Full), "a push past the cap is refused and counts nothing");
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), MAX_BACKLOG);
+        assert!(backlog.notice("full"));
+        assert!(backlog.queued.load(Ordering::SeqCst) > MAX_BACKLOG, "the notice went in past the cap");
+        // A pane that no longer reads: nothing stays counted.
+        let (backlog, reader) = Backlog::new();
+        drop(reader);
+        assert!(matches!(backlog.push(vec![0; 10]), Pushed::Gone));
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 0);
+        assert!(!backlog.notice("gone"));
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_refused_channel_is_worded_and_every_other_error_keeps_its_text() {
+        let sentence = "the server refuses another channel on this connection; it limits how many can be open at once";
+        assert_eq!(channel_text(&russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited)), sentence);
+        assert_eq!(channel_text(&russh::Error::ChannelOpenFailure(ChannelOpenFailure::ResourceShortage)), sentence);
+        let other = russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed);
+        assert_eq!(channel_text(&other), other.to_string(), "a failure of another kind is not worded as a limit");
+        assert_eq!(channel_text(&russh::Error::Disconnect), russh::Error::Disconnect.to_string());
     }
 
     #[test]

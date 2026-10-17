@@ -12,6 +12,10 @@
 //!   so a password cannot be what let a key test pass. Every refusal and every success is counted.
 //! - **Shell.** A pty request is accepted and counted; a shell request prints `welcome N` (`N` is the zero-based index
 //!   of the connection), each input line comes back as `echo:<line>` and the line `exit` ends the shell with status 3.
+//!   With [`Options::shell_flood`] the line `flood` is answered with a stream of bytes, and with
+//!   [`Options::cut_shell_after`] the first connection is cut a while after its shell started.
+//! - **Channel limit.** With [`Options::max_channels`] a session channel beyond that many open at once is refused, as
+//!   OpenSSH's `MaxSessions` does.
 //! - **Exec.** The command line is recorded, `ran:<command>` is printed and the command ends with status 0.
 //! - **Jump host.** With [`Options::jump`] the server answers `direct-tcpip` requests for loopback addresses by
 //!   connecting to them and copying both ways; every request is recorded.
@@ -55,17 +59,37 @@ pub struct Options {
     pub sftp_root: Option<PathBuf>,
     /// What every exec request prints instead of `ran:<command>`.
     pub exec_reply: Option<Vec<u8>>,
+    /// The size of the answer to the shell line `flood`; `None` makes it an ordinary line.
+    pub shell_flood: Option<usize>,
+    /// The most session channels open at once; the next one is refused.
+    pub max_channels: Option<usize>,
+    /// Cut the first connection this many milliseconds after its shell started.
+    pub cut_shell_after: Option<u64>,
 }
 
 impl Options {
     /// User `holz` with the password `pw` and nothing else.
     pub fn password() -> Self {
-        Self { user: "holz", password: Some("pw"), authorized: Vec::new(), jump: false, sftp_root: None, exec_reply: None }
+        Self::new(Some("pw"), Vec::new())
     }
 
     /// User `holz` with this public key and no password.
     pub fn key(key: PublicKey) -> Self {
-        Self { user: "holz", password: None, authorized: vec![key], jump: false, sftp_root: None, exec_reply: None }
+        Self::new(None, vec![key])
+    }
+
+    fn new(password: Option<&'static str>, authorized: Vec<PublicKey>) -> Self {
+        Self {
+            user: "holz",
+            password,
+            authorized,
+            jump: false,
+            sftp_root: None,
+            exec_reply: None,
+            shell_flood: None,
+            max_channels: None,
+            cut_shell_after: None,
+        }
     }
 
     /// The same server, and it also answers `direct-tcpip`.
@@ -77,6 +101,26 @@ impl Options {
     /// The same server, and its SFTP subsystem serves `root`. Paths outside it are refused.
     pub fn sftp(mut self, root: PathBuf) -> Self {
         self.sftp_root = Some(root.canonicalize().unwrap());
+        self
+    }
+
+    /// The same server, and the shell line `flood` is answered with `bytes` bytes (the letters `a` to `z` in turn, in
+    /// 16 KiB chunks, one chunk a millisecond: fast enough to fill any bound, slow enough that a test can use the
+    /// connection while it runs) and then the line `flood done`.
+    pub fn shell_flood(mut self, bytes: usize) -> Self {
+        self.shell_flood = Some(bytes);
+        self
+    }
+
+    /// The same server, and a session channel beyond `n` open at once is refused.
+    pub fn max_channels(mut self, n: usize) -> Self {
+        self.max_channels = Some(n);
+        self
+    }
+
+    /// The same server, and its first connection is cut `ms` milliseconds after its shell started.
+    pub fn cut_shell_after(mut self, ms: u64) -> Self {
+        self.cut_shell_after = Some(ms);
         self
     }
 
@@ -256,6 +300,14 @@ impl Out {
         Self { rx, seen: String::new() }
     }
 
+    /// Take in everything that arrives until nothing has arrived for `gap`, or `max` has passed.
+    pub fn quiet(&mut self, gap: Duration, max: Duration) {
+        let deadline = Instant::now() + max;
+        while let Ok(chunk) = self.rx.recv_timeout(gap.min(deadline.saturating_duration_since(Instant::now()))) {
+            self.seen.push_str(&String::from_utf8_lossy(&chunk));
+        }
+    }
+
     /// Wait until `needle` has been seen in the output, or fail after `secs` seconds.
     pub fn until(&mut self, needle: &str, secs: u64) {
         let deadline = Instant::now() + Duration::from_secs(secs);
@@ -282,7 +334,14 @@ impl server::Server for Factory {
     type Handler = Handler;
     fn new_client(&mut self, _: Option<SocketAddr>) -> Handler {
         let index = self.seen.connections.fetch_add(1, Ordering::SeqCst);
-        Handler { seen: self.seen.clone(), options: self.options.clone(), index, shells: HashSet::new(), channels: HashMap::new() }
+        Handler {
+            seen: self.seen.clone(),
+            options: self.options.clone(),
+            index,
+            shells: HashSet::new(),
+            channels: HashMap::new(),
+            open: HashSet::new(),
+        }
     }
 }
 
@@ -296,6 +355,8 @@ struct Handler {
     /// Session channels that have not asked for anything yet: an `sftp` request needs the channel itself. A channel is
     /// let go of when it runs a shell or a command, because nobody reads it then and its data would pile up.
     channels: HashMap<ChannelId, Channel<Msg>>,
+    /// The session channels that are open now, for [`Options::max_channels`].
+    open: HashSet<ChannelId>,
 }
 
 impl Drop for Handler {
@@ -341,10 +402,22 @@ impl server::Handler for Handler {
         reply: server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.options.max_channels.is_some_and(|most| self.open.len() >= most) {
+            // A dropped handle refuses the channel, as `MaxSessions` does.
+            drop(reply);
+            return Ok(());
+        }
+        self.open.insert(channel.id());
         if self.options.sftp_root.is_some() {
             self.channels.insert(channel.id(), channel);
         }
         reply.accept().await;
+        Ok(())
+    }
+
+    async fn channel_close(&mut self, channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
+        self.open.remove(&channel);
+        self.channels.remove(&channel);
         Ok(())
     }
 
@@ -408,6 +481,13 @@ impl server::Handler for Handler {
         self.shells.insert(channel);
         session.channel_success(channel)?;
         session.data(channel, format!("welcome {}\r\n", self.index).into_bytes())?;
+        if let (Some(ms), 0) = (self.options.cut_shell_after, self.index) {
+            let handle = session.handle();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                let _ = handle.disconnect(Disconnect::ByApplication, "cut".into(), "en".into()).await;
+            });
+        }
         Ok(())
     }
 
@@ -416,6 +496,25 @@ impl server::Handler for Handler {
             return Ok(());
         }
         let text = String::from_utf8_lossy(data).to_string();
+        if let (Some(total), "flood") = (self.options.shell_flood, text.trim()) {
+            // Sent from a task of its own through the session's handle, so the handler returns at once and the
+            // connection keeps serving its other channels while the flood runs.
+            let handle = session.handle();
+            tokio::spawn(async move {
+                let mut sent = 0usize;
+                while sent < total {
+                    let n = (total - sent).min(16 * 1024);
+                    let chunk: Vec<u8> = (sent..sent + n).map(|i| b'a' + (i % 26) as u8).collect();
+                    if handle.data(channel, chunk).await.is_err() {
+                        return;
+                    }
+                    sent += n;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                let _ = handle.data(channel, b"flood done\r\n".to_vec()).await;
+            });
+            return Ok(());
+        }
         if text.trim() == "exit" {
             session.exit_status_request(channel, 3)?;
             session.close(channel)?;

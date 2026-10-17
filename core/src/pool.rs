@@ -11,8 +11,9 @@
 //!
 //! 1. **Every consumer of a channel drains at once.** `russh` hands data to a channel with a bounded `send(..).await` in
 //!    the session task, so one channel whose reader stops stalls every channel of the connection. The consumers here
-//!    read continuously into bounded buffers; a consumer added later (the shell, a forwarded socket) must do the same
-//!    and close its channel when its buffer is full, never queue without a bound.
+//!    read continuously into bounded buffers, and the shell ([`crate::ssh::SshLink`]) closes its channel when its backlog
+//!    passes [`crate::ssh::MAX_BACKLOG`]; a consumer added later (a forwarded socket) must do the same and close its
+//!    channel when its buffer is full, never queue without a bound.
 //! 2. **The host-key policy belongs to the opener.** An [`Open::Pinned`] opener (a monitor, the agent, an exec) checks
 //!    the host key of the host and of every jump host strictly: it never *learns* a key, so an unknown key is refused
 //!    and the known hosts file stays as it was. An [`Open::Interactive`] opener (a file browser, later a pane) keeps
@@ -40,7 +41,7 @@ use russh::Disconnect;
 use russh::client::Handle;
 use russh_sftp::client::SftpSession;
 
-use crate::ssh::{Client, Outcome, SshTarget, open, pin_hosts};
+use crate::ssh::{Client, Outcome, SshTarget, channel_text, open, pin_hosts};
 use crate::{Error, Result};
 
 /// A session with no lease and no use for this long is closed by the reaper.
@@ -359,7 +360,7 @@ impl Connection {
                     return Ok(sftp.clone());
                 }
                 let opened = tokio::time::timeout(OPEN_TIMEOUT, async {
-                    let channel = on.handle.channel_open_session().await.map_err(|e| e.to_string())?;
+                    let channel = on.handle.channel_open_session().await.map_err(|e| channel_text(&e))?;
                     channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
                     SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())
                 })
@@ -386,6 +387,15 @@ impl Connection {
             *slot = None;
             drop(slot);
             let _ = stale.close().await;
+        }
+    }
+
+    /// End the session now and wait for it, bounded in time. For the last owner of a standalone connection, which ends its
+    /// login before the runtime that carries it goes.
+    pub(crate) async fn close_session(&self) {
+        let session = self.slot.lock().await.take();
+        if let Some(session) = session {
+            session.close().await;
         }
     }
 

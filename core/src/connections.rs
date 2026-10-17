@@ -281,6 +281,8 @@ impl Connections {
             Kind::Ssh => {
                 let known = self.dir.join(KNOWN_HOSTS_FILE);
                 spec.ssh = Some(profiles.ssh_target(&profile.id, self.secrets.as_ref(), self.home.as_deref(), &known)?);
+                // The pane's shell takes a channel of the profile's one login, shared with its files and commands.
+                spec.ssh_connection = Some(self.session(&profile.id)?);
             }
             Kind::Wsl | Kind::Docker => {
                 let command = profiles
@@ -429,6 +431,37 @@ mod tests {
         assert_eq!(views.len(), 2);
         assert_eq!((views[0].pane, views[0].state, views[0].attempt, views[0].of, views[0].secs), (2, "reconnecting", 2, 5, 3));
         assert_eq!(views[1].state, "failed");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn apply_sets_the_connection_and_the_target() {
+        let d = dir("apply-conn");
+        let (c, _) = manager(&d, &[1, 2, 3]);
+        let id = c.save(profile("Talos"), SecretChange::Set { value: "pw".into() }).unwrap().profile.id;
+        c.assign(2, &id).unwrap();
+        c.assign(3, &id).unwrap();
+        let (mut local, mut one, mut two) = (PaneSpec::new("sh", 80, 24), PaneSpec::new("sh", 80, 24), PaneSpec::new("sh", 80, 24));
+        c.apply(1, &mut local).unwrap();
+        assert!(local.ssh.is_none() && local.ssh_connection.is_none(), "an unassigned pane stays local");
+        c.apply(2, &mut one).unwrap();
+        c.apply(3, &mut two).unwrap();
+        assert_eq!(one.ssh.as_ref().unwrap().host, "host.example.org", "the target is kept for every reader of `ssh`");
+        let (a, b) = (one.ssh_connection.clone().unwrap(), two.ssh_connection.clone().unwrap());
+        assert!(Arc::ptr_eq(&a, &b), "the panes of one profile share one connection");
+        assert!(Arc::ptr_eq(&a, &c.session(&id).unwrap()), "and it is the one the files and the commands use");
+        assert_eq!(a.target().host, "host.example.org");
+        let shown = format!("{one:?}");
+        assert!(!shown.contains("pw\""), "the Debug of a spec shows no password: {shown}");
+
+        // A Docker profile gives neither a target nor a connection.
+        let mut p = Profile::new("", "Web", "web-1");
+        p.kind = Kind::Docker;
+        let docker = c.save(p, SecretChange::Keep).unwrap().profile.id;
+        c.assign(1, &docker).unwrap();
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        c.apply(1, &mut spec).unwrap();
+        assert!(spec.ssh.is_none() && spec.ssh_connection.is_none());
         let _ = fs::remove_dir_all(&d);
     }
 
