@@ -104,3 +104,19 @@
 .tool-result { flex: 0 0 calc(100% - 1.5rem); box-sizing: border-box; max-height: 14rem; margin: 0 0 0 1.5rem; overflow: auto; padding: .333rem .5rem;
                border: 1px solid var(--hw-line); border-radius: .333rem; color: var(--hw-ink); font-family: "JetBrains Mono", ui-monospace, monospace;
                font-size: 1rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---- narrow screens: 640 px and narrower ------------------------------------------------------------------------- */
+
+/* The card is part of the screen: every target is at least 44 px, and the payload box scrolls inside the card. The strip that
+   holds the cards keeps the bound of the consent sheet (at most 60 % of the height, scrolling), which is the strip's own rule. */
+@media (max-width: 640px) {
+  .chat-approval button, .chat-tool .tool-toggle { min-height: max(44px, calc(44rem / 12)); min-width: max(44px, calc(44rem / 12)); }
+  .approval-actions { gap: .667rem; }
+}
+
+/* ---- forced colours: system colours outline the card, the remote chip, the place chip and the banner ------------------ */
+
+@media (forced-colors: active) {
+  :root .chat-approval { outline: 2px solid CanvasText; outline-offset: -2px; }
+  :root .approval-remote, :root .approval-place, :root .approval-taint { outline: 2px solid Highlight; outline-offset: -2px; }
+}

@@ -219,6 +219,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Sync | ![](design/sync.png) | Nextcloud endpoint, last sync, end-to-end encryption, conflicts with their backup |
 | AI chat | ![](design/ai-chat-pane.png) ![](design/ai-chat-states.png) | the chat as a pane beside the shell (6.12): the bar with the provider chip and the place word, Markdown replies, a reply that streams with `Stop`; then the picker, a stopped reply, a failed turn and a long draft |
 | AI chat: sharing context | ![](design/ai-consent-ask.png) ![](design/ai-consent-offer.png) | the consent card and the items that go out (6.14): the question before a pane is shared, the destination and its place, the findings of the redactor, the total and the best-effort sentence |
+| AI chat: tool calls | ![](design/ai-approval.png) ![](design/ai-approval-states.png) | the approval card, the taint banner and the rows of tool results (6.15): every field of a request with its size, where the result goes, the untrusted text in the turn, `Allow once` and `Deny`; then a remote target, a request that can only be denied and the rows of a denied, a stopped and a finished call |
 | AI providers | ![](design/ai-providers.png) | the dialog for providers, keys, the two privacy settings and the gateway disclosure (6.13) |
 | AI chat (sidebar) | ![](design/ai-chat.png) | the column form, which replaces the sidebar; the column is drawn ahead of the work that builds it, while the consent card is built and described in 6.14 |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
@@ -255,7 +256,7 @@ the bottom bar holds the tabs of the shown workspace. Tokens are the ones above;
 
 ![Phone](design/7-phone.png)
 
-A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) sits inside the screen with the same 44 px targets. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text.
+A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) and the approval card (6.15) sit inside the screen with the same 44 px targets, and on a phone the payload box of the approval card scrolls inside it. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text.
 
 ### 6.7 Platforms
 
@@ -793,8 +794,13 @@ A refusal is never retried: the next press is a new decision of the person.
 | ran, error, waiting, no result | state words of a tool row, with the marks `✓`, `!`, `…` and `–` |
 | waiting for your decision | status line while calls wait |
 
+![Approving a tool call](design/ai-approval.png)
+![Tool call states](design/ai-approval-states.png)
+
 **Narrow screens (640 px and narrower).** `Allow once`, `Deny` and the result toggle are at least 44 px high, the strip is
 at most 60 % of the viewport height and scrolls inside, and the payload box scrolls inside.
+
+![Approving a tool call on a phone](design/ai-approval-phone.png)
 
 **Accessibility.** The card is a `group` named by its title, `aria-busy` while sending, the status line is the live region,
 every hairline is `--hw-line` so `contrast-high` holds, and nothing moves. Under forced colours the card, the remote chip
