@@ -87,6 +87,14 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
       button(actions, "consent-share", "share", `Share pane ${pane}`, () => void consent.share());
       button(actions, "consent-no", "no", "No", () => consent.close());
     } else if (m.mode === "pick" && state !== null) {
+      if (!state.required) {
+        el("p", "consent-text", section).textContent = "Asking is off for models on this computer. You still see every item.";
+      }
+      if (m.fault !== null) {
+        const fault = el("p", "consent-text", section);
+        fault.dataset.kind = "error";
+        fault.textContent = m.fault.text;
+      }
       const kinds = el("fieldset", "consent-kinds", section);
       kinds.setAttribute("aria-label", "What to attach");
       for (const kind of state.kinds) {
@@ -159,7 +167,12 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
     if (next !== signature) {
       signature = next;
       build();
-      if (key !== "") host.querySelector<HTMLElement>(`[data-key="${key}"]`)?.focus({ preventScroll: true });
+      if (key !== "") {
+        // The control that had the focus is rebuilt in place; one that is gone hands the focus to the first control later.
+        const same = host.querySelector<HTMLElement>(`[data-key="${key}"]`);
+        if (same !== null) same.focus({ preventScroll: true });
+        else wantFocus = true;
+      }
     }
     ticks();
     if (wantFocus) {
@@ -183,6 +196,14 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
     e.stopPropagation();
     consent.close();
   };
+  // A pressed control has the focus, also in a browser that does not give a pressed button the focus: the card then knows
+  // that the user is inside it, and closing it returns the focus to `Context…`. Capturing, so it runs before the control's own
+  // handler, which may close the card.
+  const onPress = (e: MouseEvent): void => {
+    const target = e.target;
+    if (target instanceof HTMLButtonElement || target instanceof HTMLInputElement) target.focus({ preventScroll: true });
+  };
+  host.addEventListener("click", onPress, true);
   host.addEventListener("keydown", onKey);
   const stop = consent.subscribe(render);
   render();
@@ -191,6 +212,7 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
     alive = false;
     stop();
     host.removeEventListener("keydown", onKey);
+    host.removeEventListener("click", onPress, true);
     host.replaceChildren();
   };
 }

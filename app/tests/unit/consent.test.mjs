@@ -3,6 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Consent } from "../../dist/consent.js";
+import { REASON_WORDS } from "../../dist/consentstate.js";
 
 const OFFER_ID = "0123456789abcdef0123456789abcdef";
 const STATE = (extra = {}) => ({
@@ -176,4 +177,312 @@ test("nothing is asked at construction, and no argument of any command is text",
   }
   assert.equal(consent.model.pane, 1);
   assert.deepEqual(calls[2][1].kinds, ["selection", "screen"], "the kinds go in the order the state lists them");
+});
+
+const NOTE = {
+  provider: "Sharing ended because the provider changed. Share again to attach context.",
+  pane: "The chat now acts for another pane. The attached context was dropped.",
+  settings: "A privacy setting changed. Add the context again.",
+};
+
+/** A controller with an offer attached for the screen of pane 1. */
+async function withOffer(options) {
+  const made = make(options);
+  await made.consent.open();
+  await made.consent.share();
+  made.consent.tick("screen", true);
+  await made.consent.preview();
+  assert.equal(made.consent.model.mode, "offer");
+  return made;
+}
+
+test("a change of provider, model, pane or address ends the share and the offer and says why", async () => {
+  const cases = [
+    [{ profile: "other-1" }, NOTE.provider],
+    [{ model: "big-model" }, NOTE.provider],
+    [{ entry: "local-1|llama3.2|elsewhere" }, NOTE.provider],
+    [{ pane: 2 }, NOTE.pane],
+    [{ pane: null }, NOTE.pane],
+    [{ settings: "auto|open" }, NOTE.settings],
+  ];
+  for (const [change, note] of cases) {
+    const { consent, calls, said, current } = await withOffer();
+    const before = calls.length;
+    Object.assign(current.route, change);
+    consent.check();
+    assert.equal(consent.model.mode, "closed", JSON.stringify(change));
+    assert.equal(consent.model.offer, null);
+    assert.equal(consent.held(), null);
+    assert.deepEqual(said, [[note, "note"]], JSON.stringify(change));
+    assert.equal(calls.length, before, "check() asks the core nothing");
+    // The next open asks the core again with the new arguments.
+    if (current.route.pane !== null) {
+      await consent.open();
+      assert.equal(calls.length, before + 1);
+      const args = calls[calls.length - 1][1];
+      assert.equal(args.pane, current.route.pane);
+      assert.equal(args.profile, current.route.profile);
+      assert.equal(args.model, current.route.model);
+    }
+  }
+
+  // The list was read: the entry is adopted, nothing is dropped and nothing is said.
+  const adopt = await withOffer({ route: { ...ROUTE, entry: null } });
+  adopt.current.route.entry = "local-1|llama3.2|localhost";
+  adopt.consent.check();
+  assert.equal(adopt.consent.model.mode, "offer");
+  assert.deepEqual(adopt.said, []);
+  adopt.current.route.entry = "local-1|llama3.2|elsewhere";
+  adopt.consent.check();
+  assert.equal(adopt.consent.model.mode, "closed", "the adopted entry is the one later compared");
+
+  // Nothing open, nothing shared: nothing is said. A share the page knows of is told when the provider changes.
+  const idle = make();
+  idle.current.route.profile = "other-1";
+  idle.consent.check();
+  assert.deepEqual(idle.said, []);
+  const quiet = make();
+  await quiet.consent.open();
+  quiet.consent.close();
+  quiet.current.route.profile = "other-1";
+  quiet.consent.check();
+  assert.deepEqual(quiet.said, [], "asked but never shared");
+  const shared = make({ answers: { ai_context_state: () => STATE({ shared: true }) } });
+  await shared.consent.open();
+  shared.consent.close();
+  shared.current.route.profile = "other-1";
+  shared.consent.check();
+  assert.deepEqual(shared.said, [[NOTE.provider, "note"]], "a share was known");
+  // A pane change with a share but no offer says nothing: the first pane stays shared in the core.
+  const pane = make({ answers: { ai_context_state: () => STATE({ shared: true }) } });
+  await pane.consent.open();
+  pane.current.route.pane = 2;
+  pane.consent.check();
+  assert.deepEqual(pane.said, []);
+  assert.equal(pane.consent.model.mode, "closed");
+});
+
+test("a refusal moves the card to the step it names", async () => {
+  const refuse = (reason, text = "x", code = "context") => () => {
+    throw { code, reason, text };
+  };
+  for (const reason of ["local_only", "destination", "nothing_to_share", "pane_gone"]) {
+    for (const cmd of ["ai_context_state", "ai_context_share"]) {
+      const made = make({ answers: { [cmd]: refuse(reason, "the core's words") } });
+      await made.consent.open();
+      if (cmd === "ai_context_share") await made.consent.share();
+      assert.equal(made.consent.model.mode, "blocked", `${cmd} ${reason}`);
+      assert.deepEqual(made.consent.model.fault, { reason, text: REASON_WORDS[reason] }, "the page's words for the reason");
+    }
+  }
+  // A code other than `context` is blocked with the core's text and no reason.
+  for (const code of ["no_such_pane", "no_profile"]) {
+    const made = make({ answers: { ai_context_state: refuse(null, "no such thing", code) } });
+    await made.consent.open();
+    assert.equal(made.consent.model.mode, "blocked");
+    assert.deepEqual(made.consent.model.fault, { reason: null, text: "no such thing" });
+  }
+  // From a preview: a refused read leaves the pick list with the words; the state is asked once more for `not_shared`.
+  for (const reason of ["bad_kinds", "unsupported_kind", "busy", "denied", "not_text", "unreadable"]) {
+    const made = make({ answers: { ai_context_preview: refuse(reason, "words") } });
+    await made.consent.open();
+    await made.consent.share();
+    made.consent.tick("screen", true);
+    await made.consent.preview();
+    assert.equal(made.consent.model.mode, "pick", reason);
+    assert.deepEqual(made.consent.model.fault, { reason, text: REASON_WORDS[reason] });
+    assert.deepEqual(made.consent.model.ticked, ["screen"], "the ticks stay");
+    assert.equal(made.calls.filter(([cmd]) => cmd === "ai_context_state").length, 1);
+  }
+  for (const reason of ["local_only", "nothing_to_share", "pane_gone"]) {
+    const made = make({ answers: { ai_context_preview: refuse(reason) } });
+    await made.consent.open();
+    await made.consent.share();
+    made.consent.tick("screen", true);
+    await made.consent.preview();
+    assert.equal(made.consent.model.mode, "blocked", reason);
+  }
+  const lost = make({ answers: { ai_context_preview: refuse("not_shared") } });
+  await lost.consent.open();
+  await lost.consent.share();
+  lost.consent.tick("screen", true);
+  await lost.consent.preview();
+  assert.equal(lost.consent.model.mode, "ask", "the share ended: ask again");
+  assert.equal(lost.calls.filter(([cmd]) => cmd === "ai_context_state").length, 2, "one second state call");
+  assert.equal(lost.consent.model.fault, null);
+
+  // A refusal of a send: an offer that is no longer good is dropped and told; any other refusal keeps it.
+  for (const raw of [
+    { code: "context", reason: "stale_offer", text: "old" },
+    { code: "context", reason: "not_shared", text: "unshared" },
+    { code: "context", reason: "bad_pick", text: "wrong pick" },
+    { code: "context_duplicate", reason: null, text: "twice" },
+  ]) {
+    const { consent, said } = await withOffer();
+    assert.equal(consent.refused(raw), true, JSON.stringify(raw));
+    assert.equal(consent.model.mode, "closed");
+    assert.equal(consent.model.offer, null);
+    assert.equal(said.length, 1);
+    assert.equal(said[0][1], "error");
+    assert.ok(said[0][0].length >= 3);
+  }
+  for (const raw of [
+    { code: "busy", reason: null, text: "a reply is running" },
+    { code: "context", reason: "local_only", text: "no" },
+    { code: "no_profile", reason: null, text: "none" },
+    "a string",
+    null,
+  ]) {
+    const { consent, said } = await withOffer();
+    assert.equal(consent.refused(raw), false, JSON.stringify(raw));
+    assert.equal(consent.model.mode, "offer", "the offer is kept");
+    assert.deepEqual(said, []);
+  }
+});
+
+test("an answer that arrives after the card closed or the route changed is dropped, and one command runs at a time", async () => {
+  /** A fake core whose answers are released by the test. */
+  const held = [];
+  const gate = (value) => () => new Promise((resolve) => held.push(() => resolve(value())));
+  const slow = {
+    ai_context_state: gate(() => STATE({ shared: true })),
+    ai_context_share: gate(() => STATE({ shared: true })),
+    ai_context_preview: gate(() => OFFER()),
+  };
+  const release = async () => {
+    for (const go of held.splice(0)) go();
+    await new Promise((done) => setImmediate(done));
+  };
+
+  // One at a time: a second open, share or preview while one is in flight makes no call.
+  const one = make({ answers: slow });
+  const opening = one.consent.open();
+  await one.consent.open();
+  await one.consent.share();
+  await one.consent.preview();
+  assert.equal(one.calls.length, 1);
+  await release();
+  await opening;
+  one.consent.tick("screen", true);
+  const sharing = one.consent.share();
+  await one.consent.share();
+  await one.consent.preview();
+  assert.equal(one.calls.length, 2);
+  await release();
+  await sharing;
+
+  // A close while the state is in flight: the answer arrives and the card stays closed.
+  const closing = make({ answers: slow });
+  const first = closing.consent.open();
+  closing.consent.close();
+  assert.equal(closing.consent.model.mode, "closed");
+  await release();
+  await first;
+  assert.equal(closing.consent.model.mode, "closed");
+  assert.equal(closing.consent.model.state, null, "the late answer was not taken");
+
+  // A provider change while a preview is in flight: the offer that arrives later is dropped.
+  const moving = make({ answers: { ...slow, ai_context_state: () => STATE({ shared: true }) } });
+  await moving.consent.open();
+  moving.consent.tick("screen", true);
+  const reading = moving.consent.preview();
+  assert.equal(moving.consent.model.mode, "busy");
+  assert.equal(moving.consent.model.busy, "preview");
+  moving.current.route.profile = "other-1";
+  moving.consent.check();
+  assert.deepEqual(moving.said, [[NOTE.provider, "note"]]);
+  await release();
+  await reading;
+  assert.equal(moving.consent.model.offer, null);
+  assert.equal(moving.consent.model.mode, "closed");
+  assert.equal(moving.consent.held(), null);
+
+  // A disposed controller ignores late answers and every call.
+  const gone = make({ answers: slow });
+  const last = gone.consent.open();
+  gone.consent.dispose();
+  await release();
+  await last;
+  assert.equal(gone.consent.model.state, null);
+  await gone.consent.open();
+  await gone.consent.share();
+  assert.equal(gone.calls.length, 1);
+});
+
+test("an offer older than its time is not sent and a pick that was never previewed blocks the send", async () => {
+  const { consent, clock } = await withOffer();
+  assert.equal(consent.model.at, 0);
+  clock.now = 299_000;
+  assert.equal(consent.expired(), false);
+  assert.deepEqual(consent.held(), { offer: OFFER_ID, picked: [1] }, "still good at 299 seconds");
+  clock.now = 301_000;
+  assert.equal(consent.expired(), true);
+  assert.equal(consent.held(), null, "an expired offer is never held");
+  consent.close();
+  assert.equal(consent.expired(), false);
+
+  // The sentences of a send that has to wait.
+  const idle = make();
+  assert.equal(idle.consent.blocksSend(), null, "closed");
+  await idle.consent.open();
+  assert.equal(idle.consent.model.mode, "ask");
+  assert.equal(idle.consent.blocksSend(), null, "asking");
+  await idle.consent.share();
+  assert.equal(idle.consent.model.mode, "pick");
+  assert.equal(idle.consent.blocksSend(), null, "nothing ticked");
+  idle.consent.tick("screen", true);
+  assert.equal(idle.consent.blocksSend(), "Preview what you ticked, or untick it, before sending.");
+  idle.consent.tick("screen", false);
+  assert.equal(idle.consent.blocksSend(), null);
+  idle.consent.tick("screen", true);
+  await idle.consent.preview();
+  assert.equal(idle.consent.blocksSend(), null, "an offer is attached");
+
+  let release;
+  const busy = make({ answers: { ai_context_state: () => new Promise((resolve) => (release = () => resolve(STATE()))) } });
+  const opening = busy.consent.open();
+  assert.equal(busy.consent.blocksSend(), "Wait for the context card to finish.");
+  release();
+  await opening;
+  assert.equal(busy.consent.blocksSend(), null);
+});
+
+test("a prefill ticks the kinds and previews at once when allowed, and waits for the share when not", async () => {
+  // Shared: ticks `screen` only (the state lists selection and screen) and previews once.
+  const ready = make({ answers: { ai_context_state: () => STATE({ shared: true }) } });
+  await ready.consent.open(["screen", "file"]);
+  assert.deepEqual(ready.calls.map(([cmd]) => cmd), ["ai_context_state", "ai_context_preview"]);
+  assert.deepEqual(ready.calls[1][1].kinds, ["screen"]);
+  assert.equal(ready.consent.model.mode, "offer");
+  assert.deepEqual(ready.consent.model.ticked, ["screen"]);
+
+  // Not required: the same without a share.
+  const free = make({ answers: { ai_context_state: () => STATE({ required: false }) } });
+  await free.consent.open(["screen"]);
+  assert.deepEqual(free.calls.map(([cmd]) => cmd), ["ai_context_state", "ai_context_preview"]);
+
+  // Asking: nothing is read, and the share is never made by the prefill. After the user shares, the kinds are read.
+  const ask = make();
+  await ask.consent.open(["screen", "selection"]);
+  assert.deepEqual(ask.calls.map(([cmd]) => cmd), ["ai_context_state"]);
+  assert.equal(ask.consent.model.mode, "ask");
+  await ask.consent.share();
+  assert.deepEqual(ask.calls.map(([cmd]) => cmd), ["ai_context_state", "ai_context_share", "ai_context_preview"]);
+  assert.deepEqual(ask.calls[2][1].kinds, ["selection", "screen"], "in the order the state lists them");
+  assert.equal(ask.consent.model.mode, "offer");
+
+  // A prefill with no kind the state lists reads nothing.
+  const none = make({ answers: { ai_context_state: () => STATE({ shared: true }) } });
+  await none.consent.open(["file", "preview"]);
+  assert.deepEqual(none.calls.map(([cmd]) => cmd), ["ai_context_state"]);
+  assert.equal(none.consent.model.mode, "pick");
+  assert.deepEqual(none.consent.model.ticked, []);
+
+  // Closing the card before the share forgets the prefill.
+  const closed = make();
+  await closed.consent.open(["screen"]);
+  closed.consent.close();
+  await closed.consent.open();
+  await closed.consent.share();
+  assert.deepEqual(closed.calls.map(([cmd]) => cmd), ["ai_context_state", "ai_context_state", "ai_context_share"]);
 });

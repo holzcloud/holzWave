@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  contextArguments, heldOf, pickedOf, readContextState, readOffer,
+  contextArguments, ctxButtonView, decideMode, heldOf, pickedOf, readContextState, readOffer, routeChange,
 } from "../../dist/consentstate.js";
 
 const STATE = {
@@ -133,4 +133,48 @@ test("the arguments of a send are the five, and the offer and the picks only tog
   const held = { offer: OFFER.offer, picked: [1] };
   contextArguments(held).picked.push(2);
   assert.deepEqual(held.picked, [1]);
+});
+
+const ROUTE = { ask: false, pane: 1, profile: "local-1", model: null, entry: "local-1|llama3.2|localhost", settings: "ask|open" };
+
+test("a route change is the pane, the provider, the saved address or a privacy setting, and nothing else", () => {
+  const same = (extra) => routeChange(ROUTE, { ...ROUTE, ...extra });
+  assert.equal(same({}), "same");
+  assert.equal(same({ ask: true }), "same", "`ask` is not part of the comparison");
+  assert.equal(same({ pane: 2 }), "pane");
+  assert.equal(same({ pane: null }), "pane", "a pane that became none counts");
+  assert.equal(routeChange({ ...ROUTE, pane: null }, ROUTE), "pane");
+  assert.equal(same({ profile: "other-1" }), "provider");
+  assert.equal(same({ profile: null }), "provider");
+  assert.equal(same({ model: "big-model" }), "provider");
+  assert.equal(same({ entry: "local-1|llama3.2|elsewhere" }), "provider", "the saved address or model changed");
+  assert.equal(same({ settings: "auto|open" }), "settings");
+  assert.equal(same({ settings: "" }), "settings");
+  // The entry was not known before and is known now: the list was read, nothing changed.
+  assert.equal(routeChange({ ...ROUTE, entry: null }, ROUTE), "adopt");
+  assert.equal(routeChange({ ...ROUTE, entry: null }, { ...ROUTE, entry: null }), "same");
+  assert.equal(routeChange(ROUTE, { ...ROUTE, entry: null }), "same", "an entry that went unknown is no change by itself");
+  // Precedence: the pane, then the provider, then the settings, then adopting.
+  assert.equal(same({ pane: 2, profile: "other-1", settings: "x" }), "pane");
+  assert.equal(same({ profile: "other-1", settings: "x" }), "provider");
+  assert.equal(routeChange({ ...ROUTE, entry: null }, { ...ROUTE, settings: "x" }), "settings");
+  assert.equal(routeChange({ ...ROUTE, entry: null }, { ...ROUTE, profile: "other-1" }), "provider");
+});
+
+test("the mode follows the core's answer", () => {
+  const state = (extra) => ({ ...readContextState({ ...STATE }), ...extra });
+  assert.equal(decideMode(state({ kinds: [] })), "blocked");
+  assert.equal(decideMode(state({ required: true, shared: false })), "ask");
+  assert.equal(decideMode(state({ required: true, shared: true })), "pick");
+  assert.equal(decideMode(state({ required: false, shared: false })), "pick");
+  assert.equal(decideMode(state({ required: false, shared: true })), "pick");
+  assert.equal(decideMode(state({ kinds: [], required: false })), "blocked");
+
+  assert.deepEqual(ctxButtonView("closed", 0, true), { text: "Context…", expanded: false, disabled: false });
+  assert.deepEqual(ctxButtonView("offer", 1, true), { text: "Context · 1 item", expanded: true, disabled: false });
+  assert.deepEqual(ctxButtonView("offer", 2, true), { text: "Context · 2 items", expanded: true, disabled: false });
+  assert.deepEqual(ctxButtonView("offer", 0, true), { text: "Context · none", expanded: true, disabled: false });
+  assert.deepEqual(ctxButtonView("pick", 0, true), { text: "Context…", expanded: true, disabled: false });
+  assert.deepEqual(ctxButtonView("ask", 0, true), { text: "Context…", expanded: true, disabled: false });
+  assert.deepEqual(ctxButtonView("closed", 0, false), { text: "Context…", expanded: false, disabled: true });
 });

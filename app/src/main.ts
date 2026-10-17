@@ -61,7 +61,7 @@ async function main() {
   // Encrypted sync: the state on the title bar and its popover.
   await initSync(() => {});
   // The AI chat: its title-bar button lands between the sync button and the sidebar button.
-  await initChat(openBlock);
+  await initChat(openBlock, { watchSettings });
   // The providers dialog changes the two privacy settings through the same queue as the Settings dialog.
   initAiSettings({ change, watch: watchSettings });
   initHistory();

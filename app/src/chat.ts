@@ -30,7 +30,7 @@ import { Consent } from "./consent.js";
 import { mountCard } from "./consentcard.js";
 import type { CardView } from "./consentcard.js";
 import { NOTES, contextArguments, ctxButtonView, paneWords, sentLine } from "./consentstate.js";
-import type { Route as ConsentRoute } from "./consentstate.js";
+import type { CtxKind, Route as ConsentRoute } from "./consentstate.js";
 import { el, loadStyles } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
@@ -76,6 +76,10 @@ const MARKDOWN_BUDGET = 8 * 1024 * 1024;
 const MAX_RENDERED = 8 * 1024 * 1024;
 /** The longest address written after the text of a link that is not one, in characters. */
 const SHOWN_HREF = 300;
+
+/** The two sentences of the page that a send and a press of `Context…` share. */
+const CHOOSE_FIRST = "Choose a provider first.";
+const REVIEW_FIRST = "Review this provider first.";
 
 /** One line under the transcript: a refusal or a hint of the page (`error`, `note`). */
 interface Notice {
@@ -272,6 +276,8 @@ function takeProfiles(raw: unknown, all: boolean, asking: Session | null): void 
   const targets = all ? [...sessions.values()] : asking === null ? [] : [asking];
   for (const t of targets) {
     t.profiles = list;
+    // A saved model or address that changed is another route: the share ends and the next press asks again.
+    t.consent?.check();
     schedule(t);
   }
 }
@@ -351,6 +357,7 @@ function followActing(): void {
   const view = state.view;
   if (!view) return;
   const live = new Set(view.panes.map(([id]) => id));
+  const before = acting;
   if (acting !== null && !live.has(acting)) acting = null;
   const focus = view.focus;
   if (live.has(focus) && (paneBlocks.has(focus) || shownPanes.has(focus))) {
@@ -359,6 +366,7 @@ function followActing(): void {
   }
   shownPanes = live;
   for (const s of sessions.values()) {
+    if (acting !== before) s.consent?.check();
     for (const v of s.views) v.drawContextButton();
   }
 }
@@ -660,8 +668,8 @@ class Mounted implements ChatView {
   }
 
   /**
-   * The button `Context…`: closes an open card, else asks the core about the pane the chat acts for. The profile list is
-   * read first when it is not known (a user act, like a send), and two providers with no choice open the picker.
+   * The button `Context…`: closes an open card, else asks the core about the pane the chat acts for. A sentence that tells
+   * why it cannot is said under the transcript.
    */
   private async pressContext(): Promise<void> {
     const s = this.session;
@@ -670,33 +678,40 @@ class Mounted implements ChatView {
       consent.close();
       return;
     }
-    if (acting === null) {
-      sayTo(s, NOTES.noPane, "note");
-      return;
-    }
+    const sentence = await this.beginContext([]);
+    if (sentence !== null) sayTo(s, sentence, sentence === REVIEW_FIRST ? "error" : "note");
+  }
+
+  /**
+   * Ask the core about the pane the chat acts for and open the card, with `prefill` ticked once the pane may be read. The
+   * profile list is read first when it is not known (a user act, like a send), and two providers with no choice open the
+   * picker. Answers null, or the sentence that says why the card did not open.
+   */
+  async beginContext(prefill: CtxKind[]): Promise<string | null> {
+    const s = this.session;
+    const consent = consentFor(s);
+    if (acting === null) return NOTES.noPane;
     let pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
     if (pick.via === "unknown") {
       try {
         await loadProfiles(s);
       } catch (e) {
-        sayTo(s, faultText(e), "error");
-        return;
+        return faultText(e);
       }
       pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
     }
     if (pick.via === "ask") {
-      sayTo(s, "Choose a provider first.", "note");
       await this.openPicker();
-      return;
+      return CHOOSE_FIRST;
     }
     if (review.has(pick.id)) {
-      sayTo(s, "Review this provider first.", "error");
       void openProviders(pick.id).then(() => {
         if (this.alive) this.focus();
       });
-      return;
+      return REVIEW_FIRST;
     }
-    await consent.open();
+    await consent.open(prefill);
+    return null;
   }
 
   private makeChip(tag: "span" | "button"): HTMLElement {
@@ -1019,6 +1034,7 @@ class Mounted implements ChatView {
     const s = this.session;
     s.choice = id;
     lastChoice = id;
+    s.consent?.check();
     this.drawBar();
     for (const view of s.views) if (view !== this) view.drawBar();
     if (close) this.closePicker(true);
@@ -1100,20 +1116,33 @@ class Mounted implements ChatView {
         pick = pickProfile(s.profiles, s.choice, s.feed.state.profile);
       }
       if (pick.via === "ask") {
-        this.say("Choose a provider first.", "note");
+        this.say(CHOOSE_FIRST, "note");
         await this.openPicker();
         return;
       }
       // A provider that waits for its review is not sent to: the dialog opens on it and the draft stays. The core refuses
       // such a send itself; this only saves the round trip and says why.
       if (review.has(pick.id)) {
-        this.say("Review this provider first.", "error");
+        this.say(REVIEW_FIRST, "error");
         void openProviders(pick.id).then(() => {
           if (this.alive) this.focus();
         });
         return;
       }
-      const held = s.consent?.held() ?? null;
+      const consent = s.consent;
+      if (consent !== null) {
+        const wait = consent.blocksSend();
+        if (wait !== null) {
+          this.say(wait, "error");
+          return;
+        }
+        if (consent.expired()) {
+          consent.close();
+          this.say(NOTES.expired, "error");
+          return;
+        }
+      }
+      const held = consent?.held() ?? null;
       try {
         await call("ai_send", {
           conversation: s.id,
@@ -1124,10 +1153,11 @@ class Mounted implements ChatView {
           ...contextArguments(held),
         });
       } catch (e) {
-        this.say(faultText(e), "error");
+        // A refusal that ends the offer says why itself; any other keeps the offer and is told like every refusal.
+        if (held === null || consent === null || !consent.refused(e)) this.say(faultText(e), "error");
         return;
       }
-      s.consent?.sent();
+      consent?.sent();
       s.draft = "";
       s.notice = null;
       for (const view of s.views) {
@@ -1216,6 +1246,18 @@ export async function openChat(newChat: boolean): Promise<string | null> {
 }
 
 /**
+ * Open the card of the chat `conversation` for the pane it acts for, tick the kinds the core lists among `kinds` and read
+ * them once the pane is shared or sharing is not required. It never shares by itself and never sends. Answers null, or one
+ * sentence that says why the card did not open (the chat is not on screen, no pane can be shared, no provider is chosen).
+ */
+export async function attachContext(conversation: string, kinds: CtxKind[]): Promise<string | null> {
+  const s = sessions.get(conversation);
+  const view = s === undefined ? undefined : [...s.views][0];
+  if (view === undefined) return "The chat is not open.";
+  return view.beginContext(kinds);
+}
+
+/**
  * The pane of a chat left the core's list: stop its reply when one runs (the core keeps the text so far as a stopped
  * message) and forget its session and its title. A pane that is only hidden by a tab switch is still in the list and
  * never comes here.
@@ -1280,5 +1322,11 @@ export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void
     button?.setAttribute("aria-pressed", pressed ? "true" : "false");
     followActing();
   });
-  void host;
+  // A privacy setting that changes ends what the page knew of a share: every card looks at its route again.
+  host?.watchSettings(() => {
+    for (const s of sessions.values()) {
+      s.consent?.check();
+      for (const v of s.views) v.draw();
+    }
+  });
 }

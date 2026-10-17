@@ -8,7 +8,7 @@
 // that a send redeems, or nothing. Nothing here decides whether a share is required, classifies an address or a host, or
 // guesses a place: the core's answer says it, and the four place names of `localityWord` are the only words for it.
 
-import { localityWord } from "./chatview.js";
+import { faultText, localityWord } from "./chatview.js";
 
 /** What a context item holds, as the core names it. */
 export type CtxKind = "selection" | "screen" | "last_command" | "file" | "preview";
@@ -384,4 +384,79 @@ export interface SentPart {
 export function sentLine(part: SentPart): string {
   const items = part.items.map((item) => `${cut(scrub(item.label), MAX_LABEL, true)} (${sizeWords(item.bytes)})`);
   return `Context sent: ${items.join("; ")} → ${localityWord(part.locality)}`;
+}
+
+/**
+ * What the card says for each of the core's thirteen reasons of a context refusal. The keys are held to the core by a golden
+ * the core's own test writes; a reason the core adds fails a test until it has a sentence here.
+ */
+export const REASON_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  not_shared: "This pane is not shared with the chat yet. Share it first.",
+  stale_offer: "The attached context is no longer valid. Read it again.",
+  bad_pick: "The chosen items do not match what was read. Read the context again.",
+  bad_kinds: "That choice of content cannot be read. Tick one to five kinds.",
+  unsupported_kind: "This pane cannot offer that kind of content.",
+  nothing_to_share: "There is nothing in this pane that can be shared.",
+  pane_gone: "The pane is closed or no longer shows what was shared.",
+  denied: "This place may not be shared.",
+  not_text: "This file is not text, so it cannot be shared.",
+  unreadable: "The pane or file could not be read. Try again.",
+  busy: "The pane did not answer within two seconds. Try again.",
+  destination: "The address of this provider cannot be checked or is not allowed. Nothing was sent.",
+  local_only: "Local only is on, and this provider is not on this computer.",
+});
+
+/** A refusal of a command, read: the core's code, the reason when the code is `context`, and the words to show. */
+export interface ContextFault {
+  code: string | null;
+  reason: string | null;
+  text: string;
+}
+
+/** What the card says about the same content sent twice in one chat. */
+export const DUPLICATE_WORDS = "This content was already sent in this chat. Change it, or ask again after it changed.";
+
+/**
+ * A rejected command as the card tells it. The code and the reason are the core's; the text is the core's text, cleaned and
+ * cut, or the page's words for the one code that has them. Nothing acts on the text.
+ */
+export function contextFault(raw: unknown): ContextFault {
+  let code: string | null = null;
+  let reason: string | null = null;
+  if (typeof raw === "object" && raw !== null) {
+    const r = raw as { code?: unknown; reason?: unknown };
+    if (typeof r.code === "string") code = cut(scrub(r.code), MAX_RULE, false);
+    if (code === "context" && typeof r.reason === "string") reason = cut(scrub(r.reason), MAX_RULE, false);
+  }
+  if (code === "context_duplicate") return { code, reason, text: DUPLICATE_WORDS };
+  if (code === "context" && reason !== null && Object.hasOwn(REASON_WORDS, reason)) {
+    return { code, reason, text: REASON_WORDS[reason] ?? faultText(raw) };
+  }
+  return { code, reason, text: faultText(raw) };
+}
+
+/** Where a refusal leaves the card: it cannot go on (`blocked`), a kind or a read is to be changed (`pick`), or it asks again. */
+export type RefusalStep = "blocked" | "pick" | "again";
+
+/**
+ * The step a refused command leads to. A destination, a pane or a switch that stops everything blocks; a choice of kinds or
+ * a read that failed leaves the pick list with the words; `not_shared` from a preview means the share ended, so the state is
+ * asked once more. Any other code, and any unknown reason from a state or share call, blocks.
+ */
+export function refusalStep(fault: ContextFault, from: "state" | "share" | "preview"): RefusalStep {
+  if (fault.code !== "context" || fault.reason === null) return "blocked";
+  if (from !== "preview") return "blocked";
+  switch (fault.reason) {
+    case "not_shared":
+      return "again";
+    case "bad_kinds":
+    case "unsupported_kind":
+    case "busy":
+    case "denied":
+    case "not_text":
+    case "unreadable":
+      return "pick";
+    default:
+      return "blocked";
+  }
 }
