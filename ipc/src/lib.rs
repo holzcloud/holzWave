@@ -6,6 +6,28 @@
 //! is refused before anything is read from it, so only a process that was started inside a pane (or that can read its
 //! environment, which is the same user) can control the app. Every size is bounded and every field is checked here,
 //! before the app's handler sees it.
+//!
+//! # Streaming commands
+//!
+//! A few commands carry a body and answer with a stream (today: `ai`). On the wire every message is one JSON object per
+//! line (UTF-8, `\n`), except the body, which is raw UTF-8 text of an announced length:
+//!
+//! 1. The client writes the request line, for example `{"token":..,"pane":..,"cmd":"ai","prompt":..,"stdin_bytes":N}`.
+//!    `stdin_bytes` announces the length of the body.
+//! 2. A request that is refused before the stream starts (wrong token, malformed request, a member the command does not
+//!    have, a size over its limit, no free stream slot) is answered by one line `{"ok":false,"message":..}`, and the server
+//!    closes. The body is never read in that case, and the token is checked before anything else is looked at.
+//! 3. Otherwise the server writes `{"event":"ready"}`. Only then the client writes exactly N bytes of UTF-8 text without a
+//!    NUL, and nothing more. The server reads them through the same buffered reader that read the request line, so no byte
+//!    is lost or read twice.
+//! 4. The server writes zero or more `{"event":"text","text":..}` lines (the answer, for standard output) and
+//!    `{"event":"note","text":..}` lines (status, for standard error), then exactly one
+//!    `{"event":"end","ok":..,"message":..}`, and closes. After `ready` every problem is an `end` line.
+//! 5. The client keeps its end open until `end`. Closing it earlier, or sending anything after the body, cancels the request:
+//!    the handler is told through [`Gone`] and its next write fails.
+//!
+//! This crate has no command that confirms, approves or decides anything on the user's behalf: those exist only as commands
+//! of the webview, because every process in a pane holds the token and the token cannot prove what a person agreed to.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +39,10 @@ use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{GenericFilePath, GenericNamespaced, ListenerOptions, Stream, ToFsName, ToNsName};
 use serde::{Deserialize, Serialize};
 
+mod stream;
+pub use stream::{Event, Gone, Outcome, Sink, stream_request};
+pub use stream::{MAX_CHUNK, MAX_NOTE, MAX_OUTPUT, MAX_REPLY};
+
 /// The longest request line, in bytes.
 pub const MAX_LINE: usize = 64 * 1024;
 /// The longest path in a command.
@@ -25,8 +51,17 @@ pub const MAX_PATH: usize = 4096;
 pub const MAX_HIST: usize = 8192;
 /// The longest value of `setmeta`.
 pub const MAX_VALUE: usize = 200;
+/// The longest prompt of `ai`, in bytes.
+pub const MAX_PROMPT: usize = 16 * 1024;
+/// The longest body (the text piped into `wsh ai`), in bytes.
+pub const MAX_STDIN: usize = 1024 * 1024;
 /// How many requests are handled at once.
 const MAX_CLIENTS: usize = 8;
+
+/// Refusal texts that tests and clients rely on.
+const PROMPT_TOO_LONG: &str = "the prompt is longer than 16384 bytes or has a NUL";
+const INPUT_TOO_LONG: &str = "the input is longer than 1048576 bytes";
+const NOTHING_TO_ASK: &str = "there is nothing to ask: give a prompt or pipe text in";
 
 /// What `wsh` can ask.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,11 +75,14 @@ pub enum Cmd {
     Setmeta { key: String, value: String },
     /// A command the shell ran, for the history. The app decides whether it is worth keeping.
     Hist { line: String, cwd: String, exit: Option<i32> },
+    /// Ask the model of the running app. `prompt` is the text as typed; `stdin_bytes` is the length of the text that follows
+    /// the request line.
+    Ai { prompt: String, stdin_bytes: u32 },
     /// Nothing: asks whether the app answers.
     Ping,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub token: String,
     /// The pane the command was typed in (`HOLZWAVE_PANE`).
@@ -59,7 +97,27 @@ pub struct Response {
     pub message: String,
 }
 
+impl std::fmt::Debug for Request {
+    /// The token is a secret: it never shows in a debug print.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request").field("token", &format_args!("<hidden>")).field("pane", &self.pane).field("cmd", &self.cmd).finish()
+    }
+}
+
 impl Cmd {
+    /// Whether the command answers with a stream (and so carries a body).
+    pub fn is_stream(&self) -> bool {
+        matches!(self, Cmd::Ai { .. })
+    }
+
+    /// The length in bytes of the body that follows the request line.
+    pub fn body_len(&self) -> usize {
+        match self {
+            Cmd::Ai { stdin_bytes, .. } => *stdin_bytes as usize,
+            _ => 0,
+        }
+    }
+
     /// Whether the command is well formed: sizes and characters. The app checks what it means.
     pub fn check(&self) -> Result<(), String> {
         let path_ok = |p: &str| !p.is_empty() && p.len() <= MAX_PATH && !p.contains('\0');
@@ -80,6 +138,18 @@ impl Cmd {
                 }
                 Ok(())
             }
+            Cmd::Ai { prompt, stdin_bytes } => {
+                if prompt.len() > MAX_PROMPT || prompt.contains('\0') {
+                    return Err(PROMPT_TOO_LONG.into());
+                }
+                if *stdin_bytes as usize > MAX_STDIN {
+                    return Err(INPUT_TOO_LONG.into());
+                }
+                if prompt.trim().is_empty() && *stdin_bytes == 0 {
+                    return Err(NOTHING_TO_ASK.into());
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -88,6 +158,19 @@ impl Cmd {
 /// What the app does with a command. `Ok` is the text `wsh` prints, `Err` the reason it exits with an error.
 pub trait Handler: Send + Sync {
     fn handle(&self, pane: Option<u64>, cmd: Cmd) -> Result<String, String>;
+
+    /// A command that answers with a stream (see the module documentation): `input` is the body, `gone` tells when the
+    /// client left, `out` takes the text (for standard output) and the notes (for standard error). `Ok(())` ends the stream
+    /// with `end` ok, `Err(message)` with `end` not ok. A handler must return soon after `gone` fires. The default answers
+    /// through [`Handler::handle`] and sends a non-empty answer as one text.
+    fn handle_stream(&self, pane: Option<u64>, cmd: Cmd, input: String, gone: &Gone, out: &mut dyn Sink) -> Result<(), String> {
+        let _ = (input, gone);
+        let answer = self.handle(pane, cmd)?;
+        if !answer.is_empty() {
+            out.text(&answer).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
 }
 
 /// A new random token: 128 bits as hex.
@@ -127,46 +210,56 @@ fn name(dir: &Path) -> io::Result<interprocess::local_socket::Name<'static>> {
     }
 }
 
-/// Read one line of at most [`MAX_LINE`] bytes.
+/// Read one line of at most [`MAX_LINE`] bytes, for a client that reads one answer.
 fn read_line(stream: &mut impl Read) -> io::Result<String> {
-    let mut reader = BufReader::new(stream.take(MAX_LINE as u64 + 1));
+    read_bounded_line(&mut BufReader::new(stream))
+}
+
+/// Read one line of at most [`MAX_LINE`] bytes through `reader`. Whatever the reader buffered beyond the newline stays in
+/// it, so a body that follows the line is read through the same reader.
+fn read_bounded_line(reader: &mut impl BufRead) -> io::Result<String> {
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    (&mut *reader).take(MAX_LINE as u64 + 1).read_line(&mut line)?;
     if line.len() > MAX_LINE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "the request is too long"));
     }
     Ok(line)
 }
 
-fn answer(stream: &mut Stream, ok: bool, message: impl Into<String>) {
+fn answer(stream: &mut impl Write, ok: bool, message: impl Into<String>) {
     let mut line = serde_json::to_string(&Response { ok, message: message.into() }).unwrap_or_default();
     line.push('\n');
     let _ = stream.write_all(line.as_bytes());
 }
 
-fn serve_one(mut stream: Stream, token: &str, handler: &dyn Handler) {
-    let line = match read_line(&mut stream) {
+fn serve_one(stream: Stream, token: &str, handler: &dyn Handler) {
+    let (recv, mut send) = stream.split();
+    let mut reader = BufReader::new(recv);
+    let line = match read_bounded_line(&mut reader) {
         Ok(l) => l,
-        Err(e) => return answer(&mut stream, false, e.to_string()),
+        Err(e) => return answer(&mut send, false, e.to_string()),
     };
     // The token first: a request that does not carry it is not looked at any further.
     let value: serde_json::Value = match serde_json::from_str(&line) {
         Ok(v) => v,
-        Err(_) => return answer(&mut stream, false, "not a valid request"),
+        Err(_) => return answer(&mut send, false, "not a valid request"),
     };
     if !value.get("token").and_then(|t| t.as_str()).is_some_and(|t| same(t, token)) {
-        return answer(&mut stream, false, "refused: wsh must run in a holzWave terminal (the token is missing or wrong)");
+        return answer(&mut send, false, "refused: wsh must run in a holzWave terminal (the token is missing or wrong)");
     }
     let request: Request = match serde_json::from_value(value) {
         Ok(r) => r,
-        Err(e) => return answer(&mut stream, false, format!("unknown command: {e}")),
+        Err(e) => return answer(&mut send, false, format!("unknown command: {e}")),
     };
     if let Err(why) = request.cmd.check() {
-        return answer(&mut stream, false, why);
+        return answer(&mut send, false, why);
+    }
+    if request.cmd.is_stream() {
+        return stream::serve(reader, send, request, handler);
     }
     match handler.handle(request.pane, request.cmd) {
-        Ok(m) => answer(&mut stream, true, m),
-        Err(e) => answer(&mut stream, false, e),
+        Ok(m) => answer(&mut send, true, m),
+        Err(e) => answer(&mut send, false, e),
     }
 }
 
@@ -243,8 +336,11 @@ pub fn connect(dir: &Path) -> io::Result<Stream> {
     Stream::connect(name(dir)?)
 }
 
-/// Send one request and read the answer.
+/// Send one request and read the answer. A command that streams needs [`stream_request`].
 pub fn request(dir: &Path, request: &Request) -> io::Result<Response> {
+    if request.cmd.is_stream() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "this command streams; use stream_request"));
+    }
     let mut stream = connect(dir)?;
     let mut line = serde_json::to_string(request).map_err(io::Error::other)?;
     line.push('\n');
@@ -358,5 +454,83 @@ mod tests {
         if !cfg!(windows) {
             assert!(serve(&long, "t".into(), Arc::new(Echo(Mutex::default()))).is_err());
         }
+    }
+
+    #[test]
+    fn the_ai_request_names_a_prompt_and_an_input_length_and_nothing_else() {
+        let r = req("t", Some(2), Cmd::Ai { prompt: "why".into(), stdin_bytes: 5 });
+        let value = serde_json::to_value(&r).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["cmd", "pane", "prompt", "stdin_bytes", "token"]);
+        assert_eq!(value["cmd"], "ai");
+        let back: Request = serde_json::from_value(value).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn the_ai_command_is_checked_for_size_text_and_emptiness() {
+        let ai = |prompt: &str, n: u32| Cmd::Ai { prompt: prompt.into(), stdin_bytes: n };
+        assert_eq!(ai(&"x".repeat(MAX_PROMPT + 1), 0).check(), Err(PROMPT_TOO_LONG.into()));
+        assert_eq!(ai("a\0b", 0).check(), Err(PROMPT_TOO_LONG.into()));
+        assert_eq!(ai("ok", MAX_STDIN as u32 + 1).check(), Err(INPUT_TOO_LONG.into()));
+        assert_eq!(ai("  \n", 0).check(), Err(NOTHING_TO_ASK.into()));
+        assert_eq!(ai("", 0).check(), Err(NOTHING_TO_ASK.into()));
+        assert_eq!(ai(&"x".repeat(MAX_PROMPT), MAX_STDIN as u32).check(), Ok(()));
+        assert_eq!(ai("", 1).check(), Ok(()), "the question may be in the input");
+        assert_eq!(ai("q", 0).check(), Ok(()));
+    }
+
+    #[test]
+    fn a_stream_command_needs_the_stream_client() {
+        let d = dir("s");
+        let echo = Arc::new(Echo(Mutex::default()));
+        let _server = serve(&d, "secret".into(), echo.clone()).unwrap();
+        let err = request(&d, &req("secret", None, Cmd::Ai { prompt: "hi".into(), stdin_bytes: 0 })).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(echo.0.lock().unwrap().is_empty(), "nothing was sent");
+        assert!(!Cmd::Ping.is_stream() && Cmd::Ai { prompt: String::new(), stdin_bytes: 3 }.is_stream());
+        assert_eq!((Cmd::Ping.body_len(), Cmd::Ai { prompt: String::new(), stdin_bytes: 3 }.body_len()), (0, 3));
+    }
+
+    /// The identifiers in the block of the enum `name` in `source` (its doc comments left out) that say the command decides,
+    /// approves, confirms or grants something.
+    fn deciding_names(source: &str, name: &str) -> Vec<String> {
+        const WORDS: [&str; 14] = [
+            "decide", "decision", "approve", "approval", "consent", "grant", "allow", "deny", "confirm", "accept", "permit",
+            "authorize", "authorise", "trust",
+        ];
+        let header = format!("pub enum {name} {{");
+        let Some(start) = source.find(&header) else { return vec![format!("no enum named {name}")] };
+        let mut found = Vec::new();
+        for line in source[start + header.len()..].lines().skip(1) {
+            if line == "}" {
+                return found;
+            }
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for word in line.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()) {
+                if WORDS.iter().any(|w| word.to_lowercase().contains(w)) {
+                    found.push(word.to_owned());
+                }
+            }
+        }
+        vec![format!("the block of {name} does not end")]
+    }
+
+    #[test]
+    fn no_command_of_the_local_socket_can_decide_approve_confirm_or_grant() {
+        let names = deciding_names(include_str!("lib.rs"), "Cmd");
+        assert!(names.is_empty(), "the socket must not decide, approve, confirm or grant: {names:?}");
+    }
+
+    #[test]
+    fn the_deciding_name_guard_flags_a_synthetic_enum_and_passes_the_real_one() {
+        let (a, b, c) = (["Ai", "Decide"].concat(), ["Con", "sent"].concat(), ["Grant", "Access"].concat());
+        let synthetic = format!("pub enum Fake {{\n    /// A doc line that says allow.\n    {a} {{ call: String }},\n    {b},\n    {c} {{ id: u32 }},\n    Ping,\n}}\n");
+        assert_eq!(deciding_names(&synthetic, "Fake"), [a, b, c]);
+        assert!(deciding_names(&synthetic, "Missing")[0].starts_with("no enum"));
+        assert!(deciding_names("pub enum Fake {\n    Ping,\n", "Fake")[0].contains("does not end"));
     }
 }

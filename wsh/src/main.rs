@@ -5,6 +5,7 @@
 //! wsh edit <file>             open a file in the editor beside this pane
 //! wsh setmeta title <text>    name this pane
 //! wsh ping                    check that holzWave answers
+//! wsh ai [--] <prompt>...      ask the model of this holzWave; text piped in is sent along; the answer is printed
 //! wsh init <bash|zsh|fish>    print the hook that feeds the history and marks where each command's output starts and ends; add `eval "$(wsh init bash)"` to the shell's rc file
 //! ```
 //!
@@ -16,7 +17,10 @@ use std::process::ExitCode;
 
 use holzwave_ipc::{Cmd, Request};
 
-const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | init <bash|zsh|fish>";
+mod ai;
+mod clean;
+
+const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | ai [--] <prompt>... | init <bash|zsh|fish>";
 
 /// The hooks that tell holzWave each command a shell ran and mark where its output starts and ends. They are files under
 /// `hooks/` so the shells and the tests can read the very text that `wsh init` prints. They run only inside a holzWave pane
@@ -54,6 +58,16 @@ fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
     }
 }
 
+/// Where the app is: the folder of its socket, the token and the pane this terminal is, from the variables holzWave sets in
+/// every pane it starts.
+fn app_env() -> Result<(PathBuf, String, Option<u64>), (u8, String)> {
+    let (Some(dir), Some(token)) = (std::env::var_os("HOLZWAVE_IPC"), std::env::var("HOLZWAVE_TOKEN").ok()) else {
+        return Err((1, "wsh: this is not a holzWave terminal (HOLZWAVE_IPC and HOLZWAVE_TOKEN are not set)".into()));
+    };
+    let pane = std::env::var("HOLZWAVE_PANE").ok().and_then(|p| p.parse().ok());
+    Ok((PathBuf::from(dir), token, pane))
+}
+
 fn run() -> Result<String, (u8, String)> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
@@ -64,16 +78,17 @@ fn run() -> Result<String, (u8, String)> {
     }
     let cwd = std::env::current_dir().map_err(|e| (1, format!("wsh: no current directory: {e}")))?;
     let cmd = parse(&args, &cwd).map_err(|e| (2, e))?;
-    let (Some(dir), Some(token)) = (std::env::var_os("HOLZWAVE_IPC"), std::env::var("HOLZWAVE_TOKEN").ok()) else {
-        return Err((1, "wsh: this is not a holzWave terminal (HOLZWAVE_IPC and HOLZWAVE_TOKEN are not set)".into()));
-    };
-    let pane = std::env::var("HOLZWAVE_PANE").ok().and_then(|p| p.parse().ok());
-    let answer = holzwave_ipc::request(&PathBuf::from(dir), &Request { token, pane, cmd })
+    let (dir, token, pane) = app_env()?;
+    let answer = holzwave_ipc::request(&dir, &Request { token, pane, cmd })
         .map_err(|e| (1, format!("wsh: holzWave does not answer ({e}); is it still running?")))?;
     if answer.ok { Ok(answer.message) } else { Err((1, format!("wsh: {}", answer.message))) }
 }
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "ai") {
+        return ai::run(&args[1..]);
+    }
     match run() {
         Ok(message) => {
             if !message.is_empty() {

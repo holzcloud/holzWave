@@ -721,6 +721,9 @@ pub struct AppCore {
     me: Weak<AppCore>,
 }
 
+/// What `wsh ai` is told while no chat answers it.
+const WSH_AI_UNCONNECTED: &str = "no chat is connected to wsh ai in this build of holzWave";
+
 impl AppCore {
     /// Load the layouts from `dir/layout.json` (a fresh one-pane window `main` when there is none or it is unusable;
     /// a layout file of before windows is one window) and start nothing: the webview starts each pane once it knows
@@ -948,6 +951,9 @@ impl AppCore {
         if cmd == Cmd::Ping {
             return Ok("holzWave".into());
         }
+        if let Cmd::Ai { .. } = &cmd {
+            return Err(WSH_AI_UNCONNECTED.into());
+        }
         if let Cmd::Hist { line, cwd, exit } = &cmd {
             // Not every command is kept (secrets, a leading space); that is not an error for the shell.
             let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
@@ -966,6 +972,7 @@ impl AppCore {
                 self.block_open_in(&label, "right", BlockKind::Preview, "local", &path)?
             }
             Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
+            Cmd::Ai { .. } => return Err(WSH_AI_UNCONNECTED.into()),
             Cmd::Ping | Cmd::Hist { .. } => return Ok(String::new()),
         };
         self.sink.send(Target::window(&label), Out::Layout(view));
@@ -4320,6 +4327,18 @@ mod tests {
     }
 
     /// A core over an existing scratch directory, so that a test can put files there first.
+    #[test]
+    fn the_local_socket_refuses_an_ai_request_when_no_chat_answers() {
+        use holzwave_ipc::Cmd;
+        let (core, _rec, _dir) = core("sh", &[]);
+        let pane = core.view().focus;
+        let ask = || Cmd::Ai { prompt: "hi".into(), stdin_bytes: 0 };
+        let said = Err("no chat is connected to wsh ai in this build of holzWave".to_owned());
+        assert_eq!(core.ipc_command(Some(pane), ask()), said);
+        assert_eq!(core.ipc_command(None, ask()), said);
+        assert_eq!(core.ipc_command(Some(9999), ask()), said, "a missing pane cannot change the answer");
+    }
+
     #[test]
     fn wsh_names_a_pane_opens_a_file_beside_it_and_refuses_what_is_not_a_pane_or_a_file() {
         use holzwave_ipc::Cmd;
