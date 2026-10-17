@@ -62,7 +62,7 @@ authoritative layout, session or setting, and can be reloaded at any time.
 | `app/src/` | TypeScript | chrome, renderers, input | ✅ |
 | `spike/` | `holzwave-spike` | measurement tool, not shipped | ✅ |
 | `wsh/` | `wsh` | CLI; depends on the small `holzwave-ipc` crate (`ipc/`: protocol, socket server and client) | ✅ |
-| `plugins/apple-ai/` | Swift package | Foundation Models bridge | phase 7 |
+| `plugins/apple-ai/` | `holzwave-apple-ai` | Foundation Models bridge: a Swift package behind a C ABI, macOS only, not a Tauri plugin | phase 7 |
 | `docs/` | | roadmap, architecture, design, sync, config, test plan | ✅ |
 
 `holzwave-core` stays free of Tauri and of any UI type. It must build and test on its own, and it is the crate the

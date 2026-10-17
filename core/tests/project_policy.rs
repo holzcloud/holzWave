@@ -1320,6 +1320,261 @@ fn tls_guard_reports_a_rustls_without_ring() {
     assert_eq!(problems, ["rustls is not in the lock: the one TLS stack is missing".to_owned()]);
 }
 
+// ---- the Apple bridge -------------------------------------------------------------------------------------
+
+/// The packages of the Apple bridge: the crate and the build tool that compiles its Swift package.
+const BRIDGE_PACKAGES: &[&str] = &["holzwave-apple-ai", "swift-rs"];
+
+/// The crates that must never reach the bridge, each with the reason.
+const BRIDGE_KEEP_OUT: &[(&str, &str)] = &[
+    ("holzwave-core", "the core is linked by the mobile shells and by the Windows and Linux builds, none of which has Swift"),
+    ("holzwave-ipc", "the socket crate is shared by the app and the CLI and must stay free of a Swift toolchain"),
+    ("wsh", "the CLI is built on every platform and must stay free of a Swift toolchain"),
+];
+
+/// What is wrong with the closures of the crates in [`BRIDGE_KEEP_OUT`], one sentence per crate and bridge package that
+/// reaches it, naming both and the reason.
+fn bridge_leak_problems(graph: &Graph) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (start, why) in BRIDGE_KEEP_OUT {
+        let reach = closure(graph, start);
+        for package in BRIDGE_PACKAGES {
+            if reach.contains(*package) {
+                problems.push(format!("{package} is in the dependency closure of {start}: {why}"));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn core_cli_and_ipc_closures_have_no_apple_bridge_and_no_swift_rs() {
+    let problems = bridge_leak_problems(&lock_graph());
+    assert!(problems.is_empty(), "the Apple bridge leaked:\n  {}", problems.join("\n  "));
+}
+
+#[test]
+fn bridge_guard_reports_swift_rs_in_the_core() {
+    let graph = parse_lock(&toy_lock(&[
+        ("holzwave-core", &["swift-rs"]),
+        ("holzwave-ipc", &[]),
+        ("wsh", &["holzwave-ipc"]),
+        ("swift-rs", &[]),
+    ]));
+
+    let problems = bridge_leak_problems(&graph);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("swift-rs") && problems[0].contains("holzwave-core"), "{problems:?}");
+}
+
+#[test]
+fn bridge_guard_reports_a_transitive_bridge() {
+    // The CLI reaches the bridge through the socket crate.
+    let graph = parse_lock(&toy_lock(&[
+        ("holzwave-core", &[]),
+        ("holzwave-ipc", &["holzwave-apple-ai"]),
+        ("wsh", &["holzwave-ipc"]),
+        ("holzwave-apple-ai", &["swift-rs"]),
+        ("swift-rs", &[]),
+    ]));
+
+    let problems = bridge_leak_problems(&graph);
+
+    // The socket crate and the CLI each reach both packages.
+    assert_eq!(problems.len(), 4, "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("holzwave-apple-ai") && p.contains("wsh")), "{problems:?}");
+    assert!(problems.iter().all(|p| !p.contains("holzwave-core")), "{problems:?}");
+}
+
+/// What is wrong with the way a member manifest names the Apple bridge: a dependency line, or a dependency table of the
+/// form `[dependencies.holzwave-apple-ai]`, that is not under a table gated to macOS (`target_os = "macos"` or
+/// `apple-darwin` in the header). Comment lines are skipped. A crate that names the bridge ungated could not be built
+/// on Windows or Linux, and the Cargo lock would pull the Swift tooling into those builds.
+fn macos_gating_problems(manifest: &str) -> Vec<String> {
+    const BRIDGE: &str = "holzwave-apple-ai";
+    let gated = |header: &str| header.contains("target_os = \"macos\"") || header.contains("apple-darwin");
+    let mut problems = Vec::new();
+    let mut header = String::new();
+    for (index, line) in manifest.lines().enumerate() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            header = line.to_owned();
+            let names_dependency_table = header.contains("dependencies");
+            let is_bridge_table = header.trim_end_matches(']').trim_end_matches('"').ends_with(&format!(".{BRIDGE}"));
+            if names_dependency_table && is_bridge_table && !gated(&header) {
+                problems.push(format!(
+                    "line {}: {header} names {BRIDGE} outside a table gated to macOS (target_os = \"macos\")",
+                    index + 1
+                ));
+            }
+        } else if header.contains("dependencies") && !header.trim_end_matches(']').ends_with(&format!(".{BRIDGE}")) {
+            let key = line.split(['=', '.']).next().unwrap_or_default().trim().trim_matches('"');
+            if key == BRIDGE && !gated(&header) {
+                problems.push(format!(
+                    "line {}: {line} sits under {header}, which is not gated to macOS (target_os = \"macos\")",
+                    index + 1
+                ));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn apple_bridge_dependency_is_gated_to_macos() {
+    let members = members_of(&read("Cargo.toml"));
+    let mut problems = Vec::new();
+    for member in &members {
+        let manifest = format!("{member}/Cargo.toml");
+        problems.extend(macos_gating_problems(&read(&manifest)).into_iter().map(|p| format!("{manifest}: {p}")));
+    }
+    assert!(problems.is_empty(), "the Apple bridge is named outside a macOS-only table:\n  {}", problems.join("\n  "));
+}
+
+#[test]
+fn gating_guard_reports_an_ungated_dependency() {
+    let manifest = "[package]\nname = \"app\"\n\n[dependencies]\nserde = \"1\"\nholzwave-apple-ai = { path = \"../plugins/apple-ai\" }\n";
+
+    let problems = macos_gating_problems(manifest);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("line 6") && problems[0].contains("[dependencies]"), "{problems:?}");
+}
+
+#[test]
+fn gating_guard_reports_an_ungated_dev_dependency_and_header_form() {
+    let dev = "[dev-dependencies]\nholzwave-apple-ai.workspace = true\n";
+    assert_eq!(macos_gating_problems(dev).len(), 1, "{:?}", macos_gating_problems(dev));
+
+    let header = "[dependencies.holzwave-apple-ai]\npath = \"../plugins/apple-ai\"\n";
+    let problems = macos_gating_problems(header);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+
+    let ungated_target = "[target.'cfg(unix)'.dependencies]\nholzwave-apple-ai = \"1\"\n";
+    assert_eq!(macos_gating_problems(ungated_target).len(), 1);
+}
+
+#[test]
+fn gating_guard_accepts_a_macos_target_table() {
+    let line_form = "[target.'cfg(target_os = \"macos\")'.dependencies]\nholzwave-apple-ai = { path = \"../plugins/apple-ai\" }\n";
+    assert_eq!(macos_gating_problems(line_form), Vec::<String>::new());
+
+    let header_form = "[target.'cfg(target_os = \"macos\")'.dependencies.holzwave-apple-ai]\npath = \"../plugins/apple-ai\"\n";
+    assert_eq!(macos_gating_problems(header_form), Vec::<String>::new());
+
+    let triple = "[target.aarch64-apple-darwin.dependencies]\nholzwave-apple-ai = \"1\"\n";
+    assert_eq!(macos_gating_problems(triple), Vec::<String>::new());
+
+    let comment = "[dependencies]\n# holzwave-apple-ai = \"1\"\nserde = \"1\"\n";
+    assert_eq!(macos_gating_problems(comment), Vec::<String>::new());
+}
+
+/// Names that must not appear in the Swift sources of the bridge, each with the reason. The Rust scan of this file reads
+/// no Swift, so Swift gets its own list: the on-device model needs no network, and a network API in the bridge would
+/// make "on device" untrue.
+const SWIFT_FORBIDDEN: [(&str, &str); 8] = [
+    ("URLSession", "a network API: the on-device model needs no network"),
+    ("URLRequest", "a network API: the on-device model needs no network"),
+    ("NSURLConnection", "a network API: the on-device model needs no network"),
+    ("NWConnection", "a network API: the on-device model needs no network"),
+    ("NWListener", "a network API: the on-device model needs no network"),
+    ("CFSocket", "a network API: the on-device model needs no network"),
+    ("import Network", "the Network framework: the on-device model needs no network"),
+    (
+        "PrivateCloudCompute",
+        "the cloud model leaves the device and is not part of this bridge (a prefix match, so \
+         PrivateCloudComputeLanguageModel is caught too)",
+    ),
+];
+
+/// Names that must not appear in `Package.swift`, each with the reason: `swift build` runs in a build script and must
+/// fetch and run nothing that `Cargo.lock` does not pin.
+const PACKAGE_FORBIDDEN: [(&str, &str); 3] = [
+    (".package(", "a SwiftPM dependency would be fetched by `swift build` and bypass Cargo.lock"),
+    (".binaryTarget(", "a prebuilt binary that nobody compiled from source here"),
+    (".plugin(", "a build plugin runs code during `swift build`"),
+];
+
+/// One sentence per hit of a token in the code of a Swift source (comments are skipped), as `label:line: token (reason)`.
+/// The comment syntax of Rust, nested block comments included, is the one of Swift.
+fn swift_source_problems(label: &str, source: &str, tokens: &[(&str, &str)]) -> Vec<String> {
+    let code = without_comments(source, Syntax::Rust);
+    let mut problems = Vec::new();
+    for (index, line) in code.lines().enumerate() {
+        for (token, reason) in tokens {
+            if line.contains(token) {
+                problems.push(format!("{label}:{}: {token} ({reason})", index + 1));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn swift_sources_use_no_network_apis_no_cloud_model_and_no_package_dependencies() {
+    let package_tokens: Vec<(&str, &str)> = SWIFT_FORBIDDEN.iter().chain(PACKAGE_FORBIDDEN.iter()).copied().collect();
+    let mut problems = Vec::new();
+    let mut files_read = 0;
+
+    let package = "plugins/apple-ai/swift/Package.swift";
+    problems.extend(swift_source_problems(package, &read(package), &package_tokens));
+    files_read += 1;
+
+    for file in files_below("plugins/apple-ai/swift/Sources", &["swift"]) {
+        let relative = shown(&file);
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("cannot read {relative}: {e}"));
+        problems.extend(swift_source_problems(&relative, &source, &SWIFT_FORBIDDEN));
+        files_read += 1;
+    }
+
+    assert!(files_read >= 3, "only {files_read} Swift files read: is the walk broken?");
+    assert!(problems.is_empty(), "the Swift side of the Apple bridge broke the policy:\n  {}", problems.join("\n  "));
+}
+
+#[test]
+fn swift_guard_reports_a_network_api_in_code() {
+    let source = "import Foundation\nlet task = URLSession.shared.dataTask(with: url)\n";
+
+    let problems = swift_source_problems("A.swift", source, &SWIFT_FORBIDDEN);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].starts_with("A.swift:2: URLSession ("), "{problems:?}");
+}
+
+#[test]
+fn swift_guard_skips_a_token_in_a_comment() {
+    let source = "// URLSession is not used here\n/* import Network\n   NWConnection */\nlet value = 1\n";
+
+    assert_eq!(swift_source_problems("A.swift", source, &SWIFT_FORBIDDEN), Vec::<String>::new());
+}
+
+#[test]
+fn swift_guard_reports_a_cloud_model_prefix() {
+    let source = "let model = PrivateCloudComputeLanguageModel()\n";
+
+    let problems = swift_source_problems("A.swift", source, &SWIFT_FORBIDDEN);
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("PrivateCloudCompute"), "{problems:?}");
+}
+
+#[test]
+fn swift_guard_reports_a_package_dependency() {
+    let manifest = "let package = Package(\n    dependencies: [\n        .package(url: \"https://example.com/x\", from: \"1.0.0\")\n    ],\n    targets: [.binaryTarget(name: \"B\", path: \"B.xcframework\"), .plugin(name: \"P\", capability: .buildTool())]\n)\n";
+    let tokens: Vec<(&str, &str)> = SWIFT_FORBIDDEN.iter().chain(PACKAGE_FORBIDDEN.iter()).copied().collect();
+
+    let problems = swift_source_problems("Package.swift", manifest, &tokens);
+
+    assert_eq!(problems.len(), 3, "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains(".package(")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains(".binaryTarget(")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains(".plugin(")), "{problems:?}");
+}
+
 #[test]
 fn members_of_reads_the_workspace_array() {
     let one_line =
