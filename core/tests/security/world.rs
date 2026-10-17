@@ -13,16 +13,25 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use holzwave_core::ai::agent::Limits;
+use holzwave_core::ai::gate::ApprovedContext;
 use holzwave_core::ai::provider::{CancelToken, Detail};
+use holzwave_core::ai::scripted::{Script, ScriptedProvider};
+use holzwave_core::ai::service::{AiService, AiSink, SendRequest};
+use holzwave_core::ai::store::{ConversationId, MemoryStore};
 use holzwave_core::ai::tools::{
-    Base, Inspected, Resolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput, plan, report,
+    Base, Decision, DenyPolicy, Inspected, Resolved, Scope, Ticket, Tool, ToolError, ToolHost, ToolName, ToolOutput,
+    plan, report,
 };
 use holzwave_core::exec::LocalExec;
 use holzwave_core::layout::PaneId;
 use holzwave_core::ssh::{ExecCancel, ExecLimits};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::common::wait_until;
 use crate::security::canaries::{canaries, file_value, terminal_text};
+use crate::security::rig::CollectSink;
 
 /// The first pane of the world.
 pub const PANE_A: PaneId = 1;
@@ -440,5 +449,165 @@ impl GateHost {
             (None, None) => Ok(()),
             _ => Err(host_error("the file changed since the card was shown")),
         }
+    }
+}
+
+// ---- the world ----------------------------------------------------------------------------------------------------
+
+/// What a world is built from. Every field has a sensible default.
+pub struct WorldOptions {
+    /// The scripts the hostile model plays, one per provider request, in order.
+    pub turns: Vec<Script>,
+    /// The limits of a turn (the approval deadline is set small by the tests that wait for it).
+    pub limits: Limits,
+    /// The panes the host offers its tools for.
+    pub panes: Vec<PaneId>,
+    /// The runner of `run_command`, when the world runs commands.
+    pub exec: Option<LocalExec>,
+}
+
+impl Default for WorldOptions {
+    fn default() -> Self {
+        WorldOptions { turns: Vec::new(), limits: Limits::default(), panes: vec![PANE_A, PANE_B], exec: None }
+    }
+}
+
+/// A service with a scripted hostile model over a scratch tree: the model asks for what the script says and the test
+/// plays the page.
+pub struct World {
+    scratch: Scratch,
+    tree: Tree,
+    host: Arc<GateHost>,
+    sink: Arc<CollectSink>,
+    service: Arc<AiService>,
+    provider: Arc<ScriptedProvider>,
+}
+
+impl World {
+    /// Builds the tree, the host, the service and the scripted provider `scripted`.
+    pub fn new(options: WorldOptions) -> World {
+        let scratch = Scratch::new("world");
+        let tree = Tree::new(scratch.path());
+        let mut host = GateHost::new(&tree, &options.panes);
+        if let Some(exec) = options.exec {
+            host = host.with_exec(exec);
+        }
+        let host = Arc::new(host);
+        let sink = Arc::new(CollectSink::default());
+        let config = scratch.path().join("config");
+        std::fs::create_dir(&config).expect("a configuration folder");
+        let service = AiService::builder(Arc::new(MemoryStore::new()), sink.clone() as Arc<dyn AiSink>, config)
+            .tool_host(host.clone())
+            .deny_policy(DenyPolicy::new(tree.protected()))
+            .limits(options.limits)
+            .build();
+        let mut provider = ScriptedProvider::new("scripted");
+        for turn in options.turns {
+            provider = provider.with_turn(turn);
+        }
+        let provider = Arc::new(provider);
+        service.register_provider("scripted", provider.clone()).expect("the provider is registered");
+        World { scratch, tree, host, sink, service: Arc::new(service), provider }
+    }
+
+    /// The tree.
+    pub fn tree(&self) -> &Tree {
+        &self.tree
+    }
+
+    /// The scratch folder of the world.
+    pub fn scratch(&self) -> &Path {
+        self.scratch.path()
+    }
+
+    /// The host.
+    pub fn host(&self) -> &Arc<GateHost> {
+        &self.host
+    }
+
+    /// The service.
+    pub fn service(&self) -> &Arc<AiService> {
+        &self.service
+    }
+
+    /// The scripted model.
+    pub fn provider(&self) -> &Arc<ScriptedProvider> {
+        &self.provider
+    }
+
+    /// The sink of the events.
+    pub fn sink(&self) -> &Arc<CollectSink> {
+        &self.sink
+    }
+
+    /// A fresh chat.
+    pub fn chat(&self) -> ConversationId {
+        self.service.new_conversation().expect("a chat id")
+    }
+
+    /// Sends `text` to the scripted model for pane A.
+    pub fn ask(&self, chat: &ConversationId, text: &str) {
+        self.ask_with_context(chat, text, Vec::new());
+    }
+
+    /// Sends `text` with the approved contexts attached.
+    pub fn ask_with_context(&self, chat: &ConversationId, text: &str, approved: Vec<ApprovedContext>) {
+        let request = SendRequest::new(chat.clone(), text.to_owned(), PANE_A).profile("scripted").context(approved);
+        self.service.send(request).expect("the send is accepted");
+    }
+
+    /// The cards of a chat so far, as JSON (`pending` of each `tool_proposed` event).
+    pub fn cards(&self, chat: &ConversationId) -> Vec<Value> {
+        self.sink
+            .events(chat.as_str())
+            .into_iter()
+            .filter(|event| event["kind"] == "tool_proposed")
+            .map(|event| event["pending"].clone())
+            .collect()
+    }
+
+    /// The `n`-th card (counting from 1), waiting up to `timeout` for it.
+    pub fn card(&self, chat: &ConversationId, n: usize, timeout: Duration) -> Option<Value> {
+        wait_until(timeout, || self.cards(chat).len() >= n);
+        self.cards(chat).into_iter().nth(n - 1)
+    }
+
+    /// The results of the calls of a chat, as JSON (the `tool_result` events).
+    pub fn results(&self, chat: &ConversationId) -> Vec<Value> {
+        self.sink.events(chat.as_str()).into_iter().filter(|event| event["kind"] == "tool_result").collect()
+    }
+
+    /// The decision of the page on a card, through the table the shell's decision command uses.
+    pub fn decide(&self, chat: &ConversationId, card: &Value, decision: Decision, hash: &str) -> Result<(), ToolError> {
+        let call_id = card["call_id"].as_str().unwrap_or("");
+        self.service.approvals().decide(chat.as_str(), call_id, decision, hash)
+    }
+
+    /// Allows a card with its own hash.
+    pub fn allow(&self, chat: &ConversationId, card: &Value) -> Result<(), ToolError> {
+        let hash = card["hash"].as_str().unwrap_or("").to_owned();
+        self.decide(chat, card, Decision::Allow, &hash)
+    }
+
+    /// The end of the last turn of a chat, waiting up to `timeout` for it.
+    pub fn wait_end(&self, chat: &ConversationId, timeout: Duration) -> Option<Value> {
+        self.sink.wait_ended(chat.as_str(), timeout)
+    }
+
+    /// Every run of the host.
+    pub fn runs(&self) -> Vec<RunRecord> {
+        self.host.runs()
+    }
+
+    /// The digest of the tree now.
+    pub fn digest(&self) -> String {
+        self.tree.digest()
+    }
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        // The turns are told to stop before the tree goes.
+        self.service.shutdown(Duration::from_secs(2));
     }
 }
