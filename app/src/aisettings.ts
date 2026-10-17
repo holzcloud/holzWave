@@ -6,12 +6,18 @@
 // (trimmed), shows what the core answered (the host of a row is the core's `host`), and names no place: where a request
 // goes is told by the chat after a turn. It probes nothing: no test connection, no model list, no scan for local servers.
 // The list of providers is read with `ai_profiles` when the dialog opens and after a write, never anywhere else; every
-// successful read is handed to `onProfilesChanged` listeners (the chat), so a saved provider shows without a reload.
+// successful read is handed to `onProfilesChanged` listeners (the chat), so a saved provider shows without a reload. On a Mac
+// the same answer carries the state of the on-device model, and the group `On device` (docs/design.md section 6.21) draws it
+// from the page's own sentences; `Check again` is one more read of the same list, never a timer.
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, fitNodes, loadStyles, setText } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { pushKeyHandler } from "./keystack.js";
+import {
+  AVAILABLE, DEVICE_CHECK, DEVICE_CHECKED, DEVICE_LEGEND, DEVICE_META, DEVICE_NAME, deviceAvailable, deviceWords, readDevice,
+} from "./ondevice.js";
+import type { DeviceView } from "./ondevice.js";
 import { state } from "./state.js";
 import {
   LOCAL_CONTEXT_HINT, LOCAL_CONTEXT_OPTIONS, LOCAL_ONLY_HINT, PRESETS, WIRE_LABELS, addressHint, describeFault,
@@ -192,9 +198,55 @@ async function show(focus: string | undefined): Promise<void> {
       stopWatching = settings.watch(() => drawPrivacy());
     }
 
-    // ---- the list ------------------------------------------------------------------------------------------------
+    // ---- the on-device model: drawn from the answer the dialog already reads, and only on a Mac -----------------------
 
     const listGroup = group("aiset-list", "Providers");
+    /** The group `On device`: in the page only while the answer carries a valid state of the model, between Privacy and the list. */
+    const deviceGroup = el("fieldset", "aiset-group aiset-device");
+    const deviceLegend = el("legend", "label", deviceGroup);
+    deviceLegend.id = "aiset-device-legend";
+    deviceLegend.textContent = DEVICE_LEGEND;
+    deviceGroup.setAttribute("role", "group");
+    deviceGroup.setAttribute("aria-labelledby", "aiset-device-legend");
+
+    /**
+     * Draw the group for `view`: nothing for none (the group leaves the page, so nothing of it is in the Tab order), else one
+     * read-only row with the name, the dim meta, the state, one sentence and, while the model cannot answer, `Check again`.
+     * Every text is a sentence of the page's own tables, chosen by the words of the shell, and goes in as text. A button that
+     * had the keyboard keeps it (the new button), or the keyboard moves to the row when the button is gone.
+     */
+    const drawDevice = (view: DeviceView | null): void => {
+      const active = document.activeElement;
+      const hadFocus = active instanceof HTMLButtonElement && deviceGroup.contains(active);
+      for (const child of [...deviceGroup.children]) if (child !== deviceLegend) child.remove();
+      if (view === null) {
+        deviceGroup.remove();
+        return;
+      }
+      if (!deviceGroup.isConnected) listGroup.before(deviceGroup);
+      const words = deviceWords(view);
+      const available = deviceAvailable(view);
+      const row = el("div", "aiset-dev-row", deviceGroup);
+      row.dataset.state = view.state;
+      row.dataset.tone = words.tone;
+      row.tabIndex = -1;
+      el("span", "aiset-dev-name", row).textContent = DEVICE_NAME;
+      el("span", "aiset-dev-meta", row).textContent = DEVICE_META;
+      el("span", "aiset-dev-state", row).textContent = available ? AVAILABLE : words.reason;
+      const line = available ? words.reason : words.advice;
+      if (line !== "") el("p", "aiset-dev-advice", row).textContent = line;
+      let check: HTMLButtonElement | null = null;
+      if (!available) {
+        check = el("button", "aiset-dev-check", row);
+        check.type = "button";
+        check.textContent = DEVICE_CHECK;
+        check.addEventListener("click", () => void recheck());
+      }
+      if (hadFocus) (check ?? row).focus({ preventScroll: true });
+    };
+
+    // ---- the list ------------------------------------------------------------------------------------------------
+
     const rowsBox = el("div", "aiset-rows", listGroup);
     rowsBox.setAttribute("role", "radiogroup");
     rowsBox.setAttribute("aria-label", "Providers");
@@ -552,7 +604,7 @@ async function show(focus: string | undefined): Promise<void> {
     /** Show the provider `id` in the form, or a new provider for null. `keepKeys` leaves what was typed in the key fields. */
     const select = (id: string | null, keepKeys = false, keepForm = false): void => {
       const row = id === null ? undefined : list.find((r) => r.id === id);
-      const same = row !== undefined && row.id === selected;
+      const same = row === undefined ? id === null && selected === null : row.id === selected;
       selected = row === undefined ? null : row.id;
       for (const item of rowsBox.querySelectorAll<HTMLElement>(".aiset-row")) {
         const chosen = item.dataset.id === selected;
@@ -561,8 +613,9 @@ async function show(focus: string | undefined): Promise<void> {
         if (radio) radio.checked = chosen;
       }
       if (keepForm && same) {
-        // The provider shown is the same: what is typed stays, and the states and the notice follow the core's view.
-        filled = draftOf(row);
+        // The provider shown is the same (or the form of a new one is): what is typed stays, and the states and the notice
+        // follow the core's view.
+        if (row !== undefined) filled = draftOf(row);
         drawKeys();
         drawDisclosure();
         return;
@@ -611,6 +664,7 @@ async function show(focus: string | undefined): Promise<void> {
           fitNodes(noteList, noteNodes, parsed.notes.length, () => el("li"));
           parsed.notes.forEach((note, i) => setText(noteNodes[i] as HTMLLIElement, note));
           noteList.hidden = parsed.notes.length === 0;
+          drawDevice(readDevice(raw));
         }
         const want = prefer === undefined ? selected : prefer;
         drawList();
@@ -622,6 +676,15 @@ async function show(focus: string | undefined): Promise<void> {
         () => {},
       );
       return run;
+    };
+
+    /**
+     * `Check again`: one more read of the list, which is where the state of the model comes from, and nothing else. What is
+     * typed in the form stays, the chat gets the answer like after any read, and the status line says that it was read.
+     */
+    const recheck = async (): Promise<void> => {
+      const ok = await read(undefined, true, true);
+      if (ok && !done) status(DEVICE_CHECKED);
     };
 
     // ---- save ----------------------------------------------------------------------------------------------------

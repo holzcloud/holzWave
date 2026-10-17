@@ -4,7 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  DEVICE_ID, DEVICE_MODEL, DEVICE_NAME, DEVICE_OFF, deviceAvailable, deviceChoice, readDevice, withDevice,
+  DEVICE_ADVICE, DEVICE_CHECK, DEVICE_CHECKED, DEVICE_ID, DEVICE_LEGEND, DEVICE_META, DEVICE_MODEL, DEVICE_NAME, DEVICE_OFF,
+  DEVICE_REASONS, deviceAvailable, deviceChoice, deviceWords, readDevice, withDevice,
 } from "../../dist/ondevice.js";
 import { chipView, pickProfile } from "../../dist/chatview.js";
 
@@ -164,4 +165,57 @@ test("a blocked send says one fixed sentence", () => {
   assert.equal(DEVICE_ID, golden.id);
   assert.equal(DEVICE_MODEL, golden.model);
   assert.equal(DEVICE_NAME, "Apple on-device");
+});
+
+test("the words cover every state and advice the shell can send, against the golden", () => {
+  const states = golden.states.map((s) => s.state);
+  const advices = [...new Set(golden.states.map((s) => s.advice))];
+  assert.deepEqual(Object.keys(DEVICE_REASONS).sort(), [...states].sort(), "the reasons are the seven states of the golden");
+  assert.equal(states.length, 7);
+  assert.deepEqual(Object.keys(DEVICE_ADVICE).sort(), advices.sort(), "the advice is the seven advice words of the golden");
+  assert.equal(advices.length, 7);
+  for (const { state, advice } of golden.states) {
+    const words = deviceWords({ state, advice });
+    assert.ok(words.reason !== "", state);
+    if (advice !== "none") assert.ok(words.advice !== "", state);
+    assert.equal(words.tone, state === "available" ? "ok" : "warn", state);
+  }
+  // The state that the shell never sends reads as `other`, with the words of `other` and `unknown`.
+  const unsent = readDevice(answer({ ...good, state: golden.unsent[0], advice: "unknown" }));
+  assert.deepEqual(deviceWords(unsent), deviceWords({ state: "other", advice: "unknown" }));
+  assert.deepEqual(deviceWords({ state: "other", advice: "unknown" }), {
+    reason: DEVICE_REASONS.other, advice: DEVICE_ADVICE.unknown, tone: "warn",
+  });
+  // A word that is in no table reads as `other` and `unknown`; a name of Object.prototype is no table key.
+  for (const word of ["constructor", "__proto__", "toString", "hasOwnProperty", "zq_not_a_state"]) {
+    assert.deepEqual(deviceWords({ state: word, advice: word }), deviceWords({ state: "other", advice: "unknown" }), word);
+  }
+  // A state that is not available always has a next step, even when the shell sent none.
+  assert.equal(deviceWords({ state: "model_not_ready", advice: "none" }).advice, DEVICE_ADVICE.unknown);
+  assert.equal(deviceWords({ state: "available", advice: "none" }).advice, "");
+
+  // The sentences are the design record's, exactly, and no sentence holds an address or a control character.
+  assert.deepEqual({ ...DEVICE_REASONS }, {
+    available: "The model runs on this Mac.",
+    apple_intelligence_not_enabled: "Apple Intelligence is switched off.",
+    device_not_eligible: "This Mac cannot run Apple Intelligence.",
+    model_not_ready: "The model is not ready yet.",
+    os_too_old: "This needs macOS 26 or later.",
+    sdk_lacks_framework: "This build of holzWave was made without Apple's model framework.",
+    other: "The on-device model is not available.",
+  });
+  assert.deepEqual({ ...DEVICE_ADVICE }, {
+    none: "",
+    enable_apple_intelligence: "Turn it on in System Settings, then choose Check again.",
+    wait_for_model: "It may still be downloading. Try again in a few minutes.",
+    not_supported: "Choose another provider.",
+    update_macos: "Update macOS, then choose Check again.",
+    not_in_this_build: "Use a build made with Xcode 26 or later.",
+    unknown: "The reason is not known. Check again later.",
+  });
+  for (const text of [...Object.values(DEVICE_REASONS), ...Object.values(DEVICE_ADVICE), DEVICE_OFF, DEVICE_LEGEND, DEVICE_META, DEVICE_CHECK, DEVICE_CHECKED]) {
+    assert.ok(!text.includes("://") && !/[\u0000-\u001f\u007f]/.test(text), text);
+  }
+  assert.deepEqual([DEVICE_LEGEND, DEVICE_META, DEVICE_CHECK, DEVICE_CHECKED], ["On device", "system model", "Check again", "Checked."]);
+  assert.ok(Object.isFrozen(DEVICE_REASONS) && Object.isFrozen(DEVICE_ADVICE));
 });

@@ -97,6 +97,21 @@
 .ai-settings button.aiset-allow { max-width: 100%; border-color: var(--hw-warn); color: var(--hw-ink); text-transform: none;
                                   overflow-wrap: anywhere; }
 
+/* The group `.aiset-device` ("On device", docs/design.md section 6.21): one read-only row, the name, the dim meta and the state, then one sentence
+   and, while the model cannot answer, a hairline button. The state is words first (the reason), then the tone, the underline and
+   the mark "!" for a state that needs attention. Nothing here moves. */
+.ai-settings .aiset-dev-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 .667rem; box-sizing: border-box;
+                              min-height: max(28px, calc(28rem / 12)); }
+.ai-settings .aiset-dev-row:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.ai-settings .aiset-dev-name { flex: none; color: var(--hw-ink); }
+.ai-settings .aiset-dev-meta { min-width: 0; color: var(--hw-dim); }
+.ai-settings .aiset-dev-state { min-width: 0; margin-left: auto; color: var(--hw-dim); text-align: right; overflow-wrap: anywhere; }
+.ai-settings .aiset-dev-row[data-tone="ok"] .aiset-dev-state { color: var(--hw-ok); }
+.ai-settings .aiset-dev-row[data-tone="warn"] .aiset-dev-state { color: var(--hw-warn); text-decoration: underline; }
+.ai-settings .aiset-dev-row[data-tone="warn"] .aiset-dev-state::before { content: "! "; font-weight: 700; }
+.ai-settings .aiset-dev-advice { flex: 1 0 100%; margin: .167rem 0 .333rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.ai-settings button.aiset-dev-check { flex: none; }
+
 /* ---- narrow screens: 640 px and narrower ------------------------------------------------------------------------------ */
 
 /* The dialog is the screen: the whole window, no radius and no shadow. The fields stack, every target is at least 44 px high
