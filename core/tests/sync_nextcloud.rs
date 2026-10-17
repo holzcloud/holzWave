@@ -448,3 +448,38 @@ fn real_nextcloud_size_and_listing() {
     }
     assert_eq!(e.text(&format!("themes/{longest}.json")).as_deref(), Some("{\"long\":true}"));
 }
+
+#[test]
+#[ignore = "needs a real Nextcloud and a TLS proxy: run `sh scripts/nextcloud-live-test.sh`"]
+fn real_nextcloud_untrusted_certificate_is_refused() {
+    let suffix = "tls";
+    // The proxy is not what broke it: the same folder works over the loopback `http` address in the same run.
+    let plain = webdav(suffix);
+    plain.ensure("").expect("the folder works over loopback http");
+    plain.put("probe.txt", b"reachable", &Cond::Any).expect("a write over loopback http");
+    assert_eq!(names(plain.list("").unwrap()), vec!["probe.txt"]);
+
+    // Through the proxy, whose certificate comes from an authority the system does not trust.
+    let tls_url = format!("{}-{suffix}", env("HOLZWAVE_TEST_NEXTCLOUD_TLS_URL"));
+    assert!(tls_url.starts_with("https://"), "the TLS address is https");
+    let dav = WebDav::new(&tls_url, &env("HOLZWAVE_TEST_NEXTCLOUD_USER"), &env("HOLZWAVE_TEST_NEXTCLOUD_PASSWORD"))
+        .expect("an https address is valid; the certificate is judged on the first request");
+    for (what, e) in [("ensure", dav.ensure("").expect_err("ensure over an untrusted certificate")), ("list", dav.list("").expect_err("list over an untrusted certificate"))] {
+        let text = e.to_string();
+        println!("untrusted certificate, {what}: {text}");
+        assert!(
+            ["certificate", "TLS", "tls", "UnknownIssuer", "unknown issuer", "Unknown issuer"].iter().any(|w| text.contains(w)),
+            "{what}: the refusal names no certificate or TLS problem: {text}"
+        );
+        // A handshake that failed before the first request sends no credential: it is not an answer of the account's server.
+        assert!(!text.contains("refused the user name or app password") && !text.contains("401"), "{what}: {text}");
+    }
+    let syncer = Syncer::connect_with(
+        dav,
+        ConfigSource::new(std::env::temp_dir(), Arc::new(MemoryStore::default())),
+        &std::env::temp_dir(),
+        PASSPHRASE,
+        KDF,
+    );
+    assert!(syncer.is_err(), "the sync does not start over an untrusted certificate");
+}

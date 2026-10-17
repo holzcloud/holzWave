@@ -176,6 +176,7 @@ cat >"$scratch/Caddyfile" <<EOF
 }
 localhost:8443 {
 	tls internal
+	log
 	reverse_proxy $NAME:80
 }
 EOF
@@ -201,5 +202,14 @@ say "running core/tests/sync_nextcloud.rs"
 cd "$root" || exit 2
 cargo test --locked --offline -p holzwave-core --no-default-features --test sync_nextcloud -- --ignored --nocapture --test-threads=1 ||
     fail "the live tests did not pass"
+
+# The refusal of the untrusted certificate must come before any credential is sent: the proxy's access log holds the
+# start-up probe of this script and no request for the account's folder. (A log without the probe would prove nothing.)
+proxy_log=$(docker logs "$TLS_NAME" 2>&1)
+printf '%s\n' "$proxy_log" | grep -q '"uri":"/status.php"' || fail "the proxy's access log is empty, so the TLS check proves nothing"
+if printf '%s\n' "$proxy_log" | grep -q '"uri":"/remote.php'; then
+    fail "a request for the account's folder reached the proxy: the client sent a credential to an untrusted certificate"
+fi
+say "TLS: no request reached the proxy behind the untrusted certificate"
 
 say "ok"
