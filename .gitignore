@@ -9,6 +9,9 @@ dist/
 # Tauri
 /src-tauri/gen/
 
+# The wsh sidecar and the static Linux wsh builds that the release scripts put into the packages (build products)
+/app/src-tauri/binaries/
+
 # macOS
 .DS_Store
 

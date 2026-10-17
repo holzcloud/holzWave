@@ -1,0 +1,10 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "externalBin": ["binaries/wsh"],
+    "resources": {
+      "binaries/wsh-linux-x86_64": "wsh/linux-x86_64",
+      "binaries/wsh-linux-aarch64": "wsh/linux-aarch64"
+    }
+  }
+}
