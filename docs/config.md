@@ -719,7 +719,7 @@ enter them again there.
 
 ## `widgets/*.json` and `widget_notes.json`
 
-Widgets of the sidebar. `notes` and `pomodoro` exist without a file; a file with the same id replaces them. Fields (no others
+Widgets of the sidebar. The files are described by [widget.schema.json](widget.schema.json). `notes` and `pomodoro` exist without a file; a file with the same id replaces them. Fields (no others
 are accepted): `version` (1), `id` (default: the file name; lowercase letters, digits, `-`, `_`, at most 32), `title`
 (1 to 40 characters), `kind`, and by kind:
 

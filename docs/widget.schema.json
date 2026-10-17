@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Describes widget files of version 1. The loader in the core is the judge and a test keeps this file equal to it, in both directions.",
+  "title": "holzWave widget file",
+  "description": "One widget of the holzWave sidebar: a JSON file widgets/<name>.json in the app data folder. This schema describes version 1 of the file. Limits that no single document can show: at most 24 widgets are shown (the two built-in widgets count, and a file with the id of a built-in replaces it), a file is at most 65536 bytes, and a list has 1 to 50 items. What a schema cannot say and the loader still checks: a file that names the same key twice is refused, a link of more than 2048 bytes is refused although this schema counts characters (so a link of more than 2048 bytes can be within 2048 characters), and an id taken from the file name (a file without an id member) must follow the id rule too. A whole number is written without a fraction or an exponent (25, not 25.0 or 2.5e1). Do not add a $schema member to a widget file: the loader refuses members that this schema does not list, so set the schema in the editor and not in the file.",
+  "type": "object",
+  "required": ["title", "kind"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "description": "The version of the file format. Absent or null means 1; a newer version is left out by this release.",
+      "enum": [1, null]
+    },
+    "id": {
+      "description": "The id of the widget: 1 to 32 lowercase letters, digits, hyphens and underscores. Absent or null means the file name without .json. A file with the id of a built-in widget (notes, pomodoro) replaces it.",
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "title": {
+      "description": "The title above the widget: 1 to 40 characters, one line, not blank.",
+      "$ref": "#/$defs/text",
+      "maxLength": 40
+    },
+    "kind": {
+      "description": "What the widget is: a note the person writes, a work and break timer, or a list of commands and links.",
+      "enum": ["note", "timer", "list"]
+    },
+    "work_min": {
+      "description": "Timer only: minutes of work, 1 to 180. Absent or null means 25.",
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 4294967295,
+      "default": 25
+    },
+    "break_min": {
+      "description": "Timer only: minutes of rest, 0 to 60. Absent or null means 5.",
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 4294967295,
+      "default": 5
+    },
+    "items": {
+      "description": "List only: 1 to 50 items, each with a label and either a command or a url.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/item" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["kind"],
+        "properties": { "kind": { "const": "timer" } }
+      },
+      "then": {
+        "properties": {
+          "work_min": { "minimum": 1, "maximum": 180 },
+          "break_min": { "maximum": 60 }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["kind"],
+        "properties": { "kind": { "const": "list" } }
+      },
+      "then": {
+        "required": ["items"],
+        "properties": {
+          "items": {
+            "minItems": 1,
+            "maxItems": 50,
+            "items": { "$ref": "#/$defs/listItem" }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "text": {
+      "description": "One line of text: no control character and not blank.",
+      "type": "string",
+      "minLength": 1,
+      "allOf": [
+        { "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$" },
+        { "pattern": "[^\\u0009-\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000]" }
+      ]
+    },
+    "link": {
+      "description": "An http or https link with something after the slashes, and no control or space character.",
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https?://[^\\u0000-\\u0020\\u007f-\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000/][^\\u0000-\\u0020\\u007f-\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000]*$"
+    },
+    "item": {
+      "description": "An item of a list, in the shape every kind checks.",
+      "type": "object",
+      "required": ["label"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "description": "The text of the item.", "type": "string" },
+        "command": { "description": "A command that is put on the prompt and never run.", "type": ["string", "null"] },
+        "url": { "description": "A link that the system opens after a click.", "type": ["string", "null"] }
+      }
+    },
+    "listItem": {
+      "description": "An item of a list widget: a label and exactly one of a command and a url.",
+      "type": "object",
+      "properties": {
+        "label": { "$ref": "#/$defs/text", "maxLength": 60 }
+      },
+      "oneOf": [
+        {
+          "required": ["command"],
+          "properties": {
+            "command": { "$ref": "#/$defs/text", "maxLength": 1024 },
+            "url": { "type": "null" }
+          }
+        },
+        {
+          "required": ["url"],
+          "properties": {
+            "url": { "$ref": "#/$defs/link" },
+            "command": { "type": "null" }
+          }
+        }
+      ]
+    }
+  }
+}
