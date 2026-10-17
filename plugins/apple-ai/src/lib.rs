@@ -1,16 +1,37 @@
-//! The Foundation Models bridge of holzWave: a first-party Swift package behind a small C ABI, built from this crate's
-//! build script, for macOS only.
+//! The Apple on-device model of holzWave: a first-party Swift package behind a small C ABI, built from this crate's
+//! build script, and an [`AppleProvider`] that makes it a provider of the AI core. Chat only: no tools.
 //!
-//! The crate asks one question, whether Apple's on-device language model is available, and answers it as an
-//! [`Availability`]. It opens no socket and knows no provider. Off macOS it is plain Rust: [`probe`] reports
-//! [`Availability::UnsupportedPlatform`] without calling a foreign function and no Swift tool is needed to build it.
+//! [`probe`] answers whether Apple's on-device language model is available, as an [`Availability`]. [`AppleProvider`]
+//! implements the `Provider` trait over a [`Backend`]: the system model on a Mac ([`AppleProvider::system`]) or a
+//! [`ScriptedBackend`] in tests, on any host. The crate opens no socket, chooses no other provider when the model is not
+//! available and sends nothing but the approved text to the model. Off macOS it is plain Rust and no Swift tool is
+//! needed to build it.
 //!
 //! The framework is linked weakly, so a process that contains this crate still starts on a Mac whose operating system
 //! has no FoundationModels framework (see `build.rs`).
 
+#![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::time::Duration;
+
+mod backend;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+pub mod native;
+mod prompt;
+mod provider;
+// The state machine is used by the system backend only; the other hosts still compile and test it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod pump;
+mod scripted;
+
+pub use backend::{AppleError, Backend, GenerateRequest, MAX_INPUT_BYTES};
+pub use prompt::{FALLBACK_CONTEXT_TOKENS, FRAME_MARGIN_TOKENS, Rendered, SYSTEM_BUDGET_TOKENS, estimate_tokens, render};
+pub use provider::{AppleProvider, MODEL_ID, PROVIDER_ID};
+pub use scripted::{BackendScript, ScriptedBackend};
+#[cfg(target_os = "macos")]
+pub use native::SystemBackend;
 
 /// Whether the system language model can be used right now.
 ///
@@ -105,8 +126,10 @@ pub fn selftest(timeout: Duration) -> Option<i32> {
     }
 }
 
-/// The only place that crosses into Swift, and the only `unsafe` code of the crate.
+/// The place that asks Swift for the availability and runs the self test: the first of the two homes of foreign calls
+/// (the stream calls are in `native`).
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 mod ffi {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicU32, Ordering};

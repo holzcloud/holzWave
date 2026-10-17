@@ -10,6 +10,10 @@ publish = false
 # depends on this one (as DEP_HOLZWAVE_APPLE_AI_WEAK_FRAMEWORK).
 links = "holzwave_apple_ai"
 
+# The AI core, without its engine feature: the provider needs only the AI module, and the engine needs Zig at build time.
+[dependencies]
+holzwave-core = { path = "../../core", default-features = false }
+
 # Build dependencies are built for the host, so Linux and Windows hosts never compile this one.
 [target.'cfg(target_os = "macos")'.build-dependencies]
 swift-rs = { version = "1.0.8", features = ["build"] }

@@ -128,11 +128,17 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
     ),
     (
         "holzwave-apple-ai",
-        &[(
-            "swift-rs",
-            "builds the first-party Swift package and links the Swift runtime from build.rs; macOS targets only; the \
-             version the Tauri build tooling already locks",
-        )],
+        &[
+            (
+                "holzwave-core",
+                "implements the Provider trait of the AI core; used without its engine feature so no Zig is needed",
+            ),
+            (
+                "swift-rs",
+                "builds the first-party Swift package and links the Swift runtime from build.rs; macOS targets only; \
+                 the version the Tauri build tooling already locks",
+            ),
+        ],
     ),
     ("holzwave-spike", &[("holzwave-core", "the Phase 1 measurements run the real PTY and engine")]),
     ("wsh", &[("holzwave-ipc", "the client of the local socket")]),
