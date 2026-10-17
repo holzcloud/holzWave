@@ -103,7 +103,8 @@ with the synced settings between your own devices.
 through another shell, so arguments cannot be given here. The arguments follow from the program's file name, without a
 `.exe` suffix and without case: `-l` (a login shell) for every shell on macOS and Linux and for `bash`, `zsh`, `fish`,
 `sh` and `nu` on Windows, none for `cmd` and for any other program, and for `pwsh` and `powershell` `-NoLogo` plus a
-prompt wrapper that reports the working directory, so that a split or a new tab opens where the pane is. `cmd.exe` has
+prompt wrapper that reports the working directory, so that a split or a new tab opens where the pane is, and that also
+marks each command (see [Command marks](#command-marks)). `cmd.exe` has
 no such report: a split from a `cmd.exe` pane starts in your home directory. Empty means the default of the platform.
 On macOS and Linux that is `$SHELL` (when it is unset or empty, `/bin/zsh` on macOS and `/bin/sh` on Linux). On Windows
 it is, in this order, PowerShell 7 (`pwsh.exe` under `%ProgramFiles%\PowerShell\7` or in a directory of `PATH`), then
@@ -530,6 +531,36 @@ convention), holds control characters or is over 4096 bytes, or contains `passwo
 guarantee: a secret typed in another form is kept, so use a leading space for such a line, and `Clear all` or
 `Shift+Delete` in the history dialog forgets. The history is not synced. At most 100,000 uses are kept; the oldest tenth
 goes when it is passed.
+
+## Command marks
+
+holzWave can tell where a command's output starts and ends only when the shell says so. The shell hooks write the
+standard prompt marks of the terminal protocol OSC 133 for that: `A` when a prompt is shown, `B` and `C` when a command
+starts (its output follows), and `D` with the exit status when it ended. A mark carries nothing else: no command text, no
+directory, no host. With the marks the terminal knows which rows are the output of the last command, which is what a
+feature such as sharing the last command and its output reads.
+
+The marks come from the same hooks as the history, so the lines of [`history.db`](#historydb) install them:
+`eval "$(wsh init bash)"`, `eval "$(wsh init zsh)"` or `wsh init fish | source`. In a PowerShell pane of holzWave nothing
+needs to be installed, because the prompt wrapper of the `shell` setting writes them. A hook that you installed earlier
+writes no marks: open a new shell. Loading the hook text again in a running shell is safe, it is only loaded once.
+
+These shells write marks: `bash` 4.4 or newer (the `bash` 3.2 that macOS ships reports the history and writes no marks),
+`zsh`, `fish` (a `fish` that marks prompts by itself, version 4 and newer, is left alone and the hook adds none), and
+PowerShell 5.1 and 7 on Windows, where the marks of a command need PSReadLine to be loaded; without it a PowerShell
+pane writes `A` at each prompt and nothing else.
+
+The hooks never read or change the text of your prompt: `A` is written when the prompt hook runs, `B` and `C` when a
+command starts and `D` when it ended. A prompt framework (starship, powerlevel10k, oh-my-posh and the like) that rebuilds
+the prompt on every prompt therefore cannot remove a mark. A framework that writes OSC 133 marks itself should keep only
+one of the two sources, or each command is marked twice. Outside a holzWave pane nothing happens: the hook text does
+nothing, and the rest of your `~/.bashrc`, `~/.zshrc` or `config.fish` keeps running.
+
+Limits: `tmux` and other multiplexers may swallow the marks, and then there is no output to find. Output that does not end
+with a newline shares its last line with the next prompt. In `zsh` a prompt function that runs before the hook's one and
+changes the exit status shows that status in the mark `D`. The marks are text that a program can print itself, so a
+program or a file shown with `cat` can fake or hide the boundary of an output: text taken from between marks is untrusted
+wherever it is used.
 
 ## `ai.json`
 

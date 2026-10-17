@@ -116,6 +116,70 @@ fn the_script_wraps_the_prompt_and_reads_and_encodes_everything_itself() {
     assert!(script[last..].contains('=') && script[..last].contains("HolzwaveOriginalPrompt"));
 }
 
+/// The body of the global `prompt` function.
+fn prompt_body() -> &'static str {
+    let script = POWERSHELL_PROMPT_SCRIPT;
+    &script[script.find("function global:prompt").expect("the prompt function")..]
+}
+
+#[test]
+fn the_script_marks_a_command_at_its_four_points() {
+    let script = POWERSHELL_PROMPT_SCRIPT;
+    // The mark ends with the string terminator, ESC and a single backslash; the escape is built from its number.
+    assert!(script.contains("$esc = [string][char]27"));
+    for mark in ["]133;A' + $esc + '\\')", "]133;B' + $esc + '\\'", "]133;C' + $esc + '\\')", "]133;D;' + [int](-not $holzwaveOk) + $esc + '\\')"] {
+        assert!(script.contains(mark), "{mark}");
+    }
+    // A mark holds a letter and, for D, one digit computed from the status: nothing else is written into it.
+    assert!(!script.contains("133;D;' + $"));
+    // In the prompt: D before A before the OSC 7 report, and D only once a command ran.
+    let body = prompt_body();
+    let d = body.find("]133;D;").expect("D");
+    let a = body.find("]133;A").expect("A");
+    let osc7 = body.find("]7;file://").expect("OSC 7");
+    assert!(d < a && a < osc7, "D, then A, then the directory");
+    assert!(body[..d].contains("if ($global:HolzwaveRan)") && body[..d].contains("$global:HolzwaveRan = $false"));
+    // B and C come from the read-line override, together, before the flag is set.
+    let over = &script[script.find("function global:PSConsoleHostReadLine").expect("override")..script.find("function global:prompt").unwrap()];
+    assert!(over.find("]133;B").unwrap() < over.find("]133;C").unwrap());
+    assert!(over.find("]133;C").unwrap() < over.find("$global:HolzwaveRan = $true").unwrap());
+}
+
+#[test]
+fn the_first_statement_of_the_prompt_reads_the_status() {
+    let body = prompt_body();
+    let open = body.find('{').expect("the body opens");
+    let first = body[open + 1..].lines().map(str::trim).find(|l| !l.is_empty()).expect("a statement");
+    assert_eq!(first, "$holzwaveOk = $?");
+    // The status of D comes from `$?`, never from $LASTEXITCODE, so the pinned order of its two accesses stays.
+    let marks = &body[body.find("]133;D;").unwrap()..body.find("]133;A").unwrap()];
+    assert!(!marks.contains("LASTEXITCODE"));
+}
+
+#[test]
+fn the_read_line_override_exists_only_when_the_original_does() {
+    let script = POWERSHELL_PROMPT_SCRIPT;
+    let save = script.find("$global:HolzwaveOriginalReadLine = $function:PSConsoleHostReadLine").expect("saves the original");
+    let guard = script.find("if ($global:HolzwaveOriginalReadLine) {").expect("the guard");
+    let over = script.find("function global:PSConsoleHostReadLine").expect("the override");
+    assert!(save < guard && guard < over, "the override sits inside the guard");
+    let end = script.find("function global:prompt").unwrap();
+    let block = &script[guard..end];
+    assert!(block.contains("& $global:HolzwaveOriginalReadLine"), "the original is called");
+    assert!(block.trim_end().ends_with('}'), "the guard closes before the prompt");
+    // The line is returned unchanged, and the writes sit in a try so a console error never loses it.
+    assert!(block.contains("$holzwaveLine\n    }"));
+    assert!(block.find("try {").unwrap() < block.find("[Console]::Write").unwrap());
+    assert!(block.find("} catch {}").unwrap() < block.find("$holzwaveLine\n    }").unwrap());
+}
+
+#[test]
+fn the_encoded_argument_stays_far_below_the_command_line_limit() {
+    // The limit of a Windows command line is 32767 characters; the argument has to stay well below it.
+    assert!(encode_command(POWERSHELL_PROMPT_SCRIPT).len() < 16000);
+    assert!(powershell_integration_args().iter().map(String::len).sum::<usize>() < 16000);
+}
+
 // ---- the Windows reading of an OSC 7 path ------------------------------------------------------------
 
 fn read(host: &str, path: &str) -> Option<String> {

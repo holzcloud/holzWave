@@ -28,29 +28,55 @@ use crate::platform::Os;
 /// The prompt wrapper that PowerShell runs once, after its profile: it keeps the `prompt` function that is
 /// current then (the user's own, a prompt framework's or the built-in one) and defines a global `prompt` that
 ///
-/// 1. remembers `$LASTEXITCODE`,
-/// 2. when the current location belongs to the FileSystem provider and has a drive letter, writes
+/// 1. remembers whether the last command succeeded (`$?`, the first statement) and `$LASTEXITCODE`,
+/// 2. when a command ran since the last prompt, writes the mark `D` (`ESC ] 133 ; D ; 0 ESC \` when it succeeded,
+///    `1` otherwise), then always writes the mark `A` (a prompt starts),
+/// 3. when the current location belongs to the FileSystem provider and has a drive letter, writes
 ///    `ESC ] 7 ; file://<COMPUTERNAME>/<drive>:/<segments> ESC \` to the console, where PowerShell itself
 ///    percent-encodes the machine name and every segment with `[uri]::EscapeDataString` and the drive keeps its
 ///    letter (a network location, a registry or a certificate drive announces nothing),
-/// 3. puts `$LASTEXITCODE` back, and
-/// 4. returns the text of the original prompt (a default `PS <path>> ` when there was none).
+/// 4. puts `$LASTEXITCODE` back, and
+/// 5. returns the text of the original prompt (a default `PS <path>> ` when there was none).
+///
+/// The marks `B` and `C` (the command starts, its output follows) are written by an override of
+/// `PSConsoleHostReadLine` that calls the original, writes both marks, remembers that a command ran and returns the
+/// line unchanged. It exists only when PSReadLine (or anything else) already defines that function; without it the
+/// pane writes `A` and nothing else, and the prompt text is never read or changed either way.
 ///
 /// It is data: Rust interpolates nothing into it, so nothing a user or a program controls can reach PowerShell
-/// through the argument (T-2.2-16). It is valid in Windows PowerShell 5.1 and in PowerShell 7, and it carries no
-/// URL with a network scheme.
+/// through the argument (T-2.2-16), and a mark holds only a letter and `0` or `1`. It is valid in Windows PowerShell
+/// 5.1 and in PowerShell 7, and it carries no URL with a network scheme.
 ///
 /// Known limitation: `$?` is not preserved for the original prompt, because the wrapper's own commands reset it.
-/// A prompt framework that reads `$?` may show a wrong status.
+/// A prompt framework that reads `$?` may show a wrong status. The mark `D` knows only success or failure, not the
+/// exit code.
 pub const POWERSHELL_PROMPT_SCRIPT: &str = r##"$global:HolzwaveOriginalPrompt = $function:prompt
+$global:HolzwaveOriginalReadLine = $function:PSConsoleHostReadLine
+if ($global:HolzwaveOriginalReadLine) {
+    function global:PSConsoleHostReadLine {
+        $holzwaveLine = & $global:HolzwaveOriginalReadLine
+        try {
+            $esc = [string][char]27
+            [Console]::Write($esc + ']133;B' + $esc + '\' + $esc + ']133;C' + $esc + '\')
+            $global:HolzwaveRan = $true
+        } catch {}
+        $holzwaveLine
+    }
+}
 function global:prompt {
+    $holzwaveOk = $?
     $holzwaveExit = $global:LASTEXITCODE
     try {
+        $esc = [string][char]27
+        if ($global:HolzwaveRan) {
+            $global:HolzwaveRan = $false
+            [Console]::Write($esc + ']133;D;' + [int](-not $holzwaveOk) + $esc + '\')
+        }
+        [Console]::Write($esc + ']133;A' + $esc + '\')
         $location = $PWD
         $path = $location.ProviderPath
         if ($location.Provider.Name -eq 'FileSystem' -and $path -match '^[A-Za-z]:') {
             $names = $path.Substring(2).Split([char[]]'\/') | Where-Object { $_ -ne '' } | ForEach-Object { [uri]::EscapeDataString($_) }
-            $esc = [string][char]27
             [Console]::Write($esc + ']7;file://' + [uri]::EscapeDataString("$env:COMPUTERNAME") + '/' + $path.Substring(0, 2) + '/' + ($names -join '/') + $esc + '\')
         }
     } catch {}

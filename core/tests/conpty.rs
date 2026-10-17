@@ -19,6 +19,8 @@
 //! | `closing_a_running_cmd_returns_quickly_and_leaves_no_process` | W3 | close does not deadlock and leaves no shell |
 //! | `a_cmd_pane_shows_typed_text_and_ends_after_exit` | W2  | the pane ends within seconds of `exit` (exit poll)     |
 //! | `a_powershell_pane_announces_its_directory`       | W7  | the prompt wrapper runs and conhost passes OSC 7 on    |
+//! | `a_powershell_pane_marks_a_command`               | W7  | the wrapper's marks A, B, C, D arrive in order and the |
+//! |                                                   |     | engine selects the command's output from them          |
 //!
 //! Every wait is bounded and every pane or PTY is closed at the end of its test.
 #![cfg(windows)]
@@ -32,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use holzwave_core::engine::{DomKey, Mods};
+use holzwave_core::{GhosttyEngine, TerminalEngine};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::platform::{self, Os};
 use holzwave_core::pty::Pty;
@@ -311,4 +314,45 @@ fn a_powershell_pane_announces_its_directory() {
 
     pane.close();
     assert!(pane.join(Duration::from_secs(5)));
+}
+
+#[test]
+fn a_powershell_pane_marks_a_command() {
+    let env = |key: &str| std::env::var(key).ok();
+    let exists = |path: &str| Path::new(path).is_file();
+    let launch = platform::shell_launch(Os::Windows, "", &env, &exists);
+    let program = launch.program.to_lowercase();
+    if !(program.contains("pwsh") || program.contains("powershell")) {
+        println!("skipped: no PowerShell on this machine, the default shell is {}", launch.program);
+        return;
+    }
+
+    let args: Vec<&str> = launch.args.iter().map(String::as_str).collect();
+    let mut raw = Raw::start(&launch.program, &args);
+    // The wrapper writes the mark A when the first prompt is drawn; a command then adds B, C, its output and D.
+    raw.expect("\x1b]133;A\x1b\\");
+    raw.send("echo holzwave-mark\r");
+    raw.expect("\x1b]133;D;0\x1b\\");
+    let d_at = raw.text().find("\x1b]133;D;0\x1b\\").expect("the end mark");
+    // The prompt that follows the command is marked as well.
+    let after_d = |raw: &Raw| raw.text()[d_at..].contains("\x1b]133;A\x1b\\");
+    while !after_d(&raw) {
+        match raw.rx.recv_timeout(WAIT) {
+            Ok(Event::Data(bytes)) => raw.seen.extend(bytes),
+            _ => panic!("no prompt mark after the command: {:?}", raw.text()),
+        }
+    }
+
+    let text = raw.text();
+    let a = text.find("\x1b]133;A\x1b\\").expect("A");
+    let b = a + text[a..].find("\x1b]133;B\x1b\\").expect("B after the first prompt");
+    let c = b + text[b..].find("\x1b]133;C\x1b\\").expect("C after B");
+    let d = c + text[c..].find("\x1b]133;D;0\x1b\\").expect("D after C");
+    assert!(text[c..d].contains("holzwave-mark"), "the output sits between C and D: {:?}", &text[c..d]);
+
+    // The engine reads the same bytes and selects the output of the command from the marks.
+    let mut engine = GhosttyEngine::new(100, 30, 1000).expect("engine");
+    engine.feed(&raw.seen[a..]);
+    let selected = (0..200u32).filter_map(|row| engine.output_at(row, 4096).expect("output_at")).any(|out| out.contains("holzwave-mark"));
+    assert!(selected, "no row of the stream is selected as output containing the word: {text:?}");
 }
