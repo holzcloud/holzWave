@@ -541,8 +541,7 @@ the prompt wait. A command is **not** written down when it starts with a space (
 convention), holds control characters or is over 4096 bytes, or contains `password`, `passwd`, `secret`, `token`,
 `api_key`, `api-key`, `apikey`, `authorization`, `bearer ` or `sshpass` (in any case). That filter is best effort and no
 guarantee: a secret typed in another form is kept, so use a leading space for such a line, and `Clear all` or
-`Shift+Delete` in the history dialog forgets. The history is not synced. At most 100,000 uses are kept; the oldest tenth
-goes when it is passed.
+`Shift+Delete` in the history dialog forgets. At most 100,000 uses are kept; the oldest tenth goes when it is passed.
 
 **`^R`.** Plain `Ctrl+R` stays with the shell: nothing binds it unless you ask. `wsh init <shell> --ctrl-r` is an opt-in
 addition that also binds `Ctrl+R` to open the history dialog of holzWave, the same one as `Cmd+Shift+H`. Put
@@ -569,8 +568,23 @@ success, not an exit code). A command is not reported when it starts with a spac
 characters, or is typed while the location is not a file system drive (a registry or certificate drive, for example); the
 filter of the store above applies on top. The command and the directory reach the short-lived `wsh` process as base64
 arguments, so that quotes and a trailing backslash survive in Windows PowerShell 5.1 and in PowerShell 7; like the arguments
-of the hooks of the other shells, they are visible in the process list of your own user for a moment. The history of
-remote hosts and a history sync are not built.
+of the hooks of the other shells, they are visible in the process list of your own user for a moment.
+
+**Hosts.** Every use is stored with the host it ran on. A command typed in a pane that runs a saved connection is kept
+under `ssh:{id}`, `wsl:{id}` or `docker:{id}` (`{id}` is the connection's id in `connections.json`), every other command
+under `local`. The history dialog and the sidebar list show the commands of the host the focused pane runs on, so a pane on
+a server finds what was typed on that server and a local pane finds the local ones. `Shift+Delete` and `Clear all` forget
+on every host. A Files or Preview pane counts as local.
+
+**Other hosts.** Commands typed on other hosts are not recorded yet. The shell on the far side of an SSH, WSL or Docker pane
+has no `wsh` and no hook, and the hooks above do nothing outside a holzWave pane. The way in is `wsh` on the remote host
+reaching holzWave over an SSH tunnel, which is not built; a command that does reach holzWave from a pane that runs a saved
+connection is stored under that connection and found from the panes that run it. An `ssh` typed in a local pane is a local
+pane: what you type after it is not recorded either. The directory of a command from another host is not recorded.
+
+**Sync.** History is not synced. The sync format has no place for `history.db`, and deletions are not synced (a deleted
+file comes back on the next run, see [sync.md](sync.md)), so a command forgotten with `Shift+Delete` would return. If
+history sync is built it will be opt-in and needs deletions in sync first.
 
 ## Command marks
 
