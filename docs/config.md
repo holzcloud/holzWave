@@ -562,7 +562,7 @@ own card. holzWave asks OpenAI not to store a request (`store: false`) and OpenR
 
 `sync.json` is `{"endpoint": "...", "user": "..."}`: the folder address and the account of the encrypted sync. The app
 password and the passphrase are in the keychain (`sync:password`, `sync:passphrase`), never here. `sync_state.json` is
-the device's random id and, per synced file, what the last run left behind (counter, ETag, SHA-256). `sync-incoming/`
+the device's random id and, per synced file, what the last run left behind (the counter, the ETag, the SHA-256 of the content and the SHA-256 of the encrypted blob). A theme or widget file name (without `.json`) may be 112 characters for a theme and 111 for a widget at most, letters, digits, `-` and `_`; a longer one is not synced and the sync says so (see [sync.md](sync.md)). `sync-incoming/`
 holds the downloads of the files the running app owns (`layout.json`, `settings.json`, `connections.json`) until the next
 start; themes, widgets and notes are moved into place right after the run, and `sync-conflicts/` holds the local versions
 that lost a conflict, were replaced by a download (among them the two pane files a downloaded layout replaced) or were

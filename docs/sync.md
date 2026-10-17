@@ -1,7 +1,9 @@
 # Sync
 
 Status: **built** (`core/src/sync`, `app/src-tauri/src/sync.rs`, `app/src/sync.ts`): format, WebDAV transport, merge engine,
-account, scheduled runs, popover. Tested against an in-memory WebDAV server, not yet against a real Nextcloud.
+account, scheduled runs, popover. Tested against an in-memory WebDAV server and, with `scripts/nextcloud-live-test.sh`, against
+a Nextcloud in Docker; two real computers, your own server and its app-password policy stay the owner's check (row S1 of
+`docs/test-plan.md`).
 
 ## What is synced
 
@@ -14,6 +16,12 @@ is never written to disk. Machine-local state (`session.json`, `known_hosts`) is
 source is a saved connection (a remote file browser or preview) or the monitor of this computer. A local folder, a local
 preview and a chat are tied to the computer they were made on and are never shared. No secret is part of the unit. The
 unit is one file on the server like any other (`files/layout.json.hwx`); the format of the blob does not change.
+
+A theme or widget file is synced under its file name without `.json`: letters, digits, `-` and `_`, at most 112 characters
+for a theme and 111 for a widget, because the file on the server is `themes.<name>.json.hwx` (or `widgets.…`) and one name
+on the server is at most 128 characters. A file with a longer name is not synced and the sync says so with the limit and the
+actual length (the popover shows the first problem of a run, and it stays until the file is renamed); every other file
+syncs. A file whose name holds another character (a space, a dot) is not synced either, and says nothing.
 
 Also not synced: `history.db` (see "The history stays local" below), `ai.json` and `chats/`
 (the AI providers and the chats), and the keychain entries of the AI providers (a provider key stays on the computer where
@@ -35,9 +43,26 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   different version stamp. The server sees names, sizes, the stamp and the writer's random device id, never a content.
 - **Versions:** a counter per file (every write is the highest seen plus one); the writer's clock only breaks a tie, so
   a device with a wrong clock cannot overwrite newer work. The server's ETag detects a concurrent write
-  (`If-Match` / `If-None-Match: *`); a refused write is looked at again, up to three times.
+  (`If-Match` / `If-None-Match: *`); a refused write is looked at again, up to three times. The ETag is only a hint, see
+  "Same-second writes".
+- **Same-second writes:** Nextcloud's ETag changes once per second, so two writes of one name inside a second can share it.
+  Every upload therefore carries `OC-Checksum: sha256:<hex>` of the sealed blob (never of the plaintext, which the server
+  never learns anything about), the listing asks for `oc:checksums`, and the identity of a server version is the SHA-256 of
+  its blob, which the local state records: a reported checksum that differs from the recorded one makes the device read the
+  blob, and the blob decides, so a server that reports a wrong checksum costs one read and never a false change. Before a
+  device overwrites an existing server file (an edit, the winning side of a conflict, a tombstone) it reads the current
+  one and compares it with the one it last saw; a different one is a change on the server and takes the conflict path
+  (the higher stamp wins, the loser is kept, an edit beats a delete). The cost is one read per upload and none for a quiet
+  run. The limit on a server that reports no checksum (plain WebDAV): a change written in the same second as the version a
+  device last saw is noticed when that device next changes the file, not at its next run; nothing is lost, the other
+  version is kept. The one race that is left is a third write between a device's read and its write inside that same
+  second. A write without the checksum header (the client never does that) leaves a Nextcloud file with no reported
+  checksum, so the ETag and the read before a write are what protect it then. There is no rollback protection: a server
+  that replays an old valid blob is the limit the sync has for any file.
 - **Conflicts:** when both sides changed, the higher stamp wins and the loser is kept: a replaced server version in
-  `backups/` on the server, a replaced local version in `sync-conflicts/` next to the files (never the secrets).
+  `backups/` on the server (named by the file name, the version's counter and the writer's id; a name too long for that
+  is shortened to its first 64 characters, a hash and `.hwx`), a replaced local version in `sync-conflicts/` next to the
+  files (never the secrets).
   A download is staged first. A local file the person changed after the download was staged is copied to
   `sync-conflicts/` first (the file name with `/` as `.`, then the time), and the run after that lists it as a conflict.
   The copy is the whole file; nothing is merged. The same rule covers both ways a staged file reaches its place (below).
@@ -95,8 +120,8 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   decision, not a gap, and it can be reopened: syncing the history would be opt-in and would need those per-entry
   deletions first.
 - **Adding a device:** enter the endpoint, user, app password and the same passphrase. A QR code comes with mobile.
-- **Local state:** `sync_state.json` (device id; per file the counter, ETag and SHA-256 of what the last run left
-  behind), `sync.json` (endpoint, user, on/off), `sync-incoming/` (the downloads of the files the running app owns, which wait for the next start, with a
+- **Local state:** `sync_state.json` (device id; per file the counter, the ETag, the SHA-256 of the content and the SHA-256
+  of the blob that the last run left behind), `sync.json` (endpoint, user, on/off), `sync-incoming/` (the downloads of the files the running app owns, which wait for the next start, with a
   record of the live file's hash at the time each was staged) and `sync-kept.json` (the names kept when a download replaced an edit,
   removed by the next run). The app password and the passphrase are in the OS keychain.
 
