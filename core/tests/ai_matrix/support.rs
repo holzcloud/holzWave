@@ -50,6 +50,9 @@ pub const CANARY_TEXT: &str = "CANARY-SERVER-TEXT-91c4e7";
 /// Text a message may have kept as the stored text of a context note.
 pub const CANARY_STORED: &str = "CANARY-STORED-TEXT-5b2d08";
 
+/// The path value inside the arguments of a hostile tool call.
+pub const ARG_CANARY: &str = "CANARY-ARG-4f8a21";
+
 // ---- the cells --------------------------------------------------------------------------------------------
 
 /// Whether a cell needs a key.
@@ -285,7 +288,8 @@ pub struct RigOptions {
     pub keys: Keys,
     /// A chokepoint to use instead of a standard one.
     pub http: Option<Arc<Http>>,
-    /// The scheme, host and port that replace the address of the fake server; the base path of the cell is added.
+    /// The scheme, host and port that replace the address of the fake server (`{port}` is the port of the fake); the
+    /// base path of the cell is added.
     pub origin: Option<String>,
     /// Resolve with the local-only switch on.
     pub local_only: bool,
@@ -359,7 +363,10 @@ pub fn store_keys(config: &mut AiConfig, vault: &KeyVault, id: &str, keys: Keys,
 /// Builds the provider of `cell` the way the service does: save, store the keys, resolve, pick the adapter, box.
 pub fn try_rig_with(cell: &Cell, replies: Vec<Reply>, options: RigOptions) -> Result<Rig, ResolveError> {
     let fake = FakeHttp::start(replies);
-    let origin = options.origin.clone().unwrap_or_else(|| fake.base());
+    let origin = options
+        .origin
+        .as_ref()
+        .map_or_else(|| fake.base(), |origin| origin.replace("{port}", &fake.port().to_string()));
     let address = format!("{origin}{}", cell.base_suffix);
     let vault = test_vault();
     let mut config = AiConfig::default();
@@ -963,4 +970,148 @@ pub fn repeated_ids_request(model: &str) -> ChatRequest {
 /// How often `needle` occurs in `text`.
 pub fn count_in(text: &str, needle: &str) -> usize {
     text.matches(needle).count()
+}
+
+// ---- failures ---------------------------------------------------------------------------------------------
+
+/// A failure a server reports with an HTTP status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Case {
+    /// The credentials were refused (401).
+    Auth,
+    /// The model or the path is not known (404).
+    NotFound,
+    /// A rate limit with a long wait (429).
+    RateLimit,
+    /// The server failed (500).
+    Server,
+    /// The service is overloaded (503, and 529 on Anthropic).
+    Overload,
+}
+
+/// What one failure must become: the class and the connections that were made for it.
+pub struct Row {
+    /// The failure.
+    pub case: Case,
+    /// The class every wire must give it.
+    pub class: &'static str,
+    /// The connections the chokepoint makes for it: one for a failure that is not retried, three for one that is.
+    pub connections: usize,
+}
+
+/// The class table of the HTTP failures, the same on every wire.
+pub const HTTP_ROWS: [Row; 5] = [
+    Row { case: Case::Auth, class: "auth", connections: 1 },
+    Row { case: Case::NotFound, class: "invalid_request", connections: 1 },
+    Row { case: Case::RateLimit, class: "rate_limit", connections: 1 },
+    Row { case: Case::Server, class: "server", connections: 3 },
+    Row { case: Case::Overload, class: "overload", connections: 3 },
+];
+
+/// The class table of the failures inside a 200 stream, by wire: the kinds that each dialect has a form for.
+pub const STREAM_ROWS: [(Wire, crate::streams::ErrorKind, &str); 6] = [
+    (Wire::OpenAiChat, crate::streams::ErrorKind::ServerError, "server"),
+    (Wire::Ollama, crate::streams::ErrorKind::ServerError, "server"),
+    (Wire::Anthropic, crate::streams::ErrorKind::Overloaded, "overload"),
+    (Wire::OpenAiResponses, crate::streams::ErrorKind::RateLimited, "rate_limit"),
+    (Wire::OpenAiResponses, crate::streams::ErrorKind::ContextLength, "context_length"),
+    (Wire::Gemini, crate::streams::ErrorKind::RateLimited, "rate_limit"),
+];
+
+/// Text with an escape character, a right-to-left override and a zero-width space after it, built from code points.
+pub fn hostile(text: &str) -> String {
+    let escape = char::from_u32(0x1b).expect("escape");
+    let override_ = char::from_u32(0x202e).expect("right-to-left override");
+    let zero_width = char::from_u32(0x200b).expect("zero-width space");
+    format!("{text} {escape}[31m{override_}{zero_width}tail")
+}
+
+/// The status and the natural error body of a failure in the dialect of `wire`. The messages hold the key and the
+/// server-text canary, and one of them carries hostile characters.
+pub fn rejection_body(wire: Wire, case: Case) -> (u16, Vec<u8>) {
+    let key = canary_key();
+    let shown = |what: &str| hostile(&format!("{what} {key} {CANARY_TEXT}"));
+    let status = match (case, wire) {
+        (Case::Auth, _) => 401,
+        (Case::NotFound, _) => 404,
+        (Case::RateLimit, _) => 429,
+        (Case::Server, _) => 500,
+        (Case::Overload, Wire::Anthropic) => 529,
+        (Case::Overload, _) => 503,
+    };
+    let body = match wire {
+        Wire::OpenAiChat | Wire::OpenAiResponses => {
+            let (message, kind, code) = match case {
+                Case::Auth => ("Incorrect API key provided", "invalid_request_error", "invalid_api_key"),
+                Case::NotFound => ("The model does not exist", "invalid_request_error", "model_not_found"),
+                Case::RateLimit => ("Rate limit reached", "rate_limit_error", "rate_limit_exceeded"),
+                Case::Server => ("The server had an error", "server_error", "server_error"),
+                Case::Overload => ("The server is overloaded", "server_error", "overloaded"),
+            };
+            serde_json::json!({ "error": { "message": shown(message), "type": kind, "code": code } })
+        }
+        Wire::Ollama => {
+            let message = match case {
+                Case::Auth => "unauthorized",
+                Case::NotFound => "model not found, try pulling it first",
+                Case::RateLimit => "too many requests",
+                Case::Server => "llama runner process has terminated",
+                Case::Overload => "server busy",
+            };
+            serde_json::json!({ "error": shown(message) })
+        }
+        Wire::Anthropic => {
+            let (kind, message) = match case {
+                Case::Auth => ("authentication_error", "invalid x-api-key"),
+                Case::NotFound => ("not_found_error", "model: not found"),
+                Case::RateLimit => ("rate_limit_error", "rate limit reached"),
+                Case::Server => ("api_error", "internal server error"),
+                Case::Overload => ("overloaded_error", "overloaded"),
+            };
+            serde_json::json!({ "type": "error", "error": { "type": kind, "message": shown(message) } })
+        }
+        Wire::Gemini => {
+            let (name, message) = match case {
+                Case::Auth => ("UNAUTHENTICATED", "API key not valid"),
+                Case::NotFound => ("NOT_FOUND", "models/x is not found"),
+                Case::RateLimit => ("RESOURCE_EXHAUSTED", "quota exceeded"),
+                Case::Server => ("INTERNAL", "internal error"),
+                Case::Overload => ("UNAVAILABLE", "the model is overloaded"),
+            };
+            let mut error = serde_json::json!({ "code": status, "message": shown(message), "status": name });
+            if case == Case::Auth {
+                error["details"] = serde_json::json!([{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID" }]);
+            }
+            serde_json::json!({ "error": error })
+        }
+    };
+    (status, body.to_string().into_bytes())
+}
+
+/// Whether a character is one that never belongs in a line shown to a person: control, bidirectional, zero-width, tag.
+pub fn is_unsafe_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}' | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
+/// Fails when the Display or the Debug of an error holds one of `forbidden`, an address, a scheme separator or an
+/// unsafe character.
+pub fn assert_clean(label: &str, error: &AiError, forbidden: &[&str]) {
+    for shown in [error.to_string(), format!("{error:?}"), format!("{error:#?}")] {
+        for text in forbidden {
+            assert!(!shown.contains(text), "{label}: the error shows {text}: {shown}");
+        }
+        assert!(!shown.contains("://"), "{label}: the error shows an address: {shown}");
+        assert!(!shown.contains("127.0.0.1"), "{label}: the error shows the loopback address: {shown}");
+        assert!(!shown.chars().any(|c| c != '\n' && is_unsafe_char(c)), "{label}: the error holds an unsafe character: {shown:?}");
+    }
+}
+
+/// A loopback port nothing listens on: bound once and released.
+pub fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    listener.local_addr().expect("address").port()
 }
