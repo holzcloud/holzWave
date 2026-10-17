@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use holzwave_ipc::{Cmd, Request};
+use holzwave_ipc::{Cmd, Request, Response};
 
 mod ai;
 mod clean;
@@ -81,7 +81,17 @@ fn run() -> Result<String, (u8, String)> {
     let (dir, token, pane) = app_env()?;
     let answer = holzwave_ipc::request(&dir, &Request { token, pane, cmd })
         .map_err(|e| (1, format!("wsh: holzWave does not answer ({e}); is it still running?")))?;
-    if answer.ok { Ok(answer.message) } else { Err((1, format!("wsh: {}", answer.message))) }
+    printable(answer)
+}
+
+/// What `wsh` prints of an answer of the app: the message with everything a terminal could act on removed (a file name with
+/// an escape character in an error text, for example).
+fn printable(answer: Response) -> Result<String, (u8, String)> {
+    if answer.ok {
+        Ok(clean::text(&answer.message))
+    } else {
+        Err((1, format!("wsh: {}", clean::text(&answer.message))))
+    }
 }
 
 fn main() -> ExitCode {
@@ -198,5 +208,15 @@ mod tests {
         for bad in [&["view"][..], &["view", "a", "b"], &["setmeta", "title"], &["rm", "x"], &["ping", "x"]] {
             assert_eq!(parse(&args(bad), cwd).unwrap_err(), USAGE, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn the_messages_of_the_older_commands_are_cleaned() {
+        let ok = printable(Response { ok: true, message: "opened \u{1b}]52;c;eA==\u{7}x\u{9b}2J".into() });
+        assert_eq!(ok, Ok("opened ]52;c;eA==x2J".to_owned()));
+        let refused = printable(Response { ok: false, message: "/tmp/a\u{1b}[31mred\u{7}: no such file".into() });
+        assert_eq!(refused, Err((1, "wsh: /tmp/a[31mred: no such file".to_owned())));
+        assert_eq!(printable(Response { ok: true, message: String::new() }), Ok(String::new()));
+        assert_eq!(printable(Response { ok: true, message: "holzWave\tok\n".into() }), Ok("holzWave\tok\n".to_owned()), "tab and newline stay");
     }
 }
