@@ -302,6 +302,15 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ph1 .sa-note{padding:2px 8px 0;font-size:7.5px}
 .ph1 .sa-pick{min-height:22px;padding:2px 6px;font-size:8px}.ph1 .sa-mt{font-size:7.5px}
 .ph1 .sa-del{min-height:22px;min-width:22px;justify-content:center;margin-right:5px;font-size:7.5px}
+/* Palette and inline actions (docs/design.md 6.19): the palette entries of the chat, and the button and the warn line under a code block of a reply. Flat and hairline; the palette keeps its own shadow. */
+.ia-r{display:flex;align-items:center;gap:10px}
+.ia-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 8px}
+.ia-btn{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border:1px solid var(--edge);border-radius:5px;color:var(--ink);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
+.ia-note{margin:0 0 8px;color:var(--warn);text-decoration:underline;font:400 10px/1.45 var(--mono)}
+.c-md pre.ia-pre{margin-bottom:4px}
+.ph1 .c-status.ia-st{min-height:24px;white-space:normal}
+.ph1 .ia-btn{min-height:22px;padding:0 8px;font-size:8px}
+.ph1 .ia-bar{margin:0 0 5px}.ph1 .ia-note{margin:0 0 5px;font-size:7.5px}.ph1 .c-md pre.ia-pre{margin-bottom:3px}
 /* Handys */
 .phones{display:flex;gap:16px;flex-wrap:wrap;width:fit-content;max-width:100%}
 .ph1{width:200px;height:400px;border:1px solid var(--edge);border-radius:22px;overflow:hidden;background:var(--ground);display:flex;flex-direction:column;font:400 10px/1.5 var(--mono);position:relative}
@@ -368,6 +377,10 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <h2>AI chat in the sidebar on a phone</h2>
   <p class="lead">The AI form of the column is the screen, as the sidebar is: ◂ Sidebar, the title button, ＋ New chat, every row and × are at least 44 px high (× also 44 px wide) and the composer text is at least 16 px. Left, the chat; right, the list with the chat on screen, a chat that is open in a pane (no ×) and a delete that was armed.</p>
   <div class="phones" id="phones-side"></div>
+
+  <h2>Explain error and Command from description on a phone</h2>
+  <p class="lead">The chat is the screen. After Explain error the prepared message is in the composer at 16 px and the context card is open with 44 px buttons; under a one-line code block of a reply Insert at prompt is a 44 px target, and a block that holds characters that are not shown has a warn line instead. Left, the chat after Explain error; right, the reply. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-actions"></div>
 
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
@@ -468,9 +481,9 @@ function base(v){
   return `<div class="titlebar row">${wcL}
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span></div><div class="ws">◇ docs <span class="n">1</span></div><div class="ws plus">＋</div>
     <span class="fill"></span>
-    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'?'on':''}">⌘K</div>${wcR}</div>
+    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
   <div class="tabrow row">${tabs(v==='blocks'?1:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?chatArea(v):`<div class="area">
+  <div class="body">${v==='preview'?previewArea():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -617,7 +630,38 @@ cBody.kisidecards=`<div class="c-chat">${saBar}
  <div class="c-status">waiting for your decision</div>
  ${saComp('Ask a question',cStop)}</div>`;
 const sideAI=v=>`<div class="side sa-side" style="width:280px">${v==='kichats'?saTop(1,'Chat deleted.')+saList:saTop(0,'')}<div class="sa-chat">${cBody[v]}</div></div>`;
-function chatArea(v){const wide=v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates';return wide?`<div class="area" style="grid-template-columns:1fr;grid-template-rows:1fr">${P('','✦','chat','Why is talos-3 NotReady?',cBody[v],{f:1,s:'grid-row:1/2'})}</div>`:`<div class="area" style="grid-template-columns:1fr 1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',shell(''),{s:'grid-row:1/2'})}${P('','✦','chat','Why is talos-3 NotReady?',cBody[v==='kiset'?'kipane':v],{f:1,s:'grid-row:1/2'})}</div>`}
+/* Palette and inline actions (docs/design.md 6.19). `kiactions` is the palette with the AI entries and the chord of the platform switch; `kiexplain` is the chat
+   that Explain error leaves behind (the message written, the card open on one item, nothing sent); `kidescribe` is the chat after Command from description, a reply
+   with its button under a one-line block, a warn line under a block that holds characters that are not shown, and the line at the prompt of pane 1, not run. */
+const iaRow=(os,title,keys,on)=>`<div class="it ${on?'on':''}"><span>${title}</span><span class="ia-r"><span class="dim lbl">ai</span><span class="kbd">${keys?chord(os,keys):''}</span></span></div>`;
+const aiPalette=os=>`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:520px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">❯</span>ai<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
+  <div class="grp lbl">Actions</div>${iaRow(os,'AI chat',['⇧⌘A','Ctrl+Shift+A'])}${iaRow(os,'New AI chat')}${iaRow(os,'AI chat in the sidebar')}${iaRow(os,'Explain error',['⇧⌘Y','Ctrl+Shift+Y'],1)}${iaRow(os,'Command from description',['⇧⌘G','Ctrl+Shift+G'])}${iaRow(os,'AI providers…')}<div style="height:8px"></div></div>`;
+const iaCmd='find . -type f -size +1G -exec ls -lh {} +';
+const iaWarn='! Not insertable: it holds characters that are not shown.';
+const iaOffer=`<div class="cx-card" role="group" aria-label="Share context"><div class="cx-head"><span class="cx-title">Goes out with your next message</span>${cxDest('localhost:11434','this computer',0)}</div>
+ ${cxItem('Last command output of pane 1','0.9 KiB','')}
+ <div class="cx-total">1 item · 0.9 KiB · ≈ 0.3k tokens</div>
+ <p class="cx-small">This chat keeps a note of what was sent (labels and sizes), not the text.</p><p class="cx-small">Valid for 5 minutes.</p>
+ <p class="cx-small">Best effort, not a guarantee: holzWave hides the secrets it recognises and cannot promise that none are left.</p>
+ <div class="cx-acts"><span class="btn">Read again</span><span class="btn">Discard</span></div></div>`;
+const iaFailed=`<div class="term pre"><span class="ro">❯</span> kubectl apply -f deploy.yaml
+<span class="er">error</span><span class="er">: no matches for kind "Deploymnt" in version "apps/v1"</span>
+<span class="ro">❯</span> <span class="cur"></span></div>`;
+const iaPrompt=`<div class="term pre"><span class="ro">❯</span> ${iaCmd}<span class="cur"></span></div>`;
+const iaReply=`<pre class="ia-pre"><code>${iaCmd}</code></pre><div class="ia-bar"><span class="ia-btn">Insert at prompt</span></div><p>Lists every regular file under the current folder that is larger than 1 GB.</p><pre class="ia-pre"><code>echo ok</code></pre><p class="ia-note">${iaWarn}</p>`;
+const iaTask='Write one shell command for this task. Reply with the command alone in one code block and, after it, one sentence saying what it does. Task: list files bigger than 1 GB under this folder';
+cBody.kiexplain=`<div class="c-chat"><div class="c-bar"><span class="c-chip">Local · llama3.2 → localhost</span><span class="c-setup">Providers…</span></div>
+ <div class="c-log"></div>
+ ${iaOffer}
+ <div class="c-status">Nothing is sent until you press Send.</div>
+ <div class="c-comp"><div class="c-in fo">Explain the error in the attached terminal output: what went wrong, the most likely cause, and the command or change that fixes it.<span class="cur"></span></div>${cFoot('≈ 45 tokens',cSend,cxBtn('Context · 1 item',1))}</div></div>`;
+cBody.kidescribe=`<div class="c-chat"><div class="c-bar"><span class="c-chip">Local · llama3.2 → localhost</span><span class="c-where">this computer</span><span class="c-usage">in 61 · out 38</span><span class="c-setup">Providers…</span></div>
+ <div class="c-log">${cMsg('you',iaTask,{u:1})}${cMsg('assistant',iaReply,{md:1})}</div>
+ <div class="c-status">Inserted at the prompt of pane 1. It was not run.</div>
+ <div class="c-comp"><div class="c-in">Ask a question</div>${cFoot('',cSend)}</div></div>`;
+const iaShell=v=>v==='kiexplain'?iaFailed:v==='kidescribe'?iaPrompt:shell('');
+const iaName=v=>v==='kiexplain'?'new chat':v==='kidescribe'?'Write one shell…':'Why is talos-3 NotReady?';
+function chatArea(v){const wide=v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates';return wide?`<div class="area" style="grid-template-columns:1fr;grid-template-rows:1fr">${P('','✦','chat','Why is talos-3 NotReady?',cBody[v],{f:1,s:'grid-row:1/2'})}</div>`:`<div class="area" style="grid-template-columns:1fr 1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',iaShell(v),{s:'grid-row:1/2'})}${P('','✦','chat',iaName(v),cBody[v==='kiset'?'kipane':v],{f:1,s:'grid-row:1/2'})}</div>`}
 
 /* The AI providers dialog (docs/design.md 6.13): three groups (privacy, providers, the provider shown) and the buttons. The chosen
    row has the wash and the 2 px bar, a row that waits for its review says so in words, the key field is empty and its state is a word. */
@@ -700,12 +744,15 @@ const views=[
  ['kicommand','AI chat: run a command','The card in which the assistant asks to run a command: the tool in words, the pane and the target, the effect line (one command, a separate process, your account’s rights), and every field of the request in the core’s order with its size. The payload box has no height limit and no scroll of its own, so the whole command is drawn and its end sits just above the destination line, the banner of a turn that already holds text from a file (with the sentence that a command will run), the hash and the buttons. Allow once is the one solid button and it allows this call only; Deny and Esc refuse it. The row of the command waits above it, and Stop in the composer ends a running command and everything it started.'],
  ['kicommandstates','AI chat: command states','A route that leaves the computer (cloud in the warn colour), the rows of a command that ran (Exit status: 0.), one that failed (a status, its standard error and the note that the start of the output was left out), one that timed out and one that was denied, each with its result as text under Result · untrusted text; a failed row has the mark ! and the word error as well as its colour. Below them the card of a command on a remote host while it runs: the chip says remote host, the destination says the output goes to the cloud, and the line Allowed · running… replaces the buttons. In the app the strip is at most half the pane and scrolls; here it is drawn in full.'],
  ['kiset','AI providers','The dialog that the chat bar button Providers… opens (also the palette entry AI providers… and a button in Settings): the two privacy switches, the list of providers with the key state in words, the form of the chosen provider with its write-only key field, and the card that a gateway or a server of your own shows before its first use. Nothing is probed; the Allow button is the only way to allow an address.'],
+ ['kiactions','AI actions in the palette','The palette lists the AI actions beside the others, with the chord of the running platform (use the platform switch): Explain error and Command from description prepare a message and never send it. Both can be changed or unbound in the key binding editor.'],
+ ['kiexplain','AI chat: explain an error','One chord opens the chat where you are with the message written and the item chosen: here the last command and its output, ticked and read, because the core lists it (else the selection, else the screen). The card is the one of 6.14, so a pane that is not shared yet still asks first. Nothing is sent until you press Send.'],
+ ['kidescribe','AI chat: command from a description','A command in a reply reaches the prompt only when you press Insert at prompt, and is never run: the line sits at the prompt of pane 1 with the cursor after it. A block that holds characters that are not shown has no button and says so, with the mark ! and in words.'],
  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):ovl[cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }
@@ -795,6 +842,21 @@ const sPhone=(list)=>ph('<span class="ro">✦</span> AI chat<span class="ro" sty
  <div class="c-comp"><div class="c-in">Ask a question<span class="cur"></span></div><div class="c-foot">${cxBtn()}<span class="keys">⏎ send</span>${cSend}</div></div></div></div></div>`,'',{raw:1});
 $('#phones-side').innerHTML=sPhone(0)+sPhone(1);
 
+/* Explain error and Command from description on a phone: the chat after Explain error, and a reply with its button and the warn line. */
+const iaPhone=(body)=>ph('<span class="ro">✦</span> chat <span class="dim">· new chat</span>',body,'',{raw:1});
+$('#phones-actions').innerHTML=iaPhone(`<div class="c-chat"><div class="c-bar"><span class="c-chip btn1">Local · llama3.2</span></div>
+ <div class="c-log"></div>
+ <div class="cx-card" role="group" aria-label="Share context"><div class="cx-head"><span class="cx-title">Goes out with your next message</span>${cxDest('localhost:11434','this computer',0)}</div>
+ ${cxItem('Last command output of pane 1','0.9 KiB','')}
+ <div class="cx-total">1 item · 0.9 KiB · ≈ 0.3k tokens</div><p class="cx-small">Best effort, not a guarantee: holzWave hides the secrets it recognises and cannot promise that none are left.</p>
+ <div class="cx-acts"><span class="btn">Read again</span><span class="btn">Discard</span></div></div>
+ <div class="c-status">Nothing is sent until you press Send.</div>
+ <div class="c-comp"><div class="c-in fo">Explain the error in the attached terminal output: what went wrong, the most likely cause, and the command or change that fixes it.<span class="cur"></span></div><div class="c-foot">${cxBtn('Context · 1 item',1)}<span class="keys">⏎ send</span>${cSend}</div></div></div>`)
++iaPhone(`<div class="c-chat"><div class="c-bar"><span class="c-chip btn1">Local · llama3.2</span></div>
+ <div class="c-log bot">${cMsg('you','Write one shell command for this task. Task: list files bigger than 1 GB',{u:1})}${cMsg('assistant',`<pre class="ia-pre"><code>find . -type f -size +1G</code></pre><div class="ia-bar"><span class="ia-btn">Insert at prompt</span></div><p>Lists the files over 1 GB.</p><pre class="ia-pre"><code>echo ok</code></pre><p class="ia-note">${iaWarn}</p>`,{md:1})}</div>
+ <div class="c-status ia-st">Inserted at the prompt of pane 1. It was not run.</div>
+ <div class="c-comp"><div class="c-in">Ask a question</div><div class="c-foot">${cxBtn()}<span class="keys">⏎ send</span>${cSend}</div></div></div>`);
+
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
 const rows=[
@@ -805,7 +867,7 @@ const rows=[
 ['SSH with reconnect','Pane header, sidebar, connections',pl(3)],['WSL, Docker','Connections, block picker',pl(3)],['Keychain','Connections',pl(3)],
 ['Nextcloud sync, end-to-end','Title bar ☁, sync popover, settings',pl('3b')],
 ['File previews (Markdown, image, video, PDF)','Previews view and Daily',pl(4)],['Editor with SFTP','Editor block',pl(4)],
-['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Sharing a pane with the chat','Chat › Context…',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['Running a command','Chat › approval card',B],['AI chat in the sidebar','Palette, title bar ✦ AI, replaces the sidebar',B],
+['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['Explain error, command from description','Palette and chat, ⇧⌘Y, ⇧⌘G',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Sharing a pane with the chat','Chat › Context…',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['Running a command','Chat › approval card',B],['AI chat in the sidebar','Palette, title bar ✦ AI, replaces the sidebar',B],
 ['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['iOS and Android','One pane per screen, sheet, key row',pl(7)]
 ];
 $('#cov').innerHTML='<tr><th>Feature</th><th>Where</th><th>Status</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');

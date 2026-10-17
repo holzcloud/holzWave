@@ -230,6 +230,9 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | AI chat (sidebar) | ![](design/ai-chat.png) | the column form (6.18), which replaces the sidebar: the head with `◂ Sidebar`, the title button and `＋ New chat`, the chat of 6.12 below it with the consent card of 6.14 |
 | AI chat: conversations | ![](design/ai-sidebar-list.png) | the list of stored chats under the head (6.18): the chat on screen with the rose wash and a 2 px bar, the model and age of every row, a chat in a pane with no `×`, a delete that was armed (`Delete?`), the core's note about its folder and the sentence under the head |
 | AI chat: approval in the column | ![](design/ai-sidebar-cards.png) | the approval card of 6.15 in the strip of the column (6.18): the fields stacked with the size at the right of the name, `✦ AI · 1` in the title bar, the place chip, the hash and the two buttons |
+| AI chat: palette actions | ![](design/ai-actions.png) | the palette with the AI entries and the chord of the running platform (6.19): `Explain error` (`⇧⌘Y`) and `Command from description` (`⇧⌘G`) beside `AI chat`, `New AI chat`, `AI chat in the sidebar` and `AI providers…`, each with the section word `ai` |
+| AI chat: explain an error | ![](design/ai-explain.png) | the chat after `Explain error` (6.19): the failed command in the pane at the left, the message written in the composer, the context card open on one item (the last command and its output, read), and the status line `Nothing is sent until you press Send.` |
+| AI chat: command from a description | ![](design/ai-describe.png) | a reply to `Command from description` (6.19): the button `Insert at prompt` under a one-line block, the warn line under a block that holds characters that are not shown, the line at the prompt of pane 1 with the cursor after it, and the status line `Inserted at the prompt of pane 1. It was not run.` |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -1119,7 +1122,9 @@ here sends a message, shares a pane, reads the text of a pane or runs a command.
 | `Command from description` | `Cmd+Shift+G` | `Ctrl+Shift+G` | the start of a message that asks for one shell command, with no context |
 
 Both are listed with `AI chat`, `New AI chat`, `AI chat in the sidebar` and `AI providers…` under the section word `ai`,
-with the chord of the running platform at the right. Both can be changed or unbound in the key binding editor (6.4). `Y` is
+with the chord of the running platform at the right.
+
+![AI actions in the palette](design/ai-actions.png) Both can be changed or unbound in the key binding editor (6.4). `Y` is
 for why and `G` for generate; `Ctrl+Shift+E` stays unused because the input method of GNOME takes it. They add no control
 to the title bar, the pane header or the status line: nothing in the page tells which command of a pane failed, so there is
 nothing to attach a control to, and nothing is drawn for what is not built.
@@ -1139,6 +1144,8 @@ engine can bound command output, so the second choice is what happens when it ca
 those of 6.14: the pane is still shared first (the card asks), the item is previewed before anything can leave, the redaction
 findings and the destination are shown, and the person can tick another item or none. The status line says `Nothing is sent
 until you press Send.`
+
+![Explain error](design/ai-explain.png)
 
 **Command from description.** The composer receives `Write one shell command for this task. Reply with the command alone in
 one code block and, after it, one sentence saying what it does. Task: ` with the caret after the colon and the space. No
@@ -1162,6 +1169,8 @@ sends no key press at all, so the person reads the line at the prompt and presse
 | several lines, a tab, an empty block, a line over 1024 characters | nothing | none; the person selects and copies what they want |
 | one line that holds a hidden character | no button; under the block the line `! Not insertable: it holds characters that are not shown.` in the warn colour, underlined | the mark `!` and the words |
 
+![Command from description](design/ai-describe.png)
+
 A hidden character is a control character (an escape sequence, a carriage return, a C1 control, DEL), a bidirectional
 control, a zero-width, tag or private-use character, a line or paragraph separator, or a space that is not the plain space.
 A reply gets at most 16 buttons and notes.
@@ -1169,6 +1178,8 @@ A reply gets at most 16 buttons and notes.
 **Narrow screens (640 px and narrower).** `Insert at prompt` is at least 44 px high, and the prepared message in the composer
 is at least 16 px like all composer text; the context card keeps its own 44 px rules. On a narrow screen the click also shows
 the terminal pane (the layout answer of focusing it), where the inserted line is.
+
+![On a phone](design/ai-actions-phone.png)
 
 **Accessibility.** The button's text is its name and the block above it is read first; the warn line is text with the mark
 and words; the status line is the live region; hairlines are `--hw-line` so `contrast-high` holds; nothing moves; under
