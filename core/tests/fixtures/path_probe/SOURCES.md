@@ -98,3 +98,63 @@ so no probe finds it (the fixed directories and the path field of the entry do).
   markers, which is an empty result like the timeout.
 - The probe never starts an interactive shell, never sources a file by name and never passes text of the environment to a
   shell. Its environment is `HOME`, `USER`, `SHELL` and the system `PATH` only.
+
+## Finder launch
+
+`scripts/probe-gui-path.sh` builds a scratch application bundle whose executable writes its environment to a file, and starts
+it three ways (`--finder` adds the third). Measured on this Mac (macOS 26, Apple silicon, a GUI session present):
+
+| How the bundle was started | `PATH` the application saw | kubectl | az |
+|---|---|---|---|
+| `open -n -W` from a terminal | the terminal's whole `PATH` (`open` hands its environment on) | found | found |
+| `open -n -W` under `env -i` with the launchd `PATH` | `/usr/bin:/bin:/usr/sbin:/sbin` | missing | missing |
+| opened by the Finder itself (AppleScript `tell application "Finder" to open`) | `/usr/bin:/bin:/usr/sbin:/sbin` | missing | missing |
+
+- The assumption that a Finder-launched app has the launchd `PATH` holds here: the Finder launch saw exactly
+  `/usr/bin:/bin:/usr/sbin:/sbin`, and `launchctl getenv PATH` is empty. `SHELL`, `HOME` and `USER` are set.
+- A launch from a terminal with `open` is not a Finder launch: the application inherits the terminal's environment. A test of
+  the built app that starts it that way proves nothing about the Finder; start it with the Finder, or under `env -i`.
+- Which of the four tools' directories are missing from the launched app's `PATH`: all of them. `kubectl` lives in
+  `/usr/local/bin` and `az` in `/opt/homebrew/bin` (Homebrew's link), and neither directory is on the launched `PATH`;
+  `gam` is behind an alias in a directory that no `PATH` holds; `talosctl` is not installed on this Mac.
+- The login-shell probe of the same session returns both directories (kubectl and az found) for zsh and bash, also with an
+  empty startup file: on macOS `path_helper` reads `/etc/paths.d`, which holds `/opt/homebrew/bin`.
+- The bundle was started in a GUI session of the owner's login, so this finding is measured, not assumed. What stays with the
+  owner row for the built app: the app itself (not a scratch bundle), started from the Finder, with fish and nushell as login
+  shell, and an exec plugin of kubectl that has to find its helper through the child's `PATH`.
+
+## Fixed directories
+
+The directories the detector searches last, after the explicit path of the entry, the process `PATH` and the login-shell
+`PATH`. `confirmed` means a tool of that kind exists in it on this Mac; `assumed` means no machine of that kind or no tool in
+it was available. `$HOME` and `%NAME%` are expanded from the environment. A directory that is not listed is reachable by the
+path field of the tool entry, which the detector always offers.
+
+macOS:
+
+- `/opt/homebrew/bin` confirmed (az). Homebrew links every formula into this directory, so the Cellar directory of a formula
+  (for example `/opt/homebrew/opt/azure-cli/bin`) is not needed
+- `/usr/local/bin` confirmed (kubectl)
+- `$HOME/.local/bin` assumed (the directory exists here and holds no one of the four)
+- `$HOME/bin` assumed (the directory exists here and holds no one of the four)
+- `$HOME/bin/gam7` confirmed (gam)
+- `$HOME/.docker/bin` confirmed (a kubectl of Docker Desktop)
+
+Linux, all assumed (no Linux machine was available):
+
+- `/usr/local/bin` assumed
+- `/usr/bin` assumed
+- `$HOME/.local/bin` assumed
+- `$HOME/bin` assumed
+- `$HOME/bin/gam7` assumed
+- `/snap/bin` assumed
+- `/home/linuxbrew/.linuxbrew/bin` assumed
+
+Windows, all assumed (no Windows machine was available):
+
+- `%LOCALAPPDATA%\Microsoft\WinGet\Links` assumed
+- `%ProgramFiles%\Microsoft SDKs\Azure\CLI2\wbin` assumed
+- `%ProgramFiles%\Docker\Docker\resources\bin` assumed
+- `%USERPROFILE%\bin` assumed
+- `C:\GAM7` assumed
+- `%ProgramFiles%\GAM7` assumed

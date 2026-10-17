@@ -47,8 +47,12 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+/// The names below `/home/` that are not a person's home directory: the stand-in of the fixtures, and the account of a
+/// Homebrew on Linux, whose install directory `/home/linuxbrew/.linuxbrew/bin` is a fixed public location.
+const HOME_NAMES_ALLOWED: [&str; 2] = ["user", "linuxbrew"];
+
 /// True when `text` names a home directory of a person: a macOS or Windows user folder, a Linux home other than the
-/// stand-in `/home/user`, or a scratch directory that the recorder used.
+/// names above, or a scratch directory that the recorder used.
 fn home_path_in(text: &str) -> Option<String> {
     for line in text.lines() {
         for needle in ["/Users/", "\\Users\\", "/var/folders", "/private/var", "/tmp/tmp."] {
@@ -60,7 +64,7 @@ fn home_path_in(text: &str) -> Option<String> {
         while let Some(at) = rest.find("/home/") {
             let after = &rest[at + "/home/".len()..];
             let name: String = after.chars().take_while(|c| !matches!(c, '/' | ':' | ' ' | '"' | '\'' | '`' | ')')).collect();
-            if name != "user" {
+            if !HOME_NAMES_ALLOWED.contains(&name.as_str()) {
                 return Some(line.to_string());
             }
             rest = after;
@@ -288,7 +292,7 @@ fn the_rules_fail_for_a_wrong_directory() {
     // A home path other than the stand-in.
     put("f.txt", "/home/user/bin\n/home/christoph/bin\n");
     put("g.txt", "/Users/someone/bin\n");
-    put("h.txt", "/home/user/bin:/home/user/.local/bin\n");
+    put("h.txt", "/home/user/bin:/home/user/.local/bin:/home/linuxbrew/.linuxbrew/bin\n");
     let homes = home_problems(&dir).join("\n");
     assert!(homes.contains("f.txt"), "{homes}");
     assert!(homes.contains("g.txt"), "{homes}");
