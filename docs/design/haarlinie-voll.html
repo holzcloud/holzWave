@@ -200,6 +200,23 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ph1 .ax-taint{padding:2px 5px;gap:0 5px}.ph1 .ax-taint .mk,.ph1 .ax-taint .tt{font-size:7.5px}.ph1 .ax-taint p{font-size:7.5px}
 .ph1 .ax-hash,.ph1 .ax-foot{font-size:7.5px}.ph1 .ax-acts{gap:5px}.ph1 .ax-acts .btn{min-height:22px;padding:2px 8px;border-radius:5px;font-size:8px}
 .ph1 .ax-tools,.ph1 .ax-tr{font-size:8px}.ph1 .ax-tr .sm{flex-basis:40px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ph1 .ax-tg{height:22px;margin-left:14px;font-size:8px}.ph1 .ax-un{margin-left:14px;font-size:7.5px;flex-basis:calc(100% - 14px)}.ph1 .ax-res{margin-left:14px;font-size:7.5px;flex-basis:calc(100% - 14px)}
+/* Changing a file (docs/design.md 6.16): the diff box inside the approval card, and the Undo button and the fault line of a tool row. Flat, hairline, no shadow. */
+.wx-diff{margin:0 0 3px;padding:0 8px;border:1px solid var(--edge);border-radius:5px;font:400 11.5px/1.35 var(--mono);color:var(--ink)}
+.wx-head{display:flex;flex-wrap:wrap;gap:0 10px;padding:2px 0;border-bottom:1px solid var(--edge)}
+.wx-head .ct{color:var(--ink3)}.wx-head .sz{margin-left:auto;color:var(--ink3);white-space:nowrap}
+.wx-row{display:grid;grid-template-columns:3ch 3ch 1.5ch 1fr;gap:0 8px;align-items:baseline}
+.wx-row .n{color:var(--ink3);text-align:right}.wx-row .sg{text-align:center}.wx-row.add .sg{color:var(--ok)}.wx-row.del .sg{color:var(--danger)}
+.wx-row .tx{min-width:0;min-height:1.35em;white-space:pre-wrap;overflow-wrap:anywhere}.wx-row .tx.dim{color:var(--ink3)}
+.wx-gap{margin:1px 0;border-top:1px solid var(--edge);border-bottom:1px solid var(--edge);color:var(--ink3)}
+.wx-un{display:inline-flex;align-items:center;height:22px;padding:0 10px;margin-left:8px;border:1px solid var(--edge);border-radius:5px;color:var(--ink);font-size:11px}
+.wx-err{flex:0 0 calc(100% - 20px);margin:1px 0 0 20px;color:var(--danger);text-decoration:underline;font:400 12px/1.4 var(--sans)}
+.wx-val br{display:block;content:""}
+.wx-fit .ax-card{padding:3px 12px 3px;font-size:11px;line-height:1.25}.wx-fit .ax-head{margin-bottom:1px}.wx-fit .ax-eff,.wx-fit .ax-dest,.wx-fit .ax-line{margin:0 0 2px;font-size:11px;line-height:1.25}
+.wx-fit .ax-pay,.wx-fit .wx-diff{margin:0 0 2px;font-size:10px;line-height:1.05}.wx-fit .wx-row .tx{min-height:1.05em}.wx-fit .ax-row{padding:0}.wx-fit .wx-head{padding:1px 0}
+.wx-fit .ax-taint{margin:0 0 2px;padding:1px 8px}.wx-fit .ax-taint p{font-size:10.5px;line-height:1.25;margin:0}.wx-fit .ax-hash{margin:0 0 2px;font-size:10.5px}.wx-fit .ax-acts{margin:1px 0}.wx-fit .ax-acts .btn{min-height:22px;padding:2px 12px}.wx-fit .ax-foot{font-size:10px;line-height:1.2}
+.wx-fit .ax-tr{padding:1px 0}.wx-fit .ax-res{padding:1px 8px}
+.ph1 .wx-fit .ax-hash,.ph1 .ax-acts .ax-hash{flex:0 0 100%;margin:0}.ph1 .wx-diff{padding:0 5px;font-size:7.5px}.ph1 .wx-head{gap:0 6px}.ph1 .wx-row{grid-template-columns:2ch 2ch 1ch 1fr;gap:0 4px}
+.ph1 .wx-un{height:22px;margin-left:6px;padding:0 8px;font-size:8px}.ph1 .wx-err{margin-left:14px;font-size:7.5px;flex-basis:calc(100% - 14px)}
 /* AI providers dialog (docs/design.md 6.13): the box of the Settings dialog with its three groups, drawn with the variables above */
 .c-setup{display:inline-flex;align-items:center;height:24px;padding:0 10px;border:1px solid var(--edge);border-radius:999px;color:var(--ink);white-space:nowrap}
 .ap{display:flex;flex-direction:column;padding:10px 16px 8px;font:400 12px/1.4 var(--mono);color:var(--ink)}
@@ -306,6 +323,10 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <p class="lead">The card is part of the screen: Allow once, Deny and the result toggle are at least 44 px high, the card is at most 60 % of the height and scrolls inside, and the payload box scrolls inside it. Left, the call that waits; right, the same chat after the allow, with the result opened as text. Shown at the scale of the mock (about half).</p>
   <div class="phones" id="phones-approval"></div>
 
+  <h2>Changing a file on a phone</h2>
+  <p class="lead">The diff box is part of the card: Allow once, Deny and Undo are at least 44 px high, the card is at most 60 % of the height and scrolls inside, the diff box wraps its rows and scrolls inside it. Left, the write that waits; right, the same chat after the allow, with its Undo button above the composer. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-write"></div>
+
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
 </div>
@@ -405,9 +426,9 @@ function base(v){
   return `<div class="titlebar row">${wcL}
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span></div><div class="ws">◇ docs <span class="n">1</span></div><div class="ws plus">＋</div>
     <span class="fill"></span>
-    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='ki'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'?'on':''}">⌘K</div>${wcR}</div>
+    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='ki'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'?'on':''}">⌘K</div>${wcR}</div>
   <div class="tabrow row">${tabs(v==='blocks'?1:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'?chatArea(v):`<div class="area">
+  <div class="body">${v==='preview'?previewArea():v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -494,7 +515,30 @@ cBody.kiapprovestates=`<div class="c-chat"><div class="c-bar"><span class="c-chi
  <div class="c-log bot">${cMsg('assistant',`<div class="ax-tools">${axTr('er','Read a file','~/.ssh/config','Hide result','The user denied this action.')}${axTr('er','Search files','NotReady in /var/log','Hide result','This call did not run: the turn was stopped.')}${axTr('ran','Read a file','~/proj/notes/todo.md','Show result (0.4 KiB)','')}</div>`,{md:1})}</div>
  ${axAsk({tool:'Search files',where:'pane 2 · talos-1',remote:1,rows:[['tool','grep','4 B'],['pane','2','1 B'],['target','talos-1','7 B'],['remote','true','4 B'],['pattern','NotReady','8 B'],['path','/var/log','8 B'],['ignore_case','false','5 B'],['max_matches','50','2 B'],['resolved_path','/var/log','8 B']],dest:axDest('claude-sonnet-5-5','api.anthropic.com','cloud',1),hash:'c52e90a7d418'})}
  ${axCannot}</div>`;
-function chatArea(v){const wide=v==='kiapprove'||v==='kiapprovestates';return wide?`<div class="area" style="grid-template-columns:1fr;grid-template-rows:1fr">${P('','✦','chat','Why is talos-3 NotReady?',cBody[v],{f:1,s:'grid-row:1/2'})}</div>`:`<div class="area" style="grid-template-columns:1fr 1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',shell(''),{s:'grid-row:1/2'})}${P('','✦','chat','Why is talos-3 NotReady?',cBody[v==='kiset'?'kipane':v],{f:1,s:'grid-row:1/2'})}</div>`}
+/* Changing a file (docs/design.md 6.16). `kiwrite` is the card of a write that waits, with its diff above the fields of the request; `kiwritestates` is
+   a cloud route with the rows of writes that ran, one that was taken back, one that was refused as changed and one whose undo was refused, and the card of
+   a new file on a remote host. */
+const wxRow=(c)=>{const k=c[0];if(k==='g')return `<div class="wx-gap">⋯ ${c[1]} unchanged lines</div>`;if(k==='n')return `<div class="wx-row"><span class="n"></span><span class="n"></span><span class="sg"></span><span class="tx dim">${c[1]}</span></div>`;const sign=k==='a'?'+':k==='d'?'-':'';return `<div class="wx-row ${k==='a'?'add':k==='d'?'del':''}"><span class="n">${c[1]}</span><span class="n">${c[2]}</span><span class="sg">${sign}</span><span class="tx">${c[3]}</span></div>`};
+const wxDiff=(h,rows)=>`<div class="wx-diff" role="group" aria-label="${h[0]} ${h[1]} ${h[2]}"><div class="wx-head"><span>${h[0]}</span><span class="ct">${h[1]}</span><span class="sz">${h[2]}</span></div>${rows.map(wxRow).join('')}</div>`;
+const wxPay=rows=>axPay(rows.map(r=>[r[0],r[1].replace(/\n/g,'<br>'),r[2]]));
+const wxAsk=o=>`<div class="ax-card ask" role="group" aria-label="Approval needed"><div class="ax-head"><span class="ax-title">! Approval needed</span><span class="ax-tool">${o.tool}</span><span class="ax-where">${o.where}</span>${o.remote?'<span class="ax-remote">remote host</span>':''}</div>
+ <p class="ax-eff">Changes one file. Check the changes below.</p>${wxDiff(o.head,o.diff)}${wxPay(o.rows)}<p class="ax-dest">Only the outcome (saved or not) is sent to <span class="mo">${o.model}</span> at <span class="mo">${o.host}</span> (${axPlace(o.place,o.leaves)}).</p>${o.taint||''}
+ <div class="ax-acts"><span class="ax-hash">hash ${o.hash}</span><span class="btn p">Allow once</span><span class="btn">Deny</span></div>
+ <p class="ax-foot">Allows this one call only. Nothing is kept for later. Esc denies.</p></div>`;
+const wxTaint=`<div class="ax-taint"><span class="mk">!</span><span class="tt">Untrusted text in this turn</span><p>This turn contains text you did not write (output of read_file). It can try to steer the assistant. Check the target and every field before you allow. A file will be changed. Check the changes below before you allow it.</p></div>`;
+const wxTr=(state,words,summary,o={})=>{const m={ran:['\u2713','ran',''],er:['!','error','bad'],wt:['\u2026','waiting','wt']}[state];return `<div class="ax-tr ${m[2]}"><span class="mk">${m[0]}</span><span>${words}</span><span class="sm">${summary}</span><span class="st">${o.undone?'ran \u00b7 undone':m[1]}</span>${o.tog?`<span class="ax-tg">${o.tog}</span>`:''}${o.undo?'<span class="wx-un">Undo</span>':''}${o.res?`<span class="ax-un">Result \u00b7 untrusted text</span><div class="ax-res">${o.res}</div>`:''}${o.err?`<p class="wx-err">${o.err}</p>`:''}</div>`};
+const wxPath='~/proj/notes/todo.md';
+const wxEditRows=[['tool','edit_file','9 B'],['pane','1','1 B'],['target','This computer','13 B'],['remote','false','5 B'],['path',wxPath,'20 B'],['old_text','- [ ] Tag the commit','20 B'],['new_text','- [ ] Run the full test suite\n- [ ] Tag the commit on main','58 B'],['replace_all','false','5 B'],['resolved_path','/Users/holz/proj/notes/todo.md','30 B'],['stamp','1760611234','10 B'],['base','sha256:570f913951c41b2fe623fdb6e45fb2cd5aa3e79dde8af43f3a189512af2cd34d','71 B']];
+const wxEditDiff=[['c',1,1,'# Release checklist'],['c',2,2,''],['c',3,3,'- [x] Bump the version'],['c',4,4,'- [x] Update the changelog'],['d',5,'','- [ ] Tag the commit'],['a','',5,'- [ ] Run the full test suite'],['a','',6,'- [ ] Tag the commit on main'],['c',6,7,'- [ ] Publish the build']];
+cBody.kiwrite=`<div class="c-chat wx-fit"><div class="c-bar"><span class="c-chip">Local \u00b7 llama3.2 \u2192 localhost:11434</span><span class="c-where">this computer</span><span class="c-usage">in 1.8k \u00b7 out 120</span><span class="c-setup">Providers\u2026</span></div>
+ <div class="c-log bot">${cMsg('you','Add the missing step to the checklist in ~/proj/notes/todo.md.',{u:1})}${cMsg('assistant',`<p>I'll read the list and then change it.</p><div class="ax-tools">${wxTr('ran','Read a file',wxPath,{tog:'Show result (0.1 KiB)'})}${wxTr('wt','Edit a file',wxPath)}</div>`,{md:1})}</div>
+ ${wxAsk({tool:'Edit a file',where:'pane 1 \u00b7 This computer',head:['Changes parts of the file','2 lines added, 1 removed','116 B \u2192 154 B'],diff:wxEditDiff,rows:wxEditRows,model:'llama3.2',host:'localhost:11434',place:'this computer',leaves:0,taint:wxTaint,hash:'9f3a41c2d7be'})}
+ <div class="c-status">waiting for your decision</div>
+ <div class="c-comp"><div class="c-in">Ask a question</div>${cFoot('',cStop)}</div></div>`;
+cBody.kiwritestates=`<div class="c-chat wx-fit"><div class="c-bar"><span class="c-chip">Claude \u00b7 claude-sonnet-5-5 \u2192 api.anthropic.com</span><span class="c-where leaves">cloud</span><span class="c-usage">in 3.1k \u00b7 out 210</span><span class="c-setup">Providers\u2026</span></div>
+ <div class="c-log bot">${cMsg('assistant',`<div class="ax-tools">${wxTr('ran','Write a file',wxPath,{undo:1})}${wxTr('ran','Edit a file','~/proj/main.go',{undone:1})}${wxTr('er','Edit a file','~/proj/util.go',{tog:'Hide result',res:'The target changed after the approval, so the action was not run.'})}${wxTr('ran','Write a file','~/proj/Makefile',{undo:1,err:'The file changed after the assistant saved it. Nothing was restored.'})}</div>`,{md:1})}</div>
+ ${wxAsk({tool:'Write a file',where:'pane 2 \u00b7 talos-1',remote:1,head:['Creates a new file','4 lines added, 0 removed','new \u00b7 52 B'],diff:[['a','',1,'#!/bin/sh'],['a','',2,'set -eu'],['a','',3,'kubectl get nodes'],['a','',4,'talosctl health']],rows:[['tool','write_file','10 B'],['pane','2','1 B'],['target','talos-1','7 B'],['remote','true','4 B'],['path','/srv/app/deploy.sh','18 B'],['content','#!/bin/sh\nset -eu\nkubectl get nodes\ntalosctl health\n','52 B'],['resolved_path','/srv/app/deploy.sh','18 B'],['base','none','4 B']],model:'claude-sonnet-5-5',host:'api.anthropic.com',place:'cloud',leaves:1,hash:'c52e90a7d418'})}</div>`;
+function chatArea(v){const wide=v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates';return wide?`<div class="area" style="grid-template-columns:1fr;grid-template-rows:1fr">${P('','✦','chat','Why is talos-3 NotReady?',cBody[v],{f:1,s:'grid-row:1/2'})}</div>`:`<div class="area" style="grid-template-columns:1fr 1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',shell(''),{s:'grid-row:1/2'})}${P('','✦','chat','Why is talos-3 NotReady?',cBody[v==='kiset'?'kipane':v],{f:1,s:'grid-row:1/2'})}</div>`}
 
 /* The AI providers dialog (docs/design.md 6.13): three groups (privacy, providers, the provider shown) and the buttons. The chosen
    row has the wash and the 2 px bar, a row that waits for its review says so in words, the key field is empty and its state is a word. */
@@ -570,13 +614,15 @@ const views=[
  ['kioffer','AI chat: what goes out','The card after the pane was shared and its content read: one row per item with its label and size, what the redactor hid (hidden text is in the warn colour, underlined, with a mark), what read empty, the total, how long the offer is good, and the sentence that the redaction is best effort and not a guarantee. The page shows labels, sizes and findings, never the text. Context · 2 items says in the composer what will go out; local only in the bar says that requests which leave this computer are refused.'],
  ['kiapprove','AI chat: approve a tool call','The card in which the assistant asks to read a file: the tool in words, the pane and the target, every field of the request in the core\u2019s order with its size, where the result goes, the untrusted text that is already in the turn, and the hash the decision repeats. Allow once is the one solid button and it allows this call only; Deny and Esc refuse it. Above it the rows of the calls so far, with a result opened as text under its label, and ✦ AI · 1 in the title bar counts the call that waits. The card never takes the keyboard.'],
  ['kiapprovestates','AI chat: tool call states','A route that leaves the computer (cloud in the warn colour), a request for a remote host (the chip says so), a request that is too large to show and can only be denied, and the rows of a call that was denied, one that was stopped and one that ran. Every state has a word besides its colour: error, ran, waiting. A result is always labelled untrusted text. In the app the strip is at most half the pane and scrolls; here it is drawn in full.'],
+ ['kiwrite','AI chat: change a file','The card in which the assistant asks to change a file: the tool in words, the pane and the target, and above the fields of the request the changes the core worked out from the text of the file as it is now: the kind, the counts and the sizes, the lines before and after the change with their numbers, and a + or - sign on every added or removed line. The last field is the digest of that text, so the hash covers what the diff shows. The destination says that only the outcome is sent. The tool rows above it show that the file was read first, and the banner says that a file will be changed.'],
+ ['kiwritestates','AI chat: file change states','A route that leaves the computer (cloud in the warn colour), the rows of writes that ran, each with an Undo button; a write that was taken back (ran \u00b7 undone, no button); a write that was refused because the file changed after the card, with the core\u2019s sentence under Result \u00b7 untrusted text; an undo that was refused, with the core\u2019s sentence under the row; and the card of a new file on a remote host (the chip says so, Creates a new file, only added lines, base none). Every state has a word besides its colour. In the app the strip is at most half the pane and scrolls; here it is drawn in full.'],
  ['kiset','AI providers','The dialog that the chat bar button Providers… opens (also the palette entry AI providers… and a button in Settings): the two privacy switches, the list of providers with the key state in words, the form of the chosen provider with its write-only key field, and the card that a gateway or a server of your own shows before its first use. Nothing is probed; the Allow button is the only way to allow an address.'],
  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):ovl[cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):ovl[cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }
@@ -637,6 +683,16 @@ $('#phones-approval').innerHTML=aaPhone(cMsg('assistant',`<div class="ax-tools">
  axAsk({tool:'Read a file',where:'pane 1 · This computer',rows:[axReadRows[0],axReadRows[3],axReadRows[4]],dest:axDest('llama3.2','localhost:11434','this computer',0),taint:axTaint('output of list_dir'),hash:'9f3a41c2d7be'}),'waiting for your decision')
 +aaPhone(cMsg('assistant',`<div class="ax-tools">${axTr('ran','List a folder','~/proj/notes','Show result (0.1 KiB)','')}${axTr('ran','Read a file',axPath,'Hide result','Talos-3 joined the cluster on Monday.\nNotReady until its certificate is signed.')}</div>`,{md:1}),axSent,'working');
 
+/* Changing a file on a phone: the write that waits, and the same chat after the allow with its Undo button. */
+const wwPhone=(log,card,note)=>ph('<span class="ro">\u2726</span> chat <span class="dim">\u00b7 talos-3</span><span class="ro" style="margin-left:auto">\u2726 AI <span class="ax-n">\u00b7 1</span></span>',`<div class="c-chat"><div class="c-bar"><span class="c-chip btn1">Local \u00b7 llama3.2</span></div>
+ <div class="c-log bot">${cMsg('you','Add the missing step to the checklist in ~/proj/notes/todo.md.',{u:1})}${log}</div>
+ ${card}
+ <div class="c-status">${note}</div>
+ <div class="c-comp"><div class="c-in">Ask a question<span class="cur"></span></div><div class="c-foot">${cxBtn()}<span class="keys">\u23ce send</span>${cStop}</div></div></div>`,'',{raw:1});
+$('#phones-write').innerHTML=wwPhone(cMsg('assistant',`<div class="ax-tools">${wxTr('wt','Edit a file',wxPath)}</div>`,{md:1}),
+ wxAsk({tool:'Edit a file',where:'pane 1 \u00b7 This computer',head:['Changes parts of the file','2 lines added, 1 removed','116 B \u2192 154 B'],diff:wxEditDiff.slice(2,7),rows:[wxEditRows[0],wxEditRows[4]],model:'llama3.2',host:'localhost:11434',place:'this computer',leaves:0,taint:wxTaint.replace(' It can try to steer the assistant. Check the target and every field before you allow.',''),hash:'9f3a41c2d7be'}),'waiting for your decision')
++wwPhone(cMsg('assistant',`<div class="ax-tools">${wxTr('ran','Edit a file',wxPath,{undo:1})}</div>`,{md:1}),axSent.replace('Read a file','Edit a file'),'working');
+
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
 const rows=[
@@ -647,7 +703,7 @@ const rows=[
 ['SSH with reconnect','Pane header, sidebar, connections',pl(3)],['WSL, Docker','Connections, block picker',pl(3)],['Keychain','Connections',pl(3)],
 ['Nextcloud sync, end-to-end','Title bar ☁, sync popover, settings',pl('3b')],
 ['File previews (Markdown, image, video, PDF)','Previews view and Daily',pl(4)],['Editor with SFTP','Editor block',pl(4)],
-['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Sharing a pane with the chat','Chat › Context…',B],['Approving a tool call','Chat › approval card',B],['AI chat in the sidebar','Title bar ✦, replaces the sidebar',pl(6)],
+['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Sharing a pane with the chat','Chat › Context…',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['AI chat in the sidebar','Title bar ✦, replaces the sidebar',pl(6)],
 ['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['iOS and Android','One pane per screen, sheet, key row',pl(7)]
 ];
 $('#cov').innerHTML='<tr><th>Feature</th><th>Where</th><th>Status</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');

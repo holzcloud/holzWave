@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  FILE_NEW, FILE_OLD, OTHER_PROFILE, PROFILE, TOOL_FILE, TOOL_PATH, VIEW_P1, addRows, boot, calls, changeFile, chars, decisionCalls, diffOf,
-  fileText, openAi, openCard, payloadOf, reloadKeeping, scriptTool, scriptWrite, seedFile, sendText, tickClock, undoCalls,
+  FILE_NEW, FILE_OLD, OTHER_PROFILE, PROFILE, TOOL_FILE, TOOL_PATH, VIEW3, VIEW_P1, addRows, boot, calls, changeFile, chars, chatBlock,
+  decisionCalls, diffOf, fileText, openAi, openCard, payloadOf, reloadKeeping, scriptTool, scriptWrite, seedFile, sendText, tickClock, undoCalls,
 } from "./ai-lib.mjs";
 
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
@@ -24,7 +24,7 @@ export default async function ({ engine, page, url, errors }) {
     }
   }
   const more = { keysCase: () => keysCase(page, url, engine), undoCase: () => undoCase(page, url), undoRefusalCase: () => undoRefusalCase(page, url),
-    rowsCase: () => rowsCase(page, url, engine) };
+    rowsCase: () => rowsCase(page, url, engine), narrowCase: () => narrowCase(page, url), modesCase: () => modesCase(page, url, engine) };
   for (const [name, run] of Object.entries(more)) {
     try {
       await run();
@@ -716,4 +716,193 @@ async function rowsCase(page, url, engine) {
   const shown = await page.locator(".chat-msg").count();
   const messages = await page.evaluate(() => window.__MOCK__.ai.chat("chat-mock-1").messages.filter((m) => m.role !== "tool").length);
   assert.equal(shown, messages, "the log holds a message for each user and assistant message");
+}
+
+// ---- narrow screens and the modes -------------------------------------------------------------------------------------
+
+/** A terminal strip above a chat that takes the rest of the window: the shape of a phone, with a pane the chat can act for. */
+const VIEW_STACK = {
+  ...VIEW3,
+  tabs: [{ title: "shell", active: true, focus: 1, panes: 2 }],
+  workspaces: [{ name: "main", active: true, panes: 2 }],
+  focus: 1,
+  panes: [[1, { x: 0, y: 0, w: 1, h: 0.08 }], [3, { x: 0, y: 0.08, w: 1, h: 0.92 }]],
+  dividers: [{ split: 10, axis: "Column", area: { x: 0, y: 0, w: 1, h: 1 }, ratio: 0.08 }],
+};
+
+/** A chat that fills the window below a terminal strip; `size` is the window. */
+async function openSized(page, url, size) {
+  await page.setViewportSize(size);
+  await boot(page, url, {
+    view: VIEW_STACK,
+    blocks: [chatBlock("chat-x")],
+    states: { "chat-x": { title: "Earlier question", profile: "local-1", model: "llama3.2" } },
+    starts: 2,
+    clock: true,
+  });
+  await page.waitForSelector(".block-chat");
+  await page.locator(".chat-input").focus();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profiles").length >= 1);
+}
+
+/** Ask for a write over a seeded file of forty long lines, all of them changed, in a chat that is already open. */
+async function askForBigWrite(page, extra = {}) {
+  const before = Array.from({ length: 40 }, (_, i) => `old line ${i + 1} ${"o".repeat(80)}`).join("\n") + "\n";
+  const after = Array.from({ length: 40 }, (_, i) => `new line ${i + 1} ${"n".repeat(i === 3 ? 600 : 80)}`).join("\n") + "\n";
+  await seedFile(page, TOOL_FILE, before);
+  await scriptWrite(page, { id: "call_1", tool: "write_file", path: TOOL_FILE, content: after, answer: "Done.", ...extra });
+  await sendText(page, "rewrite my list");
+  return openCard(page, "call_1");
+}
+
+/** The sizes of the controls of the card, of the diff box and of the row of a write. */
+const measureWrite = (page) =>
+  page.evaluate(() => {
+    const boxes = (sel) => [...document.querySelectorAll(sel)].map((n) => n.getBoundingClientRect());
+    const strip = document.querySelector(".chat-cards");
+    const diff = document.querySelector(".approval-diff");
+    const input = document.querySelector(".chat-input").getBoundingClientRect();
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    return {
+      buttons: boxes(".chat-approval button").map((r) => ({ h: r.height, w: r.width })),
+      toggles: boxes("button.tool-toggle").map((r) => ({ h: r.height, w: r.width })),
+      undos: boxes("button.tool-undo").map((r) => ({ h: r.height, w: r.width })),
+      strip: strip.getBoundingClientRect().height,
+      stripOverflow: getComputedStyle(strip).overflowY,
+      block: document.querySelector(".block-chat").getBoundingClientRect().height,
+      diff: diff === null ? null : {
+        h: diff.getBoundingClientRect().height / rem, scrolls: diff.scrollHeight > diff.clientHeight, fits: diff.scrollWidth <= diff.clientWidth + 1,
+        overflow: getComputedStyle(diff).overflowY,
+      },
+      inside: input.bottom <= innerHeight && input.top >= 0,
+      font: parseFloat(getComputedStyle(document.querySelector(".chat-input")).fontSize),
+      view: innerHeight,
+    };
+  });
+
+async function narrowCase(page, url) {
+  // A phone: every target of the card and of the row is at least 44 px, the strip is at most 60 % of the window and scrolls, the
+  // diff box is at most 16 rem high, scrolls inside and wraps its rows, and the composer stays on the screen.
+  await openSized(page, url, { width: 390, height: 780 });
+  let card = await askForBigWrite(page);
+  let t = await measureWrite(page);
+  assert.equal(t.buttons.length, 2);
+  for (const b of t.buttons) assert.ok(b.h >= 44 - 0.5 && b.w >= 44 - 0.5, `a button is ${b.w} by ${b.h} at 390 px`);
+  assert.ok(t.strip <= t.view * 0.6 + 1, `the strip is ${t.strip} of ${t.view}`);
+  assert.equal(t.stripOverflow, "auto");
+  assert.ok(t.diff.h <= 16.01, `the diff box is ${t.diff.h} rem high`);
+  assert.equal(t.diff.scrolls, true, "the diff box scrolls inside");
+  assert.equal(t.diff.fits, true, "the rows wrap: none is wider than the box");
+  assert.ok(["auto", "scroll"].includes(t.diff.overflow), t.diff.overflow);
+  assert.equal(t.inside, true, "the composer is on the screen");
+  assert.ok(t.font >= 16, `the composer text is ${t.font} px`);
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await page.waitForSelector("button.tool-undo");
+  t = await measureWrite(page);
+  for (const b of [...t.toggles, ...t.undos]) assert.ok(b.h >= 44 - 0.5 && b.w >= 44 - 0.5, `a row's button is ${b.w} by ${b.h}`);
+  assert.equal(t.undos.length, 1);
+
+  // A desktop window: 28 px targets that keep the desktop size, and the strip is at most half the pane.
+  await openSized(page, url, { width: 1000, height: 640 });
+  card = await askForBigWrite(page);
+  t = await measureWrite(page);
+  for (const b of t.buttons) assert.ok(b.h >= 28 - 0.5 && b.h < 44, `a button is ${b.h} px high on the desktop`);
+  assert.ok(t.strip <= t.block * 0.5 + 1, `the strip is ${t.strip} of the pane's ${t.block}`);
+  assert.equal(t.inside, true);
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await page.waitForSelector("button.tool-undo");
+  t = await measureWrite(page);
+  for (const b of [...t.toggles, ...t.undos]) assert.ok(b.h >= 28 - 0.5 && b.h < 44, `a row's button is ${b.h} px high on the desktop`);
+  await page.setViewportSize({ width: 1000, height: 640 });
+}
+
+async function modesCase(page, url, engine) {
+  const back = () => page.keyboard.press(engine === "webkit" && process.platform === "darwin" ? "Shift+Alt+Tab" : "Shift+Tab");
+  await openSized(page, url, { width: 1000, height: 640 });
+  const card = await openCardWithDiff(page);
+  const root = (add, name) => page.evaluate(([a, n]) => document.documentElement.classList[a ? "add" : "remove"](n), [add, name]);
+  const edge = () => page.locator("div.approval-diff").evaluate((n) => getComputedStyle(n).borderTopColor);
+  const token = (name) =>
+    page.evaluate((v) => {
+      const probe = document.createElement("i");
+      probe.style.color = `var(${v})`;
+      document.body.append(probe);
+      const c = getComputedStyle(probe).color;
+      probe.remove();
+      return c;
+    }, name);
+
+  // Higher contrast: the hairline of the diff box follows `--hw-line`, which that mode swaps.
+  const normal = await edge();
+  await root(true, "contrast-high");
+  assert.notEqual(await edge(), normal, "the diff box's hairline follows the token");
+  await root(false, "contrast-high");
+  assert.equal(await edge(), normal);
+
+  // The signs are characters in the colours of the tokens: added `--hw-ok`, removed `--hw-danger`; only an unchanged line has no sign.
+  const rows = await page.locator("div.approval-diff li.diff-row").evaluateAll((list) =>
+    list.map((r) => ({ op: r.dataset.op, sign: r.querySelector(".diff-sign")?.textContent ?? null, colour: r.querySelector(".diff-sign") === null ? null : getComputedStyle(r.querySelector(".diff-sign")).color })),
+  );
+  const ok = await token("--hw-ok");
+  const danger = await token("--hw-danger");
+  for (const row of rows.filter((r) => r.op === "add")) assert.deepEqual([row.sign, row.colour], ["+", ok]);
+  for (const row of rows.filter((r) => r.op === "del")) assert.deepEqual([row.sign, row.colour], ["-", danger]);
+  for (const row of rows.filter((r) => r.op === "ctx")) assert.equal(row.sign, "", "an unchanged line has an empty sign cell");
+  assert.ok(rows.some((r) => r.op === "add") && rows.some((r) => r.op === "del") && rows.some((r) => r.op === "ctx"));
+
+  // No motion at all, with and without the setting, and nothing flat is lost: no gradient, filter or shadow in the diff box.
+  await tickClock(page, 1000);
+  await card.locator("button.approval-allow").click();
+  await page.waitForSelector("button.tool-undo");
+  const duration = (sel) => page.locator(sel).first().evaluate((n) => getComputedStyle(n).transitionDuration);
+  for (const reduced of [false, true]) {
+    await root(reduced, "motion-reduce");
+    assert.equal(await duration("button.tool-undo"), "0s", `Undo, reduced ${reduced}`);
+  }
+  await root(false, "motion-reduce");
+
+  // Forced colours: the style sheet outlines the diff box and the Undo button with a system colour.
+  const css = await (await fetch(`${url}approval.css`)).text();
+  const forced = css.slice(css.indexOf("@media (forced-colors: active)"));
+  assert.ok(forced.startsWith("@media"), "approval.css has a forced-colors block");
+  assert.match(forced, /\.approval-diff[^{]*\{[^}]*outline[^}]*(CanvasText|Highlight)/);
+  assert.match(forced, /\.tool-undo[^{]*\{[^}]*outline[^}]*(CanvasText|Highlight)/);
+
+  // The keyboard ring is 2 px on a button, and the diff box uses the rose token for its ring.
+  await scriptWrite(page, { id: "call_2", tool: "write_file", path: TOOL_FILE, content: FILE_NEW, answer: "Done." });
+  await seedFile(page, TOOL_FILE, FILE_OLD);
+  await sendText(page, "again");
+  await openCard(page, "call_2");
+  await page.waitForFunction(() => !window.__MOCK__.ai.chat("chat-x").running || window.__MOCK__.ai.chat("chat-x").pending.length > 0);
+  const rose = await token("--hw-rose");
+  await page.locator(".chat-input").focus();
+  await back();
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "approval-deny");
+  assert.equal(await page.locator('section[data-call="call_2"] .approval-deny').evaluate((n) => getComputedStyle(n).outlineWidth), "2px");
+  await back();
+  await back();
+  await back();
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "approval-diff");
+  const ring = await page.evaluate(() => ({ w: getComputedStyle(document.activeElement).outlineWidth, c: getComputedStyle(document.activeElement).outlineColor }));
+  assert.equal(ring.w, "2px");
+  assert.equal(ring.c, rose, "the diff box: the rose ring");
+  const flat = await page.evaluate(() =>
+    [...document.querySelectorAll(".approval-diff, .approval-diff *")]
+      .filter((n) => {
+        const css = getComputedStyle(n);
+        return css.backgroundImage !== "none" || css.filter !== "none" || css.boxShadow !== "none";
+      })
+      .map((n) => n.className),
+  );
+  assert.deepEqual(flat, []);
+}
+
+/** A write card in the chat that fills the window, with rows of every kind that has a sign. */
+async function openCardWithDiff(page) {
+  await seedFile(page, TOOL_FILE, "keep one\nold two\nkeep three\n");
+  await scriptWrite(page, { id: "call_1", tool: "write_file", path: TOOL_FILE, content: "keep one\nnew two\nkeep three\n", answer: "Done." });
+  await sendText(page, "change the middle");
+  return openCard(page, "call_1");
 }
