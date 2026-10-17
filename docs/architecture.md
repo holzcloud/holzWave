@@ -40,7 +40,7 @@ with a real provider account, a real Apple model or on Windows and Linux hardwar
  │  layout      workspaces · tabs · split tree · geometry                                  ✅             │
  │  engine      TerminalEngine trait ── libghostty-vt │ alacritty_terminal (fallback)      ✅ (ghostty)  │
  │  pty         local shell over portable-pty                                              ✅             │
- │  conn        Connection trait: local · ssh (russh) · wsl · docker                       built          │
+ │  conn        Link a pane talks to: pty · ssh (russh), one login per saved profile       built          │
  │  secrets     SecretStore trait over the OS keychain                                     built          │
  │  store       SQLite: settings, history, profiles                                        phase 2/7      │
  │  sync        encrypted WebDAV sync, conflict handling                                   built          │
@@ -90,7 +90,9 @@ The modules of `holzwave-core` as built (`core/src/`):
 | `ai` | the AI chat core (`core/src/ai/`, below): the `Provider` trait and `HttpProvider` over five wire adapters in `ai/wire/` (`anthropic.rs`, `gemini.rs`, `ollama.rs`, `openai_chat.rs`, `openai_responses.rs`), the one HTTP chokepoint `ai/http.rs`, the context gate `gate.rs` and `redact.rs`, tools and approval in `tools/`, the agent loop `agent.rs`, the conversation store `store.rs`, profiles and keys `profiles.rs`, the service facade `service.rs` with `service/` | ✅ |
 | `textread` | reads the screen, the selection, the last rows or the last command's output as text, with the cells nobody could read marked | ✅ |
 | `exec` | runs one command in a separate process with a scrubbed environment, a time limit and a kill of everything it started | ✅ |
-| `ssh` | the SSH connection, and now also the exec primitive: one command on a saved connection without a terminal, over a cached connection | ✅ |
+| `conn` | the `Link` trait a pane reads and writes (a PTY, an SSH shell, nothing for a block pane) and the connection state the page shows | ✅ |
+| `ssh` | the SSH shell on a pooled connection (`SshLink`, with reconnect and a shell backlog capped at 16 MiB), the login itself, host keys, and the exec primitive: one command on a saved connection without a terminal | ✅ |
+| `pool` | one login per saved SSH connection, shared by the pane's shell and the SFTP and exec channels: single-flight logins, a wait after a failed background login, idle close, at most 16 connections | ✅ |
 | `connections` | the saved SSH, WSL and Docker connections, their secrets, and which pane runs which connection | ✅ |
 | `blocks` | panes that are not a terminal: a file browser, a preview, the system monitor and a chat | ✅ |
 | `monitor` | the system monitor of this computer (`sysinfo`) and, in `monitor/remote.rs`, of a Linux host through the exec primitive | ✅ |
@@ -119,7 +121,7 @@ Each boundary is a trait in `holzwave-core` with at least one real implementatio
 | Trait | Methods (sketch) | Implementations | Why a boundary |
 |---|---|---|---|
 | `TerminalEngine` ✅ | `feed`, `resize`, `scroll`, `update` (dirty rows), `take_replies`, `encode_key`, `encode_text`, `paste`, `mouse`, `wheel`, `select`, `search`, `copy_mode`, `set_theme` | `GhosttyEngine` ✅, `AlacrittyEngine` | `libghostty-vt` is young and its API moved already between 0.2.2 and master |
-| `Connection` | `open_shell(size) → Stream`, `open_files() → FileSystem`, `status()` | local, ssh, wsl, docker | terminal and previews share one login |
+| `Connection` (`core/src/pool.rs`) | `session(open)`, the shell channel (`SshLink::attach`), `sftp()`, exec channels through `SshExec::on`, `lease()` | SSH, through the pool: one login per saved profile. WSL and Docker are local commands that run in a pane (`wsl.exe -d`, `docker exec -it`) and have no file access yet (open) | the terminal, the files and the commands of a saved SSH connection share one login |
 | `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service, iOS/Android keystores | secrets never reach a file |
 | `SyncBackend` | `list`, `get`, `put`, `delete` with ETag | WebDAV (`opendal` or `reqwest_dav`) | Nextcloud today, others later |
 | `Provider` ✅ | `id`, `capabilities(model)`, `stream(request, callback, cancel) → completion` (blocking, with a cancel token) | `HttpProvider` ✅ over five wire adapters (local servers, cloud APIs, gateways), `AppleProvider` ✅ (Foundation Models), `ScriptedProvider` (the test double) | consent and context rules live above it: a provider accepts only context the gate approved |
@@ -369,8 +371,10 @@ by field, and `docs/widget.schema.json` (JSON Schema, draft 2020-12) describes t
 A **block pane** is a pane that runs no process: its link is a `NullLink` and the page draws its content (a file browser
 or the preview of one file) over the empty terminal. It has a header, a place in the split tree, drag and close like any
 pane, and `pane_blocks.json` remembers what each shows. `core/src/files.rs` has one `FileSource` interface with two
-implementations: this computer, and the files of a saved SSH connection over SFTP on a connection of its own (a file read
-never waits behind a terminal's output). Reads are bounded, writes are atomic (written aside, renamed over).
+implementations: this computer, and the files of a saved SSH connection over SFTP. The files, the commands and the shell
+of a saved SSH connection share its one login (`core/src/pool.rs`): a file read does not wait behind the terminal's output
+because every consumer of the connection drains its channel at once, and the shell's backlog is capped at 16 MiB, past which
+the shell is closed and says why while the other channels go on. Reads are bounded, writes are atomic (written aside, renamed over).
 
 Images, video, audio and PDFs are **not** loaded into the page. `file_grant` makes a token (128 random bits) for one file,
 and the `holzfile` URI scheme serves exactly that file from `holzfile://localhost/<token>` (`http://holzfile.localhost/`
@@ -397,6 +401,7 @@ hosts are covered; another system is shown as not supported.
 | The PTY | input injected by page content | strict CSP, no untrusted HTML in the main page, previews sandboxed |
 | Layout / settings files | corrupt or hostile file crashes the app | validated on load, fall back to a fresh state |
 | Paste | control sequences run commands | bracketed paste; warn on multi-line paste to a shell that does not support it |
+| A pooled SSH session | one login shared by a pane, the files and the commands: a command runner learns a host key, a wrong password is tried again and again, a stopped pane stalls the others, or idle logins pile up | a command runner (a monitor, the agent) never learns a host key and a changed key is refused for everyone; a background login waits 15 s after a refused login and 3 s after a lost connection, while a person's own open is never held back; the shell's backlog is capped at 16 MiB and the shell is closed past it; a session unused for 120 s is closed, and at most 16 connections are kept |
 | Everything the app is | telemetry, an update channel or an account arrives through a dependency or a plugin (DESK-26) | none exists; `core/tests/project_policy.rs` pins the dependency lists and the closure of the app, scans first-party sources and the page for network APIs and fails on a CI workflow |
 | Provider keys | read from a file, a log or the page, or sent to another host than the one they were saved for | the OS keychain only, under the account `ai:<id>` together with the address they were saved for (a changed address needs the key again); write-only, because no command returns a key; every type that holds one hides it in `Debug`; never synced and never in `ai.json` |
 | Model output | a reply runs code or loads something in the page | untrusted text; it is rendered by the core's sanitiser and copied through the page's own allow-list; no image or media element ever; a link with a query string or user information is inert |

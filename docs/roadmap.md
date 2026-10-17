@@ -75,10 +75,9 @@ Does not exist yet:
 Status: built in the core and the page, covered by tests against an in-process SSH server. Not yet run against real
 hosts, WSL or Docker on a real machine, or the OS keychain on Windows and Linux (rows C1 to C6 of [test-plan.md](test-plan.md)).
 
-- ✅ SSH manager with reconnect (`core/src/ssh.rs`, `core/src/connections.rs`), jump host, host key check (trust on first use).
+- ✅ SSH manager with reconnect (`core/src/ssh.rs`, `core/src/connections.rs`), jump host, host key check (trust on first use). The terminal, the files and the commands of a saved connection share one login (`core/src/pool.rs`).
 - ✅ Secret store on the OS keychain (`core/src/secrets.rs`, feature `keyring`).
 - ✅ WSL and Docker as connection types (a local pane that runs `wsl.exe -d` or `docker exec -it`).
-- Open: one connection abstraction that previews use too (Phase 4 reads files over SFTP on the same link).
 
 ## Phase 3b — Sync
 
