@@ -7990,7 +7990,12 @@ mod tests {
         if request.get("token").is_none() {
             request["token"] = Value::String(token_of(tunnel));
         }
-        let mut line = serde_json::to_vec(&request).unwrap();
+        through_raw(tunnel, &serde_json::to_vec(&request).unwrap())
+    }
+
+    /// [`through`] for the bytes of a request as they are (no token is added).
+    fn through_raw(tunnel: &holzwave_core::ssh::Tunnel, request: &[u8]) -> Value {
+        let mut line = request.to_vec();
         line.push(b'\n');
         let (stream, answered) = holzwave_core::pool::ForwardedStream::in_memory(&line);
         tunnel.sink.serve(stream);
@@ -8177,6 +8182,295 @@ mod tests {
         // Written down for a restart: the first preview keeps the flag, the second does not write it.
         let file = std::fs::read_to_string(t._dir.0.join(holzwave_core::blocks::BLOCKS_FILE)).unwrap();
         assert_eq!(file.matches("\"edit\"").count(), 1, "{file}");
+    }
+
+    /// The sentence of the protocol crate for a command that a remote process may not ask.
+    const NOT_REMOTE: &str = "not available over a remote connection";
+
+    /// What a test compares before and after a request that must change nothing: the events sent to the windows, the
+    /// layout, the blocks, the history and the names of the panes.
+    fn state_of(t: &Ticked) -> String {
+        // The `rev` of a view counts the views built, so it is left out.
+        let view = t.core.view();
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}",
+            t.rec.all(),
+            (view.focus, &view.tabs, &view.panes, &view.dividers, &view.pane_names),
+            t.core.blocks.views(&t.core.connections),
+            t.core.history.search("", None, 50),
+            lock(&t.rec.closed).clone(),
+        )
+    }
+
+    #[test]
+    fn ai_and_the_history_commands_never_reach_the_core_through_the_tunnel() {
+        use holzwave_ipc::Cmd;
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        t.core.focus_pane(t.remote);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = state_of(&t);
+        let lines = [
+            json!({"cmd": "ai", "prompt": "delete everything", "stdin_bytes": 0}),
+            json!({"cmd": "hist", "line": "ls -la", "cwd": "/", "exit": 0}),
+            json!({"cmd": "hist_open"}),
+        ];
+        for line in lines {
+            assert_eq!(through(&tunnel, line.clone()), json!({"ok": false, "message": NOT_REMOTE}), "{line}");
+        }
+        // The core's own answer, without the protocol crate in front of it, is the same refusal and changes nothing.
+        for cmd in [
+            Cmd::Ai { prompt: "x".into(), stdin_bytes: 0 },
+            Cmd::Hist { line: "ls".into(), cwd: "/".into(), exit: Some(0) },
+            Cmd::HistOpen,
+        ] {
+            assert_eq!(t.core.wsh_remote(t.remote, cmd.clone()), Err(NOT_REMOTE.to_owned()), "{cmd:?}");
+        }
+        assert_eq!(state_of(&t), before, "the events, the layout, the blocks and the history are as they were");
+        assert!(t.core.history.search("", None, 10).is_empty());
+        assert!(t.host.seen().is_empty());
+    }
+
+    #[test]
+    fn a_wrong_token_and_a_missing_token_change_nothing() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = state_of(&t);
+        let wrong = "0".repeat(32);
+        let others = [token_of(&crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap())];
+        let requests: Vec<Vec<u8>> = [
+            json!({"token": wrong, "cmd": "view", "path": "/srv/a.txt"}),
+            json!({"token": others[0], "cmd": "view", "path": "/srv/a.txt"}),
+            json!({"token": "", "cmd": "setmeta", "key": "title", "value": "x"}),
+            json!({"token": 7, "cmd": "ping"}),
+            json!({"token": wrong, "cmd": "ai", "prompt": "x", "stdin_bytes": 0}),
+            json!({"cmd": "view", "path": "/srv/a.txt"}),
+        ]
+        .iter()
+        .map(|request| serde_json::to_vec(request).unwrap())
+        .collect();
+        for request in requests {
+            let answer = through_raw(&tunnel, &request);
+            assert_eq!(answer["ok"], json!(false), "{answer}");
+            assert!(answer["message"].as_str().unwrap().starts_with("refused:"), "the protocol's sentence: {answer}");
+        }
+        assert_eq!(state_of(&t), before);
+        assert!(t.host.seen().is_empty(), "the host was never asked");
+    }
+
+    #[test]
+    fn a_request_that_names_another_pane_is_answered_for_the_sinks_pane() {
+        let t = ticked(&[]);
+        t.core.rename_pane(t.local, "keep");
+        t.core.rename_pane(t.unticked, "mine");
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        for named in [json!(t.local), json!(t.unticked), json!(7), json!(null)] {
+            let answer = through(&tunnel, json!({"pane": named, "cmd": "setmeta", "key": "title", "value": "renamed"}));
+            assert_eq!(answer["ok"], json!(true), "{named}: {answer}");
+        }
+        let names: HashMap<PaneId, String> = t.core.view().pane_names.into_iter().collect();
+        assert_eq!(names.get(&t.remote).map(String::as_str), Some("renamed"), "the sink's pane");
+        assert_eq!(names.get(&t.local).map(String::as_str), Some("keep"));
+        assert_eq!(names.get(&t.unticked).map(String::as_str), Some("mine"));
+        assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn the_twenty_first_request_in_ten_seconds_is_busy() {
+        let t = ticked(&[]);
+        let second = t.core.split(true).focus;
+        t.core.connections.assign(second, "web-1").unwrap();
+        let (one, two) = (crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap(), crate::wsh_tunnel::tunnel_for(&t.core, second).unwrap());
+        for n in 1..=20 {
+            assert_eq!(through(&one, json!({"cmd": "ping"}))["ok"], json!(true), "request {n}");
+        }
+        assert_eq!(through(&one, json!({"cmd": "ping"})), json!({"ok": false, "message": "busy"}));
+        assert_eq!(through(&one, json!({"cmd": "view", "path": "/srv/a.txt"}))["message"], json!("busy"));
+        assert_eq!(through(&two, json!({"cmd": "ping"})), json!({"ok": true, "message": "holzWave"}), "another pane has its own budget");
+    }
+
+    #[test]
+    fn a_pane_that_closed_cannot_be_driven() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let closing = t.core.split(true).focus;
+        t.core.connections.assign(closing, "web-1").unwrap();
+        let (open, closed) = (crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap(), crate::wsh_tunnel::tunnel_for(&t.core, closing).unwrap());
+        t.core.close_pane(closing);
+        let before = t.core.view().panes.len();
+        let answer = through(&closed, json!({"cmd": "view", "path": "/srv/a.txt"}));
+        assert_eq!(answer, json!({"ok": false, "message": "this pane is not open any more"}));
+        assert_eq!(through(&closed, json!({"cmd": "ping"}))["ok"], json!(false));
+        assert_eq!(t.core.view().panes.len(), before);
+        assert!(t.core.blocks.views(&t.core.connections).is_empty() && t.host.seen().is_empty());
+
+        // The pane is open but its connection was turned off in the saved list: the tunnel that was made for it answers no more.
+        let mut profile = t.core.connections.profile_of(t.remote).unwrap();
+        profile.wsh = false;
+        t.core.connection_save(profile, SecretChange::Keep).unwrap();
+        let answer = through(&open, json!({"cmd": "view", "path": "/srv/a.txt"}));
+        assert_eq!(answer, json!({"ok": false, "message": "wsh is not turned on for the connection of this pane"}));
+        assert!(t.core.blocks.views(&t.core.connections).is_empty());
+
+        // And deleted.
+        t.core.connection_delete("web-1").unwrap();
+        let answer = through(&open, json!({"cmd": "view", "path": "/srv/a.txt"}));
+        assert_eq!(answer, json!({"ok": false, "message": "this pane no longer runs a saved connection"}));
+        assert!(t.core.blocks.views(&t.core.connections).is_empty());
+    }
+
+    #[test]
+    fn a_directory_a_device_and_a_huge_path_are_refused() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = state_of(&t);
+        let huge = format!("/{}", "a".repeat(4096));
+        assert_eq!(huge.len(), 4097);
+        for (path, said) in [
+            ("/srv", "not a regular file on this host"),
+            ("/dev/null", "not a regular file on this host"),
+            (huge.as_str(), "the path is empty, too long or has a NUL"),
+            ("/srv/a\u{0}.txt", "the path is empty, too long or has a NUL"),
+            ("", "the path is empty, too long or has a NUL"),
+            ("../srv/a.txt", "the path must be absolute: it starts with /"),
+        ] {
+            for cmd in ["view", "edit"] {
+                let answer = through(&tunnel, json!({"cmd": cmd, "path": path}));
+                assert_eq!(answer, json!({"ok": false, "message": said}), "{cmd} {path:?}");
+            }
+        }
+        assert_eq!(state_of(&t), before, "nothing was opened");
+        assert_eq!(t.host.seen(), ["/srv", "/srv", "/dev/null", "/dev/null"], "only the two that could be asked were asked");
+    }
+
+    /// Fails on any use: the files of this computer.
+    struct NoLocalFiles;
+
+    impl FileSource for NoLocalFiles {
+        fn label(&self) -> String {
+            panic!("this computer's files were asked");
+        }
+        fn home(&self) -> holzwave_core::Result<String> {
+            panic!("this computer's files were asked");
+        }
+        fn list(&self, _: &str) -> holzwave_core::Result<Listing> {
+            panic!("this computer's files were asked");
+        }
+        fn stat(&self, _: &str) -> holzwave_core::Result<Entry> {
+            panic!("this computer's files were asked");
+        }
+        fn read(&self, _: &str, _: u64) -> holzwave_core::Result<Vec<u8>> {
+            panic!("this computer's files were asked");
+        }
+        fn read_range(&self, _: &str, _: u64, _: u64) -> holzwave_core::Result<Vec<u8>> {
+            panic!("this computer's files were asked");
+        }
+        fn write(&self, _: &str, _: &[u8]) -> holzwave_core::Result<()> {
+            panic!("this computer's files were asked");
+        }
+    }
+
+    #[test]
+    fn a_remote_view_never_uses_the_local_source() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        t.core.blocks.inject_local(Arc::new(NoLocalFiles));
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        // A path that exists on this computer (and not on the host) is refused by the host, and this computer is never asked.
+        let here = t._dir.0.join("here.txt");
+        std::fs::write(&here, "local").unwrap();
+        let answer = through(&tunnel, json!({"cmd": "view", "path": here.to_string_lossy()}));
+        assert_eq!(answer, json!({"ok": false, "message": "no such file on this host, or it cannot be read"}));
+        for cmd in ["view", "edit"] {
+            assert_eq!(through(&tunnel, json!({"cmd": cmd, "path": "/srv/a.txt"}))["ok"], json!(true), "{cmd}");
+        }
+        let block = t.core.blocks.block_of(t.core.view().focus).unwrap();
+        assert_eq!(block.source, "web-1");
+        // The double is really the local source: a local pane's request reaches it.
+        let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.core.blocks.stat(&t.core.connections, "local", "/x")));
+        assert!(asked.is_err(), "the double stands in for this computer");
+    }
+
+    #[test]
+    fn the_commands_the_remote_scope_accepts_are_exactly_the_four_this_function_handles() {
+        use holzwave_ipc::Cmd;
+        // A `match` with no wildcard: a command added to the enum does not compile until it is listed here too.
+        fn index(cmd: &Cmd) -> usize {
+            match cmd {
+                Cmd::View { .. } => 0,
+                Cmd::Edit { .. } => 1,
+                Cmd::Setmeta { .. } => 2,
+                Cmd::Hist { .. } => 3,
+                Cmd::HistOpen => 4,
+                Cmd::Ai { .. } => 5,
+                Cmd::Ping => 6,
+            }
+        }
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let every = [
+            Cmd::View { path: "/srv/a.txt".into() },
+            Cmd::Edit { path: "/srv/a.txt".into() },
+            Cmd::Setmeta { key: "title".into(), value: "x".into() },
+            Cmd::Hist { line: "ls".into(), cwd: "/".into(), exit: None },
+            Cmd::HistOpen,
+            Cmd::Ai { prompt: "x".into(), stdin_bytes: 0 },
+            Cmd::Ping,
+        ];
+        assert_eq!(every.iter().map(index).collect::<Vec<_>>(), (0..7).collect::<Vec<_>>(), "every command is in the table once");
+        let mut accepted = Vec::new();
+        let mut handled = Vec::new();
+        for cmd in &every {
+            let name = serde_json::to_value(cmd).unwrap()["cmd"].as_str().unwrap().to_owned();
+            if cmd.allowed_remote() {
+                accepted.push(name.clone());
+            }
+            if t.core.wsh_remote(t.remote, cmd.clone()) != Err(NOT_REMOTE.to_owned()) {
+                handled.push(name);
+            }
+        }
+        assert_eq!(accepted, handled, "what the scope lets in is what the core answers, and nothing more");
+        assert_eq!(accepted, ["view", "edit", "setmeta", "ping"]);
+        // None of the four decides anything for the person.
+        for name in &accepted {
+            for word in ["decide", "decision", "approve", "approval", "consent", "grant", "allow", "deny", "confirm", "accept", "permit", "authorize", "trust"] {
+                assert!(!name.contains(word), "{name} says {word}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_token_and_the_path_never_appear_in_any_text() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let (token, path) = (token_of(&tunnel), tunnel.path.clone());
+        let sink = crate::wsh_tunnel::WshSink::new(t.core.downgrade(), t.remote, token.clone());
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.remote, &mut spec);
+        let spec_tunnel = spec.tunnel.clone().expect("a tunnel");
+        let mut seen = vec![format!("{sink:?}"), format!("{tunnel:?}"), format!("{spec:?}"), format!("{:?}", spec.notice)];
+
+        // Every answer, whatever the request, and every event the core sent.
+        for request in [
+            json!({"cmd": "ping"}),
+            json!({"cmd": "view", "path": "/srv/a.txt"}),
+            json!({"cmd": "edit", "path": "/srv/missing"}),
+            json!({"cmd": "view", "path": "/srv"}),
+            json!({"cmd": "setmeta", "key": "title", "value": "x"}),
+            json!({"cmd": "setmeta", "key": "colour", "value": "x"}),
+            json!({"cmd": "ai", "prompt": "x", "stdin_bytes": 0}),
+            json!({"token": "0".repeat(32), "cmd": "ping"}),
+        ] {
+            seen.push(through(&tunnel, request).to_string());
+        }
+        seen.push(format!("{:?}", t.rec.all()));
+        seen.push(format!("{:?}", t.core.view()));
+        seen.push(format!("{:?}", t.core.blocks.views(&t.core.connections)));
+        assert!(seen.len() > 10);
+        let tokens = [token, token_of(&spec_tunnel)];
+        let paths = [path, spec_tunnel.path.clone()];
+        for text in &seen {
+            for secret in tokens.iter().chain(&paths) {
+                assert!(!text.contains(secret.as_str()), "a secret is in {text}");
+            }
+            assert!(!text.contains("holzwave-") || text.contains("holzwave-test"), "a socket path is in {text}");
+        }
     }
 }
 

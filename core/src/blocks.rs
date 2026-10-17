@@ -138,7 +138,8 @@ pub struct Blocks {
     panes: Mutex<HashMap<PaneId, Block>>,
     /// One source per connection, made on first use and made again when the connection was saved.
     sources: Mutex<HashMap<String, (u64, Arc<dyn FileSource>)>>,
-    local: Arc<dyn FileSource>,
+    /// This computer's files. A mutex only so that a test can put a double in its place ([`Blocks::inject_local`]).
+    local: Mutex<Arc<dyn FileSource>>,
     grants: Mutex<HashMap<String, Granted>>,
     grant_seq: AtomicU64,
 }
@@ -155,7 +156,7 @@ impl Blocks {
         panes.retain(|pane, block| live_panes.contains(pane) && valid(block));
         Self {
             dir: dir.to_path_buf(),
-            local: Arc::new(LocalSource::new(home.clone())),
+            local: Mutex::new(Arc::new(LocalSource::new(home.clone()))),
             home,
             panes: Mutex::new(panes),
             sources: Mutex::new(HashMap::new()),
@@ -243,7 +244,7 @@ impl Blocks {
     /// The source named `id`: this computer, or the files of a saved SSH connection.
     pub fn source(&self, connections: &Connections, id: &str) -> Result<Arc<dyn FileSource>> {
         if id == LOCAL {
-            return Ok(self.local.clone());
+            return Ok(self.local.lock().unwrap_or_else(PoisonError::into_inner).clone());
         }
         let generation = connections.generation();
         let mut sources = self.sources.lock().unwrap_or_else(PoisonError::into_inner);
@@ -263,6 +264,13 @@ impl Blocks {
     #[doc(hidden)]
     pub fn inject_source(&self, id: &str, generation: u64, source: Arc<dyn FileSource>) {
         self.sources.lock().unwrap_or_else(PoisonError::into_inner).insert(id.to_owned(), (generation, source));
+    }
+
+    /// Put `source` in the place of this computer's files. For the tests of code outside this crate, which use it to show
+    /// that a request never touches this computer; nothing in the product calls it.
+    #[doc(hidden)]
+    pub fn inject_local(&self, source: Arc<dyn FileSource>) {
+        *self.local.lock().unwrap_or_else(PoisonError::into_inner) = source;
     }
 
     pub fn list(&self, connections: &Connections, source: &str, path: &str) -> Result<Listing> {
