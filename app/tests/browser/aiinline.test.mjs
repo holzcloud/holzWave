@@ -29,7 +29,8 @@ async function ready(page, url, { auto = true, panes } = {}) {
   await settle(page);
 }
 
-const aiCalls = async (page) => (await commandNames(page)).filter((name) => name.startsWith("ai_"));
+// The listing of the `wsh ai` requests that wait is made once by every page at load, before any press; it is not a chat command.
+const aiCalls = async (page) => (await commandNames(page)).filter((name) => name.startsWith("ai_") && name !== "ai_ask_pending");
 
 /** The rows of the palette for `query`: title, section word and chord. */
 async function paletteRows(page, query) {

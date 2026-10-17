@@ -136,6 +136,18 @@
 //                      hold(), release()  an allowed command keeps running (no result) until `release()`; a stop ends it with the
 //                                   sentence of the loop for a stopped call
 //                      output(text, failed)  the next command that is allowed answers this text instead of the scripted one
+//       ask            the requests of `wsh ai` that wait for the person, as far as the page can see them: the two commands of the core
+//                      `ai_ask_pending` and `ai_ask_answer`. The events `ai-ask` are sent by the test with `emitTo(label, "ai-ask", ...)` for a
+//                      card (`{kind: "waiting", view}`) and `emit("ai-ask", ...)` for a close (`{kind: "closed", ask, why}`).
+//                      pending       the answer of `ai_ask_pending`: a list of cards (default none)
+//                      answers       the argument object of every `ai_ask_answer` call, oldest first
+//                      hold(on)      `hold(true)` keeps the answer of `ai_ask_answer` pending until `release()`; the call is recorded at once
+//                      release()     the held answers go on
+//                      fail(raw)     the next answer rejects with `raw` (the core's `{code: "ask", reason, text}`, or anything else)
+//                      The default answer resolves `null` and then, as the core does, tells every window that the request closed:
+//                      `{kind: "closed", ask, why}` with `why` `sent` for the word `send` and `refused` for `refuse`. A held answer does
+//                      that when it is released.
+//                      reset()       clear the records and the knobs (the other `reset()` calls it too)
 //     The commands `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete`, `ai_send`, `ai_cancel`,
 //     `ai_decide`, `ai_turn_snapshot`, `ai_profiles`, `ai_profile_save`, `ai_profile_remove`, `ai_key_set` and `ai_key_clear` have
 //     defaults; a rejection is the object `{code, reason, text}` as the core's. `ai_profile_save(input)` refuses an input
@@ -1026,6 +1038,27 @@
       provider: live.profile, locality: live.locality,
     }];
   };
+  // ---- wsh ai requests ------------------------------------------------------------------------------------------------
+  // The two commands of the core for a request that waits for the person: the list a page asks for when it loads, and the answer.
+  const asking = { pending: [], answers: [], held: false, waiters: [], failure: undefined };
+  const askReset = () => {
+    asking.pending = [];
+    asking.answers.length = 0;
+    asking.held = false;
+    for (const go of asking.waiters.splice(0)) go();
+    asking.failure = undefined;
+  };
+  const askAnswer = async (args) => {
+    asking.answers.push(structuredClone(args));
+    if (asking.failure !== undefined) {
+      const raw = asking.failure;
+      asking.failure = undefined;
+      throw raw;
+    }
+    if (asking.held) await new Promise((go) => asking.waiters.push(go));
+    mock.emit("ai-ask", { kind: "closed", ask: args.ask, why: args.verdict === "send" ? "sent" : "refused" });
+    return null;
+  };
   const aiCommands = {
     ...contextCommands,
     ai_conversation_new: () => `chat-mock-${++ai.chatNo}`,
@@ -1148,6 +1181,8 @@
       return copy;
     },
     ai_decide: decide,
+    ai_ask_pending: () => structuredClone(asking.pending),
+    ai_ask_answer: askAnswer,
     ai_undo: ({ conversation, call_id }) => {
       undone.calls.push({ conversation, call_id });
       if (undone.bare) {
@@ -1399,6 +1434,29 @@
         ran.runs.push(...(saved.runs ?? []));
       },
     },
+    ask: {
+      get pending() {
+        return structuredClone(asking.pending);
+      },
+      set pending(value) {
+        asking.pending = structuredClone(value);
+      },
+      get answers() {
+        return structuredClone(asking.answers);
+      },
+      hold(on = true) {
+        asking.held = on === true;
+        if (!asking.held) for (const go of asking.waiters.splice(0)) go();
+      },
+      release() {
+        asking.held = false;
+        for (const go of asking.waiters.splice(0)) go();
+      },
+      fail(raw) {
+        asking.failure = raw;
+      },
+      reset: askReset,
+    },
     script: (turn) => void ai.scripts.push(turn),
     hold: (n) => void (ai.holdLeft = n),
     release() {
@@ -1452,6 +1510,7 @@
       Object.assign(ran, { held: false, waiting: [], next: null });
       ran.runs.length = 0;
       resetContext();
+      askReset();
     },
   };
 

@@ -36,7 +36,8 @@ async function open(page, url, options = {}) {
   await settle(page);
 }
 
-const aiCalls = async (page) => (await commandNames(page)).filter((name) => name.startsWith("ai_"));
+// The listing of the `wsh ai` requests that wait is made once by every page at load, before any press; it is not a chat command.
+const aiCalls = async (page) => (await commandNames(page)).filter((name) => name.startsWith("ai_") && name !== "ai_ask_pending");
 const newChats = async (page) => (await calls(page, "ai_conversation_new")).length;
 
 /** The composer of the scope holds `text` and has the keyboard; the card is in the strip of the same scope. */

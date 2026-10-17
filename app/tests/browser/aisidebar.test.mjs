@@ -18,7 +18,9 @@ export default async function ({ page, url, errors }) {
 }
 
 /** The commands whose name starts with `ai_`, in order. */
-const aiCalls = (page) => page.evaluate(() => window.__MOCK__.calls.map((c) => c[0]).filter((c) => c.startsWith("ai_")));
+// The listing of the `wsh ai` requests that wait is made once by every page at load, before any press; it is not a chat command.
+const aiCalls = (page) =>
+  page.evaluate(() => window.__MOCK__.calls.map((c) => c[0]).filter((c) => c.startsWith("ai_") && c !== "ai_ask_pending"));
 
 const remPx = (page) => page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize));
 const widthOf = (page, sel) => page.locator(sel).evaluate((n) => n.getBoundingClientRect().width);

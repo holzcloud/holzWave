@@ -1,0 +1,86 @@
+/*
+ * The card of a `wsh ai` request (askcard.ts, docs/design.md section 6.20): a floating layer at the top right of the window of the
+ * pane that asked, with no backdrop and no keyboard of its own. It is a dialog of dialogs.css (`.dlg`), which gives it the look
+ * and the one shadow of the floating layers; this sheet sets no shadow. Every colour is a `--hw-*` token, every size is in rem so
+ * the UI scale moves it with the rest of the chrome (a pixel value only for 1 px hairlines, the 2 px focus ring, the 28 px and
+ * 44 px touch minimums and the 640 px breakpoint; a rem is 12 px, so the 16 px text of a sheet is 1.334 rem). Flat and hairline: nothing here moves, fades or blurs, so the motion setting
+ * has nothing to remove. The rules of the buttons carry the card's class so they win over the `.dlg button` reset.
+ */
+
+.dlg.ask { position: fixed; z-index: 15; top: calc(62rem / 12 + .667rem); right: 1rem; box-sizing: border-box;
+           width: min(24rem, calc(100vw - 2rem)); max-height: calc(100vh - 7rem); padding: .833rem; overflow-y: auto; }
+
+.ask-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .167rem .667rem;
+            margin-bottom: .333rem; }
+.ask-who, .ask-count { color: var(--hw-dim); }
+.ask-title { margin: 0 0 .333rem; font-size: 1.083rem; font-weight: 700; line-height: 1.3; }
+.ask-lead { margin: 0 0 .5rem; color: var(--hw-ink-2); font-size: 1.083rem; line-height: 1.4; }
+.ask[data-leaves="true"] .ask-title::before { content: "! "; color: var(--hw-warn); }
+
+/* The three rows: a `.label` name above its body. */
+.ask-rows { margin: 0; padding: 0; }
+.ask-row { margin: 0 0 .5rem; padding: .333rem 0 0; border-top: 1px solid var(--hw-line); }
+.ask-name { margin: 0 0 .167rem; color: var(--hw-dim); }
+.ask-body { margin: 0; min-width: 0; }
+
+/* The prompt: whole, wrapped and never cut. The box scrolls after about six lines; hidden characters are escapes. */
+.ask-text { box-sizing: border-box; max-height: 8.5rem; overflow: auto; padding: .167rem .5rem; border: 1px solid var(--hw-line);
+            border-radius: .333rem; color: var(--hw-ink); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem;
+            line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-text[data-empty="true"] { color: var(--hw-dim); }
+.ask-text:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
+.ask-findings { margin: .167rem 0 0; padding: 0; list-style: none; color: var(--hw-dim);
+                font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); }
+.ask-counts, .ask-best { margin: 0 0 .167rem; line-height: 1.4; overflow-wrap: anywhere; }
+.ask-counts { color: var(--hw-ink); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; }
+.ask-best { margin-top: .167rem; color: var(--hw-dim); font-size: calc(11rem / 12); }
+
+/* Where it goes: the route, the host in mono and the place chip. The words are the cue; the colour is the second. */
+.ask-route, .ask-host, .ask-place { display: inline-block; margin: 0 .5rem .167rem 0; font-family: "JetBrains Mono", ui-monospace, monospace;
+                                    font-size: 1rem; overflow-wrap: anywhere; }
+.ask-route { color: var(--hw-ink); }
+.ask-host { color: var(--hw-dim); }
+.ask-place { padding: 0 .5rem; border: 1px solid var(--hw-line); border-radius: 62.5rem; color: var(--hw-ink); }
+.ask-place[data-leaves="true"] { border-color: var(--hw-warn); color: var(--hw-warn); text-decoration: underline; }
+
+.ask-foot, .ask-fault { margin: 0 0 .5rem; font-size: calc(11rem / 12); line-height: 1.4; overflow-wrap: anywhere; }
+.ask-foot { color: var(--hw-dim); }
+.ask-fault { color: var(--hw-warn); text-decoration: underline; }
+.ask-fault[hidden] { display: none; }
+.ask-fault::before { content: "! "; }
+
+/* The buttons: `Don't send` at the left, `Send once` solid at the right. */
+.ask-actions { display: flex; justify-content: space-between; gap: .5rem; margin: 0; }
+.dlg.ask button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;
+                  min-height: max(28px, calc(28rem / 12)); padding: 0 .833rem; border: 1px solid var(--hw-line);
+                  border-radius: .333rem; background: none; color: var(--hw-ink); cursor: pointer;
+                  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: .1em;
+                  text-transform: uppercase; }
+.dlg.ask button:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.dlg.ask button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.dlg.ask .ask-yes { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep); color: var(--hw-on-accent); }
+.dlg.ask .ask-yes:hover { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep); color: var(--hw-on-accent); }
+.dlg.ask button:disabled { border-color: var(--hw-line); background: none; color: var(--hw-dim); cursor: default; opacity: 1; }
+
+/* ---- higher contrast: the hairlines of the card follow the stronger ink ----------------------------------------------- */
+
+:root.contrast-high .dlg.ask { border-color: var(--hw-ink-3); }
+:root.contrast-high .ask-row, :root.contrast-high .ask-text { border-color: var(--hw-ink-3); }
+
+/* ---- narrow screens: 640 px and narrower ------------------------------------------------------------------------------ */
+
+/* The card is a bottom sheet over the full width; every target is at least 44 px and the text is at least 16 px. */
+@media (max-width: 640px) {
+  .dlg.ask { top: auto; right: 0; bottom: 0; left: 0; width: auto; max-height: 70vh; border-radius: .5rem .5rem 0 0; }
+  .ask-lead, .ask-title, .ask-text, .ask-counts, .ask-route, .ask-host, .ask-place { font-size: 1.334rem; }
+  .dlg.ask button { min-height: max(44px, calc(44rem / 12)); min-width: max(44px, calc(44rem / 12)); }
+  .ask-actions { gap: .667rem; }
+}
+
+/* ---- forced colours: system colours outline the card and its focus ring ----------------------------------------------- */
+
+@media (forced-colors: active) {
+  :root .dlg.ask { outline: 2px solid CanvasText; outline-offset: -2px; }
+  :root .ask-place { outline: 2px solid Highlight; outline-offset: -2px; }
+  :root .dlg.ask button:focus-visible, :root .ask-text:focus-visible { outline: 2px solid Highlight; }
+}

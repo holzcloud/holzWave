@@ -93,7 +93,7 @@ default.
 | Selection | rose at 35 % over the cell background, keeps glyph contrast |
 | Cursor | block, rose; hollow when the pane is unfocused; bar and underline per DECSCUSR |
 | Status bar | mono labels, uppercase: version, renderer, pane count, workspace |
-| Overlays | command palette, theme picker, connection manager: 24 px radius, the only elements with a shadow |
+| Overlays | command palette, theme picker, connection manager, and the request card of `wsh ai` (6.20): 24 px radius, the only elements with a shadow; the request card has no backdrop and never takes the keyboard |
 | Empty state | the logo's plank with one line of text; no illustrations |
 | Chat pane | a pane of its own kind (6.12): header `chat`, a bar with the provider chip, a transcript, a status line and a composer; flat and hairline, the only shadow is the provider sheet on a phone |
 | AI providers dialog | the box of the Settings dialog (6.13): groups under `.label` legends, a list of providers as a radio group, a form with a write-only key field, a disclosure card for a gateway or a server of the user's own; on a phone it is the screen |
@@ -102,6 +102,7 @@ default.
 | Chat list | a flat list inside the sidebar column (6.18): one row per stored chat with a mark (`●` on screen, `○`), a title and a mono line with the model and the age, the chat on screen with the rose wash and a 2 px rose bar, a delete button that asks twice (`×`, then `Delete?`); hairlines above and below, scrolls inside, no shadow |
 | Reply action | a hairline mono button under a one-line code block of a finished reply (6.19): its word is its name, it puts the line at the prompt of the pane the chat acts for and never runs it; a block with characters that are not shown gets a warn line instead; no shadow |
 | Diff box | a hairline box in mono inside an approval card (6.16): a head line with the kind, the counts and the sizes, then the changed lines with their line numbers and a `+` or `-` sign as the cue; no fill, wraps and scrolls inside, at most 16 rem high |
+| Shell request card | a floating layer without a backdrop (6.20): the prompt of a `wsh ai` request in full, the piped text by counts and findings, the destination and whether it leaves this computer, `Don't send` and `Send once`; it never takes the keyboard, and only a real press after half a second can send |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
 No motion in the terminal grid itself. `prefers-reduced-motion` removes all transitions.
@@ -233,6 +234,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | AI chat: palette actions | ![](design/ai-actions.png) | the palette with the AI entries and the chord of the running platform (6.19): `Explain error` (`⇧⌘Y`) and `Command from description` (`⇧⌘G`) beside `AI chat`, `New AI chat`, `AI chat in the sidebar` and `AI providers…`, each with the section word `ai` |
 | AI chat: explain an error | ![](design/ai-explain.png) | the chat after `Explain error` (6.19): the failed command in the pane at the left, the message written in the composer, the context card open on one item (the last command and its output, read), and the status line `Nothing is sent until you press Send.` |
 | AI chat: command from a description | ![](design/ai-describe.png) | a reply to `Command from description` (6.19): the button `Insert at prompt` under a one-line block, the warn line under a block that holds characters that are not shown, the line at the prompt of pane 1 with the cursor after it, and the status line `Inserted at the prompt of pane 1. It was not run.` |
+| wsh ai request | – | a program in a terminal asked the model a question (6.20): the card at the top right with the prompt, the piped text by counts and findings, the destination with the place chip and the buttons; nothing has left this computer yet |
+| wsh ai states | – | the card in four states (6.20): asking for a cloud provider, asking for a model on this computer, after `Send once`, and after a refusal from holzWave with a second request waiting |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -267,7 +270,7 @@ the bottom bar holds the tabs of the shown workspace. Tokens are the ones above;
 
 ![Phone](design/7-phone.png)
 
-A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) and the approval card (6.15) sit inside the screen with the same 44 px targets, and on a phone the payload box of the approval card scrolls inside it. The diff box of a write card (6.16) is part of the card with the same 44 px targets, wraps its rows and scrolls inside its own height, and the `Undo` button of a finished write is 44 px too. On a phone the command card (6.17) grows and the strip scrolls, the command wraps and the buttons keep their 44 px targets. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text. The AI form of the sidebar column (6.18) is the screen on a phone like the sidebar is, with the same 44 px targets and composer text of at least 16 px (the phone image is in 6.18).
+A chat pane on a phone is the screen, with a sheet from the bottom edge for the provider (6.12); the context card (6.14) and the approval card (6.15) sit inside the screen with the same 44 px targets, and on a phone the payload box of the approval card scrolls inside it. The diff box of a write card (6.16) is part of the card with the same 44 px targets, wraps its rows and scrolls inside its own height, and the `Undo` button of a finished write is 44 px too. On a phone the command card (6.17) grows and the strip scrolls, the command wraps and the buttons keep their 44 px targets. The providers dialog (6.13) on a phone is the screen too, and the sheet rules of the chat apply to its targets and its text. The AI form of the sidebar column (6.18) is the screen on a phone like the sidebar is, with the same 44 px targets and composer text of at least 16 px (the phone image is in 6.18). The request card of `wsh ai` (6.20) is a bottom sheet over the full width with 44 px buttons and text of at least 16 px.
 
 ### 6.7 Platforms
 
@@ -569,7 +572,7 @@ chosen row and the card get a system-colour outline.
 The card in which the user shares a pane with the chat, sees what would go out and sends it. Terminal and file text
 reaches a provider only through this card: the user presses `Context…`, shares the pane, ticks what to attach, sees every
 item as a label, a size and a list of what was hidden, and sends. The page never holds the text; it sends ids and the core
-sends the text it approved.
+sends the text it approved. A request that a program in a pane makes with `wsh ai` asks in the card of 6.20, with the same words for findings and places.
 
 **The pane.** The card is about the pane the chat acts for: the last pane the user focused that shows a terminal or a
 preview (a chat, a file browser or a monitor does not count). Its number and name are in the card title (`PANE 1 · shell`,
@@ -1194,3 +1197,95 @@ forced colours the button and its focus ring use system colours; the keyboard fo
 | There is no terminal pane to insert into. | the status line when the pane is no terminal pane of the shown tab |
 | That pane shows a full-screen program, so nothing was inserted. | the status line when the pane is on the alternate screen |
 | The terminal did not take the text, so nothing was inserted. | the status line when the paste was refused or empty |
+
+### 6.20 Asking from the shell (wsh ai)
+
+A program in a pane can ask the model a question with `wsh ai`, and text piped into it goes along. That is not consent:
+every process in a pane holds the same token, so a process can ask and can never answer. Nothing leaves this computer until
+the person answers in the window. A request shows as a card in the window of the pane that asked, and only a press on that
+card releases it. The request has no tools: the model gets a question and answers in words, and the answer is printed in
+the pane that asked. holzWave keeps no copy of the request.
+
+**When a card appears.** Every request asks, unless the destination is on the device or on this computer and the setting
+`ai_local_context` is `auto` (6.13); then the answer streams at once and no card is drawn. A destination on the local
+network or on the internet always asks, whatever the setting. `Local only` (6.13) refuses a destination that leaves this
+computer before any card is shown, and the program is told why. The provider is the one of the last chat turn of this run,
+else the only provider that is set up; the command line has no flag to choose one, and holzWave never guesses, so with
+several providers and no chat yet the program is told to send a message in a chat first.
+
+**Place and form.** A floating layer without a backdrop, 24 rem wide, at the top right of the window of the pane that asked,
+under the title bar and over the stage; at 640 px and narrower a bottom sheet over the full width. It has the look of the
+dialogs: `--hw-ground-2`, a hairline `--hw-line`, an 8 px radius and the shadow of the floating layers (the page's only
+shadow, so the card takes it from the dialogs' class and adds none). It never takes the keyboard: typing in the terminal goes
+on while a card waits, and the terminal stays usable around it.
+
+**Parts, top to bottom.**
+
+| Part | Words |
+|---|---|
+| Head | a `.label` `wsh ai · pane 3`, and `1 of 2` at the right when more than one request waits |
+| Title | `Send this to the model?` |
+| Lead | `A program in pane 3 asked this. Nothing has left this computer yet.` |
+| `Prompt` | the cleaned prompt in full, in a box that scrolls after about six lines, hidden characters written as `\u{...}` escapes; below it the findings of its cleaning in words; the words `none: the piped text is the question` when it is empty |
+| `Piped text` | the counts (`142 lines · 6.1 KiB, 5.8 KiB after cleaning`), the findings of the gate in the words of 6.14 and the sentence of 6.14 that it is best effort and no guarantee; the word `none` when nothing was piped in. The text itself is never shown: an excerpt would put the text into the page |
+| `To` | the profile and the model (`anthropic · claude-sonnet`), the host in mono and the place chip: `on device` or `this computer` in ink, `local network` or `cloud` followed by `· leaves this computer` in the warn colour, underlined; the words are the cue and the colour the second |
+| Foot | `The answer is printed in pane 3. holzWave does not keep this request. Esc refuses.` |
+| Fault line | empty, unless an answer was refused; then the core's sentence, marked `!` |
+| Buttons | `Don't send` (left) and `Send once` (right, the solid one) |
+
+The card shows what is sent: the prompt after cleaning is the text that goes out, the destination is the one the core
+worked out, and every card carries a seal of what it shows. The press names the request and the seal and nothing else, so a
+request that changed since it was shown is refused (`This request changed since it was shown; look at it again.`) and the
+card is read again.
+
+**Behaviour.**
+
+- Neither button has the focus when a card appears and nothing moves the focus.
+- `Send once` is ignored for the first 500 ms after the card appears and while a press is on its way; `Don't send` is never
+  ignored. Only a press that a person made counts: a click or a key that a script made is ignored.
+- `Escape` with the focus inside the card refuses.
+- While a card waits the palette has the entry `Answer the wsh ai request`; it moves the keyboard to `Don't send`. The entry
+  is gone when the last card goes.
+- With several waiting requests the oldest is shown and the others are counted in the head. At most four wait; a fifth is
+  refused in the program with a sentence. An unanswered request ends after 120 seconds and nothing is sent; a refusal or a
+  timeout makes the same pane wait ten seconds before it may ask again.
+- After `Send once` the foot reads `Sending…` and both buttons are disabled until the card closes.
+- A card closes when the request is answered, when the program that asked left, when the wait ran out, when the pane closed
+  and when the app is closing. An answered card leaves nothing behind; the others leave one sentence in the status line.
+- A reload brings the cards back: a page that loads asks for the requests that wait for its window.
+
+**States.** Each has words as well as colour.
+
+| State | What is drawn | Second cue |
+|---|---|---|
+| waiting, cloud | the warn chip `cloud · leaves this computer` | the words and the underline |
+| waiting, this computer | the chip `this computer` in ink | the words |
+| sending | the foot `Sending…`, both buttons disabled | the word |
+| refused | the fault line with the core's sentence | the mark `!` and the underline |
+| several waiting | `1 of 2` in the head | the count |
+
+**Sentences.**
+
+| Sentence | Where |
+|---|---|
+| Send this to the model? | the title |
+| A program in pane N asked this. Nothing has left this computer yet. | the lead |
+| none: the piped text is the question | the prompt row of a request with no words of its own |
+| The answer is printed in pane N. holzWave does not keep this request. Esc refuses. | the foot |
+| Sending… | the foot after `Send once` |
+| That request is not waiting any more. | the status line when an answer finds nothing waiting |
+| The answer could not be sent. | the fault line when the refusal is not the core's |
+| The wsh ai request from pane N ended before it was answered. | the status line when the program left |
+| The wsh ai request from pane N timed out; nothing was sent. | the status line when the wait ran out |
+| The wsh ai request from pane N was withdrawn: the pane closed. | the status line when the pane closed |
+
+**Not built.** A choice of provider on the card, an always-allow or remember-this-pane choice, an excerpt of the piped text,
+a sound or a desktop notification, a badge in the title bar, a button that shows the pane, and a kept chat or history of
+requests. `Send once` sends this one request.
+
+**Narrow screens (640 px and narrower).** The card is a bottom sheet over the full width; both buttons are at least 44 px
+high and the text is at least 16 px.
+
+**Accessibility.** The card is an `alertdialog` named by its title, the prompt and the findings are text, the place chip says
+where the request goes in words, hairlines are `--hw-line` so `contrast-high` holds (`--hw-ink-3` on the card), nothing moves,
+and under forced colours the card and its focus ring use system colours; the keyboard focus ring is 2 px.

@@ -78,10 +78,10 @@ export const VIEW_P1 = { ...VIEW, tabs: [{ title: "shell", active: true, focus: 
  */
 export async function boot(
   page, url,
-  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {}, clock = false } = {},
+  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {}, clock = false, ask = {} } = {},
 ) {
   await page.addInitScript(
-    ([saved, shown, existing, chats, shared, frozen]) => {
+    ([saved, shown, existing, chats, shared, frozen, asked]) => {
       window.__MOCK__.reset();
       // A frozen clock: `Date.now` stands still and only `tickClock` moves it, so a window of the page that is measured in
       // milliseconds is the same on every machine. Off by default, so the other cases keep their page as it was.
@@ -94,6 +94,7 @@ export async function boot(
         Date.now = window.__REAL_NOW;
       }
       Object.assign(window.__MOCK__.ai.context, shared);
+      Object.assign(window.__MOCK__.ai.ask, asked);
       window.__MOCK__.ai.profiles = saved;
       for (const [id, partial] of Object.entries(chats)) window.__MOCK__.ai.setState(id, partial);
       window.__MOCK__.setView(shown);
@@ -115,7 +116,7 @@ export async function boot(
         return window.__MOCK__.view();
       });
     },
-    [profiles, view, blocks, states, context, clock],
+    [profiles, view, blocks, states, context, clock, ask],
   );
   // The settings of the core are played only when asked for, so the chat cases keep their page exactly as it was.
   if (settings) await settingsCore(page, typeof settings === "object" ? settings : {});
@@ -535,3 +536,53 @@ export const codeBars = (page, scope = ".chat-log") =>
       })),
     scope,
   );
+
+// ---- requests of `wsh ai` -------------------------------------------------------------------------------------------------
+
+/** A word of the prompt of the cloud card that must never occur in any call, attribute or store of the page but as text. */
+export const ASK_WORD = "zq-ask-prompt-8d1f3a";
+
+/** The card of a request that goes to a cloud provider, from pane 2: the golden's members with the values of the tests. */
+export const ASK = {
+  ask: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+  seal: "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+  pane: 2,
+  prompt: "why does this fail",
+  prompt_findings: [],
+  input: { lines: 142, bytes: 6254, sent_bytes: 5939, findings: [{ rule: "anthropic_key", count: 1 }] },
+  profile: "anthropic",
+  model: "example-model",
+  host: "api.example.org",
+  locality: "cloud",
+};
+
+/** The card of a request with no piped text for a model on this computer, from pane 1. */
+export const LOCAL_ASK = {
+  ask: "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  seal: "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef",
+  pane: 1,
+  prompt: "explain the last error",
+  prompt_findings: [],
+  input: null,
+  profile: "ollama",
+  model: "llama3.2",
+  host: "localhost",
+  locality: "loopback",
+};
+
+/** A card with some members replaced. */
+export const askView = (changes = {}, base = ASK) => ({ ...structuredClone(base), ...changes });
+
+/** The core tells the window `label` (the main window by default) that a request waits. */
+export const emitAsk = (page, view, label = "main") =>
+  page.evaluate(([name, v]) => window.__MOCK__.emitTo(name, "ai-ask", { kind: "waiting", view: v }), [label, view]);
+
+/** The core tells every window that a request is over. */
+export const closeAsk = (page, ask, why = "gone") =>
+  page.evaluate(([id, reason]) => window.__MOCK__.emit("ai-ask", { kind: "closed", ask: id, why: reason }), [ask, why]);
+
+/** The card on screen, as a locator. */
+export const askCard = (page) => page.locator("section.ask");
+
+/** The arguments of every answer the page made, oldest first. */
+export const askCalls = (page) => callsOf(page, "ai_ask_answer");

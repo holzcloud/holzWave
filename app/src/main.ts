@@ -7,6 +7,7 @@
 // Every window runs this same page; it listens with its own label (bridge) and says `window_ready` when it has drawn.
 import { call, listen } from "./bridge.js";
 import { initAiSettings } from "./aisettings.js";
+import { initAsk } from "./askcard.js";
 import { initBlocks, openBlock } from "./blocks.js";
 import { initChat } from "./chat.js";
 import { initChrome } from "./chrome.js";
@@ -65,6 +66,8 @@ async function main() {
   await initSync(() => {});
   // The AI chat: its title-bar button lands between the sync button and the sidebar button.
   await initChat(openBlock, { watchSettings, sidebar: sidebarChat, decorate: decorateReply });
+  // The cards of the requests that programs in a pane make with `wsh ai`: a person answers them, a program never can.
+  await initAsk();
   // The palette actions of the chat: they hand a message and a card to the chat module, so it must exist first.
   await initInline();
   // The providers dialog changes the two privacy settings through the same queue as the Settings dialog.
