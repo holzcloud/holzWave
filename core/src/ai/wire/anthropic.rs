@@ -39,10 +39,9 @@ use serde_json::{Value, json};
 use super::{Endpoint, Wire, WireAdapter, WireRequest, WireTurn};
 use crate::ai::http::{Frame, Header, Origin, Rejection};
 use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, MAX_DETAIL, StreamEvent};
-use crate::ai::redact::clean_label;
 use crate::ai::sse::{StreamEnd, ToolAssembler};
 use crate::ai::types::{
-    Capabilities, ContextKind, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolCall,
+    Capabilities, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolCall,
     ToolResult, ToolSpec, Usage, json_size,
 };
 
@@ -261,17 +260,6 @@ struct Body<'a> {
     thinking: Option<Thinking>,
 }
 
-/// The five stable words that name a kind of context.
-fn kind_name(kind: ContextKind) -> &'static str {
-    match kind {
-        ContextKind::Selection => "selection",
-        ContextKind::Screen => "screen",
-        ContextKind::LastCommand => "last_command",
-        ContextKind::File => "file",
-        ContextKind::Preview => "preview",
-    }
-}
-
 /// What a context note becomes in a request. With an approval in the request: the envelope the user saw, unchanged.
 /// Without one the note is history, and one marker line stands in for it: the kind, the cleaned label and the size of
 /// each item. Nothing else of the note is read, and the text it may have kept never.
@@ -279,18 +267,7 @@ fn context_text(req: &ChatRequest, note: &ContextNote) -> String {
     if let Some(approved) = req.approved_for(&note.hash) {
         return approved.envelope().to_owned();
     }
-    let items: Vec<String> = note
-        .items
-        .iter()
-        .map(|item| {
-            let label = clean_label(&item.label).text.replace('"', "'");
-            format!("{} \"{label}\" ({} bytes)", kind_name(item.kind), item.bytes)
-        })
-        .collect();
-    if items.is_empty() {
-        return "[terminal context from an earlier message is not sent again]".to_owned();
-    }
-    format!("[terminal context from an earlier message is not sent again: {}]", items.join("; "))
+    super::marker_line(note)
 }
 
 /// Which side of the conversation a message is written on: tool results belong to the user side.
@@ -1152,7 +1129,7 @@ mod tests {
     use super::*;
     use crate::ai::gate::{Destination, Gate, OfferRequest, RequestItem};
     use crate::ai::redact::SourceText;
-    use crate::ai::types::{Consent, NoteItem};
+    use crate::ai::types::{Consent, ContextKind, NoteItem};
 
     #[test]
     fn model_families_decide_thinking_and_capabilities() {

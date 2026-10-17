@@ -1149,10 +1149,10 @@ fn approved_context_is_rendered_from_the_envelope_and_stored_text_never_leaves()
     let text = String::from_utf8(wire.body.clone()).expect("UTF-8");
     let contents = json_of(&wire.body)["contents"].clone();
     let marker = contents[0]["parts"][0]["text"].as_str().expect("a marker line").to_owned();
-    assert!(marker.starts_with("[terminal context shared earlier"), "{marker}");
+    assert!(marker.starts_with("[terminal context from an earlier message is not sent again"), "{marker}");
     for word in [
         "selection \"chosen text\" (11 bytes)",
-        "last command \"make\" (4 bytes)",
+        "last_command \"make\" (4 bytes)",
         "file \"notes.txt\" (5 bytes)",
         "preview \"page\" (6 bytes)",
     ] {
@@ -1171,7 +1171,7 @@ fn approved_context_is_rendered_from_the_envelope_and_stored_text_never_leaves()
 
     // A note without items is a bare marker, and the same approval is never sent twice.
     let bare = Message::new("u5", Role::User, vec![Part::Context(history_note(vec![], None))], 1);
-    assert_eq!(contents_of(vec![bare])[0]["parts"][0]["text"], "[terminal context shared earlier and not repeated]");
+    assert_eq!(contents_of(vec![bare])[0]["parts"][0]["text"], "[terminal context from an earlier message is not sent again]");
     let twice = request(
         "gemini-test",
         vec![req.messages[0].clone(), assistant("a1", vec![text_part("x")], None), req.messages[0].clone()],

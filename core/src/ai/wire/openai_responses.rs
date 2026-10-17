@@ -425,23 +425,8 @@ fn context_text(req: &ChatRequest, note: &ContextNote) -> String {
     if let Some(approved) = req.approved_for(&note.hash) {
         return approved.envelope().to_owned();
     }
-    if note.items.is_empty() {
-        return "[context not sent]".to_owned();
-    }
-    let items: Vec<String> = note
-        .items
-        .iter()
-        .map(|item| {
-            let label: String = Detail::new(&item.label).as_str().chars().take(MARKER_LABEL_CHARS).collect();
-            format!("{label} ({} bytes)", item.bytes)
-        })
-        .collect();
-    format!("[context not sent: {}]", items.join(", "))
+    super::marker_line(note)
 }
-
-/// The longest label in a marker line, in characters. A label is text the user typed or a pane title, so it is cut to a
-/// short length before it goes into a request. Pinned by the context test with a label of 200 characters.
-pub const MARKER_LABEL_CHARS: usize = 80;
 
 /// The stored turn of an assistant message, when it may be replayed.
 ///

@@ -35,7 +35,7 @@ use crate::ai::http::{Frame, Rejection};
 use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, StreamEvent};
 use crate::ai::sse::{SseEvent, StreamEnd, ToolAssembler};
 use crate::ai::types::{
-    Capabilities, ContextKind, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolResult,
+    Capabilities, ContextNote, Locality, Message, Opaque, Part, Role, Size, StopReason, ToolResult,
     ToolSpec, Usage, json_size,
 };
 
@@ -645,35 +645,7 @@ fn render_context(req: &ChatRequest, note: &ContextNote, sent: &mut HashSet<Stri
     {
         return approved.envelope().to_owned();
     }
-    marker_line(note)
-}
-
-/// The start of the marker line.
-const MARKER_START: &str = "[terminal context shared earlier and not repeated";
-
-/// One line that stands for a note whose text is not sent: the kind, the label (scrubbed) and the byte count of each item.
-fn marker_line(note: &ContextNote) -> String {
-    if note.items.is_empty() {
-        return format!("{MARKER_START}]");
-    }
-    let items: Vec<String> = note
-        .items
-        .iter()
-        .map(|item| {
-            format!("{} \"{}\" ({} bytes)", kind_word(item.kind), Detail::new(&item.label).as_str(), item.bytes)
-        })
-        .collect();
-    format!("{MARKER_START}: {}]", items.join("; "))
-}
-
-fn kind_word(kind: ContextKind) -> &'static str {
-    match kind {
-        ContextKind::Selection => "selection",
-        ContextKind::Screen => "screen",
-        ContextKind::LastCommand => "last command",
-        ContextKind::File => "file",
-        ContextKind::Preview => "preview",
-    }
+    super::marker_line(note)
 }
 
 // ---- the answer -------------------------------------------------------------------------------------------

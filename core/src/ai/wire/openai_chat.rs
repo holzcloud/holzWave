@@ -34,10 +34,9 @@ use serde_json::{Map, Value};
 use super::{Endpoint, Wire, WireAdapter, WireRequest, WireTurn};
 use crate::ai::http::{Frame, Rejection};
 use crate::ai::provider::{AiError, ChatRequest, Completion, Detail, Flow, StreamEvent};
-use crate::ai::redact::clean_label;
 use crate::ai::sse::{StreamEnd, ToolAssembler, ToolFault};
 use crate::ai::types::{
-    Capabilities, ContextKind, ContextNote, Locality, Part, Role, StopReason, ToolCall, ToolSpec, Usage,
+    Capabilities, ContextNote, Locality, Part, Role, StopReason, ToolCall, ToolSpec, Usage,
 };
 
 /// The path of the chat endpoint below the base address of the profile.
@@ -124,17 +123,6 @@ fn push_assistant(plan: &mut Vec<Plain>, text: String, calls: Vec<ToolCall>) {
     }
 }
 
-/// The five stable words that name a kind of context.
-fn kind_name(kind: ContextKind) -> &'static str {
-    match kind {
-        ContextKind::Selection => "selection",
-        ContextKind::Screen => "screen",
-        ContextKind::LastCommand => "last_command",
-        ContextKind::File => "file",
-        ContextKind::Preview => "preview",
-    }
-}
-
 /// What a context note becomes in a request. With an approval in the request: the envelope the user saw, unchanged.
 /// Without one the note is history, and one marker line stands in for it: the kind, the cleaned label and the size of
 /// each item. Nothing else of the note is read.
@@ -142,18 +130,7 @@ fn render_context(req: &ChatRequest, note: &ContextNote) -> String {
     if let Some(approved) = req.approved_for(&note.hash) {
         return approved.envelope().to_owned();
     }
-    let items: Vec<String> = note
-        .items
-        .iter()
-        .map(|item| {
-            let label = clean_label(&item.label).text.replace('"', "'");
-            format!("{} \"{label}\" ({} bytes)", kind_name(item.kind), item.bytes)
-        })
-        .collect();
-    if items.is_empty() {
-        return "[terminal context from an earlier message is not sent again]".to_owned();
-    }
-    format!("[terminal context from an earlier message is not sent again: {}]", items.join("; "))
+    super::marker_line(note)
 }
 
 /// The plan of `req.messages`: user and assistant text in order, the calls of the model, the results of the tools and

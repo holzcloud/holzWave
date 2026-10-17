@@ -23,8 +23,9 @@ use serde::{Deserialize, Serialize};
 
 use super::http::{Call, Frame, Framing, Header, Http, NetworkPolicy, Outcome, Rejection, SecretHeader, Target, status_error};
 use super::provider::{AiError, CancelToken, ChatRequest, Completion, Detail, Flow, Provider, StreamEvent};
+use super::redact::clean_label;
 use super::sse::StreamEnd;
-use super::types::{Capabilities, Locality, Size};
+use super::types::{Capabilities, ContextKind, ContextNote, Locality, Size};
 
 /// The dialects a provider can speak.
 ///
@@ -76,6 +77,57 @@ impl Wire {
             _ => Framing::Sse,
         }
     }
+}
+
+/// The longest marker line, in characters. A note that would make a longer one is cut after the last item that fits and
+/// ends with a count of the items that were left out.
+pub const MAX_MARKER_CHARS: usize = 2048;
+
+/// The five stable words that name a kind of context.
+fn kind_name(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Selection => "selection",
+        ContextKind::Screen => "screen",
+        ContextKind::LastCommand => "last_command",
+        ContextKind::File => "file",
+        ContextKind::Preview => "preview",
+    }
+}
+
+/// The one line that stands for the context note of an earlier message whose text is not approved again.
+///
+/// Every dialect and the on-device provider render a history note with this function and no other, so a note reads the
+/// same to every model: `[terminal context from an earlier message is not sent again: <kind> "<label>" (<bytes> bytes);
+/// ...]`. The line is one line (no line end), made of the kind word, the label and the byte count of each item in note
+/// order and of nothing else: the text a note may have kept is never read. A label goes through
+/// [`clean_label`](crate::ai::redact::clean_label), so it is sanitised, redacted, on one line and cut at 120
+/// characters, and a quote in it becomes a single quote. The line has at most [`MAX_MARKER_CHARS`] characters.
+pub fn marker_line(note: &ContextNote) -> String {
+    const START: &str = "[terminal context from an earlier message is not sent again";
+    if note.items.is_empty() {
+        return format!("{START}]");
+    }
+    let mut line = format!("{START}:");
+    let mut length = line.chars().count();
+    for (index, item) in note.items.iter().enumerate() {
+        let label = clean_label(&item.label).text.replace('"', "'");
+        let piece = format!("{} \"{label}\" ({} bytes)", kind_name(item.kind), item.bytes);
+        let separator = if index == 0 { " " } else { "; " };
+        let left = note.items.len() - index;
+        // Room for the item, the closing bracket and, when items would follow, the count of the ones left out.
+        let reserve = if left > 1 { 32 } else { 1 };
+        let used = length + separator.len() + piece.chars().count() + reserve;
+        if used > MAX_MARKER_CHARS {
+            let more = format!("; {left} more");
+            line.push_str(&more);
+            break;
+        }
+        line.push_str(separator);
+        line.push_str(&piece);
+        length += separator.len() + piece.chars().count();
+    }
+    line.push(']');
+    line
 }
 
 /// Where a provider is and how it is reached: the dialect, the base address, the network policy, the headers it needs

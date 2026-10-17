@@ -172,7 +172,7 @@ fn an_unapproved_context_note_is_one_marker_line() {
 
     let out = rendered(&req);
 
-    let marker = format!("[context not resent: selection, {bytes} bytes]");
+    let marker = format!("[terminal context from an earlier message is not sent again: selection \"selection\" ({bytes} bytes)]");
     assert_eq!(out.prompt, format!("Earlier in this conversation:\nUser: {marker}\nexplain\n\nCurrent message:\ncontinue"));
     assert!(!out.prompt.contains("CANARY"));
 }

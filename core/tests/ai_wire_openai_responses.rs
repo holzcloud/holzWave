@@ -28,7 +28,7 @@ use holzwave_core::ai::types::{
     Role, StopReason, ToolCall, ToolResult, ToolSpec, Usage,
 };
 use holzwave_core::ai::wire::openai_responses::{
-    INCLUDE_ENCRYPTED, MARKER_LABEL_CHARS, MAX_CODE_BYTES, MAX_NATIVE_BYTES, MAX_OUTPUT_ITEMS, MAX_TOOLS,
+    INCLUDE_ENCRYPTED, MAX_CODE_BYTES, MAX_NATIVE_BYTES, MAX_OUTPUT_ITEMS, MAX_TOOLS,
     OpenAiResponsesAdapter, PATH,
 };
 use holzwave_core::ai::wire::{Endpoint, HttpProvider, Wire, WireAdapter};
@@ -495,7 +495,10 @@ fn approved_context_is_sent_as_user_text_and_a_missing_approval_sends_only_a_mar
     let body_text = String::from_utf8(wire.body.clone()).expect("UTF-8");
     let input = json_of(&wire.body)["input"].as_array().expect("input").clone();
     let bytes = note.items[0].bytes;
-    assert_eq!(first_part_text(&input), format!("[context not sent: pane 2 screen ({bytes} bytes)]"));
+    assert_eq!(
+        first_part_text(&input),
+        format!("[terminal context from an earlier message is not sent again: screen \"pane 2 screen\" ({bytes} bytes)]")
+    );
     assert!(!body_text.contains(CONTEXT_CANARY) && !body_text.contains(STORED_CANARY), "{body_text}");
 
     // The marker forms.
@@ -509,15 +512,20 @@ fn approved_context_is_sent_as_user_text_and_a_missing_approval_sends_only_a_mar
         assert!(!first.contains(STORED_CANARY), "{first}");
         first
     };
-    assert_eq!(marker(vec![note_item("A", 1), note_item("B", 2)]), "[context not sent: A (1 bytes), B (2 bytes)]");
-    assert_eq!(marker(Vec::new()), "[context not sent]");
+    assert_eq!(
+        marker(vec![note_item("A", 1), note_item("B", 2)]),
+        "[terminal context from an earlier message is not sent again: screen \"A\" (1 bytes); screen \"B\" (2 bytes)]"
+    );
+    assert_eq!(marker(Vec::new()), "[terminal context from an earlier message is not sent again]");
     let long = "x".repeat(200);
     assert_eq!(
         marker(vec![note_item(&long, 3)]),
-        format!("[context not sent: {} (3 bytes)]", "x".repeat(MARKER_LABEL_CHARS))
+        format!("[terminal context from an earlier message is not sent again: screen \"{}\u{2026}\" (3 bytes)]", "x".repeat(119))
     );
-    assert_eq!(MARKER_LABEL_CHARS, 80);
-    assert_eq!(marker(vec![note_item("pane\none\u{1b}two", 5)]), "[context not sent: pane one two (5 bytes)]");
+    assert_eq!(
+        marker(vec![note_item("pane\none\ttwo", 5)]),
+        "[terminal context from an earlier message is not sent again: screen \"pane one two\" (5 bytes)]"
+    );
 }
 
 #[test]

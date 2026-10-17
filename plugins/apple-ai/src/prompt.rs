@@ -11,7 +11,8 @@ use std::borrow::Cow;
 use std::fmt;
 
 use holzwave_core::ai::provider::{AiError, ChatRequest, Detail};
-use holzwave_core::ai::types::{ContextNote, Message, Part, Role};
+use holzwave_core::ai::types::{Message, Part, Role};
+use holzwave_core::ai::wire::marker_line;
 
 use crate::backend::MAX_INPUT_BYTES;
 
@@ -113,19 +114,6 @@ impl fmt::Debug for Rendered {
     }
 }
 
-/// One line for a note whose context is not approved for this request (history): the labels and sizes, never text.
-fn marker(note: &ContextNote) -> String {
-    let items: Vec<String> = note
-        .items
-        .iter()
-        .map(|item| {
-            let label: String = item.label.chars().map(|c| if c.is_control() { ' ' } else { c }).take(80).collect();
-            format!("{}, {} bytes", label.trim(), item.bytes)
-        })
-        .collect();
-    format!("[context not resent: {}]", items.join("; "))
-}
-
 /// The text of a message for the prompt: its text parts and its context, in order, joined by a line feed. A context is
 /// the envelope of the approved context with the note's hash, and a marker line when there is none.
 fn content(req: &ChatRequest, message: &Message) -> String {
@@ -135,7 +123,7 @@ fn content(req: &ChatRequest, message: &Message) -> String {
             Part::Text { text } => pieces.push(Cow::Borrowed(text)),
             Part::Context(note) => pieces.push(match req.approved_for(&note.hash) {
                 Some(approved) => Cow::Borrowed(approved.envelope()),
-                None => Cow::Owned(marker(note)),
+                None => Cow::Owned(marker_line(note)),
             }),
             Part::ToolCall(_) | Part::ToolResult(_) => {}
         }
