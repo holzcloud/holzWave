@@ -2139,7 +2139,7 @@ mod tests {
     }
 
     /// Against a real SSH server, for the questions the in-process server cannot answer: the order of exit status and
-    /// close, whether a signal request stops a process, the sessions limit. Plan 07-44 records what it prints.
+    /// close, whether a signal request stops a process, the sessions limit. The owner records what it prints in the test plan.
     #[test]
     #[ignore = "needs a real SSH server: set HOLZWAVE_TEST_SSH_HOST, _USER, _KEY, _KNOWN_HOSTS and optionally _PORT"]
     fn exec_against_a_real_host() {
