@@ -135,6 +135,11 @@ impl AiFault {
         AiFault { code: "no_such_pane", reason: None, text: "that pane is not open".to_owned() }
     }
 
+    /// An offer without picked items, or picked items without an offer.
+    pub fn bad_pick() -> AiFault {
+        context_fault(ContextRefusal::BadPick)
+    }
+
     /// A profile id that no profile has.
     pub fn unknown_profile() -> AiFault {
         AiFault { code: "profile", reason: Some("unknown_profile"), text: "there is no such profile".to_owned() }
@@ -334,7 +339,6 @@ impl AiHost {
     /// [`AiHost::send`] with an offer that was previewed for this chat, this pane and this route: the page names the
     /// offer and the numbers of the items it picked, never their text. The service spends the offer, and a refusal of
     /// it is the fault `context`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn send_with_offer(
         &self,
         conversation: &str,
@@ -352,7 +356,6 @@ impl AiHost {
 
     /// What `pane` can offer for this chat and where it would go: no text. A blank `profile` or `model` is not given.
     /// This classifies the destination (a name lookup for a host name) and blocks, so call it from a worker thread.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn context_state(
         &self,
         conversation: &str,
@@ -368,7 +371,6 @@ impl AiHost {
     }
 
     /// Shares `pane` for the chat on this route, or ends the share. Nothing is read.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn context_share(
         &self,
         conversation: &str,
@@ -385,7 +387,6 @@ impl AiHost {
     }
 
     /// Reads the asked kinds from the shared `pane` and offers them: labels, sizes and findings, never text.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn context_preview(
         &self,
         conversation: &str,
@@ -506,7 +507,6 @@ fn protected_dirs(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// The refusal of a context call as the page receives it.
-#[cfg_attr(not(test), allow(dead_code))]
 fn context_fault(refusal: ContextRefusal) -> AiFault {
     AiFault::from_service(&ServiceError::Context(refusal))
 }
@@ -718,9 +718,29 @@ impl AppCore {
         self.ai().send(conversation, text, pane, profile, model)
     }
 
+    /// The send of the command: the typed text alone when `offer` and `picked` are both left out, with the items of an
+    /// offer when both are given, and the fault `context` / `bad_pick` when only one is, before anything is stored.
+    pub fn ai_send_with(
+        &self,
+        conversation: &str,
+        text: String,
+        pane: PaneId,
+        profile: Option<String>,
+        model: Option<String>,
+        offer: Option<String>,
+        picked: Option<Vec<u32>>,
+    ) -> Result<TicketView, AiFault> {
+        match (offer, picked) {
+            (None, None) => self.ai_send(conversation, text, pane, profile, model),
+            (Some(offer), Some(picked)) => {
+                self.ai_send_with_context(conversation, text, pane, profile, model, offer, picked)
+            }
+            _ => Err(AiFault::bad_pick()),
+        }
+    }
+
     /// [`AppCore::ai_send`] with an offer: the page sends the offer id and the numbers of the picked items. The pane
     /// is the one whose content was read and the one the chat acts for.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn ai_send_with_context(
         &self,
         conversation: &str,
@@ -736,7 +756,6 @@ impl AppCore {
     }
 
     /// [`AiHost::context_state`] for a pane that is open.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn ai_context_state(
         &self,
         conversation: &str,
@@ -749,7 +768,6 @@ impl AppCore {
     }
 
     /// [`AiHost::context_share`] for a pane that is open.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn ai_context_share(
         &self,
         conversation: &str,
@@ -763,7 +781,6 @@ impl AppCore {
     }
 
     /// [`AiHost::context_preview`] for a pane that is open.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn ai_context_preview(
         &self,
         conversation: &str,
@@ -1977,6 +1994,46 @@ mod tests {
                 assert!(!list.contains(forbidden), "{name} takes {forbidden}");
             }
         }
+    }
+
+    #[test]
+    fn a_send_names_both_the_offer_and_the_picked_items_or_neither() {
+        let scratch = Scratch::new("ctx-ids");
+        let (core, rec, pane, provider) = core_showing(&scratch.0, "printf 'on screen\\r\\n'; sleep 30");
+        let chat = new_chat();
+        let send = |offer: Option<&str>, picked: Option<Vec<u32>>| {
+            core.ai_send_with(
+                &chat,
+                format!("hello {TEXT_CANARY}"),
+                pane,
+                Some("scripted".to_owned()),
+                None,
+                offer.map(str::to_owned),
+                picked,
+            )
+        };
+
+        // One of the two alone is refused as a bad pick, and nothing is stored or sent.
+        for fault in [send(Some(&"a".repeat(32)), None), send(None, Some(vec![1]))] {
+            let fault = fault.expect_err("refused");
+            assert_eq!((fault.code, fault.reason), ("context", Some("bad_pick")));
+        }
+        assert_eq!(provider.calls(), 0);
+        assert!(!scratch.chats().exists(), "nothing was stored");
+
+        // Both go to the offer: one nobody made is a stale offer, and one that is not an id is too.
+        for offer in ["a".repeat(32), "not an offer".to_owned()] {
+            let fault = send(Some(&offer), Some(vec![1])).expect_err("refused");
+            assert_eq!((fault.code, fault.reason), ("context", Some("stale_offer")));
+        }
+        assert!(!scratch.chats().exists(), "nothing was stored");
+
+        // Neither is the text-only send of before.
+        send(None, None).expect("a text send");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].context.is_empty(), "no context travels with a typed message");
     }
 
 }
