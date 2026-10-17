@@ -2297,6 +2297,17 @@ mod tests {
         assert!(sent.contains("The user denied this action."), "the model is told");
         assert!(!sent.contains(TOOL_TEXT), "the file text reached the model after a denial");
         assert!(!everything_serialised(&rec, &[]).contains(TOOL_TEXT), "the file text reached an event");
+
+        // The command runs on a blocking thread of the async runtime of the app, where a call that classifies a
+        // destination is refused. A decision only locks the table, so it answers as it does anywhere else.
+        let spent = {
+            let (core, chat) = (core.clone(), chat.clone());
+            tauri::async_runtime::block_on(async move {
+                tauri::async_runtime::spawn_blocking(move || core.ai_decide(&chat, "call_1", "deny", &hash)).await
+            })
+        };
+        let fault = spent.expect("the blocking thread ends").expect_err("a card that was decided");
+        assert_eq!((fault.code, fault.reason), ("tool", Some("unknown_call")));
     }
 
     // ---- the walls, the lifecycle and the recorded run --------------------------------------------------------
