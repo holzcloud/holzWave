@@ -8,7 +8,8 @@
 //! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}`, `settings` (a settings view), `ai` (one event
 //! of a chat turn, `{conversation, turn, seq, kind, ...}`, which the page routes by conversation) and `ai-ask` (a request
 //! of `wsh ai` that waits for the person, or is over: `{kind: "waiting", view}` for the window of the pane, `{kind:
-//! "closed", ask, why}` for every window); command arguments
+//! "closed", ask, why}` for every window) and `history-open` `{pane}` (the shell of that pane asked for the history
+//! search; it goes to the one window that has the pane); command arguments
 //! are snake_case. Every event but `settings`, `ai`, `exit` and the `closed` half of `ai-ask` is emitted to one window, the one that holds the pane
 //! (or whose layout changed), with `emit_str_to(label, ..)`; a page has to listen with its own label, because a
 //! listener without a target receives the events of every window.

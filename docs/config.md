@@ -544,6 +544,34 @@ guarantee: a secret typed in another form is kept, so use a leading space for su
 `Shift+Delete` in the history dialog forgets. The history is not synced. At most 100,000 uses are kept; the oldest tenth
 goes when it is passed.
 
+**`^R`.** Plain `Ctrl+R` stays with the shell: nothing binds it unless you ask. `wsh init <shell> --ctrl-r` is an opt-in
+addition that also binds `Ctrl+R` to open the history dialog of holzWave, the same one as `Cmd+Shift+H`. Put
+`eval "$(wsh init bash --ctrl-r)"` in `~/.bashrc`, `eval "$(wsh init zsh --ctrl-r)"` in `~/.zshrc`,
+`wsh init fish --ctrl-r | source` in `~/.config/fish/config.fish`, or, in PowerShell,
+`wsh init powershell --ctrl-r | Out-String | Invoke-Expression` in `$PROFILE`, instead of the line without the flag (the
+text with the flag holds the history hook first, so one line is enough; PowerShell needs no hook text, because holzWave
+starts its own). It takes a new shell, or loading the line again.
+
+The binding binds only `Ctrl+R` (in the emacs and the vi insert mode of the shell). When you press it, the shell asks
+holzWave in the background, so the prompt never waits, and the dialog opens for the pane you are typing in: it opens only
+for the pane that has the focus in its window, and a request from another pane is refused. A pick goes onto the prompt of
+that pane and is never run. The half-typed line, the prompt and the exit status of the last command are kept, nothing
+else is bound, and outside a holzWave pane nothing happens: the shell's own reverse search answers `Ctrl+R` and the rest
+of your rc file keeps running.
+
+The binding covers `bash` 4.0 or newer (the `bash` 3.2 that macOS ships gets no binding and keeps its own search), `zsh`,
+`fish` and PowerShell with PSReadLine. Another tool that binds `Ctrl+R` (the key bindings of a fuzzy finder, a history tool)
+wins or loses by the order of the lines in your rc file: the line that is loaded later wins.
+
+**PowerShell.** The prompt wrapper that holzWave starts in its own PowerShell panes reports each command to the history,
+without a line in your profile. The status is `0` when the command succeeded and `1` when it did not (PowerShell knows
+success, not an exit code). A command is not reported when it starts with a space, spans several lines, is longer than 3000
+characters, or is typed while the location is not a file system drive (a registry or certificate drive, for example); the
+filter of the store above applies on top. The command and the directory reach the short-lived `wsh` process as base64
+arguments, so that quotes and a trailing backslash survive in Windows PowerShell 5.1 and in PowerShell 7; like the arguments
+of the hooks of the other shells, they are visible in the process list of your own user for a moment. The history of
+remote hosts and a history sync are not built.
+
 ## Command marks
 
 holzWave can tell where a command's output starts and ends only when the shell says so. The shell hooks write the
