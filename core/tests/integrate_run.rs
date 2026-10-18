@@ -18,7 +18,10 @@ mod unix {
     use std::sync::Barrier;
     use std::time::{Duration, Instant};
 
-    use holzwave_core::integrate::run::{Env, RunCancel, RunEnd, RunError, RunLimits, Runner};
+    use zeroize::Zeroizing;
+
+    use holzwave_core::integrate::run::{Env, EnvExtra, EnvPolicy, RunCancel, RunEnd, RunError, RunLimits, Runner};
+    use holzwave_core::platform::Os;
 
     use crate::common::{scratch_dir, wait_until};
     use crate::fake_cli::{pattern, process_exists, FakeCli};
@@ -40,7 +43,8 @@ mod unix {
 
     /// The environment of a test run: the system directories on the `PATH` so that the fake's helpers are found.
     pub fn plain_env() -> Env {
-        Env::from_pairs(vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned())])
+        EnvPolicy::build(std::iter::empty(), Os::current(), "/usr/bin:/bin".to_owned(), EnvExtra::default())
+            .expect("an environment of nothing but a PATH")
     }
 
     pub fn os(text: &str) -> OsString {
@@ -256,5 +260,250 @@ mod unix {
             .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 60_000), &RunCancel::default())
             .expect("a slot is free");
         assert_eq!(again.end, RunEnd::Finished);
+    }
+
+    /// The secret of the canary tests: a value that must be found in the child's environment and nowhere else.
+    const CANARY: &str = "hw-canary-secret-value-0001";
+
+    #[test]
+    fn a_secret_reaches_the_child_environment_only() {
+        let dir = Scratch::new();
+        let fake = FakeCli::new(&dir.0, "tool");
+        let extra = EnvExtra {
+            secrets: vec![("AWS_SECRET_ACCESS_KEY".to_owned(), Zeroizing::new(CANARY.to_owned()))],
+            ..EnvExtra::default()
+        };
+        assert!(!format!("{extra:?}").contains(CANARY), "the debug text of the extras holds no value");
+        let inherited = vec![
+            (os("HOLZWAVE_TOKEN"), os("hw-canary-token")),
+            (os("LD_PRELOAD"), os("/tmp/evil.so")),
+            (os("GIT_SSH_COMMAND"), os("evil")),
+            (os("HOME"), os("/home/user")),
+            (os("AZURE_CLIENT_SECRET"), os("hw-canary-azure")),
+        ];
+        let env = EnvPolicy::build(inherited, Os::Linux, "/usr/bin:/bin".to_owned(), extra).expect("a valid environment");
+        assert!(!format!("{env:?}").contains(CANARY), "the debug text of an environment holds no value");
+        let args = [os("get"), os("pods")];
+        let result = Runner::new()
+            .run_argv(&fake.path(), &args, env, &limits(MIB, 60_000), &RunCancel::default())
+            .expect("the fake runs");
+        assert_eq!(result.end, RunEnd::Finished);
+        assert!(!format!("{result:?}").contains(CANARY));
+        let environment = fake.env();
+        assert_eq!(environment.get("AWS_SECRET_ACCESS_KEY").map(String::as_str), Some(CANARY), "the secret is in the child");
+        assert_eq!(environment.get("AZURE_CLIENT_SECRET").map(String::as_str), Some("hw-canary-azure"));
+        assert_eq!(environment.get("HOME").map(String::as_str), Some("/home/user"));
+        for denied in ["HOLZWAVE_TOKEN", "LD_PRELOAD", "GIT_SSH_COMMAND"] {
+            assert!(!environment.contains_key(denied), "{denied} never reaches the child");
+        }
+        assert_eq!(environment.get("PATH").map(String::as_str), Some("/usr/bin:/bin"), "the PATH is the rebuilt one");
+        for argument in fake.argv() {
+            assert!(!String::from_utf8_lossy(&argument).contains(CANARY), "the value is in no argument");
+        }
+        assert!(!String::from_utf8_lossy(&result.stdout).contains(CANARY));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(CANARY));
+    }
+
+    #[test]
+    fn a_refused_environment_says_nothing_of_its_input() {
+        let secret = |name: &str| EnvExtra {
+            secrets: vec![(name.to_owned(), Zeroizing::new(CANARY.to_owned()))],
+            ..EnvExtra::default()
+        };
+        for name in ["LD_PRELOAD", "lower", "A=B", "", "KUBECONFIG"] {
+            let error = EnvPolicy::build(std::iter::empty(), Os::Linux, "/bin".to_owned(), secret(name))
+                .expect_err("a secret may not take this name");
+            let text = format!("{error} {error:?}");
+            assert!(!text.contains(CANARY), "the refusal holds the value");
+            if !name.is_empty() {
+                assert!(!text.contains(name), "the refusal holds the name {name}");
+            }
+        }
+    }
+}
+
+// ---- the pure tests: they run on every host --------------------------------------------------------------------------
+
+mod pure {
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    use holzwave_core::integrate::run::{check_batch_args, EnvExtra, EnvPolicy, RunError};
+    use holzwave_core::platform::Os;
+    use zeroize::Zeroizing;
+
+    fn os(text: &str) -> OsString {
+        OsString::from(text)
+    }
+
+    fn pairs(names: &[&str]) -> Vec<(OsString, OsString)> {
+        names.iter().map(|name| (os(name), os(&format!("value-of-{name}")))).collect()
+    }
+
+    const DROPPED: [&str; 10] = [
+        "HOLZWAVE_IPC",
+        "HOLZWAVE_TOKEN",
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "PYTHONSTARTUP",
+        "NODE_OPTIONS",
+        "GIT_SSH_COMMAND",
+        "BASH_ENV",
+        "ENV",
+        "IFS",
+    ];
+    const KEPT: [&str; 6] =
+        ["AWS_SECRET_ACCESS_KEY", "AZURE_CLIENT_SECRET", "GOOGLE_APPLICATION_CREDENTIALS", "KUBECONFIG", "HOME", "LANG"];
+
+    #[test]
+    fn the_environment_policy_keeps_credential_variables_and_drops_loader_and_app_variables() {
+        let mut inherited = pairs(&DROPPED);
+        inherited.extend(pairs(&["PATH"]));
+        inherited.extend(pairs(&KEPT));
+        for os_name in [Os::Linux, Os::Macos, Os::Windows] {
+            let env = EnvPolicy::build(inherited.clone(), os_name, "/rebuilt:/path".to_owned(), EnvExtra::default())
+                .expect("a valid environment");
+            let mut expected: Vec<&str> = KEPT.to_vec();
+            expected.push("PATH");
+            expected.sort_unstable();
+            assert_eq!(env.names(), expected, "the kept names on {os_name:?}");
+            assert_eq!(env.value("PATH"), Some("/rebuilt:/path"), "PATH is the one given in the call");
+            assert_eq!(env.value("AWS_SECRET_ACCESS_KEY"), Some("value-of-AWS_SECRET_ACCESS_KEY"));
+            assert_eq!(env.value("GOOGLE_APPLICATION_CREDENTIALS"), Some("value-of-GOOGLE_APPLICATION_CREDENTIALS"));
+        }
+    }
+
+    #[test]
+    fn on_windows_the_same_names_in_other_cases_are_dropped_too_and_on_unix_they_are_not() {
+        let other_case = ["ld_preload", "Holzwave_Token", "dyld_insert_libraries", "pythonpath", "Node_Options", "git_dir", "Bash_Env", "env", "Ifs", "Path"];
+        let windows = EnvPolicy::build(pairs(&other_case), Os::Windows, "C:\\tool".to_owned(), EnvExtra::default())
+            .expect("valid");
+        assert_eq!(windows.names(), ["PATH"], "only the rebuilt PATH is left on Windows");
+        assert_eq!(windows.value("PATH"), Some("C:\\tool"));
+        let linux = EnvPolicy::build(pairs(&other_case), Os::Linux, "/bin".to_owned(), EnvExtra::default()).expect("valid");
+        assert_eq!(linux.names().len(), other_case.len() + 1, "names are case-sensitive on Unix: ten kept and the PATH");
+        assert_eq!(linux.value("PATH"), Some("/bin"), "the rebuilt PATH, not the inherited Path");
+    }
+
+    #[test]
+    fn malformed_inherited_entries_are_dropped_and_the_count_is_bounded() {
+        let mut inherited = vec![
+            (os(""), os("x")),
+            (os("A=B"), os("x")),
+            (os("A\0B"), os("x")),
+            (os("GOOD"), os("a\0b")),
+            (os("FINE"), os("yes")),
+        ];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            inherited.push((OsString::from_vec(vec![b'B', 0xff]), os("x")));
+            inherited.push((os("BADVALUE"), OsString::from_vec(vec![0xff, 0xfe])));
+        }
+        let env = EnvPolicy::build(inherited, Os::Linux, "/bin".to_owned(), EnvExtra::default()).expect("valid");
+        assert_eq!(env.names(), ["FINE", "PATH"]);
+        let many: Vec<(OsString, OsString)> = (0..3000).map(|n| (os(&format!("VAR_{n}")), os("v"))).collect();
+        let env = EnvPolicy::build(many, Os::Linux, "/bin".to_owned(), EnvExtra::default()).expect("valid");
+        assert!(env.len() <= 1024, "at most 1024 pairs, got {}", env.len());
+        assert_eq!(env.value("PATH"), Some("/bin"), "the PATH is always there");
+    }
+
+    #[test]
+    fn extras_win_over_inherited_variables_and_cannot_name_a_denied_variable_or_path() {
+        let extra = EnvExtra {
+            plain: vec![("HOME".to_owned(), "/profile".to_owned()), ("AWS_REGION".to_owned(), "eu-1".to_owned())],
+            fixed: &[("AZURE_CORE_COLLECT_TELEMETRY", "false")],
+            isolation: vec![("KUBECONFIG".to_owned(), "/overlay".to_owned())],
+            secrets: Vec::new(),
+        };
+        let env = EnvPolicy::build(pairs(&["HOME", "KUBECONFIG", "LANG"]), Os::Linux, "/bin".to_owned(), extra).expect("valid");
+        assert_eq!(env.value("HOME"), Some("/profile"), "the profile's variable wins");
+        assert_eq!(env.value("KUBECONFIG"), Some("/overlay"), "the isolation variable wins");
+        assert_eq!(env.value("AZURE_CORE_COLLECT_TELEMETRY"), Some("false"));
+        assert_eq!(env.value("LANG"), Some("value-of-LANG"));
+
+        let build = |extra: EnvExtra| EnvPolicy::build(std::iter::empty(), Os::Linux, "/bin".to_owned(), extra);
+        let plain = |name: &str| EnvExtra { plain: vec![(name.to_owned(), "v".to_owned())], ..EnvExtra::default() };
+        for name in [
+            "HOLZWAVE_X", "LD_PRELOAD", "DYLD_FALLBACK_LIBRARY_PATH", "PYTHONPATH", "NODE_OPTIONS", "GIT_ASKPASS", "BASH_ENV", "ENV", "IFS", "PATH",
+            "KUBECONFIG", "TALOSCONFIG", "AZURE_CONFIG_DIR", "GAMCFGDIR", "GAMCFGSECTION",
+        ] {
+            assert_eq!(build(plain(name)).expect_err(name), RunError::EnvName, "a profile may not set {name}");
+        }
+        for bad in ["lower", "A=B", "", "1X", "A B", "A\0B"] {
+            assert_eq!(build(plain(bad)).expect_err(bad), RunError::EnvName, "{bad:?} is no variable name");
+        }
+        let nul = EnvExtra { plain: vec![("OK".to_owned(), "a\0b".to_owned())], ..EnvExtra::default() };
+        assert_eq!(build(nul).expect_err("a NUL in a value"), RunError::EnvValue);
+        let long = EnvExtra { plain: vec![("OK".to_owned(), "x".repeat(20_000))], ..EnvExtra::default() };
+        assert_eq!(build(long).expect_err("a value over the bound"), RunError::EnvValue);
+        let isolation = EnvExtra { isolation: vec![("LD_PRELOAD".to_owned(), "x".to_owned())], ..EnvExtra::default() };
+        assert_eq!(build(isolation).expect_err("isolation is no way around the deny list"), RunError::EnvName);
+        static EVIL: [(&str, &str); 1] = [("LD_PRELOAD", "x")];
+        let fixed = EnvExtra { fixed: &EVIL, ..EnvExtra::default() };
+        assert_eq!(build(fixed).expect_err("a fixed variable is no way around it either"), RunError::EnvName);
+        let secret = EnvExtra { secrets: vec![("PATH".to_owned(), Zeroizing::new("x".to_owned()))], ..EnvExtra::default() };
+        assert_eq!(build(secret).expect_err("a secret named PATH"), RunError::EnvName);
+        let many = EnvExtra { plain: (0..300).map(|n| (format!("V_{n}"), "v".to_owned())).collect(), ..EnvExtra::default() };
+        assert_eq!(build(many).expect_err("too many extras"), RunError::TooManyVariables);
+        assert_eq!(
+            EnvPolicy::build(std::iter::empty(), Os::Linux, "a\0b".to_owned(), EnvExtra::default()).expect_err("PATH"),
+            RunError::EnvValue
+        );
+    }
+
+    #[test]
+    fn the_names_a_pane_has_removed_are_the_denied_ones_that_are_present() {
+        let inherited: Vec<OsString> =
+            ["HOLZWAVE_TOKEN", "HOME", "LD_PRELOAD", "PATH", "GIT_DIR", "LD_PRELOAD", "A=B", "", "NODE_OPTIONS"].iter().map(|n| os(n)).collect();
+        let removals = EnvPolicy::removals(inherited.clone(), Os::Linux);
+        assert_eq!(removals, ["GIT_DIR", "HOLZWAVE_TOKEN", "LD_PRELOAD", "NODE_OPTIONS"], "sorted, once, no PATH, no HOME");
+        let windows = EnvPolicy::removals([os("Ld_Preload"), os("Path"), os("Holzwave_Ipc")], Os::Windows);
+        assert_eq!(windows, ["Holzwave_Ipc", "Ld_Preload"]);
+        assert!(EnvPolicy::removals([os("ld_preload")], Os::Linux).is_empty(), "case-sensitive on Unix");
+    }
+
+    #[test]
+    fn batch_files_get_a_strict_argument_charset() {
+        let args = |list: &[&str]| -> Vec<OsString> { list.iter().map(|a| os(a)).collect() };
+        let fine = args(&["account", "show", "-o", "json", "--subscription=0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"]);
+        assert!(check_batch_args("C:\\Tools\\az.cmd", &fine, Os::Windows).is_ok());
+        assert!(check_batch_args("C:\\Tools\\AZ.CMD", &fine, Os::Windows).is_ok());
+        assert!(check_batch_args("c:\\tools\\gam.Bat", &fine, Os::Windows).is_ok());
+        assert!(check_batch_args("x.cmd", &args(&["a.b:c/d@e=f+g,h_i-j"]), Os::Windows).is_ok(), "the whole charset");
+        for bad in [
+            "a b", "a%b", "a^b", "a&b", "a|b", "a<b", "a>b", "a\"b", "a\nb", "a\rb", "caf\u{e9}", "", "a\tb", "a;b", "a(b", "a)b", "a!b", "a`b", "a$b", "a\\b", "a'b", "a*b", "a?b", "a~b", "a#b", "a\0b",
+        ] {
+            assert_eq!(check_batch_args("az.cmd", &args(&[bad]), Os::Windows), Err(RunError::BatchArgument), "{bad:?}");
+        }
+        assert_eq!(check_batch_args("az.cmd", &args(&["ok", "not ok"]), Os::Windows), Err(RunError::BatchArgument));
+        // Only a batch file on Windows is checked.
+        let hostile = args(&["a b", "%PATH%", "&calc", ""]);
+        assert!(check_batch_args("az.exe", &hostile, Os::Windows).is_ok(), "a real executable gets any argument");
+        assert!(check_batch_args("az.cmd", &hostile, Os::Linux).is_ok(), "no batch interpreter off Windows");
+        assert!(check_batch_args("az.cmd", &hostile, Os::Macos).is_ok());
+        assert!(check_batch_args("az.cmd.exe", &hostile, Os::Windows).is_ok(), "the end of the name decides");
+        let sentence = RunError::BatchArgument.to_string();
+        assert!(!sentence.contains("%PATH%") && !sentence.contains("calc"), "{sentence}");
+    }
+
+    #[test]
+    fn no_secret_or_environment_value_is_printed_by_the_runner_source() {
+        let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/integrate/run.rs"))
+            .expect("the runner source");
+        let production = source.split("\n#[cfg(test)]\nmod ").next().expect("a production part");
+        let code: String = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            "println!", "print!", "eprintln!", "eprint!", "dbg!", "format!(\"{:?}\"", "{env:?}", "{secret", "{value", "log::", "tracing::", "write_all(",
+        ] {
+            assert!(!code.contains(forbidden), "the runner source holds {forbidden}: a value could be printed");
+        }
+        // Every manual `Debug` of a type that can hold a value prints counts.
+        assert!(code.contains("impl std::fmt::Debug for Env"), "a manual Debug for Env");
+        assert!(code.contains("impl std::fmt::Debug for EnvExtra"), "a manual Debug for EnvExtra");
     }
 }

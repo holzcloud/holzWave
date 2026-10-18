@@ -1,6 +1,7 @@
 //! Running a tool: an argument list and never a shell, a scrubbed environment, bounded output, a time limit,
 //! cancellation, and a cap on how many children run at once.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::Path;
@@ -10,7 +11,11 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use zeroize::Zeroizing;
+
+use super::args::EnvName;
 use crate::exec::{exit_code, isolate, kill_tree, stop};
+use crate::platform::Os;
 
 /// The most bytes of standard output kept by default.
 pub const DEFAULT_STDOUT: usize = 16 * 1024 * 1024;
@@ -31,6 +36,13 @@ pub const SLOT_WAIT: Duration = Duration::from_secs(1);
 /// The bytes of standard error that are kept, from its start.
 pub const STDERR_KEPT: usize = 64 * 1024;
 
+/// The most variables a child gets, inherited and added together.
+pub const MAX_ENV_PAIRS: usize = 1024;
+/// The most variables the profile, the tool and the isolation can add together.
+pub const MAX_EXTRA_PAIRS: usize = 256;
+/// The most bytes of one variable value, a secret or not.
+pub const MAX_ENV_VALUE: usize = 16 * 1024;
+
 /// How often the run looks at the program, its time limit, its output cap and the switch.
 const POLL: Duration = Duration::from_millis(10);
 /// How long the readers get to reach the end of their pipes after the program ended by itself.
@@ -40,20 +52,241 @@ const REAP: Duration = Duration::from_millis(500);
 /// The size of one read from a pipe.
 const CHUNK: usize = 32 * 1024;
 
-/// The environment of a child.
-pub struct Env(Vec<(String, String)>);
+/// The names the app itself sets from its own state: a synced profile may not set them, the isolation of a pane does.
+const APP_STATE_NAMES: [&str; 5] = ["KUBECONFIG", "TALOSCONFIG", "AZURE_CONFIG_DIR", "GAMCFGDIR", "GAMCFGSECTION"];
+/// The prefixes of the names that never reach a child: the app's own, the loader's, the interpreters'.
+const DENIED_PREFIXES: [&str; 6] = ["HOLZWAVE_", "LD_", "DYLD_", "PYTHON", "NODE_", "GIT_"];
+/// The names that never reach a child, exact: shell start-up files and word splitting, and the `PATH` (which is rebuilt).
+const DENIED_NAMES: [&str; 4] = ["BASH_ENV", "ENV", "IFS", "PATH"];
+
+/// The environment of a child, built by [`EnvPolicy::build`]. The secret values are wiped when it is dropped, which
+/// [`Runner::run_argv`] does right after the start. `Debug` prints counts.
+pub struct Env {
+    vars: Vec<(String, String)>,
+    secrets: Vec<(String, Zeroizing<String>)>,
+}
 
 impl Env {
-    /// An environment of these pairs.
-    pub fn from_pairs(pairs: Vec<(String, String)>) -> Self {
-        Self(pairs)
+    /// The names, sorted, secret names included (a name is no secret).
+    pub fn names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .vars
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.secrets.iter().map(|(name, _)| name.as_str()))
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// The value of a plain variable. A secret is never read back this way.
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.vars.iter().find(|(own, _)| own == name).map(|(_, value)| value.as_str())
+    }
+
+    /// How many variables, secrets included.
+    pub fn len(&self) -> usize {
+        self.vars.len() + self.secrets.len()
+    }
+
+    /// Whether there is no variable.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// How many of the variables are secrets.
+    pub fn secret_count(&self) -> usize {
+        self.secrets.len()
+    }
+
+    /// The plain pairs and the secret pairs, for a launch that hands them to a pane.
+    pub(crate) fn into_parts(self) -> (Vec<(String, String)>, Vec<(String, Zeroizing<String>)>) {
+        (self.vars, self.secrets)
     }
 }
 
 impl std::fmt::Debug for Env {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Env").field("variables", &self.0.len()).finish()
+        f.debug_struct("Env").field("variables", &self.vars.len()).field("secrets", &self.secrets.len()).finish()
     }
+}
+
+/// What a call adds to the inherited environment. `Debug` prints counts.
+#[derive(Default)]
+pub struct EnvExtra {
+    /// The plain variables of the profile; they may not take a name the app sets from its own state.
+    pub plain: Vec<(String, String)>,
+    /// The fixed variables of the tool's description (for Azure, the telemetry switch).
+    pub fixed: &'static [(&'static str, &'static str)],
+    /// The variable the selection asks for to isolate the tool's configuration.
+    pub isolation: Vec<(String, String)>,
+    /// The values read from the keychain for this call; wiped when the environment is dropped.
+    pub secrets: Vec<(String, Zeroizing<String>)>,
+}
+
+impl std::fmt::Debug for EnvExtra {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvExtra")
+            .field("plain", &self.plain.len())
+            .field("fixed", &self.fixed.len())
+            .field("isolation", &self.isolation.len())
+            .field("secrets", &self.secrets.len())
+            .finish()
+    }
+}
+
+/// The rule for the environment of a child: the inverse of the command runner's. That runner lets a short list of names
+/// through and drops everything that looks like a credential; a tool needs its credential variables and the loader and
+/// the interpreters must not be hijacked, so here the inherited environment passes except what a hijacker could use.
+pub struct EnvPolicy;
+
+impl EnvPolicy {
+    /// Whether the name never reaches a child: the prefixes `HOLZWAVE_`, `LD_`, `DYLD_`, `PYTHON`, `NODE_` and `GIT_`,
+    /// and `BASH_ENV`, `ENV`, `IFS` and `PATH` exactly; without regard to case on Windows.
+    pub fn is_denied(name: &str, os: Os) -> bool {
+        let folded;
+        let name = if os == Os::Windows {
+            folded = name.to_ascii_uppercase();
+            folded.as_str()
+        } else {
+            name
+        };
+        DENIED_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) || DENIED_NAMES.contains(&name)
+    }
+
+    /// The environment of a child: the inherited variables minus the denied names (and minus entries that are not valid
+    /// Unicode, have an empty name, a `=` or a NUL in a name or a NUL in a value), `PATH` replaced by `path`, then the
+    /// plain variables of the profile, the fixed ones of the tool, the isolation variable and the secrets, each group
+    /// winning over what came before. At most [`MAX_ENV_PAIRS`] variables.
+    ///
+    /// # Errors
+    ///
+    /// A fixed sentence when an added name is not a variable name, is denied, or is one the app sets from its own state
+    /// (plain variables and secrets), when a value holds a NUL or is over [`MAX_ENV_VALUE`] bytes, or when more than
+    /// [`MAX_EXTRA_PAIRS`] variables are added.
+    pub fn build(
+        inherited: impl IntoIterator<Item = (OsString, OsString)>,
+        os: Os,
+        path: String,
+        extra: EnvExtra,
+    ) -> Result<Env, RunError> {
+        let EnvExtra { plain, fixed, isolation, secrets } = extra;
+        if plain.len() + fixed.len() + isolation.len() + secrets.len() > MAX_EXTRA_PAIRS {
+            return Err(RunError::TooManyVariables);
+        }
+        check_value(&path)?;
+        for (name, value) in &plain {
+            check_added(name, value, os, true)?;
+        }
+        for (name, value) in fixed {
+            check_added(name, value, os, false)?;
+        }
+        for (name, value) in &isolation {
+            check_added(name, value, os, false)?;
+        }
+        for (name, value) in &secrets {
+            check_added(name, value, os, true)?;
+        }
+
+        // The key folds the case on Windows so that a later variable replaces an earlier one of the same name.
+        let key = |name: &str| if os == Os::Windows { name.to_ascii_uppercase() } else { name.to_owned() };
+        let mut vars: BTreeMap<String, (String, String)> = BTreeMap::new();
+        let mut secret_vars: BTreeMap<String, (String, Zeroizing<String>)> = BTreeMap::new();
+        let room = MAX_ENV_PAIRS - 1 - (plain.len() + fixed.len() + isolation.len() + secrets.len());
+        let mut taken = 0;
+        for (name, value) in inherited {
+            if taken >= room {
+                break;
+            }
+            let (Ok(name), Ok(value)) = (name.into_string(), value.into_string()) else { continue };
+            if name.is_empty() || name.contains(['=', '\0']) || value.contains('\0') || Self::is_denied(&name, os) {
+                continue;
+            }
+            vars.insert(key(&name), (name, value));
+            taken += 1;
+        }
+        vars.insert(key("PATH"), ("PATH".to_owned(), path));
+        let mut put = |name: String, value: String| {
+            secret_vars.remove(&key(&name));
+            vars.insert(key(&name), (name, value));
+        };
+        for (name, value) in plain {
+            put(name, value);
+        }
+        for (name, value) in fixed {
+            put((*name).to_owned(), (*value).to_owned());
+        }
+        for (name, value) in isolation {
+            put(name, value);
+        }
+        for (name, value) in secrets {
+            vars.remove(&key(&name));
+            secret_vars.insert(key(&name), (name, value));
+        }
+        Ok(Env { vars: vars.into_values().collect(), secrets: secret_vars.into_values().collect() })
+    }
+
+    /// The names of `inherited` that a pane's environment must have removed: the denied ones, once each and sorted,
+    /// except `PATH` (a launch sets its own). A name that is not valid Unicode, is empty or holds a `=` is not listed.
+    pub fn removals(inherited: impl IntoIterator<Item = OsString>, os: Os) -> Vec<String> {
+        let mut names: Vec<String> = inherited
+            .into_iter()
+            .filter_map(|name| name.into_string().ok())
+            .filter(|name| !name.is_empty() && !name.contains(['=', '\0']))
+            .filter(|name| !(if os == Os::Windows { name.eq_ignore_ascii_case("PATH") } else { name == "PATH" }))
+            .filter(|name| Self::is_denied(name, os))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
+/// A value of a variable: no NUL and not over [`MAX_ENV_VALUE`] bytes.
+fn check_value(value: &str) -> Result<(), RunError> {
+    if value.contains('\0') || value.len() > MAX_ENV_VALUE {
+        return Err(RunError::EnvValue);
+    }
+    Ok(())
+}
+
+/// A variable added by the profile, the tool, the isolation or the keychain: a valid name that is not denied, and (for
+/// the profile and the keychain, whose names come from a synced file) not one the app sets from its own state.
+fn check_added(name: &str, value: &str, os: Os, from_profile: bool) -> Result<(), RunError> {
+    if EnvName::parse(name).is_err() || EnvPolicy::is_denied(name, os) {
+        return Err(RunError::EnvName);
+    }
+    if from_profile && APP_STATE_NAMES.contains(&name) {
+        return Err(RunError::EnvName);
+    }
+    check_value(value)
+}
+
+/// The characters a batch-file argument may have.
+fn batch_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '@' | '=' | '+' | ',' | '-')
+}
+
+/// A batch file on Windows is run by the command interpreter, which reads `%`, `^`, `&`, `|`, `<`, `>`, quotes and line
+/// feeds in an argument as its own syntax, and no quoting is safe. So a program that ends in `.cmd` or `.bat` (any
+/// case) on Windows gets only arguments of `[A-Za-z0-9._:/@=+,-]`, at least one character each; any other program or
+/// system gets any argument.
+///
+/// # Errors
+///
+/// [`RunError::BatchArgument`] for the first argument that is empty, not Unicode or has another character.
+pub fn check_batch_args(program: &str, args: &[OsString], os: Os) -> Result<(), RunError> {
+    let lower = program.to_ascii_lowercase();
+    if os != Os::Windows || !(lower.ends_with(".cmd") || lower.ends_with(".bat")) {
+        return Ok(());
+    }
+    for arg in args {
+        match arg.to_str() {
+            Some(text) if !text.is_empty() && text.chars().all(batch_char) => {}
+            _ => return Err(RunError::BatchArgument),
+        }
+    }
+    Ok(())
 }
 
 /// What one call is bounded by.
@@ -155,6 +388,14 @@ pub enum RunError {
     CannotStart,
     /// Four children already run and none ended within the wait.
     Busy,
+    /// A variable name is not allowed: not a variable name, denied, or one the app sets from its own state.
+    EnvName,
+    /// A variable value holds a NUL or is too long.
+    EnvValue,
+    /// More variables than allowed were added.
+    TooManyVariables,
+    /// An argument of a batch file on Windows has a character outside the allowed set.
+    BatchArgument,
 }
 
 impl std::fmt::Display for RunError {
@@ -163,6 +404,10 @@ impl std::fmt::Display for RunError {
             Self::NotAbsolute => "the program is not given as an absolute path",
             Self::CannotStart => "the program could not be started",
             Self::Busy => "too many tools are running at once",
+            Self::EnvName => "an environment variable name is not allowed",
+            Self::EnvValue => "an environment variable value is not allowed",
+            Self::TooManyVariables => "too many environment variables",
+            Self::BatchArgument => "an argument is not allowed for a batch file",
         })
     }
 }
@@ -246,6 +491,7 @@ impl Runner {
         if !program.is_absolute() {
             return Err(RunError::NotAbsolute);
         }
+        check_batch_args(&program.to_string_lossy(), args, Os::current())?;
         let limits = limits.clamped();
         if cancel.is_cancelled() {
             return Ok(RunResult::without_output(RunEnd::Cancelled));
@@ -253,8 +499,11 @@ impl Runner {
         let _slot = self.slots.acquire(SLOT_WAIT).ok_or(RunError::Busy)?;
         let mut command = Command::new(program);
         command.args(args).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        for (name, value) in &env.0 {
+        for (name, value) in &env.vars {
             command.env(name, value);
+        }
+        for (name, value) in &env.secrets {
+            command.env(name, value.as_str());
         }
         isolate(&mut command);
         let spawned = command.spawn();
