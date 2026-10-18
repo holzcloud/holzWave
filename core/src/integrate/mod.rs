@@ -34,6 +34,7 @@ pub mod ticket;
 pub mod view;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 
 use serde::de::{self, Deserializer, MapAccess, Visitor};
@@ -43,6 +44,7 @@ use args::{
     flag_value, lines, ArgError, ContainerName, ContextName, Namespace, NodeName, PodName, ProfileId, SectionName,
     SubscriptionId,
 };
+use view::ViewModel;
 
 /// The most bytes any one argument value may have, checked before its kind is looked at.
 const VALUE_MAX: usize = 4096;
@@ -445,4 +447,54 @@ impl Validated {
     pub fn section(&self) -> Option<&SectionName> {
         self.first(|v| if let Value::Section(x) = v { Some(x) } else { None })
     }
+}
+
+/// Why a tool's output could not be turned into a view model. Each variant is a fixed sentence: none holds a byte of the
+/// output, so another party's text cannot reach a log, a card or a fault line through an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseError {
+    /// The output is not in a shape the parser knows.
+    Unrecognised,
+    /// The output is larger than the parser reads.
+    TooLarge,
+    /// The tool wrote nothing where the verb needs an answer.
+    Empty,
+}
+
+impl ParseError {
+    /// The fixed sentence of the refusal.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unrecognised => "the output of the tool is not in a shape that is known",
+            Self::TooLarge => "the output of the tool is larger than is read",
+            Self::Empty => "the tool wrote no output",
+        }
+    }
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// One tool, as the engine sees it. An implementation holds only argument builders and parsers: it starts no process,
+/// reads no file and holds no state, so the generic engine is the only code that runs a tool.
+///
+/// `argv` builds the argument list of a verb from validated values (never from loose text, and never with a name as a
+/// separate argument after a flag: see [`args::flag_eq`]). `view` turns the standard output into a [`ViewModel`]; output
+/// that is merely unexpected (a field that moved, a new shape) must come back as [`view::text_fallback`], which shows
+/// the cleaned, bounded text, and not as an error, so that drift in a tool degrades to readable text. A [`ParseError`]
+/// is for output that is no answer at all.
+pub trait Integration: Send + Sync {
+    /// The compiled-in description of the tool.
+    fn spec(&self) -> &'static IntegrationSpec;
+
+    /// The arguments after the program for `verb`. `selection` is the person's validated context.
+    fn argv(&self, verb: &Verb, args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError>;
+
+    /// The view model of the standard output of `verb`.
+    fn view(&self, verb: &Verb, stdout: &[u8]) -> Result<ViewModel, ParseError>;
 }

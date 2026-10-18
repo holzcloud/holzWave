@@ -51,13 +51,18 @@ const ELLIPSIS: char = '\u{2026}';
 // Cleaning.
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// Every Unicode line break that is also a control character (carriage return, vertical tab, form feed, next line) as a
+/// line feed, so that the cleaner treats it as white space between two words and does not drop it and join them.
+fn line_breaks(text: &str) -> String {
+    text.chars().map(|c| if matches!(c, '\r' | '\u{b}' | '\u{c}' | '\u{85}') { '\n' } else { c }).collect()
+}
+
 /// Cleans a one-line text: escape sequences with their payload, control characters and characters with no visible shape
 /// are removed, every run of white space (line breaks, tabs, carriage returns, no-break and wide spaces) becomes one
 /// plain space and the ends are trimmed. The text is not cut here; see [`clean_cell`].
 fn clean_line(text: &str) -> String {
-    // A carriage return is white space here: it must not be dropped as a control character, or two words would join.
-    let text = text.replace('\r', "\n");
-    let cleaned = redact::sanitise(&text).text;
+    // A line break is white space here: it must not be dropped as a control character, or two words would join.
+    let cleaned = redact::sanitise(&line_breaks(text)).text;
     let mut out = String::with_capacity(cleaned.len());
     let mut gap = false;
     for c in cleaned.chars() {
@@ -108,8 +113,7 @@ pub fn clean_text(text: &str) -> String {
 
 /// [`clean_text`] and whether it had to cut.
 fn clean_block(text: &str) -> (String, bool) {
-    let text = text.replace("\r\n", "\n").replace('\r', "\n");
-    let cleaned = redact::sanitise(&text).text;
+    let cleaned = redact::sanitise(&line_breaks(&text.replace("\r\n", "\n"))).text;
     let kept: String = cleaned.chars().filter(|c| matches!(c, '\n' | '\t') || !is_hidden(*c)).collect();
     cut_flag(kept, MAX_TEXT)
 }
@@ -939,4 +943,60 @@ pub fn text_fallback(title: &str, output: &[u8]) -> ViewModel {
         })),
         fetched: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_struct_of_the_model_is_read_from_an_object_only() {
+        // A derived reader would take these arrays as the member values in order.
+        let arrays = [
+            r#"["id","label"]"#,
+            r#"["key",["a"]]"#,
+            r#"["label","value"]"#,
+            r#"[1,"note"]"#,
+            r#"["verb","label","read",{}]"#,
+            r#"["Pods",[],[]]"#,
+            r#"["table"]"#,
+        ];
+        for text in arrays {
+            assert!(serde_json::from_str::<Column>(text).is_err(), "Column {text}");
+            assert!(serde_json::from_str::<Row>(text).is_err(), "Row {text}");
+            assert!(serde_json::from_str::<KvRow>(text).is_err(), "KvRow {text}");
+            assert!(serde_json::from_str::<Truncation>(text).is_err(), "Truncation {text}");
+            assert!(serde_json::from_str::<RowAction>(text).is_err(), "RowAction {text}");
+            assert!(serde_json::from_str::<TableView>(text).is_err(), "TableView {text}");
+            assert!(serde_json::from_str::<KvView>(text).is_err(), "KvView {text}");
+            assert!(serde_json::from_str::<TextView>(text).is_err(), "TextView {text}");
+            assert!(serde_json::from_str::<ViewModel>(text).is_err(), "ViewModel {text}");
+        }
+        assert!(serde_json::from_str::<Column>(r#"{"id":"a","label":"b"}"#).is_ok());
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_character_and_stays_inside_the_cap() {
+        for width_char in ['x', '\u{e9}', '\u{4e2d}', '\u{1f600}'] {
+            for cap in [4_usize, 5, 6, 7, 8, 9, 10, 31, 32, 33, 128, 253] {
+                let text: String = std::iter::repeat_n(width_char, 500).collect();
+                let (cut, was_cut) = cut_flag(text, cap);
+                assert!(was_cut && cut.len() <= cap && cut.ends_with(ELLIPSIS), "{width_char:?} at {cap}: {} bytes", cut.len());
+            }
+        }
+        assert_eq!(cut_flag("abc".to_owned(), 3), ("abc".to_owned(), false));
+        assert_eq!(cut_flag("abcd".to_owned(), 3), (ELLIPSIS.to_string(), true));
+        // A cap smaller than the ellipsis still gives a valid string.
+        assert!(cut_flag("abcdef".to_owned(), 1).0.len() <= 3);
+    }
+
+    #[test]
+    fn a_bounded_value_refuses_what_is_over_its_cap() {
+        assert!(serde_json::from_str::<Capped<3>>(r#""abc""#).is_ok());
+        assert!(serde_json::from_str::<Capped<3>>(r#""abcd""#).is_err());
+        assert!(serde_json::from_str::<Capped<3>>("1").is_err());
+        assert!(serde_json::from_str::<List<u8, 2>>("[1,2]").is_ok());
+        assert!(serde_json::from_str::<List<u8, 2>>("[1,2,3]").is_err());
+        assert!(serde_json::from_str::<List<u8, 2>>(r#"{"a":1}"#).is_err());
+    }
 }
