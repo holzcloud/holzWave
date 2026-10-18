@@ -4,7 +4,7 @@
 
 <br>
 
-[![Status](https://img.shields.io/badge/status-0.0.1--alpha2%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
+[![Status](https://img.shields.io/badge/status-0.0.1--alpha3%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
 [![License](https://img.shields.io/github/license/holzcloud/holzwave?style=for-the-badge&color=4B5563)](LICENSE)
 [![Rust](https://img.shields.io/badge/core-Rust-8D3F63?style=for-the-badge&logo=rust&logoColor=white)](docs/architecture.md)
 
@@ -17,11 +17,18 @@ Nextcloud, and an AI chat that sees your terminal only after you share that pane
 
 > [!WARNING]
 > **Alpha.** holzWave is at `0.0.1-alpha3`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
-> The macOS build (Apple Silicon) is the one the author tests; the Windows and Linux packages are cross-built on a Mac and
-> have not run on real machines yet. The window in the images below is the
+> The macOS build (Apple Silicon) is the one the author tests most. The Windows installer and the Fedora rpm and
+> AppImage start and run on real machines; the deb is not tried yet. The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built.
 
-## Install (macOS, Apple Silicon)
+## Install
+
+Take the package for your system from the [releases](https://github.com/holzcloud/holzWave/releases): `.dmg` (macOS,
+Apple Silicon), `-setup.exe` (Windows x64), `.deb`, `.rpm` or `.AppImage` (Linux x86_64). Each file has a `.sha256`.
+The packages are unsigned, so macOS and Windows warn on the first start. Build guides:
+[Windows](docs/build-windows.md), [Linux](docs/build-linux.md).
+
+### macOS with Homebrew
 
 Two Homebrew channels from the casks in this repository:
 
@@ -95,13 +102,14 @@ Built and tested on macOS from source:
 | System monitor of this computer and of Linux hosts over SSH | built, tested against a test server, not yet against real hosts |
 | AI chat in a pane, the sidebar, the palette and `wsh ai`: Anthropic, OpenAI, Gemini, local servers and gateways; you share a pane before its text leaves, and every tool action asks first | built, tested against test servers, not yet against real providers |
 | Apple on-device model (macOS 26 or later with Apple Intelligence) | built, not yet run on a real Mac |
-| iOS, Android, Windows, Linux | planned |
+| Windows and Linux packages | built, started on real machines (Windows 11, Fedora KDE); the manual rows are still open |
+| iOS, Android | planned |
 
 Per-phase detail: [docs/status.md](docs/status.md).
 
 ## Build from source
 
-macOS on Apple Silicon is the only verified platform. You need Rust, Node and **Zig 0.16.0 exactly**, because
+macOS on Apple Silicon is the most tested platform; Windows and Linux build the same way (see the build guides). You need Rust, Node and **Zig 0.16.0 exactly**, because
 `libghostty-vt` does not build with Zig 0.17. On a Mac the Swift toolchain (Xcode or the Command Line Tools) is also needed
 for the bridge of the on-device model, and the model itself needs the Xcode 26 SDK; with an older SDK the app builds without
 it.

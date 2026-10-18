@@ -26,7 +26,8 @@
 
 ## Behind today
 
-- No release, no installer, no signing. macOS from source is the only verified platform.
+- `0.0.1-alpha3` has installers for macOS, Windows and Linux (deb, rpm, AppImage), all unsigned. macOS is the most
+  tested; Windows and Fedora were started by the owner, the manual rows are still open.
 - Tauri 3 and `libghostty-vt` are pre-release; their APIs move and the build pins exact versions.
 - The keyboard uses a small table until the engine's key encoder lands (Phase 2).
 - A single maintainer, and no CI by design: everything is built and tested locally.

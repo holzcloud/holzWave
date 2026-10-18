@@ -36,7 +36,7 @@ Done when: a shell runs in the window, the renderer is chosen with the measureme
 
 ## Phase 2 — Desktop MVP
 
-Status in `0.0.1-alpha1` (macOS, from source; there is no release): implemented and covered by the automated suites.
+Status in `0.0.1-alpha3` (packages for macOS, Windows and Linux; the macOS checks ran first): implemented and covered by the automated suites.
 What no suite can see is the human checklist in [test-plan.md](test-plan.md), and it has not been run yet.
 
 Exists: the key encoder with Kitty keyboard and application modes (Option is not Alt by default), engine replies,
