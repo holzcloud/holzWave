@@ -44,7 +44,7 @@ use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 
 use super::args::{flag_eq, ArgError, SubscriptionId};
-use super::view::{clean_cell, text_fallback, KvBuilder, Tone, ViewModel};
+use super::view::{clean_cell, text_fallback, KvBuilder, RowBuilder, TableBuilder, Tone, ViewModel};
 use super::{
     ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId, Validated,
     Verb, VerbEffect, VersionProbe,
@@ -327,6 +327,62 @@ fn soft_object<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) 
     deserializer.deserialize_any(Member(PhantomData))
 }
 
+/// The number of members of an object member (null counts as none), or `None` for a member of any other type. The keys
+/// and the values are skipped without being read, so no tag of a resource group is ever held.
+fn soft_count<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    struct Count;
+
+    impl<'de> Visitor<'de> for Count {
+        type Value = Option<u32>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("any value")
+        }
+
+        fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(Some(0))
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(Some(0))
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+            drain_seq(seq).map(|()| None)
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut count: u32 = 0;
+            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {
+                count = count.saturating_add(1);
+            }
+            Ok(Some(count))
+        }
+    }
+
+    deserializer.deserialize_any(Count)
+}
+
 /// Without a leading byte order mark, which a tool on Windows may write.
 fn without_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
@@ -508,6 +564,150 @@ fn account_view(stdout: &[u8]) -> ViewModel {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Subscriptions.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The members of an entry of `account list` that are shown. The tenant lists, the cloud and the user are dropped.
+#[derive(Deserialize)]
+struct RawSubscription {
+    #[serde(default, deserialize_with = "soft_text")]
+    id: Option<String>,
+    #[serde(default, deserialize_with = "soft_text")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "soft_text")]
+    state: Option<String>,
+    #[serde(default, rename = "tenantId", deserialize_with = "soft_text")]
+    tenant_id: Option<String>,
+    #[serde(default, rename = "isDefault", deserialize_with = "soft_bool")]
+    is_default: Option<bool>,
+}
+
+struct SubscriptionDoc(RawSubscription);
+
+impl<'de> Deserialize<'de> for SubscriptionDoc {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        object_only(deserializer).map(Self)
+    }
+}
+
+/// How a read of a list ended.
+enum Listing<T> {
+    /// A list of objects.
+    Items(Vec<T>),
+    /// Output that is no list of objects: the text of it is shown.
+    Other,
+}
+
+/// The list in the standard output of a read verb. No output at all is [`ParseError::Empty`], an answer over
+/// [`READ_MAX`] is [`ParseError::TooLarge`].
+fn read_list<T: for<'de> Deserialize<'de>>(stdout: &[u8]) -> Result<Listing<T>, ParseError> {
+    if is_blank(stdout) {
+        return Err(ParseError::Empty);
+    }
+    if stdout.len() > READ_MAX {
+        return Err(ParseError::TooLarge);
+    }
+    Ok(serde_json::from_slice::<Vec<T>>(without_bom(stdout)).map_or(Listing::Other, Listing::Items))
+}
+
+fn shown(value: Option<&str>) -> &str {
+    value.unwrap_or(UNKNOWN)
+}
+
+/// A table of the subscriptions of the account: a star on the default, the state in words, and a button to make one
+/// the default for each entry whose id is a GUID (an id of another shape is shown and has none).
+fn subscriptions_view(stdout: &[u8]) -> Result<ViewModel, ParseError> {
+    const TITLE: &str = "Azure subscriptions";
+    let Listing::Items(items) = read_list::<SubscriptionDoc>(stdout)? else {
+        return Ok(text_fallback(TITLE, stdout));
+    };
+    let mut table = TableBuilder::new(TITLE);
+    table.column("default", "Default").column("name", "Name").column("id", "ID").column("state", "State").column(
+        "tenant",
+        "Tenant",
+    );
+    let make_default = SPEC.verb("set_subscription");
+    for SubscriptionDoc(item) in &items {
+        let guid = item.id.as_deref().and_then(|id| SubscriptionId::parse(id).ok());
+        let id = guid.as_ref().map(SubscriptionId::as_str).or(item.id.as_deref());
+        let mark = if item.is_default == Some(true) { "*" } else { "" };
+        let cells = [
+            mark,
+            shown(item.name.as_deref()),
+            shown(id),
+            shown(item.state.as_deref()),
+            shown(item.tenant_id.as_deref()),
+        ];
+        let mut row = RowBuilder::new(shown(id), &cells);
+        // Only the state decides the tone: the star is the cue for the default.
+        if item.state.as_deref().is_some_and(|state| state != "Enabled") {
+            row.tone(Tone::Warn);
+        }
+        if let (Some(guid), Some(verb)) = (&guid, make_default) {
+            row.action(verb, &[("subscription", guid.as_str())]);
+        }
+        table.push(row);
+    }
+    Ok(table.finish())
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Resource groups.
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawProperties {
+    #[serde(default, rename = "provisioningState", deserialize_with = "soft_text")]
+    state: Option<String>,
+}
+
+/// The members of an entry of `group list` that are shown. The tags are counted and nothing else: a tag is text that
+/// an account owner or somebody else chose.
+#[derive(Deserialize)]
+struct RawGroup {
+    #[serde(default, deserialize_with = "soft_text")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "soft_text")]
+    location: Option<String>,
+    #[serde(default, deserialize_with = "soft_object")]
+    properties: Option<RawProperties>,
+    #[serde(default, deserialize_with = "soft_count")]
+    tags: Option<u32>,
+}
+
+struct GroupDoc(RawGroup);
+
+impl<'de> Deserialize<'de> for GroupDoc {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        object_only(deserializer).map(Self)
+    }
+}
+
+/// A table of the resource groups of the selected (or the default) subscription: name, location, provisioning state
+/// and the number of tags. A state other than `Succeeded` is told in the tone as well as in the word.
+fn groups_view(stdout: &[u8]) -> Result<ViewModel, ParseError> {
+    const TITLE: &str = "Azure resource groups";
+    let Listing::Items(items) = read_list::<GroupDoc>(stdout)? else {
+        return Ok(text_fallback(TITLE, stdout));
+    };
+    let mut table = TableBuilder::new(TITLE);
+    table.column("name", "Name").column("location", "Location").column("state", "State").column("tags", "Tags");
+    for GroupDoc(item) in &items {
+        let state = item.properties.as_ref().and_then(|properties| properties.state.as_deref());
+        let tags = item.tags.map(|count| count.to_string());
+        let mut row = RowBuilder::new(
+            shown(item.name.as_deref()),
+            &[shown(item.name.as_deref()), shown(item.location.as_deref()), shown(state), shown(tags.as_deref())],
+        );
+        if state.is_some_and(|state| state != "Succeeded") {
+            row.tone(Tone::Warn);
+        }
+        table.push(row);
+    }
+    Ok(table.finish())
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The version.
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -572,6 +772,15 @@ impl Integration for Azure {
                 argv.extend(JSON_ONLY.map(OsString::from));
                 selected(selection, &mut argv);
             }
+            "subscriptions" => {
+                argv.extend(["account", "list"].map(OsString::from));
+                argv.extend(JSON_ONLY.map(OsString::from));
+            }
+            "groups" => {
+                argv.extend(["group", "list"].map(OsString::from));
+                argv.extend(JSON_ONLY.map(OsString::from));
+                selected(selection, &mut argv);
+            }
             _ => return Err(ArgError::Unknown),
         }
         Ok(argv)
@@ -580,6 +789,8 @@ impl Integration for Azure {
     fn view(&self, verb: &Verb, stdout: &[u8]) -> Result<ViewModel, ParseError> {
         match verb.id {
             "account" => Ok(account_view(stdout)),
+            "subscriptions" => subscriptions_view(stdout),
+            "groups" => groups_view(stdout),
             _ => Err(ParseError::Unrecognised),
         }
     }
