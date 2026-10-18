@@ -28,9 +28,13 @@
 use std::ffi::OsString;
 
 use csv::{ByteRecord, Reader, ReaderBuilder};
+use serde_json::{Map, Value};
 
 use super::args::ArgError;
-use super::view::{clean_cell, text_fallback, RowBuilder, TableBuilder, Tone, ViewModel, MAX_CELL, MAX_COLUMNS, MAX_ROWS};
+use super::view::{
+    clean_cell, text_fallback, text_view, KvBuilder, RowBuilder, TableBuilder, TextFormat, Tone, ViewModel, MAX_CELL,
+    MAX_COLUMNS, MAX_ROWS, MAX_TEXT,
+};
 use super::{
     ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId,
     Validated, Verb, VerbEffect, VersionProbe,
@@ -179,7 +183,8 @@ impl Integration for Gam {
         }
         match verb.id {
             "users" => users_view(stdout),
-            "sections" | "domain" => Ok(text_fallback(verb.label, stdout)),
+            "domain" => domain_view(stdout),
+            "sections" => Ok(text_fallback(verb.label, stdout)),
             _ => Err(ParseError::Unrecognised),
         }
     }
@@ -261,8 +266,7 @@ fn column_ids(names: &[String]) -> Vec<String> {
 }
 
 /// The table of a `print users` output.
-fn users_table(bytes: &[u8]) -> Result<ViewModel, ParseError> {
-    let (mut reader, header) = open(bytes)?;
+fn users_table(mut reader: Reader<&[u8]>, header: &Header) -> Result<ViewModel, ParseError> {
     let ids = column_ids(&header.names);
     let width = header.names.len();
     let key_column = header.names.iter().position(|name| name.eq_ignore_ascii_case("primaryemail"));
@@ -302,10 +306,203 @@ fn users_table(bytes: &[u8]) -> Result<ViewModel, ParseError> {
     Ok(if notes.is_empty() { model } else { model.with_note(&notes.join(" ")) })
 }
 
+/// The model of a `print users` output: the table of the columns GAM printed, or, when the output has the `JSON`
+/// column that `formatjson` adds, the objects of that column as one JSON text. Output that is not CSV is plain text.
 fn users_view(stdout: &[u8]) -> Result<ViewModel, ParseError> {
-    match users_table(stdout) {
-        Err(ParseError::Empty) => Ok(TableBuilder::new("Users").finish().with_note("GAM printed no rows.")),
+    let (reader, header) = match open(stdout) {
+        Ok(opened) => opened,
+        Err(ParseError::Empty) => return Ok(TableBuilder::new("Users").finish().with_note("GAM printed no rows.")),
+        Err(ParseError::Unrecognised) => return Ok(text_fallback("Users", stdout)),
+        Err(other) => return Err(other),
+    };
+    let json_column = header.names.iter().position(|name| name.eq_ignore_ascii_case("json"));
+    let model = match json_column {
+        Some(at) => users_json(reader, at),
+        None => users_table(reader, &header),
+    };
+    match model {
         Err(ParseError::Unrecognised) => Ok(text_fallback("Users", stdout)),
         other => other,
     }
+}
+
+/// The objects of the `JSON` column, parsed and written again as one pretty array: the text of the model is made of
+/// parsed values and never holds a byte of the output as it came. A cell that is not a JSON object (or is over the
+/// cap of a text) is skipped and counted. Collecting stops once the text cap is passed, and the cut says so.
+fn users_json(mut reader: Reader<&[u8]>, at: usize) -> Result<ViewModel, ParseError> {
+    let mut values: Vec<Value> = Vec::new();
+    let mut skipped = 0_usize;
+    let mut size = 0_usize;
+    let more = read_rows(&mut reader, |record| {
+        if size > MAX_TEXT {
+            return;
+        }
+        match record.get(at) {
+            Some(cell) if cell.len() <= MAX_TEXT => match serde_json::from_slice::<Value>(cell) {
+                Ok(value @ Value::Object(_)) => {
+                    size += value.to_string().len();
+                    values.push(value);
+                }
+                _ => skipped += 1,
+            },
+            _ => skipped += 1,
+        }
+    })?;
+    let shown = values.len();
+    let text = serde_json::to_string_pretty(&Value::Array(values)).unwrap_or_else(|_| "[]".to_owned());
+    let mut note = format!("{shown} objects shown.");
+    if skipped > 0 {
+        note.push_str(&format!(" {skipped} cells skipped, they are not JSON objects."));
+    }
+    if more {
+        note.push_str(" More rows exist than are read.");
+    }
+    Ok(text_view("Users", &text, TextFormat::Json).with_note(&note))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The domain.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The members of `info domain formatjson` the module knows; every other member is dropped.
+const DOMAIN_MEMBERS: &[&str] = &["customerDomain", "creationTime", "isVerified", "domainAliases"];
+
+/// A domain as far as the module knows it. It is read from a parsed JSON object only (never from an array, never by
+/// position), a member of the wrong type makes the whole document unrecognised, and members that are not named are
+/// counted and dropped.
+struct Domain {
+    name: Option<String>,
+    created: Option<String>,
+    verified: Option<bool>,
+    aliases: Vec<(Option<String>, Option<bool>)>,
+    others: usize,
+}
+
+/// A text member: `Some(None)` when it is absent or null, `None` when it has another type.
+fn text_member(map: &Map<String, Value>, key: &str) -> Option<Option<String>> {
+    match map.get(key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => Some(Some(text.clone())),
+        Some(_) => None,
+    }
+}
+
+/// A flag member, read like [`text_member`].
+fn flag_member(map: &Map<String, Value>, key: &str) -> Option<Option<bool>> {
+    match map.get(key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::Bool(flag)) => Some(Some(*flag)),
+        Some(_) => None,
+    }
+}
+
+/// The domain of a document, or `None` when it is not the shape the module knows.
+fn read_domain(stdout: &[u8]) -> Option<Domain> {
+    if stdout.len() > MAX_DOMAIN {
+        return None;
+    }
+    let Value::Object(map) = serde_json::from_slice::<Value>(stdout).ok()? else {
+        return None;
+    };
+    let mut aliases = Vec::new();
+    match map.get("domainAliases") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(items)) => {
+            for item in items {
+                let Value::Object(alias) = item else {
+                    return None;
+                };
+                aliases.push((text_member(alias, "domainAliasName")?, flag_member(alias, "verified")?));
+            }
+        }
+        Some(_) => return None,
+    }
+    let domain = Domain {
+        name: text_member(&map, "customerDomain")?,
+        created: text_member(&map, "creationTime")?,
+        verified: flag_member(&map, "isVerified")?,
+        aliases,
+        others: map.keys().filter(|key| !DOMAIN_MEMBERS.contains(&key.as_str())).count(),
+    };
+    let known = domain.name.is_some() || domain.created.is_some() || domain.verified.is_some() || !domain.aliases.is_empty();
+    known.then_some(domain)
+}
+
+fn yes_no(flag: bool) -> &'static str {
+    if flag { "yes" } else { "no" }
+}
+
+fn domain_view(stdout: &[u8]) -> Result<ViewModel, ParseError> {
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(ParseError::Empty);
+    }
+    let Some(domain) = read_domain(stdout) else {
+        return Ok(text_fallback("Domain", stdout));
+    };
+    let mut rows = KvBuilder::new("Domain");
+    if let Some(name) = &domain.name {
+        rows.row("Domain", name, Tone::Normal);
+    }
+    if let Some(created) = &domain.created {
+        rows.row("Created", created, Tone::Normal);
+    }
+    if let Some(verified) = domain.verified {
+        rows.row("Verified", yes_no(verified), if verified { Tone::Normal } else { Tone::Warn });
+    }
+    for (name, verified) in &domain.aliases {
+        let name = name.as_deref().unwrap_or("(unnamed)");
+        let value = match verified {
+            Some(true) => format!("{name}, verified"),
+            Some(false) => format!("{name}, not verified"),
+            None => name.to_owned(),
+        };
+        rows.row("Alias", &value, if *verified == Some(false) { Tone::Warn } else { Tone::Normal });
+    }
+    let model = rows.finish();
+    Ok(match domain.others {
+        0 => model,
+        1 => model.with_note("1 other member is not shown."),
+        n => model.with_note(&format!("{n} other members are not shown.")),
+    })
+}
+
+/// The domain as JSON text, for the person who asks for it: the members the module knows, parsed and written again
+/// as one pretty object. Members it does not know are not in it, so nothing else the tool printed can reach the page.
+pub fn domain_json_text(stdout: &[u8]) -> Result<ViewModel, ParseError> {
+    if stdout.len() > MAX_INPUT {
+        return Err(ParseError::TooLarge);
+    }
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(ParseError::Empty);
+    }
+    let domain = read_domain(stdout).ok_or(ParseError::Unrecognised)?;
+    let mut object = Map::new();
+    if let Some(name) = domain.name {
+        object.insert("customerDomain".to_owned(), Value::String(name));
+    }
+    if let Some(created) = domain.created {
+        object.insert("creationTime".to_owned(), Value::String(created));
+    }
+    if let Some(verified) = domain.verified {
+        object.insert("isVerified".to_owned(), Value::Bool(verified));
+    }
+    let aliases: Vec<Value> = domain
+        .aliases
+        .into_iter()
+        .map(|(name, verified)| {
+            let mut alias = Map::new();
+            if let Some(name) = name {
+                alias.insert("domainAliasName".to_owned(), Value::String(name));
+            }
+            if let Some(verified) = verified {
+                alias.insert("verified".to_owned(), Value::Bool(verified));
+            }
+            Value::Object(alias)
+        })
+        .collect();
+    if !aliases.is_empty() {
+        object.insert("domainAliases".to_owned(), Value::Array(aliases));
+    }
+    let text = serde_json::to_string_pretty(&Value::Object(object)).unwrap_or_else(|_| "{}".to_owned());
+    Ok(text_view("Domain", &text, TextFormat::Json))
 }
