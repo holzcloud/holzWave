@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Integration view model",
+  "description": "What the output of an integration tool becomes for the page: a table, a key-value list or a text, selected by the kind member.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "table" },
+        "title": { "type": "string", "maxLength": 128 },
+        "columns": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/column" } },
+        "rows": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/tableRow" } },
+        "truncated": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/truncation" }] },
+        "note": { "type": ["string", "null"], "maxLength": 128 },
+        "fetched": { "type": ["integer", "null"], "minimum": 0, "maximum": 4294967295 }
+      },
+      "required": ["kind", "title", "columns", "rows"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": { "kind": { "const": "kv" } },
+      "required": ["kind"]
+    },
+    {
+      "type": "object",
+      "properties": { "kind": { "const": "text" } },
+      "required": ["kind"]
+    }
+  ],
+  "$defs": {
+    "text": { "type": "string", "maxLength": 4096 },
+    "tone": { "enum": ["normal", "dim", "warn", "danger"] },
+    "effect": { "enum": ["read", "local", "write", "exec"] },
+    "action": {
+      "type": "object",
+      "properties": {
+        "verb": { "type": "string", "maxLength": 128 },
+        "label": { "type": "string", "maxLength": 128 },
+        "effect": { "$ref": "#/$defs/effect" },
+        "args": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 253 } }
+      },
+      "required": ["verb", "label", "effect", "args"],
+      "additionalProperties": false
+    },
+    "column": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "label": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["id", "label"],
+      "additionalProperties": false
+    },
+    "tableRow": {
+      "type": "object",
+      "properties": {
+        "key": { "type": "string", "maxLength": 253 },
+        "cells": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/text" } },
+        "tone": { "$ref": "#/$defs/tone" },
+        "actions": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/action" } }
+      },
+      "required": ["key", "cells"],
+      "additionalProperties": false
+    },
+    "truncation": {
+      "type": "object",
+      "properties": {
+        "shown": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "note": { "type": "string", "maxLength": 128 }
+      },
+      "required": ["shown", "note"],
+      "additionalProperties": false
+    }
+  }
+}
