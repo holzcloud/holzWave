@@ -32,7 +32,7 @@ pub use catalog::{
     EditFile, Effect, Field, FieldKind, Grep, HASH_PREFIX, ListDir, Newlines, ReadFile, ReadPane, RunCommand, Tool,
     ToolName, WriteFile, fields_of, payload_hash, visible, visible_multiline,
 };
-pub(crate) use catalog::is_hidden;
+pub(crate) use catalog::{hex, is_hidden};
 pub use change::{Base, Change, ChangeFault, Diff, DiffKind, DiffRow, diff, diff_with, plan};
 pub use command::{
     CANCELLED_LINE, CAPTURE_BYTES, CWD_MISSING, CWD_REMOTE_RELATIVE, CWD_UNKNOWN, LOST_LINE, NO_OUTPUT, OMITTED, REMOTE_FAILED,
