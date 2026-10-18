@@ -5,6 +5,17 @@
 //! card to the request, only the window decides, the core resolves and hashes the request again when the answer
 //! arrives, and what runs happens once. Nothing here starts a process: [`Approved`] is a token that the service turns
 //! into a run.
+//!
+//! The fields of a card, in this fixed order, are what the hash covers: `tool`, `verb`, `effect`, `program`, `arg 1` to
+//! `arg n`, the target pairs in the order the resolver gives them (a context, a namespace, a subscription, a section, a
+//! node, and for a local verb `changes`, the sentence that names the file it changes), `guard` (`production` or
+//! `none`) and, only for a production context, `production_name`. Every text is spelled with
+//! [`crate::ai::tools::visible`], so a line break, a direction mark or a terminal escape in a name is shown as its
+//! escape and never acts; the hash is [`crate::ai::tools::payload_hash`] over the fields as shown, hex encoded.
+//!
+//! Limits: a card waits [`TICKET_LIFETIME`] (120 s), [`MAX_ATTEMPTS`] (3) wrong hashes drop it, [`MAX_PENDING`] (8)
+//! cards wait, and a card holds at most [`MAX_CARD_BYTES`] (8 KiB) of field text. Nothing is approved by the absence of
+//! an answer, nothing is remembered, and the table is in memory only.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -14,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::ai::tools::{hex, payload_hash};
+use crate::ai::tools::{hex, payload_hash, visible};
 use crate::layout::PaneId;
 
 use super::{ToolId, Verb, VerbEffect};
@@ -26,7 +37,14 @@ pub const MAX_ATTEMPTS: usize = 3;
 /// How many tickets wait at most; a ninth drops the oldest.
 pub const MAX_PENDING: usize = 8;
 
+/// The most bytes of field text (names and values, as shown) one card holds.
+pub const MAX_CARD_BYTES: usize = 8 * 1024;
+
 const HASH_LEN: usize = 64;
+const MAX_VERB_BYTES: usize = 64;
+const MAX_REQUEST_ARGS: usize = 16;
+const MAX_KEY_BYTES: usize = 64;
+const MAX_VALUE_BYTES: usize = 4096;
 
 /// What the table asks the service for: the request, resolved to what would run.
 ///
@@ -125,7 +143,82 @@ pub struct Card {
     pub expires_in_secs: u64,
 }
 
-/// The proof that a card was confirmed and still is what the person saw. Only [`TicketTable::confirm`] makes one.
+/// The proof that a card was confirmed and still is what the person saw. Only [`TicketTable::confirm`] makes one: the
+/// fields are private, the one constructor is private to this module, and it has no `Default`, `Clone`, `Serialize` or
+/// `Deserialize`.
+///
+/// An approval can be received and read:
+///
+/// ```
+/// use holzwave_core::integrate::ticket::{Approved, Resolution};
+/// use holzwave_core::integrate::ToolId;
+///
+/// fn describe(approved: &Approved) -> usize {
+///     approved.argv().len()
+/// }
+///
+/// fn forge(tool: ToolId, resolution: Resolution) -> Option<Approved> {
+///     let _ = (tool, resolution);
+///     None
+/// }
+/// ```
+///
+/// It cannot be written as a struct literal:
+///
+/// ```compile_fail
+/// use holzwave_core::integrate::ticket::{Approved, Resolution};
+/// use holzwave_core::integrate::ToolId;
+///
+/// fn forge(tool: ToolId, resolution: Resolution) -> Approved {
+///     Approved { tool, pane: None, hash: String::new(), resolution }
+/// }
+/// ```
+///
+/// It cannot be issued by calling its constructor:
+///
+/// ```compile_fail
+/// use holzwave_core::integrate::ticket::{Approved, Resolution};
+/// use holzwave_core::integrate::ToolId;
+///
+/// fn forge(tool: ToolId, resolution: Resolution) -> Approved {
+///     Approved::issue(tool, None, String::new(), resolution)
+/// }
+/// ```
+///
+/// It has no default:
+///
+/// ```compile_fail
+/// use holzwave_core::integrate::ticket::{Approved, Resolution};
+/// use holzwave_core::integrate::ToolId;
+///
+/// fn forge() -> Approved {
+///     Approved::default()
+/// }
+/// ```
+///
+/// It cannot be copied:
+///
+/// ```compile_fail
+/// use holzwave_core::integrate::ticket::{Approved, Resolution};
+/// use holzwave_core::integrate::ToolId;
+///
+/// fn copy(approved: &Approved) -> Approved {
+///     approved.clone()
+/// }
+/// ```
+///
+/// It cannot be read from data:
+///
+/// ```compile_fail
+/// use holzwave_core::integrate::ticket::{Approved, Resolution};
+/// use holzwave_core::integrate::ToolId;
+///
+/// fn forge(json: &str) -> Approved {
+///     serde_json::from_str::<Approved>(json).unwrap()
+/// }
+/// ```
+///
+/// The examples share the imports of the one that compiles, so a typo cannot make a failing one pass.
 pub struct Approved {
     tool: ToolId,
     pane: Option<PaneId>,
@@ -135,7 +228,7 @@ pub struct Approved {
 
 impl Approved {
     fn issue(tool: ToolId, pane: Option<PaneId>, hash: String, resolution: Resolution) -> Self {
-        Self { tool, pane, hash, resolution }
+        Approved { tool, pane, hash, resolution }
     }
 
     /// The tool.
@@ -166,6 +259,16 @@ impl Approved {
     /// The hash the person confirmed.
     pub fn hash(&self) -> &str {
         &self.hash
+    }
+}
+
+impl fmt::Debug for Approved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Approved")
+            .field("tool", &self.tool)
+            .field("verb", &self.resolution.verb.id)
+            .field("args", &self.resolution.argv.len())
+            .finish()
     }
 }
 
@@ -201,36 +304,65 @@ fn effect_word(effect: VerbEffect) -> &'static str {
     }
 }
 
+/// Builds the card's fields from a resolution: every text is spelled out with [`visible`], the order is fixed, and the
+/// whole is bounded. The hash is over the fields as the person reads them.
 fn build(tool: ToolId, resolution: &Resolution) -> Result<Built, TicketError> {
     let effect = resolution.verb.effect;
     if effect == VerbEffect::Read {
         return Err(TicketError::NotGated);
     }
-    let mut argv = Vec::new();
+    // The spelled text is never shorter than the raw text, so a raw size over the bound is refused before any copy.
+    let raw: usize = resolution.argv.iter().map(|a| a.len()).sum::<usize>()
+        + resolution.program.len()
+        + resolution.target.iter().map(|(l, v)| l.len() + v.len()).sum::<usize>()
+        + resolution.production.as_ref().map_or(0, String::len);
+    if raw > MAX_CARD_BYTES {
+        return Err(TicketError::Refused);
+    }
+    // A local change has to say what it changes, and a production guard has to say which one it is.
+    if effect == VerbEffect::Local && !resolution.target.iter().any(|(label, _)| label == "changes") {
+        return Err(TicketError::Refused);
+    }
+    if resolution.production.as_deref() == Some("") {
+        return Err(TicketError::Refused);
+    }
+    let mut argv = Vec::with_capacity(resolution.argv.len());
     for arg in &resolution.argv {
-        argv.push(arg.to_str().ok_or(TicketError::Refused)?.to_owned());
+        argv.push(visible(arg.to_str().ok_or(TicketError::Refused)?));
     }
     let mut fields = vec![
-        ("tool".to_owned(), tool.as_str().to_owned()),
-        ("verb".to_owned(), resolution.verb.id.to_owned()),
+        ("tool".to_owned(), visible(tool.as_str())),
+        ("verb".to_owned(), visible(resolution.verb.id)),
         ("effect".to_owned(), effect_word(effect).to_owned()),
-        ("program".to_owned(), resolution.program.clone()),
+        ("program".to_owned(), visible(&resolution.program)),
     ];
     for (index, arg) in argv.iter().enumerate() {
         fields.push((format!("arg {}", index + 1), arg.clone()));
     }
     for (label, value) in &resolution.target {
-        fields.push((label.clone(), value.clone()));
+        fields.push((visible(label), visible(value)));
     }
     match &resolution.production {
         Some(name) => {
             fields.push(("guard".to_owned(), "production".to_owned()));
-            fields.push(("production_name".to_owned(), name.clone()));
+            fields.push(("production_name".to_owned(), visible(name)));
         }
         None => fields.push(("guard".to_owned(), "none".to_owned())),
     }
+    let size: usize = fields.iter().map(|(name, value)| name.len() + value.len()).sum();
+    if size > MAX_CARD_BYTES {
+        return Err(TicketError::Refused);
+    }
     let hash = hex(&payload_hash(&fields));
     Ok(Built { effect, argv, fields, hash })
+}
+
+/// Bounds the request that is kept for the ticket's lifetime. The validators of the arguments cut far below these.
+fn check_request(verb: &str, args: &BTreeMap<String, String>) -> Result<(), TicketError> {
+    let fits = verb.len() <= MAX_VERB_BYTES
+        && args.len() <= MAX_REQUEST_ARGS
+        && args.iter().all(|(key, value)| key.len() <= MAX_KEY_BYTES && value.len() <= MAX_VALUE_BYTES);
+    if fits { Ok(()) } else { Err(TicketError::Refused) }
 }
 
 fn new_id() -> Result<String, TicketError> {
@@ -251,8 +383,9 @@ fn same(a: &str, b: &str) -> bool {
 
 /// The cards that wait for an answer. In memory only: nothing survives a restart and nothing is remembered.
 ///
-/// A card waits for [`TICKET_LIFETIME`]; at most [`MAX_PENDING`] wait (a ninth drops the oldest); [`MAX_ATTEMPTS`] wrong
-/// hashes drop it. A confirm removes the ticket before it returns, so the same ticket never approves twice.
+/// A card waits for [`TICKET_LIFETIME`]; at most [`MAX_PENDING`] wait (a ninth drops the oldest);
+/// [`MAX_ATTEMPTS`] wrong hashes drop it. A confirm removes the ticket before it returns, so the same ticket never
+/// approves twice.
 pub struct TicketTable {
     clock: Box<dyn Fn() -> Instant + Send + Sync>,
     inner: Mutex<Vec<Entry>>,
@@ -307,6 +440,7 @@ impl TicketTable {
         pane: Option<PaneId>,
         args: &BTreeMap<String, String>,
     ) -> Result<Card, TicketError> {
+        check_request(verb, args)?;
         let resolution = resolver.resolve(tool, verb, pane, args)?;
         let built = build(tool, &resolution)?;
         let id = new_id()?;
@@ -315,10 +449,10 @@ impl TicketTable {
             tool,
             verb: resolution.verb.id.to_owned(),
             effect: built.effect,
-            program: resolution.program.clone(),
+            program: visible(&resolution.program),
             argv: built.argv,
-            target: resolution.target.clone(),
-            guard: Guard { production: resolution.production.clone() },
+            target: resolution.target.iter().map(|(label, value)| (visible(label), visible(value))).collect(),
+            guard: Guard { production: resolution.production.as_deref().map(visible) },
             fields: built.fields.clone(),
             hash: built.hash.clone(),
             expires_in_secs: TICKET_LIFETIME.as_secs(),
