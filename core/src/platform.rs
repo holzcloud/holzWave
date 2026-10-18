@@ -9,6 +9,8 @@
 //! - [`utf8_locale`]: the `LC_CTYPE` a child gets when its parent has no locale.
 //! - [`exit_poll`] and [`rename_retries`]: the two numbers the pane actor and the atomic file writer read.
 //! - [`in_flatpak`], [`host_shell_launch`] and [`host_command`]: inside a Flatpak the shell runs on the host.
+//! - [`search_dirs`], [`candidate_names`], [`is_absolute_path`] and [`join_path`]: the lookup of a program by name, shared
+//!   by the shell lookup and the detector of the integrations.
 
 use std::time::Duration;
 
@@ -162,12 +164,10 @@ fn locate_program(
     env: &dyn Fn(&str) -> Option<String>,
     check: &dyn Fn(&str) -> ProgramCheck,
 ) -> Result<String, ProgramCheck> {
-    let windows = os == Os::Windows;
-    let absolute = |path: &str| if windows { is_drive_absolute(path) } else { path.starts_with('/') };
-    let has_separator = name.contains('/') || (windows && name.contains('\\'));
+    let has_separator = name.contains('/') || (os == Os::Windows && name.contains('\\'));
     if has_separator {
         // A path is checked as it is; a relative one is not looked up.
-        return if absolute(name) {
+        return if is_absolute_path(os, name) {
             match check(name) {
                 ProgramCheck::Usable => Ok(name.to_string()),
                 other => Err(other),
@@ -177,24 +177,12 @@ fn locate_program(
         };
     }
     // The name of a program, searched like the shell's own lookup, in absolute directories only.
-    let mut dirs: Vec<String> = Vec::new();
-    if let Some(path) = non_empty(env("PATH")) {
-        let separator = if windows { ';' } else { ':' };
-        dirs.extend(path.split(separator).map(|dir| dir.trim_matches('"').to_string()).filter(|dir| absolute(dir)));
-    }
-    if windows {
-        if let Some(root) = non_empty(env("SystemRoot")).filter(|root| is_drive_absolute(root)) {
-            dirs.push(join_windows(&root, "System32"));
-        }
-    }
-    let mut candidates = vec![name.to_string()];
-    if windows && !name.contains('.') {
-        candidates.push(format!("{name}.exe"));
-    }
+    let dirs = search_dirs(os, env);
+    let candidates = candidate_names(os, name, None);
     let mut worst = ProgramCheck::Missing;
     for dir in &dirs {
         for candidate in &candidates {
-            let path = if windows { join_windows(dir, candidate) } else { format!("{}/{candidate}", dir.trim_end_matches('/')) };
+            let path = join_path(os, dir, candidate);
             match check(&path) {
                 ProgramCheck::Usable => return Ok(path),
                 ProgramCheck::Missing => {}
@@ -204,6 +192,57 @@ fn locate_program(
         }
     }
     Err(worst)
+}
+
+/// The directories a program name is looked up in, in order: the absolute entries of `PATH` (split with the separator
+/// of `os`, quotes trimmed), and on Windows `%SystemRoot%\System32` last. An empty entry, a relative entry and on
+/// Windows a network or device path are dropped: an empty or relative entry would start a program out of the current
+/// directory, and a network path would hand the user's credentials to a foreign host. Duplicates are kept, as the
+/// shell's own lookup keeps them.
+pub fn search_dirs(os: Os, env: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
+    let windows = os == Os::Windows;
+    let mut dirs: Vec<String> = Vec::new();
+    if let Some(path) = non_empty(env("PATH")) {
+        let separator = if windows { ';' } else { ':' };
+        dirs.extend(
+            path.split(separator).map(|dir| dir.trim_matches('"').to_string()).filter(|dir| is_absolute_path(os, dir)),
+        );
+    }
+    if windows {
+        if let Some(root) = non_empty(env("SystemRoot")).filter(|root| is_drive_absolute(root)) {
+            dirs.push(join_windows(&root, "System32"));
+        }
+    }
+    dirs
+}
+
+/// The file names to try for the program `name`, in order. Unix: the name. Windows: a name that has a dot is tried as
+/// it is; one without is tried with each extension of `pathext` (the value of `PATHEXT`, `;` separated, in order) and,
+/// when `pathext` is `None`, as the name itself and then with `.exe` (the rule of the shell lookup).
+pub fn candidate_names(os: Os, name: &str, pathext: Option<&str>) -> Vec<String> {
+    if os != Os::Windows || name.contains('.') {
+        return vec![name.to_string()];
+    }
+    match pathext {
+        None => vec![name.to_string(), format!("{name}.exe")],
+        Some(list) => list
+            .split(';')
+            .map(str::trim)
+            .filter(|ext| !ext.is_empty())
+            .map(|ext| if ext.starts_with('.') { format!("{name}{ext}") } else { format!("{name}.{ext}") })
+            .collect(),
+    }
+}
+
+/// Whether `path` is an absolute path of `os`: it starts with `/` on Unix, with a drive letter and a separator on
+/// Windows (a drive-less, network or device path is not).
+pub fn is_absolute_path(os: Os, path: &str) -> bool {
+    if os == Os::Windows { is_drive_absolute(path) } else { path.starts_with('/') }
+}
+
+/// `name` inside the directory `dir`, with exactly one separator of `os` between them.
+pub fn join_path(os: Os, dir: &str, name: &str) -> String {
+    if os == Os::Windows { join_windows(dir, name) } else { format!("{}/{name}", dir.trim_end_matches('/')) }
 }
 
 /// The Windows default, see [`shell_launch`]. `cmd.exe` is the one program that is not a path: it is resolved
