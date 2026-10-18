@@ -77,7 +77,7 @@ if [ "$publish" = 1 ]; then
     echo "  \`brew tap holzcloud/holzwave https://github.com/holzcloud/holzWave, then brew install --cask holzcloud/holzwave/holzwave@preview\`"
     echo "- Or open the DMG, drag holzWave to Applications, then right-click and Open once."
     echo "- SHA-256: \`$sum\`"
-    echo "- Windows and Linux are not part of this release."
+    echo "- The Windows installer and the Linux packages are built separately and attached to this release by hand when they exist (see the files below). They are preview quality; see docs/building.md."
   } > "$notes"
   gh release create "$tag" "$dmg" "$out/release/$name.dmg.sha256" --target "$(git rev-parse HEAD)" \
     --title "holzWave $version" --notes-file "$notes" $flag || exit 1
