@@ -61,6 +61,12 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
             ("argon2", "Argon2id stretching of the sync passphrase into the file key (sync/crypto.rs)"),
             ("chacha20poly1305", "XChaCha20-Poly1305 authenticated encryption of every synced file (sync/crypto.rs)"),
             (
+                "csv",
+                "the reader of GAM's CSV output (integrate/gam.rs), which has quoted multi-line cells holding JSON that a \
+                 line splitter cannot read; a hand-written reader was rejected because it would parse text that other \
+                 people wrote into a directory; pinned to an exact version, it brings csv-core and ryu",
+            ),
+            (
                 "getrandom",
                 "operating-system randomness: the 128-bit tokens of file grants (blocks.rs) and the salts and nonces of \
                  the sync (sync/crypto.rs)",

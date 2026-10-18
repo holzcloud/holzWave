@@ -47,6 +47,11 @@ regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "system-proxy"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-platform-verifier = "0.7.1"
+# The reader of GAM's CSV output (core/src/integrate/gam.rs). `print` commands write quoted multi-line cells that hold
+# JSON, which a line splitter cannot read, and the text is written by other people into a domain's directory, so the
+# parse is done by the established crate and not by a hand-written one; the module only adds caps around it. Pinned to
+# the exact current release for the same reason as the other security-relevant crates; it adds csv-core and ryu.
+csv = "=1.4.0"
 
 [dev-dependencies]
 rand = { version = "0.10", features = ["thread_rng"] }
