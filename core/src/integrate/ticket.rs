@@ -21,6 +21,12 @@ use super::{ToolId, Verb, VerbEffect};
 
 /// How long a card waits for its answer.
 pub const TICKET_LIFETIME: Duration = Duration::from_secs(120);
+/// How many wrong hashes drop a ticket.
+pub const MAX_ATTEMPTS: usize = 3;
+/// How many tickets wait at most; a ninth drops the oldest.
+pub const MAX_PENDING: usize = 8;
+
+const HASH_LEN: usize = 64;
 
 /// What the table asks the service for: the request, resolved to what would run.
 ///
@@ -173,8 +179,10 @@ struct Request {
 struct Entry {
     id: String,
     request: Request,
+    fields: Vec<(String, String)>,
     hash: String,
     created: Instant,
+    attempts: usize,
 }
 
 struct Built {
@@ -231,8 +239,22 @@ fn new_id() -> Result<String, TicketError> {
     Ok(hex(&raw))
 }
 
+/// Whether `text` has the shape of a hash of a card: 64 lower-case hex digits.
+fn is_hash_shaped(text: &str) -> bool {
+    text.len() == HASH_LEN && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Compares two texts of equal length without stopping at the first difference.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// The cards that wait for an answer. In memory only: nothing survives a restart and nothing is remembered.
+///
+/// A card waits for [`TICKET_LIFETIME`]; at most [`MAX_PENDING`] wait (a ninth drops the oldest); [`MAX_ATTEMPTS`] wrong
+/// hashes drop it. A confirm removes the ticket before it returns, so the same ticket never approves twice.
 pub struct TicketTable {
+    clock: Box<dyn Fn() -> Instant + Send + Sync>,
     inner: Mutex<Vec<Entry>>,
 }
 
@@ -243,13 +265,37 @@ impl Default for TicketTable {
 }
 
 impl TicketTable {
-    /// An empty table.
+    /// An empty table that reads the system's monotonic clock.
     pub fn new() -> Self {
-        Self { inner: Mutex::new(Vec::new()) }
+        Self::with_clock(Instant::now)
+    }
+
+    /// An empty table with its own clock, so that a test needs no waiting.
+    pub fn with_clock(clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        Self { clock: Box::new(clock), inner: Mutex::new(Vec::new()) }
     }
 
     fn lock(&self) -> MutexGuard<'_, Vec<Entry>> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn expired(&self, entry: &Entry) -> bool {
+        (self.clock)().saturating_duration_since(entry.created) >= TICKET_LIFETIME
+    }
+
+    /// How many tickets wait for an answer. An expired ticket is not counted and is dropped.
+    pub fn pending(&self) -> usize {
+        let mut entries = self.lock();
+        entries.retain(|entry| !self.expired(entry));
+        entries.len()
+    }
+
+    /// Drops a ticket, for a card that was closed. Returns whether there was one.
+    pub fn cancel(&self, ticket: &str) -> bool {
+        let mut entries = self.lock();
+        let before = entries.len();
+        entries.retain(|entry| entry.id != ticket);
+        entries.len() != before
     }
 
     /// Makes the card for a request, or refuses a verb that only reads.
@@ -273,27 +319,59 @@ impl TicketTable {
             argv: built.argv,
             target: resolution.target.clone(),
             guard: Guard { production: resolution.production.clone() },
-            fields: built.fields,
+            fields: built.fields.clone(),
             hash: built.hash.clone(),
             expires_in_secs: TICKET_LIFETIME.as_secs(),
         };
         let request = Request { tool, verb: verb.to_owned(), pane, args: args.clone() };
-        self.lock().push(Entry { id, request, hash: built.hash, created: Instant::now() });
+        let mut entries = self.lock();
+        entries.retain(|entry| !self.expired(entry));
+        while entries.len() >= MAX_PENDING {
+            entries.remove(0);
+        }
+        entries.push(Entry {
+            id,
+            request,
+            fields: built.fields,
+            hash: built.hash,
+            created: (self.clock)(),
+            attempts: 0,
+        });
         Ok(card)
     }
 
     /// Turns the answer of the window into an approval, once.
+    ///
+    /// The ticket is found, and refused when it is unknown, expired or answered with a hash that is not the card's.
+    /// With the right hash the ticket is removed first, then the request is resolved again from the facts stored at
+    /// prepare and the card is built again; any difference is [`TicketError::Changed`]. So what runs is what the card
+    /// showed, and a ticket approves at most once.
     pub fn confirm(&self, resolver: &dyn Resolve, ticket: &str, hash: &str) -> Result<Approved, TicketError> {
         let entry = {
             let mut entries = self.lock();
-            let index = entries.iter().position(|e| e.id == ticket).ok_or(TicketError::Unknown)?;
-            if entries[index].hash != hash {
+            let index = entries.iter().position(|e| same(&e.id, ticket)).ok_or(TicketError::Unknown)?;
+            if self.expired(&entries[index]) {
+                entries.remove(index);
+                return Err(TicketError::Expired);
+            }
+            if !is_hash_shaped(hash) || !same(&entries[index].hash, hash) {
+                entries[index].attempts += 1;
+                if entries[index].attempts >= MAX_ATTEMPTS {
+                    entries.remove(index);
+                }
                 return Err(TicketError::Mismatch);
             }
             entries.remove(index)
         };
+        // The lock is released: the resolver is the service's and may take its own locks.
         let request = &entry.request;
-        let resolution = resolver.resolve(request.tool, &request.verb, request.pane, &request.args)?;
+        let resolution = resolver
+            .resolve(request.tool, &request.verb, request.pane, &request.args)
+            .map_err(|_| TicketError::Changed)?;
+        let built = build(request.tool, &resolution).map_err(|_| TicketError::Changed)?;
+        if built.fields != entry.fields || !same(&built.hash, &entry.hash) {
+            return Err(TicketError::Changed);
+        }
         Ok(Approved::issue(request.tool, request.pane, entry.hash, resolution))
     }
 }
