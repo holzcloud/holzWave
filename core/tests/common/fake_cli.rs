@@ -3,8 +3,14 @@
 //! A fake records what it was started with, then behaves as chosen. The recording goes to files next to the script
 //! (`<name>.argv`: the arguments as NUL-terminated bytes, `<name>.env`: the environment as NUL-terminated
 //! `NAME=VALUE` entries, `<name>.ppid`, `<name>.pgid`, `<name>.child`), so a test reads back exactly what the program
-//! received. The text of the script is written by this file only: nothing a test passes (output text, counts, a
-//! number of seconds) is interpolated into it; outputs go through files the rig writes and the script copies.
+//! received.
+//!
+//! There is one script text, a constant of this file: every fake is a hard link to it under its own name, and its
+//! behaviour comes from files next to the link (`<name>.conf` holds numbers the rig formatted, `<name>.out` and
+//! `<name>.err` hold the text to print). Nothing a test passes is interpolated into a script. The one script is
+//! started once per test process before any fake exists: the first start of a new executable file can take 15 to 45
+//! seconds on a Mac whose system policy daemon is busy, and a hard link to a file that was started once does not pay
+//! it again, so a test of a time limit never measures that.
 //!
 //! The scripts are POSIX shell, so the rig is Unix only.
 #![allow(dead_code)]
@@ -14,8 +20,54 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-/// A fake program in a scratch directory. Every builder method rewrites the script, so a test can chain them.
+/// The text of every fake. The warm mode (an environment variable only the rig sets) exits before anything is recorded.
+const SCRIPT: &str = "#!/bin/sh
+if [ -n \"$HW_FAKE_WARM\" ]; then exit 0; fi
+d=${0%/*}
+n=${0##*/}
+stdin=0; out_bytes=0; err_bytes=0; sleep_secs=0; child_secs=0; exit_code=0
+if [ -f \"$d/$n.conf\" ]; then . \"$d/$n.conf\"; fi
+for a in \"$@\"; do printf '%s\\0' \"$a\"; done > \"$d/$n.argv\"
+/usr/bin/env -0 > \"$d/$n.env\"
+echo \"$PPID\" > \"$d/$n.ppid\"
+/bin/ps -o pgid= -p \"$$\" | tr -d ' ' > \"$d/$n.pgid\"
+if [ \"$stdin\" = 1 ]; then cat; fi
+if [ -f \"$d/$n.out\" ]; then cat \"$d/$n.out\"; fi
+if [ -f \"$d/$n.err\" ]; then cat \"$d/$n.err\" >&2; fi
+if [ \"$out_bytes\" -gt 0 ]; then yes 0123456789abcdef0123456789abcde | head -c \"$out_bytes\"; fi
+if [ \"$err_bytes\" -gt 0 ]; then yes 0123456789abcdef0123456789abcde | head -c \"$err_bytes\" >&2; fi
+if [ \"$child_secs\" -gt 0 ]; then sleep \"$child_secs\" & echo \"$!\" > \"$d/$n.child\"; wait; fi
+if [ \"$sleep_secs\" -gt 0 ]; then sleep \"$sleep_secs\"; fi
+exit \"$exit_code\"
+";
+
+/// The one script as a file: content-addressed in the build's scratch directory, written once, started once.
+fn master() -> &'static Path {
+    static MASTER: OnceLock<PathBuf> = OnceLock::new();
+    MASTER.get_or_init(|| {
+        let hash = SCRIPT.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fake_cli");
+        fs::create_dir_all(&dir).expect("the build's scratch directory");
+        let path = dir.join(format!("base-{hash:016x}"));
+        if !path.exists() {
+            let temporary = dir.join(format!("base-{hash:016x}.{}", std::process::id()));
+            fs::write(&temporary, SCRIPT).expect("write the script");
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755)).expect("make the script executable");
+            fs::rename(&temporary, &path).expect("put the script in place");
+        }
+        let status = std::process::Command::new(&path)
+            .env("HW_FAKE_WARM", "1")
+            .stdin(std::process::Stdio::null())
+            .status()
+            .expect("start the script once");
+        assert!(status.success(), "the warm start exits at once");
+        path
+    })
+}
+
+/// A fake program in a scratch directory. Every builder method rewrites the settings, so a test can chain them.
 #[derive(Debug, Clone)]
 pub struct FakeCli {
     dir: PathBuf,
@@ -34,8 +86,6 @@ impl FakeCli {
     /// A fake named `name` in `dir`: it records its start and exits with status 0 without output.
     pub fn new(dir: &Path, name: &str) -> FakeCli {
         assert!(!name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'));
-        let shown = dir.to_string_lossy();
-        assert!(!shown.contains('\'') && !shown.contains('\n'), "the scratch directory must be plain");
         let fake = FakeCli {
             dir: dir.to_path_buf(),
             name: name.to_owned(),
@@ -48,6 +98,11 @@ impl FakeCli {
             out_text: None,
             err_text: None,
         };
+        let link = fake.path();
+        let _ = fs::remove_file(&link);
+        if fs::hard_link(master(), &link).is_err() {
+            fs::copy(master(), &link).expect("put the fake in place");
+        }
         fake.write();
         fake
     }
@@ -55,7 +110,6 @@ impl FakeCli {
     /// The fake prints `text` on standard output (exactly these bytes).
     pub fn prints(mut self, text: &str) -> FakeCli {
         self.out_text = Some(text.to_owned());
-        fs::write(self.file("out"), text).expect("write the output text");
         self.write();
         self
     }
@@ -63,7 +117,6 @@ impl FakeCli {
     /// The fake prints `text` on standard error.
     pub fn prints_stderr(mut self, text: &str) -> FakeCli {
         self.err_text = Some(text.to_owned());
-        fs::write(self.file("err"), text).expect("write the error text");
         self.write();
         self
     }
@@ -166,39 +219,26 @@ impl FakeCli {
         self.dir.join(format!("{}.{ext}", self.name))
     }
 
+    /// Writes the files the script reads: the numbers and the texts to print.
     fn write(&self) {
-        let mut script = String::from("#!/bin/sh\n");
-        script.push_str(&format!("d='{}'\n", self.dir.to_string_lossy()));
-        let n = &self.name;
-        script.push_str(&format!("for a in \"$@\"; do printf '%s\\0' \"$a\"; done > \"$d/{n}.argv\"\n"));
-        script.push_str(&format!("/usr/bin/env -0 > \"$d/{n}.env\"\n"));
-        script.push_str(&format!("echo \"$PPID\" > \"$d/{n}.ppid\"\n"));
-        script.push_str(&format!("/bin/ps -o pgid= -p \"$$\" | tr -d ' ' > \"$d/{n}.pgid\"\n"));
-        if self.reads_stdin {
-            script.push_str("cat\n");
+        let conf = format!(
+            "stdin={}\nout_bytes={}\nerr_bytes={}\nsleep_secs={}\nchild_secs={}\nexit_code={}\n",
+            u8::from(self.reads_stdin),
+            self.out_bytes,
+            self.err_bytes,
+            self.sleep_secs.unwrap_or(0),
+            self.child_secs.unwrap_or(0),
+            self.exit
+        );
+        fs::write(self.file("conf"), conf).expect("write the settings");
+        for (ext, text) in [("out", &self.out_text), ("err", &self.err_text)] {
+            match text {
+                Some(text) => fs::write(self.file(ext), text).expect("write the text"),
+                None => {
+                    let _ = fs::remove_file(self.file(ext));
+                }
+            }
         }
-        if self.out_text.is_some() {
-            script.push_str(&format!("cat \"$d/{n}.out\"\n"));
-        }
-        if self.err_text.is_some() {
-            script.push_str(&format!("cat \"$d/{n}.err\" >&2\n"));
-        }
-        if self.out_bytes > 0 {
-            script.push_str(&format!("yes 0123456789abcdef0123456789abcde | head -c {}\n", self.out_bytes));
-        }
-        if self.err_bytes > 0 {
-            script.push_str(&format!("yes 0123456789abcdef0123456789abcde | head -c {} >&2\n", self.err_bytes));
-        }
-        if let Some(secs) = self.child_secs {
-            script.push_str(&format!("sleep {secs} &\necho \"$!\" > \"$d/{n}.child\"\nwait\n"));
-        }
-        if let Some(secs) = self.sleep_secs {
-            script.push_str(&format!("sleep {secs}\n"));
-        }
-        script.push_str(&format!("exit {}\n", self.exit));
-        let path = self.path();
-        fs::write(&path, script).expect("write the fake");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("make the fake executable");
     }
 }
 

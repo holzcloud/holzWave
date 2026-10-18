@@ -6,16 +6,39 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::exec::{exit_code, isolate, stop};
+use crate::exec::{exit_code, isolate, kill_tree, stop};
 
 /// The most bytes of standard output kept by default.
 pub const DEFAULT_STDOUT: usize = 16 * 1024 * 1024;
 /// The default time limit of a call.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The least a call may ask for as a cap on standard output.
+pub const MIN_STDOUT: usize = 1024;
+/// The most a call may ask for as a cap on standard output.
+pub const MAX_STDOUT: usize = 64 * 1024 * 1024;
+/// The least time limit of a call.
+pub const MIN_TIMEOUT: Duration = Duration::from_millis(10);
+/// The most time a call may take.
+pub const MAX_TIMEOUT: Duration = Duration::from_secs(120);
+/// How many children run at once.
+pub const MAX_CHILDREN: usize = 4;
+/// How long a call waits for a free slot before it answers [`RunError::Busy`].
+pub const SLOT_WAIT: Duration = Duration::from_secs(1);
+/// The bytes of standard error that are kept, from its start.
+pub const STDERR_KEPT: usize = 64 * 1024;
+
+/// How often the run looks at the program, its time limit, its output cap and the switch.
+const POLL: Duration = Duration::from_millis(10);
+/// How long the readers get to reach the end of their pipes after the program ended by itself.
+const DRAIN: Duration = Duration::from_millis(250);
+/// How long the readers get after the process group was killed, before they are given up.
+const REAP: Duration = Duration::from_millis(500);
+/// The size of one read from a pipe.
+const CHUNK: usize = 32 * 1024;
 
 /// The environment of a child.
 pub struct Env(Vec<(String, String)>);
@@ -45,6 +68,17 @@ pub struct RunLimits {
 impl Default for RunLimits {
     fn default() -> Self {
         Self { max_stdout: DEFAULT_STDOUT, timeout: DEFAULT_TIMEOUT }
+    }
+}
+
+impl RunLimits {
+    /// The limits brought into the allowed range: standard output from [`MIN_STDOUT`] to [`MAX_STDOUT`], the time from
+    /// [`MIN_TIMEOUT`] to [`MAX_TIMEOUT`]. [`Runner::run_argv`] applies it to whatever the caller passes.
+    pub fn clamped(self) -> Self {
+        Self {
+            max_stdout: self.max_stdout.clamp(MIN_STDOUT, MAX_STDOUT),
+            timeout: self.timeout.clamp(MIN_TIMEOUT, MAX_TIMEOUT),
+        }
     }
 }
 
@@ -93,6 +127,13 @@ pub struct RunResult {
     pub stdout_dropped: bool,
 }
 
+impl RunResult {
+    /// A result of a run that never started a process.
+    fn without_output(end: RunEnd) -> Self {
+        Self { stdout: Vec::new(), stderr: Vec::new(), status: None, end, stdout_dropped: false }
+    }
+}
+
 impl std::fmt::Debug for RunResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RunResult")
@@ -112,6 +153,8 @@ pub enum RunError {
     NotAbsolute,
     /// The system refused to start the program or to read its output.
     CannotStart,
+    /// Four children already run and none ended within the wait.
+    Busy,
 }
 
 impl std::fmt::Display for RunError {
@@ -119,39 +162,95 @@ impl std::fmt::Display for RunError {
         f.write_str(match self {
             Self::NotAbsolute => "the program is not given as an absolute path",
             Self::CannotStart => "the program could not be started",
+            Self::Busy => "too many tools are running at once",
         })
     }
 }
 
 impl std::error::Error for RunError {}
 
-/// The runner: the one place where an integration starts a child process.
-#[derive(Debug, Clone, Default)]
-pub struct Runner;
+/// The slots: how many children run at once.
+struct Slots {
+    used: Mutex<usize>,
+    freed: Condvar,
+}
+
+/// A held slot; dropping it frees the slot, on every path out of a call.
+struct Slot(Arc<Slots>);
+
+impl Slots {
+    /// A slot, waiting at most `wait` for one to be freed; none when all are still held.
+    fn acquire(self: &Arc<Self>, wait: Duration) -> Option<Slot> {
+        let until = Instant::now() + wait;
+        let mut used = self.used.lock().unwrap_or_else(PoisonError::into_inner);
+        while *used >= MAX_CHILDREN {
+            let left = until.checked_duration_since(Instant::now())?;
+            let (guard, _) = self.freed.wait_timeout(used, left).unwrap_or_else(PoisonError::into_inner);
+            used = guard;
+        }
+        *used += 1;
+        Some(Slot(Arc::clone(self)))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut used = self.0.used.lock().unwrap_or_else(PoisonError::into_inner);
+        *used = used.saturating_sub(1);
+        self.0.freed.notify_one();
+    }
+}
+
+/// The runner: the one place where an integration starts a child process. Clones share their slots.
+#[derive(Clone)]
+pub struct Runner {
+    slots: Arc<Slots>,
+}
+
+impl std::fmt::Debug for Runner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let running = *self.slots.used.lock().unwrap_or_else(PoisonError::into_inner);
+        f.debug_struct("Runner").field("running", &running).finish()
+    }
+}
+
+impl Default for Runner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Runner {
-    /// A runner.
+    /// A runner with all of its slots free.
     pub fn new() -> Self {
-        Self
+        Self { slots: Arc::new(Slots { used: Mutex::new(0), freed: Condvar::new() }) }
     }
 
     /// Runs `program` (an absolute path, taken as given) with `args` and nothing else: no shell, standard input closed,
-    /// the child leading a process group of its own, the environment exactly `env`. Blocks until the program ended.
+    /// the child leading a process group of its own, the environment exactly `env`. Blocks until the program ended,
+    /// the time limit passed, standard output passed its cap or `cancel` was raised; the last three kill the whole
+    /// process group. `env` is dropped, and its secrets wiped, right after the start.
     ///
     /// # Errors
     ///
-    /// A [`RunError`] with a fixed sentence when the program is not an absolute path or cannot be started.
+    /// A [`RunError`] with a fixed sentence: the program is not an absolute path, it cannot be started, or four
+    /// children already run and none ended within [`SLOT_WAIT`] ([`RunError::Busy`]; the caller tries again later).
     pub fn run_argv(
         &self,
         program: &Path,
         args: &[OsString],
         env: Env,
         limits: &RunLimits,
-        _cancel: &RunCancel,
+        cancel: &RunCancel,
     ) -> Result<RunResult, RunError> {
         if !program.is_absolute() {
             return Err(RunError::NotAbsolute);
         }
+        let limits = limits.clamped();
+        if cancel.is_cancelled() {
+            return Ok(RunResult::without_output(RunEnd::Cancelled));
+        }
+        let _slot = self.slots.acquire(SLOT_WAIT).ok_or(RunError::Busy)?;
         let mut command = Command::new(program);
         command.args(args).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         for (name, value) in &env.0 {
@@ -162,26 +261,73 @@ impl Runner {
         drop(command);
         drop(env);
         let mut child = spawned.map_err(|_| RunError::CannotStart)?;
+        let pid = child.id();
         let out = Arc::new(Mutex::new(Head::new(limits.max_stdout)));
         let err = Arc::new(Mutex::new(Head::new(STDERR_KEPT)));
-        let readers = (
+        let made = (
             child.stdout.take().and_then(|pipe| reader("hw-run-out", pipe, Arc::clone(&out))),
             child.stderr.take().and_then(|pipe| reader("hw-run-err", pipe, Arc::clone(&err))),
         );
-        let (Some(out_reader), Some(err_reader)) = readers else {
-            let pid = child.id();
+        let (Some(out_reader), Some(err_reader)) = made else {
+            // A program whose output cannot be read is not run: it ends before it can write what nobody would see.
             stop(&mut child, pid);
             return Err(RunError::CannotStart);
         };
-        let waited = child.wait();
-        let _ = out_reader.join();
-        let _ = err_reader.join();
+        let readers = [out_reader, err_reader];
+
+        // The time limit is the program's own run time: it starts when the program does.
+        let deadline = Instant::now() + limits.timeout;
+        let (mut end, status) = loop {
+            match child.try_wait() {
+                Ok(Some(done)) => break (RunEnd::Finished, exit_code(&done)),
+                Ok(None) => {}
+                Err(_) => {
+                    stop(&mut child, pid);
+                    break (RunEnd::Lost, None);
+                }
+            }
+            if out.lock().unwrap_or_else(PoisonError::into_inner).overflow {
+                stop(&mut child, pid);
+                break (RunEnd::Overflow, None);
+            }
+            if cancel.is_cancelled() {
+                stop(&mut child, pid);
+                break (RunEnd::Cancelled, None);
+            }
+            if Instant::now() >= deadline {
+                stop(&mut child, pid);
+                break (RunEnd::TimedOut, None);
+            }
+            thread::sleep(POLL);
+        };
+
+        // After a normal end the readers get a moment to reach the end of their pipes; a helper that still holds a pipe
+        // keeps them blocked, and the group is killed then. After a stop the group is dead already.
+        let mut given_up = false;
+        if end == RunEnd::Finished {
+            if !wait_for(&readers, DRAIN) {
+                kill_tree(pid);
+                given_up = !wait_for(&readers, REAP);
+            }
+        } else {
+            given_up = !wait_for(&readers, REAP);
+        }
+        for handle in readers {
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
         let (stdout, stdout_dropped) = take(&out);
         let (stderr, _) = take(&err);
-        let (end, status) = match waited {
-            Ok(done) => (RunEnd::Finished, exit_code(&done)),
-            Err(_) => (RunEnd::Lost, None),
-        };
+        if end == RunEnd::Finished {
+            // The program ended and the cap was passed in the same moment, or its output could not be read to the end.
+            if stdout_dropped {
+                end = RunEnd::Overflow;
+            } else if given_up {
+                end = RunEnd::Lost;
+            }
+        }
+        let status = if end == RunEnd::Finished { status } else { None };
         Ok(RunResult { stdout, stderr, status, end, stdout_dropped })
     }
 }
@@ -231,7 +377,16 @@ fn reader(name: &str, mut pipe: impl Read + Send + 'static, head: Arc<Mutex<Head
         .ok()
 }
 
-/// The size of one read from a pipe.
-const CHUNK: usize = 32 * 1024;
-/// The bytes of standard error that are kept, from its start.
-const STDERR_KEPT: usize = 64 * 1024;
+/// Waits until every reader has finished or `limit` has passed; answers whether they all finished.
+fn wait_for(readers: &[JoinHandle<()>], limit: Duration) -> bool {
+    let until = Instant::now() + limit;
+    loop {
+        if readers.iter().all(JoinHandle::is_finished) {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        thread::sleep(POLL);
+    }
+}
