@@ -806,8 +806,8 @@ impl TableBuilder {
         self
     }
 
-    /// Adds a row; the 2001st and later are dropped and counted. A row whose key is already taken gets `#2`, `#3` and so
-    /// on after it, so the keys stay unique.
+    /// Adds a row; the 2001st and later are dropped and counted. A row whose key is already taken gets `#2`, `#3` and
+    /// so on after it, so the keys stay unique.
     pub fn push(&mut self, row: RowBuilder) -> &mut Self {
         if self.rows.len() + self.pending.len() >= MAX_ROWS {
             self.dropped_rows += 1;
@@ -845,7 +845,12 @@ impl TableBuilder {
             let key = self.unique_key(&pending.key);
             let mut cells: Vec<Capped<MAX_CELL>> = pending.cells.into_iter().map(Capped).collect();
             cells.resize(width, Capped(String::new()));
-            self.rows.push(Row { key: Capped(key), cells: List(cells), tone: pending.tone, actions: List(pending.actions) });
+            self.rows.push(Row {
+                key: Capped(key),
+                cells: List(cells),
+                tone: pending.tone,
+                actions: List(pending.actions),
+            });
         }
         let shown = self.rows.len();
         let truncated = (self.dropped_rows > 0).then(|| Truncation {
@@ -911,7 +916,8 @@ impl KvBuilder {
     }
 }
 
-/// A text model of `text`, cleaned (line breaks stay) and cut at [`MAX_TEXT`] bytes with `truncated` set when it was cut.
+/// A text model of `text`, cleaned (line breaks stay) and cut at [`MAX_TEXT`] bytes with `truncated` set when it was
+/// cut.
 pub fn text_view(title: &str, text: &str, format: TextFormat) -> ViewModel {
     let (cleaned, cut) = clean_block(text);
     ViewModel::Text(TextView {
@@ -981,7 +987,8 @@ mod tests {
             for cap in [4_usize, 5, 6, 7, 8, 9, 10, 31, 32, 33, 128, 253] {
                 let text: String = std::iter::repeat_n(width_char, 500).collect();
                 let (cut, was_cut) = cut_flag(text, cap);
-                assert!(was_cut && cut.len() <= cap && cut.ends_with(ELLIPSIS), "{width_char:?} at {cap}: {} bytes", cut.len());
+                let ok = was_cut && cut.len() <= cap && cut.ends_with(ELLIPSIS);
+                assert!(ok, "{width_char:?} at {cap}: {} bytes", cut.len());
             }
         }
         assert_eq!(cut_flag("abc".to_owned(), 3), ("abc".to_owned(), false));

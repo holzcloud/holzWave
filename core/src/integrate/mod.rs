@@ -449,8 +449,8 @@ impl Validated {
     }
 }
 
-/// Why a tool's output could not be turned into a view model. Each variant is a fixed sentence: none holds a byte of the
-/// output, so another party's text cannot reach a log, a card or a fault line through an error.
+/// Why a tool's output could not be turned into a view model. Each variant is a fixed sentence: none holds a byte of
+/// the output, so another party's text cannot reach a log, a card or a fault line through an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
     /// The output is not in a shape the parser knows.
@@ -484,10 +484,10 @@ impl std::error::Error for ParseError {}
 /// reads no file and holds no state, so the generic engine is the only code that runs a tool.
 ///
 /// `argv` builds the argument list of a verb from validated values (never from loose text, and never with a name as a
-/// separate argument after a flag: see [`args::flag_eq`]). `view` turns the standard output into a [`ViewModel`]; output
-/// that is merely unexpected (a field that moved, a new shape) must come back as [`view::text_fallback`], which shows
-/// the cleaned, bounded text, and not as an error, so that drift in a tool degrades to readable text. A [`ParseError`]
-/// is for output that is no answer at all.
+/// separate argument after a flag: see [`args::flag_eq`]). `view` turns the standard output into a [`ViewModel`];
+/// output that is merely unexpected (a field that moved, a new shape) must come back as [`view::text_fallback`], which
+/// shows the cleaned, bounded text, and not as an error, so that drift in a tool degrades to readable text. A
+/// [`ParseError`] is for output that is no answer at all.
 pub trait Integration: Send + Sync {
     /// The compiled-in description of the tool.
     fn spec(&self) -> &'static IntegrationSpec;

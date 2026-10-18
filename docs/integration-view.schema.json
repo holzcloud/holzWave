@@ -1,75 +1,347 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Integration view model",
-  "description": "What the output of an integration tool becomes for the page: a table, a key-value list or a text, selected by the kind member.",
+  "description": "What the output of an integration tool becomes for the page: a table, a key-value list or a text, selected by the kind member. The core produces these documents and the page draws them with text only: no field is markup, a link or a command, whatever it looks like. The core cleans every text before it is in a model (escape sequences, control characters and characters with no visible shape are removed, white space becomes single spaces) and cuts what is over a cap with an ellipsis; a table or a list that was cut says so. Limits: a table has at most 64 columns and 2000 rows, a key-value list at most 2000 entries, a row at most 64 cells and 8 actions, an action at most 8 arguments. A cell and a value are at most 4096 bytes, a text at most 65536 bytes, a row key and an argument value at most 253 bytes, a title, a label, a note, a column id, a verb id and an argument name at most 128 bytes. Members that are absent are read as null, as the normal tone, as no actions, as plain text and as not truncated. Named gaps, which no keyword of this schema can state and which the type enforces: the cells of a row equal the columns in number; row keys are unique; every cap above counts bytes in the type and characters in this schema, so a text of more bytes than its cap within the cap in characters is accepted here and refused by the type; the same key twice in an object is refused by the type, and a parsed document keeps only the last.",
   "oneOf": [
     {
       "type": "object",
+      "description": "Columns and rows.",
       "properties": {
-        "kind": { "const": "table" },
-        "title": { "type": "string", "maxLength": 128 },
-        "columns": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/column" } },
-        "rows": { "type": "array", "maxItems": 2000, "items": { "$ref": "#/$defs/tableRow" } },
-        "truncated": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/truncation" }] },
-        "note": { "type": ["string", "null"], "maxLength": 128 },
-        "fetched": { "type": ["integer", "null"], "minimum": 0, "maximum": 4294967295 }
+        "kind": {
+          "const": "table",
+          "description": "The kind of the document."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The title of the block."
+        },
+        "columns": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/column"
+          },
+          "description": "At most 64 columns."
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "$ref": "#/$defs/tableRow"
+          },
+          "description": "At most 2000 rows."
+        },
+        "truncated": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/truncation"
+            }
+          ],
+          "description": "Set when rows were dropped, with the number that are shown; null or absent otherwise."
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128,
+          "description": "A line of context under the table, or null."
+        },
+        "fetched": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "When the data was read, in seconds since the Unix epoch, or null when it is not known."
+        }
       },
-      "required": ["kind", "title", "columns", "rows"],
+      "required": [
+        "kind",
+        "title",
+        "columns",
+        "rows"
+      ],
       "additionalProperties": false
     },
     {
       "type": "object",
-      "properties": { "kind": { "const": "kv" } },
-      "required": ["kind"]
+      "description": "Labelled values with actions of their own.",
+      "properties": {
+        "kind": {
+          "const": "kv",
+          "description": "The kind of the document."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The title of the block."
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "$ref": "#/$defs/kvRow"
+          },
+          "description": "At most 2000 entries."
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/action"
+          },
+          "description": "The actions of the whole list, at most 8; absent means none."
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128,
+          "description": "A line of context under the list, or null."
+        },
+        "fetched": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "When the data was read, in seconds since the Unix epoch, or null when it is not known."
+        }
+      },
+      "required": [
+        "kind",
+        "title",
+        "rows"
+      ],
+      "additionalProperties": false
     },
     {
       "type": "object",
-      "properties": { "kind": { "const": "text" } },
-      "required": ["kind"]
+      "description": "A text, plain or JSON.",
+      "properties": {
+        "kind": {
+          "const": "text",
+          "description": "The kind of the document."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The title of the block."
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536,
+          "description": "The text, at most 65536 characters here and 65536 bytes in the type; line feeds and tabs are kept."
+        },
+        "format": {
+          "enum": [
+            "plain",
+            "json"
+          ],
+          "description": "How the text is meant to be read; absent means plain."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the text is only the start of what the tool wrote; absent means false."
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128,
+          "description": "A line of context under the text, or null."
+        },
+        "fetched": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "When the data was read, in seconds since the Unix epoch, or null when it is not known."
+        }
+      },
+      "required": [
+        "kind",
+        "title",
+        "text"
+      ],
+      "additionalProperties": false
     }
   ],
   "$defs": {
-    "text": { "type": "string", "maxLength": 4096 },
-    "tone": { "enum": ["normal", "dim", "warn", "danger"] },
-    "effect": { "enum": ["read", "local", "write", "exec"] },
+    "text": {
+      "type": "string",
+      "maxLength": 4096,
+      "description": "The text of a cell or a value: at most 4096 bytes in the type and 4096 characters here, cleaned by the core."
+    },
+    "tone": {
+      "enum": [
+        "normal",
+        "dim",
+        "warn",
+        "danger"
+      ],
+      "description": "How an entry is drawn: normal, dim (quiet), warn (worth a look) or danger (wrong). The page adds a second cue besides colour."
+    },
+    "effect": {
+      "enum": [
+        "read",
+        "local",
+        "write",
+        "exec"
+      ],
+      "description": "What a verb does to the world: read changes nothing, local changes the tool's own configuration on this computer, write changes a cluster or an account, exec opens a session with the person's credentials."
+    },
     "action": {
       "type": "object",
+      "description": "A button: a verb of the tool with the arguments it was validated with. The page sends the verb and the arguments back and the core validates them again; the effect is the verb's and tells the page whether to show a card first.",
       "properties": {
-        "verb": { "type": "string", "maxLength": 128 },
-        "label": { "type": "string", "maxLength": 128 },
-        "effect": { "$ref": "#/$defs/effect" },
-        "args": { "type": "object", "additionalProperties": { "type": "string", "maxLength": 253 } }
+        "verb": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The id of the verb."
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The label on the button."
+        },
+        "effect": {
+          "$ref": "#/$defs/effect"
+        },
+        "args": {
+          "type": "object",
+          "maxProperties": 8,
+          "propertyNames": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 253
+          },
+          "description": "The arguments by name: at most 8, a name at most 128 and a value at most 253 characters."
+        }
       },
-      "required": ["verb", "label", "effect", "args"],
+      "required": [
+        "verb",
+        "label",
+        "effect",
+        "args"
+      ],
       "additionalProperties": false
     },
     "column": {
       "type": "object",
+      "description": "One column.",
       "properties": {
-        "id": { "type": "string", "maxLength": 128 },
-        "label": { "type": "string", "maxLength": 128 }
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The id of the column."
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The heading the person reads."
+        }
       },
-      "required": ["id", "label"],
+      "required": [
+        "id",
+        "label"
+      ],
       "additionalProperties": false
     },
     "tableRow": {
       "type": "object",
+      "description": "One row: its key, one cell per column, a tone and its actions.",
       "properties": {
-        "key": { "type": "string", "maxLength": 253 },
-        "cells": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/text" } },
-        "tone": { "$ref": "#/$defs/tone" },
-        "actions": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/action" } }
+        "key": {
+          "type": "string",
+          "maxLength": 253,
+          "description": "The identity of the row in its table: unique, and stable between two reads of the same list."
+        },
+        "cells": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/text"
+          },
+          "description": "The cells, as many as the table has columns."
+        },
+        "tone": {
+          "$ref": "#/$defs/tone",
+          "description": "How the entry is drawn; absent means normal."
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/action"
+          },
+          "description": "At most 8 actions; absent means none."
+        }
       },
-      "required": ["key", "cells"],
+      "required": [
+        "key",
+        "cells"
+      ],
+      "additionalProperties": false
+    },
+    "kvRow": {
+      "type": "object",
+      "description": "One labelled value.",
+      "properties": {
+        "label": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "The name of the entry."
+        },
+        "value": {
+          "$ref": "#/$defs/text",
+          "description": "The value."
+        },
+        "tone": {
+          "$ref": "#/$defs/tone",
+          "description": "How the entry is drawn; absent means normal."
+        }
+      },
+      "required": [
+        "label",
+        "value"
+      ],
       "additionalProperties": false
     },
     "truncation": {
       "type": "object",
+      "description": "The note that a table shows only its first rows.",
       "properties": {
-        "shown": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-        "note": { "type": "string", "maxLength": 128 }
+        "shown": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "How many rows the table holds."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "What the person reads."
+        }
       },
-      "required": ["shown", "note"],
+      "required": [
+        "shown",
+        "note"
+      ],
       "additionalProperties": false
     }
   }

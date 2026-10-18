@@ -33,6 +33,8 @@ pub const EVALUATED: &[&str] = &[
     "pattern",
     "minItems",
     "maxItems",
+    "maxProperties",
+    "propertyNames",
     "items",
     "required",
     "properties",
@@ -105,7 +107,7 @@ pub fn walk(root: &Value, schema: &Value, at: &str) -> Result<(), Unsupported> {
         match key.as_str() {
             "$defs" | "properties" => walk_map(root, value, &here)?,
             "allOf" | "oneOf" => walk_list(root, value, &here)?,
-            "items" | "if" | "then" | "else" => walk(root, value, &here)?,
+            "items" | "propertyNames" | "if" | "then" | "else" => walk(root, value, &here)?,
             "additionalProperties" => {
                 if !value.is_boolean() {
                     walk(root, value, &here)?;
@@ -252,6 +254,23 @@ pub fn eval(root: &Value, schema: &Value, instance: &Value, at: &str, depth: usi
                     }
                 }
             }
+            "maxProperties" => {
+                if let Value::Object(members) = instance {
+                    if members.len() as u64 > limit(value, &here)? {
+                        return refused;
+                    }
+                }
+            }
+            "propertyNames" => {
+                if let Value::Object(members) = instance {
+                    for name in members.keys() {
+                        let as_value = Value::String(name.clone());
+                        if let Some(path) = eval(root, value, &as_value, &here, depth)? {
+                            return Ok(Some(format!("{path} (member {name:?})")));
+                        }
+                    }
+                }
+            }
             "items" => {
                 if let Value::Array(list) = instance {
                     for (n, element) in list.iter().enumerate() {
@@ -354,8 +373,8 @@ pub fn load_schema(root: &Path, relative: &str) -> Value {
     value
 }
 
-/// What `schema` says about the text of a document: `Err` is "not JSON" or the first failing keyword path. A keyword the
-/// checker does not evaluate stops the test and is never an accept.
+/// What `schema` says about the text of a document: `Err` is "not JSON" or the first failing keyword path. A keyword
+/// the checker does not evaluate stops the test and is never an accept.
 pub fn schema_verdict(schema: &Value, name: &str, text: &str) -> Result<(), String> {
     let document: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
     match eval(schema, schema, &document, "#", 0) {
@@ -371,15 +390,18 @@ pub fn pointer_number(schema: &Value, name: &str, pointer: &str) -> u64 {
     number.unwrap_or_else(|| panic!("{name} has no number at {pointer}"))
 }
 
-/// The pointer of every limit the schema states (`minLength`, `maxLength`, `minimum`, `maximum`, `minItems`, `maxItems`).
-/// A `default` and an `enum` are not limits and are skipped.
+/// The pointer of every limit the schema states (`minLength`, `maxLength`, `minimum`, `maximum`, `minItems`,
+/// `maxItems`, `maxProperties`). A `default` and an `enum` are not limits and are skipped.
 pub fn limit_pointers(value: &Value, at: &str, out: &mut Vec<String>) {
     match value {
         Value::Object(map) => {
             for (key, inner) in map {
                 let here = format!("{at}/{key}");
                 match (key.as_str(), inner) {
-                    ("minLength" | "maxLength" | "minimum" | "maximum" | "minItems" | "maxItems", Value::Number(_)) => {
+                    (
+                        "minLength" | "maxLength" | "minimum" | "maximum" | "minItems" | "maxItems" | "maxProperties",
+                        Value::Number(_),
+                    ) => {
                         out.push(here);
                     }
                     ("default" | "enum", _) => {}
