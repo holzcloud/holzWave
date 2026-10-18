@@ -5,9 +5,14 @@
 //! hidden character. A refusal is judged twice: by its outcome and by its text, which has to be one of a fixed list of
 //! sentences and must not contain the input.
 
+use std::collections::BTreeMap;
+
 use holzwave_core::integrate::args::{
     flag_eq, flag_value, lines, ArgError, ContainerName, ContextName, EnvName, Namespace, NodeName, PodName, ProfileId,
     SectionName, SubscriptionId,
+};
+use holzwave_core::integrate::{
+    ArgKind, ArgSpec, IntegrationSpec, Output, SelectKind, Selection, ToolId, Validated, Verb, VerbEffect, VersionProbe,
 };
 
 /// A scalar value from its code point.
@@ -22,6 +27,9 @@ const SENTENCES: &[&str] = &[
     "the value starts with a dash",
     "the value holds a control or invisible character",
     "the value has the wrong form for its kind",
+    "the name is not in the closed catalogue",
+    "a required argument is missing",
+    "the selection field does not belong to the tool",
 ];
 
 /// The refusal is one fixed sentence and holds none of the input.
@@ -115,7 +123,16 @@ fn the_refusal_reasons_are_told_apart() {
 
 #[test]
 fn every_refusal_text_is_one_fixed_sentence() {
-    let all = [ArgError::Empty, ArgError::TooLong, ArgError::LeadingDash, ArgError::Hidden, ArgError::Shape];
+    let all = [
+        ArgError::Empty,
+        ArgError::TooLong,
+        ArgError::LeadingDash,
+        ArgError::Hidden,
+        ArgError::Shape,
+        ArgError::Unknown,
+        ArgError::Missing,
+        ArgError::NotForTool,
+    ];
     let texts: Vec<String> = all.iter().map(ToString::to_string).collect();
     let mut expected: Vec<&str> = SENTENCES.to_vec();
     let mut sorted: Vec<&str> = texts.iter().map(String::as_str).collect();
@@ -519,4 +536,267 @@ fn no_kind_accepts_an_input_that_starts_with_a_dash_or_holds_a_hidden_character(
         }
     }
     assert!(checked > 10_000, "the sweep is generated: {checked} inputs");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The spec types, the closed catalogue and the selection.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const TOY_ARGS: &[ArgSpec] = &[
+    ArgSpec { name: "pod", kind: ArgKind::Pod, required: true },
+    ArgSpec { name: "container", kind: ArgKind::Container, required: false },
+    ArgSpec { name: "lines", kind: ArgKind::Lines, required: false },
+];
+
+const TOY_FORMAT_ARGS: &[ArgSpec] = &[
+    ArgSpec { name: "format", kind: ArgKind::Choice(&["json", "csv"]), required: true },
+    ArgSpec { name: "as_json", kind: ArgKind::Flag, required: false },
+    ArgSpec { name: "context", kind: ArgKind::Context, required: false },
+    ArgSpec { name: "namespace", kind: ArgKind::Namespace, required: false },
+    ArgSpec { name: "node", kind: ArgKind::Node, required: false },
+    ArgSpec { name: "subscription", kind: ArgKind::Subscription, required: false },
+    ArgSpec { name: "section", kind: ArgKind::Section, required: false },
+];
+
+const TOY_VERBS: &[Verb] = &[
+    Verb {
+        id: "read",
+        label: "Read",
+        effect: VerbEffect::Read,
+        output: Output::View,
+        args: TOY_ARGS,
+        refresh_secs: Some(10),
+        exit_is_state: false,
+    },
+    Verb {
+        id: "export",
+        label: "Export",
+        effect: VerbEffect::Local,
+        output: Output::Done,
+        args: TOY_FORMAT_ARGS,
+        refresh_secs: None,
+        exit_is_state: true,
+    },
+];
+
+fn toy_version(output: &str) -> Option<String> {
+    output.lines().next().map(str::to_owned)
+}
+
+static TOY: IntegrationSpec = IntegrationSpec {
+    id: ToolId::Kube,
+    label: "Toy",
+    binaries: &["toy"],
+    windows_binaries: &["toy.exe"],
+    fixed_dirs: &["/usr/local/bin"],
+    version_probe: VersionProbe { argv: &["version"], parse: toy_version },
+    env_set: &[("TOY_TELEMETRY", "false")],
+    selects: &[SelectKind::Context, SelectKind::Namespace],
+    verbs: TOY_VERBS,
+};
+
+fn pairs(items: &[(&str, &str)]) -> BTreeMap<String, String> {
+    items.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+}
+
+fn read_verb() -> &'static Verb {
+    TOY.verb("read").expect("the toy verb")
+}
+
+#[test]
+fn tool_ids_round_trip_and_refuse_other_words() {
+    let all = [ToolId::Kube, ToolId::Talos, ToolId::Azure, ToolId::Gam];
+    assert_eq!(ToolId::ALL, all);
+    for tool in all {
+        assert_eq!(ToolId::parse(tool.as_str()), Ok(tool), "{} round-trips", tool.as_str());
+        let json = serde_json::to_string(&tool).expect("a tool id serialises");
+        assert_eq!(json, format!("\"{}\"", tool.as_str()), "the wire name is the lower-case name");
+        assert_eq!(serde_json::from_str::<ToolId>(&json).expect("it reads back"), tool);
+    }
+    assert_eq!(all.map(ToolId::as_str), ["kube", "talos", "azure", "gam"]);
+    for word in ["Kube", "KUBE", "kubectl", "", " kube", "kube\n", "kube\0", "k8s", "azure-cli", "--kube"] {
+        assert_eq!(ToolId::parse(word), Err(ArgError::Unknown), "a word that is no tool");
+        let json = format!("\"{}\"", word.replace('\n', "\\n").replace('\0', "\\u0000"));
+        assert!(serde_json::from_str::<ToolId>(&json).is_err(), "the wire refuses other words");
+    }
+}
+
+#[test]
+fn the_wire_names_are_snake_case() {
+    let json = serde_json::to_value(read_verb()).expect("a verb serialises");
+    assert_eq!(json["id"], "read");
+    assert_eq!(json["effect"], "read");
+    assert_eq!(json["output"], "view");
+    assert_eq!(json["refresh_secs"], 10);
+    assert_eq!(json["exit_is_state"], false);
+    assert_eq!(json["args"][0], serde_json::json!({ "name": "pod", "kind": "pod", "required": true }));
+    let export = serde_json::to_value(TOY.verb("export").expect("a toy verb")).expect("a verb serialises");
+    assert_eq!(export["effect"], "local");
+    assert_eq!(export["output"], "done");
+    assert_eq!(export["refresh_secs"], serde_json::Value::Null);
+    assert_eq!(export["args"][0]["kind"], serde_json::json!({ "choice": ["json", "csv"] }));
+    assert_eq!(serde_json::to_value(VerbEffect::Exec).expect("effect"), "exec");
+    assert_eq!(serde_json::to_value(Output::Terminal).expect("output"), "terminal");
+    assert_eq!(serde_json::to_value(SelectKind::Subscription).expect("select"), "subscription");
+}
+
+#[test]
+fn the_catalogue_is_closed() {
+    let verb = read_verb();
+    // What the verb declares is accepted and typed.
+    let one = Validated::parse(verb, &pairs(&[("pod", "api-0")])).expect("the required argument alone");
+    assert_eq!(one.pod().map(PodName::as_str), Some("api-0"));
+    assert!(one.container().is_none() && one.lines().is_none());
+    let two = Validated::parse(verb, &pairs(&[("pod", "api-0"), ("lines", "200")])).expect("with the optional count");
+    assert_eq!(two.lines(), Some(200));
+    let all = pairs(&[("pod", "a.b"), ("container", "main"), ("lines", "5000")]);
+    let three = Validated::parse(verb, &all).expect("all");
+    assert_eq!(three.container().map(ContainerName::as_str), Some("main"));
+
+    // What it does not declare, what is missing and what is malformed is refused with a fixed sentence.
+    let big = "a".repeat(4097);
+    let refusals = [
+        (pairs(&[]), ArgError::Missing),
+        (pairs(&[("container", "main")]), ArgError::Missing),
+        (pairs(&[("pod", "api-0"), ("extra", "x")]), ArgError::Unknown),
+        (pairs(&[("pod", "api-0"), ("--all", "x")]), ArgError::Unknown),
+        (pairs(&[("pod", "api-0"), ("Lines", "5")]), ArgError::Unknown),
+        (pairs(&[("pod", "-x")]), ArgError::LeadingDash),
+        (pairs(&[("pod", "")]), ArgError::Empty),
+        (pairs(&[("pod", "api-0"), ("lines", "0")]), ArgError::Shape),
+        (pairs(&[("pod", "api-0"), ("container", "a_b")]), ArgError::Shape),
+        (pairs(&[("pod", big.as_str())]), ArgError::TooLong),
+        (pairs(&[("pod", "api-0"), ("lines", big.as_str())]), ArgError::TooLong),
+    ];
+    for (index, (input, reason)) in refusals.iter().enumerate() {
+        let error = Validated::parse(verb, input).expect_err("a refused argument bag");
+        assert_eq!(error, *reason, "refusal row {index}");
+        let joined: String = input.iter().map(|(k, v)| format!("{k}{v}")).collect();
+        assert_fixed_sentence(error, &joined);
+    }
+    // A value over the bound is refused before its kind is looked at: a hidden character beyond the bound is too long,
+    // not hidden, and a kind that would accept the text still cannot be handed 4097 bytes.
+    let long_context = format!("{}\u{202e}", "a".repeat(4097));
+    let export = TOY.verb("export").expect("a toy verb");
+    let error = Validated::parse(export, &pairs(&[("format", "json"), ("context", long_context.as_str())]));
+    assert_eq!(error.expect_err("too long"), ArgError::TooLong);
+}
+
+#[test]
+fn choices_flags_and_names_are_typed_and_exact() {
+    let export = TOY.verb("export").expect("a toy verb");
+    let ok = Validated::parse(
+        export,
+        &pairs(&[
+            ("format", "csv"),
+            ("as_json", "true"),
+            ("context", "arn:aws:eks:eu-central-1:000000000000:cluster/prod"),
+            ("namespace", "kube-system"),
+            ("node", "10.0.4.12"),
+            ("subscription", "0B0C7A7E-1234-4ABC-8DEF-0123456789AB"),
+            ("section", "default"),
+        ]),
+    )
+    .expect("every kind at once");
+    assert_eq!(ok.choice("format"), Some("csv"));
+    assert_eq!(ok.flag("as_json"), Some(true));
+    assert_eq!(ok.context().map(ContextName::as_str), Some("arn:aws:eks:eu-central-1:000000000000:cluster/prod"));
+    assert_eq!(ok.namespace().map(Namespace::as_str), Some("kube-system"));
+    assert_eq!(ok.node().map(NodeName::as_str), Some("10.0.4.12"));
+    assert_eq!(ok.subscription().map(SubscriptionId::as_str), Some("0b0c7a7e-1234-4abc-8def-0123456789ab"));
+    assert_eq!(ok.section().map(SectionName::as_str), Some("default"));
+    assert_eq!(ok.choice("as_json"), None, "a flag is not a choice");
+    assert_eq!(ok.flag("format"), None, "a choice is not a flag");
+    assert_eq!(ok.choice("unknown"), None);
+
+    for (name, value, reason) in [
+        ("format", "xml", ArgError::Shape),
+        ("format", "JSON", ArgError::Shape),
+        ("format", "json ", ArgError::Shape),
+        ("format", "", ArgError::Shape),
+        ("as_json", "yes", ArgError::Shape),
+        ("context", "-x", ArgError::LeadingDash),
+        ("node", "1.2.3.4.5", ArgError::Shape),
+    ] {
+        let error = Validated::parse(export, &pairs(&[("format", "json"), (name, value)])).expect_err("refused");
+        assert_eq!(error, reason, "{name}");
+    }
+}
+
+#[test]
+fn a_selection_only_holds_what_its_tool_selects() {
+    let full = |context, namespace, subscription, section, node| Selection {
+        profile: Some("prod".into()),
+        context,
+        namespace,
+        subscription,
+        section,
+        node,
+    };
+    let some = |s: &str| Some(s.to_owned());
+    let guid = "0b0c7a7e-1234-4abc-8def-0123456789ab";
+
+    let kube = full(some("dev"), some("default"), None, None, None).check(ToolId::Kube).expect("kube selects these");
+    assert_eq!(kube.context.as_ref().map(ContextName::as_str), Some("dev"));
+    assert_eq!(kube.namespace.as_ref().map(Namespace::as_str), Some("default"));
+    assert_eq!(kube.profile.as_ref().map(ProfileId::as_str), Some("prod"));
+    let talos = full(some("dev"), None, None, None, some("node-1")).check(ToolId::Talos).expect("talos selects these");
+    assert_eq!(talos.node.as_ref().map(NodeName::as_str), Some("node-1"));
+    let azure = full(None, None, some(guid), None, None).check(ToolId::Azure).expect("azure selects a subscription");
+    assert_eq!(azure.subscription.as_ref().map(SubscriptionId::as_str), Some(guid));
+    let gam = full(None, None, None, some("default"), None).check(ToolId::Gam).expect("gam selects a section");
+    assert_eq!(gam.section.as_ref().map(SectionName::as_str), Some("default"));
+
+    // A field that does not belong to the tool is refused whatever its value is.
+    let wrong = [
+        (ToolId::Kube, full(None, None, some(guid), None, None)),
+        (ToolId::Kube, full(None, None, None, some("default"), None)),
+        (ToolId::Kube, full(None, None, None, None, some("node-1"))),
+        (ToolId::Talos, full(None, some("default"), None, None, None)),
+        (ToolId::Talos, full(None, None, some(guid), None, None)),
+        (ToolId::Azure, full(some("dev"), None, None, None, None)),
+        (ToolId::Azure, full(None, some("default"), None, None, None)),
+        (ToolId::Gam, full(None, None, some(guid), None, None)),
+        (ToolId::Gam, full(some("dev"), None, None, None, None)),
+    ];
+    for (index, (tool, selection)) in wrong.into_iter().enumerate() {
+        assert_eq!(selection.check(tool).expect_err("a field of another tool"), ArgError::NotForTool, "row {index}");
+    }
+    // Every tool takes a profile, and nothing at all is a valid selection.
+    for tool in ToolId::ALL {
+        let only = Selection { profile: some("prod"), ..Selection::default() };
+        assert!(only.check(tool).is_ok(), "{} takes a profile", tool.as_str());
+        assert!(Selection::default().check(tool).is_ok(), "{} takes an empty selection", tool.as_str());
+    }
+    // A value of the right field is validated by its kind.
+    let hostile = Selection { context: some("--server=https://x"), ..Selection::default() };
+    assert_eq!(hostile.check(ToolId::Kube).expect_err("an option-shaped context"), ArgError::LeadingDash);
+    let bad_profile = Selection { profile: some("Prod"), ..Selection::default() };
+    assert_eq!(bad_profile.check(ToolId::Gam).expect_err("a bad profile id"), ArgError::Shape);
+
+    // The wire: members that are not fields are refused, absent ones default.
+    let read: Selection = serde_json::from_str(r#"{"context":"dev","namespace":null}"#).expect("a partial selection");
+    assert_eq!(read.context.as_deref(), Some("dev"));
+    let unreadable = [
+        r#"{"context":"dev","server":"x"}"#,
+        r#"{"args":["--x"]}"#,
+        r#"{"Context":"dev"}"#,
+        r#"["dev"]"#,
+        r#"["dev","default"]"#,
+        r#"{"context":"a","context":"b"}"#,
+        r#"{"context":5}"#,
+        r#"null"#,
+    ];
+    for json in unreadable {
+        assert!(serde_json::from_str::<Selection>(json).is_err(), "a selection that holds an unknown member: {json}");
+    }
+}
+
+#[test]
+fn a_verb_is_found_by_its_id_only() {
+    assert_eq!(TOY.verb("read").map(|verb| verb.id), Some("read"));
+    assert_eq!(TOY.verb("export").map(|verb| verb.label), Some("Export"));
+    for id in ["", "Read", "READ", "read ", " read", "rea", "read\0", "readexport", "--read", "../read", "*"] {
+        assert!(TOY.verb(id).is_none(), "an id that is no verb of the spec");
+    }
 }

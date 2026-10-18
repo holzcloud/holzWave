@@ -25,6 +25,12 @@ pub enum ArgError {
     Hidden,
     /// The value is made of the wrong characters or has the wrong form for its kind.
     Shape,
+    /// The tool, verb or argument is not in the closed catalogue.
+    Unknown,
+    /// An argument the verb requires was not given.
+    Missing,
+    /// A selection field that the tool does not select.
+    NotForTool,
 }
 
 impl ArgError {
@@ -36,6 +42,9 @@ impl ArgError {
             Self::LeadingDash => "the value starts with a dash",
             Self::Hidden => "the value holds a control or invisible character",
             Self::Shape => "the value has the wrong form for its kind",
+            Self::Unknown => "the name is not in the closed catalogue",
+            Self::Missing => "a required argument is missing",
+            Self::NotForTool => "the selection field does not belong to the tool",
         }
     }
 }
