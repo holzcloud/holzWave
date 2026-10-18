@@ -9381,7 +9381,7 @@ mod protocol {
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {
-                version: "0.0.1-alpha2".into(),
+                version: "0.0.1-alpha3".into(),
                 os: "macos".into(),
                 hostname: "holz-mac.local".into(),
             }),

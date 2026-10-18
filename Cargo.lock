@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-app"
-version = "0.0.1-alpha2"
+version = "0.0.1-alpha3"
 dependencies = [
  "holzwave-apple-ai",
  "holzwave-core",
@@ -2088,7 +2088,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-apple-ai"
-version = "0.0.1-alpha2"
+version = "0.0.1-alpha3"
 dependencies = [
  "holzwave-core",
  "swift-rs",
@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-core"
-version = "0.0.1-alpha2"
+version = "0.0.1-alpha3"
 dependencies = [
  "ammonia",
  "argon2",
@@ -2129,7 +2129,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-ipc"
-version = "0.0.1-alpha2"
+version = "0.0.1-alpha3"
 dependencies = [
  "getrandom 0.4.3",
  "interprocess",
@@ -2139,7 +2139,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-spike"
-version = "0.0.1-alpha2"
+version = "0.0.1-alpha3"
 dependencies = [
  "holzwave-core",
 ]
@@ -6726,7 +6726,7 @@ dependencies = [
 
 [[package]]
 name = "wsh"
-version = "0.0.1-alpha2"
+version = "0.0.1-alpha3"
 dependencies = [
  "holzwave-ipc",
 ]

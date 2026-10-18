@@ -16,8 +16,9 @@ look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, 
 Nextcloud, and an AI chat that sees your terminal only after you share that pane. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
-> **Alpha, macOS only.** holzWave is at `0.0.1-alpha2`: a preview build for Apple Silicon, unsigned (no Developer ID,
-> no notarisation). Windows and Linux builds are written but not yet tested on real machines. The window in the images below is the
+> **Alpha.** holzWave is at `0.0.1-alpha3`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
+> The macOS build (Apple Silicon) is the one the author tests; the Windows and Linux packages are cross-built on a Mac and
+> have not run on real machines yet. The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built.
 
 ## Install (macOS, Apple Silicon)
@@ -122,7 +123,7 @@ connection manager), phase 4 (file browser, previews, editor), the encrypted syn
 tested against test servers. The system monitor (local and over SSH), the history search and the sidebar with widgets are
 built too, and so are the AI chat and the on-device model, whose manual checks wait for real accounts and Macs (Part 7 of
 the [test plan](docs/test-plan.md)); the native integrations and mobile follow.
-Versions go `0.0.1-alpha2`, `0.0.1-beta1`, `0.0.1`.
+Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation
