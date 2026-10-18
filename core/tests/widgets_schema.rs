@@ -11,15 +11,18 @@
 //! file is linted keyword by keyword before any verdict is read.
 
 mod common;
+#[path = "common/schema_check.rs"]
+mod schema_check;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use holzwave_core::widgets::{self, Body, WidgetDef, MAX_FILE, MAX_ITEMS, MAX_WIDGETS};
 use regex::Regex;
-use serde_json::{json, Map, Number, Value};
+use schema_check::{evaluate, load_schema, regex, Outcome, Unsupported};
+use serde_json::{json, Map, Value};
 
 const SCHEMA_PATH: &str = "docs/widget.schema.json";
 const CONFIG_PATH: &str = "docs/config.md";
@@ -34,335 +37,8 @@ fn read(relative: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// The checker: a subset of JSON Schema 2020-12 that fails closed.
-// ---------------------------------------------------------------------------------------------------------------------
+// The checker lives in the shared test module; the schema of widgets is read and judged below.
 
-/// The checker was asked to judge a schema that uses something it does not evaluate.
-#[derive(Debug, PartialEq)]
-struct Unsupported(String);
-
-/// `Ok(None)` is valid, `Ok(Some(path))` is invalid and names the first failing keyword, `Err` is a schema the checker
-/// cannot judge.
-type Outcome = Result<Option<String>, Unsupported>;
-
-/// Keywords that decide a verdict.
-const EVALUATED: &[&str] = &[
-    "type",
-    "enum",
-    "const",
-    "minimum",
-    "maximum",
-    "minLength",
-    "maxLength",
-    "pattern",
-    "minItems",
-    "maxItems",
-    "items",
-    "required",
-    "properties",
-    "additionalProperties",
-    "allOf",
-    "oneOf",
-    "if",
-    "then",
-    "else",
-    "$ref",
-];
-
-/// Keywords that never decide a verdict. `$defs` is a container: its entries are reached through `$ref` and are linted.
-const ANNOTATIONS: &[&str] = &["$schema", "$comment", "title", "description", "default", "examples", "$defs"];
-
-const TYPE_NAMES: &[&str] = &["object", "array", "string", "integer", "number", "boolean", "null"];
-
-/// The deepest chain of references the checker follows.
-const MAX_DEPTH: usize = 32;
-
-fn unsupported(at: &str, why: &str) -> Unsupported {
-    Unsupported(format!("{at}: {why}"))
-}
-
-/// A compiled pattern, cached: the sweeps judge thousands of documents with the same few patterns.
-fn regex(pattern: &str) -> Result<Arc<Regex>, Unsupported> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Regex>>>> = OnceLock::new();
-    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(found) = cache.get(pattern) {
-        return Ok(Arc::clone(found));
-    }
-    let compiled = Regex::new(pattern)
-        .map_err(|e| Unsupported(format!("the pattern {pattern:?} does not compile: {e}")))?;
-    let compiled = Arc::new(compiled);
-    cache.insert(pattern.to_owned(), Arc::clone(&compiled));
-    Ok(compiled)
-}
-
-/// The `$defs` entry that a reference names. Only `#/$defs/<name>` is followed: no remote, no anchor, no other pointer.
-fn resolve<'a>(root: &'a Value, reference: &Value, at: &str) -> Result<&'a Value, Unsupported> {
-    let reference = reference.as_str().ok_or_else(|| unsupported(at, "a $ref must be a string"))?;
-    let name = reference
-        .strip_prefix("#/$defs/")
-        .filter(|n| !n.is_empty() && !n.contains('/') && !n.contains('~'))
-        .ok_or_else(|| unsupported(at, &format!("the reference {reference:?} is not a local $defs entry")))?;
-    root.get("$defs")
-        .and_then(|defs| defs.get(name))
-        .ok_or_else(|| unsupported(at, &format!("the reference {reference:?} names no $defs entry")))
-}
-
-/// Check every keyword of every subschema, also in branches that no document reaches.
-fn lint(root: &Value) -> Result<(), Unsupported> {
-    walk(root, root, "#")
-}
-
-fn walk_map(root: &Value, value: &Value, at: &str) -> Result<(), Unsupported> {
-    let map = value.as_object().ok_or_else(|| unsupported(at, "this must be an object of subschemas"))?;
-    map.iter().try_for_each(|(name, sub)| walk(root, sub, &format!("{at}/{name}")))
-}
-
-fn walk_list(root: &Value, value: &Value, at: &str) -> Result<(), Unsupported> {
-    let list = value.as_array().ok_or_else(|| unsupported(at, "this must be an array of subschemas"))?;
-    list.iter().enumerate().try_for_each(|(n, sub)| walk(root, sub, &format!("{at}/{n}")))
-}
-
-fn walk(root: &Value, schema: &Value, at: &str) -> Result<(), Unsupported> {
-    let map = schema.as_object().ok_or_else(|| unsupported(at, "a subschema must be an object"))?;
-    for (key, value) in map {
-        let here = format!("{at}/{key}");
-        match key.as_str() {
-            "$defs" | "properties" => walk_map(root, value, &here)?,
-            "allOf" | "oneOf" => walk_list(root, value, &here)?,
-            "items" | "if" | "then" | "else" => walk(root, value, &here)?,
-            "additionalProperties" => {
-                if !value.is_boolean() {
-                    walk(root, value, &here)?;
-                }
-            }
-            "$ref" => {
-                resolve(root, value, &here)?;
-            }
-            "pattern" => {
-                let pattern = value.as_str().ok_or_else(|| unsupported(&here, "a pattern must be a string"))?;
-                regex(pattern)?;
-            }
-            "type" => {
-                let names: Vec<&str> = match value {
-                    Value::String(one) => vec![one.as_str()],
-                    Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
-                    _ => Vec::new(),
-                };
-                let count = value.as_array().map_or(1, Vec::len);
-                if names.len() != count || names.iter().any(|n| !TYPE_NAMES.contains(n)) {
-                    return Err(unsupported(&here, "a type must be a name or an array of names the checker knows"));
-                }
-            }
-            other if EVALUATED.contains(&other) || ANNOTATIONS.contains(&other) => {}
-            other => return Err(unsupported(&here, &format!("the keyword {other} is not evaluated by the checker"))),
-        }
-    }
-    Ok(())
-}
-
-fn as_i128(n: &Number) -> Option<i128> {
-    n.as_i64().map(i128::from).or_else(|| n.as_u64().map(i128::from))
-}
-
-fn compare(a: &Number, b: &Number) -> std::cmp::Ordering {
-    match (as_i128(a), as_i128(b)) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        _ => {
-            let (x, y) = (a.as_f64().expect("a JSON number has an f64"), b.as_f64().expect("a JSON number has an f64"));
-            x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
-        }
-    }
-}
-
-fn type_matches(name: &str, instance: &Value) -> bool {
-    match name {
-        "object" => instance.is_object(),
-        "array" => instance.is_array(),
-        "string" => instance.is_string(),
-        "boolean" => instance.is_boolean(),
-        "null" => instance.is_null(),
-        "number" => instance.is_number(),
-        // A number written with a fraction or an exponent is not an integer, whatever its value: the loader reads its
-        // integer members as integers and refuses 25.0 and 2.5e1.
-        "integer" => matches!(instance, Value::Number(n) if n.is_i64() || n.is_u64()),
-        _ => false,
-    }
-}
-
-fn limit(value: &Value, at: &str) -> Result<u64, Unsupported> {
-    value.as_u64().ok_or_else(|| unsupported(at, "a limit must be a whole number"))
-}
-
-/// Judge `instance` by `schema` (a subschema of `root`). Every keyword of the schema must be known, reached or not.
-fn evaluate(root: &Value, schema: &Value, instance: &Value) -> Outcome {
-    lint(root)?;
-    eval(root, schema, instance, "#", 0)
-}
-
-fn eval_all<'a>(
-    root: &Value,
-    schemas: impl Iterator<Item = (String, &'a Value)>,
-    instance: &Value,
-    depth: usize,
-) -> Result<Vec<Option<String>>, Unsupported> {
-    schemas.map(|(at, sub)| eval(root, sub, instance, &at, depth)).collect()
-}
-
-fn eval(root: &Value, schema: &Value, instance: &Value, at: &str, depth: usize) -> Outcome {
-    if depth > MAX_DEPTH {
-        return Err(unsupported(at, "references nest deeper than the checker follows"));
-    }
-    let map = schema.as_object().ok_or_else(|| unsupported(at, "a subschema must be an object"))?;
-    for (key, value) in map {
-        let here = format!("{at}/{key}");
-        let refused = Ok(Some(here.clone()));
-        match key.as_str() {
-            "type" => {
-                let names: Vec<&str> = match value {
-                    Value::String(one) => vec![one.as_str()],
-                    other => other.as_array().into_iter().flatten().filter_map(Value::as_str).collect(),
-                };
-                if !names.iter().any(|name| type_matches(name, instance)) {
-                    return refused;
-                }
-            }
-            "enum" => {
-                let allowed = value.as_array().ok_or_else(|| unsupported(&here, "an enum must be an array"))?;
-                if !allowed.contains(instance) {
-                    return refused;
-                }
-            }
-            "const" => {
-                if value != instance {
-                    return refused;
-                }
-            }
-            "minimum" | "maximum" => {
-                if let Value::Number(n) = instance {
-                    let Value::Number(bound) = value else {
-                        return Err(unsupported(&here, "a bound must be a number"));
-                    };
-                    let order = compare(n, bound);
-                    let below = key == "minimum" && order == std::cmp::Ordering::Less;
-                    let above = key == "maximum" && order == std::cmp::Ordering::Greater;
-                    if below || above {
-                        return refused;
-                    }
-                }
-            }
-            "minLength" | "maxLength" => {
-                if let Value::String(s) = instance {
-                    let bound = limit(value, &here)?;
-                    let chars = s.chars().count() as u64;
-                    if (key == "minLength" && chars < bound) || (key == "maxLength" && chars > bound) {
-                        return refused;
-                    }
-                }
-            }
-            "pattern" => {
-                if let Value::String(s) = instance {
-                    let pattern = value.as_str().ok_or_else(|| unsupported(&here, "a pattern must be a string"))?;
-                    if !regex(pattern)?.is_match(s) {
-                        return refused;
-                    }
-                }
-            }
-            "minItems" | "maxItems" => {
-                if let Value::Array(list) = instance {
-                    let bound = limit(value, &here)?;
-                    let count = list.len() as u64;
-                    if (key == "minItems" && count < bound) || (key == "maxItems" && count > bound) {
-                        return refused;
-                    }
-                }
-            }
-            "items" => {
-                if let Value::Array(list) = instance {
-                    for (n, element) in list.iter().enumerate() {
-                        if let Some(path) = eval(root, value, element, &here, depth)? {
-                            return Ok(Some(format!("{path} (item {n})")));
-                        }
-                    }
-                }
-            }
-            "required" => {
-                if let Value::Object(members) = instance {
-                    let names = value.as_array().ok_or_else(|| unsupported(&here, "required must be an array"))?;
-                    if names.iter().any(|name| name.as_str().is_none_or(|n| !members.contains_key(n))) {
-                        return refused;
-                    }
-                }
-            }
-            "properties" => {
-                if let Value::Object(members) = instance {
-                    let declared = value.as_object().ok_or_else(|| unsupported(&here, "properties must be an object"))?;
-                    for (name, sub) in declared {
-                        if let Some(member) = members.get(name) {
-                            if let Some(path) = eval(root, sub, member, &format!("{here}/{name}"), depth)? {
-                                return Ok(Some(path));
-                            }
-                        }
-                    }
-                }
-            }
-            "additionalProperties" => {
-                if let Value::Object(members) = instance {
-                    let declared = map.get("properties").and_then(Value::as_object);
-                    for (name, member) in members {
-                        if declared.is_some_and(|d| d.contains_key(name)) {
-                            continue;
-                        }
-                        match value {
-                            Value::Bool(false) => return Ok(Some(format!("{here} (member {name:?})"))),
-                            Value::Bool(true) => {}
-                            sub => {
-                                if let Some(path) = eval(root, sub, member, &here, depth)? {
-                                    return Ok(Some(path));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "allOf" => {
-                let list = value.as_array().ok_or_else(|| unsupported(&here, "allOf must be an array"))?;
-                let all = list.iter().enumerate().map(|(n, sub)| (format!("{here}/{n}"), sub));
-                if let Some(path) = eval_all(root, all, instance, depth)?.into_iter().flatten().next() {
-                    return Ok(Some(path));
-                }
-            }
-            "oneOf" => {
-                let list = value.as_array().ok_or_else(|| unsupported(&here, "oneOf must be an array"))?;
-                let all = list.iter().enumerate().map(|(n, sub)| (format!("{here}/{n}"), sub));
-                let matching = eval_all(root, all, instance, depth)?.into_iter().filter(Option::is_none).count();
-                if matching != 1 {
-                    return refused;
-                }
-            }
-            "if" => {
-                let chosen = if eval(root, value, instance, &here, depth)?.is_none() { "then" } else { "else" };
-                if let Some(branch) = map.get(chosen) {
-                    if let Some(path) = eval(root, branch, instance, &format!("{at}/{chosen}"), depth)? {
-                        return Ok(Some(path));
-                    }
-                }
-            }
-            "$ref" => {
-                let target = resolve(root, value, &here)?;
-                let name = value.as_str().unwrap_or_default().trim_start_matches('#');
-                if let Some(path) = eval(root, target, instance, &format!("#{name}"), depth + 1)? {
-                    return Ok(Some(path));
-                }
-            }
-            // `then` and `else` are judged by `if`, and without `if` they are ignored, as the draft says.
-            "then" | "else" => {}
-            other if ANNOTATIONS.contains(&other) => {}
-            other => return Err(unsupported(&here, &format!("the keyword {other} is not evaluated by the checker"))),
-        }
-    }
-    Ok(None)
-}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The two verdicts.
@@ -371,14 +47,7 @@ fn eval(root: &Value, schema: &Value, instance: &Value, at: &str, depth: usize) 
 /// The schema file, parsed once and linted before it is returned.
 fn schema() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        let text = read(SCHEMA_PATH);
-        let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{SCHEMA_PATH} is not JSON: {e}"));
-        if let Err(Unsupported(why)) = lint(&value) {
-            panic!("{SCHEMA_PATH} uses what the checker does not evaluate: {why}");
-        }
-        value
-    })
+    SCHEMA.get_or_init(|| load_schema(&root(), SCHEMA_PATH))
 }
 
 /// What the app does with a widget file named `widget.json`.
@@ -389,13 +58,7 @@ fn loader_verdict(text: &str) -> Result<WidgetDef, String> {
 /// What the schema says: `Err` is "not JSON" or the first failing keyword path. A keyword the checker does not evaluate
 /// stops the test and is never an accept.
 fn schema_verdict(text: &str) -> Result<(), String> {
-    let document: Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
-    let schema = schema();
-    match eval(schema, schema, &document, "#", 0) {
-        Ok(None) => Ok(()),
-        Ok(Some(path)) => Err(path),
-        Err(Unsupported(why)) => panic!("the checker cannot judge {SCHEMA_PATH}: {why}"),
-    }
+    schema_check::schema_verdict(schema(), SCHEMA_PATH, text)
 }
 
 /// Both sides must give the same verdict; says whether they accepted.
@@ -1255,8 +918,7 @@ const BOUNDS: &[Bound] = &[
 
 /// The whole number at `pointer` of the schema file.
 fn pointer_number(pointer: &str) -> u64 {
-    let number = schema().pointer(pointer).and_then(Value::as_u64);
-    number.unwrap_or_else(|| panic!("{SCHEMA_PATH} has no number at {pointer}"))
+    schema_check::pointer_number(schema(), SCHEMA_PATH, pointer)
 }
 
 #[test]
@@ -1276,29 +938,7 @@ fn every_bound_of_the_schema_is_a_bound_of_the_loader() {
     }
     // The rows cover every number that the schema file states.
     let mut numbers = Vec::new();
-    fn numbers_in(value: &Value, at: &str, out: &mut Vec<String>) {
-        match value {
-            Value::Object(map) => {
-                for (key, inner) in map {
-                    let here = format!("{at}/{key}");
-                    match (key.as_str(), inner) {
-                        (
-                            "minLength" | "maxLength" | "minimum" | "maximum" | "minItems" | "maxItems",
-                            Value::Number(_),
-                        ) => out.push(here),
-                        // A default is a hint for editors; it is tested against the loader in its own test.
-                        ("default" | "enum", _) => {}
-                        _ => numbers_in(inner, &here, out),
-                    }
-                }
-            }
-            Value::Array(list) => {
-                list.iter().enumerate().for_each(|(n, inner)| numbers_in(inner, &format!("{at}/{n}"), out));
-            }
-            _ => {}
-        }
-    }
-    numbers_in(schema(), "", &mut numbers);
+    schema_check::limit_pointers(schema(), "", &mut numbers);
     let covered: BTreeSet<&str> = BOUNDS.iter().map(|b| b.pointer).collect();
     for number in &numbers {
         assert!(covered.contains(number.as_str()), "the schema states a number at {number} that no bound row tests");
