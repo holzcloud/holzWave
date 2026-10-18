@@ -70,7 +70,7 @@ mod unix {
         .iter()
         .map(|a| os(a))
         .collect();
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&fake.path(), &args, plain_env(), &limits(MIB, 60_000), &RunCancel::default())
             .expect("the fake runs");
         assert_eq!(result.end, RunEnd::Finished);
@@ -86,7 +86,7 @@ mod unix {
         let dir = Scratch::new();
         let fake = FakeCli::new(&dir.0, "tool").reads_stdin();
         // A `cat` that inherited a terminal or a pipe would wait for input until the time limit ends it.
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 30_000), &RunCancel::default())
             .expect("the fake runs");
         assert_eq!(result.end, RunEnd::Finished, "cat on a closed input returns at once");
@@ -97,7 +97,7 @@ mod unix {
     fn the_child_leads_its_own_group_and_has_no_shell_in_between() {
         let dir = Scratch::new();
         let fake = FakeCli::new(&dir.0, "tool");
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 60_000), &RunCancel::default())
             .expect("the fake runs");
         assert_eq!(result.end, RunEnd::Finished);
@@ -113,7 +113,7 @@ mod unix {
 
     #[test]
     fn a_program_that_is_not_an_absolute_path_is_refused_before_it_starts() {
-        let result = Runner::new().run_argv(
+        let result = Runner::new(true).run_argv(
             std::path::Path::new("kubectl"),
             &[],
             plain_env(),
@@ -144,7 +144,7 @@ mod unix {
         // The fake sleeps after it printed: a runner that did not kill the group would wait for the sleep.
         let fake = FakeCli::new(&dir.0, "tool").prints_bytes(20 * MIB).sleeps(30);
         let started = Instant::now();
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 60_000), &RunCancel::default())
             .expect("the fake runs");
         assert!(started.elapsed() < Duration::from_secs(10), "the call did not wait for the sleep");
@@ -157,10 +157,40 @@ mod unix {
     }
 
     #[test]
+    fn a_run_that_ends_by_itself_over_the_cap_is_still_an_overflow() {
+        let dir = Scratch::new();
+        // No sleep: the fake may be gone before the runner looks at the cap. The answer is the same.
+        let fake = FakeCli::new(&dir.0, "tool").prints_bytes(2 * MIB);
+        let result = Runner::new(true)
+            .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 60_000), &RunCancel::default())
+            .expect("the fake runs");
+        assert_eq!(result.end, RunEnd::Overflow, "cut-off output is a failure, whatever the order of events");
+        assert!(result.stdout_dropped);
+        assert!(result.stdout == pattern(MIB), "what is kept is the head");
+        assert_eq!(result.status, None, "no status of a run that failed");
+    }
+
+    #[test]
+    fn a_program_that_leaves_a_child_holding_its_output_does_not_hold_the_call() {
+        let dir = Scratch::new();
+        let fake = FakeCli::new(&dir.0, "tool").prints("done").leaves_a_child(30);
+        let started = Instant::now();
+        let result = Runner::new(true)
+            .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 60_000), &RunCancel::default())
+            .expect("the fake runs");
+        assert!(started.elapsed() < Duration::from_secs(20), "the call did not wait for the sleeping child");
+        assert_eq!(result.end, RunEnd::Finished, "the program itself ended and its output was read to the end");
+        assert_eq!(result.status, Some(0));
+        assert_eq!(result.stdout, b"done");
+        let child = fake.child_pid().expect("the fake started its child");
+        assert!(wait_until(Duration::from_secs(3), || !process_exists(child)), "the child is gone: no leftover");
+    }
+
+    #[test]
     fn stderr_keeps_its_start() {
         let dir = Scratch::new();
         let fake = FakeCli::new(&dir.0, "tool").prints("fine").prints_stderr_bytes(MIB);
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 60_000), &RunCancel::default())
             .expect("the fake runs");
         assert_eq!(result.end, RunEnd::Finished, "a long stderr is no failure");
@@ -176,7 +206,7 @@ mod unix {
         let dir = Scratch::new();
         let fake = FakeCli::new(&dir.0, "tool").sleeps(30);
         let started = Instant::now();
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 1_500), &RunCancel::default())
             .expect("the fake runs");
         assert_eq!(result.end, RunEnd::TimedOut);
@@ -187,7 +217,7 @@ mod unix {
 
         // A program that started a child of its own leaves no child behind.
         let parent = FakeCli::new(&dir.0, "parent").spawns_a_sleeping_child(30);
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&parent.path(), &[], plain_env(), &limits(MIB, 2_500), &RunCancel::default())
             .expect("the fake runs");
         assert_eq!(result.end, RunEnd::TimedOut);
@@ -203,7 +233,7 @@ mod unix {
         let raised = Instant::now();
         let result = std::thread::scope(|scope| {
             let handle = scope.spawn(|| {
-                Runner::new().run_argv(&parent.path(), &[], plain_env(), &limits(MIB, 60_000), &cancel)
+                Runner::new(true).run_argv(&parent.path(), &[], plain_env(), &limits(MIB, 60_000), &cancel)
             });
             assert!(wait_until(Duration::from_secs(30), || parent.child_pid().is_some()), "the fake started its child");
             cancel.cancel();
@@ -220,7 +250,7 @@ mod unix {
         let fake = FakeCli::new(&dir.0, "never");
         let early = RunCancel::default();
         early.cancel();
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&fake.path(), &[], plain_env(), &RunLimits::default(), &early)
             .expect("an answer, not an error");
         assert_eq!(result.end, RunEnd::Cancelled);
@@ -231,7 +261,7 @@ mod unix {
     fn at_most_four_children_run_at_once() {
         let dir = Scratch::new();
         let fake = FakeCli::new(&dir.0, "tool").sleeps(2);
-        let runner = Runner::new();
+        let runner = Runner::new(true);
         let barrier = Barrier::new(5);
         let calls: Vec<(Result<RunEnd, RunError>, Instant, Duration)> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..5)
@@ -262,6 +292,31 @@ mod unix {
         assert_eq!(again.end, RunEnd::Finished);
     }
 
+    #[test]
+    fn a_disabled_runner_starts_nothing() {
+        let dir = Scratch::new();
+        let fake = FakeCli::new(&dir.0, "tool").prints("ran");
+        let disabled = Runner::new(false);
+        let error = disabled
+            .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 60_000), &RunCancel::default())
+            .expect_err("a disabled runner answers an error");
+        assert_eq!(error, RunError::Unsupported);
+        assert!(!fake.started(), "no process was started");
+        assert!(!error.to_string().contains(&*fake.path().to_string_lossy()), "the sentence names nothing of the call");
+        // A switch raised before the call and a program that is no absolute path change nothing: still unsupported.
+        let cancel = RunCancel::default();
+        cancel.cancel();
+        assert_eq!(
+            disabled.run_argv(&fake.path(), &[], plain_env(), &RunLimits::default(), &cancel).expect_err("unsupported"),
+            RunError::Unsupported
+        );
+        let enabled = Runner::new(true);
+        let result = enabled
+            .run_argv(&fake.path(), &[], plain_env(), &limits(MIB, 60_000), &RunCancel::default())
+            .expect("an enabled runner runs");
+        assert_eq!(result.stdout, b"ran");
+    }
+
     /// The secret of the canary tests: a value that must be found in the child's environment and nowhere else.
     const CANARY: &str = "hw-canary-secret-value-0001";
 
@@ -281,16 +336,18 @@ mod unix {
             (os("HOME"), os("/home/user")),
             (os("AZURE_CLIENT_SECRET"), os("hw-canary-azure")),
         ];
-        let env = EnvPolicy::build(inherited, Os::Linux, "/usr/bin:/bin".to_owned(), extra).expect("a valid environment");
+        let env =
+            EnvPolicy::build(inherited, Os::Linux, "/usr/bin:/bin".to_owned(), extra).expect("a valid environment");
         assert!(!format!("{env:?}").contains(CANARY), "the debug text of an environment holds no value");
         let args = [os("get"), os("pods")];
-        let result = Runner::new()
+        let result = Runner::new(true)
             .run_argv(&fake.path(), &args, env, &limits(MIB, 60_000), &RunCancel::default())
             .expect("the fake runs");
         assert_eq!(result.end, RunEnd::Finished);
         assert!(!format!("{result:?}").contains(CANARY));
         let environment = fake.env();
-        assert_eq!(environment.get("AWS_SECRET_ACCESS_KEY").map(String::as_str), Some(CANARY), "the secret is in the child");
+        let secret = environment.get("AWS_SECRET_ACCESS_KEY").map(String::as_str);
+        assert_eq!(secret, Some(CANARY), "the secret is in the child");
         assert_eq!(environment.get("AZURE_CLIENT_SECRET").map(String::as_str), Some("hw-canary-azure"));
         assert_eq!(environment.get("HOME").map(String::as_str), Some("/home/user"));
         for denied in ["HOLZWAVE_TOKEN", "LD_PRELOAD", "GIT_SSH_COMMAND"] {
@@ -322,13 +379,13 @@ mod unix {
     }
 }
 
-// ---- the pure tests: they run on every host --------------------------------------------------------------------------
+// ---- the pure tests: they run on every host ----------------------------------------------------------------
 
 mod pure {
     use std::ffi::OsString;
     use std::path::Path;
 
-    use holzwave_core::integrate::run::{check_batch_args, EnvExtra, EnvPolicy, RunError};
+    use holzwave_core::integrate::run::{check_batch_args, spawn_supported, EnvExtra, EnvPolicy, Launch, RunError};
     use holzwave_core::platform::Os;
     use zeroize::Zeroizing;
 
@@ -353,7 +410,14 @@ mod pure {
         "IFS",
     ];
     const KEPT: [&str; 6] =
-        ["AWS_SECRET_ACCESS_KEY", "AZURE_CLIENT_SECRET", "GOOGLE_APPLICATION_CREDENTIALS", "KUBECONFIG", "HOME", "LANG"];
+        [
+            "AWS_SECRET_ACCESS_KEY",
+            "AZURE_CLIENT_SECRET",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "KUBECONFIG",
+            "HOME",
+            "LANG",
+        ];
 
     #[test]
     fn the_environment_policy_keeps_credential_variables_and_drops_loader_and_app_variables() {
@@ -375,13 +439,26 @@ mod pure {
 
     #[test]
     fn on_windows_the_same_names_in_other_cases_are_dropped_too_and_on_unix_they_are_not() {
-        let other_case = ["ld_preload", "Holzwave_Token", "dyld_insert_libraries", "pythonpath", "Node_Options", "git_dir", "Bash_Env", "env", "Ifs", "Path"];
+        let other_case = [
+            "ld_preload",
+            "Holzwave_Token",
+            "dyld_insert_libraries",
+            "pythonpath",
+            "Node_Options",
+            "git_dir",
+            "Bash_Env",
+            "env",
+            "Ifs",
+            "Path",
+        ];
         let windows = EnvPolicy::build(pairs(&other_case), Os::Windows, "C:\\tool".to_owned(), EnvExtra::default())
             .expect("valid");
         assert_eq!(windows.names(), ["PATH"], "only the rebuilt PATH is left on Windows");
         assert_eq!(windows.value("PATH"), Some("C:\\tool"));
-        let linux = EnvPolicy::build(pairs(&other_case), Os::Linux, "/bin".to_owned(), EnvExtra::default()).expect("valid");
-        assert_eq!(linux.names().len(), other_case.len() + 1, "names are case-sensitive on Unix: ten kept and the PATH");
+        let linux =
+            EnvPolicy::build(pairs(&other_case), Os::Linux, "/bin".to_owned(), EnvExtra::default()).expect("valid");
+        let kept = other_case.len() + 1;
+        assert_eq!(linux.names().len(), kept, "names are case-sensitive on Unix: ten kept and the PATH");
         assert_eq!(linux.value("PATH"), Some("/bin"), "the rebuilt PATH, not the inherited Path");
     }
 
@@ -416,7 +493,8 @@ mod pure {
             isolation: vec![("KUBECONFIG".to_owned(), "/overlay".to_owned())],
             secrets: Vec::new(),
         };
-        let env = EnvPolicy::build(pairs(&["HOME", "KUBECONFIG", "LANG"]), Os::Linux, "/bin".to_owned(), extra).expect("valid");
+        let inherited = pairs(&["HOME", "KUBECONFIG", "LANG"]);
+        let env = EnvPolicy::build(inherited, Os::Linux, "/bin".to_owned(), extra).expect("valid");
         assert_eq!(env.value("HOME"), Some("/profile"), "the profile's variable wins");
         assert_eq!(env.value("KUBECONFIG"), Some("/overlay"), "the isolation variable wins");
         assert_eq!(env.value("AZURE_CORE_COLLECT_TELEMETRY"), Some("false"));
@@ -425,7 +503,16 @@ mod pure {
         let build = |extra: EnvExtra| EnvPolicy::build(std::iter::empty(), Os::Linux, "/bin".to_owned(), extra);
         let plain = |name: &str| EnvExtra { plain: vec![(name.to_owned(), "v".to_owned())], ..EnvExtra::default() };
         for name in [
-            "HOLZWAVE_X", "LD_PRELOAD", "DYLD_FALLBACK_LIBRARY_PATH", "PYTHONPATH", "NODE_OPTIONS", "GIT_ASKPASS", "BASH_ENV", "ENV", "IFS", "PATH",
+            "HOLZWAVE_X",
+            "LD_PRELOAD",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "PYTHONPATH",
+            "NODE_OPTIONS",
+            "GIT_ASKPASS",
+            "BASH_ENV",
+            "ENV",
+            "IFS",
+            "PATH",
             "KUBECONFIG", "TALOSCONFIG", "AZURE_CONFIG_DIR", "GAMCFGDIR", "GAMCFGSECTION",
         ] {
             assert_eq!(build(plain(name)).expect_err(name), RunError::EnvName, "a profile may not set {name}");
@@ -442,9 +529,11 @@ mod pure {
         static EVIL: [(&str, &str); 1] = [("LD_PRELOAD", "x")];
         let fixed = EnvExtra { fixed: &EVIL, ..EnvExtra::default() };
         assert_eq!(build(fixed).expect_err("a fixed variable is no way around it either"), RunError::EnvName);
-        let secret = EnvExtra { secrets: vec![("PATH".to_owned(), Zeroizing::new("x".to_owned()))], ..EnvExtra::default() };
+        let secret_path = vec![("PATH".to_owned(), Zeroizing::new("x".to_owned()))];
+        let secret = EnvExtra { secrets: secret_path, ..EnvExtra::default() };
         assert_eq!(build(secret).expect_err("a secret named PATH"), RunError::EnvName);
-        let many = EnvExtra { plain: (0..300).map(|n| (format!("V_{n}"), "v".to_owned())).collect(), ..EnvExtra::default() };
+        let plain_many = (0..300).map(|n| (format!("V_{n}"), "v".to_owned())).collect();
+        let many = EnvExtra { plain: plain_many, ..EnvExtra::default() };
         assert_eq!(build(many).expect_err("too many extras"), RunError::TooManyVariables);
         assert_eq!(
             EnvPolicy::build(std::iter::empty(), Os::Linux, "a\0b".to_owned(), EnvExtra::default()).expect_err("PATH"),
@@ -455,9 +544,13 @@ mod pure {
     #[test]
     fn the_names_a_pane_has_removed_are_the_denied_ones_that_are_present() {
         let inherited: Vec<OsString> =
-            ["HOLZWAVE_TOKEN", "HOME", "LD_PRELOAD", "PATH", "GIT_DIR", "LD_PRELOAD", "A=B", "", "NODE_OPTIONS"].iter().map(|n| os(n)).collect();
+            ["HOLZWAVE_TOKEN", "HOME", "LD_PRELOAD", "PATH", "GIT_DIR", "LD_PRELOAD", "A=B", "", "NODE_OPTIONS"]
+                .iter()
+                .map(|n| os(n))
+                .collect();
         let removals = EnvPolicy::removals(inherited.clone(), Os::Linux);
-        assert_eq!(removals, ["GIT_DIR", "HOLZWAVE_TOKEN", "LD_PRELOAD", "NODE_OPTIONS"], "sorted, once, no PATH, no HOME");
+        let expected = ["GIT_DIR", "HOLZWAVE_TOKEN", "LD_PRELOAD", "NODE_OPTIONS"];
+        assert_eq!(removals, expected, "sorted, once, no PATH, no HOME");
         let windows = EnvPolicy::removals([os("Ld_Preload"), os("Path"), os("Holzwave_Ipc")], Os::Windows);
         assert_eq!(windows, ["Holzwave_Ipc", "Ld_Preload"]);
         assert!(EnvPolicy::removals([os("ld_preload")], Os::Linux).is_empty(), "case-sensitive on Unix");
@@ -472,7 +565,8 @@ mod pure {
         assert!(check_batch_args("c:\\tools\\gam.Bat", &fine, Os::Windows).is_ok());
         assert!(check_batch_args("x.cmd", &args(&["a.b:c/d@e=f+g,h_i-j"]), Os::Windows).is_ok(), "the whole charset");
         for bad in [
-            "a b", "a%b", "a^b", "a&b", "a|b", "a<b", "a>b", "a\"b", "a\nb", "a\rb", "caf\u{e9}", "", "a\tb", "a;b", "a(b", "a)b", "a!b", "a`b", "a$b", "a\\b", "a'b", "a*b", "a?b", "a~b", "a#b", "a\0b",
+            "a b", "a%b", "a^b", "a&b", "a|b", "a<b", "a>b", "a\"b", "a\nb", "a\rb", "caf\u{e9}", "", "a\tb",
+            "a;b", "a(b", "a)b", "a!b", "a`b", "a$b", "a\\b", "a'b", "a*b", "a?b", "a~b", "a#b", "a\0b",
         ] {
             assert_eq!(check_batch_args("az.cmd", &args(&[bad]), Os::Windows), Err(RunError::BatchArgument), "{bad:?}");
         }
@@ -488,6 +582,79 @@ mod pure {
     }
 
     #[test]
+    fn the_spawn_decision_covers_mobile_and_a_flatpak_build() {
+        assert!(!spawn_supported("ios", false), "no process may be started on iOS");
+        assert!(!spawn_supported("android", false), "no process may be started on Android");
+        assert!(!spawn_supported("linux", true), "a Flatpak build runs no integration");
+        assert!(!spawn_supported("macos", true));
+        assert!(!spawn_supported("windows", true));
+        assert!(!spawn_supported("ios", true));
+        for target in ["macos", "linux", "windows", "freebsd"] {
+            assert!(spawn_supported(target, false), "{target} runs the tools of the person");
+        }
+    }
+
+    #[test]
+    fn a_launch_description_prints_sizes_only() {
+        let secret = ("AWS_SECRET_ACCESS_KEY".to_owned(), Zeroizing::new("hw-canary-launch-secret".to_owned()));
+        let extra = EnvExtra {
+            plain: vec![("AWS_REGION".to_owned(), "eu-central-1".to_owned())],
+            secrets: vec![secret],
+            ..EnvExtra::default()
+        };
+        let env = EnvPolicy::build(std::iter::empty(), Os::Linux, "/usr/bin:/bin".to_owned(), extra).expect("valid");
+        let inherited = vec![os("HOLZWAVE_TOKEN"), os("HOME"), os("LD_PRELOAD"), os("GIT_DIR")];
+        let launch = Launch::new(
+            "/opt/tools/kubectl".into(),
+            vec![os("exec"), os("-i"), os("pod-with-a-name")],
+            env,
+            inherited.clone(),
+            Os::Linux,
+            Some("/work/dir".into()),
+            "Exec in pod pod-with-a-name".to_owned(),
+        );
+        assert_eq!(launch.program, Path::new("/opt/tools/kubectl"));
+        assert_eq!(launch.args.len(), 3);
+        assert_eq!(launch.env_remove, EnvPolicy::removals(inherited, Os::Linux), "the removals are the policy's");
+        assert_eq!(launch.env_remove, ["GIT_DIR", "HOLZWAVE_TOKEN", "LD_PRELOAD"]);
+        let names: Vec<&str> = launch.env.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["AWS_REGION", "PATH"], "the plain pairs of the call: the PATH and the profile's variables");
+        assert_eq!(launch.secrets.len(), 1);
+        assert_eq!(launch.secrets[0].0, "AWS_SECRET_ACCESS_KEY");
+        let shown = format!("{launch:?}");
+        let hidden_words = [
+            "hw-canary-launch-secret",
+            "kubectl",
+            "pod-with-a-name",
+            "eu-central-1",
+            "/work/dir",
+            "LD_PRELOAD",
+            "Exec in pod",
+        ];
+        for hidden in hidden_words {
+            assert!(!shown.contains(hidden), "the debug text of a launch shows {hidden}: {shown}");
+        }
+        assert!(shown.contains("args") && shown.contains("secrets"), "it shows counts: {shown}");
+    }
+
+    #[test]
+    fn the_spawn_code_is_gated_off_on_mobile() {
+        let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/integrate/run.rs"))
+            .expect("the runner source");
+        let production = source.split("\n#[cfg(test)]\nmod ").next().expect("a production part");
+        let open = "#[cfg(not(any(target_os = \"ios\", target_os = \"android\")))]\nmod spawn {";
+        let closed = "#[cfg(any(target_os = \"ios\", target_os = \"android\"))]\nmod spawn {";
+        assert!(production.contains(open), "the module that starts processes is behind the gate");
+        let after = production.split(closed).nth(1).expect("a sibling for the gated targets");
+        assert!(after.contains("RunError::Unsupported"), "the sibling answers Unsupported");
+        assert!(!after.contains("Command"), "the sibling starts nothing");
+        // Nothing that starts a process is outside the gated module.
+        let before_gate = production.split(open).next().expect("the part before the gate");
+        assert!(!before_gate.contains("Command::new"), "no spawn before the gate");
+        assert!(!before_gate.contains(".spawn()"), "no spawn before the gate");
+    }
+
+    #[test]
     fn no_secret_or_environment_value_is_printed_by_the_runner_source() {
         let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/integrate/run.rs"))
             .expect("the runner source");
@@ -498,7 +665,18 @@ mod pure {
             .collect::<Vec<_>>()
             .join("\n");
         for forbidden in [
-            "println!", "print!", "eprintln!", "eprint!", "dbg!", "format!(\"{:?}\"", "{env:?}", "{secret", "{value", "log::", "tracing::", "write_all(",
+            "println!",
+            "print!",
+            "eprintln!",
+            "eprint!",
+            "dbg!",
+            "format!(\"{:?}\"",
+            "{env:?}",
+            "{secret",
+            "{value",
+            "log::",
+            "tracing::",
+            "write_all(",
         ] {
             assert!(!code.contains(forbidden), "the runner source holds {forbidden}: a value could be printed");
         }

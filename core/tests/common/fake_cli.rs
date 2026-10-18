@@ -27,7 +27,7 @@ const SCRIPT: &str = "#!/bin/sh
 if [ -n \"$HW_FAKE_WARM\" ]; then exit 0; fi
 d=${0%/*}
 n=${0##*/}
-stdin=0; out_bytes=0; err_bytes=0; sleep_secs=0; child_secs=0; exit_code=0
+stdin=0; out_bytes=0; err_bytes=0; sleep_secs=0; child_secs=0; orphan_secs=0; exit_code=0
 if [ -f \"$d/$n.conf\" ]; then . \"$d/$n.conf\"; fi
 for a in \"$@\"; do printf '%s\\0' \"$a\"; done > \"$d/$n.argv\"
 /usr/bin/env -0 > \"$d/$n.env\"
@@ -39,6 +39,7 @@ if [ -f \"$d/$n.err\" ]; then cat \"$d/$n.err\" >&2; fi
 if [ \"$out_bytes\" -gt 0 ]; then yes 0123456789abcdef0123456789abcde | head -c \"$out_bytes\"; fi
 if [ \"$err_bytes\" -gt 0 ]; then yes 0123456789abcdef0123456789abcde | head -c \"$err_bytes\" >&2; fi
 if [ \"$child_secs\" -gt 0 ]; then sleep \"$child_secs\" & echo \"$!\" > \"$d/$n.child\"; wait; fi
+if [ \"$orphan_secs\" -gt 0 ]; then sleep \"$orphan_secs\" & echo \"$!\" > \"$d/$n.child\"; fi
 if [ \"$sleep_secs\" -gt 0 ]; then sleep \"$sleep_secs\"; fi
 exit \"$exit_code\"
 ";
@@ -47,7 +48,9 @@ exit \"$exit_code\"
 fn master() -> &'static Path {
     static MASTER: OnceLock<PathBuf> = OnceLock::new();
     MASTER.get_or_init(|| {
-        let hash = SCRIPT.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let hash = SCRIPT
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fake_cli");
         fs::create_dir_all(&dir).expect("the build's scratch directory");
         let path = dir.join(format!("base-{hash:016x}"));
@@ -77,6 +80,7 @@ pub struct FakeCli {
     err_bytes: usize,
     sleep_secs: Option<u32>,
     child_secs: Option<u32>,
+    orphan_secs: Option<u32>,
     exit: i32,
     out_text: Option<String>,
     err_text: Option<String>,
@@ -94,6 +98,7 @@ impl FakeCli {
             err_bytes: 0,
             sleep_secs: None,
             child_secs: None,
+            orphan_secs: None,
             exit: 0,
             out_text: None,
             err_text: None,
@@ -135,15 +140,23 @@ impl FakeCli {
         self
     }
 
-    /// The fake starts `sleep secs` in the background, records the pid of that child in `<name>.child` and waits for it.
+    /// The fake starts `sleep secs` in the background, records the pid of that child in `<name>.child` and waits.
     pub fn spawns_a_sleeping_child(mut self, secs: u32) -> FakeCli {
         self.child_secs = Some(secs);
         self.write();
         self
     }
 
-    /// The fake prints `n` bytes on standard output: the line `0123456789abcdef0123456789abcde` and a line feed, repeated
-    /// (see [`pattern`]).
+    /// The fake starts `sleep secs` in the background, records its pid in `<name>.child` and exits without waiting: the
+    /// sleeping child keeps the fake's output pipes open.
+    pub fn leaves_a_child(mut self, secs: u32) -> FakeCli {
+        self.orphan_secs = Some(secs);
+        self.write();
+        self
+    }
+
+    /// The fake prints `n` bytes on standard output: the line `0123456789abcdef0123456789abcde` and a line feed,
+    /// repeated (see [`pattern`]).
     pub fn prints_bytes(mut self, n: usize) -> FakeCli {
         self.out_bytes = n;
         self.write();
@@ -222,12 +235,13 @@ impl FakeCli {
     /// Writes the files the script reads: the numbers and the texts to print.
     fn write(&self) {
         let conf = format!(
-            "stdin={}\nout_bytes={}\nerr_bytes={}\nsleep_secs={}\nchild_secs={}\nexit_code={}\n",
+            "stdin={}\nout_bytes={}\nerr_bytes={}\nsleep_secs={}\nchild_secs={}\norphan_secs={}\nexit_code={}\n",
             u8::from(self.reads_stdin),
             self.out_bytes,
             self.err_bytes,
             self.sleep_secs.unwrap_or(0),
             self.child_secs.unwrap_or(0),
+            self.orphan_secs.unwrap_or(0),
             self.exit
         );
         fs::write(self.file("conf"), conf).expect("write the settings");

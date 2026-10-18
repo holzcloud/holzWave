@@ -1,20 +1,34 @@
 //! Running a tool: an argument list and never a shell, a scrubbed environment, bounded output, a time limit,
 //! cancellation, and a cap on how many children run at once.
+//!
+//! The inverse of the command runner of the AI chat (`exec`), point by point:
+//!
+//! - that one runs a string through a shell; this one takes an absolute program and an argument list and nothing else;
+//! - that one drops every variable that looks like a credential; this one keeps them (a tool needs
+//!   `AWS_SECRET_ACCESS_KEY` and the like) and drops what could hijack the tool: the app's own `HOLZWAVE_` names, the
+//!   loader's and the interpreters';
+//! - that one keeps the tail of the output; this one keeps the head and fails when the cap is passed, so a CSV header
+//!   or a JSON opening brace is never cut off.
+//!
+//! A Flatpak build does not run the integrations (the runner is built disabled): they would start the person's tools on
+//! the host, and the disclosure of that build says the only host command is the login shell. iOS and Android cannot
+//! start a process, so the code that does is compiled out there and the call answers [`RunError::Unsupported`].
+//!
+//! Secrets are held for the moment of the spawn only: a value is a wiped string, reaches the child through its
+//! environment and nowhere else, and is never printed. The accepted residual is the copy that `std::process::Command`
+//! keeps of what it was given until the call ends, and the child's own environment, which `ps eww` can show to the same
+//! user.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Read;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
 use super::args::EnvName;
-use crate::exec::{exit_code, isolate, kill_tree, stop};
 use crate::platform::Os;
 
 /// The most bytes of standard output kept by default.
@@ -43,20 +57,11 @@ pub const MAX_EXTRA_PAIRS: usize = 256;
 /// The most bytes of one variable value, a secret or not.
 pub const MAX_ENV_VALUE: usize = 16 * 1024;
 
-/// How often the run looks at the program, its time limit, its output cap and the switch.
-const POLL: Duration = Duration::from_millis(10);
-/// How long the readers get to reach the end of their pipes after the program ended by itself.
-const DRAIN: Duration = Duration::from_millis(250);
-/// How long the readers get after the process group was killed, before they are given up.
-const REAP: Duration = Duration::from_millis(500);
-/// The size of one read from a pipe.
-const CHUNK: usize = 32 * 1024;
-
 /// The names the app itself sets from its own state: a synced profile may not set them, the isolation of a pane does.
 const APP_STATE_NAMES: [&str; 5] = ["KUBECONFIG", "TALOSCONFIG", "AZURE_CONFIG_DIR", "GAMCFGDIR", "GAMCFGSECTION"];
 /// The prefixes of the names that never reach a child: the app's own, the loader's, the interpreters'.
 const DENIED_PREFIXES: [&str; 6] = ["HOLZWAVE_", "LD_", "DYLD_", "PYTHON", "NODE_", "GIT_"];
-/// The names that never reach a child, exact: shell start-up files and word splitting, and the `PATH` (which is rebuilt).
+/// The names that never reach a child, exact: shell start-up files, word splitting, and the `PATH` (which is rebuilt).
 const DENIED_NAMES: [&str; 4] = ["BASH_ENV", "ENV", "IFS", "PATH"];
 
 /// The environment of a child, built by [`EnvPolicy::build`]. The secret values are wiped when it is dropped, which
@@ -382,6 +387,8 @@ impl std::fmt::Debug for RunResult {
 /// Why a call did not run. Every sentence is fixed and holds nothing of the call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunError {
+    /// The runner is disabled (a Flatpak build) or this target cannot start processes (iOS, Android).
+    Unsupported,
     /// The program is not an absolute path.
     NotAbsolute,
     /// The system refused to start the program or to read its output.
@@ -401,6 +408,7 @@ pub enum RunError {
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::Unsupported => "the integrations are not available in this build",
             Self::NotAbsolute => "the program is not given as an absolute path",
             Self::CannotStart => "the program could not be started",
             Self::Busy => "too many tools are running at once",
@@ -446,29 +454,33 @@ impl Drop for Slot {
     }
 }
 
+/// Whether this build may start the tools of the person at all: not on iOS and Android, where no process may be
+/// started, and not in a Flatpak build (the integrations are not available there: they would start the person's tools
+/// on the host, and the disclosure of that build keeps the host commands to the login shell). `target_os` is the
+/// value of `std::env::consts::OS`; the app passes `platform::in_flatpak(..)` for `in_flatpak`.
+pub fn spawn_supported(target_os: &str, in_flatpak: bool) -> bool {
+    !in_flatpak && !matches!(target_os, "ios" | "android")
+}
+
 /// The runner: the one place where an integration starts a child process. Clones share their slots.
 #[derive(Clone)]
 pub struct Runner {
+    enabled: bool,
     slots: Arc<Slots>,
 }
 
 impl std::fmt::Debug for Runner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let running = *self.slots.used.lock().unwrap_or_else(PoisonError::into_inner);
-        f.debug_struct("Runner").field("running", &running).finish()
-    }
-}
-
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new()
+        f.debug_struct("Runner").field("enabled", &self.enabled).field("running", &running).finish()
     }
 }
 
 impl Runner {
-    /// A runner with all of its slots free.
-    pub fn new() -> Self {
-        Self { slots: Arc::new(Slots { used: Mutex::new(0), freed: Condvar::new() }) }
+    /// A runner with all of its slots free. A runner built with `enabled` false (a Flatpak build; the shell passes
+    /// [`spawn_supported`]) answers [`RunError::Unsupported`] to every call and starts nothing.
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled, slots: Arc::new(Slots { used: Mutex::new(0), freed: Condvar::new() }) }
     }
 
     /// Runs `program` (an absolute path, taken as given) with `args` and nothing else: no shell, standard input closed,
@@ -478,8 +490,9 @@ impl Runner {
     ///
     /// # Errors
     ///
-    /// A [`RunError`] with a fixed sentence: the program is not an absolute path, it cannot be started, or four
-    /// children already run and none ended within [`SLOT_WAIT`] ([`RunError::Busy`]; the caller tries again later).
+    /// A [`RunError`] with a fixed sentence: the runner is disabled or the target cannot start processes
+    /// ([`RunError::Unsupported`]), the program is not an absolute path, it cannot be started, or four children already
+    /// run and none ended within [`SLOT_WAIT`] ([`RunError::Busy`]; the caller tries again later).
     pub fn run_argv(
         &self,
         program: &Path,
@@ -488,6 +501,9 @@ impl Runner {
         limits: &RunLimits,
         cancel: &RunCancel,
     ) -> Result<RunResult, RunError> {
+        if !self.enabled {
+            return Err(RunError::Unsupported);
+        }
         if !program.is_absolute() {
             return Err(RunError::NotAbsolute);
         }
@@ -497,145 +513,249 @@ impl Runner {
             return Ok(RunResult::without_output(RunEnd::Cancelled));
         }
         let _slot = self.slots.acquire(SLOT_WAIT).ok_or(RunError::Busy)?;
-        let mut command = Command::new(program);
-        command.args(args).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        for (name, value) in &env.vars {
-            command.env(name, value);
-        }
-        for (name, value) in &env.secrets {
-            command.env(name, value.as_str());
-        }
-        isolate(&mut command);
-        let spawned = command.spawn();
-        drop(command);
-        drop(env);
-        let mut child = spawned.map_err(|_| RunError::CannotStart)?;
-        let pid = child.id();
-        let out = Arc::new(Mutex::new(Head::new(limits.max_stdout)));
-        let err = Arc::new(Mutex::new(Head::new(STDERR_KEPT)));
-        let made = (
-            child.stdout.take().and_then(|pipe| reader("hw-run-out", pipe, Arc::clone(&out))),
-            child.stderr.take().and_then(|pipe| reader("hw-run-err", pipe, Arc::clone(&err))),
-        );
-        let (Some(out_reader), Some(err_reader)) = made else {
-            // A program whose output cannot be read is not run: it ends before it can write what nobody would see.
-            stop(&mut child, pid);
-            return Err(RunError::CannotStart);
-        };
-        let readers = [out_reader, err_reader];
+        spawn::run(program, args, env, &limits, cancel)
+    }
+}
 
-        // The time limit is the program's own run time: it starts when the program does.
-        let deadline = Instant::now() + limits.timeout;
-        let (mut end, status) = loop {
-            match child.try_wait() {
-                Ok(Some(done)) => break (RunEnd::Finished, exit_code(&done)),
-                Ok(None) => {}
-                Err(_) => {
-                    stop(&mut child, pid);
-                    break (RunEnd::Lost, None);
+/// The code that starts a process. It is a module of its own because of the gate that closes it on iOS and Android.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+mod spawn {
+    use std::ffi::OsString;
+    use std::io::Read;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    use super::{Env, RunCancel, RunEnd, RunError, RunLimits, RunResult, STDERR_KEPT};
+    use crate::exec::{exit_code, isolate, kill_tree, stop};
+
+    /// How often the run looks at the program, its time limit, its output cap and the switch.
+    const POLL: Duration = Duration::from_millis(10);
+    /// How long the readers get to reach the end of their pipes after the program ended by itself.
+    const DRAIN: Duration = Duration::from_millis(250);
+    /// How long the readers get after the process group was killed, before they are given up.
+    const REAP: Duration = Duration::from_millis(500);
+    /// The size of one read from a pipe.
+    const CHUNK: usize = 32 * 1024;
+
+    /// Starts `program` and waits for it; the limits are already clamped and a slot is held by the caller.
+    pub(super) fn run(
+        program: &Path,
+        args: &[OsString],
+        env: Env,
+        limits: &RunLimits,
+        cancel: &RunCancel,
+    ) -> Result<RunResult, RunError> {
+            let mut command = Command::new(program);
+            command.args(args).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            for (name, value) in &env.vars {
+                command.env(name, value);
+            }
+            for (name, value) in &env.secrets {
+                command.env(name, value.as_str());
+            }
+            isolate(&mut command);
+            let spawned = command.spawn();
+            drop(command);
+            drop(env);
+            let mut child = spawned.map_err(|_| RunError::CannotStart)?;
+            let pid = child.id();
+            let out = Arc::new(Mutex::new(Head::new(limits.max_stdout)));
+            let err = Arc::new(Mutex::new(Head::new(STDERR_KEPT)));
+            let made = (
+                child.stdout.take().and_then(|pipe| reader("hw-run-out", pipe, Arc::clone(&out))),
+                child.stderr.take().and_then(|pipe| reader("hw-run-err", pipe, Arc::clone(&err))),
+            );
+            let (Some(out_reader), Some(err_reader)) = made else {
+                // A program whose output cannot be read is not run: it ends before it can write what nobody would see.
+                stop(&mut child, pid);
+                return Err(RunError::CannotStart);
+            };
+            let readers = [out_reader, err_reader];
+
+            // The time limit is the program's own run time: it starts when the program does.
+            let deadline = Instant::now() + limits.timeout;
+            let (mut end, status) = loop {
+                match child.try_wait() {
+                    Ok(Some(done)) => break (RunEnd::Finished, exit_code(&done)),
+                    Ok(None) => {}
+                    Err(_) => {
+                        stop(&mut child, pid);
+                        break (RunEnd::Lost, None);
+                    }
                 }
-            }
-            if out.lock().unwrap_or_else(PoisonError::into_inner).overflow {
-                stop(&mut child, pid);
-                break (RunEnd::Overflow, None);
-            }
-            if cancel.is_cancelled() {
-                stop(&mut child, pid);
-                break (RunEnd::Cancelled, None);
-            }
-            if Instant::now() >= deadline {
-                stop(&mut child, pid);
-                break (RunEnd::TimedOut, None);
-            }
-            thread::sleep(POLL);
-        };
+                if out.lock().unwrap_or_else(PoisonError::into_inner).overflow {
+                    stop(&mut child, pid);
+                    break (RunEnd::Overflow, None);
+                }
+                if cancel.is_cancelled() {
+                    stop(&mut child, pid);
+                    break (RunEnd::Cancelled, None);
+                }
+                if Instant::now() >= deadline {
+                    stop(&mut child, pid);
+                    break (RunEnd::TimedOut, None);
+                }
+                thread::sleep(POLL);
+            };
 
-        // After a normal end the readers get a moment to reach the end of their pipes; a helper that still holds a pipe
-        // keeps them blocked, and the group is killed then. After a stop the group is dead already.
-        let mut given_up = false;
-        if end == RunEnd::Finished {
-            if !wait_for(&readers, DRAIN) {
-                kill_tree(pid);
+            // After a normal end the readers get a moment to reach the end of their pipes; a helper that still holds a
+            // pipe keeps them blocked, and the group is killed then. After a stop the group is dead already.
+            let mut given_up = false;
+            if end == RunEnd::Finished {
+                if !wait_for(&readers, DRAIN) {
+                    kill_tree(pid);
+                    given_up = !wait_for(&readers, REAP);
+                }
+            } else {
                 given_up = !wait_for(&readers, REAP);
             }
-        } else {
-            given_up = !wait_for(&readers, REAP);
-        }
-        for handle in readers {
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
-        }
-        let (stdout, stdout_dropped) = take(&out);
-        let (stderr, _) = take(&err);
-        if end == RunEnd::Finished {
-            // The program ended and the cap was passed in the same moment, or its output could not be read to the end.
-            if stdout_dropped {
-                end = RunEnd::Overflow;
-            } else if given_up {
-                end = RunEnd::Lost;
-            }
-        }
-        let status = if end == RunEnd::Finished { status } else { None };
-        Ok(RunResult { stdout, stderr, status, end, stdout_dropped })
-    }
-}
-
-/// The first `cap` bytes of everything pushed, and whether more came.
-struct Head {
-    cap: usize,
-    bytes: Vec<u8>,
-    overflow: bool,
-}
-
-impl Head {
-    fn new(cap: usize) -> Self {
-        Self { cap, bytes: Vec::new(), overflow: false }
-    }
-
-    fn push(&mut self, chunk: &[u8]) {
-        let room = self.cap - self.bytes.len();
-        if chunk.len() > room {
-            self.bytes.extend_from_slice(&chunk[..room]);
-            self.overflow = true;
-        } else {
-            self.bytes.extend_from_slice(chunk);
-        }
-    }
-}
-
-/// The bytes a head holds and whether it dropped any.
-fn take(head: &Mutex<Head>) -> (Vec<u8>, bool) {
-    let mut guard = head.lock().unwrap_or_else(PoisonError::into_inner);
-    (std::mem::take(&mut guard.bytes), guard.overflow)
-}
-
-/// A thread that copies a pipe into a head until the pipe ends; none when the system refuses the thread.
-fn reader(name: &str, mut pipe: impl Read + Send + 'static, head: Arc<Mutex<Head>>) -> Option<JoinHandle<()>> {
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(move || {
-            let mut buffer = vec![0u8; CHUNK];
-            loop {
-                match pipe.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => head.lock().unwrap_or_else(PoisonError::into_inner).push(&buffer[..n]),
+            for handle in readers {
+                if handle.is_finished() {
+                    let _ = handle.join();
                 }
             }
-        })
-        .ok()
+            let (stdout, stdout_dropped) = take(&out);
+            let (stderr, _) = take(&err);
+            if end == RunEnd::Finished {
+                // The program ended and the cap was passed in the same moment, or its output was not read to the end.
+                if stdout_dropped {
+                    end = RunEnd::Overflow;
+                } else if given_up {
+                    end = RunEnd::Lost;
+                }
+            }
+            let status = if end == RunEnd::Finished { status } else { None };
+            Ok(RunResult { stdout, stderr, status, end, stdout_dropped })
+    }
+
+    /// The first `cap` bytes of everything pushed, and whether more came.
+    struct Head {
+        cap: usize,
+        bytes: Vec<u8>,
+        overflow: bool,
+    }
+
+    impl Head {
+        fn new(cap: usize) -> Self {
+            Self { cap, bytes: Vec::new(), overflow: false }
+        }
+
+        fn push(&mut self, chunk: &[u8]) {
+            let room = self.cap - self.bytes.len();
+            if chunk.len() > room {
+                self.bytes.extend_from_slice(&chunk[..room]);
+                self.overflow = true;
+            } else {
+                self.bytes.extend_from_slice(chunk);
+            }
+        }
+    }
+
+    /// The bytes a head holds and whether it dropped any.
+    fn take(head: &Mutex<Head>) -> (Vec<u8>, bool) {
+        let mut guard = head.lock().unwrap_or_else(PoisonError::into_inner);
+        (std::mem::take(&mut guard.bytes), guard.overflow)
+    }
+
+    /// A thread that copies a pipe into a head until the pipe ends; none when the system refuses the thread.
+    fn reader(name: &str, mut pipe: impl Read + Send + 'static, head: Arc<Mutex<Head>>) -> Option<JoinHandle<()>> {
+        thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                let mut buffer = vec![0u8; CHUNK];
+                loop {
+                    match pipe.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.lock().unwrap_or_else(PoisonError::into_inner).push(&buffer[..n]),
+                    }
+                }
+            })
+            .ok()
+    }
+
+    /// Waits until every reader has finished or `limit` has passed; answers whether they all finished.
+    fn wait_for(readers: &[JoinHandle<()>], limit: Duration) -> bool {
+        let until = Instant::now() + limit;
+        loop {
+            if readers.iter().all(JoinHandle::is_finished) {
+                return true;
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            thread::sleep(POLL);
+        }
+    }
 }
 
-/// Waits until every reader has finished or `limit` has passed; answers whether they all finished.
-fn wait_for(readers: &[JoinHandle<()>], limit: Duration) -> bool {
-    let until = Instant::now() + limit;
-    loop {
-        if readers.iter().all(JoinHandle::is_finished) {
-            return true;
-        }
-        if Instant::now() >= until {
-            return false;
-        }
-        thread::sleep(POLL);
+/// The sibling for the targets where no process may be started: it answers [`RunError::Unsupported`], no spawn.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod spawn {
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    use super::{Env, RunCancel, RunError, RunLimits, RunResult};
+
+    pub(super) fn run(
+        _program: &Path,
+        _args: &[OsString],
+        _env: Env,
+        _limits: &RunLimits,
+        _cancel: &RunCancel,
+    ) -> Result<RunResult, RunError> {
+        Err(RunError::Unsupported)
+    }
+}
+
+/// A terminal launch: what a pane needs to start a tool in a terminal of its own, described and not started. The pane
+/// inherits the app's environment minus `env_remove`, then gets `env` and `secrets` on top. `Debug` prints counts.
+pub struct Launch {
+    /// The absolute path of the program.
+    pub program: PathBuf,
+    /// The arguments, exactly as the program gets them.
+    pub args: Vec<OsString>,
+    /// The variables to set: the rebuilt `PATH` and the plain variables of the profile and the tool.
+    pub env: Vec<(String, String)>,
+    /// The inherited names the pane must remove first (see [`EnvPolicy::removals`]).
+    pub env_remove: Vec<String>,
+    /// The working directory, when the launch names one.
+    pub cwd: Option<PathBuf>,
+    /// What the person sees as the name of the pane.
+    pub label: String,
+    /// The secret variables, wiped when the launch is dropped; the pane takes copies for its environment.
+    pub secrets: Vec<(String, Zeroizing<String>)>,
+}
+
+impl Launch {
+    /// A launch of `program` with `args`; `env` is built by [`EnvPolicy::build`] from nothing inherited (the pane
+    /// inherits by itself), and `inherited_names` are the names of the environment the pane will inherit.
+    pub fn new(
+        program: PathBuf,
+        args: Vec<OsString>,
+        env: Env,
+        inherited_names: impl IntoIterator<Item = OsString>,
+        os: Os,
+        cwd: Option<PathBuf>,
+        label: String,
+    ) -> Self {
+        let (env, secrets) = env.into_parts();
+        Self { program, args, env, env_remove: EnvPolicy::removals(inherited_names, os), cwd, label, secrets }
+    }
+}
+
+impl std::fmt::Debug for Launch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Launch")
+            .field("program_bytes", &self.program.as_os_str().len())
+            .field("args", &self.args.len())
+            .field("env", &self.env.len())
+            .field("env_remove", &self.env_remove.len())
+            .field("has_cwd", &self.cwd.is_some())
+            .field("label_bytes", &self.label.len())
+            .field("secrets", &self.secrets.len())
+            .finish()
     }
 }
