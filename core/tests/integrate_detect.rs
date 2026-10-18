@@ -9,8 +9,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use holzwave_core::integrate::detect::{
-    detect, login_probe, parse_login_path, Detection, Facts, Found, Place, UnusableReason, LOGIN_PROBE_BEGIN,
-    LOGIN_PROBE_END, LOGIN_PROBE_SCRIPT, LOGIN_PROBE_TIMEOUT,
+    child_path, detect, login_probe, parse_login_path, read_version, recheck, version_probe, Detection, Facts, Found,
+    Place, UnusableReason, LOGIN_PROBE_BEGIN, LOGIN_PROBE_END, LOGIN_PROBE_SCRIPT, LOGIN_PROBE_TIMEOUT,
 };
 use holzwave_core::integrate::{IntegrationSpec, SelectKind, ToolId, VersionProbe};
 use holzwave_core::platform::{Os, ProgramCheck};
@@ -45,6 +45,7 @@ struct World {
     os: Os,
     env: HashMap<String, String>,
     files: HashMap<String, ProgramCheck>,
+    modes: HashMap<String, u32>,
     home: Option<String>,
     login: Vec<String>,
     login_calls: Cell<usize>,
@@ -52,7 +53,15 @@ struct World {
 
 impl World {
     fn new(os: Os) -> Self {
-        Self { os, env: HashMap::new(), files: HashMap::new(), home: None, login: Vec::new(), login_calls: Cell::new(0) }
+        Self {
+            os,
+            env: HashMap::new(),
+            files: HashMap::new(),
+            modes: HashMap::new(),
+            home: None,
+            login: Vec::new(),
+            login_calls: Cell::new(0),
+        }
     }
 
     fn var(mut self, key: &str, value: &str) -> Self {
@@ -75,6 +84,12 @@ impl World {
         if self.os == Os::Windows { path.to_ascii_lowercase() } else { path.to_string() }
     }
 
+    /// The Unix mode bits of a path (file type bits may be included, as `stat` gives them).
+    fn mode(mut self, path: &str, bits: u32) -> Self {
+        self.modes.insert(path.to_string(), bits);
+        self
+    }
+
     fn home(mut self, home: &str) -> Self {
         self.home = Some(home.to_string());
         self
@@ -85,15 +100,31 @@ impl World {
         self
     }
 
-    fn detect(&self, spec: &IntegrationSpec, override_path: Option<&str>) -> Detection {
+    fn with_facts<T>(&self, run: impl FnOnce(&Facts<'_>) -> T) -> T {
         let env = |key: &str| self.env.get(key).cloned();
         let check = |path: &str| self.files.get(&self.key(path)).copied().unwrap_or(ProgramCheck::Missing);
         let login = || {
             self.login_calls.set(self.login_calls.get() + 1);
             self.login.clone()
         };
-        let facts = Facts { os: self.os, env: &env, check: &check, home: self.home.as_deref(), login_path: &login };
-        detect(spec, &facts, override_path)
+        let mode_of = |path: &str| self.modes.get(path).copied();
+        let facts = Facts {
+            os: self.os,
+            env: &env,
+            check: &check,
+            home: self.home.as_deref(),
+            login_path: &login,
+            mode_of: &mode_of,
+        };
+        run(&facts)
+    }
+
+    fn detect(&self, spec: &IntegrationSpec, override_path: Option<&str>) -> Detection {
+        self.with_facts(|facts| detect(spec, facts, override_path))
+    }
+
+    fn recheck(&self, found: &Found) -> bool {
+        self.with_facts(|facts| recheck(found, facts))
     }
 }
 
@@ -387,6 +418,13 @@ fn windows_tries_pathext_in_order_and_marks_batch_files() {
         "a batch file named with its extension"
     );
 
+    // A file in the root of a drive has the root as its directory.
+    let world = World::new(Os::Windows).var("PATH", r"C:\").exe(r"C:\kubectl.exe");
+    let answer = found(world.detect(&toy(), None));
+    assert_eq!((answer.path.as_str(), answer.dir.as_str()), (r"C:\kubectl.exe", r"C:\"));
+    let world = World::new(Os::Linux).var("PATH", "/").exe("/kubectl");
+    assert_eq!(found(world.detect(&toy(), None)).dir, "/");
+
     // The same directory spelled twice in another case is searched once.
     let world = World::new(Os::Windows).var("PATH", r"C:\Tools;c:\tools\;C:\TOOLS");
     assert_eq!(not_found(world.detect(&az, None))[0], r"C:\Tools");
@@ -458,4 +496,142 @@ fn a_relative_or_empty_path_entry_is_never_searched_on_any_system() {
             .exe("~/bin/kubectl");
         assert_eq!(not_found(world.detect(&toy(), None)), ["/opt/homebrew/bin", "/usr/local/bin"], "{os:?}: only the fixed directories");
     }
+}
+
+// ---- the PATH of a child -----------------------------------------------------------------------------------------------
+
+fn owned(list: &[&str]) -> Vec<String> {
+    list.iter().map(|d| d.to_string()).collect()
+}
+
+#[test]
+fn the_child_path_puts_the_tool_first_and_keeps_only_absolute_unique_directories() {
+    assert_eq!(
+        child_path(Os::Macos, "/opt/k", "/usr/bin:rel:/opt/k::/bin:.", &owned(&["/usr/local/bin", "/usr/bin", "rel2", ""])),
+        "/opt/k:/usr/bin:/bin:/usr/local/bin",
+        "the tool's directory, the process directories, the login directories; relative and empty entries and repeats go"
+    );
+    assert_eq!(child_path(Os::Linux, "/opt/k", "", &[]), "/opt/k", "with the rest empty it is the tool's directory");
+    assert_eq!(child_path(Os::Linux, "/opt/k", "/opt/k:/opt/k", &owned(&["/opt/k"])), "/opt/k", "the first wins");
+    assert_eq!(child_path(Os::Linux, "relative", "/usr/bin", &[]), "/usr/bin", "a relative tool directory is not kept");
+    assert_eq!(child_path(Os::Linux, "", "", &[]), "", "nothing at all");
+    assert_eq!(child_path(Os::Linux, "/a\nb", "/ok:/b\tc", &[]), "/ok", "a control character drops the entry");
+
+    // Windows: `;`, drive paths only, case does not make a directory new, quotes are trimmed.
+    assert_eq!(
+        child_path(Os::Windows, r"C:\Tools", r#"C:\Win;"C:\Q";rel;\\srv\x;c:\tools\;\\?\C:\y;."#, &owned(&[r"C:\L", r"C:\TOOLS"])),
+        r"C:\Tools;C:\Win;C:\Q;C:\L"
+    );
+
+    // At most 64 entries, the tool's directory among them and first.
+    let process: Vec<String> = (0..100).map(|n| format!("/p/{n}")).collect();
+    let built = child_path(Os::Linux, "/opt/k", &process.join(":"), &owned(&["/late"]));
+    let parts: Vec<&str> = built.split(':').collect();
+    assert_eq!(parts.len(), 64);
+    assert_eq!((parts[0], parts[1], parts[63]), ("/opt/k", "/p/0", "/p/62"));
+}
+
+// ---- the check again, the hijack refusal ---------------------------------------------------------------------------------
+
+#[test]
+fn a_run_checks_the_file_again_before_it_starts() {
+    let world = World::new(Os::Linux).var("PATH", "/opt/tools/bin").exe("/opt/tools/bin/kubectl").mode("/opt/tools/bin", 0o40755);
+    let answer = found(world.detect(&toy(), None));
+    assert!(world.recheck(&answer), "the same file, still there");
+
+    let gone = World::new(Os::Linux).var("PATH", "/opt/tools/bin");
+    assert!(!gone.recheck(&answer), "the file is gone");
+    let replaced = World::new(Os::Linux).file("/opt/tools/bin/kubectl", ProgramCheck::NotAFile);
+    assert!(!replaced.recheck(&answer), "replaced by a directory");
+    let stripped = World::new(Os::Linux).file("/opt/tools/bin/kubectl", ProgramCheck::NotExecutable);
+    assert!(!stripped.recheck(&answer), "no longer executable");
+    let opened = World::new(Os::Linux).exe("/opt/tools/bin/kubectl").mode("/opt/tools/bin", 0o40777);
+    assert!(!opened.recheck(&answer), "the directory became writable by everyone after the detection");
+
+    // A Found that is not an absolute path never passes (a value that came from somewhere else).
+    let forged = Found { path: "kubectl".into(), dir: String::new(), place: Place::Path, batch: false, version: None };
+    assert!(!World::new(Os::Linux).exe("kubectl").recheck(&forged));
+}
+
+#[test]
+fn a_world_writable_place_is_unusable_and_a_group_writable_one_is_not() {
+    let base = || World::new(Os::Macos).var("PATH", "/opt/homebrew/bin").exe("/opt/homebrew/bin/kubectl");
+
+    // Homebrew's directories are group-writable (0775) and the files are 0755: accepted.
+    let world = base().mode("/opt/homebrew/bin", 0o40775).mode("/opt/homebrew/bin/kubectl", 0o100755);
+    assert_eq!(found(world.detect(&toy(), None)).path, "/opt/homebrew/bin/kubectl");
+    let world = base().mode("/opt/homebrew/bin", 0o40775).mode("/opt/homebrew/bin/kubectl", 0o100775);
+    assert!(matches!(world.detect(&toy(), None), Detection::Found(_)), "a group-writable file");
+    assert!(matches!(base().detect(&toy(), None), Detection::Found(_)), "a mode that is not known is not a refusal");
+
+    // Anyone can write the directory: whoever can may replace the program that runs with the person's credentials.
+    let world = base().mode("/opt/homebrew/bin", 0o40777);
+    let (path, reason) = unusable(world.detect(&toy(), None));
+    assert_eq!((path.as_str(), reason), ("/opt/homebrew/bin/kubectl", UnusableReason::WritableByEveryone));
+    assert_eq!(reason.to_string(), "writable by everyone");
+    let world = base().mode("/opt/homebrew/bin", 0o40757);
+    assert!(matches!(world.detect(&toy(), None), Detection::Unusable { .. }), "other-writable alone is enough");
+
+    // The sticky bit on a directory (as /tmp has it) keeps others from replacing a file they do not own.
+    let world = base().mode("/opt/homebrew/bin", 0o41777);
+    assert!(matches!(world.detect(&toy(), None), Detection::Found(_)), "a sticky directory");
+    // A file that anyone can write is refused whatever its directory is.
+    let world = base().mode("/opt/homebrew/bin", 0o41777).mode("/opt/homebrew/bin/kubectl", 0o100757);
+    assert!(matches!(world.detect(&toy(), None), Detection::Unusable { .. }), "a world-writable file");
+
+    // A safe place later on the PATH still wins over a hijackable one earlier; with no safe one the answer is unusable.
+    let world = World::new(Os::Linux)
+        .var("PATH", "/tmp/x:/opt/safe")
+        .exe("/tmp/x/kubectl")
+        .exe("/opt/safe/kubectl")
+        .mode("/tmp/x", 0o40777)
+        .mode("/opt/safe", 0o40755);
+    assert_eq!(found(world.detect(&toy(), None)).path, "/opt/safe/kubectl");
+    let world = World::new(Os::Linux).var("PATH", "/tmp/x").exe("/tmp/x/kubectl").mode("/tmp/x", 0o40777);
+    assert_eq!(unusable(world.detect(&toy(), None)), ("/tmp/x/kubectl".to_string(), UnusableReason::WritableByEveryone));
+
+    // The same rule for the path the person set, and nothing is substituted for it.
+    let world = base().exe("/srv/mine/kubectl").mode("/srv/mine", 0o40777);
+    assert_eq!(
+        unusable(world.detect(&toy(), Some("/srv/mine/kubectl"))),
+        ("/srv/mine/kubectl".to_string(), UnusableReason::WritableByEveryone)
+    );
+
+    // Windows has no mode bits: the rule does not apply where the host cannot tell.
+    let world = World::new(Os::Windows).var("PATH", r"C:\Tools").exe(r"C:\Tools\kubectl.exe");
+    assert!(matches!(world.detect(&toy(), None), Detection::Found(_)));
+}
+
+/// The text after `Client Version: `, whole, or nothing.
+fn client_version(stdout: &str) -> Option<String> {
+    stdout.split_once("Client Version: ").map(|(_, rest)| rest.trim().to_string())
+}
+
+#[test]
+fn the_version_probe_is_a_description_and_its_result_is_cut_and_cleaned() {
+    let mut spec = toy();
+    spec.version_probe = VersionProbe { argv: &["version", "--client"], parse: client_version };
+    let answer = Found {
+        path: "/opt/k/kubectl".into(),
+        dir: "/opt/k".into(),
+        place: Place::Path,
+        batch: false,
+        version: None,
+    };
+    let probe = version_probe(&spec, &answer);
+    assert_eq!((probe.program.as_str(), probe.args.as_slice()), ("/opt/k/kubectl", &["version".to_string(), "--client".to_string()][..]));
+
+    assert_eq!(read_version(&spec, "Client Version: v1.31.2\n").as_deref(), Some("v1.31.2"));
+    assert_eq!(read_version(&spec, "nothing like it"), None, "the parser finds none");
+    assert_eq!(read_version(&spec, "Client Version: \n"), None, "an empty version is none");
+    let noisy = format!("Client Version: v1.\u{1b}[31m2\u{7}\u{0}.{}", "9".repeat(100));
+    let cut = read_version(&spec, &noisy).expect("a version");
+    assert_eq!(cut.chars().count(), 64, "cut to 64 characters");
+    assert!(!cut.chars().any(char::is_control), "no control character: {cut:?}");
+    assert!(cut.starts_with("v1.[31m2.99"), "{cut:?}");
+
+    // A missing version never makes the tool unusable: it is a field of Found that is filled when a probe succeeded.
+    let with = answer.clone().with_version(read_version(&spec, "Client Version: v1.31.2"));
+    assert_eq!(with.version.as_deref(), Some("v1.31.2"));
+    assert_eq!(answer.clone().with_version(None).version, None);
 }

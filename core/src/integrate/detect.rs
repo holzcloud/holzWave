@@ -16,6 +16,9 @@ use std::time::Duration;
 use super::IntegrationSpec;
 use crate::platform::{self, Os, ProgramCheck};
 
+/// The most characters of a version that are kept.
+const VERSION_MAX_CHARS: usize = 64;
+
 /// The longest list of directories kept from the login shell and the longest `PATH` built for a child.
 const MAX_DIRS: usize = 64;
 
@@ -57,6 +60,9 @@ pub struct Facts<'a> {
     pub home: Option<&'a str>,
     /// The directories of the login shell's `PATH`, asked for lazily and at most once per call.
     pub login_path: &'a dyn Fn() -> Vec<String>,
+    /// The Unix mode bits of a path (as `stat` gives them, file type bits allowed), or `None` where they are not known;
+    /// always `None` for Windows. Used for the file and for its directory, see [`UnusableReason::WritableByEveryone`].
+    pub mode_of: &'a dyn Fn(&str) -> Option<u32>,
 }
 
 impl fmt::Debug for Facts<'_> {
@@ -93,6 +99,15 @@ pub struct Found {
     pub version: Option<String>,
 }
 
+impl Found {
+    /// This tool with the version a probe read (see [`read_version`]); `None` leaves it unknown. A missing version never
+    /// makes a tool unusable.
+    pub fn with_version(mut self, version: Option<String>) -> Self {
+        self.version = version;
+        self
+    }
+}
+
 /// Why a path cannot be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnusableReason {
@@ -106,6 +121,10 @@ pub enum UnusableReason {
     NotAFile,
     /// A file that cannot be executed.
     NotExecutable,
+    /// The file, or its directory (unless the directory has the sticky bit), can be written by anyone: whoever can may
+    /// replace the program that will run with the person's credentials. Group-writable stays allowed, because the
+    /// directories of Homebrew and of a shared workstation's tool account are.
+    WritableByEveryone,
 }
 
 impl UnusableReason {
@@ -117,6 +136,7 @@ impl UnusableReason {
             Self::Missing => "not found",
             Self::NotAFile => "not a file",
             Self::NotExecutable => "not executable",
+            Self::WritableByEveryone => "writable by everyone",
         }
     }
 }
@@ -339,6 +359,7 @@ fn vet(facts: &Facts<'_>, path: &str) -> Result<(), UnusableReason> {
         return Err(UnusableReason::NotAbsolute);
     }
     match (facts.check)(path) {
+        ProgramCheck::Usable if writable_by_everyone(facts, path) => Err(UnusableReason::WritableByEveryone),
         ProgramCheck::Usable => Ok(()),
         ProgramCheck::Missing => Err(UnusableReason::Missing),
         ProgramCheck::NotAFile => Err(UnusableReason::NotAFile),
@@ -346,11 +367,25 @@ fn vet(facts: &Facts<'_>, path: &str) -> Result<(), UnusableReason> {
     }
 }
 
-/// The directory of an absolute `path` (the whole text up to its last separator; `/` for a file at the root).
+/// Whether anyone can write the file at `path` (mode bit `o+w`) or its directory (`o+w` without the sticky bit, which
+/// keeps others from replacing files they do not own, as on a shared `/tmp`). The bits are injected: a host that cannot
+/// tell gives `None` and the rule does not apply.
+fn writable_by_everyone(facts: &Facts<'_>, path: &str) -> bool {
+    const OTHERS_WRITE: u32 = 0o002;
+    const STICKY: u32 = 0o1000;
+    let file = (facts.mode_of)(path).is_some_and(|mode| mode & OTHERS_WRITE != 0);
+    let dir = (facts.mode_of)(&parent_dir(facts.os, path))
+        .is_some_and(|mode| mode & OTHERS_WRITE != 0 && mode & STICKY == 0);
+    file || dir
+}
+
+/// The directory of an absolute `path` (the whole text up to its last separator; the root itself for a file at the root).
 fn parent_dir(os: Os, path: &str) -> String {
     let at = if os == Os::Windows { path.rfind(['\\', '/']) } else { path.rfind('/') };
     match at {
+        // The root keeps its separator: `/` and `C:\`.
         Some(0) => path[..1].to_string(),
+        Some(2) if os == Os::Windows => path[..3].to_string(),
         Some(at) => path[..at].to_string(),
         None => String::new(),
     }
@@ -399,4 +434,45 @@ fn expand_fixed(facts: &Facts<'_>, entry: &str) -> Option<String> {
         out = out.replace('/', "\\");
     }
     (platform::is_absolute_path(os, &out) && !out.chars().any(char::is_control)).then_some(out)
+}
+
+/// Looks at a found tool again, right before a run: true while the file is still a usable executable at the same
+/// absolute path that no one but the person's group can write to, false once it is gone, has become a directory, is no
+/// longer executable or its place was opened to everyone. It narrows the gap between the detection and the start; it does
+/// not close it (a file can still change between this look and the start), which is why a tool's directory must not be
+/// writable by others in the first place.
+pub fn recheck(found: &Found, facts: &Facts<'_>) -> bool {
+    vet(facts, &found.path).is_ok()
+}
+
+/// The `PATH` of a child: the tool's directory first (so that a plugin or helper of the same family is found next to it),
+/// then the directories of the process `PATH`, then those of the login shell's `PATH`. Absolute directories only, without
+/// a control character, each once (the first wins, ignoring case on Windows), at most 64 in all, joined with the separator
+/// of `os`. A relative or empty entry is dropped: it would make the child look in the current directory.
+pub fn child_path(os: Os, tool_dir: &str, process_path: &str, login_path: &[String]) -> String {
+    let mut dirs = Dirs::new(os);
+    dirs.push(tool_dir);
+    let process = process_path.split(separator(os)).map(|entry| entry.trim_matches('"'));
+    for entry in process.chain(login_path.iter().map(String::as_str)) {
+        if dirs.len() == MAX_DIRS {
+            break;
+        }
+        dirs.push(entry);
+    }
+    dirs.into_vec().join(&separator(os).to_string())
+}
+
+/// The version probe of a found tool: its absolute path and the arguments of the spec. The caller runs it through the
+/// runner (with the time limit and the bounded output of any run) and hands standard output to [`read_version`].
+pub fn version_probe(spec: &IntegrationSpec, found: &Found) -> Probe {
+    Probe { program: found.path.clone(), args: spec.version_probe.argv.iter().map(|arg| (*arg).to_string()).collect() }
+}
+
+/// The version in `stdout`, read by the spec's parser, without control characters and cut at 64 characters; `None` when
+/// the parser finds none or nothing is left.
+pub fn read_version(spec: &IntegrationSpec, stdout: &str) -> Option<String> {
+    let version = (spec.version_probe.parse)(stdout)?;
+    let clean: String = version.chars().filter(|c| !c.is_control()).take(VERSION_MAX_CHARS).collect();
+    let clean = clean.trim().to_string();
+    (!clean.is_empty()).then_some(clean)
 }
