@@ -11,10 +11,13 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use holzwave_core::integrate::kube::{self, KUBE};
-use holzwave_core::integrate::view::ViewModel;
-use holzwave_core::integrate::{CheckedSelection, Integration, Selection, ToolId, Validated, Verb};
+use holzwave_core::integrate::view::{Row, TableView, Tone, ViewModel, MAX_CELL, MAX_TEXT};
+use holzwave_core::integrate::{
+    CheckedSelection, Integration, ParseError, Selection, ToolId, Validated, Verb, VerbEffect,
+};
 
 /// The canary strings of the scratch kubeconfig. No model, no argument list and no overlay may ever hold them.
 const CANARY_TOKEN: &str = "HW-CANARY-TOKEN-0001";
@@ -45,11 +48,16 @@ fn selection(context: Option<&str>, namespace: Option<&str>) -> CheckedSelection
     selection.check(ToolId::Kube).expect("a valid selection")
 }
 
-fn table(model: &ViewModel) -> &holzwave_core::integrate::view::TableView {
+fn table(model: &ViewModel) -> &TableView {
     match model {
         ViewModel::Table(table) => table,
         other => panic!("a table was expected, not {other:?}"),
     }
+}
+
+/// The actions of a row as (verb, arguments).
+fn actions_of(row: &Row) -> Vec<(&str, Vec<(&str, &str)>)> {
+    row.actions().iter().map(|a| (a.verb(), a.args().collect())).collect()
 }
 
 fn texts(argv: &[OsString]) -> Vec<String> {
@@ -70,7 +78,8 @@ fn contexts_go_from_argument_list_to_table() {
     let table = table(&model);
     let columns: Vec<&str> = table.columns().iter().map(|c| c.label()).collect();
     assert_eq!(columns, ["CURRENT", "NAME", "CLUSTER", "USER", "NAMESPACE"]);
-    let rows: Vec<(String, Vec<&str>)> = table.rows().iter().map(|r| (r.key().to_owned(), r.cells().collect())).collect();
+    let rows: Vec<(String, Vec<&str>)> =
+        table.rows().iter().map(|r| (r.key().to_owned(), r.cells().collect())).collect();
     assert_eq!(
         rows,
         [
@@ -90,9 +99,9 @@ fn contexts_go_from_argument_list_to_table() {
         "one row per context, a star in the current one, the row key is the context name, the ARN-shaped name is whole"
     );
     for row in table.rows() {
-        let actions: Vec<(&str, Vec<(&str, &str)>)> = row.actions().iter().map(|a| (a.verb(), a.args().collect())).collect();
         let name = row.cells().nth(1).expect("the name cell");
-        assert_eq!(actions, [("use_context", vec![("context", name)])], "a context row offers use_context for its name");
+        let expected = [("use_context", vec![("context", name)])];
+        assert_eq!(actions_of(row), expected, "a context row offers use_context for its name");
     }
 }
 
@@ -106,7 +115,8 @@ fn the_credential_members_of_a_config_view_never_enter_a_model() {
     let bytes = serde_json::to_vec(&config).expect("serialise");
     let model = KUBE.view(verb("contexts"), &bytes).expect("a config view with canaries reads");
     let shown = serde_json::to_string(&model).expect("the model serialises");
-    for canary in [CANARY_TOKEN, CANARY_EXEC_ENV, "HW-CANARY-KEY", "interactiveMode", "REDACTED", "eks.example.com", "get-token"] {
+    let canaries = [CANARY_TOKEN, CANARY_EXEC_ENV, "HW-CANARY-KEY", "interactiveMode", "REDACTED", "eks.example.com"];
+    for canary in canaries.into_iter().chain(["get-token"]) {
         assert!(!shown.contains(canary), "{canary} reached the model: {shown}");
     }
 }
@@ -121,6 +131,384 @@ fn the_version_probe_reads_the_client_version() {
     for garbage in ["", "not json", "[]", "{}", r#"{"clientVersion":{}}"#, r#"{"clientVersion":{"gitVersion":5}}"#] {
         assert_eq!(kube::parse_version(garbage), None, "{garbage:?}");
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Namespaces and pods.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// 2026-01-05T10:00:00Z, the creation time of every pod of the recorded list.
+const CREATED: u64 = 1_767_607_200;
+
+fn at(seconds_after_created: u64) -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(CREATED + seconds_after_created)
+}
+
+fn pods_at(bytes: &[u8], seconds_after_created: u64) -> ViewModel {
+    KUBE.view_at(verb("pods"), bytes, at(seconds_after_created)).expect("a pod list reads")
+}
+
+fn cells(model: &ViewModel) -> Vec<Vec<String>> {
+    table(model).rows().iter().map(|row| row.cells().map(str::to_owned).collect()).collect()
+}
+
+fn argv_of(id: &str, pairs: &[(&str, &str)], context: Option<&str>, namespace: Option<&str>) -> Vec<String> {
+    texts(&KUBE.argv(verb(id), &args(id, pairs), &selection(context, namespace)).expect("argv"))
+}
+
+#[test]
+fn namespace_and_pod_argument_lists_carry_the_selection_in_the_equals_form() {
+    assert_eq!(
+        argv_of("namespaces", &[], Some("dev"), None),
+        ["get", "namespaces", "-o", "json", "--context=dev", "--request-timeout=10s"]
+    );
+    assert_eq!(
+        argv_of("pods", &[], Some("dev"), Some("payments")),
+        ["get", "pods", "-o", "json", "--context=dev", "--namespace=payments", "--request-timeout=10s"]
+    );
+    assert_eq!(argv_of("pods", &[], None, None), ["get", "pods", "-o", "json", "--request-timeout=10s"]);
+    assert_eq!(
+        argv_of("pods", &[], None, Some("payments")),
+        ["get", "pods", "-o", "json", "--namespace=payments", "--request-timeout=10s"]
+    );
+    assert_eq!(
+        argv_of("namespaces", &[], Some("dev"), Some("payments")),
+        ["get", "namespaces", "-o", "json", "--context=dev", "--request-timeout=10s"],
+        "a list of namespaces is not scoped to a namespace"
+    );
+    // A context name with a colon, a slash and an at sign is one argument.
+    let arn = "arn:aws:eks:eu-central-1:000000000000:cluster/demo";
+    assert_eq!(argv_of("pods", &[], Some(arn), None)[4], format!("--context={arn}"));
+    assert_eq!(argv_of("pods", &[], Some("user@cluster"), None)[4], "--context=user@cluster");
+    // A selection field that is invalid never gets as far as an argument list.
+    for bad in ["--server=https://x", "-x", "a\nb", "a\u{202e}b", ""] {
+        let selection = Selection { context: Some(bad.to_owned()), ..Selection::default() };
+        assert!(selection.check(ToolId::Kube).is_err(), "{bad:?} passed the selection check");
+    }
+    // The 10 s refresh is on the pods verb only, and the other reads are on request.
+    let refresh: Vec<(&str, Option<u32>)> = KUBE.spec().verbs.iter().map(|v| (v.id, v.refresh_secs)).collect();
+    assert_eq!(refresh.iter().filter(|(_, secs)| secs.is_some()).collect::<Vec<_>>(), [&("pods", Some(10))]);
+}
+
+#[test]
+fn namespaces_become_a_table() {
+    let model = KUBE.view_at(verb("namespaces"), &fixture("kubectl/namespaces.json"), at(860_400)).expect("reads");
+    let table = table(&model);
+    let columns: Vec<&str> = table.columns().iter().map(|c| c.label()).collect();
+    assert_eq!(columns, ["NAME", "STATUS", "AGE"]);
+    assert_eq!(
+        cells(&model),
+        [["default", "Active", "14d"], ["kube-system", "Active", "13d"], ["team-a", "Active", "12d"]],
+        "the namespaces were created on 1, 2 and 3 January at 9:00 and the list is read on 15 January at 9:00"
+    );
+    let keys: Vec<&str> = table.rows().iter().map(|r| r.key()).collect();
+    assert_eq!(keys, ["default", "kube-system", "team-a"]);
+    for row in table.rows() {
+        let name = row.key();
+        let expected = [("set_namespace", vec![("namespace", name)])];
+        assert_eq!(actions_of(row), expected, "a namespace row offers set_namespace");
+    }
+}
+
+#[test]
+fn pods_become_a_table_with_the_status_a_person_expects() {
+    let model = pods_at(&fixture("kubectl/pods.json"), 45);
+    let table = table(&model);
+    let columns: Vec<&str> = table.columns().iter().map(|c| c.label()).collect();
+    assert_eq!(columns, ["NAME", "READY", "STATUS", "RESTARTS", "AGE", "NODE"]);
+    assert_eq!(
+        cells(&model),
+        [
+            ["web-7d9f", "2/2", "Running", "0", "45s", "node-1"],
+            ["batch-1", "0/1", "ContainerCreating", "0", "45s", ""],
+            ["api-5c6d", "0/1", "CrashLoopBackOff", "7", "45s", "node-2"],
+        ]
+    );
+    let tones: Vec<Tone> = table.rows().iter().map(|r| r.tone()).collect();
+    assert_eq!(tones, [Tone::Normal, Tone::Warn, Tone::Danger]);
+    // The age is computed from the clock that is passed in.
+    let ages = [(0, "0s"), (59, "59s"), (60, "1m"), (7 * 60, "7m"), (3 * 3600 + 5, "3h"), (12 * 86_400, "12d")];
+    for (after, shown) in ages {
+        assert_eq!(cells(&pods_at(&fixture("kubectl/pods.json"), after))[0][4], shown, "after {after} s");
+    }
+    assert_eq!(cells(&pods_at(&fixture("kubectl/pods.json"), 0))[0][4], "0s");
+    // A clock before the creation time gives 0s and not a wrapped number.
+    let early = KUBE.view_at(verb("pods"), &fixture("kubectl/pods.json"), UNIX_EPOCH).expect("reads");
+    assert_eq!(cells(&early)[0][4], "0s");
+}
+
+/// A pod list with one pod whose `status` is `status` (a JSON text) and whose `metadata` has `extra` members.
+fn one_pod(extra: &str, status: &str) -> Vec<u8> {
+    format!(
+        r#"{{"items":[{{"metadata":{{"name":"p-1","creationTimestamp":"2026-01-05T10:00:00Z"{extra}}},
+        "spec":{{"nodeName":"n-1","containers":[{{"name":"app"}}]}},"status":{status}}}]}}"#
+    )
+    .into_bytes()
+}
+
+fn status_of(bytes: &[u8]) -> (String, Tone) {
+    let model = pods_at(bytes, 10);
+    let row = &table(&model).rows()[0];
+    (row.cells().nth(2).expect("status").to_owned(), row.tone())
+}
+
+#[test]
+fn the_status_follows_the_waiting_reason_then_the_terminated_reason_then_terminating_then_the_phase() {
+    let with_state = |state: &str| {
+        let container = format!(r#"{{"name":"app","ready":false,"restartCount":1,"state":{state}}}"#);
+        format!(r#"{{"phase":"Running","containerStatuses":[{container}]}}"#)
+    };
+    let waiting = |reason: &str| with_state(&format!(r#"{{"waiting":{{"reason":"{reason}"}}}}"#));
+    let terminated = |reason: &str| with_state(&format!(r#"{{"terminated":{{"reason":"{reason}","exitCode":137}}}}"#));
+    for (reason, tone) in [
+        ("CrashLoopBackOff", Tone::Danger),
+        ("ImagePullBackOff", Tone::Danger),
+        ("ErrImagePull", Tone::Danger),
+        ("ContainerCreating", Tone::Warn),
+        ("PodInitializing", Tone::Warn),
+        ("SomethingNew", Tone::Normal),
+    ] {
+        assert_eq!(status_of(&one_pod("", &waiting(reason))), (reason.to_owned(), tone), "waiting {reason}");
+    }
+    for (reason, tone) in [("OOMKilled", Tone::Danger), ("Error", Tone::Danger), ("Completed", Tone::Normal)] {
+        assert_eq!(status_of(&one_pod("", &terminated(reason))), (reason.to_owned(), tone), "terminated {reason}");
+    }
+    // A waiting reason wins over a terminated one of a later container only by order of the containers.
+    let both = r#"{"phase":"Running","containerStatuses":[
+        {"name":"a","state":{"terminated":{"reason":"Error"}}},
+        {"name":"b","state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}"#;
+    assert_eq!(status_of(&one_pod("", both)).0, "Error", "the first container with a reason decides, as kubectl does");
+    // No reason: terminating when a deletion timestamp is set, else the phase.
+    let plain = r#"{"phase":"Running","containerStatuses":[{"name":"app","ready":true,"state":{"running":{}}}]}"#;
+    assert_eq!(
+        status_of(&one_pod(r#","deletionTimestamp":"2026-01-05T10:00:05Z""#, plain)),
+        ("Terminating".to_owned(), Tone::Warn)
+    );
+    for (phase, tone) in [
+        ("Running", Tone::Normal),
+        ("Succeeded", Tone::Normal),
+        ("Pending", Tone::Warn),
+        ("Failed", Tone::Danger),
+        ("Unknown", Tone::Warn),
+    ] {
+        let status = format!(r#"{{"phase":"{phase}"}}"#);
+        assert_eq!(status_of(&one_pod("", &status)), (phase.to_owned(), tone), "phase {phase}");
+    }
+    // A completed container next to a running one is not a completed pod.
+    let mixed = r#"{"phase":"Running","containerStatuses":[
+        {"name":"init","state":{"terminated":{"reason":"Completed"}}},
+        {"name":"app","ready":true,"state":{"running":{}}}]}"#;
+    assert_eq!(status_of(&one_pod("", mixed)).0, "Running");
+    // No status at all is shown as unknown.
+    assert_eq!(status_of(&one_pod("", "null")), ("?".to_owned(), Tone::Warn));
+}
+
+#[test]
+fn pod_actions_need_valid_names() {
+    let model = pods_at(&fixture("kubectl/pods.json"), 1);
+    let first = &table(&model).rows()[0];
+    assert_eq!(
+        actions_of(first),
+        [
+            ("exec", vec![("container", "app"), ("pod", "web-7d9f")]),
+            ("logs", vec![("container", "app"), ("pod", "web-7d9f")]),
+            ("delete_pod", vec![("pod", "web-7d9f")]),
+        ],
+        "a pod row has Exec, Logs and Delete; the first container travels with the first two"
+    );
+    let effects: Vec<VerbEffect> = first.actions().iter().map(|a| a.effect()).collect();
+    assert_eq!(effects, [VerbEffect::Exec, VerbEffect::Read, VerbEffect::Write]);
+
+    let hostile = |name: &str, container: &str| -> Vec<(String, usize)> {
+        let name = serde_json::to_string(name).expect("json text");
+        let container = serde_json::to_string(container).expect("json text");
+        let bytes = format!(
+            r#"{{"items":[{{"metadata":{{"name":{name}}},"spec":{{"containers":[{{"name":{container}}}]}},
+            "status":{{"phase":"Running"}}}}]}}"#
+        );
+        let model = pods_at(bytes.as_bytes(), 1);
+        table(&model).rows()[0].actions().iter().map(|a| (a.verb().to_owned(), a.args().count())).collect()
+    };
+    let hostile_names = [
+        "bad\u{202e}name",
+        "zero\u{200b}width",
+        "tab\tname",
+        "line\nbreak",
+        "esc\u{1b}[31m",
+        "--server=x",
+        "Upper",
+        "a b",
+        "x.-y",
+    ];
+    for name in hostile_names {
+        assert!(hostile(name, "app").is_empty(), "a pod named {name:?} must show no action");
+    }
+    assert_eq!(hostile("good", "app").len(), 3);
+    // A first container whose name does not validate takes Exec and Logs away; deleting the valid pod stays possible.
+    assert_eq!(hostile("good", "bad\u{200b}c"), [("delete_pod".to_owned(), 1)]);
+    // A pod that names no container offers Exec and Logs for its default container.
+    let no_container = br#"{"items":[{"metadata":{"name":"good"},"status":{"phase":"Running"}}]}"#;
+    let model = pods_at(no_container, 1);
+    let row = &table(&model).rows()[0];
+    let shapes: Vec<(&str, usize)> = row.actions().iter().map(|a| (a.verb(), a.args().count())).collect();
+    assert_eq!(shapes, [("exec", 1), ("logs", 1), ("delete_pod", 1)]);
+}
+
+#[test]
+fn drift_degrades_to_text_or_an_empty_table_and_never_panics() {
+    // An unknown member at every level changes nothing.
+    let base = cells(&KUBE.view(verb("contexts"), &fixture("kubectl/config_view.json")).expect("base"));
+    let drifted = fixture("kubectl/config_view_unknown_member.json");
+    let unknown = KUBE.view(verb("contexts"), &drifted).expect("unknown member");
+    assert_eq!(cells(&unknown), base, "unknown members are ignored");
+    // A missing list and a wrong type give a plain text that names no byte of the answer.
+    for name in ["kubectl/config_view_missing_contexts.json", "kubectl/config_view_wrong_type.json"] {
+        let model = KUBE.view(verb("contexts"), &fixture(name)).expect("degrades, not an error");
+        let ViewModel::Text(text) = &model else { panic!("{name} gave {model:?} and not a text") };
+        assert!(text.note().is_some_and(|note| !note.is_empty()), "{name} has no note");
+        let shown = serde_json::to_string(&model).expect("serialises");
+        for leak in ["REDACTED", "token", "exec", "eks.example.com", "DATA+OMITTED", "dev-cluster"] {
+            assert!(!shown.contains(leak), "{name}: {leak} was shown as text: {shown}");
+        }
+    }
+    // A shape that is valid and empty is an empty table: `kubectl` prints `null` lists for an empty kubeconfig.
+    let nothing = br#"{"kind":"Config","clusters":null,"users":null,"contexts":null,"current-context":""}"#;
+    let empty = KUBE.view(verb("contexts"), nothing).expect("an empty kubeconfig reads");
+    assert!(table(&empty).rows().is_empty());
+    assert_eq!(table(&empty).columns().len(), 5);
+    for text in [r#"{"contexts":[],"current-context":"x"}"#, r#"{"contexts":null}"#] {
+        assert!(table(&KUBE.view(verb("contexts"), text.as_bytes()).expect("reads")).rows().is_empty(), "{text}");
+    }
+    // A kubeconfig that holds a clear credential and cannot be read shows none of it.
+    let leaky = br#"{"users":[{"name":"u","user":{"exec":{"env":[{"name":"K","value":"HW-CANARY-EXEC-ENV"}]}}}],
+        "contexts":5}"#;
+    let model = KUBE.view(verb("contexts"), leaky).expect("degrades");
+    assert!(!serde_json::to_string(&model).expect("serialises").contains("HW-CANARY"), "a clear value was shown");
+    // Nothing, too much, and not JSON at all are errors without text, never a panic.
+    assert_eq!(KUBE.view(verb("contexts"), b"").unwrap_err(), ParseError::Empty);
+    assert_eq!(KUBE.view(verb("contexts"), b" \n").unwrap_err(), ParseError::Empty);
+    assert_eq!(kube::parse_contexts(b"not json").unwrap_err(), ParseError::Unrecognised);
+    assert_eq!(kube::parse_contexts(b"[]").unwrap_err(), ParseError::Unrecognised);
+    assert_eq!(kube::parse_contexts(br#"{"contexts":[]} trailing"#).unwrap_err(), ParseError::Unrecognised);
+
+    // Objects only: a list entry or a member that is an array is never read as its member values in order.
+    for text in [
+        r#"{"contexts":[["dev",{"cluster":"c","user":"u"}]],"current-context":"dev"}"#,
+        r#"{"contexts":[{"name":"dev","context":["c","u"]}]}"#,
+        r#"["contexts",[]]"#,
+        r#"{"contexts":{"name":"dev"}}"#,
+        r#"{"contexts":[{"name":["dev"]}]}"#,
+        r#"{"contexts":[{"name":"dev","context":{"cluster":["c"]}}]}"#,
+    ] {
+        assert_eq!(kube::parse_contexts(text.as_bytes()).unwrap_err(), ParseError::Unrecognised, "{text}");
+    }
+    // A duplicated member is a refusal and not a silent last-wins.
+    assert!(kube::parse_contexts(br#"{"contexts":[],"contexts":[]}"#).is_err());
+    // A pod list: a truncated one is shown as a bounded text with a note, a wrong shape too.
+    let unreadable = [
+        fixture("kubectl/pods_truncated.json"),
+        br#"{"items":"x"}"#.to_vec(),
+        b"[]".to_vec(),
+        b"7".to_vec(),
+        br#"{"x":1}"#.to_vec(),
+    ];
+    for bytes in unreadable {
+        let model = pods_at(&bytes, 1);
+        let ViewModel::Text(text) = &model else { panic!("{} bytes gave {model:?}", bytes.len()) };
+        assert!(text.note().is_some(), "the text says it is the plain output");
+        assert!(text.text().len() <= MAX_TEXT);
+    }
+    assert!(table(&pods_at(br#"{"items":[]}"#, 1)).rows().is_empty());
+    assert!(table(&pods_at(br#"{"items":null,"kind":"List"}"#, 1)).rows().is_empty());
+    assert_eq!(KUBE.view_at(verb("pods"), b"", at(0)).unwrap_err(), ParseError::Empty);
+    // A pod list whose items are arrays, null or numbers is counted, never read positionally.
+    let mixed = br#"{"items":[["x"],null,3,{"metadata":{"name":"ok"}},{"metadata":["name"]}]}"#;
+    let model = pods_at(mixed, 1);
+    assert_eq!(cells(&model)[0][0], "ok");
+    assert_eq!(cells(&model)[1][0], "?", "metadata that is an array is no name");
+    let note = table(&model).note();
+    assert!(note.is_some_and(|note| note.contains('3')), "three entries could not be read: {note:?}");
+    // A wrong type in one member is a ? and the list still shows.
+    let wrong = br#"{"items":[{"metadata":{"name":5,"creationTimestamp":7},
+        "spec":{"nodeName":[],"containers":"x"},"status":{"phase":1}}]}"#;
+    assert_eq!(cells(&pods_at(wrong, 1)), [["?", "?", "?", "0", "?", "?"]], "no container list at all is no restarts");
+}
+
+#[test]
+fn hostile_pods_give_clean_bounded_cells() {
+    let model = pods_at(&fixture("kubectl/pods_hostile.json"), 1);
+    let list = table(&model);
+    assert_eq!(list.rows().len(), 3);
+    // The 253-character name stays whole in its cell and its key; it is no pod name a verb accepts, so no action.
+    let long = &list.rows()[0];
+    assert_eq!(long.key().len(), 253);
+    assert_eq!(long.cells().next().expect("name").len(), 253);
+    assert!(long.actions().is_empty(), "a 253-character name without dots has a label over 63 characters");
+    // Labels and annotations are not read, so neither the escape text nor the 5000 characters is in the model.
+    let shown = serde_json::to_string(&model).expect("serialises");
+    assert!(!shown.contains("xxxxxxxx"), "the long annotation reached the model");
+    assert!(!shown.contains("evil") && !shown.contains("rtl") && !shown.contains("width"), "a label reached the model");
+    // A restart count that is a string is a ? and not a failed list.
+    let third = &list.rows()[2];
+    assert_eq!(third.cells().nth(3), Some("?"));
+    assert_eq!(third.cells().next(), Some("unknown-members"));
+
+    // Escape sequences, direction and zero-width characters in the fields that ARE read never come out raw.
+    let evil = "evil\u{1b}[31mred\u{1b}]0;title\u{7}\u{202e}rtl\u{200b}zw\u{9b}2Jx\nbreak\ttab";
+    let json_text = serde_json::to_string(evil).expect("json text");
+    let document = format!(
+        r#"{{"items":[{{"metadata":{{"name":{json_text}}},
+        "spec":{{"nodeName":{json_text},"containers":[{{"name":{json_text}}}]}},
+        "status":{{"phase":{json_text},
+        "containerStatuses":[{{"name":"c","state":{{"waiting":{{"reason":{json_text}}}}}}}]}}}}]}}"#
+    );
+    let model = pods_at(document.as_bytes(), 1);
+    let shown = serde_json::to_string(&model).expect("serialises");
+    for raw in ["\\u001b", "\\u009b", "\\u202e", "\\u200b", "\\u0007", "\\n", "\\t"] {
+        assert!(!shown.contains(raw), "{raw} is in the model: {shown}");
+    }
+    assert!(table(&model).rows()[0].actions().is_empty(), "a hostile name offers no action");
+    for cell in cells(&model).concat() {
+        assert!(cell.len() <= MAX_CELL);
+    }
+    // A name of 100,000 characters is cut at the cell cap, with its key at 253 bytes, and offers no action.
+    let big = "n".repeat(100_000);
+    let document = format!(r#"{{"items":[{{"metadata":{{"name":"{big}"}}}}]}}"#);
+    let model = pods_at(document.as_bytes(), 1);
+    let row = &table(&model).rows()[0];
+    assert!(row.cells().next().expect("cell").len() <= MAX_CELL);
+    assert!(row.key().len() <= 253 && row.actions().is_empty());
+    // A list of empty objects cannot make the reader keep more than its cap.
+    let many = format!(r#"{{"items":[{}]}}"#, vec!["{}"; 300_000].join(","));
+    let model = pods_at(many.as_bytes(), 1);
+    assert_eq!(table(&model).rows().len(), 2000);
+    // The containers of one pod are bounded too.
+    let statuses = vec![r#"{"ready":true}"#; 5000].join(",");
+    let document =
+        format!(r#"{{"items":[{{"metadata":{{"name":"p"}},"status":{{"containerStatuses":[{statuses}]}}}}]}}"#);
+    let model = pods_at(document.as_bytes(), 1);
+    assert_eq!(cells(&model)[0][1], "?", "a pod with more containers than are kept does not claim a count");
+}
+
+#[test]
+fn a_long_pod_list_is_cut_with_a_note() {
+    let item = |n: u32| format!(r#"{{"metadata":{{"name":"pod-{n}"}},"status":{{"phase":"Running"}}}}"#);
+    let items: Vec<String> = (0..3000).map(item).collect();
+    let document = format!(r#"{{"kind":"List","items":[{}]}}"#, items.join(","));
+    let model = pods_at(document.as_bytes(), 1);
+    let list = table(&model);
+    assert_eq!(list.rows().len(), 2000);
+    let truncated = list.truncated().expect("a cut list says so");
+    assert_eq!(truncated.shown(), 2000);
+    assert!(truncated.note().contains("3000"), "{}", truncated.note());
+    assert!(model.check().is_ok());
+    // The same for contexts.
+    let context = |n: u32| format!(r#"{{"name":"c-{n}","context":{{"cluster":"x","user":"y"}}}}"#);
+    let contexts: Vec<String> = (0..2500).map(context).collect();
+    let document = format!(r#"{{"contexts":[{}],"current-context":"c-1"}}"#, contexts.join(","));
+    let model = KUBE.view(verb("contexts"), document.as_bytes()).expect("reads");
+    assert_eq!(table(&model).rows().len(), 2000);
+    assert!(table(&model).truncated().is_some());
 }
 
 /// Keeps the helpers of later tasks used while the file grows.

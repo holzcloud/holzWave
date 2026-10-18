@@ -3,7 +3,8 @@
 //! `kubectl` is run as a program by the engine of this module's neighbours; no Kubernetes client is written here, so
 //! its auth plugins, proxies and the exec transport stay `kubectl`'s own work. This file holds only argument builders
 //! and parsers: it starts no process, reads no file and keeps no state. Every argument list is built from validated
-//! names ([`super::args`]), a name that follows an option travels in the equals form, and every other name follows `--`.
+//! names ([`super::args`]): a name that follows an option travels in the equals form, and every other name follows
+//! `--`.
 //!
 //! What `kubectl` prints is another party's text. Each answer is read by a typed reader that keeps only the members a
 //! table shows. A member that is not there or has another type is a `?` cell and not an error, an unknown member is
@@ -15,14 +16,15 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::marker::PhantomData;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 
-use super::args::ArgError;
+use super::args::{flag_eq, ArgError};
 use super::run::MAX_STDOUT;
-use super::view::{text_view, RowBuilder, TableBuilder, TextFormat, ViewModel};
+use super::view::{text_fallback, text_view, RowBuilder, TableBuilder, TextFormat, Tone, ViewModel};
 use super::{
     ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId, Validated,
     Verb, VerbEffect, VersionProbe,
@@ -443,7 +445,9 @@ object_members!(VersionDocument, ClientVersion);
 pub fn parse_version(text: &str) -> Option<String> {
     let document: VersionDocument = read_document(text.as_bytes()).ok()?;
     let version = document.client.is()?.git.is()?;
-    let valid = !version.is_empty() && version.chars().count() <= VERSION_MAX && version.chars().all(|c| c.is_ascii_graphic());
+    let valid = !version.is_empty()
+        && version.chars().count() <= VERSION_MAX
+        && version.chars().all(|c| c.is_ascii_graphic());
     valid.then(|| version.clone())
 }
 
@@ -612,7 +616,8 @@ fn contexts_view(data: &ContextsData) -> ViewModel {
     let use_context = own_verb("use_context");
     for entry in &data.contexts {
         let current = data.current.as_deref() == Some(entry.name.as_str());
-        let cells = [if current { "*" } else { "" }, &entry.name, &entry.cluster, &entry.user, entry.namespace().unwrap_or("")];
+        let star = if current { "*" } else { "" };
+        let cells = [star, &entry.name, &entry.cluster, &entry.user, entry.namespace().unwrap_or("")];
         let mut row = RowBuilder::new(&entry.name, &cells);
         if let Some(verb) = use_context {
             row.action(verb, &[("context", &entry.name)]);
@@ -650,20 +655,12 @@ fn own(verb: &Verb) -> Result<&'static Verb, ArgError> {
     SPEC.verb(verb.id).filter(|listed| *listed == verb).ok_or(ArgError::Unknown)
 }
 
-impl Integration for Kube {
-    fn spec(&self) -> &'static IntegrationSpec {
-        &SPEC
-    }
-
-    fn argv(&self, verb: &Verb, _args: &Validated, _selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
-        let verb = own(verb)?;
-        match verb.id {
-            "contexts" => Ok(["config", "view", "-o", "json"].map(OsString::from).to_vec()),
-            _ => Err(ArgError::Unknown),
-        }
-    }
-
-    fn view(&self, verb: &Verb, stdout: &[u8]) -> Result<ViewModel, ParseError> {
+impl Kube {
+    /// The view model of the standard output of `verb`, with the ages of the rows computed against `now`. [`view`]
+    /// calls it with the system clock; a test passes a fixed time.
+    ///
+    /// [`view`]: Integration::view
+    pub fn view_at(&self, verb: &Verb, stdout: &[u8], now: SystemTime) -> Result<ViewModel, ParseError> {
         let verb = own(verb).map_err(|_| ParseError::Unrecognised)?;
         match verb.id {
             "contexts" => match parse_contexts(stdout) {
@@ -671,7 +668,447 @@ impl Integration for Kube {
                 Err(ParseError::Unrecognised) => Ok(unreadable_config()),
                 Err(other) => Err(other),
             },
+            "namespaces" => namespaces_view(stdout, epoch_seconds(now)),
+            "pods" => pods_view(stdout, epoch_seconds(now)),
             _ => Err(ParseError::Unrecognised),
         }
     }
+}
+
+impl Integration for Kube {
+    fn spec(&self) -> &'static IntegrationSpec {
+        &SPEC
+    }
+
+    fn argv(&self, verb: &Verb, args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
+        let verb = own(verb)?;
+        match verb.id {
+            "contexts" => Ok(["config", "view", "-o", "json"].map(OsString::from).to_vec()),
+            "namespaces" => Ok(read_list("namespaces", selection, false)),
+            "pods" => Ok(read_list("pods", selection, true)),
+            _ => {
+                let _ = args;
+                Err(ArgError::Unknown)
+            }
+        }
+    }
+
+    fn view(&self, verb: &Verb, stdout: &[u8]) -> Result<ViewModel, ParseError> {
+        self.view_at(verb, stdout, SystemTime::now())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Argument lists.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The time limit of a read, which a hung cluster cannot get past.
+const REQUEST_TIMEOUT: &str = "--request-timeout=10s";
+
+/// `--context=<name>` when the selection has a context. The name is validated, and the equals form keeps it one
+/// argument, so it cannot become an option of its own.
+fn context_flag(selection: &CheckedSelection) -> Option<OsString> {
+    selection.context.as_ref().map(|context| flag_eq("context", context.as_str()))
+}
+
+/// `--namespace=<name>` when the selection has a namespace.
+fn namespace_flag(selection: &CheckedSelection) -> Option<OsString> {
+    selection.namespace.as_ref().map(|namespace| flag_eq("namespace", namespace.as_str()))
+}
+
+/// `get <what> -o json` with the selection and the time limit. A list of namespaces is not scoped to a namespace.
+fn read_list(what: &str, selection: &CheckedSelection, namespaced: bool) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = ["get", what, "-o", "json"].map(OsString::from).to_vec();
+    argv.extend(context_flag(selection));
+    if namespaced {
+        argv.extend(namespace_flag(selection));
+    }
+    argv.push(REQUEST_TIMEOUT.into());
+    argv
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Time.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Whole seconds since the Unix epoch; a time before it is 0.
+fn epoch_seconds(time: SystemTime) -> i64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Seconds since the Unix epoch of a `YYYY-MM-DDTHH:MM:SSZ` time, the form `kubectl` writes, or `None` for any other
+/// text. The date is checked, not only the shape.
+fn parse_timestamp(text: &str) -> Option<i64> {
+    let bytes = text.as_bytes();
+    let separators = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':'), (19, b'Z')];
+    let shape = bytes.len() == 20 && separators.iter().all(|(at, c)| bytes[*at] == *c);
+    if !shape {
+        return None;
+    }
+    let number = |from: usize, to: usize| -> Option<i64> {
+        let digits = text.get(from..to)?;
+        if digits.bytes().all(|b| b.is_ascii_digit()) { digits.parse().ok() } else { None }
+    };
+    let (year, month, day) = (number(0, 4)?, number(5, 7)?, number(8, 10)?);
+    let (hour, minute, second) = (number(11, 13)?, number(14, 16)?, number(17, 19)?);
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let month_days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 28 + i64::from(leap),
+        _ => return None,
+    };
+    if !(1..=month_days).contains(&day) || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    // Days from 1970-01-01 to the civil date (the proleptic Gregorian calendar).
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
+}
+
+/// The age of a thing created at `created` as `45s`, `7m`, `3h` or `12d`; a creation time in the future is `0s`.
+fn age(created: &Member<String>, now: i64) -> String {
+    match created.is().and_then(|text| parse_timestamp(text)) {
+        Some(created) => {
+            let seconds = now.saturating_sub(created).max(0);
+            match seconds {
+                0..=59 => format!("{seconds}s"),
+                60..=3599 => format!("{}m", seconds / 60),
+                3600..=86_399 => format!("{}h", seconds / 3600),
+                _ => format!("{}d", seconds / 86_400),
+            }
+        }
+        None => "?".to_owned(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Lists of namespaces and pods.
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct NamespaceList {
+    #[serde(default)]
+    items: Seq<NamespaceItem, LIST_KEPT>,
+}
+
+#[derive(Deserialize)]
+struct NamespaceItem {
+    #[serde(default)]
+    metadata: Member<ObjectMeta>,
+    #[serde(default)]
+    status: Member<NamespaceStatus>,
+}
+
+#[derive(Deserialize)]
+struct NamespaceStatus {
+    #[serde(default)]
+    phase: Member<String>,
+}
+
+/// The members of `metadata` that a table shows. Labels and annotations have no field, so they are skipped unread.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectMeta {
+    #[serde(default)]
+    name: Member<String>,
+    #[serde(default)]
+    creation_timestamp: Member<String>,
+    #[serde(default)]
+    deletion_timestamp: Member<String>,
+}
+
+#[derive(Deserialize)]
+struct PodList {
+    #[serde(default)]
+    items: Seq<PodItem, LIST_KEPT>,
+}
+
+#[derive(Deserialize)]
+struct PodItem {
+    #[serde(default)]
+    metadata: Member<ObjectMeta>,
+    #[serde(default)]
+    spec: Member<PodSpec>,
+    #[serde(default)]
+    status: Member<PodStatus>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodSpec {
+    #[serde(default)]
+    node_name: Member<String>,
+    #[serde(default)]
+    containers: Seq<ContainerSpec, INNER_KEPT>,
+}
+
+#[derive(Deserialize)]
+struct ContainerSpec {
+    #[serde(default)]
+    name: Member<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodStatus {
+    #[serde(default)]
+    phase: Member<String>,
+    #[serde(default)]
+    container_statuses: Seq<ContainerStatus, INNER_KEPT>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContainerStatus {
+    #[serde(default)]
+    ready: Member<bool>,
+    #[serde(default)]
+    restart_count: Member<u64>,
+    #[serde(default)]
+    state: Member<ContainerState>,
+}
+
+#[derive(Deserialize)]
+struct ContainerState {
+    #[serde(default)]
+    waiting: Member<StateReason>,
+    #[serde(default)]
+    terminated: Member<StateReason>,
+    #[serde(default)]
+    running: Member<Anything>,
+}
+
+#[derive(Deserialize)]
+struct StateReason {
+    #[serde(default)]
+    reason: Member<String>,
+}
+
+/// An object whose members are all skipped: its presence is what is read.
+#[derive(Deserialize)]
+struct Anything {}
+
+object_members!(
+    NamespaceList,
+    NamespaceItem,
+    NamespaceStatus,
+    ObjectMeta,
+    PodList,
+    PodItem,
+    PodSpec,
+    ContainerSpec,
+    PodStatus,
+    ContainerStatus,
+    ContainerState,
+    StateReason,
+    Anything,
+);
+
+/// The items of a list member as rows to show: a `null` list is empty, an array is its items, and anything else (a
+/// member that is missing or is no array) is no list at all.
+fn items_of<T, const CAP: usize>(list: &Seq<T, CAP>) -> Option<&[T]> {
+    match list.shape {
+        Shape::Null => Some(&[]),
+        Shape::List => Some(&list.items),
+        Shape::Missing | Shape::Wrong => None,
+    }
+}
+
+/// The sentence under a table about the items that were not shown as rows.
+fn list_note<T, const CAP: usize>(list: &Seq<T, CAP>) -> Option<String> {
+    let mut parts = Vec::new();
+    if list.unreadable > 0 {
+        parts.push(format!("{} entries could not be read.", list.unreadable));
+    }
+    let kept_or_unreadable = list.items.len() + list.unreadable;
+    if list.total > kept_or_unreadable {
+        parts.push(format!("{} more entries were not read.", list.total - kept_or_unreadable));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn with_list_note<T, const CAP: usize>(model: ViewModel, list: &Seq<T, CAP>) -> ViewModel {
+    match list_note(list) {
+        Some(note) => model.with_note(&note),
+        None => model,
+    }
+}
+
+fn text_of(member: &Member<String>) -> &str {
+    member.is().map_or("?", String::as_str)
+}
+
+fn namespaces_view(stdout: &[u8], now: i64) -> Result<ViewModel, ParseError> {
+    let list: NamespaceList = match read_document(stdout) {
+        Ok(list) => list,
+        Err(ParseError::Unrecognised) => return Ok(text_fallback("Namespaces", stdout)),
+        Err(other) => return Err(other),
+    };
+    let Some(items) = items_of(&list.items) else { return Ok(text_fallback("Namespaces", stdout)) };
+    let mut table = TableBuilder::new("Namespaces");
+    table.column("name", "NAME").column("status", "STATUS").column("age", "AGE");
+    let set_namespace = own_verb("set_namespace");
+    for item in items {
+        let meta = item.metadata.is();
+        let name = meta.and_then(|meta| meta.name.is());
+        let phase = item.status.is().map_or("?", |status| text_of(&status.phase));
+        let created = meta.map_or_else(|| "?".to_owned(), |meta| age(&meta.creation_timestamp, now));
+        let shown = name.map_or("?", String::as_str);
+        let mut row = RowBuilder::new(shown, &[shown, phase, &created]);
+        row.tone(if phase == "Terminating" { Tone::Warn } else { Tone::Normal });
+        if let (Some(name), Some(verb)) = (name, set_namespace) {
+            row.action(verb, &[("namespace", name)]);
+        }
+        table.push(row);
+    }
+    Ok(with_list_note(table.finish(), &list.items))
+}
+
+/// The statuses of the containers as a slice when every one was read: a pod that has none yet (a `null` or missing
+/// member) has an empty slice, and a status that is no object, a list that was cut or one that holds an unreadable
+/// entry has none.
+fn container_statuses(status: &Member<PodStatus>) -> Option<&[ContainerStatus]> {
+    let status = match status {
+        Member::Missing => return Some(&[]),
+        Member::Wrong => return None,
+        Member::Is(status) => status,
+    };
+    match status.container_statuses.shape {
+        Shape::Missing | Shape::Null => Some(&[]),
+        Shape::List if status.container_statuses.complete() => Some(&status.container_statuses.items),
+        Shape::List | Shape::Wrong => None,
+    }
+}
+
+/// `ready/total`, or `?` when either number is not known. The total is the number of containers in the spec, else the
+/// number of statuses when the spec lists none.
+fn ready_cell(spec: &Member<PodSpec>, status: &Member<PodStatus>) -> String {
+    let statuses = container_statuses(status);
+    let total = match spec {
+        Member::Wrong => None,
+        Member::Is(spec) => match spec.containers.shape {
+            Shape::List if spec.containers.complete() => Some(spec.containers.items.len()),
+            Shape::Missing | Shape::Null => statuses.map(<[ContainerStatus]>::len),
+            Shape::List | Shape::Wrong => None,
+        },
+        Member::Missing => statuses.map(<[ContainerStatus]>::len),
+    };
+    let ready = statuses.and_then(|statuses| {
+        statuses.iter().try_fold(0_usize, |ready, status| match &status.ready {
+            Member::Is(true) => Some(ready + 1),
+            Member::Is(false) | Member::Missing => Some(ready),
+            Member::Wrong => None,
+        })
+    });
+    match (ready, total) {
+        (Some(ready), Some(total)) => format!("{ready}/{total}"),
+        _ => "?".to_owned(),
+    }
+}
+
+/// The restarts of all containers, or `?`.
+fn restarts_cell(status: &Member<PodStatus>) -> String {
+    let total = container_statuses(status).and_then(|statuses| {
+        statuses.iter().try_fold(0_u64, |sum, status| match &status.restart_count {
+            Member::Is(count) => Some(sum.saturating_add(*count)),
+            Member::Missing => Some(sum),
+            Member::Wrong => None,
+        })
+    });
+    total.map_or_else(|| "?".to_owned(), |total| total.to_string())
+}
+
+fn reason_of(state: &Member<StateReason>) -> Option<&str> {
+    state.is().and_then(|state| state.reason.is()).map(String::as_str).filter(|reason| !reason.is_empty())
+}
+
+/// What a person expects to read as the status of a pod, as `kubectl` shows it: the waiting or terminated reason of
+/// the first container that has one (a `Completed` container beside a running one is not a completed pod), else
+/// `Terminating` when the pod is being deleted, else the phase.
+fn pod_status(meta: Option<&ObjectMeta>, status: Option<&PodStatus>) -> Option<String> {
+    let containers: &[ContainerStatus] = status.map_or(&[][..], |status| &status.container_statuses.items);
+    let reason = containers.iter().find_map(|container| {
+        let state = container.state.is()?;
+        reason_of(&state.waiting).or_else(|| reason_of(&state.terminated))
+    });
+    if let Some(reason) = reason {
+        let running = containers
+            .iter()
+            .any(|container| container.state.is().is_some_and(|state| state.running.is().is_some()));
+        return Some(if reason == "Completed" && running { "Running" } else { reason }.to_owned());
+    }
+    if meta.is_some_and(|meta| meta.deletion_timestamp.is().is_some_and(|stamp| !stamp.is_empty())) {
+        return Some("Terminating".to_owned());
+    }
+    status?.phase.is().filter(|phase| !phase.is_empty()).cloned()
+}
+
+fn pod_tone(status: &str) -> Tone {
+    match status {
+        "Pending" | "ContainerCreating" | "PodInitializing" | "Terminating" | "Unknown" | "?" => Tone::Warn,
+        "CrashLoopBackOff" | "Error" | "OOMKilled" | "ImagePullBackOff" | "ErrImagePull" | "Failed"
+        | "CreateContainerConfigError" | "CreateContainerError" | "InvalidImageName" | "RunContainerError"
+        | "DeadlineExceeded" | "Evicted" | "ContainerCannotRun" => Tone::Danger,
+        _ => Tone::Normal,
+    }
+}
+
+/// The node of a pod: empty while it is not scheduled, `?` when the member is no text.
+fn node_cell(spec: &Member<PodSpec>) -> &str {
+    match spec {
+        Member::Missing => "",
+        Member::Wrong => "?",
+        Member::Is(spec) => match &spec.node_name {
+            Member::Missing => "",
+            Member::Is(node) => node,
+            Member::Wrong => "?",
+        },
+    }
+}
+
+fn pods_view(stdout: &[u8], now: i64) -> Result<ViewModel, ParseError> {
+    let list: PodList = match read_document(stdout) {
+        Ok(list) => list,
+        Err(ParseError::Unrecognised) => return Ok(text_fallback("Pods", stdout)),
+        Err(other) => return Err(other),
+    };
+    let Some(items) = items_of(&list.items) else { return Ok(text_fallback("Pods", stdout)) };
+    let mut table = TableBuilder::new("Pods");
+    table.column("name", "NAME").column("ready", "READY").column("status", "STATUS");
+    table.column("restarts", "RESTARTS").column("age", "AGE").column("node", "NODE");
+    let (exec, logs, delete) = (own_verb("exec"), own_verb("logs"), own_verb("delete_pod"));
+    for item in items {
+        let (meta, spec, status) = (item.metadata.is(), item.spec.is(), item.status.is());
+        let name = meta.and_then(|meta| meta.name.is());
+        let shown = name.map_or("?", String::as_str);
+        let state = pod_status(meta, status).unwrap_or_else(|| "?".to_owned());
+        let created = meta.map_or_else(|| "?".to_owned(), |meta| age(&meta.creation_timestamp, now));
+        let ready = ready_cell(&item.spec, &item.status);
+        let restarts = restarts_cell(&item.status);
+        let cells = [shown, &ready, &state, &restarts, &created, node_cell(&item.spec)];
+        let mut row = RowBuilder::new(shown, &cells);
+        row.tone(pod_tone(&state));
+        if let Some(pod) = name {
+            // The first container travels with Exec and Logs; a pod that names none gets its default container.
+            let first = spec.and_then(|spec| spec.containers.items.first()).and_then(|container| container.name.is());
+            let mut with_container = vec![("pod", pod.as_str())];
+            if let Some(container) = first {
+                with_container.push(("container", container.as_str()));
+            }
+            for verb in [exec, logs].into_iter().flatten() {
+                row.action(verb, &with_container);
+            }
+            if let Some(verb) = delete {
+                row.action(verb, &[("pod", pod.as_str())]);
+            }
+        }
+        table.push(row);
+    }
+    Ok(with_list_note(table.finish(), &list.items))
 }
