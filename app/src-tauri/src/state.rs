@@ -2752,6 +2752,8 @@ impl AppCore {
                     core.pane_gone(pane, code);
                 }
             }
+            // The pane stays open with its last words on the screen; nothing to do until it ends.
+            PaneEvent::Held { .. } => {}
             PaneEvent::Failed(reason) => {
                 // The reason names the failure (no program, no PTY), never terminal content.
                 eprintln!("holzwave: pane {pane} did not start: {reason}");

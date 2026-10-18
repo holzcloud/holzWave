@@ -130,6 +130,18 @@ impl<C> PaneQueue<C> {
     /// [`Popped::Closed`] if the queue was closed, then [`Popped::Finished`] if the producer finished, otherwise
     /// the call waits and returns [`Popped::Timeout`] when nothing arrived.
     pub fn pop(&self, timeout: Duration) -> Popped<C> {
+        self.pop_with(timeout, false)
+    }
+
+    /// [`pop`](Self::pop) for a consumer that outlives the end of the output (a pane held after its program ended): the
+    /// end of the output is not an answer, so a call with nothing queued waits for a control message, the close or
+    /// the timeout instead of returning [`Popped::Finished`] again and again. Without this such a consumer would have
+    /// to poll. Output that is still queued is delivered, in order.
+    pub fn pop_held(&self, timeout: Duration) -> Popped<C> {
+        self.pop_with(timeout, true)
+    }
+
+    fn pop_with(&self, timeout: Duration, past_finish: bool) -> Popped<C> {
         // A timeout too large to add to the clock simply waits without a deadline.
         let deadline = Instant::now().checked_add(timeout);
         let mut inner = self.lock();
@@ -145,7 +157,7 @@ impl<C> PaneQueue<C> {
             if inner.closed {
                 return Popped::Closed;
             }
-            if inner.finished {
+            if inner.finished && !past_finish {
                 return Popped::Finished;
             }
             match deadline {

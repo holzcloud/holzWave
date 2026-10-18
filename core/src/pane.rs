@@ -44,7 +44,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::engine::{
-    CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, MouseEvent, PasteOutcome, SearchOp, SearchState,
+    CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, Mods, MouseEvent, PasteOutcome, SearchOp, SearchState,
     SelectOp, TerminalEngine, WheelEvent, WheelOutcome, parse_osc7,
 };
 use crate::layout::PaneId;
@@ -106,6 +106,15 @@ const READ_CHUNK: usize = 64 * 1024;
 /// that the shell's last words are in the last frame. The output pipe has no end to wait for, so this is a bound.
 const EXIT_GRACE: Duration = Duration::from_millis(150);
 
+/// How long a pane whose output ended waits for the child's exit status to become readable before it holds the pane
+/// without one ([`PaneSpec::linger`]). The status is there a few milliseconds after the output ends; this only bounds a
+/// child that closed its terminal and runs on.
+const STATUS_SETTLE: Duration = Duration::from_millis(500);
+
+/// What a held pane does to the terminal modes before its notice: the program's mouse and focus reporting end, so that
+/// the person can select and copy the error line with the mouse. Nothing else of the screen changes.
+const HELD_MODES_RESET: &[u8] = b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1006l";
+
 /// How a pane is started.
 #[derive(Clone, Debug)]
 pub struct PaneSpec {
@@ -154,6 +163,14 @@ pub struct PaneSpec {
     /// Extra environment variables of the local shell (`HOLZWAVE_IPC`, `HOLZWAVE_TOKEN`, `HOLZWAVE_PANE`: what `wsh` finds the
     /// app by). Not used for an SSH pane: a remote host reaches the app through `tunnel`.
     pub env: Vec<(String, String)>,
+    /// Hold the pane when its program ends instead of closing it at once. `Some(time)`: a program that ends with a
+    /// status that is not zero, with no readable status, or within `time` of the start, leaves the pane open with one
+    /// notice line (`[holzWave] exited with status N. Press Enter to close.`), one [`PaneEvent::Held`], and no input
+    /// but Enter and a close request; the pane then ends through the one `Exited`. A program that ran longer than
+    /// `time` and ended with status 0 closes the pane at once, as it does without this. `None` (the default) never
+    /// holds: the pane ends with its program. It is for a pane whose program is a tool and whose last line explains a
+    /// failure: a pane that vanished with it would leave nothing to read.
+    pub linger: Option<Duration>,
 }
 
 impl PaneSpec {
@@ -179,6 +196,7 @@ impl PaneSpec {
             tunnel: None,
             blank: false,
             env: Vec::new(),
+            linger: None,
         }
     }
 
@@ -211,6 +229,10 @@ pub enum PaneEvent {
     /// The shell ended and was reaped. Exactly once per pane that started, and the last event it sends.
     /// `code` is `None` when the exit status could not be read.
     Exited { code: Option<u32> },
+    /// The program ended and the pane stays ([`PaneSpec::linger`]): its last output and a notice line are on the screen
+    /// and the pane ends, with one `Exited`, on Enter or when it is closed. At most once per pane, and always before
+    /// `Exited`. `code` is `None` when the exit status could not be read.
+    Held { code: Option<u32> },
     /// The pane could not start. Exactly once, and no other event follows.
     Failed(String),
 }
@@ -258,6 +280,15 @@ fn notice_line(text: &str) -> Vec<u8> {
         clean.push(c);
     }
     format!("\r\n\x1b[33m{clean}\x1b[0m\r\n").into_bytes()
+}
+
+/// Whether a key closes a held pane: Enter, or the one on the numeric pad, pressed once with no modifier.
+fn is_enter(key: &DomKey) -> bool {
+    matches!(key.code.as_str(), "Enter" | "NumpadEnter")
+        && key.mods == Mods::NONE
+        && !key.release
+        && !key.repeat
+        && !key.composing
 }
 
 /// A message from the shell to the engine thread.
@@ -713,6 +744,9 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     /// once when the pane starts; empty off Windows) that a Windows prompt names as the host of its report.
     os: Os,
     local_host: String,
+    /// [`PaneSpec::linger`] and when the pane started, for the rule of the held exit.
+    linger: Option<Duration>,
+    started: Instant,
 }
 
 impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
@@ -739,6 +773,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                     if self.dirty {
                         self.emit_frame();
                     }
+                    self.hold_if_wanted(None);
                     return;
                 }
                 Popped::Timeout => {}
@@ -752,29 +787,109 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             // Asked on the clock and not on a timeout: output that keeps arriving makes every wait end early.
             if self.exit_poll.is_some_and(|poll| self.last_exit_check.elapsed() >= poll) {
                 self.last_exit_check = Instant::now();
-                if self.shell_exited() {
-                    self.drain_after_exit();
+                if let Some(code) = self.child_status() {
+                    if !self.drain_after_exit() {
+                        self.hold_if_wanted(Some(code));
+                    }
                     return;
                 }
             }
         }
     }
 
-    /// Whether the shell has exited. Does not block; a child that cannot be asked counts as running.
-    fn shell_exited(&mut self) -> bool {
-        self.pty.as_mut().is_some_and(|pty| matches!(pty.try_wait(), Ok(Some(_))))
+    /// The exit status of the shell if it has exited. Does not block; a child that cannot be asked counts as running.
+    /// The child is not closed: a second ask gives the same status.
+    fn child_status(&mut self) -> Option<u32> {
+        self.pty.as_mut().and_then(|pty| pty.try_wait().ok().flatten())
+    }
+
+    /// The status of a child whose output has ended, which is readable a few milliseconds later at the latest: asked
+    /// every few milliseconds for [`STATUS_SETTLE`], `None` when it never became readable.
+    fn settled_status(&mut self) -> Option<u32> {
+        let deadline = Instant::now() + STATUS_SETTLE;
+        loop {
+            if let Some(code) = self.child_status() {
+                return Some(code);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The program ended and the output was shown: with [`PaneSpec::linger`] set, keep the pane when the status is not
+    /// zero, is unknown, or the pane is younger than the linger time. `known` is the status the caller already has.
+    fn hold_if_wanted(&mut self, known: Option<u32>) {
+        let Some(linger) = self.linger else { return };
+        let code = known.or_else(|| self.settled_status());
+        if code == Some(0) && self.started.elapsed() >= linger {
+            return;
+        }
+        self.hold(code);
+    }
+
+    /// The held exit: one notice line on the screen, one [`PaneEvent::Held`], then nothing but a close request and Enter
+    /// end the pane. Resizes, themes, scrolling, search and the like work as before; everything that would reach the
+    /// program (keys, text, pastes, mouse reports) is dropped, because there is no program, and so is output. The caller
+    /// ends the pane through [`Actor::finish`], which sends the one `Exited`.
+    fn hold(&mut self, code: Option<u32>) {
+        let line = match code {
+            Some(code) => format!("[holzWave] exited with status {code}. Press Enter to close."),
+            None => "[holzWave] exited. Press Enter to close.".to_owned(),
+        };
+        let mut bytes = HELD_MODES_RESET.to_vec();
+        bytes.extend_from_slice(&notice_line(&line));
+        self.feed(&bytes);
+        self.emit_frame();
+        (self.sink)(PaneEvent::Held { code });
+        loop {
+            let wait = match (self.dirty, self.last_emit) {
+                (true, Some(last)) => self.interval.saturating_sub(last.elapsed()),
+                (true, None) => Duration::ZERO,
+                (false, _) => Duration::from_secs(3600),
+            };
+            match self.queue.pop_held(wait) {
+                Popped::Control(Control::Close) | Popped::Closed => return,
+                Popped::Control(Control::Key(key)) if is_enter(&key) => return,
+                Popped::Control(control) => self.handle_held(control),
+                // Output after the end (a pseudo console that still flushes) and the end itself are of no interest.
+                Popped::Output(_) | Popped::Finished | Popped::Timeout => {}
+            }
+            if self.dirty && self.last_emit.is_none_or(|last| last.elapsed() >= self.interval) {
+                self.emit_frame();
+            }
+        }
+    }
+
+    /// A control message of a held pane: what would reach the program is dropped, the rest is as in a live pane.
+    fn handle_held(&mut self, control: Control) {
+        match control {
+            Control::Key(_) | Control::Edit(_) | Control::Text(_) | Control::Mouse(_) | Control::CwdFound(_) => {}
+            Control::Paste { reply, .. } => {
+                let _ = reply.send(Err(Error::Pty("the program has ended".into())));
+            }
+            // A wheel scrolls the screen locally or does nothing; bytes for the program are dropped.
+            Control::Wheel(event) => {
+                if matches!(self.engine.wheel(&event), Ok(WheelOutcome::Scrolled)) {
+                    self.dirty = true;
+                }
+            }
+            other => self.handle(other),
+        }
     }
 
     /// The shell exited but the output did not end (a Windows pseudo console before 24H2): feed what is still queued
     /// or arriving for [`EXIT_GRACE`], show the last frame, and go. The caller then ends the pane like the end of the
-    /// output does, so the reader keeps draining while the child is closed and the one `Exited` follows.
-    fn drain_after_exit(&mut self) {
+    /// output does, so the reader keeps draining while the child is closed and the one `Exited` follows. Returns true
+    /// when a request to close the pane was met on the way (it is answered by ending, so the pane is not held then).
+    fn drain_after_exit(&mut self) -> bool {
         let deadline = Instant::now() + EXIT_GRACE;
         loop {
             match self.queue.pop(deadline.saturating_duration_since(Instant::now())) {
                 Popped::Output(chunk) => self.feed(&chunk),
                 // Answered, so that a caller waiting for a reply does not wait out its timeout; nothing else is.
-                Popped::Control(Control::Close) | Popped::Closed => return,
+                Popped::Control(Control::Close) | Popped::Closed => return true,
                 Popped::Control(control) => self.handle(control),
                 Popped::Finished | Popped::Timeout => break,
             }
@@ -785,6 +900,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         if self.dirty {
             self.emit_frame();
         }
+        false
     }
 
     /// Ask for the shell's working directory without waiting for it. The lookup starts a process that can stall
@@ -1175,6 +1291,8 @@ fn engine_main<E, F, S>(
             Os::Windows => std::env::var("COMPUTERNAME").unwrap_or_default(),
             _ => String::new(),
         },
+        linger: spec.linger,
+        started: Instant::now(),
     };
     let _ = started.send(Ok(pid));
     actor.run();
