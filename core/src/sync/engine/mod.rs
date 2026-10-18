@@ -4,9 +4,21 @@
 //! content by its SHA-256, the server file by its ETag). Only one side changed: it is copied to the other. Both changed:
 //! the higher version stamp wins (counter first, the writer's clock only to break a tie), and the version that lost is
 //! kept: a lost server version in `backups/` on the server, a lost local version in `sync-conflicts/` next to the files
-//! (never for the secrets, which are never written to a file). Deletions are not synced yet; a deleted file comes back.
+//! (never for the secrets, which are never written to a file). A download is staged and applied at the next start; a
+//! live file the person changed after the download was staged is copied to `sync-conflicts/` first, and the first run
+//! after that start lists it among the conflicts.
+//!
+//! A deletion is a version like any other: the device that deleted a theme or a widget uploads a *tombstone*, the sealed
+//! payload [`TOMBSTONE`], and a device that finds one over a file it has not changed copies the file to `sync-conflicts/`
+//! and removes it. Tombstones exist for the folders that hold one file per item (`themes/`, `widgets/`) and nowhere else;
+//! an edit beats a delete on either side; a file that is merely not found counts as deleted, an error or a missing
+//! folder never does; and a run sends at most [`MAX_DELETES_SENT`] and applies at most [`MAX_DELETES_APPLIED`].
+//!
+//! The name `layout.json` carries a *layout unit*: the layout together with the pane assignments that make sense on
+//! another computer (see [`Unit`]). Pane ids are small per-device counters, so a layout adopted without the assignments
+//! that belong to it would meet the other device's own pane files; an adoption replaces them as one step.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,10 +26,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::crypto::{self, Kdf, Key, Stamp};
-use super::webdav::{Backend, CONFLICT, Cond, safe_segment};
+use super::webdav::{Backend, CONFLICT, Cond, MAX_SEGMENT, safe_segment, sha256_hex};
+use crate::blocks::{self, BLOCKS_FILE, Block};
+use crate::connections::PANES_FILE;
+use crate::layout::PaneId;
 use crate::persist::{read_limited, write_atomic};
 use crate::profiles::Profiles;
 use crate::secrets::SecretStore;
@@ -35,6 +49,41 @@ const FIXED: [&str; 5] = ["layout.json", "settings.json", "connections.json", "w
 /// The folders whose `<name>.json` files are synced one by one.
 const DIRS: [&str; 2] = ["themes", "widgets"];
 const STATE: &str = "sync_state.json";
+/// The synced name whose payload is a layout unit.
+const LAYOUT: &str = "layout.json";
+/// The synced name of the saved connections.
+const CONNECTIONS: &str = "connections.json";
+/// The version of the layout unit, and the most entries one of its two maps may hold.
+const UNIT_VERSION: u32 = 1;
+const MAX_UNIT_ENTRIES: usize = 4096;
+/// The most files of one folder whose names are too long to sync that one run names; the rest are counted.
+const MAX_UNSYNCABLE_SHOWN: usize = 5;
+/// The most a pane file is read at, as everywhere else.
+const PANE_FILE_LIMIT: u64 = 256 * 1024;
+/// The longest connection id or block source a unit may name, and the longest block path.
+const MAX_ID: usize = 64;
+const MAX_BLOCK_PATH: usize = 4096;
+/// The plaintext of a deleted file: a NUL byte and a fixed word. It is sealed like any file, so the blob format does not
+/// change, and it is not valid JSON, so a client that does not know it sees an invalid theme or widget file and ignores it.
+pub const TOMBSTONE: &[u8] = b"\0holzwave:deleted";
+/// The most tombstones one run sends, and the most files one run removes because another device deleted them.
+pub const MAX_DELETES_SENT: usize = 5;
+pub const MAX_DELETES_APPLIED: usize = 20;
+
+/// Whether a payload is the marker of a deleted file.
+fn is_tombstone(plain: &[u8]) -> bool {
+    plain == TOMBSTONE
+}
+
+/// Whether a deletion can be synced for `name`: only the folders that hold one file per item.
+fn deletable(name: &str) -> bool {
+    allowed(name) && name.split_once('/').is_some_and(|(dir, _)| DIRS.contains(&dir))
+}
+
+/// The folder (`themes` or `widgets`) of a deletable name.
+fn folder_of(name: &str) -> &str {
+    name.split_once('/').map_or(name, |(dir, _)| dir)
+}
 
 fn err(m: impl Into<String>) -> Error {
     Error::Io(io::Error::other(m.into()))
@@ -60,17 +109,46 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
+    sha256_hex(bytes)
 }
 
 // ---- names -------------------------------------------------------------------------------------------------------
 
-/// Whether `name` is a file the sync handles: a fixed one, or `themes/<safe>.json`.
+/// What follows the folder name and a dot in the server's file name of a themes or widgets file: `.json` and `.hwx`.
+const REMOTE_TAIL: &str = ".json.hwx";
+
+/// The longest file name stem (the name without `.json`) that a file of the folder `dir` may have: the server's file is
+/// `<dir>.<stem>.json.hwx` and one name on the server is at most [`MAX_SEGMENT`] characters, so this is derived from the
+/// transport's limit (112 for `themes`, 111 for `widgets`) and never typed. Every accepted name can be written, read and
+/// lose a conflict.
+pub fn max_stem(dir: &str) -> usize {
+    MAX_SEGMENT.saturating_sub(dir.len() + 1 + REMOTE_TAIL.len())
+}
+
+/// The characters a file name stem may hold: letters, digits, `-` and `_`.
+fn stem_chars(stem: &str) -> bool {
+    !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Whether `name` is a file the sync handles: a fixed one, or `themes/<stem>.json` and `widgets/<stem>.json` with a stem
+/// of the allowed characters and at most [`max_stem`] of them.
 pub fn allowed(name: &str) -> bool {
     FIXED.contains(&name)
         || name.split_once('/').is_some_and(|(dir, file)| {
-            DIRS.contains(&dir) && file.strip_suffix(".json").is_some_and(|stem| safe_segment(stem) && !stem.contains('.'))
+            DIRS.contains(&dir) && file.strip_suffix(".json").is_some_and(|stem| stem_chars(stem) && stem.len() <= max_stem(dir))
         })
+}
+
+/// Read a synced file of the data folder. An error names the logical file and never the absolute path, which a person
+/// should not have to read in a popover (and which tells a reader of a log where the data folder is).
+fn read_local(path: &Path, name: &str) -> Result<Option<Vec<u8>>> {
+    read_limited(path, MAX_FILE).map_err(|e| {
+        err(match e.kind() {
+            io::ErrorKind::InvalidData => format!("{name} is larger than the limit of {MAX_FILE} bytes"),
+            io::ErrorKind::InvalidInput => format!("{name} is not a regular file"),
+            _ => format!("{name}: {e}"),
+        })
+    })
 }
 
 /// The server's file name for a logical name: `themes/dark.json` is `themes.dark.json.hwx`, `widgets/a.json` is
@@ -96,6 +174,16 @@ pub trait Source: Send {
     fn names(&self) -> Result<Vec<String>>;
     fn read(&self, name: &str) -> Result<Option<Vec<u8>>>;
     fn write(&self, name: &str, bytes: &[u8]) -> Result<()>;
+    /// Remove the local file of `name` (a name under `themes/` or `widgets/`) after a copy of it was kept; fails without
+    /// removing anything when the copy cannot be written.
+    fn delete(&self, name: &str) -> Result<()>;
+    /// Whether the folder `folder` (`themes` or `widgets`) exists here. A missing folder is not a deletion of its files.
+    fn folder_exists(&self, folder: &str) -> bool;
+    /// Local files the sync cannot carry, as a name and a sentence that says why. Reported by every run; the other files
+    /// still sync. The default has none.
+    fn unsyncable(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 /// Where downloaded files wait until the next start. The running app owns its files (it rewrites the layout, the settings
@@ -103,11 +191,57 @@ pub trait Source: Send {
 /// before anything is read.
 const INCOMING: &str = "sync-incoming";
 
+/// The live hashes recorded when a download was first staged (inside `sync-incoming/`), and the names kept at the last
+/// start (inside the data folder). Both are local state of the sync, read bounded; damaged content counts as empty.
+const STAGE_BASE: &str = ".live-at-stage.json";
+const KEPT: &str = "sync-kept.json";
+const NOTE_LIMIT: u64 = 256 * 1024;
+const NOTE_NAMES: usize = 256;
+
+/// What [`promote_incoming_with_report`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Promoted {
+    /// The names moved into place, sorted.
+    pub applied: Vec<String>,
+    /// The applied names whose live file had been changed since the download was staged and was copied first.
+    pub kept: Vec<String>,
+    /// The names left staged because the copy of the live file could not be written; the next start tries again.
+    pub skipped: Vec<String>,
+    /// The ids of the saved connections that the replaced `connections.json` held and the new one does not, sorted. Empty
+    /// when the new file did not read as a connection list: a corrupt or hostile file never drops anything. The caller
+    /// deletes the keychain entries of these profiles ([`crate::connections::Connections::forget_secrets`]).
+    pub dropped_profiles: Vec<String>,
+}
+
 /// Move what the sync downloaded into place. Called once at start, before the configuration is read. Returns the names
-/// that were applied. A file that is not a synced name is removed, not applied.
+/// that were applied. A file that is not a synced name is removed, not applied. A live file the person changed after
+/// the download was staged is copied to `sync-conflicts/` first and comes back as a conflict of the next run; see
+/// [`promote_incoming_with_report`].
 pub fn promote_incoming(dir: &Path) -> Vec<String> {
+    promote_incoming_with_report(dir).applied
+}
+
+/// [`promote_incoming`] with what else happened: every staged name, see [`promote_where`].
+pub fn promote_incoming_with_report(dir: &Path) -> Promoted {
+    promote_where(dir, &|_| true)
+}
+
+/// Whether the running app leaves `name` alone: the themes and the widgets (it only reads them) and the note texts (one
+/// writer, which shares a lock with the promote). The layout, the settings and the connections are rewritten from memory
+/// by the running app, so they wait for the next start.
+pub fn is_unowned(name: &str) -> bool {
+    allowed(name) && (name == "widget_notes.json" || name.split_once('/').is_some_and(|(dir, _)| dir == "themes" || dir == "widgets"))
+}
+
+/// Move the staged files `wanted` accepts into place; every other staged file stays staged, with its record. For each
+/// staged name the live file is compared with the hash recorded when the download was staged: a live file that changed
+/// since (or that did not exist then) is written to `sync-conflicts/<name with / as .>.<time>` before the download
+/// replaces it. When that copy cannot be written the name is skipped: the staged file and the live file stay as they
+/// are. The kept names are noted in `sync-kept.json` for the next run. The staging folder is removed last, and only when
+/// no staged name is left and nothing was skipped. `wanted` only ever sees synced names other than the secrets.
+pub fn promote_where(dir: &Path, wanted: &dyn Fn(&str) -> bool) -> Promoted {
     let root = dir.join(INCOMING);
-    let mut names = Vec::new();
+    let mut staged = Vec::new();
     let mut stack = vec![(root.clone(), String::new())];
     while let Some((path, prefix)) = stack.pop() {
         let Ok(read) = fs::read_dir(&path) else { continue };
@@ -118,17 +252,151 @@ pub fn promote_incoming(dir: &Path) -> Vec<String> {
             if kind.is_dir() && prefix.is_empty() && DIRS.contains(&file.as_str()) {
                 stack.push((entry.path(), format!("{file}/")));
             } else if kind.is_file() && allowed(&name) && name != SECRETS {
-                if let Some(parent) = dir.join(&name).parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                if fs::rename(entry.path(), dir.join(&name)).is_ok() {
-                    names.push(name);
-                }
+                staged.push((name, entry.path()));
             }
         }
     }
-    let _ = fs::remove_dir_all(&root);
+    staged.sort();
+    let bases = load_bases(&root);
+    let mut out = Promoted::default();
+    let mut waiting = Vec::new();
+    for (name, path) in staged {
+        if !wanted(&name) {
+            waiting.push(name);
+            continue;
+        }
+        if name == LAYOUT {
+            match adopt_layout(dir, &path, bases.get(&name)) {
+                Adopted::Applied { edited } => {
+                    if edited {
+                        out.kept.push(name.clone());
+                    }
+                    out.applied.push(name);
+                }
+                Adopted::Skipped => out.skipped.push(name),
+                Adopted::Refused => {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+            continue;
+        }
+        let live_path = dir.join(&name);
+        let staged_bytes = read_limited(&path, MAX_FILE).ok().flatten();
+        let incoming = staged_bytes.as_deref().map(digest);
+        let mut old_connections = None;
+        let edited = match read_limited(&live_path, MAX_FILE) {
+            Ok(None) => false,
+            Ok(Some(live)) => {
+                let hash = digest(&live);
+                if name == CONNECTIONS {
+                    old_connections = Some(live.clone());
+                }
+                let changed = incoming.as_deref() != Some(hash.as_str())
+                    && !matches!(bases.get(&name), Some(Some(base)) if *base == hash);
+                if changed && !copy_edit(dir, &name, &live) {
+                    out.skipped.push(name);
+                    continue;
+                }
+                changed
+            }
+            // Present but unreadable (too large, not a file): it cannot be copied, so it is not replaced.
+            Err(_) => {
+                out.skipped.push(name);
+                continue;
+            }
+        };
+        if let Some(parent) = live_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::rename(&path, &live_path).is_ok() {
+            if edited {
+                out.kept.push(name.clone());
+            }
+            if let (Some(old), Some(new)) = (&old_connections, &staged_bytes) {
+                out.dropped_profiles = dropped_profiles(old, new);
+            }
+            out.applied.push(name);
+        } else {
+            out.skipped.push(name);
+        }
+    }
+    if !out.kept.is_empty() {
+        let mut names = load_kept(dir);
+        names.extend(out.kept.iter().cloned());
+        names.sort();
+        names.dedup();
+        names.truncate(NOTE_NAMES);
+        let note = serde_json::json!({ "kept": names });
+        let _ = write_atomic(&dir.join(KEPT), &serde_json::to_vec_pretty(&note).unwrap_or_default());
+    }
+    if out.skipped.is_empty() && waiting.is_empty() {
+        let _ = fs::remove_dir_all(&root);
+    } else {
+        // The staged files that wait keep their own base; the entries of what was applied go.
+        let mut left = bases;
+        left.retain(|name, _| out.skipped.contains(name) || waiting.contains(name));
+        save_bases(&root, &left);
+    }
+    out
+}
+
+/// The ids of the profiles the connection list `old` holds and the list `new` does not. Nothing when `new` is not a
+/// connection list (it would be reset by the loader, not emptied) and nothing for a profile that is still named in it,
+/// however invalid its other fields are: only a profile that is really gone counts, so a corrupt or hostile file cannot
+/// make the app delete a keychain entry.
+fn dropped_profiles(old: &[u8], new: &[u8]) -> Vec<String> {
+    use crate::layout::LoadStatus;
+    let read = |bytes: &[u8]| std::str::from_utf8(bytes).ok().map(Profiles::from_json).filter(|(_, status)| !matches!(status, LoadStatus::Reset(_)));
+    let (Some((before, _)), Some((after, _))) = (read(old), read(new)) else { return Vec::new() };
+    // The ids the new file names, including those a repair left out.
+    let mut named: BTreeSet<String> = after.items.iter().map(|p| p.id.clone()).collect();
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(new) {
+        if let Some(serde_json::Value::Array(items)) = map.get("items") {
+            // A list in which no profile is usable is a broken file, not the deletion of everything.
+            if after.items.is_empty() && !items.is_empty() {
+                return Vec::new();
+            }
+            named.extend(items.iter().filter_map(|i| i.get("id").and_then(serde_json::Value::as_str)).map(str::to_owned));
+        }
+    }
+    let mut gone: Vec<String> = before.items.iter().map(|p| p.id.clone()).filter(|id| !named.contains(id)).collect();
+    gone.sort();
+    gone.dedup();
+    gone
+}
+
+/// Write the live file `bytes` of `name` to `sync-conflicts/` before it is replaced. Whether that worked.
+fn copy_edit(dir: &Path, name: &str, bytes: &[u8]) -> bool {
+    let copy = dir.join("sync-conflicts").join(format!("{}.{}", name.replace('/', "."), now()));
+    write_atomic(&copy, bytes).is_ok()
+}
+
+fn load_bases(root: &Path) -> BTreeMap<String, Option<String>> {
+    let read = read_limited(&root.join(STAGE_BASE), NOTE_LIMIT).ok().flatten();
+    let mut bases: BTreeMap<String, Option<String>> = read.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    bases.retain(|name, _| allowed(name) && name != SECRETS);
+    while bases.len() > NOTE_NAMES {
+        bases.pop_last();
+    }
+    bases
+}
+
+fn save_bases(root: &Path, bases: &BTreeMap<String, Option<String>>) {
+    let _ = write_atomic(&root.join(STAGE_BASE), &serde_json::to_vec(bases).unwrap_or_default());
+}
+
+/// The names `sync-kept.json` holds: only allowed names, no duplicates, at most [`NOTE_NAMES`].
+fn load_kept(dir: &Path) -> Vec<String> {
+    #[derive(Deserialize)]
+    struct Note {
+        kept: Vec<String>,
+    }
+    let read = read_limited(&dir.join(KEPT), NOTE_LIMIT).ok().flatten();
+    let mut names = read.and_then(|b| serde_json::from_slice::<Note>(&b).ok()).map(|n| n.kept).unwrap_or_default();
+    names.retain(|n| allowed(n) && n != SECRETS);
     names.sort();
+    names.dedup();
+    names.truncate(NOTE_NAMES);
     names
 }
 
@@ -153,8 +421,213 @@ fn promote_names(root: &Path) -> Vec<String> {
     out
 }
 
+// ---- the layout unit ---------------------------------------------------------------------------------------------
+
+/// The payload of the name `layout.json`. A layout names panes by small per-device counters, and what runs in a pane
+/// (a saved connection, a file browser, the monitor) is kept in two machine-local files keyed by the same numbers. So the
+/// layout travels with the part of those files that makes sense on another computer, and an adoption replaces both as
+/// one step. The unit is built from the live files without changing them.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Unit {
+    unit: u32,
+    layout: serde_json::Value,
+    /// Pane id to the id of a saved connection.
+    #[serde(default)]
+    connections: BTreeMap<String, String>,
+    /// Pane id to its block; only blocks that [`blocks::portable`] accepts.
+    #[serde(default)]
+    blocks: BTreeMap<String, Block>,
+}
+
+/// What a downloaded `layout.json` is: a unit, or the plain layout an older build uploaded.
+enum Download {
+    Unit(Unit),
+    Plain(serde_json::Value),
+}
+
+/// A connection id or a block source that names a saved connection.
+fn named_id(s: &str) -> bool {
+    s.len() <= MAX_ID && safe_segment(s)
+}
+
+/// A block the unit may hold: a source (this computer or a saved connection) and a bounded path.
+fn block_fits(block: &Block) -> bool {
+    !block.source.is_empty()
+        && (block.source == blocks::LOCAL || named_id(&block.source))
+        && block.path.len() <= MAX_BLOCK_PATH
+        && !block.path.contains('\0')
+}
+
+/// A pane id as the app writes it: decimal digits without a sign or a leading zero, so one pane has one spelling.
+fn is_pane_key(key: &str) -> bool {
+    key.parse::<PaneId>().is_ok_and(|pane| pane.to_string() == key)
+}
+
+/// The value with every object's keys in sorted order, so the same content always gives the same bytes.
+fn sorted(value: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => {
+            let ordered: BTreeMap<String, Value> = map.into_iter().map(|(k, v)| (k, sorted(v))).collect();
+            Value::Object(ordered.into_iter().collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        other => other,
+    }
+}
+
+/// The two pane files of the data folder, each as the entries that are fit for a unit: a numeric pane key and a value
+/// that passes the bounds. A missing or unreadable file is empty; one entry that does not fit is left out.
+fn live_assignments(dir: &Path) -> (BTreeMap<String, String>, BTreeMap<String, Block>) {
+    let read = |file: &str| -> serde_json::Map<String, serde_json::Value> {
+        match read_limited(&dir.join(file), PANE_FILE_LIMIT).ok().flatten().and_then(|b| serde_json::from_slice(&b).ok()) {
+            Some(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        }
+    };
+    let mut connections = BTreeMap::new();
+    for (key, value) in read(PANES_FILE) {
+        let (true, Some(id)) = (is_pane_key(&key), value.as_str().filter(|id| named_id(id))) else { continue };
+        if connections.len() < MAX_UNIT_ENTRIES {
+            connections.insert(key, id.to_owned());
+        }
+    }
+    let mut shared = BTreeMap::new();
+    for (key, value) in read(BLOCKS_FILE) {
+        let (true, Ok(block)) = (is_pane_key(&key), serde_json::from_value::<Block>(value)) else { continue };
+        if blocks::portable(&block) && block_fits(&block) && shared.len() < MAX_UNIT_ENTRIES {
+            shared.insert(key, block);
+        }
+    }
+    (connections, shared)
+}
+
+/// The unit of this device, as its canonical bytes (sorted keys, no whitespace), built from `layout.json` and the two
+/// pane files. `None` when there is no layout. A layout that is not a JSON object is an error that names it: it would
+/// be refused by every other device.
+fn live_unit(dir: &Path) -> Result<Option<Vec<u8>>> {
+    let Some(bytes) = read_local(&dir.join(LAYOUT), LAYOUT)? else { return Ok(None) };
+    let layout: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| err(format!("{LAYOUT} is not valid JSON: {e}")))?;
+    if !layout.is_object() {
+        return Err(err(format!("{LAYOUT} is not a layout (not a JSON object)")));
+    }
+    let (connections, blocks) = live_assignments(dir);
+    let unit = Unit { unit: UNIT_VERSION, layout: sorted(layout), connections, blocks };
+    Ok(Some(serde_json::to_vec(&unit).map_err(|e| err(e.to_string()))?))
+}
+
+/// Check the bytes of a downloaded `layout.json` before anything is staged or applied: a unit of this version with
+/// nothing but the members it names, a layout that is an object, numeric pane keys, safe connection ids and bounded
+/// maps; or a plain layout object (no `unit` member). Anything else is refused.
+fn check_download(bytes: &[u8]) -> Result<Download> {
+    if bytes.len() as u64 > MAX_FILE {
+        return Err(err("the synced layout is too large"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| err(format!("the synced layout is not valid JSON: {e}")))?;
+    let Some(object) = value.as_object() else { return Err(err("the synced layout is not a JSON object")) };
+    if !object.contains_key("unit") {
+        return Ok(Download::Plain(value));
+    }
+    let unit: Unit = serde_json::from_value(value).map_err(|e| err(format!("the synced layout unit is not valid: {e}")))?;
+    if unit.unit != UNIT_VERSION {
+        return Err(err("the synced layout unit is of another version; update holzWave"));
+    }
+    if !unit.layout.is_object() {
+        return Err(err("the synced layout unit holds a layout that is not an object"));
+    }
+    if unit.connections.len() > MAX_UNIT_ENTRIES || unit.blocks.len() > MAX_UNIT_ENTRIES {
+        return Err(err("the synced layout unit holds too many pane assignments"));
+    }
+    for (pane, id) in &unit.connections {
+        if !is_pane_key(pane) || !named_id(id) {
+            return Err(err("the synced layout unit names a pane or a connection that is not valid"));
+        }
+    }
+    for (pane, block) in &unit.blocks {
+        if !is_pane_key(pane) || !block_fits(block) {
+            return Err(err("the synced layout unit holds a block that is not valid"));
+        }
+    }
+    Ok(Download::Unit(unit))
+}
+
+/// How the promote of `layout.json` ended.
+enum Adopted {
+    /// Applied; whether the live unit had been changed since the download was staged (its layout was copied first).
+    Applied { edited: bool },
+    /// Left staged, nothing live touched: a backup copy could not be written, or a write failed.
+    Skipped,
+    /// Not a unit or layout (a planted file): removed, not applied.
+    Refused,
+}
+
+/// Whether the live pane file `file` holds something a replacement would lose: it exists, is not an empty object and
+/// does not say what `target` says. `Err` when it cannot be read (so it cannot be copied either).
+fn pane_file_needs_copy(dir: &Path, file: &str, target: &serde_json::Value) -> io::Result<Option<Vec<u8>>> {
+    let Some(live) = read_limited(&dir.join(file), PANE_FILE_LIMIT)? else { return Ok(None) };
+    let same = serde_json::from_slice::<serde_json::Value>(&live).is_ok_and(|v| v == *target || v.as_object().is_some_and(serde_json::Map::is_empty));
+    Ok((!same).then_some(live))
+}
+
+/// Adopt the staged `layout.json` at `staged` as one step: copy what is replaced to `sync-conflicts/`, write the two pane
+/// files, then the layout, then remove the staged file. The order makes a crash in between repeat the whole step at the
+/// next start. A backup that cannot be written stops the adoption before anything live is touched.
+fn adopt_layout(dir: &Path, staged: &Path, base: Option<&Option<String>>) -> Adopted {
+    let Ok(Some(bytes)) = read_limited(staged, MAX_FILE) else { return Adopted::Refused };
+    let Ok(download) = check_download(&bytes) else { return Adopted::Refused };
+    let (layout, connections, blocks) = match download {
+        Download::Unit(unit) => {
+            // What a unit shares is what `portable` accepts, whoever built it.
+            let shared: BTreeMap<String, Block> = unit.blocks.into_iter().filter(|(_, b)| blocks::portable(b)).collect();
+            (unit.layout, unit.connections, shared)
+        }
+        Download::Plain(layout) => (layout, BTreeMap::new(), BTreeMap::new()),
+    };
+    let (Ok(connections_target), Ok(blocks_target)) = (serde_json::to_value(&connections), serde_json::to_value(&blocks)) else {
+        return Adopted::Skipped;
+    };
+    // The live layout counts as edited like any synced file (see `promote_where`), judged on the unit it makes.
+    let live_layout = match read_limited(&dir.join(LAYOUT), MAX_FILE) {
+        Ok(live) => live,
+        Err(_) => return Adopted::Skipped,
+    };
+    let live_hash = match live_layout {
+        Some(_) => live_unit(dir).ok().flatten().map(|u| digest(&u)),
+        None => None,
+    };
+    let edited = live_hash.as_deref().is_some_and(|hash| {
+        hash != digest(&bytes) && !matches!(base, Some(Some(recorded)) if recorded == hash)
+    });
+    // Backups first: nothing live changes unless every copy is written.
+    let mut copies: Vec<(String, Vec<u8>)> = Vec::new();
+    for (file, target) in [(PANES_FILE, &connections_target), (BLOCKS_FILE, &blocks_target)] {
+        match pane_file_needs_copy(dir, file, target) {
+            Ok(Some(live)) => copies.push((file.to_owned(), live)),
+            Ok(None) => {}
+            Err(_) => return Adopted::Skipped,
+        }
+    }
+    if edited {
+        if let Some(live) = live_layout {
+            copies.push((LAYOUT.to_owned(), live));
+        }
+    }
+    for (name, live) in &copies {
+        if !copy_edit(dir, name, live) {
+            return Adopted::Skipped;
+        }
+    }
+    let pretty = |v: &serde_json::Value| serde_json::to_vec_pretty(v).unwrap_or_default();
+    let written = write_atomic(&dir.join(PANES_FILE), &pretty(&connections_target))
+        .and_then(|()| write_atomic(&dir.join(BLOCKS_FILE), &pretty(&blocks_target)))
+        .and_then(|()| write_atomic(&dir.join(LAYOUT), &pretty(&layout)))
+        .and_then(|()| fs::remove_file(staged));
+    if written.is_ok() { Adopted::Applied { edited } } else { Adopted::Skipped }
+}
+
 /// The configuration folder, plus the connection secrets as the virtual file [`SECRETS`]. Downloads are staged, see
-/// [`promote_incoming`]; what is staged counts as the local version.
+/// [`promote_incoming`]; what is staged counts as the local version, and the live hash at staging is recorded.
 pub struct ConfigSource {
     dir: PathBuf,
     secrets: Arc<dyn SecretStore>,
@@ -165,9 +638,52 @@ impl ConfigSource {
         Self { dir: dir.into(), secrets }
     }
 
-    fn accounts(&self) -> Vec<String> {
-        Profiles::load(&self.dir).0.items.iter().map(|p| p.secret_account()).collect()
+    /// Note the live hash of `name` the first time a download is staged for it (a second download before the start
+    /// keeps the first value). No entry, or no room for one, means the next promote treats a differing live file as
+    /// changed, which only ever costs a copy.
+    fn record_live(&self, name: &str) {
+        let root = self.dir.join(INCOMING);
+        let mut bases = load_bases(&root);
+        if bases.contains_key(name) || bases.len() >= NOTE_NAMES {
+            return;
+        }
+        // The layout is judged as the unit it makes with the pane files, like everything the sync reads of it.
+        let live = if name == LAYOUT {
+            live_unit(&self.dir).ok().flatten()
+        } else {
+            read_limited(&self.dir.join(name), MAX_FILE).ok().flatten()
+        };
+        bases.insert(name.to_owned(), live.as_deref().map(digest));
+        save_bases(&root, &bases);
     }
+
+    /// The keychain accounts of the connection profiles whose secrets the sync carries. A downloaded `connections.json`
+    /// waits in `sync-incoming/` until the next start and counts as the local version of its name (see [`Source::read`]),
+    /// so its profiles are the ones that are meant: the live list would still name a profile that another computer
+    /// removed, and a run before the start would upload the stale `ssh:<id>` secret. A staged file that does not read as
+    /// a connection list is not used.
+    fn accounts(&self) -> Vec<String> {
+        let staged = read_limited(&self.dir.join(INCOMING).join(CONNECTIONS), MAX_FILE).ok().flatten().and_then(|b| usable_list(&b));
+        let list = staged.unwrap_or_else(|| Profiles::load(&self.dir).0);
+        list.items.iter().map(|p| p.secret_account()).collect()
+    }
+}
+
+/// The connection list `bytes` holds, or `None` when it is not one the loader would use: not text, not a list of this
+/// version, or a list that names profiles of which none is usable (a broken file, not the removal of every profile).
+fn usable_list(bytes: &[u8]) -> Option<Profiles> {
+    use crate::layout::LoadStatus;
+    let (profiles, status) = Profiles::from_json(std::str::from_utf8(bytes).ok()?);
+    if matches!(status, LoadStatus::Reset(_)) {
+        return None;
+    }
+    if profiles.items.is_empty() {
+        let raw: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        if raw.get("items").and_then(serde_json::Value::as_array).is_some_and(|items| !items.is_empty()) {
+            return None;
+        }
+    }
+    Some(profiles)
 }
 
 impl Source for ConfigSource {
@@ -213,10 +729,13 @@ impl Source for ConfigSource {
             }
             return Ok((!map.is_empty()).then(|| serde_json::to_vec(&map).unwrap_or_default()));
         }
-        if let Some(staged) = read_limited(&self.dir.join(INCOMING).join(name), MAX_FILE)? {
+        if let Some(staged) = read_local(&self.dir.join(INCOMING).join(name), name)? {
             return Ok(Some(staged));
         }
-        Ok(read_limited(&self.dir.join(name), MAX_FILE)?)
+        if name == LAYOUT {
+            return live_unit(&self.dir);
+        }
+        read_local(&self.dir.join(name), name)
     }
 
     fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {
@@ -236,7 +755,75 @@ impl Source for ConfigSource {
             }
             return Ok(());
         }
+        if name == LAYOUT {
+            // Staged verbatim, so it counts as the local version; refused before anything is staged when it is not a layout.
+            check_download(bytes)?;
+        }
+        self.record_live(name);
         Ok(write_atomic(&self.dir.join(INCOMING).join(name), bytes)?)
+    }
+
+    fn delete(&self, name: &str) -> Result<()> {
+        if !deletable(name) {
+            return Err(err("the sync never deletes this file"));
+        }
+        let live = self.dir.join(name);
+        // The copy comes first: when it cannot be written nothing is removed.
+        if let Some(bytes) = read_local(&live, name)? {
+            if !copy_edit(&self.dir, name, &bytes) {
+                return Err(err("a copy of the file could not be kept in sync-conflicts, so it was not removed"));
+            }
+        }
+        match fs::remove_file(&live) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let root = self.dir.join(INCOMING);
+        match fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let mut bases = load_bases(&root);
+        if bases.remove(name).is_some() {
+            save_bases(&root, &bases);
+        }
+        Ok(())
+    }
+
+    fn folder_exists(&self, folder: &str) -> bool {
+        DIRS.contains(&folder) && fs::metadata(self.dir.join(folder)).is_ok_and(|m| m.is_dir())
+    }
+
+    /// The files of `themes/` and `widgets/` whose names have the right characters but too many of them to be a file on
+    /// the server. At most [`MAX_UNSYNCABLE_SHOWN`] per folder are named; one more entry counts the rest.
+    fn unsyncable(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for dir in DIRS {
+            let Ok(read) = fs::read_dir(self.dir.join(dir)) else { continue };
+            let max = max_stem(dir);
+            let mut long: Vec<(String, usize)> = Vec::new();
+            for entry in read.flatten().take(NOTE_NAMES) {
+                let file = entry.file_name().to_string_lossy().into_owned();
+                let Some(stem) = file.strip_suffix(".json") else { continue };
+                let length = stem.len();
+                if stem_chars(stem) && length > max && entry.path().is_file() {
+                    long.push((file, length));
+                }
+            }
+            long.sort();
+            for (file, length) in long.iter().take(MAX_UNSYNCABLE_SHOWN) {
+                out.push((
+                    format!("{dir}/{file}"),
+                    format!("the file name is too long to sync: at most {max} characters before .json in {dir}/, this one has {length}"),
+                ));
+            }
+            if long.len() > MAX_UNSYNCABLE_SHOWN {
+                out.push(((*dir).to_owned(), format!("{} more files in {dir}/ have names too long to sync", long.len() - MAX_UNSYNCABLE_SHOWN)));
+            }
+        }
+        out
     }
 }
 
@@ -246,7 +833,19 @@ impl Source for ConfigSource {
 struct Seen {
     counter: u64,
     etag: String,
+    /// The hash of the content last in agreement; empty for a deleted name.
     hash: String,
+    /// The SHA-256 of the sealed blob this device last wrote to the server or read from it: the identity of a server
+    /// version (an ETag alone is not, see [`Remote`]). Empty in the record of an older build.
+    #[serde(default)]
+    blob: String,
+    /// The name was deleted (the server holds a tombstone) and the local file is gone.
+    #[serde(default, skip_serializing_if = "is_false")]
+    deleted: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -298,6 +897,25 @@ const CHECK_TEXT: &[u8] = b"holzwave sync";
 
 // ---- a run -------------------------------------------------------------------------------------------------------
 
+/// What the listing says about one server file. The ETag of a server like Nextcloud moves once per second, so two
+/// writes of one name inside a second share it: it is a hint. The checksum (when the server reports one) is another
+/// hint. What a server version *is* is the SHA-256 of its sealed blob ([`Seen::blob`]), which only a read can tell.
+#[derive(Clone, Debug)]
+struct Remote {
+    etag: String,
+    checksum: Option<String>,
+}
+
+/// A server file read in full: its blob, the ETag of that read, the version stamp and plaintext it opens to, and the
+/// digest of the blob (the identity of the version).
+struct Fetched {
+    blob: Vec<u8>,
+    etag: String,
+    stamp: Stamp,
+    plain: zeroize::Zeroizing<Vec<u8>>,
+    blob_digest: String,
+}
+
 /// What one run did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Report {
@@ -307,6 +925,10 @@ pub struct Report {
     pub conflicts: Vec<String>,
     /// A name and why it could not be synced; the others were.
     pub errors: Vec<(String, String)>,
+    /// Files this device removed because another device deleted them (a copy is in `sync-conflicts/`).
+    pub removed: Vec<String>,
+    /// Files this device deleted, whose tombstones were sent.
+    pub deleted: Vec<String>,
 }
 
 pub struct Syncer<B: Backend, S: Source> {
@@ -317,6 +939,11 @@ pub struct Syncer<B: Backend, S: Source> {
     state: State,
     /// The directory for the copies of local versions that lost (`None`: keep none).
     conflicts_dir: Option<PathBuf>,
+    /// The names whose deletion this run may send (see [`Self::plan_deletions`]).
+    sendable: BTreeSet<String>,
+    /// The files this run removed because another device deleted them, and whether the limit was already reported.
+    removed_now: usize,
+    removal_limit_told: bool,
 }
 
 impl<B: Backend, S: Source> Syncer<B, S> {
@@ -343,7 +970,11 @@ impl<B: Backend, S: Source> Syncer<B, S> {
                 }
             },
         };
-        Ok(Self { backend, source, key, dir: dir.to_path_buf(), state, conflicts_dir: Some(dir.join("sync-conflicts")) })
+        Ok(Self { backend, source, key, dir: dir.to_path_buf(), state, conflicts_dir: Some(dir.join("sync-conflicts")),
+            sendable: BTreeSet::new(),
+            removed_now: 0,
+            removal_limit_told: false,
+        })
     }
 
     fn open_meta(bytes: &[u8], passphrase: &str) -> Result<Key> {
@@ -376,99 +1007,268 @@ impl<B: Backend, S: Source> Syncer<B, S> {
 
     /// Bring both sides level.
     pub fn sync_once(&mut self) -> Result<Report> {
-        let remote: BTreeMap<String, String> = self
+        let remote: BTreeMap<String, Remote> = self
             .backend
             .list(FILES)?
             .into_iter()
-            .filter_map(|e| logical_name(&e.name).map(|n| (n, e.etag)))
+            .filter_map(|e| logical_name(&e.name).map(|n| (n, Remote { etag: e.etag, checksum: e.checksum })))
             .collect();
         let mut names: Vec<String> = self.source.names()?;
         names.extend(remote.keys().cloned());
+        // A local deletion is noticed even when the name is no longer among the local files.
+        names.extend(self.state.files.iter().filter(|(n, s)| !s.deleted && deletable(n)).map(|(n, _)| n.clone()));
         names.sort();
         names.dedup();
+        let kept = load_kept(&self.dir);
         let mut report = Report::default();
+        self.plan_deletions(&remote, &names, &mut report);
         for name in names {
             if let Err(e) = self.one(&name, remote.get(&name).cloned(), &mut report) {
                 report.errors.push((name, e.to_string()));
             }
         }
+        // Files the transport cannot carry are told every run, until they are renamed; the others were synced above.
+        report.errors.extend(self.source.unsyncable());
         self.state.save(&self.dir)?;
+        // The names a start kept before replacing them come back as conflicts, once.
+        for name in kept {
+            if !report.conflicts.contains(&name) {
+                report.conflicts.push(name);
+            }
+        }
+        let _ = fs::remove_file(self.dir.join(KEPT));
         Ok(report)
     }
 
-    fn one(&mut self, name: &str, mut remote_etag: Option<String>, report: &mut Report) -> Result<()> {
+    /// Decide before the run which local deletions may be sent. A deletion is a name that is in agreement with the server
+    /// (the server's file is the one this device last saw), whose local file is not found (any other result of the read
+    /// is an error of that name, found later, and never a deletion). The deletions of a folder that does not exist are
+    /// not sent (a missing folder is a mistake, reported once), and a run that would send more than
+    /// [`MAX_DELETES_SENT`] sends none of them (reported once per folder), so a mass deletion stops whole.
+    fn plan_deletions(&mut self, remote: &BTreeMap<String, Remote>, names: &[String], report: &mut Report) {
+        self.sendable.clear();
+        self.removed_now = 0;
+        self.removal_limit_told = false;
+        let mut gone: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+        for name in names.iter().filter(|n| deletable(n)) {
+            let agreed = self.state.files.get(name.as_str()).is_some_and(|s| !s.deleted && remote.get(name.as_str()).is_some_and(|r| r.etag == s.etag));
+            if agreed && matches!(self.source.read(name), Ok(None)) {
+                gone.entry(folder_of(name)).or_default().push(name);
+            }
+        }
+        gone.retain(|folder, _| {
+            let there = self.source.folder_exists(folder);
+            if !there {
+                report.errors.push(((*folder).to_owned(), format!("the folder {folder} is missing; no deletion was sent")));
+            }
+            there
+        });
+        let total: usize = gone.values().map(Vec::len).sum();
+        if total > MAX_DELETES_SENT {
+            for (folder, files) in &gone {
+                report.errors.push((
+                    (*folder).to_owned(),
+                    format!(
+                        "{} files of the folder {folder} are gone and {total} deletions in one run are too many: at most {MAX_DELETES_SENT} are sent per run, so none was sent",
+                        files.len()
+                    ),
+                ));
+            }
+            return;
+        }
+        self.sendable = gone.values().flatten().map(|n| (*n).clone()).collect();
+    }
+
+    /// Bring one name level.
+    ///
+    /// *The server changed* means that the ETag differs from the record, or that the ETag is equal but the blob is not the
+    /// one this device wrote or read last (a server that reports checksums says so in the listing; one that does not is
+    /// found out by the read below). The ETag alone is not trusted: on a server whose ETag moves once per second, two
+    /// writes of a name inside one second share it.
+    ///
+    /// Read before write: whenever this device is about to write over an existing server file (an edit, the winning side of
+    /// a conflict, a tombstone) it reads that file first, even when the listing says it is unchanged, and takes the ETag
+    /// of that read for its condition. A version this device has not seen turns the write into a change of the server, so
+    /// the ordinary rules decide (the higher stamp wins, the loser is kept, an edit beats a delete). The cost is one read
+    /// per upload and none for a quiet name. One race is left: another device's write that lands between this device's read
+    /// and its write, inside the same server second as the previous version's write, is not seen; the window is one
+    /// request round trip.
+    fn one(&mut self, name: &str, mut remote: Option<Remote>, report: &mut Report) -> Result<()> {
         let seen = self.state.files.get(name).cloned();
         let local = self.source.read(name)?;
         let local_hash = local.as_deref().map(digest);
         let local_changed = local_hash.is_some() && local_hash.as_deref() != seen.as_ref().map(|s| s.hash.as_str());
+        let base = seen.as_ref().map_or(0, |s| s.counter);
+        let was_live = seen.as_ref().is_some_and(|s| !s.deleted);
         for _ in 0..3 {
-            let remote_changed = remote_etag.is_some() && remote_etag.as_deref() != seen.as_ref().map(|s| s.etag.as_str());
-            if !local_changed && !remote_changed {
+            let etag_moved = remote.as_ref().is_some_and(|r| Some(r.etag.as_str()) != seen.as_ref().map(|s| s.etag.as_str()));
+            // The ETag is the same but the server reports another content than this device last wrote or read.
+            let suspect = !etag_moved
+                && seen.as_ref().zip(remote.as_ref()).is_some_and(|(s, r)| {
+                    !s.blob.is_empty() && r.checksum.as_deref().is_some_and(|sum| sum != s.blob)
+                });
+            // The file is not found here, it was in agreement before and the server's ETag is the one this device saw: a
+            // deletion, unless the read below finds another version.
+            let deleting = local.is_none() && !etag_moved && deletable(name) && was_live;
+            if deleting && remote.is_none() {
+                // The server has no such file any more either: nothing to keep in step.
+                self.state.files.remove(name);
                 return Ok(());
             }
-            // Fetch the server's version when it is needed to decide or to apply.
-            let fetched = if remote_etag.is_some() && (remote_changed || local.is_none()) {
-                match self.backend.get(&format!("{FILES}/{}", remote_file(name)))? {
-                    Some((blob, etag)) => {
-                        let (stamp, plain) = self.key.open(name, &blob)?;
-                        Some((blob, etag, stamp, plain))
-                    }
-                    None => None,
-                }
-            } else {
-                None
-            };
-            if remote_changed && fetched.is_none() {
-                remote_etag = None; // gone between the listing and now: treat as absent
-                continue;
+            let send_delete = deleting && self.sendable.contains(name);
+            if deleting && !send_delete && !suspect {
+                // Held back by the checks of the run (a missing folder, too many at once); already reported.
+                return Ok(());
             }
-            let base = seen.as_ref().map_or(0, |s| s.counter);
+            let writes = local_changed || send_delete;
+            let must_read = remote.is_some() && (etag_moved || suspect || writes);
+            if !must_read && !local_changed {
+                return Ok(());
+            }
+            // Read the server's version when it is needed to decide, to apply or to verify.
+            let mut fetched: Option<Fetched> = None;
+            let mut verified: Option<String> = None;
+            if let Some(listed) = remote.as_ref().filter(|_| must_read) {
+                let Some((blob, etag)) = self.backend.get(&format!("{FILES}/{}", remote_file(name)))? else {
+                    remote = None; // gone between the listing and now: treat as absent
+                    continue;
+                };
+                let (stamp, plain) = self.key.open(name, &blob)?;
+                let blob_digest = sha256_hex(&blob);
+                // A server that sends no ETag with a read has the listing's.
+                let etag = if etag.is_empty() { listed.etag.clone() } else { etag };
+                // The same version as the record: the blob's digest, or, for a record of an older build, its counter.
+                let same = !etag_moved
+                    && seen.as_ref().is_some_and(|s| if s.blob.is_empty() { s.counter == stamp.counter } else { s.blob == blob_digest });
+                if same {
+                    verified = Some(etag);
+                } else {
+                    fetched = Some(Fetched { blob, etag, stamp, plain, blob_digest });
+                }
+            }
+            // Nothing changed on the server and nothing is to be written: a wrong checksum cost this one read.
+            if fetched.is_none() && !writes {
+                return Ok(());
+            }
+            if let (true, None, Some(etag)) = (send_delete, &fetched, &verified) {
+                match self.upload(name, TOMBSTONE, base + 1, Some(etag)) {
+                    Ok((new_etag, sum)) => {
+                        self.remember_deleted(name, base + 1, &new_etag, &sum);
+                        report.deleted.push(name.to_owned());
+                        report.uploaded.push(name.to_owned());
+                        return Ok(());
+                    }
+                    Err(e) if e.to_string().contains(CONFLICT) => {
+                        remote = self.fresh_remote(name)?;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if let Some(f) = &fetched {
+                if is_tombstone(&f.plain) {
+                    // Another device deleted the file.
+                    if !deletable(name) {
+                        return Err(err("a deletion for a file the sync never deletes"));
+                    }
+                    match &local {
+                        // This device has none: record it and create nothing.
+                        None => {}
+                        // An unchanged file goes, after a copy, within the limit of the run.
+                        Some(_) if !local_changed => {
+                            if self.removed_now >= MAX_DELETES_APPLIED {
+                                if self.removal_limit_told {
+                                    return Ok(());
+                                }
+                                self.removal_limit_told = true;
+                                return Err(err(format!(
+                                    "at most {MAX_DELETES_APPLIED} files are removed per run; the rest of the folder {} waits for the next run",
+                                    folder_of(name)
+                                )));
+                            }
+                            self.source.delete(name)?;
+                            self.removed_now += 1;
+                            report.removed.push(name.to_owned());
+                        }
+                        // A file changed here beats the deletion: it goes back over the tombstone.
+                        Some(bytes) => {
+                            report.conflicts.push(name.to_owned());
+                            let counter = f.stamp.counter.max(base) + 1;
+                            match self.upload(name, bytes, counter, Some(&f.etag)) {
+                                Ok((new_etag, sum)) => {
+                                    self.remember(name, counter, &new_etag, &sum, &digest(bytes));
+                                    report.uploaded.push(name.to_owned());
+                                    return Ok(());
+                                }
+                                Err(e) if e.to_string().contains(CONFLICT) => {
+                                    report.conflicts.pop();
+                                    remote = self.fresh_remote(name)?;
+                                    continue;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                    self.remember_deleted(name, f.stamp.counter, &f.etag, &f.blob_digest);
+                    return Ok(());
+                }
+            }
+            // A file that is not found here while the server holds a newer version of it: the edit beats the deletion.
+            if local.is_none() && fetched.is_some() && deletable(name) && was_live {
+                report.conflicts.push(name.to_owned());
+            }
             match (&local, &fetched, local_changed) {
                 // Only the server changed (or the local file is gone): take its version.
-                (_, Some((_, etag, stamp, plain)), false) | (None, Some((_, etag, stamp, plain)), _) => {
-                    self.source.write(name, plain)?;
-                    self.remember(name, stamp.counter, etag, &digest(plain));
+                (_, Some(f), false) | (None, Some(f), _) => {
+                    self.source.write(name, &f.plain)?;
+                    self.remember(name, f.stamp.counter, &f.etag, &f.blob_digest, &digest(&f.plain));
                     report.downloaded.push(name.to_owned());
                     return Ok(());
                 }
-                // Only the local file changed: send it.
+                // Only the local file changed: send it, over the version just read (or as a new name).
                 (Some(bytes), None, true) => {
-                    match self.upload(name, bytes, base + 1, remote_etag.as_deref()) {
-                        Ok(etag) => {
-                            self.remember(name, base + 1, &etag, &digest(bytes));
+                    let etag = verified.or_else(|| remote.as_ref().map(|r| r.etag.clone()));
+                    match self.upload(name, bytes, base + 1, etag.as_deref()) {
+                        Ok((etag, sum)) => {
+                            self.remember(name, base + 1, &etag, &sum, &digest(bytes));
                             report.uploaded.push(name.to_owned());
                             return Ok(());
                         }
                         Err(e) if e.to_string().contains(CONFLICT) => {
                             // Somebody wrote in between: look at the server again.
-                            remote_etag = self.fresh_etag(name)?;
+                            remote = self.fresh_remote(name)?;
                             continue;
                         }
                         Err(e) => return Err(e),
                     }
                 }
                 // Both changed: the higher stamp wins, the other version is kept.
-                (Some(bytes), Some((blob, etag, stamp, plain)), true) => {
+                (Some(bytes), Some(f), true) if *bytes == *f.plain => {
+                    // Both changed to the very same content (two devices that moved to the same unit): nothing to keep.
+                    self.remember(name, f.stamp.counter, &f.etag, &f.blob_digest, &digest(&f.plain));
+                    return Ok(());
+                }
+                (Some(bytes), Some(f), true) => {
                     let mine = Stamp { counter: base + 1, time: now(), device: self.state.device() };
-                    let theirs_wins = (stamp.counter, stamp.time) > (mine.counter, mine.time);
+                    let theirs_wins = (f.stamp.counter, f.stamp.time) > (mine.counter, mine.time);
                     report.conflicts.push(name.to_owned());
                     if theirs_wins {
-                        self.keep_local(name, bytes);
-                        self.source.write(name, plain)?;
-                        self.remember(name, stamp.counter, etag, &digest(plain));
+                        self.keep_local(name, bytes)?;
+                        self.source.write(name, &f.plain)?;
+                        self.remember(name, f.stamp.counter, &f.etag, &f.blob_digest, &digest(&f.plain));
                         report.downloaded.push(name.to_owned());
                         return Ok(());
                     }
-                    self.backend.put(&format!("{BACKUPS}/{}", backup_file(name, stamp)), blob, &Cond::Any)?;
-                    let counter = stamp.counter.max(base) + 1;
-                    match self.upload(name, bytes, counter, Some(etag)) {
-                        Ok(new_etag) => {
-                            self.remember(name, counter, &new_etag, &digest(bytes));
+                    self.backend.put(&format!("{BACKUPS}/{}", backup_file(name, &f.stamp)), &f.blob, &Cond::Any)?;
+                    let counter = f.stamp.counter.max(base) + 1;
+                    match self.upload(name, bytes, counter, Some(&f.etag)) {
+                        Ok((new_etag, sum)) => {
+                            self.remember(name, counter, &new_etag, &sum, &digest(bytes));
                             report.uploaded.push(name.to_owned());
                             return Ok(());
                         }
                         Err(e) if e.to_string().contains(CONFLICT) => {
-                            remote_etag = self.fresh_etag(name)?;
+                            remote = self.fresh_remote(name)?;
                             continue;
                         }
                         Err(e) => return Err(e),
@@ -480,35 +1280,62 @@ impl<B: Backend, S: Source> Syncer<B, S> {
         Err(err("the server kept changing while syncing; try again"))
     }
 
-    fn upload(&self, name: &str, bytes: &[u8], counter: u64, etag: Option<&str>) -> Result<String> {
+    /// Seal and write `bytes`. The new ETag, and the SHA-256 of the blob that was written (the identity of that version).
+    fn upload(&self, name: &str, bytes: &[u8], counter: u64, etag: Option<&str>) -> Result<(String, String)> {
         let stamp = Stamp { counter, time: now(), device: self.state.device() };
         let blob = self.key.seal(name, stamp, bytes)?;
         let cond = etag.map_or(Cond::Absent, |e| Cond::Match(e.to_owned()));
-        self.backend.put(&format!("{FILES}/{}", remote_file(name)), &blob, &cond)
+        let new_etag = self.backend.put(&format!("{FILES}/{}", remote_file(name)), &blob, &cond)?;
+        Ok((new_etag, sha256_hex(&blob)))
     }
 
-    fn fresh_etag(&self, name: &str) -> Result<Option<String>> {
+    /// The listing's view of `name` now.
+    fn fresh_remote(&self, name: &str) -> Result<Option<Remote>> {
         let file = remote_file(name);
-        Ok(self.backend.list(FILES)?.into_iter().find(|e| e.name == file).map(|e| e.etag))
+        Ok(self.backend.list(FILES)?.into_iter().find(|e| e.name == file).map(|e| Remote { etag: e.etag, checksum: e.checksum }))
     }
 
-    fn remember(&mut self, name: &str, counter: u64, etag: &str, hash: &str) {
-        self.state.files.insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: hash.to_owned() });
+    /// Note that `name` is in agreement at the version `counter`/`etag`, whose blob has the digest `blob`.
+    fn remember(&mut self, name: &str, counter: u64, etag: &str, blob: &str, hash: &str) {
+        self.state
+            .files
+            .insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: hash.to_owned(), blob: blob.to_owned(), deleted: false });
+    }
+
+    /// Note that `name` is deleted at the version `counter`/`etag`: no hash, the local file is gone.
+    fn remember_deleted(&mut self, name: &str, counter: u64, etag: &str, blob: &str) {
+        self.state
+            .files
+            .insert(name.to_owned(), Seen { counter, etag: etag.to_owned(), hash: String::new(), blob: blob.to_owned(), deleted: true });
     }
 
     /// Keep a local version that lost. Never for the secrets: they must not be written to a file.
-    fn keep_local(&self, name: &str, bytes: &[u8]) {
+    /// A copy that cannot be written is an error: the caller must not replace the local file then.
+    fn keep_local(&self, name: &str, bytes: &[u8]) -> Result<()> {
         if name == SECRETS {
-            return;
+            return Ok(());
         }
         if let Some(dir) = &self.conflicts_dir {
-            let _ = write_atomic(&dir.join(format!("{}.{}", name.replace('/', "."), now())), bytes);
+            write_atomic(&dir.join(format!("{}.{}", name.replace('/', "."), now())), bytes)
+                .map_err(|_| err(&format!("could not keep your copy of {name} before replacing it; nothing was changed")))?;
         }
+        Ok(())
     }
 }
 
+/// The name of the server's copy of a replaced version: the flat file name, the version's counter and the writer, and
+/// `.hwx`. The longest names the sync accepts would make that longer than a name on the server may be, so then (and only
+/// then) it is the first 64 characters of the flat name, 16 hex characters of the SHA-256 of the long name, and `.hwx`.
 fn backup_file(name: &str, stamp: &Stamp) -> String {
-    format!("{}.{}.{}.hwx", name.replace('/', "."), stamp.counter, hex(&stamp.device[..4]))
+    let flat = name.replace('/', ".");
+    let natural = format!("{flat}.{}.{}.hwx", stamp.counter, hex(&stamp.device[..4]));
+    if natural.len() <= MAX_SEGMENT {
+        return natural;
+    }
+    // A synced name is ASCII, so the cut is on a character boundary.
+    let head = flat.get(..64).unwrap_or(&flat);
+    let tag: String = sha256_hex(natural.as_bytes()).chars().take(16).collect();
+    format!("{head}.{tag}.hwx")
 }
 
 #[cfg(test)]

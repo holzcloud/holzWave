@@ -40,7 +40,7 @@ with a real provider account, a real Apple model or on Windows and Linux hardwar
  │  layout      workspaces · tabs · split tree · geometry                                  ✅             │
  │  engine      TerminalEngine trait ── libghostty-vt │ alacritty_terminal (fallback)      ✅ (ghostty)  │
  │  pty         local shell over portable-pty                                              ✅             │
- │  conn        Connection trait: local · ssh (russh) · wsl · docker                       built          │
+ │  conn        Link a pane talks to: pty · ssh (russh), one login per saved profile       built          │
  │  secrets     SecretStore trait over the OS keychain                                     built          │
  │  store       SQLite: settings, history, profiles                                        phase 2/7      │
  │  sync        encrypted WebDAV sync, conflict handling                                   built          │
@@ -90,7 +90,9 @@ The modules of `holzwave-core` as built (`core/src/`):
 | `ai` | the AI chat core (`core/src/ai/`, below): the `Provider` trait and `HttpProvider` over five wire adapters in `ai/wire/` (`anthropic.rs`, `gemini.rs`, `ollama.rs`, `openai_chat.rs`, `openai_responses.rs`), the one HTTP chokepoint `ai/http.rs`, the context gate `gate.rs` and `redact.rs`, tools and approval in `tools/`, the agent loop `agent.rs`, the conversation store `store.rs`, profiles and keys `profiles.rs`, the service facade `service.rs` with `service/` | ✅ |
 | `textread` | reads the screen, the selection, the last rows or the last command's output as text, with the cells nobody could read marked | ✅ |
 | `exec` | runs one command in a separate process with a scrubbed environment, a time limit and a kill of everything it started | ✅ |
-| `ssh` | the SSH connection, and now also the exec primitive: one command on a saved connection without a terminal, over a cached connection | ✅ |
+| `conn` | the `Link` trait a pane reads and writes (a PTY, an SSH shell, nothing for a block pane) and the connection state the page shows | ✅ |
+| `ssh` | the SSH shell on a pooled connection (`SshLink`, with reconnect and a shell backlog capped at 16 MiB), the login itself, host keys, and the exec primitive: one command on a saved connection without a terminal | ✅ |
+| `pool` | one login per saved SSH connection, shared by the pane's shell and the SFTP and exec channels: single-flight logins, a wait after a failed background login, idle close, at most 16 connections | ✅ |
 | `connections` | the saved SSH, WSL and Docker connections, their secrets, and which pane runs which connection | ✅ |
 | `blocks` | panes that are not a terminal: a file browser, a preview, the system monitor and a chat | ✅ |
 | `monitor` | the system monitor of this computer (`sysinfo`) and, in `monitor/remote.rs`, of a Linux host through the exec primitive | ✅ |
@@ -119,7 +121,7 @@ Each boundary is a trait in `holzwave-core` with at least one real implementatio
 | Trait | Methods (sketch) | Implementations | Why a boundary |
 |---|---|---|---|
 | `TerminalEngine` ✅ | `feed`, `resize`, `scroll`, `update` (dirty rows), `take_replies`, `encode_key`, `encode_text`, `paste`, `mouse`, `wheel`, `select`, `search`, `copy_mode`, `set_theme` | `GhosttyEngine` ✅, `AlacrittyEngine` | `libghostty-vt` is young and its API moved already between 0.2.2 and master |
-| `Connection` | `open_shell(size) → Stream`, `open_files() → FileSystem`, `status()` | local, ssh, wsl, docker | terminal and previews share one login |
+| `Connection` (`core/src/pool.rs`) | `session(open)`, the shell channel (`SshLink::attach`), `sftp()`, exec channels through `SshExec::on`, `lease()` | SSH, through the pool: one login per saved profile. WSL and Docker are local commands that run in a pane (`wsl.exe -d`, `docker exec -it`) and have no file access yet (open) | the terminal, the files and the commands of a saved SSH connection share one login |
 | `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service, iOS/Android keystores | secrets never reach a file |
 | `SyncBackend` | `list`, `get`, `put`, `delete` with ETag | WebDAV (`opendal` or `reqwest_dav`) | Nextcloud today, others later |
 | `Provider` ✅ | `id`, `capabilities(model)`, `stream(request, callback, cancel) → completion` (blocking, with a cancel token) | `HttpProvider` ✅ over five wire adapters (local servers, cloud APIs, gateways), `AppleProvider` ✅ (Foundation Models), `ScriptedProvider` (the test double) | consent and context rules live above it: a provider accepts only context the gate approved |
@@ -170,7 +172,7 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 95 commands and 12 events. The tables below list the
+The webview talks to the core through a deny-by-default set of 98 commands and 14 events. The tables below list the
 commands of the terminal core and of the AI chat; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
@@ -193,6 +195,7 @@ snake_case everywhere (`cell_w`, `allow_unsafe`).
 | AI decisions | `ai_decide(conversation, call_id, decision, hash)`, `ai_undo(conversation, call_id)` | nothing; webview commands only |
 | `wsh ai` requests | `ai_ask_pending`, `ai_ask_answer(ask, verdict, seal)` | the requests that wait, nothing |
 | Markdown | `markdown_render(text)` | the cleaned HTML of a reply |
+| `wsh` on a host | `wsh_install(pane)` | the sentence the pane also shows; the page names the pane, never a host |
 
 Every refusal of the AI commands is an object with `code`, `reason` and `text` (the page words its own sentence from the
 code and the reason and shows the text only as the core's plain sentence); a plain string is the shape of the older commands.
@@ -219,6 +222,8 @@ that only bound their numbers and push to the pane's queue.
 | `ai` | one event of a chat turn, to every window (the page routes it by `conversation`): `conversation`, `turn`, `seq` (from 1 per turn), `kind` (`turn_started`, `delta`, `reasoning`, `usage`, `trimmed`, `message`, `tool_proposed`, `tool_result`, `turn_ended`) and the fields of the kind |
 | `ai-ask` | `{kind: waiting, view}` to the window of the pane that asked, `{kind: closed}` to every window: a `wsh ai` request waits for a person, or is over |
 | `history-open` | `{pane}`: the shell of that pane asked for the history search (the `^R` binding); the window that has the pane opens the dialog |
+| `login-prompt` | `{id, connection, host, name, instructions, prompts: [{text, echo}]}`: the server of a saved connection asks a question to log in; every window. `connection` and `host` are the person's own saved connection, the rest is the server's text, cleaned and bounded, shown as text only. The page answers with `login_prompt_answer(id, answers)` or `login_prompt_cancel(id)`; an unknown or old id changes nothing |
+| `login-prompt-end` | `{id, outcome}`: the question is over (`answered`, `cancelled` or `timed_out`); every window takes its dialog away |
 
 **AI events.** A chat turn is a stream of `ai` events with a sequence number that starts at 1 in each turn and goes up by
 one. The webview can reload at any time, so the stream is not a channel: a page that sees a gap, opens a chat or comes back
@@ -304,7 +309,7 @@ applied step by step by the TypeScript patcher, so both languages are proven aga
 | Themes | `themes/*.json` ✅ | yes | one file per theme, validated; `#rrggbb` colours only |
 | Working directories, window frame | `session.json` ✅ | no | machine-local hints; a damaged file costs the hint, never the start |
 | Connection profiles | SQLite | yes | secret fields hold a keychain key, never the secret |
-| Command history | `history.db` ✅, SQLite, owner-only, deleted rows overwritten | no | fuzzy search (`nucleo-matcher`); each use carries the label of the host it ran on (`local`, `ssh:{id}`, `wsl:{id}`, `docker:{id}`). Only commands typed in a pane of this computer or of a saved connection reach it, nothing is recorded from a far shell, and deletions are not synced, so a forgotten command would come back |
+| Command history | `history.db` ✅, SQLite, owner-only, deleted rows overwritten | no | fuzzy search (`nucleo-matcher`); each use carries the label of the host it ran on (`local`, `ssh:{id}`, `wsl:{id}`, `docker:{id}`). Only commands typed in a pane of this computer or of a saved connection reach it, nothing is recorded from a far shell. It is not synced: deletions of themes and widgets travel (see [sync.md](sync.md)), but the history is a database that cannot be carried entry by entry, so a forgotten command would come back |
 | Widgets | `widgets/<id>.json`, `widget_notes.json` ✅ | yes | data only, checked by the loader and described by `docs/widget.schema.json` |
 | AI provider profiles | `ai.json` ✅, private atomic write | no | no keys, only a marker that a key exists; the keychain accounts `ai:<id>` are not synced either |
 | AI conversations | `chats/<id>.json` ✅, one file per chat, owner-only, atomic, written at message boundaries | no | terminal context is stored as a marker unless `ai_persist_context` says text; deleting a chat is an unlink, not a secure overwrite; a damaged file is moved aside as `.bad` and kept until the chat is deleted |
@@ -369,8 +374,10 @@ by field, and `docs/widget.schema.json` (JSON Schema, draft 2020-12) describes t
 A **block pane** is a pane that runs no process: its link is a `NullLink` and the page draws its content (a file browser
 or the preview of one file) over the empty terminal. It has a header, a place in the split tree, drag and close like any
 pane, and `pane_blocks.json` remembers what each shows. `core/src/files.rs` has one `FileSource` interface with two
-implementations: this computer, and the files of a saved SSH connection over SFTP on a connection of its own (a file read
-never waits behind a terminal's output). Reads are bounded, writes are atomic (written aside, renamed over).
+implementations: this computer, and the files of a saved SSH connection over SFTP. The files, the commands and the shell
+of a saved SSH connection share its one login (`core/src/pool.rs`): a file read does not wait behind the terminal's output
+because every consumer of the connection drains its channel at once, and the shell's backlog is capped at 16 MiB, past which
+the shell is closed and says why while the other channels go on. Reads are bounded, writes are atomic (written aside, renamed over).
 
 Images, video, audio and PDFs are **not** loaded into the page. `file_grant` makes a token (128 random bits) for one file,
 and the `holzfile` URI scheme serves exactly that file from `holzfile://localhost/<token>` (`http://holzfile.localhost/`
@@ -397,6 +404,9 @@ hosts are covered; another system is shown as not supported.
 | The PTY | input injected by page content | strict CSP, no untrusted HTML in the main page, previews sandboxed |
 | Layout / settings files | corrupt or hostile file crashes the app | validated on load, fall back to a fresh state |
 | Paste | control sequences run commands | bracketed paste; warn on multi-line paste to a shell that does not support it |
+| A pooled SSH session | one login shared by a pane, the files and the commands: a command runner learns a host key, a wrong password is tried again and again, a stopped pane stalls the others, or idle logins pile up | a command runner (a monitor, the agent) never learns a host key and a changed key is refused for everyone; a background login waits 15 s after a refused login and 3 s after a lost connection, while a person's own open is never held back; the shell's backlog is capped at 16 MiB and the shell is closed past it; a session unused for 120 s is closed, and at most 16 connections are kept |
+| A login prompt | the server of a connection asks a question (a one-time code, a PAM prompt) and writes the text itself, so it can imitate a holzWave question, put markup or hidden characters in it, ask without end, or be answered by a background poller that locks an account; an answer ends up in a log, a file or the keychain | the server's text is untrusted: the core removes control, direction and zero-width characters and bounds it (60, 300 and 200 characters, at most 5 questions a round, 3 rounds, 120 s), and the page sets it as text only under the fixed sentence "This text comes from the server, not from holzWave."; the title and the host of the dialog come from the person's own saved connection by its id, never from the server; an answer is moved into that one login and never stored, logged or part of a `Debug` text, and a connection of this kind cannot hold a saved secret; a background opener (a monitor, a command) never asks and never waits behind a person, so only a pane or a file browser raises the dialog, once for the pane, the files and the commands. Tested against an in-process server; not yet against a real one-time-code host (`docs/test-plan.md`) |
+| wsh over an SSH tunnel | a process on a remote host asks the app for more than a preview, or another user of that host reaches the socket | one Unix socket per remote pane is forwarded in reverse over the pooled login; `sshd` creates it with an owner-only mode and its path holds 128 random bits; a per-pane token is checked first; the protocol crate's remote scope accepts `ping`, `view`, `edit` and `setmeta` only and takes the pane from the forward, never from the request; at most 4 connections per pane, 1 MiB per connection, 10 s of silence, 30 s of life and 20 requests per 10 s; opt-in per connection, no TCP fallback, a new socket path for every start of a shell, and `wsh` is put on a host only by one explicit act of the person |
 | Everything the app is | telemetry, an update channel or an account arrives through a dependency or a plugin (DESK-26) | none exists; `core/tests/project_policy.rs` pins the dependency lists and the closure of the app, scans first-party sources and the page for network APIs and fails on a CI workflow |
 | Provider keys | read from a file, a log or the page, or sent to another host than the one they were saved for | the OS keychain only, under the account `ai:<id>` together with the address they were saved for (a changed address needs the key again); write-only, because no command returns a key; every type that holds one hides it in `Debug`; never synced and never in `ai.json` |
 | Model output | a reply runs code or loads something in the page | untrusted text; it is rendered by the core's sanitiser and copied through the page's own allow-list; no image or media element ever; a link with a query string or user information is inert |
@@ -446,25 +456,23 @@ keychain; a command of the agent has the rights of the account and no sandbox (a
 outlives the kill); a name lookup of a host-name provider happens between the last check and the chokepoint's own resolve; a
 test that proves that nothing happened proves it for a time window, never for ever.
 
-## 11. Platforms
+### wsh over an SSH tunnel
 
-| | macOS | Windows | Linux | iOS | Android |
-|---|---|---|---|---|---|
-| Webview | WKWebView | WebView2 | WebKitGTK | WKWebView | System WebView |
-| Local shell | ✅ | written (ConPTY), not yet run | written, not yet run | ❌ | ✅ |
-| Keychain | Keychain | Credential Manager | Secret Service | Keychain | Keystore |
-| Apple AI | ✅ macOS 26 or later with Apple Intelligence, linked weakly so that older macOS runs the app without it | – | – | later | – |
-| AI chat | ✅ (test servers only) | written, not yet run | written, not yet run | no key store yet, so the chat refuses to send | same |
-| `wsh ai` | ✅ Unix socket | named pipe, no read timeouts | ✅ Unix socket | – | – |
+**What is forwarded.** One Unix socket for each remote pane of a connection that has `wsh` switched on (it is off until the person turns it on). The app asks the `sshd` of the host for a reverse forward of `/tmp/holzwave-` plus 32 random hex characters (128 bits) plus `.sock` on the connection's pooled login. `sshd` creates the socket with its owner-only mode (`StreamLocalBindMask`, `0177` by default), so another user of that host can neither open it nor guess its name. A host that does not allow Unix socket forwarding gets no tunnel and its pane stays a plain shell with one line that says why: there is no fallback to a TCP port, because a port on a host is open to every user of it. The shell learns the socket, a per-pane token and the pane number from its environment, which the app sets with one constant start line and never types into the shell, so no secret reaches the history file of the host.
 
-Differences are confined to the shell crate and to implementations of the traits in section 4. The layout model and
-the frame protocol are identical everywhere; mobile shows one block per screen from the same `View`.
+**What a remote process can ask.** `ping`, `view`, `edit` and the title of `setmeta`, and nothing else. `ai`, the history commands, consent, approval and every command that decides anything are refused with `not available over a remote connection` before a body is read, by the protocol crate itself; a command added to the protocol does not compile until it has a decision for this scope, and the guard that no command can decide, approve, confirm or grant covers it. The pane and the scope come from the forward and the per-pane token: the `pane` member of a request is ignored. The token is checked in constant time before anything else is looked at.
 
-The AI chat core builds for mobile, but provider keys need a mobile secret store, so the chat refuses to send there. The chat
-and its cards were drawn and tested in two browser engines (WebKit and Chromium) and are unverified on WebView2 and WebKitGTK
-(rows AI6 and AI7 of [test-plan.md](test-plan.md)); the Apple model is a crate that only the macOS build of the shell links,
-and the real model has not been run (rows AI-A1 to AI-A4).
+**Limits.** At most 4 forwarded connections are open at once for a pane (a fifth is refused), each may send 1 MiB and is ended after 10 s of silence or 30 s of life, and a pane may send 20 requests per 10 s (then the answer is `busy`). The bytes of a forwarded connection reach the code that answers through a queue of fixed size and the connection is closed when it is full, so a slow or hostile peer cannot hold up the other channels of the login. The forward ends when the pane closes or its login is replaced, and is asked for again after a reconnect, on a new path (see below).
 
+**What is not defended.** A process of the same account on that host holds what the pane's shell holds: it can read the token from the environment, open the socket, ask for previews of any file that account can read and rename the pane, at the rate above. A compromised host can ask; it can never decide, consent or approve for the person, and it can never reach the AI or the history. The administrator of the host can do all of this for every account on it. WSL and Docker panes have no SSH session to forward over and no tunnel, and a host that is not Linux has no build of `wsh` to install.
+
+**Paths, and the file `sshd` leaves.** `sshd` refuses a forward for a path that already exists and does not unlink one unless it is told to (`StreamLocalBindUnlink`, a setting of the host that the app cannot make). The OpenSSH of the live check below also leaves the socket file behind when the forward is cancelled and when the login ends: an empty, owner-only socket in `/tmp` with nothing listening on it. So the first start of a pane's shell asks for the path its tunnel was made with, and every start after it (a reconnect, or Enter after a failure) asks for a new path of the same form, with 128 fresh random bits, and the new shell's environment names it; the token and the pane stay the same. The files that stay are harmless and are left to the host's own cleaning of its temporary folder.
+
+**What answers on the app's side.** The sink of a pane's tunnel is made for that pane and answers `ping`, `setmeta title`, `view` and `edit` for it. `view` and `edit` need an absolute path that the pane's own saved connection finds to be a regular file over SFTP; the preview or the editor opens beside the pane with that connection as its source, and a path of this computer is never read. When a pane starts, the app records where its saved connection points (the host, the port and the user). A connection that is edited to another host afterwards is refused, with one fixed sentence, for every request of that pane and for the install below, because the process that asks is on the old host and a path would otherwise be resolved on the new one.
+
+**How `wsh` finds the socket, and how it gets onto a host.** On this computer `wsh` finds the app through `HOLZWAVE_IPC` (the folder of its socket). On a host reached over SSH the start line sets `HOLZWAVE_SOCKET` (the path of the forwarded socket) with the token and the pane, and not `HOLZWAVE_IPC`: `wsh` prefers `HOLZWAVE_SOCKET` when it is set (Unix only), and the history hooks, which test `HOLZWAVE_IPC`, stay off on that host. `wsh version` prints the version without an app. The binary gets onto a host by one explicit act, the palette action `Install wsh on this host` for the focused pane of a saved SSH connection: the app asks the host `uname -sm` (a fixed command), accepts Linux on `x86_64` or `aarch64` only, skips the upload when `wsh version` there already says the app's version, and otherwise uploads the static build that the release scripts bundled (read from two fixed names in the resource folder, never downloaded and never built on the host) over the connection's pooled SFTP to `~/.holzwave/bin/wsh`, with the folders at mode 0700 and the file at mode 0755, written aside and swapped in so that an old file is never removed before the new one is in place, runs `wsh version` there to check it, and says the result as a line on the pane. Nothing is installed at connect or on a timer, nothing but that file and its two folders is created, and no startup file of the account is changed (the start line appends `~/.holzwave/bin` to `PATH` itself). A host that is not Linux, another processor, a build of the app without the bundled files, a host without SFTP and a server that refuses the upload each get one sentence on the pane and keep running; a failed upload leaves no temporary file.
+
+**What was run against a real OpenSSH.** `sh scripts/ssh-loopback-check.sh` starts a throwaway `sshd` on loopback that allows Unix socket forwarding, builds `wsh`, saves a connection to it with `wsh` ticked in an app core, starts a pane and types the real `wsh` into the real remote shell: `ping`, `setmeta title`, `view` and `edit` of a file of that host work through the forward; `ai`, `hist add` and a wrong token are refused; the socket exists with an owner-only mode while the pane runs and nothing listens on it after the pane closed. That is the build of the computer that runs the check, started by its absolute path, so nothing is installed into a home. What it does not show is a Linux host, another processor, the static Linux builds through the tunnel (they are run in a container by the release scripts) and a server of another make; the owner's rows for a real Linux host are in the test plan.
 ### The platform seam (Phase 2.2)
 
 Windows and Linux are written and cross-checked from a Mac; **they have not been run on their own platform**, and the

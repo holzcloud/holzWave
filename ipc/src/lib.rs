@@ -28,20 +28,30 @@
 //!
 //! This crate has no command that confirms, approves or decides anything on the user's behalf: those exist only as commands
 //! of the webview, because every process in a pane holds the token and the token cannot prove what a person agreed to.
+//!
+//! # The remote scope
+//!
+//! A request that arrives through an SSH forward (a remote pane's `wsh`) is answered by [`serve_remote`], one request per
+//! connection, and may ask four things only: `ping`, `view`, `edit` and `setmeta` ([`Cmd::allowed_remote`]). Every other
+//! command is refused with [`REMOTE_REFUSED`] before a body is read and before the handler is called. The pane comes from
+//! the caller (the forward and its token identify it), never from the request: the `pane` member of a request is ignored.
+//! The token is checked in constant time before anything else is looked at, and a pane may send [`REMOTE_REQUESTS`]
+//! requests in [`REMOTE_WINDOW`] ([`RateLimit`]); the next one is answered `busy`. The local socket does not use any of this.
 
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{GenericFilePath, GenericNamespaced, ListenerOptions, Stream, ToFsName, ToNsName};
 use serde::{Deserialize, Serialize};
 
 mod stream;
-pub use stream::{Event, Gone, Outcome, Sink, stream_request};
+pub use stream::{Event, Gone, Outcome, Sink, stream_request, stream_request_at};
 pub use stream::{MAX_CHUNK, MAX_NOTE, MAX_OUTPUT, MAX_REPLY};
 
 /// The longest request line, in bytes.
@@ -62,6 +72,13 @@ const MAX_CLIENTS: usize = 8;
 const MAX_STREAMS: usize = 2;
 /// How long a connection may stay silent before it is dropped (not on Windows: named pipes have no timeouts).
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a remote pane is refused with when it asks for a command outside its scope.
+pub const REMOTE_REFUSED: &str = "not available over a remote connection";
+/// How many requests a remote pane may send in [`REMOTE_WINDOW`].
+pub const REMOTE_REQUESTS: usize = 20;
+/// The window of [`REMOTE_REQUESTS`].
+pub const REMOTE_WINDOW: Duration = Duration::from_secs(10);
 
 /// Refusal texts that tests and clients rely on.
 const PROMPT_TOO_LONG: &str = "the prompt is longer than 16384 bytes or has a NUL";
@@ -124,6 +141,16 @@ impl Cmd {
         match self {
             Cmd::Ai { stdin_bytes, .. } => *stdin_bytes as usize,
             _ => 0,
+        }
+    }
+
+    /// Whether a request that arrives through an SSH forward may ask this command: `ping`, `view`, `edit` and `setmeta`.
+    /// Every other command is refused in the remote scope ([`serve_remote`]). There is no wildcard arm on purpose: a
+    /// command added to the enum does not compile until it is given a decision here.
+    pub fn allowed_remote(&self) -> bool {
+        match self {
+            Cmd::Ping | Cmd::View { .. } | Cmd::Edit { .. } | Cmd::Setmeta { .. } => true,
+            Cmd::Hist { .. } | Cmd::HistOpen | Cmd::Ai { .. } => false,
         }
     }
 
@@ -203,6 +230,41 @@ fn same(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// Where the app listens, as a client finds it: the folder that holds the socket of this computer (`HOLZWAVE_IPC`), or the path
+/// of one socket (`HOLZWAVE_SOCKET`, the end of a reverse forward on a remote host). This is the one place that decides how a
+/// name is made from either; [`connect`], [`request`] and [`stream_request`] are the folder forms of the `_at` functions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Endpoint {
+    /// The folder of the app's socket (`ipc.sock` in it on Unix, a pipe made from the folder on Windows).
+    Dir(PathBuf),
+    /// The path of a Unix socket. A pipe of Windows has no path, so this is not supported there.
+    Socket(PathBuf),
+}
+
+impl From<&Path> for Endpoint {
+    fn from(dir: &Path) -> Self {
+        Endpoint::Dir(dir.to_path_buf())
+    }
+}
+
+/// The longest socket path: `sun_path` is about 104 bytes on macOS and 108 on Linux.
+const MAX_SOCKET_PATH: usize = 100;
+
+fn endpoint_name(endpoint: &Endpoint) -> io::Result<interprocess::local_socket::Name<'static>> {
+    match endpoint {
+        Endpoint::Dir(dir) => name(dir),
+        Endpoint::Socket(_) if cfg!(windows) => {
+            Err(io::Error::new(io::ErrorKind::Unsupported, "a socket path is not supported on Windows"))
+        }
+        Endpoint::Socket(path) => {
+            if path.as_os_str().len() > MAX_SOCKET_PATH {
+                return Err(io::Error::other("the socket path is too long"));
+            }
+            path.as_path().to_fs_name::<GenericFilePath>().map(interprocess::local_socket::Name::into_owned)
+        }
+    }
+}
+
 fn name(dir: &Path) -> io::Result<interprocess::local_socket::Name<'static>> {
     if cfg!(windows) {
         // A named pipe is not in the file system; the directory's last parts make it the user's own.
@@ -211,8 +273,7 @@ fn name(dir: &Path) -> io::Result<interprocess::local_socket::Name<'static>> {
         format!("holzwave-{tag}").to_ns_name::<GenericNamespaced>().map(interprocess::local_socket::Name::into_owned)
     } else {
         let path = dir.join("ipc.sock");
-        // `sun_path` is about 104 bytes on macOS and 108 on Linux.
-        if path.as_os_str().len() > 100 {
+        if path.as_os_str().len() > MAX_SOCKET_PATH {
             return Err(io::Error::other("the socket path is too long; set XDG_RUNTIME_DIR to a shorter one"));
         }
         path.to_fs_name::<GenericFilePath>().map(interprocess::local_socket::Name::into_owned)
@@ -279,6 +340,81 @@ fn serve_one(stream: Stream, token: &str, handler: &dyn Handler, limits: &Limits
     match handler.handle(request.pane, request.cmd) {
         Ok(m) => answer(&mut send, true, m),
         Err(e) => answer(&mut send, false, e),
+    }
+}
+
+/// How many requests may be accepted in a window. One per pane in the remote scope; it counts only requests that passed the
+/// token and the scope, so a flood of refused ones neither uses it up nor is helped by it.
+pub struct RateLimit {
+    max: usize,
+    window: Duration,
+    accepted: Mutex<VecDeque<Instant>>,
+}
+
+impl RateLimit {
+    /// At most `max` requests in any `window`.
+    pub fn new(max: usize, window: Duration) -> Self {
+        Self { max, window, accepted: Mutex::new(VecDeque::new()) }
+    }
+
+    /// Whether a request at `now` is inside the budget. A request that is let in is counted; one that is not, is not.
+    pub fn allow(&self, now: Instant) -> bool {
+        let mut accepted = self.accepted.lock().unwrap_or_else(PoisonError::into_inner);
+        while accepted.front().is_some_and(|at| now.saturating_duration_since(*at) >= self.window) {
+            accepted.pop_front();
+        }
+        if accepted.len() >= self.max {
+            return false;
+        }
+        accepted.push_back(now);
+        true
+    }
+}
+
+/// Answer one request that arrived through an SSH forward (see the module documentation, "The remote scope").
+///
+/// The order is fixed: one bounded line is read; the token is checked in constant time before the line is looked at any
+/// further; the request is parsed; the scope is checked ([`Cmd::allowed_remote`]), so a command outside it is refused
+/// before its own checks, before the budget and before a body is read; then the budget ([`RateLimit`]); then the command's
+/// own checks; then the handler, with `pane` (the caller's, never the request's). Exactly one answer line is written.
+pub fn serve_remote(
+    reader: &mut impl BufRead,
+    writer: &mut impl Write,
+    token: &str,
+    pane: u64,
+    handler: &dyn Handler,
+    limit: &RateLimit,
+) {
+    let line = match read_bounded_line(reader) {
+        Ok(line) => line,
+        Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            return answer(writer, false, NO_REQUEST_IN_TIME);
+        }
+        Err(e) => return answer(writer, false, e.to_string()),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&line) {
+        Ok(value) => value,
+        Err(_) => return answer(writer, false, "not a valid request"),
+    };
+    if !value.get("token").and_then(|t| t.as_str()).is_some_and(|t| same(t, token)) {
+        return answer(writer, false, "refused: wsh must run in a holzWave terminal (the token is missing or wrong)");
+    }
+    let request: Request = match serde_json::from_value(value) {
+        Ok(request) => request,
+        Err(e) => return answer(writer, false, format!("unknown command: {e}")),
+    };
+    if !request.cmd.allowed_remote() {
+        return answer(writer, false, REMOTE_REFUSED);
+    }
+    if !limit.allow(Instant::now()) {
+        return answer(writer, false, "busy");
+    }
+    if let Err(why) = request.cmd.check() {
+        return answer(writer, false, why);
+    }
+    match handler.handle(Some(pane), request.cmd) {
+        Ok(message) => answer(writer, true, message),
+        Err(message) => answer(writer, false, message),
     }
 }
 
@@ -395,15 +531,25 @@ fn make_private_dir(dir: &Path) -> io::Result<()> {
 
 /// Connect to the app whose socket is in `dir`.
 pub fn connect(dir: &Path) -> io::Result<Stream> {
-    Stream::connect(name(dir)?)
+    connect_endpoint(&Endpoint::from(dir))
+}
+
+/// Connect to the app at `endpoint`.
+pub fn connect_endpoint(endpoint: &Endpoint) -> io::Result<Stream> {
+    Stream::connect(endpoint_name(endpoint)?)
 }
 
 /// Send one request and read the answer. A command that streams needs [`stream_request`].
 pub fn request(dir: &Path, request: &Request) -> io::Result<Response> {
+    request_at(&Endpoint::from(dir), request)
+}
+
+/// [`request`] to an [`Endpoint`].
+pub fn request_at(endpoint: &Endpoint, request: &Request) -> io::Result<Response> {
     if request.cmd.is_stream() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "this command streams; use stream_request"));
     }
-    let mut stream = connect(dir)?;
+    let mut stream = connect_endpoint(endpoint)?;
     let mut line = serde_json::to_string(request).map_err(io::Error::other)?;
     line.push('\n');
     stream.write_all(line.as_bytes())?;
@@ -584,13 +730,20 @@ mod tests {
         assert_eq!((Cmd::Ping.body_len(), Cmd::Ai { prompt: String::new(), stdin_bytes: 3 }.body_len()), (0, 3));
     }
 
+    /// The words that say a command decides, approves, confirms or grants something.
+    const DECIDING_WORDS: [&str; 14] = [
+        "decide", "decision", "approve", "approval", "consent", "grant", "allow", "deny", "confirm", "accept", "permit",
+        "authorize", "authorise", "trust",
+    ];
+
+    /// The names among `names` that say a command decides, approves, confirms or grants something.
+    fn deciding_words(names: &[String]) -> Vec<String> {
+        names.iter().filter(|name| DECIDING_WORDS.iter().any(|w| name.to_lowercase().contains(w))).cloned().collect()
+    }
+
     /// The identifiers in the block of the enum `name` in `source` (its doc comments left out) that say the command decides,
     /// approves, confirms or grants something.
     fn deciding_names(source: &str, name: &str) -> Vec<String> {
-        const WORDS: [&str; 14] = [
-            "decide", "decision", "approve", "approval", "consent", "grant", "allow", "deny", "confirm", "accept", "permit",
-            "authorize", "authorise", "trust",
-        ];
         let header = format!("pub enum {name} {{");
         let Some(start) = source.find(&header) else { return vec![format!("no enum named {name}")] };
         let mut found = Vec::new();
@@ -602,7 +755,7 @@ mod tests {
                 continue;
             }
             for word in line.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()) {
-                if WORDS.iter().any(|w| word.to_lowercase().contains(w)) {
+                if !deciding_words(&[word.to_owned()]).is_empty() {
                     found.push(word.to_owned());
                 }
             }
@@ -623,6 +776,63 @@ mod tests {
         assert_eq!(deciding_names(&synthetic, "Fake"), [a, b, c]);
         assert!(deciding_names(&synthetic, "Missing")[0].starts_with("no enum"));
         assert!(deciding_names("pub enum Fake {\n    Ping,\n", "Fake")[0].contains("does not end"));
+    }
+
+    /// One value of every variant of `Cmd`. The match has no wildcard: a variant added to the enum does not compile here
+    /// until it is listed, and `allowed_remote` has the same property, so a new command always gets a remote decision.
+    fn every_command() -> Vec<Cmd> {
+        let list = vec![
+            Cmd::View { path: "/a".into() },
+            Cmd::Edit { path: "/a".into() },
+            Cmd::Setmeta { key: "title".into(), value: "t".into() },
+            Cmd::Hist { line: "ls".into(), cwd: "/".into(), exit: Some(0) },
+            Cmd::HistOpen,
+            Cmd::Ai { prompt: "q".into(), stdin_bytes: 0 },
+            Cmd::Ping,
+        ];
+        for cmd in &list {
+            match cmd {
+                Cmd::View { .. }
+                | Cmd::Edit { .. }
+                | Cmd::Setmeta { .. }
+                | Cmd::Hist { .. }
+                | Cmd::HistOpen
+                | Cmd::Ai { .. }
+                | Cmd::Ping => {}
+            }
+        }
+        list
+    }
+
+    #[test]
+    fn every_command_has_a_remote_decision() {
+        let decisions: Vec<(String, bool)> =
+            every_command().iter().map(|cmd| (serde_json::to_value(cmd).unwrap()["cmd"].as_str().unwrap().to_owned(), cmd.allowed_remote())).collect();
+        assert_eq!(
+            decisions,
+            [
+                ("view".to_owned(), true),
+                ("edit".to_owned(), true),
+                ("setmeta".to_owned(), true),
+                ("hist".to_owned(), false),
+                ("hist_open".to_owned(), false),
+                ("ai".to_owned(), false),
+                ("ping".to_owned(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_remote_command_can_decide_approve_confirm_or_grant() {
+        let accepted: Vec<Cmd> = every_command().into_iter().filter(Cmd::allowed_remote).collect();
+        // Both spellings of every accepted command: the name on the wire and the name of the variant.
+        let mut names: Vec<String> = accepted.iter().map(|cmd| serde_json::to_value(cmd).unwrap()["cmd"].as_str().unwrap().to_owned()).collect();
+        names.extend(accepted.iter().map(|cmd| format!("{cmd:?}").split([' ', '{']).next().unwrap_or("").to_owned()));
+        assert_eq!(accepted.len(), 4, "the remote scope has four commands");
+        assert!(deciding_words(&names).is_empty(), "a remote command must not decide, approve, confirm or grant: {names:?}");
+        // The matching itself flags a decision, and a name that merely contains no such word passes.
+        let (consent, grant) = (["con", "sent"].concat(), ["Grant", "Access"].concat());
+        assert_eq!(deciding_words(&[consent.clone(), "view".into(), grant.clone()]), [consent, grant]);
     }
 
     #[test]

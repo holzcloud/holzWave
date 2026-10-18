@@ -1208,7 +1208,10 @@ impl GhosttyEngine {
         // The terminal's live modes (DECCKM, keypad, Kitty flags, modifyOtherKeys) are read at encode time.
         // `set_options_from_terminal` resets option-as-alt to false, so the setting goes in afterwards.
         let option_as_alt = if self.option_as_alt { OptionAsAlt::True } else { OptionAsAlt::False };
-        let mut out = Vec::with_capacity(16);
+        // The buffer holds the whole answer at once: the encoder's own retry when the buffer is too small asks for too little
+        // (`reserve(required - capacity)`), so committed text of more than 16 bytes failed and was dropped. The most it
+        // writes per character is the Kitty form `ESC [ 0 ; ; <code point> u` with the associated text, well under 32 bytes.
+        let mut out = Vec::with_capacity(32 + text.map_or(0, |t| t.len().saturating_mul(8)));
         self.encoder
             .set_options_from_terminal(&self.terminal)
             .set_macos_option_as_alt(option_as_alt)

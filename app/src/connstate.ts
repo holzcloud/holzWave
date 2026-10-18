@@ -23,13 +23,19 @@ export interface Connection {
   host: string;
   port: number;
   user: string;
-  auth: "key" | "password";
+  /**
+   * `agent`: the person's ssh-agent signs the login, nothing is stored, `key_path` may name a public key file.
+   * `interactive`: the server asks the questions (a one-time code, a password prompt) and the person answers them.
+   */
+  auth: "key" | "password" | "agent" | "interactive";
   key_path: string;
   jump: string | null;
   startup: string;
   reconnect_attempts: number;
   reconnect_delay_secs: number;
   shell: string;
+  /** SSH only: the person allows the `wsh` tunnel on this host. Absent from the core's answer means false. */
+  wsh: boolean;
   has_secret: boolean;
 }
 
@@ -91,13 +97,14 @@ export function readConnections(raw: unknown): Connection[] {
       host: text(o.host),
       port: typeof o.port === "number" ? o.port : 22,
       user: text(o.user),
-      auth: o.auth === "password" ? "password" : "key",
+      auth: o.auth === "password" || o.auth === "agent" || o.auth === "interactive" ? o.auth : "key",
       key_path: text(o.key_path),
       jump: typeof o.jump === "string" ? o.jump : null,
       startup: text(o.startup),
       reconnect_attempts: count(o.reconnect_attempts),
       reconnect_delay_secs: count(o.reconnect_delay_secs),
       shell: text(o.shell),
+      wsh: o.wsh === true,
       has_secret: o.has_secret === true,
     });
   }

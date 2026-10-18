@@ -16,6 +16,8 @@ export interface BlockInfo {
   path: string;
   /** The name of the source for the header. */
   source_label: string;
+  /** A preview that opens its file in the editor at once (`wsh edit`). Present only when the core says `true`. */
+  edit?: boolean;
 }
 
 export interface FileEntry {
@@ -47,6 +49,22 @@ export interface Opened {
   text: string | null;
   /** The file's modification time (seconds), sent back with a save to notice a change on disk. */
   modified: number | null;
+  /** The SHA-256 of the bytes the core read (64 lowercase hex characters), sent back with a save for an exact check. */
+  digest: string | null;
+}
+
+/** A digest as the core writes it: 64 lowercase hex characters. Anything else is no digest. */
+export function readDigest(raw: unknown): string | null {
+  return typeof raw === "string" && /^[0-9a-f]{64}$/.test(raw) ? raw : null;
+}
+
+/** The answer of `file_save`: the new change time and digest. A bare number is the older answer (a time only). */
+export function readSaved(raw: unknown): { modified: number | null; digest: string | null } {
+  if (typeof raw === "number") return { modified: Number.isFinite(raw) ? raw : null, digest: null };
+  if (typeof raw !== "object" || raw === null) return { modified: null, digest: null };
+  const o = raw as { modified?: unknown; digest?: unknown };
+  const modified = typeof o.modified === "number" && Number.isFinite(o.modified) ? o.modified : null;
+  return { modified, digest: readDigest(o.digest) };
 }
 
 /** The block of each pane that has one. Replaced as a whole by every answer of `pane_blocks`. */
@@ -65,13 +83,16 @@ export function readBlocks(raw: unknown): BlockInfo[] {
     if (typeof o.source !== "string" || typeof o.path !== "string") continue;
     // A chat's path becomes the argument of chat commands: one that is not a plausible chat id never leaves this list.
     if (o.kind === "chat" && !isChatId(o.path)) continue;
-    out.push({
+    const block: BlockInfo = {
       pane: o.pane,
       kind: o.kind as BlockKind,
       source: o.source.slice(0, 64),
       path: o.path.slice(0, 4096),
       source_label: typeof o.source_label === "string" ? o.source_label.slice(0, 256) : o.source,
-    });
+    };
+    // Like the core, which leaves the member out when it is false: a strict `true` and nothing else, and only a preview has it.
+    if (o.edit === true && o.kind === "preview") block.edit = true;
+    out.push(block);
   }
   return out;
 }

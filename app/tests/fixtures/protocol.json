@@ -198,7 +198,7 @@
   "app_info": {
     "hostname": "holz-mac.local",
     "os": "macos",
-    "version": "0.0.1-alpha2"
+    "version": "0.0.1-alpha3"
   },
   "commands": {
     "ai_ask_answer": [
@@ -350,7 +350,8 @@
       "source",
       "path",
       "text",
-      "expected_modified"
+      "expected_modified",
+      "expected_digest"
     ],
     "file_stat": [
       "source",
@@ -381,6 +382,13 @@
       "repeat",
       "release",
       "composing"
+    ],
+    "login_prompt_answer": [
+      "id",
+      "answers"
+    ],
+    "login_prompt_cancel": [
+      "id"
     ],
     "markdown_render": [
       "text"
@@ -541,7 +549,10 @@
       "text"
     ],
     "widgets_list": [],
-    "window_ready": []
+    "window_ready": [],
+    "wsh_install": [
+      "pane"
+    ]
   },
   "events": {
     "ai": {
@@ -612,6 +623,37 @@
         "y": 12.0
       }
     ],
+    "login-prompt": {
+      "connection": "Talos",
+      "host": "talos.example",
+      "id": "0123456789abcdef0123456789abcdef",
+      "instructions": "Enter your password and the code of your token.",
+      "name": "Two-factor login",
+      "prompts": [
+        {
+          "echo": false,
+          "text": "Password:"
+        },
+        {
+          "echo": true,
+          "text": "Code:"
+        }
+      ]
+    },
+    "login-prompt-end": [
+      {
+        "id": "0123456789abcdef0123456789abcdef",
+        "outcome": "answered"
+      },
+      {
+        "id": "0123456789abcdef0123456789abcdef",
+        "outcome": "cancelled"
+      },
+      {
+        "id": "0123456789abcdef0123456789abcdef",
+        "outcome": "timed_out"
+      }
+    ],
     "names": [
       "frame",
       "layout",
@@ -624,7 +666,9 @@
       "drag-end",
       "ai",
       "ai-ask",
-      "history-open"
+      "history-open",
+      "login-prompt",
+      "login-prompt-end"
     ],
     "pane-exit": [
       {

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use holzwave_core::ai::service::AskEvent;
-use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened};
+use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened, Saved};
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
 use holzwave_core::files::{Entry, FileSource, Listing};
 use holzwave_core::engine::{
@@ -35,7 +35,8 @@ use holzwave_core::platform::{
 use holzwave_core::pty::process_cwd;
 use holzwave_core::session::{MonitorRect, Placement, SESSION_FILE, Session, WindowState};
 use holzwave_core::settings::{SETTINGS_FILE, Settings};
-use holzwave_core::ssh::{ExecCancel, ExecLimits, ExecResult, SshExec};
+use holzwave_core::ssh::{ExecCancel, ExecLimits, ExecResult, PromptLine, SshExec};
+use holzwave_core::wshinstall::Bundled;
 use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
 use holzwave_core::wire::FrameMsg;
 use serde::{Serialize, Serializer};
@@ -43,6 +44,7 @@ use serde_json::Value;
 
 use crate::ai_host::{AiHost, AiParts, AiPayload};
 use crate::ai_exec::RemoteExecs;
+use crate::login_prompt::{PromptEnd, PromptHost};
 use crate::ai_tools::{ExecFault, FileTarget, TerminalTarget};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
@@ -77,6 +79,20 @@ fn path_with_wsh(bin: &Path, path: Option<&std::ffi::OsStr>) -> Option<std::ffi:
 /// Where passwords and key passphrases are kept: the operating system's keychain.
 fn default_secrets() -> Arc<dyn SecretStore> {
     Arc::new(holzwave_core::secrets::KeychainStore)
+}
+
+/// The saved connections, and the keychain entries of the profiles that a list from another computer removed: those
+/// profiles are gone from the list just applied, so their secrets go too. Only exactly those ids are touched (and none
+/// when the new list did not read as one: the sync reports no ids then), see `Promoted::dropped_profiles`.
+fn load_connections(
+    dir: &Path,
+    secrets: Arc<dyn SecretStore>,
+    live_panes: &[PaneId],
+    dropped: &[String],
+) -> (Connections, holzwave_core::layout::LoadStatus) {
+    let (connections, status) = Connections::load(dir, secrets, user_home(), live_panes);
+    connections.forget_secrets(dropped);
+    (connections, status)
 }
 
 // ---- what the webview sees -------------------------------------------------------------------------------------
@@ -378,6 +394,13 @@ pub enum Out {
     /// The shell of `pane` asked for the history search (the binding added by `wsh init`): the page of the window that has
     /// the pane opens the dialog for it.
     HistoryOpen { pane: PaneId },
+    /// The server of a saved connection asks the person a question to log in (a one-time code, a PAM prompt). Goes to every
+    /// window; the page draws a dialog. `connection` and `host` are the name and the host of the person's own saved
+    /// connection, never what the server says; `name`, `instructions` and the texts of `prompts` are the server's text,
+    /// already cleaned and bounded by the core, and are shown as text only.
+    LoginPrompt { id: String, connection: String, host: String, name: String, instructions: String, prompts: Vec<PromptLine> },
+    /// The question `id` is over (answered, cancelled or timed out): every window takes its dialog away.
+    LoginPromptEnd { id: String, outcome: PromptEnd },
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -398,6 +421,8 @@ impl Out {
             Out::Ai(_) => "ai",
             Out::AiAsk(_) => "ai-ask",
             Out::HistoryOpen { .. } => "history-open",
+            Out::LoginPrompt { .. } => "login-prompt",
+            Out::LoginPromptEnd { .. } => "login-prompt-end",
             Out::Exit => "exit",
         }
     }
@@ -412,6 +437,28 @@ struct TitlePayload<'a> {
 #[derive(Serialize)]
 struct HistoryOpenPayload {
     pane: PaneId,
+}
+
+#[derive(Serialize)]
+struct PromptLinePayload<'a> {
+    text: &'a str,
+    echo: bool,
+}
+
+#[derive(Serialize)]
+struct LoginPromptPayload<'a> {
+    id: &'a str,
+    connection: &'a str,
+    host: &'a str,
+    name: &'a str,
+    instructions: &'a str,
+    prompts: Vec<PromptLinePayload<'a>>,
+}
+
+#[derive(Serialize)]
+struct LoginPromptEndPayload<'a> {
+    id: &'a str,
+    outcome: PromptEnd,
 }
 
 #[derive(Serialize)]
@@ -451,6 +498,16 @@ impl Serialize for Out {
             Out::Ai(payload) => payload.serialize(serializer),
             Out::AiAsk(event) => event.serialize(serializer),
             Out::HistoryOpen { pane } => HistoryOpenPayload { pane: *pane }.serialize(serializer),
+            Out::LoginPrompt { id, connection, host, name, instructions, prompts } => LoginPromptPayload {
+                id,
+                connection,
+                host,
+                name,
+                instructions,
+                prompts: prompts.iter().map(|p| PromptLinePayload { text: &p.text, echo: p.echo }).collect(),
+            }
+            .serialize(serializer),
+            Out::LoginPromptEnd { id, outcome } => LoginPromptEndPayload { id, outcome: *outcome }.serialize(serializer),
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -689,6 +746,9 @@ pub struct AppCore {
     /// Serialises the commands that write `settings.json` or reload it, so the file, the memory and the events
     /// of two of them never interleave. Held across the file IO; `config` is not.
     settings_io: Mutex<()>,
+    /// Serialises the writers of `widget_notes.json`: a note save and the apply of a download of the file. Held across
+    /// the file IO and nothing else: never across `reload_settings`, a sink call or a window call.
+    notes_io: Mutex<()>,
     /// The last working directory each pane reported (its `Cwd` events).
     last_cwd: Arc<Mutex<HashMap<PaneId, String>>>,
     /// The last title each pane reported. The core sends a title when a program changes it and never again, so a
@@ -714,6 +774,12 @@ pub struct AppCore {
     blocks: Blocks,
     /// Where `wsh` finds the app, set once the socket listens: the folder and the secret of this run.
     ipc: Mutex<Option<(PathBuf, String)>>,
+    /// Where the saved SSH connection of each running pane pointed when the pane started, so that a connection edited
+    /// afterwards to another host is never answered for as the old one (see [`crate::wsh_tunnel::Target`]).
+    pane_targets: Mutex<HashMap<PaneId, crate::wsh_tunnel::Target>>,
+    /// The resource folder of the app, where the bundled `wsh` builds for Linux hosts are (set once at start; none in a test
+    /// and in a build made without them).
+    resource_dir: Mutex<Option<PathBuf>>,
     /// The typed commands, searchable. An empty in-memory one when the file cannot be opened.
     history: holzwave_core::history::History,
     /// The system monitor's sampler, shared by every monitor pane.
@@ -727,6 +793,9 @@ pub struct AppCore {
     ai: AiHost,
     /// The exec primitive of each saved connection a command ran on, kept for the life of the connection list.
     remote_execs: RemoteExecs<SshExec>,
+    /// The questions of keyboard-interactive logins that wait for the person (see [`crate::login_prompt`]). Also the
+    /// prompter of `connections`.
+    prompts: Arc<PromptHost>,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
     saver: Debounced,
     /// How many times the saver job wrote the file, for tests.
@@ -742,6 +811,62 @@ pub struct AppCore {
 
 /// What the single-answer path says to `wsh ai`: the request is answered as a stream (see `ai_ask`), never as one line.
 const WSH_AI_STREAM_ONLY: &str = "wsh ai is answered as a stream, not as one line";
+
+/// What a remote `wsh` is told when its pane has gone, and when its connection has gone or was turned off. Fixed
+/// sentences: a request that came through a forward is answered with nothing of this computer in it.
+const WSH_PANE_GONE: &str = "this pane is not open any more";
+const WSH_NO_CONNECTION: &str = "this pane no longer runs a saved connection";
+const WSH_TURNED_OFF: &str = "wsh is not turned on for the connection of this pane";
+const WSH_NOT_ABSOLUTE: &str = "the path must be absolute: it starts with /";
+const WSH_NOT_A_FILE: &str = "not a regular file on this host";
+const WSH_NO_SUCH_FILE: &str = "no such file on this host, or it cannot be read";
+/// What a file browser, a preview or a monitor is told when the layout cannot hold another pane.
+const NO_ROOM_FOR_A_PANE: &str = "there is no room for another pane here";
+const WSH_NO_HOST: &str = "the connection of this pane could not be used";
+/// What a remote `wsh` is told when the saved connection of its pane was edited to point at another host after the pane
+/// started: the pane is of the old host, so nothing is answered for it on the new one.
+const WSH_TARGET_CHANGED: &str = "the saved connection of this pane now points to another host; close this pane and open it again";
+
+/// What the install of `wsh` on a host says when it cannot start. Fixed sentences, like the ones of the core: nothing of this
+/// computer, no command and no secret in them.
+const INSTALL_NO_PANE: &str = "wsh was not installed: this pane is not running";
+const INSTALL_NOT_SSH: &str = "wsh was not installed: this pane does not run a saved SSH connection";
+const INSTALL_NOT_FOCUSED: &str = "wsh was not installed: this is not the pane in focus";
+const INSTALL_TARGET_CHANGED: &str =
+    "wsh was not installed: the saved connection of this pane now points to another host; close this pane and open it again";
+const INSTALL_NO_CONNECTION: &str = "wsh was not installed: the connection of this pane could not be used";
+/// The most bytes of a bundled `wsh` that are read: the builds are about half a megabyte.
+const MAX_BUNDLED_WSH: u64 = 16 * 1024 * 1024;
+
+/// The sentence the install says for its result: what was done on the connection called `name` (control characters of the
+/// name made spaces), or the core's own sentence for a refusal.
+fn install_sentence(result: &Result<holzwave_core::wshinstall::Installed, String>, name: &str) -> String {
+    use holzwave_core::wshinstall::Installed;
+    let name: String = name.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let version = env!("CARGO_PKG_VERSION");
+    match result {
+        Ok(Installed::Installed(_)) => format!("wsh {version} was installed on {name}"),
+        Ok(Installed::AlreadyCurrent(_)) => format!("wsh {version} is already installed on {name}"),
+        Err(sentence) => sentence.clone(),
+    }
+}
+
+/// One bundled build: a regular file (a link is not followed) of at most [`MAX_BUNDLED_WSH`] bytes, or `None`.
+fn read_bundled(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_BUNDLED_WSH) {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    // The opened file again: what was checked is what is read.
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_BUNDLED_WSH {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    file.take(MAX_BUNDLED_WSH + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= MAX_BUNDLED_WSH).then_some(bytes)
+}
 
 /// The host of every history entry that comes from a pane without a saved connection.
 const LOCAL_HOST: &str = "local";
@@ -775,10 +900,14 @@ impl AppCore {
     /// hand-edited file is honoured before the first command can run.
     pub fn new_with_ai(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec, ai: AiParts) -> Arc<AppCore> {
         // What the sync downloaded last time is put in place before anything is read.
-        let applied = holzwave_core::sync::engine::promote_incoming(&dir);
+        let promoted = holzwave_core::sync::engine::promote_incoming_with_report(&dir);
+        let applied = promoted.applied;
         if !applied.is_empty() {
             eprintln!("holzwave: applied from sync: {}", applied.join(", "));
         }
+        // An adopted layout replaced the pane files as well (it is one unit), so the working directories kept for the old
+        // panes belong to other panes now: pane ids are small per-device counters.
+        let adopted_layout = applied.iter().any(|name| name == "layout.json");
         let path = dir.join("layout.json");
         let windows = Arc::new(Mutex::new(load_layout(&path)));
         let writes = Arc::new(AtomicUsize::new(0));
@@ -802,7 +931,7 @@ impl AppCore {
         let config = Mutex::new(Config::load(&dir));
         let connections = {
             let live = lock(&windows).all_panes();
-            let (connections, status) = Connections::load(&dir, default_secrets(), user_home(), &live);
+            let (connections, status) = load_connections(&dir, default_secrets(), &live, &promoted.dropped_profiles);
             match status {
                 holzwave_core::layout::LoadStatus::Clean => {}
                 holzwave_core::layout::LoadStatus::Repaired(notes) => {
@@ -826,12 +955,21 @@ impl AppCore {
         };
         let session = {
             let mut session = load_session(&dir.join(SESSION_FILE));
+            if adopted_layout {
+                session.forget_panes();
+            }
             // A directory of a pane that is not in the layout is of no use and must not be written back, and neither
             // is the frame of a window that is not in it.
             let set = lock(&windows);
             session.sanitise(&set.all_panes());
             session.sanitise_windows(&set.labels());
             drop(set);
+            if adopted_layout {
+                // Written now, so a start that ends before the next save does not bring the old directories back.
+                if let Err(e) = session.save(&dir) {
+                    eprintln!("holzwave: cannot save {SESSION_FILE}: {e}");
+                }
+            }
             Arc::new(Mutex::new(session))
         };
         let session_saver = {
@@ -847,9 +985,20 @@ impl AppCore {
         let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
         let host = AiHost::new(&dir, sink.clone(), ai);
         let core = Arc::new_cyclic(|me| {
+            // A login that asks a question raises it through this host. The name and the host of the dialog are looked up in
+            // the saved list by the id of the connection: the core stamps it, the server cannot.
+            let prompts = {
+                let weak = me.clone();
+                let lookup = Box::new(move |id: &str| weak.upgrade().and_then(|core: Arc<AppCore>| core.connections.identity_of(id)));
+                PromptHost::new(sink.clone(), lookup)
+            };
+            connections.set_prompter(prompts.clone());
             // The source of shared content reaches the panes and the files through the core, so it gets a weak
             // reference before the core exists: it keeps the core alive for nothing.
             host.bind(me.clone());
+            // The sync applies what the app does not own right after a run, through the same weak reference.
+            let weak = me.clone();
+            sync.bind_applier(Arc::new(move || weak.upgrade().map(|core| core.apply_synced()).unwrap_or_default()));
             AppCore {
                 dir,
                 windows,
@@ -857,6 +1006,7 @@ impl AppCore {
                 panes,
                 config,
                 settings_io: Mutex::new(()),
+                notes_io: Mutex::new(()),
                 last_cwd,
                 last_title: Mutex::new(HashMap::new()),
                 drops: Mutex::new(Drops::default()),
@@ -872,10 +1022,13 @@ impl AppCore {
                 sync,
                 ai: host,
                 remote_execs: RemoteExecs::new(),
+                prompts,
                 monitor: holzwave_core::monitor::Monitor::new(),
                 remote_monitors: holzwave_core::monitor::RemoteMonitors::new(),
                 history,
                 ipc: Mutex::new(None),
+                pane_targets: Mutex::new(HashMap::new()),
+                resource_dir: Mutex::new(None),
                 saver,
                 writes,
                 exiting: AtomicBool::new(false),
@@ -887,6 +1040,17 @@ impl AppCore {
         let settings = lock(&core.config).settings.clone();
         core.ai.apply_settings(&settings);
         core
+    }
+
+    /// The person answered the question of a login. Moves the answers into the login; false (and nothing changed) for an
+    /// id that is unknown, old or malformed.
+    pub fn login_prompt_answer(&self, id: &str, answers: Vec<String>) -> bool {
+        self.prompts.answer(id, answers)
+    }
+
+    /// The person gave up on the question of a login.
+    pub fn login_prompt_cancel(&self, id: &str) -> bool {
+        self.prompts.cancel(id)
     }
 
     /// The AI chat service of the shell.
@@ -1007,14 +1171,8 @@ impl AppCore {
         let pane = pane.ok_or("HOLZWAVE_PANE is not set")?;
         let label = lock(&self.routes).live.get(&pane).map(|l| l.to_string()).ok_or("this pane is not open any more")?;
         let view = match cmd {
-            Cmd::View { path } | Cmd::Edit { path } => {
-                let p = std::path::Path::new(&path);
-                if !p.is_absolute() || !p.is_file() {
-                    return Err(format!("{path}: no such file"));
-                }
-                self.focus_pane_in(&label, pane)?;
-                self.block_open_in(&label, "right", BlockKind::Preview, "local", &path)?
-            }
+            Cmd::View { path } => self.open_local_file_beside(&label, pane, &path, false)?,
+            Cmd::Edit { path } => self.open_local_file_beside(&label, pane, &path, true)?,
             Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
             Cmd::Ai { .. } => return Err(WSH_AI_STREAM_ONLY.into()),
             Cmd::HistOpen => {
@@ -1025,6 +1183,140 @@ impl AppCore {
         };
         self.sink.send(Target::window(&label), Out::Layout(view));
         Ok(String::new())
+    }
+
+    /// A weak reference to this core, for the code that answers what comes through a tunnel.
+    pub(crate) fn downgrade(&self) -> Weak<AppCore> {
+        self.me.clone()
+    }
+
+    /// The saved connection `pane` runs, when `wsh` may be answered for it: an SSH connection with `wsh` turned on, in a
+    /// pane that is a terminal. The words say which of the three is not true.
+    pub(crate) fn wsh_profile(&self, pane: PaneId) -> Result<Profile, &'static str> {
+        if self.blocks.block_of(pane).is_some() {
+            return Err(WSH_NO_CONNECTION);
+        }
+        let profile = self.connections.profile_of(pane).ok_or(WSH_NO_CONNECTION)?;
+        if profile.kind != ConnectionKind::Ssh || !profile.wsh {
+            return Err(WSH_TURNED_OFF);
+        }
+        Ok(profile)
+    }
+
+    /// A command that a process on a remote host sent through the forward of `pane`. `pane` is the one the forward was made
+    /// for, never the one the request names, and the answer is the text `wsh` prints.
+    ///
+    /// It can ping, name its own pane and show a regular file of its own host beside the pane; nothing else has a branch
+    /// here (the `match` has no wildcard, so a new command does not compile until it is decided), and the protocol crate
+    /// refuses the others before this is called. In particular nothing here consents, approves, confirms or grants.
+    ///
+    /// A path is resolved by the pane's own saved connection over SFTP and never on this computer. Blocks on the
+    /// network: the sink's thread, never the main one.
+    ///
+    /// `target` is where the pane's connection pointed when its tunnel was made. A connection that was edited to another
+    /// host since is refused with a fixed sentence, because the process that asks is on the old host and a path would
+    /// otherwise be resolved on the new one.
+    pub fn wsh_remote(&self, pane: PaneId, target: &crate::wsh_tunnel::Target, cmd: holzwave_ipc::Cmd) -> Result<String, String> {
+        use holzwave_ipc::{Cmd, REMOTE_REFUSED};
+        let label = lock(&self.routes).live.get(&pane).map(|l| l.to_string()).ok_or(WSH_PANE_GONE)?;
+        let profile = self.wsh_profile(pane)?;
+        if !target.is(&profile) {
+            return Err(WSH_TARGET_CHANGED.into());
+        }
+        let view = match cmd {
+            Cmd::Ping => return Ok("holzWave".into()),
+            Cmd::Setmeta { value, .. } => self.rename_pane_in(&label, pane, &value)?,
+            Cmd::View { path } => self.open_remote_file_beside(&label, pane, &profile, &path, false)?,
+            Cmd::Edit { path } => self.open_remote_file_beside(&label, pane, &profile, &path, true)?,
+            Cmd::Hist { .. } | Cmd::HistOpen | Cmd::Ai { .. } => return Err(REMOTE_REFUSED.into()),
+        };
+        self.sink.send(Target::window(&label), Out::Layout(view));
+        Ok(String::new())
+    }
+
+    /// `wsh view` and `wsh edit` through a tunnel: an absolute path that the pane's own saved connection finds to be a
+    /// regular file opens in a preview beside `pane`, in the editor when `edit` is set. The path is resolved on the pane's
+    /// host over SFTP and never on this computer.
+    fn open_remote_file_beside(&self, label: &str, pane: PaneId, profile: &Profile, path: &str, edit: bool) -> Result<View, String> {
+        if !path.starts_with('/') {
+            return Err(WSH_NOT_ABSOLUTE.into());
+        }
+        let source = self.blocks.source(&self.connections, &profile.id).map_err(|_| WSH_NO_HOST.to_owned())?;
+        let entry = source.stat(path).map_err(|_| WSH_NO_SUCH_FILE.to_owned())?;
+        if entry.kind != holzwave_core::files::Kind::File {
+            return Err(WSH_NOT_A_FILE.into());
+        }
+        self.focus_pane_in(label, pane)?;
+        self.block_open_edit_in(label, "right", BlockKind::Preview, &profile.id, path, edit)
+    }
+
+    /// `wsh view` and `wsh edit` of a local pane: an absolute path of a file of this computer opens in a preview beside
+    /// `pane`, in the editor when `edit` is set.
+    fn open_local_file_beside(&self, label: &str, pane: PaneId, path: &str, edit: bool) -> Result<View, String> {
+        let p = std::path::Path::new(path);
+        if !p.is_absolute() || !p.is_file() {
+            return Err(format!("{path}: no such file"));
+        }
+        self.focus_pane_in(label, pane)?;
+        self.block_open_edit_in(label, "right", BlockKind::Preview, LOCAL, path, edit)
+    }
+
+    /// Tell the app where the resource folder of the package is, which holds the static `wsh` builds for Linux hosts
+    /// (`wsh/linux-x86_64` and `wsh/linux-aarch64`). Not set in a test, and a build made without them has no such folder.
+    pub fn set_resource_dir(&self, dir: PathBuf) {
+        *lock(&self.resource_dir) = Some(dir);
+    }
+
+    /// The bundled builds, read from the two fixed names in the resource folder. A name that is missing, is not a regular
+    /// file (a link is not followed), or is larger than [`MAX_BUNDLED_WSH`] is `None`: the install then says this build
+    /// of the app has no `wsh` for that processor.
+    fn bundled_wsh(&self) -> Bundled {
+        let Some(dir) = lock(&self.resource_dir).clone() else { return Bundled::default() };
+        let folder = dir.join("wsh");
+        // The folder must be a real folder, so that a link cannot send the two reads elsewhere.
+        if !std::fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir()) {
+            return Bundled::default();
+        }
+        Bundled { x86_64: read_bundled(&folder.join("linux-x86_64")), aarch64: read_bundled(&folder.join("linux-aarch64")) }
+    }
+
+    /// Put the bundled `wsh` on the host of the saved SSH connection that `pane` runs, as the person asked by choosing
+    /// `Install wsh on this host` in the pane they have in focus. The result is one sentence, which is also put on the
+    /// pane's screen, and a refusal is one too: a pane that is not running, one that does not run a saved SSH
+    /// connection, one that is not the focused pane of its window, and one whose connection was edited to another host
+    /// since the pane started (the install would otherwise go to a host the pane never showed). Nothing is installed without
+    /// this call, and nothing but `~/.holzwave/bin/wsh` on the host is created (see `holzwave_core::wshinstall`). Blocks
+    /// on the network: the command that calls it is async.
+    pub fn wsh_install(&self, pane: PaneId) -> Result<String, String> {
+        // A block pane has no screen to say anything on, and neither has a pane that is not running.
+        if self.blocks.block_of(pane).is_some() {
+            return Err(INSTALL_NOT_SSH.into());
+        }
+        let handle = self.handle(pane).ok_or_else(|| INSTALL_NO_PANE.to_owned())?;
+        let say = |sentence: &str| -> String {
+            let _ = handle.notice(sentence);
+            sentence.to_owned()
+        };
+        if !self.is_focused(pane) {
+            return Err(say(INSTALL_NOT_FOCUSED));
+        }
+        // An assignment takes effect when a pane starts, so a pane that has no recorded target runs a local shell.
+        let recorded = lock(&self.pane_targets).get(&pane).cloned();
+        let profile = self.connections.profile_of(pane).filter(|p| p.kind == ConnectionKind::Ssh);
+        let (Some(profile), Some(recorded)) = (profile, recorded) else { return Err(say(INSTALL_NOT_SSH)) };
+        if !recorded.is(&profile) {
+            return Err(say(INSTALL_TARGET_CHANGED));
+        }
+        let connection = self.connections.session(&profile.id).map_err(|_| say(INSTALL_NO_CONNECTION))?;
+        let result = holzwave_core::wshinstall::install(&connection, &self.bundled_wsh(), env!("CARGO_PKG_VERSION"));
+        let sentence = say(&install_sentence(&result, &profile.name));
+        result.map(|_| sentence.clone()).map_err(|_| sentence)
+    }
+
+    /// Whether `pane` is the focused pane of the tab its window shows.
+    fn is_focused(&self, pane: PaneId) -> bool {
+        let Some(label) = lock(&self.routes).live.get(&pane).map(|l| l.to_string()) else { return false };
+        lock(&self.windows).layout(&label).is_some_and(|layout| layout.tab().focus == pane)
     }
 
     /// Tell the window `label` that the shell of `pane` asked for the history search, when `pane` is the one in focus in
@@ -1073,6 +1365,7 @@ impl AppCore {
 
     /// Save the text of a note widget.
     pub fn widget_note_save(&self, id: &str, text: &str) -> Result<(), String> {
+        let _notes = lock(&self.notes_io);
         holzwave_core::widgets::save_note(&self.dir, id, text).map_err(|e| e.to_string())
     }
 
@@ -1089,6 +1382,27 @@ impl AppCore {
             return Ok(holzwave_core::monitor::Reading::Live(self.monitor.sample()));
         }
         self.remote_monitors.sample(&self.connections, &block.source)
+    }
+
+    /// Move what the last sync run downloaded into place, for the files the running app does not own: the themes, the
+    /// widgets and the texts of the notes. The layout, the settings and the connections stay staged until the next
+    /// start, because the app rewrites them from memory. A live file the person edited after the download was staged is
+    /// copied to `sync-conflicts/` first. The notes lock is held for the move only; the registry is reloaded after it is
+    /// released (a theme may have arrived or been removed), which announces `settings` to every window when it changed.
+    /// Blocks on small files: not on the main thread.
+    pub fn apply_synced(&self) -> holzwave_core::sync::engine::Promoted {
+        use holzwave_core::sync::engine::{is_unowned, promote_where};
+        let promoted = {
+            let _notes = lock(&self.notes_io);
+            promote_where(&self.dir, &is_unowned)
+        };
+        if !promoted.applied.is_empty() {
+            eprintln!("holzwave: applied from sync: {}", promoted.applied.join(", "));
+        }
+        // Every time: the run may also have removed a theme, which nothing here staged. A reload compares sizes and
+        // modification times and does nothing when nothing changed.
+        self.reload_settings();
+        promoted
     }
 
     /// The state of the sync, for the page.
@@ -1136,6 +1450,8 @@ impl AppCore {
         if !self.connections.contains(id) {
             return Err(format!("no connection {id}"));
         }
+        // Refused before a tab is made for it (a WSL connection off Windows).
+        self.connections.ensure_opens_here(id).map_err(|e| e.to_string())?;
         let view = self.new_tab_in(label)?;
         self.connections.assign(view.focus, id).map_err(|e| e.to_string())?;
         Ok(view)
@@ -1146,6 +1462,20 @@ impl AppCore {
     /// Open a file browser or a preview in a new tab (`placement` is `tab`) or beside the focused pane (`right`, `down`).
     /// The pane runs no process; the answer is the view with the new pane focused.
     pub fn block_open_in(&self, label: &str, placement: &str, kind: BlockKind, source: &str, path: &str) -> Result<View, String> {
+        self.block_open_edit_in(label, placement, kind, source, path, false)
+    }
+
+    /// [`AppCore::block_open_in`] with the flag of a preview that opens its file in the editor at once (`wsh edit`). The
+    /// flag is for a preview: any other kind with it is refused with the block.
+    pub fn block_open_edit_in(
+        &self,
+        label: &str,
+        placement: &str,
+        kind: BlockKind,
+        source: &str,
+        path: &str,
+        edit: bool,
+    ) -> Result<View, String> {
         let path = if path.is_empty() && kind == BlockKind::Files {
             self.blocks.start_dir(&self.connections, source).map_err(|e| e.to_string())?
         } else {
@@ -1162,15 +1492,21 @@ impl AppCore {
                 }
             }
         }
-        let block = Block { kind, source: source.to_owned(), path };
+        let block = Block { kind, source: source.to_owned(), path, edit };
         // Checked before the pane is made, so a refused block leaves no empty pane behind.
         self.blocks.assign(0, block.clone()).map_err(|e| e.to_string())?;
         self.blocks.forget(0);
+        let focused = lock(&self.windows).layout(label).map(|layout| layout.tab().focus);
         let view = match placement {
             "right" => self.split_in(label, false)?,
             "down" => self.split_in(label, true)?,
             _ => self.new_tab_in(label)?,
         };
+        // At a limit of the layout (panes, or how deep a split may nest) the view comes back unchanged, and its focus is
+        // still the pane that was asked to make room: it must not become the block.
+        if Some(view.focus) == focused {
+            return Err(NO_ROOM_FOR_A_PANE.into());
+        }
         self.blocks.assign(view.focus, block).map_err(|e| e.to_string())?;
         Ok(view)
     }
@@ -1218,8 +1554,10 @@ impl AppCore {
         self.blocks.read_granted(&self.connections, token, offset, len).map(|r| r.map_err(|e| e.to_string()))
     }
 
-    pub fn file_save(&self, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>, String> {
-        self.blocks.save_file(&self.connections, source, path, text, expected).map_err(|e| e.to_string())
+    /// Save the editor's text. With `expected_digest` the conflict check compares the bytes (see `Blocks::save_file`);
+    /// the answer carries the new change time and the digest of what was written.
+    pub fn file_save(&self, source: &str, path: &str, text: &str, expected: Option<i64>, expected_digest: Option<&str>) -> Result<Saved, String> {
+        self.blocks.save_file(&self.connections, source, path, text, expected, expected_digest).map_err(|e| e.to_string())
     }
 
     /// The connection state of every running pane that has a connection. The webview asks about once a second while it
@@ -1873,6 +2211,7 @@ impl AppCore {
         lock(&self.last_cwd).remove(&pane);
         lock(&self.last_title).remove(&pane);
         lock(&self.starts).remove(&pane);
+        lock(&self.pane_targets).remove(&pane);
         self.connections.forget(pane);
         // A chat pane that leaves the layout ends the shares of its chat: the block is read before it is forgotten.
         let chat = self.blocks.block_of(pane).filter(|block| block.kind == BlockKind::Chat).map(|block| block.path);
@@ -2276,7 +2615,7 @@ impl AppCore {
     /// Saves `text` over a file for the agent's write tools: the same `Blocks::save_file` the editor uses, with the change
     /// time the card showed as `expected`. No lock of this struct is held across the call.
     pub(crate) fn tool_save_text(&self, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>, String> {
-        self.file_save(source, path, text, expected)
+        self.file_save(source, path, text, expected, None).map(|saved| saved.modified)
     }
 
     /// The files of `source` (`local` or a saved connection), made if need be; none when they cannot be made. Undo reads
@@ -2313,9 +2652,11 @@ impl AppCore {
         let exec = self
             .remote_execs
             .get_or_build(connection, generation, || {
-                let label = self.connections.label_of(connection).ok_or_else(|| "there is no such connection".to_owned())?;
-                let target = self.connections.ssh_target(connection).map_err(|error| error.to_string())?;
-                SshExec::new(label, target).map(Arc::new).map_err(|error| error.to_string())
+                if !self.connections.contains(connection) {
+                    return Err("there is no such connection".to_owned());
+                }
+                let shared = self.connections.session(connection).map_err(|error| error.to_string())?;
+                SshExec::on(shared).map(Arc::new).map_err(|error| error.to_string())
             })
             .map_err(|why| scrubbed(&why))?;
         exec.exec(command, limits, cancel).map_err(|error| scrubbed(&error.to_string()))
@@ -2360,8 +2701,8 @@ impl AppCore {
         spec.blank = self.blocks.block_of(pane).is_some();
         if spec.blank {
             spec.notice = None;
-        } else if let Err(e) = self.connections.apply(pane, &mut spec) {
-            spec.notice = Some(format!("holzWave: cannot open the connection: {e}"));
+        } else {
+            self.apply_connection(pane, &mut spec);
         }
         lock(&self.starts).remove(&pane);
         // What the shell is started with; a settings change while it starts is pushed once it runs.
@@ -2426,6 +2767,24 @@ impl AppCore {
             }
             // The sink was told, and `pane_gone` forgot the slot, before `spawn_ghostty` returned.
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Make `spec` the saved connection `pane` runs, if it runs one. A connection that cannot be made up (a missing jump
+    /// host, an unreadable keychain) is said on the pane's screen and leaves the pane a local shell. Only a connection that
+    /// was made up and has `wsh` turned on gets a tunnel; its variables live in the tunnel and never in `spec.env`, whose
+    /// `Debug` prints its values.
+    fn apply_connection(&self, pane: PaneId, spec: &mut PaneSpec) {
+        match self.connections.apply(pane, spec) {
+            Err(e) => spec.notice = Some(format!("holzWave: cannot open the connection: {e}")),
+            Ok(()) if spec.ssh_connection.is_some() => {
+                // Where the connection points now is where this pane is: recorded before anything can be asked of it.
+                if let Some(profile) = self.connections.profile_of(pane) {
+                    lock(&self.pane_targets).insert(pane, crate::wsh_tunnel::Target::of(&profile));
+                }
+                spec.tunnel = crate::wsh_tunnel::tunnel_for(self, pane);
+            }
+            Ok(()) => {}
         }
     }
 
@@ -4248,6 +4607,54 @@ mod tests {
     }
 
     #[test]
+    fn the_connections_of_the_core_get_the_host_as_their_prompter() {
+        use holzwave_core::ssh::{PromptAnswer, PromptRound, Prompter, SshAuth};
+
+        let (core, rec, _dir) = core("/bin/cat", &[]);
+        let profile = Profile {
+            user: "holz".into(),
+            auth: holzwave_core::profiles::Auth::Interactive,
+            ..Profile::new("talos", "Talos", "talos.example")
+        };
+        core.connection_save(profile, SecretChange::Keep).expect("a valid connection");
+
+        // The target of an interactive connection carries the host that raises the question.
+        let target = core.connections.ssh_target("talos").unwrap();
+        let SshAuth::Interactive { prompter: Some(prompter) } = &target.auth else { panic!("no prompter: {:?}", target.auth) };
+        let prompter: Arc<dyn Prompter> = prompter.clone();
+        let asking = std::thread::spawn(move || {
+            prompter.ask(PromptRound {
+                // Whatever the core's own adapter stamps wins: this is what a server would like the dialog to say.
+                connection: "evil".into(),
+                host: "evil.example".into(),
+                name: "Login".into(),
+                instructions: String::new(),
+                prompts: vec![PromptLine { text: "Code:".into(), echo: false }],
+            })
+        });
+        let started = Instant::now();
+        let id = loop {
+            let found = rec.all().into_iter().find_map(|o| match o {
+                Out::LoginPrompt { id, connection, host, .. } => Some((id, connection, host)),
+                _ => None,
+            });
+            if let Some((id, connection, host)) = found {
+                assert_eq!((connection.as_str(), host.as_str()), ("Talos", "talos.example"), "the title is the saved connection's");
+                break id;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "the question never arrived");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(!core.login_prompt_answer(&id, vec!["one".into(), "too many".into()]), "the count of answers is the question's");
+        assert!(core.login_prompt_answer(&id, vec!["424242".into()]));
+        assert!(matches!(asking.join().unwrap(), PromptAnswer::Answers(a) if a == ["424242"]));
+        assert!(rec.all().iter().any(|o| matches!(o, Out::LoginPromptEnd { outcome: PromptEnd::Answered, .. })));
+        assert!(!core.login_prompt_cancel(&id), "an ended question cannot be touched");
+        // No answer is in anything the recorder saw.
+        assert!(!format!("{:?}", rec.all()).contains("424242"));
+    }
+
+    #[test]
     fn monitor_pane_of_this_computer_is_sampled_by_its_pane_id() {
         let (core, _rec, _dir) = core("/bin/cat", &[]);
         let view = core.block_open_in("main", "tab", BlockKind::Monitor, LOCAL, "").unwrap();
@@ -4292,7 +4699,7 @@ mod tests {
     fn monitor_pane_of_a_deleted_connection_answers_with_the_reason() {
         let (core, _rec, _dir) = core("/bin/cat", &[]);
         let pane = only_pane(&core);
-        core.blocks.assign(pane, Block { kind: BlockKind::Monitor, source: "gone".into(), path: String::new() }).unwrap();
+        core.blocks.assign(pane, Block { kind: BlockKind::Monitor, source: "gone".into(), path: String::new(), edit: false }).unwrap();
         let error = core.monitor_sample(pane).unwrap_err();
         assert!(error.contains("no connection gone"), "{error}");
         assert!(!error.starts_with("unsupported"), "{error}");
@@ -5195,6 +5602,342 @@ mod tests {
         assert_eq!(view.settings.font_size, 22, "a half-written edit does not reset the running app");
         assert!(view.warnings.iter().any(|w| w.contains("settings.json")), "{:?}", view.warnings);
         assert_eq!(rec.settings_events().len(), 2);
+    }
+
+    // ---- what the sync downloaded and the app does not own is applied at once ---------------------------------------
+
+    /// A download as the sync leaves it: `bytes` staged under `name` in `sync-incoming/`.
+    fn staged(dir: &Scratch, name: &str, bytes: &[u8]) {
+        let path = dir.0.join("sync-incoming").join(name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("staging dir");
+        std::fs::write(path, bytes).expect("staged file");
+    }
+
+    #[test]
+    fn adopting_a_layout_forgets_the_working_directories_of_this_device() {
+        let dir = Scratch::new("adopt");
+        // A first start makes a layout; remember a directory for its pane and a frame for the window.
+        let (first, _rec) = core_in(&dir, "/bin/cat", &[]);
+        first.new_tab();
+        let pane = only_pane(&first);
+        first.flush();
+        first.shutdown();
+        drop(first);
+        let layout: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.layout_file()).expect("layout")).expect("json");
+        let frame = WindowState { x: 10, y: 20, width: 900, height: 700, maximized: false };
+        let remember = || {
+            let mut session = Session::default();
+            assert!(session.set_cwd(pane, "/tmp"));
+            session.set_window(frame);
+            session.save(&dir.0).expect("session file");
+        };
+
+        // Nothing staged: the directory and the frame are kept.
+        remember();
+        let (kept, _rec) = core_in(&dir, "/bin/cat", &[]);
+        assert_eq!(lock(&kept.session).cwds.get(&pane).map(String::as_str), Some("/tmp"));
+        kept.shutdown();
+        drop(kept);
+
+        // A layout unit from another device is applied at the start: no directory survives, the frame does.
+        remember();
+        staged(&dir, "layout.json", serde_json::json!({"unit": 1, "layout": layout, "connections": {}}).to_string().as_bytes());
+        let (adopted, _rec) = core_in(&dir, "/bin/cat", &[]);
+        {
+            let session = lock(&adopted.session);
+            assert!(session.cwds.is_empty(), "{:?}", session.cwds);
+            assert_eq!(session.window, Some(frame), "the window frame is kept");
+        }
+        assert!(!dir.0.join("sync-incoming").exists(), "the unit was applied");
+        // And it is on disk already, so a start that ends before the next save cannot bring them back.
+        let (on_disk, _status) = Session::load(&dir.0);
+        assert!(on_disk.cwds.is_empty() && on_disk.window == Some(frame));
+    }
+
+    fn theme_json(name: &str) -> String {
+        serde_json::to_string(&Theme { name: name.into(), ..Theme::papier() }).expect("theme json")
+    }
+
+    #[test]
+    fn a_start_after_a_download_forgets_the_secrets_of_removed_profiles() {
+        use holzwave_core::secrets::MemoryStore;
+        let dir = Scratch::new("forgets-secrets");
+        let list = |ids: &[&str]| {
+            let items: Vec<String> = ids
+                .iter()
+                .map(|id| format!(r#"{{"id":"{id}","name":"{id}","host":"h.example","user":"u","auth":"password"}}"#))
+                .collect();
+            format!(r#"{{"version":1,"items":[{}]}}"#, items.join(","))
+        };
+        // This computer knows `web` and `db` and holds a secret for each; a download without `web` waits for the start.
+        std::fs::write(dir.0.join("connections.json"), list(&["web", "db"])).unwrap();
+        staged(&dir, "connections.json", list(&["db"]).as_bytes());
+        let secrets = Arc::new(MemoryStore::default());
+        secrets.set("ssh:web", "web-secret").unwrap();
+        secrets.set("ssh:db", "db-secret").unwrap();
+        secrets.set("ai:key", "ai-secret").unwrap();
+
+        let promoted = holzwave_core::sync::engine::promote_incoming_with_report(&dir.0);
+        assert_eq!(promoted.dropped_profiles, ["web"]);
+        let (connections, _) = load_connections(&dir.0, secrets.clone(), &[], &promoted.dropped_profiles);
+
+        assert_eq!(secrets.get("ssh:web").unwrap(), None, "the removed profile's secret is gone");
+        assert_eq!(secrets.get("ssh:db").unwrap().as_deref(), Some("db-secret"), "the other profile's secret stays");
+        assert_eq!(secrets.get("ai:key").unwrap().as_deref(), Some("ai-secret"), "no other entry is touched");
+        assert_eq!(connections.list().len(), 1);
+    }
+
+    #[test]
+    fn a_downloaded_theme_is_applied_at_once_and_announced() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        staged(&dir, "themes/mine.json", theme_json("mine").as_bytes());
+        staged(&dir, "settings.json", br#"{"font_size": 31}"#);
+
+        let promoted = core.apply_synced();
+
+        assert_eq!(promoted.applied, ["themes/mine.json"]);
+        assert!(dir.0.join("themes").join("mine.json").is_file(), "the theme is live");
+        let events = rec.settings_events();
+        assert_eq!(events.len(), 1, "one announcement");
+        assert!(events[0].themes.iter().any(|t| t.name == "mine" && !t.builtin), "the theme list names it");
+        assert!(core.get_settings().themes.iter().any(|t| t.name == "mine"));
+        assert!(dir.0.join("sync-incoming").join("settings.json").is_file(), "settings.json still waits for a start");
+        assert!(!dir.0.join("settings.json").exists());
+        assert_ne!(core.get_settings().settings.font_size, 31, "the settings in force are not touched");
+    }
+
+    #[test]
+    fn an_apply_after_a_run_reloads_the_themes_even_when_none_was_downloaded() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        staged(&dir, "themes/mine.json", theme_json("mine").as_bytes());
+        core.apply_synced();
+        assert!(core.get_settings().themes.iter().any(|t| t.name == "mine"));
+        let before = rec.settings_events().len();
+
+        // A run that changed nothing announces nothing.
+        core.apply_synced();
+        assert_eq!(rec.settings_events().len(), before, "nothing changed, nothing announced");
+
+        // A deletion by the sync removed the live file: nothing is staged, and the list still follows, once.
+        std::fs::remove_file(dir.0.join("themes").join("mine.json")).unwrap();
+        let promoted = core.apply_synced();
+        assert!(promoted.applied.is_empty());
+        let events = rec.settings_events();
+        assert_eq!(events.len(), before + 1, "announced once");
+        assert!(events.last().unwrap().themes.iter().all(|t| t.name != "mine"), "the theme list no longer holds it");
+        assert!(core.get_settings().themes.iter().all(|t| t.name != "mine"));
+    }
+
+    #[test]
+    fn a_downloaded_theme_that_is_not_one_is_left_out_and_the_rest_still_loads() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        staged(&dir, "themes/bad.json", b"{ this is not a theme");
+        staged(&dir, "themes/good.json", theme_json("good").as_bytes());
+
+        core.apply_synced();
+
+        let view = core.get_settings();
+        assert!(view.themes.iter().any(|t| t.name == "good"), "{:?}", view.themes.iter().map(|t| &t.name).collect::<Vec<_>>());
+        assert_eq!(view.themes.iter().filter(|t| t.builtin).count(), 3, "the built-in themes survive");
+        assert!(view.warnings.iter().any(|w| w.contains("bad.json")), "{:?}", view.warnings);
+        assert_eq!(rec.settings_events().len(), 1);
+    }
+
+    #[test]
+    fn a_selected_theme_that_a_download_replaced_is_the_new_one_in_force() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        let first = Theme { name: "Mine".into(), ..Theme::papier() };
+        let mut second = Theme { name: "Mine".into(), ..Theme::papier() };
+        second.terminal.background = Rgb::new(first.terminal.background.r ^ 1, first.terminal.background.g, first.terminal.background.b);
+        std::fs::create_dir_all(dir.0.join("themes")).unwrap();
+        std::fs::write(dir.0.join("themes").join("mine.json"), serde_json::to_string(&first).unwrap()).unwrap();
+        core.reload_settings();
+        core.set_setting("theme", json!("Mine")).expect("select");
+        assert_eq!(core.get_settings().theme.terminal.background, first.terminal.background);
+
+        staged(&dir, "themes/mine.json", serde_json::to_string(&second).unwrap().as_bytes());
+        core.apply_synced();
+
+        assert_eq!(core.get_settings().theme.terminal.background, second.terminal.background);
+    }
+
+    #[test]
+    fn settings_layout_and_connections_always_wait() {
+        let (core, rec, dir) = core("/bin/cat", &[]);
+        let before = std::fs::read(dir.layout_file()).ok();
+        for name in ["layout.json", "settings.json", "connections.json"] {
+            staged(&dir, name, b"{\"from\":\"another device\"}");
+        }
+        for _ in 0..5 {
+            let promoted = core.apply_synced();
+            assert!(promoted.applied.is_empty() && promoted.skipped.is_empty(), "{promoted:?}");
+        }
+        for name in ["layout.json", "settings.json", "connections.json"] {
+            let waiting = dir.0.join("sync-incoming").join(name);
+            assert_eq!(std::fs::read(waiting).unwrap(), b"{\"from\":\"another device\"}", "{name} stays staged");
+            let live = std::fs::read(dir.0.join(name)).ok();
+            assert!(live.as_deref() != Some(&b"{\"from\":\"another device\"}"[..]), "{name} is not applied while the app runs");
+        }
+        assert_eq!(std::fs::read(dir.layout_file()).ok(), before);
+        assert!(rec.settings_events().is_empty(), "nothing was applied, nothing is announced");
+    }
+
+    #[test]
+    fn a_downloaded_note_is_on_the_sidebar_at_once() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        core.widget_note_save("todo", "mine").expect("save");
+        staged(&dir, "widget_notes.json", br#"{"todo":"from the other computer","extra":"second"}"#);
+        staged(&dir, "widgets/todo.json", br#"{"id":"todo","title":"Todo","kind":"note"}"#);
+
+        let promoted = core.apply_synced();
+
+        assert_eq!(promoted.applied, ["widget_notes.json", "widgets/todo.json"]);
+        let view = core.widgets_list();
+        assert_eq!(view.notes.get("todo").map(String::as_str), Some("from the other computer"));
+        assert_eq!(view.notes.get("extra").map(String::as_str), Some("second"));
+        assert!(view.widgets.iter().any(|w| w.id == "todo"), "the widget is listed without a restart");
+    }
+
+    #[test]
+    fn a_hand_edited_widget_file_is_kept_before_a_download_replaces_it() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        std::fs::create_dir_all(dir.0.join("widgets")).unwrap();
+        std::fs::write(dir.0.join("widgets").join("deploy.json"), "my edit").unwrap();
+        staged(&dir, "widgets/deploy.json", br#"{"id":"deploy","title":"Deploy","kind":"note"}"#);
+
+        let promoted = core.apply_synced();
+
+        assert_eq!(promoted.applied, ["widgets/deploy.json"]);
+        assert_eq!(promoted.kept, ["widgets/deploy.json"]);
+        let copies: Vec<_> = std::fs::read_dir(dir.0.join("sync-conflicts")).expect("copies").flatten().collect();
+        assert_eq!(copies.len(), 1);
+        assert!(copies[0].file_name().to_string_lossy().starts_with("widgets.deploy.json."));
+        assert_eq!(std::fs::read_to_string(copies[0].path()).unwrap(), "my edit");
+        assert!(std::fs::read_to_string(dir.0.join("widgets").join("deploy.json")).unwrap().contains("Deploy"));
+    }
+
+    #[test]
+    fn the_apply_and_a_note_save_take_the_same_lock() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        staged(&dir, "widget_notes.json", br#"{"a":"staged"}"#);
+        let held = lock(&core.notes_io);
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<&'static str>();
+        let apply = {
+            let (core, tx) = (core.clone(), done_tx.clone());
+            std::thread::spawn(move || {
+                core.apply_synced();
+                let _ = tx.send("apply");
+            })
+        };
+        let save = {
+            let (core, tx) = (core.clone(), done_tx);
+            std::thread::spawn(move || {
+                core.widget_note_save("b", "typed").expect("save");
+                let _ = tx.send("save");
+            })
+        };
+        assert!(done_rx.recv_timeout(Duration::from_millis(300)).is_err(), "both wait for the lock");
+        drop(held);
+        let mut finished = vec![done_rx.recv_timeout(Duration::from_secs(20)).expect("first"), done_rx.recv_timeout(Duration::from_secs(20)).expect("second")];
+        finished.sort_unstable();
+        assert_eq!(finished, ["apply", "save"]);
+        apply.join().unwrap();
+        save.join().unwrap();
+    }
+
+    #[test]
+    fn a_note_save_and_an_apply_never_interleave() {
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        let notes = dir.0.join("widget_notes.json");
+        let read_valid = |notes: &std::path::Path| {
+            if let Ok(bytes) = std::fs::read(notes) {
+                let map: std::collections::BTreeMap<String, String> =
+                    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("a torn notes file: {e}: {:?}", String::from_utf8_lossy(&bytes)));
+                map
+            } else {
+                Default::default()
+            }
+        };
+        let saver = {
+            let (core, notes) = (core.clone(), notes.clone());
+            std::thread::spawn(move || {
+                for i in 0..100 {
+                    core.widget_note_save("typed", &format!("typed {i}")).expect("save");
+                    let map = read_valid(&notes);
+                    assert!(map.is_empty() || map.contains_key("typed") || map.contains_key("staged"));
+                }
+            })
+        };
+        let applier = {
+            let (core, dir_path, notes) = (core.clone(), dir.0.clone(), notes.clone());
+            std::thread::spawn(move || {
+                for i in 0..100 {
+                    let path = dir_path.join("sync-incoming").join("widget_notes.json");
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    holzwave_core::persist::write_atomic(&path, format!(r#"{{"staged":"staged {i}"}}"#).as_bytes()).unwrap();
+                    core.apply_synced();
+                    read_valid(&notes);
+                }
+            })
+        };
+        // Neither thread may wait forever: a deadlock shows as a timeout here, not as a hung run.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !(saver.is_finished() && applier.is_finished()) {
+            assert!(Instant::now() < deadline, "the note save and the apply did not finish: a deadlock");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        saver.join().expect("saver");
+        applier.join().expect("applier");
+        let map = read_valid(&notes);
+        for (id, text) in &map {
+            let ok = (id == "typed" && text.starts_with("typed ")) || (id == "staged" && text.starts_with("staged "));
+            assert!(ok, "{id}: {text}");
+        }
+        assert!(!map.is_empty());
+    }
+
+    /// A sink that notes whether the notes lock was free when `settings` was announced.
+    struct NotesProbe {
+        inner: Arc<Recorder>,
+        core: Mutex<Weak<AppCore>>,
+        free: Mutex<Vec<bool>>,
+    }
+
+    impl Sink for NotesProbe {
+        fn send(&self, target: Target, out: Out) {
+            if matches!(out, Out::Settings(_)) {
+                let free = lock(&self.core).upgrade().is_none_or(|core| core.notes_io.try_lock().is_ok());
+                lock(&self.free).push(free);
+            }
+            self.inner.send(target, out);
+        }
+
+        fn close_window(&self, label: &str) {
+            self.inner.close_window(label);
+        }
+
+        fn open_window(&self, label: &str, place: &Place) -> Result<(), String> {
+            self.inner.open_window(label, place)
+        }
+
+        fn cursor_spot(&self, source: &str) -> CursorSpot {
+            self.inner.cursor_spot(source)
+        }
+    }
+
+    #[test]
+    fn the_announcement_of_an_applied_theme_is_made_after_the_notes_lock_is_released() {
+        let dir = Scratch::new("probe");
+        let probe = Arc::new(NotesProbe { inner: Arc::new(Recorder::default()), core: Mutex::new(Weak::new()), free: Mutex::new(Vec::new()) });
+        let core = AppCore::new(dir.0.clone(), probe.clone(), ShellSpec::new("/bin/cat", &[]));
+        dir.attach(&core);
+        *lock(&probe.core) = Arc::downgrade(&core);
+        staged(&dir, "themes/mine.json", theme_json("mine").as_bytes());
+        staged(&dir, "widget_notes.json", b"{}");
+
+        core.apply_synced();
+
+        assert_eq!(*lock(&probe.free), [true], "one announcement, with the notes lock free");
     }
 
     // ---- session, working directories and the window (plan 23, task 2) -------------------------------------------
@@ -7371,6 +8114,950 @@ mod tests {
         let set = lock(&again.windows);
         assert_eq!(set.layout(&label).unwrap().pane_name(second), Some("db"));
     }
+
+    // ---- wsh through a tunnel ---------------------------------------------------------------------------------------
+
+    /// The files of a host, as the pane's saved connection sees them. It remembers every path it was asked about, so a
+    /// test can tell what a request made the core ask and what it never did.
+    #[derive(Default)]
+    struct Host {
+        files: HashMap<String, Vec<u8>>,
+        dirs: Vec<String>,
+        others: Vec<String>,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl Host {
+        fn with_files(files: &[(&str, &str)]) -> Arc<Host> {
+            Arc::new(Host {
+                files: files.iter().map(|(path, text)| ((*path).to_owned(), text.as_bytes().to_vec())).collect(),
+                dirs: vec!["/srv".into()],
+                others: vec!["/dev/null".into()],
+                seen: Mutex::default(),
+            })
+        }
+
+        fn seen(&self) -> Vec<String> {
+            lock(&self.seen).clone()
+        }
+    }
+
+    impl FileSource for Host {
+        fn label(&self) -> String {
+            "Web 1".into()
+        }
+
+        fn home(&self) -> holzwave_core::Result<String> {
+            Ok("/home/holz".into())
+        }
+
+        fn list(&self, _path: &str) -> holzwave_core::Result<Listing> {
+            Err(holzwave_core::Error::Unsupported("no listing in this double".into()))
+        }
+
+        fn stat(&self, path: &str) -> holzwave_core::Result<Entry> {
+            lock(&self.seen).push(path.to_owned());
+            let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+            let entry = |kind, size| Entry { name: name.clone(), kind, link: false, size, modified: Some(1), hidden: false };
+            if let Some(bytes) = self.files.get(path) {
+                Ok(entry(holzwave_core::files::Kind::File, bytes.len() as u64))
+            } else if self.dirs.iter().any(|d| d == path) {
+                Ok(entry(holzwave_core::files::Kind::Dir, 0))
+            } else if self.others.iter().any(|d| d == path) {
+                Ok(entry(holzwave_core::files::Kind::Other, 0))
+            } else {
+                Err(holzwave_core::Error::Unsupported("no such file".into()))
+            }
+        }
+
+        fn read(&self, path: &str, _limit: u64) -> holzwave_core::Result<Vec<u8>> {
+            self.files.get(path).cloned().ok_or_else(|| holzwave_core::Error::Unsupported("no such file".into()))
+        }
+
+        fn read_range(&self, path: &str, offset: u64, len: u64) -> holzwave_core::Result<Vec<u8>> {
+            let bytes = self.read(path, u64::MAX)?;
+            let from = (offset as usize).min(bytes.len());
+            Ok(bytes[from..(from + len as usize).min(bytes.len())].to_vec())
+        }
+
+        fn write(&self, _path: &str, _bytes: &[u8]) -> holzwave_core::Result<()> {
+            Err(holzwave_core::Error::Unsupported("read only".into()))
+        }
+    }
+
+    /// A core with the saved SSH connections `web-1` (with `wsh` on) and `web-2` (with `wsh` off), a local first pane, a
+    /// pane that runs `web-1` and one that runs `web-2`, and the files of `host` standing in for the host of `web-1`.
+    /// Nothing is started: a request is answered against the layout, so no shell and no network is needed.
+    struct Ticked {
+        core: Arc<AppCore>,
+        rec: Arc<Recorder>,
+        _dir: Scratch,
+        local: PaneId,
+        remote: PaneId,
+        unticked: PaneId,
+        host: Arc<Host>,
+    }
+
+    impl Ticked {
+        /// Where the connection of the ticked pane points now, as a pane that started now would have recorded it.
+        fn target(&self) -> crate::wsh_tunnel::Target {
+            crate::wsh_tunnel::Target::of(&self.core.wsh_profile(self.remote).expect("the ticked pane runs a ticked connection"))
+        }
+    }
+
+    fn ticked(files: &[(&str, &str)]) -> Ticked {
+        let dir = Scratch::new("ticked");
+        let mut profiles = holzwave_core::profiles::Profiles::default();
+        for (id, wsh) in [("web-1", true), ("web-2", false)] {
+            let profile = Profile {
+                user: "holz".into(),
+                key_path: "/nonexistent/holzwave-test-key".into(),
+                wsh,
+                ..Profile::new(id, id, "web.example.invalid")
+            };
+            profiles.upsert(profile).unwrap();
+        }
+        profiles.save(&dir.0).unwrap();
+        let (core, rec) = core_in(&dir, "sh", &[]);
+        let local = only_pane(&core);
+        let remote = core.split(true).focus;
+        let unticked = core.split(true).focus;
+        core.connections.assign(remote, "web-1").unwrap();
+        core.connections.assign(unticked, "web-2").unwrap();
+        let host = Host::with_files(files);
+        core.blocks.inject_source("web-1", core.connections.generation(), host.clone());
+        Ticked { core, rec, _dir: dir, local, remote, unticked, host }
+    }
+
+    /// Send `request` (a JSON object, with `token` filled in from the tunnel unless it names one) through the forwarded
+    /// stream of `tunnel` and give the answer line, parsed. The real `serve_remote` reads it.
+    fn through(tunnel: &holzwave_core::ssh::Tunnel, mut request: Value) -> Value {
+        if request.get("token").is_none() {
+            request["token"] = Value::String(token_of(tunnel));
+        }
+        through_raw(tunnel, &serde_json::to_vec(&request).unwrap())
+    }
+
+    /// [`through`] for the bytes of a request as they are (no token is added).
+    fn through_raw(tunnel: &holzwave_core::ssh::Tunnel, request: &[u8]) -> Value {
+        let mut line = request.to_vec();
+        line.push(b'\n');
+        let (stream, answered) = holzwave_core::pool::ForwardedStream::in_memory(&line);
+        tunnel.sink.serve(stream);
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let bytes = lock(&answered).clone();
+            if bytes.ends_with(b"\n") {
+                assert_eq!(bytes.iter().filter(|b| **b == b'\n').count(), 1, "exactly one answer line");
+                return serde_json::from_slice(&bytes).expect("the answer is JSON");
+            }
+            assert!(Instant::now() < deadline, "no answer came back");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn token_of(tunnel: &holzwave_core::ssh::Tunnel) -> String {
+        tunnel.env.iter().find(|(name, _)| name == crate::wsh_tunnel::TOKEN_VAR).map(|(_, value)| value.clone()).expect("the token")
+    }
+
+    /// The last layout event the window `main` was sent.
+    fn last_layout(rec: &Recorder) -> Option<View> {
+        rec.all().into_iter().rev().find_map(|out| if let Out::Layout(view) = out { Some(view) } else { None })
+    }
+
+    #[test]
+    fn a_ticked_ssh_pane_gets_a_tunnel_and_nothing_else_does() {
+        use holzwave_core::pool::valid_forward_path;
+        let t = ticked(&[]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).expect("a ticked SSH pane has a tunnel");
+        assert!(valid_forward_path(&tunnel.path), "{}", tunnel.path);
+        let mut names: Vec<&str> = tunnel.env.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["HOLZWAVE_PANE", "HOLZWAVE_SOCKET", "HOLZWAVE_TOKEN"]);
+        let value = |name: &str| tunnel.env.iter().find(|(n, _)| n == name).unwrap().1.clone();
+        assert_eq!(value("HOLZWAVE_SOCKET"), tunnel.path);
+        assert_eq!(value("HOLZWAVE_PANE"), t.remote.to_string());
+        let token = value("HOLZWAVE_TOKEN");
+        assert!(token.len() == 32 && token.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{token}");
+        assert!(!tunnel.path.contains(&token), "the path and the token are independent values");
+
+        let again = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        assert_ne!(again.path, tunnel.path);
+        assert_ne!(token_of(&again), token);
+
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, t.unticked).is_none(), "an SSH pane that is not ticked");
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, t.local).is_none(), "a local pane");
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, 9999).is_none(), "a pane nobody knows");
+
+        // A Docker connection, even one that was ticked in an older file, gets none.
+        let mut docker = Profile::new("api", "API", "api-1");
+        docker.kind = ConnectionKind::Docker;
+        t.core.connections.save(docker, SecretChange::Keep).unwrap();
+        let pane = t.core.split(true).focus;
+        t.core.connections.assign(pane, "api").unwrap();
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, pane).is_none(), "a Docker pane");
+
+        // A block pane that has a saved connection assigned (a preview of a file of the host) runs nothing.
+        let block = t.core.split(true).focus;
+        t.core.connections.assign(block, "web-1").unwrap();
+        t.core.blocks.assign(block, Block { kind: BlockKind::Preview, source: "web-1".into(), path: "/srv/a".into(), edit: false }).unwrap();
+        assert!(crate::wsh_tunnel::tunnel_for(&t.core, block).is_none(), "a block pane");
+    }
+
+    #[test]
+    fn a_pane_spec_gets_the_tunnel_only_when_the_connection_was_made_up() {
+        let t = ticked(&[]);
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.remote, &mut spec);
+        assert!(spec.ssh_connection.is_some() && spec.notice.is_none(), "{:?}", spec.notice);
+        let tunnel = spec.tunnel.clone().expect("the ticked pane starts with a tunnel");
+        assert!(spec.env.is_empty(), "the variables live in the tunnel, not in the spec's environment");
+        let shown = format!("{spec:?} {tunnel:?}");
+        assert!(!shown.contains(&token_of(&tunnel)) && !shown.contains(&tunnel.path), "{shown}");
+
+        let mut plain = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.unticked, &mut plain);
+        assert!(plain.ssh_connection.is_some() && plain.tunnel.is_none(), "an SSH pane that is not ticked");
+        let mut local = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.local, &mut local);
+        assert!(local.ssh_connection.is_none() && local.tunnel.is_none(), "a local pane");
+    }
+
+    #[test]
+    fn a_view_through_the_forwarded_socket_opens_a_preview_of_the_hosts_file() {
+        let t = ticked(&[("/srv/notes.md", "# notes\n")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = t.core.view().panes.len();
+
+        // The request names pane 99; the sink's pane is the one that is acted on.
+        let answer = through(&tunnel, json!({"pane": 99, "cmd": "view", "path": "/srv/notes.md"}));
+
+        assert_eq!(answer, json!({"ok": true, "message": ""}));
+        let view = last_layout(&t.rec).expect("the window is told the new layout");
+        assert_eq!(view.panes.len(), before + 1, "a pane was added beside the pane");
+        let block = t.core.blocks.block_of(view.focus).expect("the new pane shows a block");
+        assert_eq!(block.kind, BlockKind::Preview);
+        assert_eq!((block.source.as_str(), block.path.as_str()), ("web-1", "/srv/notes.md"));
+        assert_eq!(t.host.seen(), ["/srv/notes.md"], "the host's own source was asked, once");
+        assert!(t.core.blocks.block_of(t.remote).is_none() && t.core.blocks.block_of(99).is_none());
+    }
+
+    #[test]
+    fn setmeta_and_ping_work_and_the_title_is_the_panes_own() {
+        let t = ticked(&[]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        assert_eq!(through(&tunnel, json!({"pane": 99, "cmd": "ping"})), json!({"ok": true, "message": "holzWave"}));
+        let answer = through(&tunnel, json!({"pane": t.local, "cmd": "setmeta", "key": "title", "value": "build"}));
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        let names = t.core.view().pane_names;
+        assert!(names.contains(&(t.remote, "build".to_owned())), "{names:?}");
+        assert!(!names.iter().any(|(pane, _)| *pane == t.local), "the pane the request named keeps its name: {names:?}");
+        assert!(last_layout(&t.rec).is_some(), "the window is told");
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_regular_file_on_the_host_is_refused() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = t.core.view().panes.len();
+        for path in ["/srv", "/missing", "relative/a.txt", "a.txt", "/dev/null"] {
+            let answer = through(&tunnel, json!({"cmd": "view", "path": path}));
+            assert_eq!(answer["ok"], json!(false), "{path}: {answer}");
+            assert!(answer["message"].as_str().is_some_and(|m| m.len() > 8), "{path}: words: {answer}");
+        }
+        assert_eq!(t.core.view().panes.len(), before, "nothing was opened");
+        assert!(t.core.blocks.views(&t.core.connections).is_empty());
+        let asked = t.host.seen();
+        assert!(!asked.iter().any(|p| !p.starts_with('/')), "a relative path was never asked of the host: {asked:?}");
+        assert!(t.core.view().pane_names.is_empty());
+    }
+
+    #[test]
+    fn a_preview_at_the_pane_limit_is_refused_and_no_pane_is_turned_into_it() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        // Splitting the pane in focus again and again ends at a limit of the layout (its depth, before its pane count).
+        loop {
+            let before = core.view().panes.len();
+            if core.split(true).panes.len() == before {
+                break;
+            }
+        }
+        let view = core.view();
+        let panes = view.panes.len();
+        assert!(panes > 8, "some panes were made: {panes}");
+
+        let refused = core.block_open_in(MAIN_WINDOW, "right", BlockKind::Preview, "local", "/tmp/a.txt");
+
+        assert!(refused.is_err(), "there is no room for another pane: {refused:?}");
+        assert!(core.blocks.block_of(view.focus).is_none(), "the pane in focus was not turned into the preview");
+        assert!(core.blocks.views(&core.connections).is_empty());
+        assert_eq!(core.view().panes.len(), panes);
+    }
+
+    #[test]
+    fn wsh_edit_sets_the_flag_and_wsh_view_does_not() {
+        use holzwave_ipc::Cmd;
+        // This computer: the local socket's path.
+        let (core, _rec, dir) = core("/bin/cat", &[]);
+        let file = dir.0.join("notes.md");
+        std::fs::write(&file, "# notes\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let pane = only_pane(&core);
+        let opened = |core: &AppCore| core.blocks.block_of(core.view().focus).expect("the new pane shows a block");
+
+        assert_eq!(core.ipc_command(Some(pane), Cmd::Edit { path: path.clone() }), Ok(String::new()));
+        let edit = opened(&core);
+        assert_eq!((edit.kind, edit.source.as_str(), edit.path.as_str(), edit.edit), (BlockKind::Preview, LOCAL, path.as_str(), true));
+        assert_ne!(core.view().focus, pane, "beside the pane, as before");
+
+        assert_eq!(core.ipc_command(Some(pane), Cmd::View { path: path.clone() }), Ok(String::new()));
+        assert!(!opened(&core).edit, "wsh view shows the page");
+
+        // A host over a tunnel: the same two commands through the forwarded socket.
+        let t = ticked(&[("/srv/notes.md", "# notes\n")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let answer = through(&tunnel, json!({"cmd": "edit", "path": "/srv/notes.md"}));
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        let block = t.core.blocks.block_of(t.core.view().focus).unwrap();
+        assert_eq!((block.source.as_str(), block.path.as_str(), block.edit), ("web-1", "/srv/notes.md", true));
+        let answer = through(&tunnel, json!({"cmd": "view", "path": "/srv/notes.md"}));
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        let block = t.core.blocks.block_of(t.core.view().focus).unwrap();
+        assert_eq!((block.source.as_str(), block.edit), ("web-1", false));
+        // Written down for a restart: the first preview keeps the flag, the second does not write it.
+        let file = std::fs::read_to_string(t._dir.0.join(holzwave_core::blocks::BLOCKS_FILE)).unwrap();
+        assert_eq!(file.matches("\"edit\"").count(), 1, "{file}");
+    }
+
+    /// The sentence of the protocol crate for a command that a remote process may not ask.
+    const NOT_REMOTE: &str = "not available over a remote connection";
+
+    /// What a test compares before and after a request that must change nothing: the events sent to the windows, the
+    /// layout, the blocks, the history and the names of the panes.
+    fn state_of(t: &Ticked) -> String {
+        // The `rev` of a view counts the views built, so it is left out.
+        let view = t.core.view();
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:?}",
+            t.rec.all(),
+            (view.focus, &view.tabs, &view.panes, &view.dividers, &view.pane_names),
+            t.core.blocks.views(&t.core.connections),
+            t.core.history.search("", None, 50),
+            lock(&t.rec.closed).clone(),
+        )
+    }
+
+    #[test]
+    fn ai_and_the_history_commands_never_reach_the_core_through_the_tunnel() {
+        use holzwave_ipc::Cmd;
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        t.core.focus_pane(t.remote);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = state_of(&t);
+        let lines = [
+            json!({"cmd": "ai", "prompt": "delete everything", "stdin_bytes": 0}),
+            json!({"cmd": "hist", "line": "ls -la", "cwd": "/", "exit": 0}),
+            json!({"cmd": "hist_open"}),
+        ];
+        for line in lines {
+            assert_eq!(through(&tunnel, line.clone()), json!({"ok": false, "message": NOT_REMOTE}), "{line}");
+        }
+        // The core's own answer, without the protocol crate in front of it, is the same refusal and changes nothing.
+        for cmd in [
+            Cmd::Ai { prompt: "x".into(), stdin_bytes: 0 },
+            Cmd::Hist { line: "ls".into(), cwd: "/".into(), exit: Some(0) },
+            Cmd::HistOpen,
+        ] {
+            assert_eq!(t.core.wsh_remote(t.remote, &t.target(), cmd.clone()), Err(NOT_REMOTE.to_owned()), "{cmd:?}");
+        }
+        assert_eq!(state_of(&t), before, "the events, the layout, the blocks and the history are as they were");
+        assert!(t.core.history.search("", None, 10).is_empty());
+        assert!(t.host.seen().is_empty());
+    }
+
+    #[test]
+    fn a_wrong_token_and_a_missing_token_change_nothing() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = state_of(&t);
+        let wrong = "0".repeat(32);
+        let others = [token_of(&crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap())];
+        let requests: Vec<Vec<u8>> = [
+            json!({"token": wrong, "cmd": "view", "path": "/srv/a.txt"}),
+            json!({"token": others[0], "cmd": "view", "path": "/srv/a.txt"}),
+            json!({"token": "", "cmd": "setmeta", "key": "title", "value": "x"}),
+            json!({"token": 7, "cmd": "ping"}),
+            json!({"token": wrong, "cmd": "ai", "prompt": "x", "stdin_bytes": 0}),
+            json!({"cmd": "view", "path": "/srv/a.txt"}),
+        ]
+        .iter()
+        .map(|request| serde_json::to_vec(request).unwrap())
+        .collect();
+        for request in requests {
+            let answer = through_raw(&tunnel, &request);
+            assert_eq!(answer["ok"], json!(false), "{answer}");
+            assert!(answer["message"].as_str().unwrap().starts_with("refused:"), "the protocol's sentence: {answer}");
+        }
+        assert_eq!(state_of(&t), before);
+        assert!(t.host.seen().is_empty(), "the host was never asked");
+    }
+
+    #[test]
+    fn a_request_that_names_another_pane_is_answered_for_the_sinks_pane() {
+        let t = ticked(&[]);
+        t.core.rename_pane(t.local, "keep");
+        t.core.rename_pane(t.unticked, "mine");
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        for named in [json!(t.local), json!(t.unticked), json!(7), json!(null)] {
+            let answer = through(&tunnel, json!({"pane": named, "cmd": "setmeta", "key": "title", "value": "renamed"}));
+            assert_eq!(answer["ok"], json!(true), "{named}: {answer}");
+        }
+        let names: HashMap<PaneId, String> = t.core.view().pane_names.into_iter().collect();
+        assert_eq!(names.get(&t.remote).map(String::as_str), Some("renamed"), "the sink's pane");
+        assert_eq!(names.get(&t.local).map(String::as_str), Some("keep"));
+        assert_eq!(names.get(&t.unticked).map(String::as_str), Some("mine"));
+        assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn the_twenty_first_request_in_ten_seconds_is_busy() {
+        let t = ticked(&[]);
+        let second = t.core.split(true).focus;
+        t.core.connections.assign(second, "web-1").unwrap();
+        let (one, two) = (crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap(), crate::wsh_tunnel::tunnel_for(&t.core, second).unwrap());
+        for n in 1..=20 {
+            assert_eq!(through(&one, json!({"cmd": "ping"}))["ok"], json!(true), "request {n}");
+        }
+        assert_eq!(through(&one, json!({"cmd": "ping"})), json!({"ok": false, "message": "busy"}));
+        assert_eq!(through(&one, json!({"cmd": "view", "path": "/srv/a.txt"}))["message"], json!("busy"));
+        assert_eq!(through(&two, json!({"cmd": "ping"})), json!({"ok": true, "message": "holzWave"}), "another pane has its own budget");
+    }
+
+    #[test]
+    fn a_pane_that_closed_cannot_be_driven() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let closing = t.core.split(true).focus;
+        t.core.connections.assign(closing, "web-1").unwrap();
+        let (open, closed) = (crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap(), crate::wsh_tunnel::tunnel_for(&t.core, closing).unwrap());
+        t.core.close_pane(closing);
+        let before = t.core.view().panes.len();
+        let answer = through(&closed, json!({"cmd": "view", "path": "/srv/a.txt"}));
+        assert_eq!(answer, json!({"ok": false, "message": "this pane is not open any more"}));
+        assert_eq!(through(&closed, json!({"cmd": "ping"}))["ok"], json!(false));
+        assert_eq!(t.core.view().panes.len(), before);
+        assert!(t.core.blocks.views(&t.core.connections).is_empty() && t.host.seen().is_empty());
+
+        // The pane is open but its connection was turned off in the saved list: the tunnel that was made for it answers no more.
+        let mut profile = t.core.connections.profile_of(t.remote).unwrap();
+        profile.wsh = false;
+        t.core.connection_save(profile, SecretChange::Keep).unwrap();
+        let answer = through(&open, json!({"cmd": "view", "path": "/srv/a.txt"}));
+        assert_eq!(answer, json!({"ok": false, "message": "wsh is not turned on for the connection of this pane"}));
+        assert!(t.core.blocks.views(&t.core.connections).is_empty());
+
+        // And deleted.
+        t.core.connection_delete("web-1").unwrap();
+        let answer = through(&open, json!({"cmd": "view", "path": "/srv/a.txt"}));
+        assert_eq!(answer, json!({"ok": false, "message": "this pane no longer runs a saved connection"}));
+        assert!(t.core.blocks.views(&t.core.connections).is_empty());
+    }
+
+    #[test]
+    fn a_directory_a_device_and_a_huge_path_are_refused() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let before = state_of(&t);
+        let huge = format!("/{}", "a".repeat(4096));
+        assert_eq!(huge.len(), 4097);
+        for (path, said) in [
+            ("/srv", "not a regular file on this host"),
+            ("/dev/null", "not a regular file on this host"),
+            (huge.as_str(), "the path is empty, too long or has a NUL"),
+            ("/srv/a\u{0}.txt", "the path is empty, too long or has a NUL"),
+            ("", "the path is empty, too long or has a NUL"),
+            ("../srv/a.txt", "the path must be absolute: it starts with /"),
+        ] {
+            for cmd in ["view", "edit"] {
+                let answer = through(&tunnel, json!({"cmd": cmd, "path": path}));
+                assert_eq!(answer, json!({"ok": false, "message": said}), "{cmd} {path:?}");
+            }
+        }
+        assert_eq!(state_of(&t), before, "nothing was opened");
+        assert_eq!(t.host.seen(), ["/srv", "/srv", "/dev/null", "/dev/null"], "only the two that could be asked were asked");
+    }
+
+    /// Fails on any use: the files of this computer.
+    struct NoLocalFiles;
+
+    impl FileSource for NoLocalFiles {
+        fn label(&self) -> String {
+            panic!("this computer's files were asked");
+        }
+        fn home(&self) -> holzwave_core::Result<String> {
+            panic!("this computer's files were asked");
+        }
+        fn list(&self, _: &str) -> holzwave_core::Result<Listing> {
+            panic!("this computer's files were asked");
+        }
+        fn stat(&self, _: &str) -> holzwave_core::Result<Entry> {
+            panic!("this computer's files were asked");
+        }
+        fn read(&self, _: &str, _: u64) -> holzwave_core::Result<Vec<u8>> {
+            panic!("this computer's files were asked");
+        }
+        fn read_range(&self, _: &str, _: u64, _: u64) -> holzwave_core::Result<Vec<u8>> {
+            panic!("this computer's files were asked");
+        }
+        fn write(&self, _: &str, _: &[u8]) -> holzwave_core::Result<()> {
+            panic!("this computer's files were asked");
+        }
+    }
+
+    #[test]
+    fn a_remote_view_never_uses_the_local_source() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        t.core.blocks.inject_local(Arc::new(NoLocalFiles));
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        // A path that exists on this computer (and not on the host) is refused by the host, and this computer is never asked.
+        let here = t._dir.0.join("here.txt");
+        std::fs::write(&here, "local").unwrap();
+        let answer = through(&tunnel, json!({"cmd": "view", "path": here.to_string_lossy()}));
+        assert_eq!(answer, json!({"ok": false, "message": "no such file on this host, or it cannot be read"}));
+        for cmd in ["view", "edit"] {
+            assert_eq!(through(&tunnel, json!({"cmd": cmd, "path": "/srv/a.txt"}))["ok"], json!(true), "{cmd}");
+        }
+        let block = t.core.blocks.block_of(t.core.view().focus).unwrap();
+        assert_eq!(block.source, "web-1");
+        // The double is really the local source: a local pane's request reaches it.
+        let asked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.core.blocks.stat(&t.core.connections, "local", "/x")));
+        assert!(asked.is_err(), "the double stands in for this computer");
+    }
+
+    #[test]
+    fn the_commands_the_remote_scope_accepts_are_exactly_the_four_this_function_handles() {
+        use holzwave_ipc::Cmd;
+        // A `match` with no wildcard: a command added to the enum does not compile until it is listed here too.
+        fn index(cmd: &Cmd) -> usize {
+            match cmd {
+                Cmd::View { .. } => 0,
+                Cmd::Edit { .. } => 1,
+                Cmd::Setmeta { .. } => 2,
+                Cmd::Hist { .. } => 3,
+                Cmd::HistOpen => 4,
+                Cmd::Ai { .. } => 5,
+                Cmd::Ping => 6,
+            }
+        }
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let every = [
+            Cmd::View { path: "/srv/a.txt".into() },
+            Cmd::Edit { path: "/srv/a.txt".into() },
+            Cmd::Setmeta { key: "title".into(), value: "x".into() },
+            Cmd::Hist { line: "ls".into(), cwd: "/".into(), exit: None },
+            Cmd::HistOpen,
+            Cmd::Ai { prompt: "x".into(), stdin_bytes: 0 },
+            Cmd::Ping,
+        ];
+        assert_eq!(every.iter().map(index).collect::<Vec<_>>(), (0..7).collect::<Vec<_>>(), "every command is in the table once");
+        let mut accepted = Vec::new();
+        let mut handled = Vec::new();
+        for cmd in &every {
+            let name = serde_json::to_value(cmd).unwrap()["cmd"].as_str().unwrap().to_owned();
+            if cmd.allowed_remote() {
+                accepted.push(name.clone());
+            }
+            if t.core.wsh_remote(t.remote, &t.target(), cmd.clone()) != Err(NOT_REMOTE.to_owned()) {
+                handled.push(name);
+            }
+        }
+        assert_eq!(accepted, handled, "what the scope lets in is what the core answers, and nothing more");
+        assert_eq!(accepted, ["view", "edit", "setmeta", "ping"]);
+        // None of the four decides anything for the person.
+        for name in &accepted {
+            for word in ["decide", "decision", "approve", "approval", "consent", "grant", "allow", "deny", "confirm", "accept", "permit", "authorize", "trust"] {
+                assert!(!name.contains(word), "{name} says {word}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_token_and_the_path_never_appear_in_any_text() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        let (token, path) = (token_of(&tunnel), tunnel.path.clone());
+        let sink = crate::wsh_tunnel::WshSink::new(t.core.downgrade(), t.remote, token.clone(), t.target());
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.remote, &mut spec);
+        let spec_tunnel = spec.tunnel.clone().expect("a tunnel");
+        let mut seen = vec![format!("{sink:?}"), format!("{tunnel:?}"), format!("{spec:?}"), format!("{:?}", spec.notice)];
+
+        // Every answer, whatever the request, and every event the core sent.
+        for request in [
+            json!({"cmd": "ping"}),
+            json!({"cmd": "view", "path": "/srv/a.txt"}),
+            json!({"cmd": "edit", "path": "/srv/missing"}),
+            json!({"cmd": "view", "path": "/srv"}),
+            json!({"cmd": "setmeta", "key": "title", "value": "x"}),
+            json!({"cmd": "setmeta", "key": "colour", "value": "x"}),
+            json!({"cmd": "ai", "prompt": "x", "stdin_bytes": 0}),
+            json!({"token": "0".repeat(32), "cmd": "ping"}),
+        ] {
+            seen.push(through(&tunnel, request).to_string());
+        }
+        seen.push(format!("{:?}", t.rec.all()));
+        seen.push(format!("{:?}", t.core.view()));
+        seen.push(format!("{:?}", t.core.blocks.views(&t.core.connections)));
+        assert!(seen.len() > 10);
+        let tokens = [token, token_of(&spec_tunnel)];
+        let paths = [path, spec_tunnel.path.clone()];
+        for text in &seen {
+            for secret in tokens.iter().chain(&paths) {
+                assert!(!text.contains(secret.as_str()), "a secret is in {text}");
+            }
+            assert!(!text.contains("holzwave-") || text.contains("holzwave-test"), "a socket path is in {text}");
+        }
+    }
+
+    /// Edit the saved connection of the ticked pane (`web-1`), the rest as it was.
+    fn edit_connection(t: &Ticked, change: impl FnOnce(&mut Profile)) {
+        let mut profile = t.core.connections.profile_of(t.remote).expect("the connection is saved");
+        change(&mut profile);
+        t.core.connections.save(profile, SecretChange::Keep).expect("saves");
+    }
+
+    #[test]
+    fn a_request_from_a_pane_of_an_edited_connection_is_refused_and_the_host_is_never_asked() {
+        let t = ticked(&[("/srv/a.txt", "a")]);
+        let tunnel = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        assert_eq!(through(&tunnel, json!({"cmd": "ping"}))["ok"], true);
+
+        // Renaming the connection moves nothing: the host, the port and the user are the target.
+        let original = t.core.connections.profile_of(t.remote).unwrap();
+        edit_connection(&t, |p| p.name = "Renamed".into());
+        assert_eq!(through(&tunnel, json!({"cmd": "ping"}))["ok"], true, "a new name is the same host");
+
+        for (what, change) in [
+            ("host", Box::new(|p: &mut Profile| p.host = "other.example.invalid".into()) as Box<dyn Fn(&mut Profile)>),
+            ("port", Box::new(|p: &mut Profile| p.port = 2222)),
+            ("user", Box::new(|p: &mut Profile| p.user = "someone-else".into())),
+        ] {
+            edit_connection(&t, |p| *p = original.clone());
+            let before = lock(&t.host.seen).len();
+            edit_connection(&t, |p| change(p));
+            for request in [
+                json!({"cmd": "ping"}),
+                json!({"cmd": "view", "path": "/srv/a.txt"}),
+                json!({"cmd": "edit", "path": "/srv/a.txt"}),
+                json!({"cmd": "setmeta", "key": "title", "value": "x"}),
+            ] {
+                let answer = through(&tunnel, request.clone());
+                assert_eq!(answer, json!({"ok": false, "message": WSH_TARGET_CHANGED}), "{what}: {request}");
+            }
+            assert_eq!(lock(&t.host.seen).len(), before, "{what}: nothing was asked of any host");
+            assert!(t.core.blocks.views(&t.core.connections).is_empty(), "{what}: no preview opened");
+            // The sentence is fixed: it names no host, no user and no path.
+            let text = WSH_TARGET_CHANGED;
+            assert!(!text.contains("example") && !text.contains("someone"), "{text}");
+        }
+
+        // A pane that starts now records where the connection points now, and is answered.
+        let fresh = crate::wsh_tunnel::tunnel_for(&t.core, t.remote).unwrap();
+        assert_eq!(through(&fresh, json!({"cmd": "ping"}))["ok"], true);
+        // The old tunnel stays refused until the connection points where it did.
+        assert_eq!(through(&tunnel, json!({"cmd": "ping"}))["ok"], false);
+        edit_connection(&t, |p| {
+            p.host = "web.example.invalid".into();
+            p.port = 22;
+            p.user = "holz".into();
+        });
+        assert_eq!(through(&tunnel, json!({"cmd": "ping"}))["ok"], true, "pointing back is the same target again");
+    }
+
+    #[test]
+    fn the_target_is_recorded_when_the_pane_starts_and_forgotten_when_it_closes() {
+        let t = ticked(&[]);
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.remote, &mut spec);
+        assert!(lock(&t.core.pane_targets).contains_key(&t.remote));
+        // A pane that runs a local shell, or a connection that is not SSH, records nothing.
+        let mut local = PaneSpec::new("sh", 80, 24);
+        t.core.apply_connection(t.local, &mut local);
+        assert!(!lock(&t.core.pane_targets).contains_key(&t.local));
+        let debug = format!("{:?}", t.target());
+        assert!(!debug.contains("web.example") && !debug.contains("holz"), "{debug}");
+        t.core.forget_pane(t.remote);
+        assert!(!lock(&t.core.pane_targets).contains_key(&t.remote));
+    }
+
+    /// Start the pane `pane` of `t` and focus it, as the person's act would find it.
+    fn started_and_focused(t: &Ticked, pane: PaneId) {
+        t.core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+        t.core.focus_pane_in(MAIN_WINDOW, pane).expect("focus");
+    }
+
+    fn says(t: &Ticked, pane: PaneId, words: &str) -> bool {
+        wait_until(WAIT, || t.rec.has_text(pane, words))
+    }
+
+    #[test]
+    fn an_install_on_a_pane_that_is_not_ssh_says_so_on_the_pane() {
+        let t = ticked(&[]);
+        // A local pane.
+        started_and_focused(&t, t.local);
+        assert_eq!(t.core.wsh_install(t.local), Err(INSTALL_NOT_SSH.to_owned()));
+        assert!(says(&t, t.local, "does not run a saved SSH"), "the sentence is on the pane: {:?}", t.rec.all());
+
+        // A connection assigned to a pane that already runs a local shell takes effect when it starts: not SSH yet.
+        t.core.connections.assign(t.local, "web-1").unwrap();
+        assert_eq!(t.core.wsh_install(t.local), Err(INSTALL_NOT_SSH.to_owned()));
+
+        // A Docker connection on a running pane.
+        let mut docker = Profile::new("api", "API", "api-1");
+        docker.kind = ConnectionKind::Docker;
+        t.core.connections.save(docker, SecretChange::Keep).unwrap();
+        let pane = t.core.split(true).focus;
+        started_and_focused(&t, pane);
+        t.core.connections.assign(pane, "api").unwrap();
+        assert_eq!(t.core.wsh_install(pane), Err(INSTALL_NOT_SSH.to_owned()));
+        assert!(says(&t, pane, "does not run a saved SSH"));
+
+        // A block pane has no screen, and a pane that is not open is not running.
+        let block = t.core.split(true).focus;
+        t.core.blocks.assign(block, Block { kind: BlockKind::Preview, source: "web-1".into(), path: "/srv/a".into(), edit: false }).unwrap();
+        assert_eq!(t.core.wsh_install(block), Err(INSTALL_NOT_SSH.to_owned()));
+        assert_eq!(t.core.wsh_install(9999), Err(INSTALL_NO_PANE.to_owned()));
+        // An SSH pane that has not started yet is not running either.
+        assert_eq!(t.core.wsh_install(t.unticked), Err(INSTALL_NO_PANE.to_owned()));
+        // Nothing was recorded for any of them: no connection was made up.
+        assert!(lock(&t.core.pane_targets).is_empty());
+    }
+
+    #[test]
+    fn an_install_only_acts_for_the_pane_in_focus() {
+        let t = ticked(&[]);
+        started_and_focused(&t, t.remote);
+        started_and_focused(&t, t.unticked);
+        // `unticked` is in focus now: the install for `remote` is refused, on its own screen.
+        assert_eq!(t.core.wsh_install(t.remote), Err(INSTALL_NOT_FOCUSED.to_owned()));
+        assert!(says(&t, t.remote, "not the pane in focus"));
+    }
+
+    #[test]
+    fn an_install_for_a_connection_edited_to_another_host_is_refused() {
+        let t = ticked(&[]);
+        started_and_focused(&t, t.remote);
+        assert!(lock(&t.core.pane_targets).contains_key(&t.remote), "recorded when the pane started");
+        edit_connection(&t, |p| p.host = "other.example.invalid".into());
+        assert_eq!(t.core.wsh_install(t.remote), Err(INSTALL_TARGET_CHANGED.to_owned()));
+        assert!(says(&t, t.remote, "now points to"), "{:?}", t.rec.all());
+        let text = INSTALL_TARGET_CHANGED;
+        assert!(!text.contains("example") && !text.contains("holz"), "{text}");
+    }
+
+    #[test]
+    fn the_install_sentences_name_the_connection_and_nothing_else() {
+        use holzwave_core::wshinstall::Installed;
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(install_sentence(&Ok(Installed::Installed("/home/holz/.holzwave/bin/wsh".into())), "Web 1"), format!("wsh {version} was installed on Web 1"));
+        assert_eq!(install_sentence(&Ok(Installed::AlreadyCurrent("/x".into())), "Web 1"), format!("wsh {version} is already installed on Web 1"));
+        assert_eq!(install_sentence(&Err("wsh was not installed: because".into()), "Web 1"), "wsh was not installed: because");
+        // A name with control characters cannot be an escape sequence.
+        let sentence = install_sentence(&Ok(Installed::Installed(String::new())), "A\u{1b}[2Jb\r\nc");
+        assert!(!sentence.chars().any(char::is_control), "{sentence:?}");
+        // No path of the host or of this computer is in a success sentence.
+        assert!(!install_sentence(&Ok(Installed::Installed("/home/holz/.holzwave/bin/wsh".into())), "Web 1").contains("/home"));
+    }
+
+    #[test]
+    fn an_install_without_bundled_binaries_says_so() {
+        let t = ticked(&[]);
+        // No resource folder at all, an empty one, and one without the `wsh` folder: nothing is bundled.
+        assert!(t.core.bundled_wsh().x86_64.is_none() && t.core.bundled_wsh().aarch64.is_none());
+        let res = Scratch::new("resources");
+        t.core.set_resource_dir(res.0.clone());
+        let none = t.core.bundled_wsh();
+        assert!(none.x86_64.is_none() && none.aarch64.is_none());
+        // With the files present they are read and passed on, each for its own processor.
+        std::fs::create_dir(res.0.join("wsh")).unwrap();
+        std::fs::write(res.0.join("wsh/linux-x86_64"), b"\x7fELFx86").unwrap();
+        std::fs::write(res.0.join("wsh/linux-aarch64"), b"\x7fELFarm").unwrap();
+        let both = t.core.bundled_wsh();
+        assert_eq!((both.x86_64.as_deref(), both.aarch64.as_deref()), (Some(&b"\x7fELFx86"[..]), Some(&b"\x7fELFarm"[..])));
+        // One of the two is enough for the host that needs it.
+        std::fs::remove_file(res.0.join("wsh/linux-aarch64")).unwrap();
+        let one = t.core.bundled_wsh();
+        assert!(one.x86_64.is_some() && one.aarch64.is_none());
+        // A file over 16 MiB is not read.
+        let big = std::fs::File::create(res.0.join("wsh/linux-aarch64")).unwrap();
+        big.set_len(MAX_BUNDLED_WSH + 1).unwrap();
+        assert!(t.core.bundled_wsh().aarch64.is_none(), "over the bound");
+        big.set_len(MAX_BUNDLED_WSH).unwrap();
+        assert_eq!(t.core.bundled_wsh().aarch64.map(|b| b.len() as u64), Some(MAX_BUNDLED_WSH), "at the bound");
+    }
+
+    /// The text of every row of `pane` that any frame carried as changed, oldest first.
+    #[cfg(unix)]
+    fn rows_of(rec: &Recorder, pane: PaneId) -> Vec<String> {
+        rec.frames(pane)
+            .iter()
+            .flat_map(|f| f.changed.iter().map(|row| row.runs.iter().flat_map(|r| r.0.chars()).filter(|c| *c != '\0').collect::<String>()))
+            .collect()
+    }
+
+    /// The tunnel against a real OpenSSH server, with the real `wsh` binary: `scripts/ssh-loopback-check.sh` starts a
+    /// throwaway `sshd` on 127.0.0.1 that allows Unix socket forwarding, builds `wsh`, and passes in where both are. The
+    /// test saves a connection to it with `wsh` ticked, starts a pane, and types the real `wsh` into the real remote shell.
+    ///
+    /// The server runs on this computer, so the socket the forward makes is a file here, which the test can look at; and
+    /// the `wsh` that runs is the macOS (or host) build by its absolute path, so nothing is installed into a real home.
+    /// What it cannot prove: a Linux host, another processor, the static Linux build (Docker proves that one runs).
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "needs a real sshd and a built wsh: run scripts/ssh-loopback-check.sh"]
+    fn wsh_tunnel_live() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        fn var(name: &str) -> String {
+            std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set; run this test through scripts/ssh-loopback-check.sh"))
+        }
+        const LIVE_WAIT: Duration = Duration::from_secs(30);
+        let (host, port, user) = (var("HOLZWAVE_TEST_SSH_HOST"), var("HOLZWAVE_TEST_SSH_PORT"), var("HOLZWAVE_TEST_SSH_USER"));
+        let (known, key_file, wsh) = (var("HOLZWAVE_TEST_SSH_KNOWN_HOSTS"), var("HOLZWAVE_TEST_SSH_KEY_ED25519"), var("HOLZWAVE_TEST_WSH"));
+        assert!(Path::new(&wsh).is_absolute(), "HOLZWAVE_TEST_WSH names the built wsh by an absolute path");
+
+        let dir = Scratch::new("live");
+        std::fs::copy(&known, dir.0.join("known_hosts")).expect("the server's host key is the app's known host");
+        let mut profiles = holzwave_core::profiles::Profiles::default();
+        let mut profile = Profile::new("live-host", "Live host", host);
+        profile.port = port.parse().expect("a port number");
+        profile.user = user;
+        profile.auth = holzwave_core::profiles::Auth::Key;
+        profile.key_path = key_file;
+        profile.wsh = true;
+        profile.reconnect_attempts = 0;
+        profiles.upsert(profile).unwrap();
+        profiles.save(&dir.0).unwrap();
+        let (core, rec) = core_in(&dir, "sh", &[]);
+        let local = only_pane(&core);
+        let remote = core.split(true).focus;
+        core.connections.assign(remote, "live-host").unwrap();
+        core.start_pane(remote, 100, 30, 0, 0).expect("the pane starts");
+        core.focus_pane_in(MAIN_WINDOW, remote).unwrap();
+
+        // The line as committed text, then the Enter key runs it, as a person types.
+        let type_line = |line: &str| {
+            core.text(remote, line.to_owned()).expect("typed");
+            core.key(remote, key("Enter", "Enter")).expect("Enter");
+        };
+        let wait_for = |needle: &str, what: &str| {
+            assert!(wait_until(LIVE_WAIT, || rec.has_text(remote, needle)), "no `{needle}` on the screen ({what}): {:?}", rows_of(&rec, remote));
+        };
+
+        // The login shell prints its prompt when it is ready; what is typed before that may be lost to its start-up files.
+        assert!(
+            wait_until(LIVE_WAIT, || rows_of(&rec, remote).iter().any(|row| !row.trim().is_empty())),
+            "the remote shell printed nothing: {:?}",
+            rows_of(&rec, remote)
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        // The remote shell runs: it does a sum. Then the variables the wrapped start gave it, by their effect only.
+        type_line(&format!("W='{wsh}'"));
+        type_line("printf 'L1=[%s]\\n' \"$((6*7))\"");
+        wait_for("L1=[42]", "the shell runs");
+        println!("live: the pane's shell runs on the real sshd");
+        type_line("printf 'S1=[%s]\\n' \"$HOLZWAVE_SOCKET\"");
+        type_line("printf 'I1=[%s]\\n' \"${HOLZWAVE_IPC-unset}\"");
+        type_line("printf 'T1=[%s]\\n' \"${#HOLZWAVE_TOKEN}\"");
+        wait_for("T1=[32]", "a token of 32 characters is set (its value is never printed)");
+        wait_for("I1=[unset]", "HOLZWAVE_IPC is not set on a remote host, so the history hooks stay off");
+        let socket = rows_of(&rec, remote)
+            .iter()
+            .find_map(|row| row.split("S1=[").nth(1).and_then(|rest| rest.split(']').next()).filter(|path| path.starts_with('/')).map(str::to_owned))
+            .expect("the shell has HOLZWAVE_SOCKET");
+        assert!(holzwave_core::pool::valid_forward_path(&socket), "{socket}");
+        // The server made the socket (on this computer): a socket file that only its owner can reach.
+        let meta = std::fs::metadata(&socket).expect("sshd made the socket while the pane runs");
+        assert!(meta.file_type().is_socket(), "{socket} is a socket");
+        assert_eq!(meta.permissions().mode() & 0o077, 0, "the socket is owner-only: {:o}", meta.permissions().mode());
+        println!("live: the forwarded socket exists, is owner-only, and HOLZWAVE_IPC is not set");
+
+        // ping through the real forward with the real binary.
+        type_line("printf 'R1=[%s]\\n' \"$(\"$W\" ping 2>&1)\"");
+        wait_for("R1=[holzWave]", "wsh ping through the tunnel");
+        println!("live: wsh ping answers through the forward");
+
+        // setmeta renames this pane.
+        type_line("\"$W\" setmeta title live-ok");
+        assert!(wait_until(LIVE_WAIT, || core.view().pane_names.contains(&(remote, "live-ok".to_owned()))), "{:?}", core.view().pane_names);
+        assert!(!core.view().pane_names.iter().any(|(pane, _)| *pane == local), "no other pane was renamed");
+        println!("live: wsh setmeta title renames the pane");
+
+        // view and edit of a file of that host, over the real SFTP of the real server.
+        let file = dir.0.join("note.md");
+        std::fs::write(&file, "# live\n\nhello\n").unwrap();
+        let file_text = file.to_string_lossy().into_owned();
+        type_line(&format!("\"$W\" view '{file_text}'"));
+        let open = |edit: bool| {
+            core.blocks.views(&core.connections).into_iter().any(|v| {
+                v.block.kind == BlockKind::Preview && v.block.source == "live-host" && v.block.path == file_text && v.block.edit == edit
+            })
+        };
+        assert!(wait_until(LIVE_WAIT, || open(false)), "no preview of the host's file: {:?}", core.blocks.views(&core.connections));
+        type_line(&format!("\"$W\" edit '{file_text}'"));
+        assert!(wait_until(LIVE_WAIT, || open(true)), "no editor of the host's file: {:?}", core.blocks.views(&core.connections));
+        println!("live: wsh view and wsh edit open the host's file beside the pane");
+
+        // What a remote process must never do: the AI, the history and a wrong token.
+        let history_before = core.history_search("", 50).len();
+        type_line("printf 'A1=[%s]\\n' \"$(\"$W\" ai hello 2>&1)\"");
+        wait_for("A1=[wsh: not available over a remote connection]", "wsh ai is refused");
+        type_line("printf 'H1=[%s]\\n' \"$(\"$W\" hist add 0 /tmp pwned 2>&1)\"");
+        wait_for("H1=[wsh: not available over a remote connection]", "wsh hist add is refused");
+        type_line("printf 'X1=[%s]\\n' \"$(HOLZWAVE_TOKEN=wrong \"$W\" ping 2>&1)\"");
+        wait_for("X1=[wsh: refused", "a wrong token is refused");
+        assert_eq!(core.history_search("", 50).len(), history_before, "nothing reached the history");
+        assert!(!core.history_search("pwned", 50).iter().any(|_| true), "the refused history command was not stored");
+        println!("live: wsh ai, wsh hist add and a wrong token are refused");
+
+        // Closing the pane ends the forward: nothing listens on the socket any more, so a process on the host can reach nothing
+        // through it. The file may stay behind (this OpenSSH does not unlink it); the next pane gets a new path.
+        core.close_pane_in(MAIN_WINDOW, remote).unwrap();
+        assert!(
+            wait_until(LIVE_WAIT, || std::os::unix::net::UnixStream::connect(&socket).is_err()),
+            "the socket still accepts connections after the pane closed: {socket}"
+        );
+        let left = Path::new(&socket).exists();
+        println!("live: nothing listens on the socket after the pane closed (the file {})", if left { "stays behind" } else { "is gone" });
+        if left {
+            let _ = std::fs::remove_file(&socket);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_resource_files_are_read_only_from_the_resource_folder() {
+        use std::os::unix::fs::symlink;
+        let t = ticked(&[]);
+        let res = Scratch::new("resources-links");
+        let elsewhere = Scratch::new("elsewhere");
+        std::fs::write(elsewhere.0.join("secret"), b"\x7fELFnot-a-resource").unwrap();
+        t.core.set_resource_dir(res.0.clone());
+        std::fs::create_dir(res.0.join("wsh")).unwrap();
+        // A link in place of a file is not followed.
+        symlink(elsewhere.0.join("secret"), res.0.join("wsh/linux-x86_64")).unwrap();
+        // A directory in place of a file is not a regular file.
+        std::fs::create_dir(res.0.join("wsh/linux-aarch64")).unwrap();
+        let bundled = t.core.bundled_wsh();
+        assert!(bundled.x86_64.is_none() && bundled.aarch64.is_none());
+        // A link in place of the folder sends neither read elsewhere.
+        std::fs::remove_dir_all(res.0.join("wsh")).unwrap();
+        std::fs::write(elsewhere.0.join("linux-x86_64"), b"\x7fELFelsewhere").unwrap();
+        symlink(&elsewhere.0, res.0.join("wsh")).unwrap();
+        let bundled = t.core.bundled_wsh();
+        assert!(bundled.x86_64.is_none() && bundled.aarch64.is_none(), "{:?}", bundled);
+        // The two names are fixed: nothing in this function reads a name that came from anywhere else.
+        let source = include_str!("state.rs");
+        assert_eq!(source.matches("\"linux-x86_64\"").count(), 2, "the two fixed names appear in the reader and in this test only");
+    }
 }
 
 /// The protocol golden (`app/tests/fixtures/protocol.json`): what the webview depends on, generated from the real
@@ -7626,6 +9313,18 @@ mod protocol {
             })),
             Out::AiAsk(AskEvent::Waiting { view: sample_ask() }),
             Out::HistoryOpen { pane: 3 },
+            Out::LoginPrompt {
+                id: "0123456789abcdef0123456789abcdef".into(),
+                connection: "Talos".into(),
+                host: "talos.example".into(),
+                name: "Two-factor login".into(),
+                instructions: "Enter your password and the code of your token.".into(),
+                prompts: vec![
+                    PromptLine { text: "Password:".into(), echo: false },
+                    PromptLine { text: "Code:".into(), echo: true },
+                ],
+            },
+            Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::Answered },
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -7673,10 +9372,16 @@ mod protocol {
                 "ai": payload(9),
                 "ai-ask": payload(10),
                 "history-open": payload(11),
+                "login-prompt": payload(12),
+                "login-prompt-end": [
+                    payload(13),
+                    to_value(&Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::Cancelled }),
+                    to_value(&Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::TimedOut }),
+                ],
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {
-                version: "0.0.1-alpha2".into(),
+                version: "0.0.1-alpha3".into(),
                 os: "macos".into(),
                 hostname: "holz-mac.local".into(),
             }),

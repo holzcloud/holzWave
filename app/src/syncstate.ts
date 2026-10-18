@@ -15,10 +15,12 @@ export interface SyncStatus {
   error: string | null;
   /** Something was downloaded; it is applied at the next start. */
   restart: boolean;
+  /** How many files another computer removed in the last run (copies are kept in `sync-conflicts`). */
+  removed: number;
 }
 
 export const OFF: SyncStatus = {
-  configured: false, endpoint: "", user: "", state: "off", last: null, files: 0, conflicts: 0, error: null, restart: false,
+  configured: false, endpoint: "", user: "", state: "off", last: null, files: 0, conflicts: 0, error: null, restart: false, removed: 0,
 };
 
 const PHASES: ReadonlySet<string> = new Set(["off", "idle", "syncing", "error"]);
@@ -50,6 +52,7 @@ export function readSync(raw: unknown): SyncStatus {
     conflicts: count(o, "conflicts"),
     error,
     restart: o["restart"] === true,
+    removed: count(o, "removed"),
   };
 }
 
@@ -83,6 +86,11 @@ export function lastText(s: SyncStatus): string {
 /** "none", or "1 · the other version is kept". */
 export function conflictText(s: SyncStatus): string {
   return s.conflicts === 0 ? "none" : `${s.conflicts} · the other version is kept`;
+}
+
+/** The line under the list when another computer removed files in the last run; empty at zero. */
+export function removedText(s: SyncStatus): string {
+  return s.removed === 0 ? "" : `Removed on another computer: ${s.removed}. Copies are kept in sync-conflicts.`;
 }
 
 /** The host of the endpoint, for the line under the title; the whole address if it does not parse. */

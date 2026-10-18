@@ -11,9 +11,15 @@
 # proven by this run: the desktop file in the package has the categories of the template, which the default
 # template does not give.
 #
+# wsh is part of every package: the container builds the sidecar for its own triple (scripts/wsh-sidecar.sh) and the two
+# static Linux builds (scripts/wsh-linux.sh, zig cc), and every `tauri build` gets the overlay
+# app/src-tauri/tauri.wsh.conf.json, which installs `wsh` beside the app binary (/usr/bin/wsh, the folder a pane's PATH
+# gets) and the two Linux builds as resources. The overlay is merged after the one that removes beforeBuildCommand.
+#
 # Inspected, any mismatch fails the script: the deb depends on WebKitGTK 4.1 and GTK 3, lists the binary, the desktop
 # file and the icons, its desktop file has `Categories=System;TerminalEmulator;`, and it has no maintainer script
-# (T-2.2-26); the rpm requires the matching libraries, lists the same files and has no script. Then the AppImage is
+# (T-2.2-26); the rpm requires the matching libraries, lists the same files and has no script. Both hold `/usr/bin/wsh`,
+# byte-identical to the sidecar that was built, and the two Linux wsh resources. Then the AppImage is
 # tried with APPIMAGE_EXTRACT_AND_RUN=1 (a container has no FUSE) and its result is printed: `appimage: built` or
 # `appimage: not built, <first error line>`. It never fails the script: the AppImage is judged on the owner's
 # machines (test-plan row L6).
@@ -156,7 +162,29 @@ have() { printf '%s\n' "$2" | grep -q -- "$1"; }
 cd /work/app || exit 1
 npm ci --ignore-scripts --no-audit --no-fund || fail "npm ci"
 # The page is the host's app/dist: no beforeBuildCommand (null removes the key from the merged configuration).
-tauri() { ./node_modules/.bin/tauri build --config '{"build":{"beforeBuildCommand":null}}' "$@" -- --locked; }
+# The overlay of wsh follows it (the CLI merges the configurations in the order given).
+tauri() { ./node_modules/.bin/tauri build --config '{"build":{"beforeBuildCommand":null}}' --config /work/app/src-tauri/tauri.wsh.conf.json "$@" -- --locked; }
+
+# wsh: the sidecar for this container's own triple, and the two static Linux builds (they need their Rust targets).
+# (if, not case: a case pattern's closing parenthesis inside this $( ) block trips older shells)
+if [ "$(uname -m)" = x86_64 ]; then
+    host=x86_64-unknown-linux-gnu
+elif [ "$(uname -m)" = aarch64 ]; then
+    host=aarch64-unknown-linux-gnu
+else
+    fail "unsupported architecture $(uname -m)"
+fi
+for t in x86_64 aarch64; do
+    rustup target list --installed | grep -qx "$t-unknown-linux-musl" || rustup target add "$t-unknown-linux-musl" || fail "rustup target add $t-unknown-linux-musl"
+done
+sidecar=$(sh /work/scripts/wsh-sidecar.sh "$host" | tail -n 1) && [ -f "/work/$sidecar" ] || fail "building the wsh sidecar for $host"
+sidecar=/work/$sidecar
+sh /work/scripts/wsh-linux.sh all || fail "building the static Linux wsh"
+
+# The target volume keeps the packages of earlier runs (and of earlier versions): the inspections below read the first
+# file they find, so only what this run builds may be there, or an old package without wsh is inspected and shipped.
+rm -rf /work/target/release/bundle/deb /work/target/release/bundle/rpm /work/target/release/bundle/appimage
+
 tauri --bundles deb,rpm || fail "tauri build --bundles deb,rpm"
 
 bundle=/work/target/release/bundle
@@ -179,6 +207,14 @@ echo "$files"
 bin=$(printf '%s\n' "$files" | grep -E ' (\./)?usr/bin/[^/]+$' | head -n 1)
 [ -n "$bin" ] || fail "the deb lists no binary in usr/bin"
 # The member name as the archive spells it, to read the file back (the bundler writes no leading ./).
+# wsh beside the app binary, the same file that was built, and the two static Linux builds as resources.
+printf '%s\n' "$files" | grep -qE ' (\./)?usr/bin/wsh$' || fail "the deb does not list usr/bin/wsh: a pane would find no wsh"
+for arch in x86_64 aarch64; do
+    printf '%s\n' "$files" | grep -qE " (\./)?usr/lib/[^ ]*/wsh/linux-$arch\$" || fail "the deb does not list the wsh resource linux-$arch"
+done
+wsh_member=$(dpkg-deb --fsys-tarfile "$deb" | tar -t | grep -E '(^|/)usr/bin/wsh$' | head -n 1)
+dpkg-deb --fsys-tarfile "$deb" | tar -xO "$wsh_member" | cmp -s - "$sidecar" || fail "usr/bin/wsh in the deb is not the sidecar that was built"
+echo "-- deb: usr/bin/wsh is the sidecar that was built, and the two Linux wsh resources are listed"
 desktop=$(dpkg-deb --fsys-tarfile "$deb" | tar -t | grep -E '(^|/)usr/share/applications/[^/]+\.desktop$' | head -n 1)
 [ -n "$desktop" ] || fail "the deb lists no desktop file"
 have 'usr/share/icons/hicolor/.*\.png' "$files" || fail "the deb lists no icon"
@@ -204,6 +240,12 @@ have 'gtk3\|libgtk-3' "$requires" || fail "the rpm does not require GTK 3"
 rfiles=$(rpm -qpl "$rpm") || fail "rpm -qpl"
 echo "$rfiles"
 printf '%s\n' "$rfiles" | grep -qE '^/usr/bin/[^/]+$' || fail "the rpm lists no binary in /usr/bin"
+printf '%s\n' "$rfiles" | grep -qx '/usr/bin/wsh' || fail "the rpm does not list /usr/bin/wsh: a pane would find no wsh"
+for arch in x86_64 aarch64; do
+    printf '%s\n' "$rfiles" | grep -qE "^/usr/lib/[^ ]*/wsh/linux-$arch\$" || fail "the rpm does not list the wsh resource linux-$arch"
+done
+rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/bin/wsh 2>/dev/null | cmp -s - "$sidecar" || fail "/usr/bin/wsh in the rpm is not the sidecar that was built"
+echo "-- rpm: /usr/bin/wsh is the sidecar that was built, and the two Linux wsh resources are listed"
 rdesktop=$(printf '%s\n' "$rfiles" | grep -E '^/usr/share/applications/.*\.desktop$' | head -n 1)
 [ -n "$rdesktop" ] || fail "the rpm lists no desktop file"
 have 'usr/share/icons/hicolor/.*\.png' "$rfiles" || fail "the rpm lists no icon"
@@ -226,6 +268,13 @@ if APPIMAGE_EXTRACT_AND_RUN=1 tauri --bundles appimage >/tmp/appimage.log 2>&1; 
     image=$(ls "$bundle"/appimage/*.AppImage 2>/dev/null | head -n 1)
     if [ -n "$image" ] && cp "$image" /out/; then
         echo "appimage: built ($(basename "$image"))"
+        # A note, not a gate: does the squashfs behind the ELF runtime hold usr/bin/wsh?
+        off=$(readelf -h "$image" | awk '/Start of section headers/{s=$5} /Size of section headers/{z=$5} /Number of section headers/{n=$5} END{print s+z*n}')
+        if unsquashfs -o "$off" -l "$image" 2>/dev/null | grep -q 'usr/bin/wsh$'; then
+            echo "appimage: holds usr/bin/wsh"
+        else
+            echo "appimage: note: usr/bin/wsh was not found in the AppImage"
+        fi
     else
         echo "appimage: not built, the build succeeded but left no .AppImage"
     fi

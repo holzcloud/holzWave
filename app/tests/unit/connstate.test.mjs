@@ -69,3 +69,33 @@ test("the saved list is read with defaults for what is missing", () => {
   assert.equal(list[1].has_secret, false);
   assert.equal(list[1].auth, "key");
 });
+
+test("readConnections reads wsh as a strict boolean", () => {
+  const entry = (over = {}) => ({ id: "a", name: "A", kind: "ssh", ...over });
+  const wsh = (over) => readConnections([entry(over)])[0].wsh;
+  assert.equal(wsh({ wsh: true }), true);
+  assert.equal(wsh({}), false, "absent is false");
+  assert.equal(wsh({ wsh: false }), false);
+  assert.equal(wsh({ wsh: 1 }), false, "a number is not true");
+  assert.equal(wsh({ wsh: "true" }), false, "a string is not true");
+  assert.equal(wsh({ wsh: null }), false);
+});
+
+test("readConnections reads agent as a login", () => {
+  const login = (auth) => readConnections([{ id: "a", name: "A", kind: "ssh", ...(auth === undefined ? {} : { auth }) }])[0].auth;
+  assert.equal(login("agent"), "agent");
+  assert.equal(login("interactive"), "interactive");
+  assert.equal(login("password"), "password");
+  assert.equal(login("key"), "key");
+  assert.equal(login(undefined), "key", "absent is the key file, as before");
+  for (const odd of ["Agent", "Interactive", "", 1, null, true, {}]) assert.equal(login(odd), "key", `${JSON.stringify(odd)} falls back to key`);
+});
+
+test("readConnections_reads_interactive_as_a_login", () => {
+  const login = (auth) => readConnections([{ id: "a", name: "A", kind: "ssh", auth }])[0].auth;
+  assert.equal(login("interactive"), "interactive");
+  // Only the exact word: anything else is the key file, as before.
+  for (const odd of ["INTERACTIVE", "interactive ", "keyboard-interactive", "code", 2, [], {}]) {
+    assert.equal(login(odd), "key", `${JSON.stringify(odd)} falls back to key`);
+  }
+});

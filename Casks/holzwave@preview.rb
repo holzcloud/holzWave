@@ -1,7 +1,7 @@
 # The preview channel: the newest alpha, beta or plain release. Written by scripts/release-macos.sh.
 cask "holzwave@preview" do
-  version "0.0.1-alpha2"
-  sha256 "2e1c7cbeb4a6b77fea18419fdee4fd0f07b38b81a2f74d21c071b7111c9d5761"
+  version "0.0.1-alpha3"
+  sha256 "fd56b4fdbf9dedc349ae2dbac8ff4408f123f9cdad7fdb00b3dc3c9b9be2e6d4"
 
   url "https://github.com/holzcloud/holzWave/releases/download/v#{version}/holzWave_#{version}_aarch64.dmg"
   name "holzWave"

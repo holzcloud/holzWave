@@ -5,6 +5,7 @@ import { registerAction, unregisterAction } from "./actions.js";
 import { openBlock } from "./blocks.js";
 import { call } from "./bridge.js";
 import { focusInput } from "./keyboard.js";
+import { state } from "./state.js";
 import { connSummary, paneConns, readConnections, readPaneConns, setPaneConns } from "./connstate.js";
 import type { Connection } from "./connstate.js";
 import type { View } from "./types.js";
@@ -39,8 +40,12 @@ export async function refreshConnections(): Promise<readonly Connection[]> {
   for (const c of saved) {
     const id = `connect.${c.id}`;
     if (dynamicIds.has(id)) continue; // the core's ids are unique; a repeat must not break the others
-    registerAction({ id, title: connectTitle(c), run: () => void connect(c.id) });
-    dynamicIds.add(id);
+    // A WSL connection opens on Windows only: where the platform is known and is not Windows, the palette lacks the
+    // entry (the connection stays in the list and in the sync; the core refuses it with a sentence all the same).
+    if (!(c.kind === "wsl" && state.os !== "" && state.os !== "windows")) {
+      registerAction({ id, title: connectTitle(c), run: () => void connect(c.id) });
+      dynamicIds.add(id);
+    }
     if (c.kind === "ssh") {
       // The files of a host, over SFTP on a connection of their own.
       const filesId = `files.${c.id}`;
@@ -98,6 +103,18 @@ export async function initConnections(
   applyView = apply;
   onChange = changed;
   registerAction({ id: "connections.open", title: "Connections…", run: open });
+  // The one explicit act that puts `wsh` on the host of the focused SSH pane. The page names the pane and never a host; the
+  // core resolves the saved connection, says the result as a line on the pane, and refuses what is not an SSH pane. A call
+  // that fails is ignored: the sentence is already on the pane's screen.
+  registerAction({
+    id: "wsh.install",
+    title: "Install wsh on this host",
+    run: () => {
+      const pane = state.view?.focus;
+      if (pane === undefined) return;
+      void call<string>("wsh_install", { pane }).catch(() => undefined);
+    },
+  });
   await refreshConnections();
   await pollConnections();
   setInterval(() => void pollConnections(), POLL_MS);

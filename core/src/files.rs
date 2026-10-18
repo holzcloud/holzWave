@@ -1,8 +1,8 @@
 //! Files, local and over SFTP: what the file browser and the previews read, and the editor writes.
 //!
 //! [`FileSource`] is the one interface. [`LocalSource`] is this machine's files; [`SftpSource`] is the files of a
-//! saved SSH connection over SFTP on a connection of its own (so a file read never waits behind a terminal's output
-//! and a terminal never waits behind a file). Everything is bounded: a listing holds at most [`MAX_ENTRIES`] entries,
+//! saved SSH connection over SFTP, on the connection that profile shares with the command runner ([`crate::pool`]), one
+//! channel of its own, which is drained at once so a file read never holds up another channel. Everything is bounded: a listing holds at most [`MAX_ENTRIES`] entries,
 //! a read at most the limit it is given, a path at most [`MAX_PATH`] bytes, and nothing is ever executed or
 //! interpreted here.
 
@@ -10,16 +10,16 @@ use std::cmp::Ordering;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use russh::client::Handle;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileType, OpenFlags};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use crate::ssh::{Client, SshTarget, open_session};
+use crate::pool::{Connection, Session};
+use crate::ssh::SshTarget;
 use crate::{Error, Result};
 
 /// The most entries a listing holds; the rest is cut and the listing says so.
@@ -76,6 +76,11 @@ pub trait FileSource: Send + Sync {
     /// Replace the file with `bytes`: written aside and renamed over it, so a failure leaves the old file.
     fn write(&self, path: &str, bytes: &[u8]) -> Result<()>;
 }
+
+/// The names beside a file that an SFTP save works with: the new bytes are written to the first, and on a server that
+/// will not rename over an existing file the old file waits in the second while the new one takes its place.
+const TMP_SUFFIX: &str = ".holzwave-tmp";
+const OLD_SUFFIX: &str = ".holzwave-old";
 
 fn bad(path: &str) -> Result<()> {
     if path.is_empty() || path.len() > MAX_PATH || path.contains('\0') {
@@ -228,70 +233,56 @@ impl FileSource for LocalSource {
 
 // ---- SFTP --------------------------------------------------------------------------------------------------------
 
-struct Conn {
-    /// Kept so the connection lives as long as the SFTP session on it.
-    _handle: Handle<Client>,
-    sftp: SftpSession,
-}
-
-/// The files of an SSH connection, over SFTP, on a connection of its own.
+/// The files of an SSH connection, over SFTP, on the connection of the saved profile (see [`crate::pool`]).
 pub struct SftpSource {
     label: String,
-    target: SshTarget,
-    runtime: tokio::runtime::Runtime,
-    conn: Mutex<Option<std::sync::Arc<Conn>>>,
+    conn: Arc<Connection>,
 }
 
 impl SftpSource {
-    /// Prepare a source for `target`; nothing connects until the first request, and a lost connection is made again by
-    /// the next request.
+    /// Prepare a source on a connection of its own for `target`; nothing connects until the first request, and a lost
+    /// connection is made again by the next request.
     pub fn new(label: impl Into<String>, target: SshTarget) -> Result<Self> {
-        // One worker thread drives the SSH and SFTP tasks between requests (keepalives, replies); the calling threads
-        // only wait on the result.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .thread_name("hw-sftp")
-            .build()
-            .map_err(|e| Error::Pty(format!("sftp runtime: {e}")))?;
-        Ok(Self { label: label.into(), target, runtime, conn: Mutex::new(None) })
+        Ok(Self::on(Connection::standalone(label, target)?))
     }
 
-    fn connection(&self) -> Result<std::sync::Arc<Conn>> {
-        if let Some(conn) = self.conn.lock().unwrap_or_else(PoisonError::into_inner).clone() {
-            return Ok(conn);
-        }
-        let made = self.runtime.block_on(async {
-            let handle = tokio::time::timeout(Duration::from_secs(20), open_session(&self.target))
-                .await
-                .map_err(|_| "the connection timed out".to_string())??;
-            let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
-            channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
-            let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())?;
-            Ok::<_, String>(std::sync::Arc::new(Conn { _handle: handle, sftp }))
+    /// Prepare a source on a connection that others share (the one of a saved profile). Nothing connects until the
+    /// first request.
+    pub fn on(conn: Arc<Connection>) -> Self {
+        Self { label: conn.label().to_owned(), conn }
+    }
+
+    /// Forget the SFTP session that failed, and the connection under it when that ended too, so the next request
+    /// starts afresh. A connection that is still alive is left to the others that use it.
+    fn forget(&self, session: &Arc<Session>, sftp: &Arc<SftpSession>) {
+        self.conn.block_on(async {
+            self.conn.drop_sftp(session, sftp).await;
+            if session.is_closed() {
+                self.conn.invalidate(session).await;
+            }
         });
-        let conn = made.map_err(|e| Error::Unsupported(format!("sftp: {e}")))?;
-        *self.conn.lock().unwrap_or_else(PoisonError::into_inner) = Some(conn.clone());
-        Ok(conn)
     }
 
     /// Run one request. A request that fails because the connection is gone is tried once more on a new connection.
     fn run<T, F, Fut>(&self, f: F) -> Result<T>
     where
-        F: Fn(std::sync::Arc<Conn>) -> Fut,
+        F: Fn(Arc<SftpSession>) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, russh_sftp::client::error::Error>>,
     {
+        // The connection counts the request as a use, so the idle reaper never closes it under the request.
+        let _lease = self.conn.lease();
         for attempt in 0..2 {
-            let conn = self.connection()?;
-            let outcome = self.runtime.block_on(async { tokio::time::timeout(REQUEST_TIMEOUT, f(conn)).await });
+            let (session, sftp) = self
+                .conn
+                .block_on(self.conn.sftp())
+                .map_err(|e| Error::Unsupported(format!("sftp: {e}")))?;
+            let outcome = self.conn.block_on(async { tokio::time::timeout(REQUEST_TIMEOUT, f(sftp.clone())).await });
             match outcome {
                 Ok(Ok(value)) => return Ok(value),
-                Ok(Err(e)) if attempt == 0 && is_connection_error(&e) => {
-                    *self.conn.lock().unwrap_or_else(PoisonError::into_inner) = None;
-                }
+                Ok(Err(e)) if attempt == 0 && is_connection_error(&e) => self.forget(&session, &sftp),
                 Ok(Err(e)) => return Err(Error::Unsupported(format!("sftp: {e}"))),
                 Err(_) => {
-                    *self.conn.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                    self.forget(&session, &sftp);
                     return Err(Error::Unsupported("sftp: the request timed out".into()));
                 }
             }
@@ -311,7 +302,7 @@ impl FileSource for SftpSource {
     }
 
     fn home(&self) -> Result<String> {
-        self.run(|c| async move { c.sftp.canonicalize(".").await })
+        self.run(|c| async move { c.canonicalize(".").await })
     }
 
     fn list(&self, path: &str) -> Result<Listing> {
@@ -320,10 +311,10 @@ impl FileSource for SftpSource {
         let (dir, mut entries, truncated) = self.run(|c| {
             let path = path.clone();
             async move {
-                let dir = c.sftp.canonicalize(path).await?;
+                let dir = c.canonicalize(path).await?;
                 let mut entries = Vec::new();
                 let mut truncated = false;
-                for item in c.sftp.read_dir(dir.clone()).await? {
+                for item in c.read_dir(dir.clone()).await? {
                     if entries.len() >= MAX_ENTRIES {
                         truncated = true;
                         break;
@@ -333,7 +324,7 @@ impl FileSource for SftpSource {
                     let link = item.file_type() == FileType::Symlink;
                     let (kind, size, modified) = if link {
                         // A link shows what it points to; one that points nowhere is an other entry.
-                        match c.sftp.metadata(item.path()).await {
+                        match c.metadata(item.path()).await {
                             Ok(target) => (kind_of(target.file_type()), target.len(), target.modified().ok().and_then(secs)),
                             Err(_) => (Kind::Other, 0, None),
                         }
@@ -356,7 +347,7 @@ impl FileSource for SftpSource {
         let (name, meta) = self.run(|c| {
             let path = path.clone();
             async move {
-                let meta = c.sftp.metadata(path.clone()).await?;
+                let meta = c.metadata(path.clone()).await?;
                 Ok((path, meta))
             }
         })?;
@@ -378,7 +369,7 @@ impl FileSource for SftpSource {
         self.run(|c| {
             let path = path.clone();
             async move {
-                let mut file = c.sftp.open(path).await?;
+                let mut file = c.open(path).await?;
                 let size = file.metadata().await?.len();
                 if size > limit {
                     return Ok(Err(too_large(size, limit)));
@@ -401,7 +392,7 @@ impl FileSource for SftpSource {
         self.run(|c| {
             let path = path.clone();
             async move {
-                let mut file = c.sftp.open(path).await?;
+                let mut file = c.open(path).await?;
                 file.seek(std::io::SeekFrom::Start(offset)).await?;
                 let mut bytes = Vec::new();
                 (&mut file).take(len).read_to_end(&mut bytes).await?;
@@ -412,30 +403,148 @@ impl FileSource for SftpSource {
 
     fn write(&self, path: &str, bytes: &[u8]) -> Result<()> {
         bad(path)?;
+        self.put(path, bytes, Mode::KeepOld)
+    }
+}
+
+/// The permissions a file that is put on the host gets.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Those of the file it replaces; a new file keeps what the server gives it.
+    KeepOld,
+    /// These, set on the new file before it takes its place.
+    Exact(u32),
+}
+
+/// The mode a file is made with while its bytes are written, when the caller will set another one afterwards: nobody but the
+/// owner reads or runs a half-written file.
+const MODE_WHILE_WRITING: u32 = 0o600;
+
+impl SftpSource {
+    /// Put `bytes` at `path` as one whole file: written aside, renamed over the old file, with the swap of [`write`]
+    /// when the server will not rename over an existing file. The old file is never removed before the new one is in
+    /// place, and a failure leaves no temporary file behind.
+    fn put(&self, path: &str, bytes: &[u8], mode: Mode) -> Result<()> {
         let path = path.to_owned();
-        let aside = format!("{path}.holzwave-tmp");
+        let aside = format!("{path}{TMP_SUFFIX}");
+        let old = format!("{path}{OLD_SUFFIX}");
+        // The closure may run twice (a lost connection is made again once): the temporary file is opened with truncate,
+        // so a second run writes it afresh. A message that cannot be an `sftp::Error` comes back as the inner `Err`.
         self.run(|c| {
-            let (path, aside) = (path.clone(), aside.clone());
+            let (path, aside, old) = (path.clone(), aside.clone(), old.clone());
             async move {
-                let mode = c.sftp.metadata(path.clone()).await.ok();
-                let mut file = c.sftp.open_with_flags(aside.clone(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE).await?;
-                file.write_all(bytes).await?;
-                file.flush().await?;
-                file.shutdown().await?;
-                if let Some(meta) = mode {
+                let existing = c.metadata(path.clone()).await.ok();
+                let wrote = async {
+                    let flags = OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE;
+                    let mut file = match mode {
+                        Mode::KeepOld => c.open_with_flags(aside.clone(), flags).await?,
+                        Mode::Exact(_) => {
+                            let mut attrs = russh_sftp::protocol::FileAttributes::empty();
+                            attrs.permissions = Some(MODE_WHILE_WRITING);
+                            c.open_with_flags_and_attributes(aside.clone(), flags, attrs).await?
+                        }
+                    };
+                    file.write_all(bytes).await?;
+                    file.flush().await?;
+                    file.shutdown().await?;
+                    Ok::<(), russh_sftp::client::error::Error>(())
+                }
+                .await;
+                if let Err(e) = wrote {
+                    // Whatever was written is not wanted: nothing stays behind, the old file was never touched.
+                    let _ = c.remove_file(aside.clone()).await;
+                    return Err(e);
+                }
+                if let Mode::Exact(bits) = mode {
+                    // The mode is set with the attributes after the data is in; a server that ignores it is found by
+                    // the caller's own check, not trusted.
+                    let mut set = russh_sftp::protocol::FileAttributes::empty();
+                    set.permissions = Some(bits);
+                    let _ = c.set_metadata(aside.clone(), set).await;
+                }
+                let Some(meta) = existing else {
+                    // A new file: one rename, nothing to swap.
+                    return match c.rename(aside.clone(), path).await {
+                        Ok(()) => Ok(Ok(())),
+                        Err(e) => {
+                            let _ = c.remove_file(aside).await;
+                            Err(e)
+                        }
+                    };
+                };
+                if matches!(mode, Mode::KeepOld) {
                     // Keep the permissions of the file that is replaced.
                     let mut keep = russh_sftp::protocol::FileAttributes::empty();
                     keep.permissions = meta.permissions;
-                    let _ = c.sftp.set_metadata(aside.clone(), keep).await;
+                    let _ = c.set_metadata(aside.clone(), keep).await;
                 }
-                if c.sftp.rename(aside.clone(), path.clone()).await.is_err() {
-                    // A server that does not rename over an existing file: remove it, then rename.
-                    c.sftp.remove_file(path.clone()).await?;
-                    c.sftp.rename(aside, path).await?;
+                if c.rename(aside.clone(), path.clone()).await.is_ok() {
+                    return Ok(Ok(()));
                 }
-                Ok(())
+                // A server that does not rename over an existing file (OpenSSH's does not): the old file is moved aside,
+                // the new one put in its place and the old one removed. The old file is never removed before the new
+                // one is in place, and it is put back when the middle step fails.
+                let _ = c.remove_file(old.clone()).await; // a copy left by an earlier failure
+                if let Err(e) = c.rename(path.clone(), old.clone()).await {
+                    let _ = c.remove_file(aside).await;
+                    return Err(e);
+                }
+                if let Err(e) = c.rename(aside.clone(), path.clone()).await {
+                    if c.rename(old.clone(), path.clone()).await.is_ok() {
+                        let _ = c.remove_file(aside).await;
+                        return Err(e);
+                    }
+                    return Ok(Err(format!("the file could not be replaced ({e}); the new text is in {aside} and the old file is in {old}")));
+                }
+                let _ = c.remove_file(old).await; // the new file is in place: a copy that stays is harmless
+                Ok(Ok(()))
             }
-        })
+        })?
+        .map_err(|message| Error::Unsupported(format!("sftp: {message}")))
+    }
+
+    /// Put `bytes` as the executable `name` in the folder `dir_parts` below the home directory of the account (for example
+    /// `[".holzwave", "bin"]`), and return its path. The folders are made when they are missing (a folder that exists is not
+    /// an error and keeps its mode; a new one gets 0700); the file is written aside with 0755, swapped in as [`write`] does
+    /// and given 0755 again once it is in place. Nothing outside the folder is created or changed. The parts are plain
+    /// names: an empty one, `.`, `..` or one with a slash or a NUL is refused.
+    pub fn install_executable(&self, dir_parts: &[&str], name: &str, bytes: &[u8]) -> Result<String> {
+        let plain = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.contains(['/', '\0']);
+        if dir_parts.is_empty() || !dir_parts.iter().all(|part| plain(part)) || !plain(name) {
+            return Err(Error::Unsupported("the install place is not a plain folder and file name".into()));
+        }
+        let mut dir = self.home()?;
+        if !dir.starts_with('/') {
+            return Err(Error::Unsupported("sftp: the home directory is not an absolute path".into()));
+        }
+        for part in dir_parts {
+            dir = format!("{}/{part}", dir.trim_end_matches('/'));
+            let folder = dir.clone();
+            self.run(|c| {
+                let folder = folder.clone();
+                async move {
+                    if c.metadata(folder.clone()).await.is_ok_and(|m| m.is_dir()) {
+                        return Ok(());
+                    }
+                    c.create_dir(folder.clone()).await?;
+                    let mut private = russh_sftp::protocol::FileAttributes::empty();
+                    private.permissions = Some(0o700);
+                    c.set_metadata(folder, private).await
+                }
+            })?;
+        }
+        let path = format!("{dir}/{name}");
+        self.put(&path, bytes, Mode::Exact(0o755))?;
+        let target = path.clone();
+        self.run(|c| {
+            let target = target.clone();
+            async move {
+                let mut exec = russh_sftp::protocol::FileAttributes::empty();
+                exec.permissions = Some(0o755);
+                c.set_metadata(target, exec).await
+            }
+        })?;
+        Ok(path)
     }
 }
 
@@ -566,21 +675,63 @@ mod sftp_tests {
     use std::collections::HashMap;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    /// What the test server is told to get wrong, switched per test. All off: it serves a directory faithfully, and its
+    /// `rename` overwrites an existing target.
+    #[derive(Default)]
+    struct Faults {
+        /// Opening any file fails.
+        fail_open: AtomicBool,
+        /// Writing to any file fails.
+        fail_write: AtomicBool,
+        /// `rename` refuses a target that exists, as OpenSSH's `sftp-server` does.
+        rename_refuses_existing: AtomicBool,
+        /// Moving the file that is being replaced to its `.holzwave-old` name fails.
+        fail_move_aside: AtomicBool,
+        /// Moving the new file to a name that does not exist (its place after the old one was moved away) fails.
+        fail_into_place: AtomicBool,
+        /// Moving a `.holzwave-old` file back fails.
+        fail_restore: AtomicBool,
+    }
+
+    /// The faults of the server and the log of what it was asked, shared with the test.
+    #[derive(Default)]
+    struct Shared {
+        faults: Faults,
+        /// One line per operation that changes something: `open P`, `write P`, `rename OLD NEW`, `remove P`, `setstat P`.
+        log: Mutex<Vec<String>>,
+    }
+
+    impl Shared {
+        fn note(&self, line: String) {
+            self.log.lock().unwrap().push(line);
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+
+        fn on(&self, fault: &AtomicBool) {
+            fault.store(true, Ordering::SeqCst);
+        }
+    }
 
     /// An SSH server with an SFTP subsystem that serves a real directory.
     #[derive(Clone)]
-    struct Fake;
+    struct Fake(Arc<Shared>);
 
     struct Conn {
         channels: HashMap<ChannelId, Channel<Msg>>,
+        shared: Arc<Shared>,
     }
 
     impl server::Server for Fake {
         type Handler = Conn;
         fn new_client(&mut self, _: Option<SocketAddr>) -> Conn {
-            Conn { channels: HashMap::new() }
+            Conn { channels: HashMap::new(), shared: self.0.clone() }
         }
     }
 
@@ -606,7 +757,7 @@ mod sftp_tests {
             if name == "sftp" {
                 if let Some(channel) = self.channels.remove(&id) {
                     session.channel_success(id)?;
-                    russh_sftp::server::run(channel.into_stream(), Files::default()).await;
+                    russh_sftp::server::run(channel.into_stream(), Files { shared: self.shared.clone(), ..Files::default() }).await;
                     return Ok(());
                 }
             }
@@ -624,6 +775,7 @@ mod sftp_tests {
     struct Files {
         handles: HashMap<String, Open>,
         next: u32,
+        shared: Arc<Shared>,
     }
 
     fn status(id: u32, code: StatusCode) -> Status {
@@ -693,6 +845,10 @@ mod sftp_tests {
 
         async fn open(&mut self, id: u32, path: String, flags: russh_sftp::protocol::OpenFlags, _a: FileAttributes) -> std::result::Result<Handle, Self::Error> {
             use russh_sftp::protocol::OpenFlags as F;
+            if self.shared.faults.fail_open.load(Ordering::SeqCst) {
+                return Err(StatusCode::PermissionDenied);
+            }
+            self.shared.note(format!("open {path}"));
             let mut options = std::fs::OpenOptions::new();
             options.read(flags.contains(F::READ)).write(flags.contains(F::WRITE)).create(flags.contains(F::CREATE)).truncate(flags.contains(F::TRUNCATE));
             let file = options.open(&path).map_err(|e| io_status(&e))?;
@@ -716,6 +872,10 @@ mod sftp_tests {
 
         async fn write(&mut self, id: u32, handle: String, offset: u64, data: Vec<u8>) -> std::result::Result<Status, Self::Error> {
             let Some(Open::File(file)) = self.handles.get_mut(&handle) else { return Err(StatusCode::Failure) };
+            if self.shared.faults.fail_write.load(Ordering::SeqCst) {
+                return Err(StatusCode::Failure);
+            }
+            self.shared.note(format!("write {handle}"));
             file.seek(SeekFrom::Start(offset)).map_err(|e| io_status(&e))?;
             file.write_all(&data).map_err(|e| io_status(&e))?;
             Ok(status(id, StatusCode::Ok))
@@ -726,22 +886,50 @@ mod sftp_tests {
             Ok(status(id, StatusCode::Ok))
         }
 
-        async fn setstat(&mut self, id: u32, _path: String, _attrs: FileAttributes) -> std::result::Result<Status, Self::Error> {
+        async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> std::result::Result<Status, Self::Error> {
+            self.shared.note(format!("setstat {path}"));
+            #[cfg(unix)]
+            if let Some(mode) = attrs.permissions {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o7777)).map_err(|e| io_status(&e))?;
+            }
+            #[cfg(not(unix))]
+            let _ = attrs;
             Ok(status(id, StatusCode::Ok))
         }
 
         async fn rename(&mut self, id: u32, old: String, new: String) -> std::result::Result<Status, Self::Error> {
+            let faults = &self.shared.faults;
+            let refuse = (faults.rename_refuses_existing.load(Ordering::SeqCst) && std::path::Path::new(&new).exists())
+                || (faults.fail_move_aside.load(Ordering::SeqCst) && new.ends_with(OLD_SUFFIX))
+                || (faults.fail_into_place.load(Ordering::SeqCst) && old.ends_with(TMP_SUFFIX) && !std::path::Path::new(&new).exists())
+                || (faults.fail_restore.load(Ordering::SeqCst) && old.ends_with(OLD_SUFFIX));
+            self.shared.note(format!("rename {old} {new}"));
+            if refuse {
+                return Err(StatusCode::Failure);
+            }
             std::fs::rename(old, new).map_err(|e| io_status(&e))?;
             Ok(status(id, StatusCode::Ok))
         }
 
         async fn remove(&mut self, id: u32, path: String) -> std::result::Result<Status, Self::Error> {
+            self.shared.note(format!("remove {path}"));
             std::fs::remove_file(path).map_err(|e| io_status(&e))?;
             Ok(status(id, StatusCode::Ok))
         }
     }
 
     fn serve() -> SocketAddr {
+        serve_with(Arc::default())
+    }
+
+    /// A server whose faults and log the test holds.
+    fn serve_shared() -> (SocketAddr, Arc<Shared>) {
+        let shared = Arc::<Shared>::default();
+        (serve_with(shared.clone()), shared)
+    }
+
+    fn serve_with(shared: Arc<Shared>) -> SocketAddr {
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let config = Arc::new(server::Config {
             keys: vec![key],
@@ -755,7 +943,7 @@ mod sftp_tests {
             rt.block_on(async move {
                 let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
                 tx.send(socket.local_addr().unwrap()).unwrap();
-                let _ = Fake.run_on_socket(config, &socket).await;
+                let _ = Fake(shared).run_on_socket(config, &socket).await;
             });
         });
         rx.recv().unwrap()
@@ -822,6 +1010,160 @@ mod sftp_tests {
         src.write(d.join("fresh.txt").to_str().unwrap(), b"x").unwrap();
         assert_eq!(fs::read_to_string(d.join("fresh.txt")).unwrap(), "x");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    fn names(d: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
+    /// The operations of the log that move or remove a file, in order.
+    fn moves(shared: &Shared) -> Vec<String> {
+        shared.log().into_iter().filter(|l| l.starts_with("rename ") || l.starts_with("remove ")).collect()
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temporary_file_and_the_old_file_intact() {
+        let d = scratch("fail-write");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.fail_write);
+        let src = source(addr);
+        assert!(src.write(p.to_str().unwrap(), b"new content").is_err());
+        assert_eq!(names(&d), ["f.txt"], "no temporary file stays");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_open_leaves_nothing() {
+        let d = scratch("fail-open");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.fail_open);
+        let src = source(addr);
+        assert!(src.write(p.to_str().unwrap(), b"new content").is_err());
+        assert!(src.write(d.join("fresh.txt").to_str().unwrap(), b"x").is_err());
+        assert_eq!(names(&d), ["f.txt"]);
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_server_that_refuses_to_rename_over_an_existing_file_still_saves() {
+        let d = scratch("swap");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        let src = source(addr);
+        let target = p.to_str().unwrap();
+        src.write(target, b"new content").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "new content");
+        assert_eq!(names(&d), ["f.txt"], "neither the temporary file nor the old copy stays");
+        // The old file is never removed: it is moved aside, and only that copy is removed once the new file is in place.
+        let (tmp, old) = (format!("{target}.holzwave-tmp"), format!("{target}.holzwave-old"));
+        let log = moves(&shared);
+        assert!(!log.contains(&format!("remove {target}")), "the target is never removed: {log:?}");
+        assert_eq!(
+            log,
+            [
+                format!("rename {tmp} {target}"), // refused: the target exists
+                format!("remove {old}"),          // a copy of an earlier failure, if there is one
+                format!("rename {target} {old}"),
+                format!("rename {tmp} {target}"),
+                format!("remove {old}"),
+            ]
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_swap_restores_the_old_file() {
+        let d = scratch("swap-restore");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        shared.on(&shared.faults.fail_into_place);
+        let src = source(addr);
+        let err = src.write(p.to_str().unwrap(), b"new content").unwrap_err().to_string();
+        assert!(err.starts_with("unsupported: sftp:"), "the save did not succeed: {err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old", "the old file is back under its name");
+        assert_eq!(names(&d), ["f.txt"], "the temporary file is gone and so is the old copy");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_move_aside_leaves_the_old_file_in_place() {
+        let d = scratch("swap-aside");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        shared.on(&shared.faults.fail_move_aside);
+        let src = source(addr);
+        assert!(src.write(p.to_str().unwrap(), b"new content").is_err());
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        assert_eq!(names(&d), ["f.txt"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_restore_says_where_the_new_text_is() {
+        let d = scratch("swap-lost");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        shared.on(&shared.faults.fail_into_place);
+        shared.on(&shared.faults.fail_restore);
+        let src = source(addr);
+        let target = p.to_str().unwrap();
+        let err = src.write(target, b"new content").unwrap_err().to_string();
+        assert!(err.contains(&format!("the new text is in {target}.holzwave-tmp")), "{err}");
+        assert!(err.contains(&format!("the old file is in {target}.holzwave-old")), "{err}");
+        assert_eq!(names(&d), ["f.txt.holzwave-old", "f.txt.holzwave-tmp"]);
+        assert_eq!(fs::read_to_string(d.join("f.txt.holzwave-old")).unwrap(), "old");
+        assert_eq!(fs::read_to_string(d.join("f.txt.holzwave-tmp")).unwrap(), "new content");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_new_file_is_created_without_a_swap() {
+        let d = scratch("fresh");
+        let (addr, shared) = serve_shared();
+        shared.on(&shared.faults.rename_refuses_existing);
+        let src = source(addr);
+        let target = d.join("fresh.txt");
+        let target = target.to_str().unwrap();
+        src.write(target, b"x").unwrap();
+        assert_eq!(names(&d), ["fresh.txt"]);
+        assert_eq!(moves(&shared), [format!("rename {target}.holzwave-tmp {target}")], "one rename, no old copy");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissions_of_the_old_file_are_kept_through_the_swap() {
+        use std::os::unix::fs::PermissionsExt;
+        for refuses in [false, true] {
+            let d = scratch(&format!("mode-{refuses}"));
+            let p = d.join("f.txt");
+            fs::write(&p, "old").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
+            let (addr, shared) = serve_shared();
+            if refuses {
+                shared.on(&shared.faults.rename_refuses_existing);
+            }
+            source(addr).write(p.to_str().unwrap(), b"new content").unwrap();
+            assert_eq!(fs::read_to_string(&p).unwrap(), "new content");
+            assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o640, "swap through a refusing server: {refuses}");
+            let _ = fs::remove_dir_all(&d);
+        }
     }
 
     #[test]

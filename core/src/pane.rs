@@ -51,7 +51,8 @@ use crate::layout::PaneId;
 use crate::platform::{self, Os, ShellLaunch};
 use crate::conn::{ConnState, Link, SharedState};
 use crate::pty::{Pty, SpawnOptions, process_cwd};
-use crate::ssh::{SshLink, SshTarget};
+use crate::pool::Connection;
+use crate::ssh::{SshLink, SshTarget, Tunnel};
 use crate::queue::{PaneQueue, Popped};
 use crate::textread::{MAX_READ_BYTES, MAX_READ_ROWS, TextRead, TextRegion};
 use crate::wire::{FrameEncoder, FrameMsg};
@@ -139,11 +140,19 @@ pub struct PaneSpec {
     /// Run the pane on another machine over SSH instead of a local shell. `program`, `args`, `cwd` and `host_spawn`
     /// are then not used. The pane's own thread reconnects when the connection is lost.
     pub ssh: Option<SshTarget>,
+    /// The connection of a saved SSH profile that this pane runs on, shared with the file browser and the commands of
+    /// the same profile (one login). When it is set the shell takes a channel of it; otherwise `ssh` is connected on a
+    /// connection of the pane's own. [`crate::connections::Connections::apply`] sets both.
+    pub ssh_connection: Option<Arc<Connection>>,
+    /// The tunnel of an SSH pane that runs on `ssh_connection`: the socket forwarded back from the host and the
+    /// environment its shell gets ([`SshLink::attach_with`]). `None` (the default) starts a plain shell; it is not used
+    /// without `ssh_connection`. Its `Debug` prints neither the socket path nor the token.
+    pub tunnel: Option<Tunnel>,
     /// No process at all ([`crate::conn::NullLink`]): the page draws this pane's content itself (a file browser, a
     /// preview). The pane is otherwise a pane like any other: it has a header, can be split, moved and closed.
     pub blank: bool,
     /// Extra environment variables of the local shell (`HOLZWAVE_IPC`, `HOLZWAVE_TOKEN`, `HOLZWAVE_PANE`: what `wsh` finds the
-    /// app by). Not used for an SSH pane: a remote host reaches the app through a tunnel, which is not built yet.
+    /// app by). Not used for an SSH pane: a remote host reaches the app through `tunnel`.
     pub env: Vec<(String, String)>,
 }
 
@@ -166,6 +175,8 @@ impl PaneSpec {
             host_spawn: false,
             cwd_lookup: true,
             ssh: None,
+            ssh_connection: None,
+            tunnel: None,
             blank: false,
             env: Vec::new(),
         }
@@ -232,11 +243,30 @@ impl EditAction {
     }
 }
 
+/// The most bytes of a notice [`PaneHandle::notice`] shows.
+pub const MAX_NOTICE_BYTES: usize = 512;
+
+/// The bytes that show `text` as one warn-colour line of its own: control characters become spaces, so the text can never be
+/// an escape sequence, and the line is cut at [`MAX_NOTICE_BYTES`] on a character boundary.
+fn notice_line(text: &str) -> Vec<u8> {
+    let mut clean = String::with_capacity(text.len().min(MAX_NOTICE_BYTES));
+    for c in text.chars() {
+        let c = if c.is_control() { ' ' } else { c };
+        if clean.len() + c.len_utf8() > MAX_NOTICE_BYTES {
+            break;
+        }
+        clean.push(c);
+    }
+    format!("\r\n\x1b[33m{clean}\x1b[0m\r\n").into_bytes()
+}
+
 /// A message from the shell to the engine thread.
 enum Control {
     Key(DomKey),
     Edit(EditAction),
     Text(String),
+    /// One line for the screen only (never the shell): what the app has to tell about an act of the person.
+    Notice(String),
     /// The engine's answer travels back over `reply`; a dropped sender tells the caller the pane is gone.
     Paste { text: String, allow_unsafe: bool, reply: Sender<Result<PasteOutcome>> },
     Resize { cols: u16, rows: u16, cell_px: (u32, u32) },
@@ -418,6 +448,13 @@ impl PaneHandle {
             return Err(Error::Pty("text too long".into()));
         }
         self.send(Control::Text(text))
+    }
+
+    /// Show one line on the pane's screen, in the warn colour like the lines a connection says: what the app has to tell about
+    /// something the person asked for. It goes to the screen only and never to the shell, control characters in it become
+    /// spaces so it can never be an escape sequence, and at most [`MAX_NOTICE_BYTES`] of it are shown.
+    pub fn notice(&self, text: &str) -> Result<()> {
+        self.send(Control::Notice(text.to_owned()))
     }
 
     /// Send a request and wait for the engine thread's answer, at most [`REPLY_TIMEOUT`].
@@ -781,6 +818,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             Control::Key(dom) => self.key(&dom),
             Control::Edit(action) => self.edit(action),
             Control::Text(text) => self.text(&text),
+            Control::Notice(text) => self.feed(&notice_line(&text)),
             Control::Paste { text, allow_unsafe, reply } => {
                 let outcome = self.engine.paste(&text, allow_unsafe);
                 // A paste comes out of the same buffer as the answers to queries: take it now, so nothing that
@@ -1020,6 +1058,10 @@ where
     }
     if spec.blank {
         return Ok((engine, Box::new(crate::conn::NullLink::new())));
+    }
+    if let Some(connection) = &spec.ssh_connection {
+        let link = SshLink::attach_with(connection.clone(), spec.cols, spec.rows, spec.tunnel.clone())?;
+        return Ok((engine, Box::new(link)));
     }
     if let Some(target) = &spec.ssh {
         let link = SshLink::connect(target.clone(), spec.cols, spec.rows)?;

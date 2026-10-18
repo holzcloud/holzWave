@@ -23,7 +23,7 @@ use holzwave_core::ai::profiles::KeySlot;
 use holzwave_core::ai::service::events::ChatState;
 use holzwave_core::ai::service::{AskView, ContextState, OfferView};
 use holzwave_core::ai::types::ContextKind;
-use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened};
+use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened, Saved};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
 use holzwave_core::engine::{
@@ -797,8 +797,9 @@ pub struct GrantAnswer {
 }
 
 /// Save the editor's text over a file (written aside and renamed over it). `expected_modified` is the change time the
-/// file was opened with: a file that changed meanwhile is not overwritten (`null` overwrites). The answer is the new
-/// change time.
+/// file was opened with and `expected_digest` the SHA-256 of the bytes that were read: with a digest the check is exact
+/// (the file is read again), without one the change time is compared; a file that changed meanwhile is not overwritten
+/// (`null` for both overwrites). The answer is the new change time and the digest of what was written.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn file_save(
     core: State<Arc<AppCore>>,
@@ -806,8 +807,9 @@ pub fn file_save(
     path: String,
     text: String,
     expected_modified: Option<i64>,
-) -> Result<Option<i64>, String> {
-    core.file_save(&source, &path, &text, expected_modified)
+    expected_digest: Option<String>,
+) -> Result<Saved, String> {
+    core.file_save(&source, &path, &text, expected_modified, expected_digest.as_deref())
 }
 
 /// The state of the sync.
@@ -847,6 +849,14 @@ pub fn monitor_sample(core: State<Arc<AppCore>>, pane: PaneId) -> Result<holzwav
     core.monitor_sample(pane)
 }
 
+/// Put the bundled `wsh` on the host of the saved SSH connection the focused pane runs, verify it there and say the result
+/// as a line on the pane. The page names the pane and never a host; the core resolves the connection, and nothing is
+/// installed without this call (the palette action `Install wsh on this host`). The answer is the sentence the pane shows.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn wsh_install(core: State<Arc<AppCore>>, pane: PaneId) -> Result<String, String> {
+    core.wsh_install(pane)
+}
+
 /// Typed commands that match `query` (fuzzy), newest and best first; an empty query lists the newest. The search is the
 /// history of the host the focused pane of the calling window runs on: the page sends no host.
 #[tauri::command(async, rename_all = "snake_case")]
@@ -869,6 +879,19 @@ pub fn history_delete(core: State<Arc<AppCore>>, cmd: String) -> Result<usize, S
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn history_clear(core: State<Arc<AppCore>>) -> Result<(), String> {
     core.history_clear()
+}
+
+/// The person answered the question of a login (a one-time code, a PAM prompt): one answer per question, in order. True when
+/// the question was waiting; an unknown, old or malformed id changes nothing. Nothing of the answers is kept or logged.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn login_prompt_answer(core: State<Arc<AppCore>>, id: String, answers: Vec<String>) -> bool {
+    core.login_prompt_answer(&id, answers)
+}
+
+/// The person gave up on the question of a login. True when it was waiting.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn login_prompt_cancel(core: State<Arc<AppCore>>, id: String) -> bool {
+    core.login_prompt_cancel(&id)
 }
 
 /// The widgets of the sidebar, their saved notes and what was wrong with a widget file.

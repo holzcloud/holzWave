@@ -22,7 +22,8 @@ import { pushKeyHandler } from "./keystack.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
 import { state } from "./state.js";
 import {
-  dirtyPanes, entryIcon, goneChats, humanSize, joinPath, paneBlocks, readBlocks, readListing, setPaneBlocks, shortDate,
+  dirtyPanes, entryIcon, goneChats, humanSize, joinPath, paneBlocks, readBlocks, readDigest, readListing, readSaved, setPaneBlocks,
+  shortDate,
   visibleEntries,
 } from "./blockstate.js";
 import type { BlockInfo, FileEntry, Listing, Opened } from "./blockstate.js";
@@ -311,7 +312,12 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
   let saved = "";
   /** The file's time as last read or saved; sent with a save so a change on disk is noticed. `null` overwrites. */
   let expected: number | null = null;
+  /** The digest of the bytes as last read or saved: what a save is compared with exactly. `null` with `expected`. */
+  let expectedDigest: string | null = null;
   let facts = "";
+  /** `wsh edit` asked for the editor: the first load of a Markdown file opens it at once, once, so that leaving the editor
+   * without changes shows the page as it does for a file that was opened with `wsh view`. */
+  let startInEditor = info.edit === true;
 
   const setDirty = (dirty: boolean): void => {
     if (dirty === dirtyPanes.has(info.pane)) return;
@@ -326,11 +332,14 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
     if (!editor) return;
     const text = editor.getText();
     try {
-      const modified = await call<number | null>("file_save", {
-        source: current.source, path: current.path, text, expected_modified: expected,
-      });
+      const answer = readSaved(
+        await call<unknown>("file_save", {
+          source: current.source, path: current.path, text, expected_modified: expected, expected_digest: expectedDigest,
+        }),
+      );
       saved = text;
-      expected = modified ?? null;
+      expected = answer.modified;
+      expectedDigest = answer.digest;
       status.dataset.failed = "false";
       setDirty(editor.getText() !== saved);
       if (!dirtyPanes.has(info.pane)) setText(status, `saved · ${facts}`);
@@ -339,7 +348,10 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
       status.dataset.failed = "true";
       setText(status, why);
       // A change on disk is said once; the next save overwrites it on purpose.
-      if (why.includes("changed on disk")) expected = null;
+      if (why.includes("changed on disk")) {
+        expected = null;
+        expectedDigest = null;
+      }
     }
   };
 
@@ -402,10 +414,16 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
     facts = `${opened.mime} · ${humanSize(opened.size)}`;
     saved = opened.text ?? "";
     expected = opened.modified ?? null;
+    expectedDigest = readDigest(opened.digest);
     setText(status, facts);
     try {
       switch (opened.content) {
         case "markdown": {
+          if (startInEditor && opened.text !== null) {
+            startInEditor = false;
+            await edit(opened.text, "markdown", true);
+            break;
+          }
           const doc = el("div", "md", body);
           // The core cleaned this HTML; the page copies it through an allow-list of its own and never uses innerHTML.
           doc.tabIndex = 0;
@@ -485,7 +503,10 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
     update(next) {
       const changed = next.path !== current.path || next.source !== current.source;
       current = next;
-      if (changed) void load();
+      if (changed) {
+        startInEditor = next.edit === true;
+        void load();
+      }
     },
     key(e) {
       if (pdf) return pdf.key(e);

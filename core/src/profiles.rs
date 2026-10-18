@@ -49,6 +49,12 @@ pub enum Auth {
     Key,
     /// A password from the keychain.
     Password,
+    /// The user's ssh-agent signs the login. Nothing is stored for the connection; `key_path` may name a public key file
+    /// that picks one of the agent's keys. Never a fallback: a connection uses the login it names.
+    Agent,
+    /// The server asks the questions (a password prompt of PAM, a one-time code, a token's challenge) and the person answers
+    /// each time they connect. Nothing is stored for the connection.
+    Interactive,
 }
 
 fn default_port() -> u16 {
@@ -59,6 +65,9 @@ fn default_attempts() -> u32 {
 }
 fn default_delay() -> u32 {
     3
+}
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +87,8 @@ pub struct Profile {
     pub user: String,
     #[serde(default)]
     pub auth: Auth,
-    /// The private key file (SSH with a key). A `~/` start is the home directory.
+    /// The private key file (SSH with a key). A `~/` start is the home directory. With the agent login it may name a public
+    /// key file that picks one of the agent's keys.
     #[serde(default)]
     pub key_path: String,
     /// The id of the profile to go through first.
@@ -94,6 +104,10 @@ pub struct Profile {
     /// Docker: the shell to start in the container; empty is `sh`.
     #[serde(default)]
     pub shell: String,
+    /// SSH: the person allows the `wsh` tunnel on this host. Off unless ticked, and left out of the file when off, so
+    /// an older file and its sync read the same as before.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wsh: bool,
 }
 
 impl Profile {
@@ -112,6 +126,7 @@ impl Profile {
             reconnect_attempts: 5,
             reconnect_delay_secs: 3,
             shell: String::new(),
+            wsh: false,
         }
     }
 
@@ -150,6 +165,9 @@ impl Profile {
             if let Some(p) = text(label, value, false) {
                 return Some(p);
             }
+        }
+        if self.wsh && self.kind != Kind::Ssh {
+            return Some("wsh only applies to SSH".into());
         }
         match self.kind {
             Kind::Ssh => {
@@ -292,12 +310,21 @@ impl Profiles {
         if profile.kind != Kind::Ssh {
             return Err(Error::Unsupported(format!("{} is not an SSH connection", profile.name)));
         }
-        let secret = secrets.get(&profile.secret_account())?;
         let auth = match profile.auth {
+            // The agent signs: nothing is stored for the connection, so the keychain is not asked.
+            Auth::Agent => SshAuth::Agent {
+                socket: None,
+                identity: (!profile.key_path.trim().is_empty()).then(|| expand_home(&profile.key_path, home)),
+            },
+            // The person answers every time: nothing is stored, the keychain is not asked, and the program that owns the
+            // profiles puts the prompter in (`Connections::set_prompter`).
+            Auth::Interactive => SshAuth::Interactive { prompter: None },
             Auth::Password => SshAuth::Password(
-                secret.ok_or_else(|| Error::Unsupported(format!("no password is saved for {}", profile.name)))?,
+                secrets
+                    .get(&profile.secret_account())?
+                    .ok_or_else(|| Error::Unsupported(format!("no password is saved for {}", profile.name)))?,
             ),
-            Auth::Key => SshAuth::Key { path: expand_home(&profile.key_path, home), passphrase: secret },
+            Auth::Key => SshAuth::Key { path: expand_home(&profile.key_path, home), passphrase: secrets.get(&profile.secret_account())? },
         };
         let mut target = SshTarget::new(profile.host.clone(), profile.user.clone(), auth);
         target.port = profile.port;
@@ -545,6 +572,122 @@ mod tests {
         assert_eq!(d.args, ["exec", "-it", "web-1", "bash"]);
         list.upsert(ssh("a")).unwrap();
         assert!(list.local_command("a").is_none());
+    }
+
+    #[test]
+    fn an_old_profile_without_wsh_loads_as_false_and_a_false_one_is_not_written() {
+        let old = r#"{"version":1,"items":[{"id":"talos","name":"Talos","host":"h","user":"u","key_path":"k"}]}"#;
+        let (list, status) = Profiles::from_json(old);
+        assert_eq!(status, LoadStatus::Clean);
+        assert!(!list.get("talos").unwrap().wsh, "a file written before the field means false");
+        assert!(!list.to_json().contains("wsh"), "a false value is not written");
+
+        let mut on = ssh("web");
+        on.wsh = true;
+        let mut both = Profiles::default();
+        both.upsert(ssh("off")).unwrap();
+        both.upsert(on).unwrap();
+        let text = both.to_json();
+        assert_eq!(text.matches("\"wsh\": true").count(), 1, "only the ticked profile writes it: {text}");
+        assert_eq!(text.matches("wsh").count(), 1, "{text}");
+        let (back, status) = Profiles::from_json(&text);
+        assert_eq!(status, LoadStatus::Clean);
+        assert!(back.get("web").unwrap().wsh && !back.get("off").unwrap().wsh);
+        assert_eq!(back, both);
+    }
+
+    #[test]
+    fn wsh_only_applies_to_ssh() {
+        let mut ok = ssh("a");
+        ok.wsh = true;
+        assert_eq!(ok.problem(), None);
+        for kind in [Kind::Wsl, Kind::Docker] {
+            let mut p = Profile::new("b", "B", "box");
+            p.kind = kind;
+            p.wsh = true;
+            assert_eq!(p.problem().as_deref(), Some("wsh only applies to SSH"), "{kind:?}");
+            p.wsh = false;
+            assert_eq!(p.problem(), None, "{kind:?} without it is fine");
+        }
+        let mut list = Profiles::default();
+        let mut w = Profile::new("w", "W", "Ubuntu");
+        w.kind = Kind::Wsl;
+        w.wsh = true;
+        assert!(list.upsert(w).is_err() && list.items.is_empty(), "a save is refused and changes nothing");
+        // A file that carries it on a WSL profile loses that profile with a note, and keeps the valid one.
+        let text = r#"{"version":1,"items":[
+            {"id":"w","name":"W","kind":"wsl","host":"Ubuntu","wsh":true},
+            {"id":"s","name":"S","host":"h","user":"u","key_path":"k","wsh":true}]}"#;
+        let (list, status) = Profiles::from_json(text);
+        assert_eq!(list.items.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["s"]);
+        let LoadStatus::Repaired(notes) = status else { panic!("not repaired") };
+        assert!(notes.iter().any(|n| n.contains("wsh only applies to SSH")), "{notes:?}");
+        assert!(list.get("s").unwrap().wsh);
+    }
+
+    #[test]
+    fn the_field_travels_in_the_synced_connection_list() {
+        // The sync moves `connections.json` as bytes, so the bytes of one device must read the same on another. A
+        // list from a build that knows no `wsh` has every profile false; one with it keeps it through a file.
+        let dir = std::env::temp_dir().join(format!("holzwave-profiles-wsh-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut list = Profiles::default();
+        let mut ticked = ssh("ticked");
+        ticked.wsh = true;
+        list.upsert(ticked).unwrap();
+        list.upsert(ssh("plain")).unwrap();
+        list.save(&dir).unwrap();
+        let bytes = fs::read(dir.join(FILE)).unwrap();
+        let other = std::env::temp_dir().join(format!("holzwave-profiles-wsh-b-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&other);
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join(FILE), &bytes).unwrap();
+        let (b, status) = Profiles::load(&other);
+        assert_eq!(status, LoadStatus::Clean);
+        assert!(b.get("ticked").unwrap().wsh && !b.get("plain").unwrap().wsh);
+        assert_eq!(b, list);
+        let old = r#"{"version":1,"items":[{"id":"a","name":"A","host":"h","user":"u","key_path":"k"},{"id":"b","name":"B","host":"h","user":"u","key_path":"k"}]}"#;
+        let (c, _) = Profiles::from_json(old);
+        assert!(c.items.iter().all(|p| !p.wsh));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn saving_a_connection_with_wsh_changes_no_secret() {
+        use crate::connections::{Connections, SecretChange};
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("holzwave-profiles-wsh-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let secrets = Arc::new(MemoryStore::default());
+        let (c, _) = Connections::load(&dir, secrets.clone(), Some(PathBuf::from("/home/holz")), &[]);
+        let mut p = Profile::new("", "Talos", "host.example.org");
+        p.user = "holz".into();
+        p.auth = Auth::Password;
+        let saved = c.save(p, SecretChange::Set { value: "hunter2".into() }).unwrap();
+        assert!(!saved.profile.wsh);
+        let before = c.generation();
+        let mut flipped = saved.profile.clone();
+        flipped.wsh = true;
+        let view = c.save(flipped, SecretChange::Keep).unwrap();
+        assert!(view.profile.wsh && view.has_secret);
+        assert_eq!(secrets.get("ssh:talos").unwrap().as_deref(), Some("hunter2"), "the keychain entry is as it was");
+        assert_eq!(c.generation(), before + 1, "one save, one generation");
+        assert!(c.list()[0].profile.wsh);
+        let file = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(file.contains("\"wsh\": true") && !file.contains("hunter2"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_view_for_the_page_lists_wsh_only_when_true() {
+        use crate::connections::ProfileView;
+        let off = serde_json::to_value(ProfileView { profile: ssh("a"), has_secret: false }).unwrap();
+        assert!(off.get("wsh").is_none(), "{off}");
+        let mut p = ssh("b");
+        p.wsh = true;
+        let on = serde_json::to_value(ProfileView { profile: p, has_secret: true }).unwrap();
+        assert_eq!(on.get("wsh"), Some(&serde_json::Value::Bool(true)), "{on}");
     }
 
     #[test]

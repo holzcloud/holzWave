@@ -7,7 +7,7 @@ import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
-import { OFF, clock, conflictText, endpointText, lastText, readSync, syncLabel } from "./syncstate.js";
+import { OFF, clock, conflictText, endpointText, lastText, readSync, removedText, syncLabel } from "./syncstate.js";
 import type { SyncStatus } from "./syncstate.js";
 
 let status: SyncStatus = OFF;
@@ -170,6 +170,8 @@ function configured(box: HTMLElement, _note: HTMLElement, _render: (m?: string, 
   el("p", "label sy-group", box).textContent = "Synced";
   el("p", "sy-sub", box).textContent = "Settings · themes · connections · layouts";
   el("p", "sy-sub", box).textContent = "Secrets only inside the encrypted files";
+  const removed = removedText(status);
+  if (removed !== "") el("p", "sy-sub sy-removed", box).textContent = removed;
   if (status.restart) el("p", "sy-restart", box).textContent = "Changes from another computer arrived. They apply at the next start.";
 }
 

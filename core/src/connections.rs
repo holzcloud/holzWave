@@ -18,9 +18,13 @@ use serde::{Deserialize, Serialize};
 use crate::conn::ConnState;
 use crate::layout::{LoadStatus, PaneId};
 use crate::pane::PaneSpec;
+use crate::platform::Os;
+use crate::pool::{Connection, SessionPool};
 use crate::persist::{read_limited, write_atomic};
-use crate::profiles::{Kind, Profile, Profiles};
+use crate::profiles::{Auth, Kind, Profile, Profiles};
 use crate::secrets::SecretStore;
+use crate::ssh::{PromptAnswer, PromptRound, Prompter, SshAuth, SshTarget};
+use crate::sync::webdav::safe_segment;
 use crate::{Error, Result};
 
 pub const PANES_FILE: &str = "pane_connections.json";
@@ -85,14 +89,44 @@ impl ConnView {
     }
 }
 
+/// Said when a WSL connection is assigned or started anywhere but on Windows: `wsl.exe` exists there only.
+pub const WSL_ONLY_ON_WINDOWS: &str = "WSL connections open on Windows only.";
+
+/// Said when a password or passphrase is saved for a connection that logs in through the ssh-agent.
+pub const AGENT_HAS_NO_SECRET: &str = "an agent login has no password or passphrase";
+
+/// Said when a password or code is saved for a connection whose login is answered by the person each time.
+pub const INTERACTIVE_HAS_NO_SECRET: &str = "an interactive login has no saved password or code";
+
+/// The prompter of one saved connection: it puts the connection's id into every round before it goes on to the program's
+/// prompter, so the dialog names the connection from the person's own list and never by what the server calls itself. A
+/// jump host's login has its own, with the jump host's id.
+struct ProfilePrompter {
+    profile: String,
+    inner: Arc<dyn Prompter>,
+}
+
+impl Prompter for ProfilePrompter {
+    fn ask(&self, mut round: PromptRound) -> PromptAnswer {
+        round.connection.clone_from(&self.profile);
+        self.inner.ask(round)
+    }
+}
+
 pub struct Connections {
     dir: PathBuf,
+    /// The OS the connections open on: a WSL connection is refused unless it is Windows. A field so a test can say it.
+    os: Os,
     home: Option<PathBuf>,
     profiles: Mutex<Profiles>,
     secrets: Arc<dyn SecretStore>,
     panes: Mutex<HashMap<PaneId, String>>,
     /// Counts the saves and deletes, so what was made from a connection (a file source) knows when it is out of date.
     generation: AtomicU64,
+    /// The SSH connection of each saved profile, shared by the file browser, the monitor and the agent's commands.
+    pool: Arc<SessionPool>,
+    /// Who asks the person when a login of an interactive connection has questions. Set once by the program.
+    prompter: Mutex<Option<Arc<dyn Prompter>>>,
 }
 
 impl Connections {
@@ -107,8 +141,32 @@ impl Connections {
             _ => HashMap::new(),
         };
         panes.retain(|pane, id| live_panes.contains(pane) && profiles.get(id).is_some());
-        let me = Self { dir: dir.to_path_buf(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0) };
+        let me = Self { dir: dir.to_path_buf(), os: Os::current(), home, profiles: Mutex::new(profiles), secrets, panes: Mutex::new(panes), generation: AtomicU64::new(0), pool: SessionPool::new(), prompter: Mutex::new(None) };
         (me, status)
+    }
+
+    /// The same connections as if they ran on `os` (the seam the tests use; [`load`](Self::load) takes the real OS).
+    #[must_use]
+    pub fn for_os(mut self, os: Os) -> Self {
+        self.os = os;
+        self
+    }
+
+    /// The refusal of a connection that cannot open on this OS: a WSL profile off Windows. The profile stays in the
+    /// list and in the sync (one made on Windows must survive on a Mac); only opening it is refused.
+    fn check_opens_here(&self, profile: &Profile) -> Result<()> {
+        if profile.kind == Kind::Wsl && self.os != Os::Windows {
+            return Err(Error::Unsupported(WSL_ONLY_ON_WINDOWS.into()));
+        }
+        Ok(())
+    }
+
+    /// Whether connection `id` can be opened on this OS, said before a tab is made for it.
+    pub fn ensure_opens_here(&self, id: &str) -> Result<()> {
+        match self.profiles().get(id) {
+            Some(profile) => self.check_opens_here(profile),
+            None => Err(Error::Unsupported(format!("no connection {id}"))),
+        }
     }
 
     fn profiles(&self) -> std::sync::MutexGuard<'_, Profiles> {
@@ -119,7 +177,39 @@ impl Connections {
         self.panes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Who asks the person the questions of a keyboard-interactive login (a one-time code, a PAM prompt). Takes effect for the
+    /// targets made after it; the program sets it once, before any connection is used. With none set such a login fails
+    /// with a sentence instead of asking.
+    pub fn set_prompter(&self, prompter: Arc<dyn Prompter>) {
+        *self.prompter.lock().unwrap_or_else(PoisonError::into_inner) = Some(prompter);
+    }
+
+    /// Put a prompter that stamps its profile's id into every interactive login of `target` and of its jump chain. `id` is
+    /// the profile `target` was made from.
+    fn stamp_prompters(&self, profiles: &Profiles, id: &str, target: &mut SshTarget) {
+        let Some(inner) = self.prompter.lock().unwrap_or_else(PoisonError::into_inner).clone() else { return };
+        let (mut id, mut target) = (id, target);
+        loop {
+            if let SshAuth::Interactive { prompter } = &mut target.auth {
+                *prompter = Some(Arc::new(ProfilePrompter { profile: id.to_owned(), inner: inner.clone() }));
+            }
+            let Some(next) = profiles.get(id).and_then(|p| p.jump.as_deref()) else { return };
+            let Some(jump) = target.jump.as_deref_mut() else { return };
+            (id, target) = (next, jump);
+        }
+    }
+
+    /// What the connection `id` is called and where it goes, as the person saved it: the name and the host for the title
+    /// of a login dialog. Never from a server.
+    pub fn identity_of(&self, id: &str) -> Option<(String, String)> {
+        self.profiles().get(id).filter(|p| p.kind == Kind::Ssh).map(|p| (p.name.clone(), p.host.clone()))
+    }
+
     fn view(&self, profile: &Profile) -> ProfileView {
+        // An agent or interactive login has no secret and the keychain is not asked.
+        if profile.kind == Kind::Ssh && matches!(profile.auth, Auth::Agent | Auth::Interactive) {
+            return ProfileView { profile: profile.clone(), has_secret: false };
+        }
         // A keychain that cannot be read counts as no secret: the list must still show.
         let has_secret = self.secrets.get(&profile.secret_account()).ok().flatten().is_some();
         ProfileView { profile: profile.clone(), has_secret }
@@ -148,7 +238,19 @@ impl Connections {
     /// The SSH target of connection `id`, with its login from the keychain and its jump hosts. For the file sources.
     pub fn ssh_target(&self, id: &str) -> Result<crate::ssh::SshTarget> {
         let profiles = self.profiles().clone();
-        profiles.ssh_target(id, self.secrets.as_ref(), self.home.as_deref(), &self.dir.join(KNOWN_HOSTS_FILE))
+        let mut target = profiles.ssh_target(id, self.secrets.as_ref(), self.home.as_deref(), &self.dir.join(KNOWN_HOSTS_FILE))?;
+        self.stamp_prompters(&profiles, id, &mut target);
+        Ok(target)
+    }
+
+    /// The shared SSH connection of profile `id` for the current version of the connection list: the one login that the
+    /// file browser, the monitor and the agent's commands use. A save or delete makes the next call build a new one.
+    /// The keychain is read only when the pool has none for this version yet.
+    pub fn session(&self, id: &str) -> Result<Arc<Connection>> {
+        self.pool.connection(id, self.generation(), || {
+            let label = self.label_of(id).unwrap_or_else(|| id.to_owned());
+            Ok((label, self.ssh_target(id)?))
+        })
     }
 
     /// Every saved connection.
@@ -160,15 +262,33 @@ impl Connections {
     /// Add or change a connection and its secret. An id that is empty is made from the name. Validated as a whole;
     /// nothing is written when it does not validate. The keychain is written before the file, and rolled back when the
     /// file cannot be written.
+    ///
+    /// An agent login has no secret: a password or passphrase for it is refused before anything is written, and the
+    /// keychain entry an earlier login of the connection left is removed once the file is saved (the keychain is not read).
     pub fn save(&self, mut profile: Profile, secret: SecretChange) -> Result<ProfileView> {
         let mut profiles = self.profiles();
         if profile.id.trim().is_empty() {
             profile.id = profiles.fresh_id(&profile.name);
         }
         let account = profile.secret_account();
-        let previous_secret = self.secrets.get(&account).ok().flatten();
+        // An agent or an interactive login has no secret to keep.
+        let agent = matches!(profile.auth, Auth::Agent | Auth::Interactive) && profile.kind == Kind::Ssh;
+        if agent && matches!(secret, SecretChange::Set { .. }) {
+            let why = if profile.auth == Auth::Agent { AGENT_HAS_NO_SECRET } else { INTERACTIVE_HAS_NO_SECRET };
+            return Err(Error::Unsupported(why.into()));
+        }
         let mut next = profiles.clone();
         next.upsert(profile.clone())?;
+        if agent {
+            next.save(&self.dir).map_err(Error::Io)?;
+            // Not an error when it cannot be removed: the entry is unused and the person can clear it from the keychain.
+            let _ = self.secrets.delete(&account);
+            *profiles = next;
+            drop(profiles);
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            return Ok(ProfileView { profile, has_secret: false });
+        }
+        let previous_secret = self.secrets.get(&account).ok().flatten();
         match &secret {
             SecretChange::Keep => {}
             SecretChange::Set { value } if !value.is_empty() => self.secrets.set(&account, value)?,
@@ -207,11 +327,20 @@ impl Connections {
         Ok(())
     }
 
+    /// Delete the keychain entries `ssh:<id>` of the connections that went (another computer deleted them). Only an id
+    /// that is a safe name of at most 64 bytes is used and only an account that starts with `ssh:` is touched; a missing
+    /// entry is fine and any other error is left for the next start to try again.
+    pub fn forget_secrets(&self, ids: &[String]) {
+        for id in ids {
+            if id.len() <= 64 && safe_segment(id) {
+                let _ = self.secrets.delete(&format!("ssh:{id}"));
+            }
+        }
+    }
+
     /// Say that `pane` runs connection `id`. Takes effect when the pane is started.
     pub fn assign(&self, pane: PaneId, id: &str) -> Result<()> {
-        if self.profiles().get(id).is_none() {
-            return Err(Error::Unsupported(format!("no connection {id}")));
-        }
+        self.ensure_opens_here(id)?;
         self.panes().insert(pane, id.to_owned());
         self.save_panes();
         Ok(())
@@ -235,10 +364,15 @@ impl Connections {
     pub fn apply(&self, pane: PaneId, spec: &mut PaneSpec) -> Result<()> {
         let Some(profile) = self.profile_of(pane) else { return Ok(()) };
         let profiles = self.profiles().clone();
+        self.check_opens_here(&profile)?;
         match profile.kind {
             Kind::Ssh => {
                 let known = self.dir.join(KNOWN_HOSTS_FILE);
-                spec.ssh = Some(profiles.ssh_target(&profile.id, self.secrets.as_ref(), self.home.as_deref(), &known)?);
+                let mut target = profiles.ssh_target(&profile.id, self.secrets.as_ref(), self.home.as_deref(), &known)?;
+                self.stamp_prompters(&profiles, &profile.id, &mut target);
+                spec.ssh = Some(target);
+                // The pane's shell takes a channel of the profile's one login, shared with its files and commands.
+                spec.ssh_connection = Some(self.session(&profile.id)?);
             }
             Kind::Wsl | Kind::Docker => {
                 let command = profiles
@@ -304,6 +438,28 @@ mod tests {
         let secrets = Arc::new(MemoryStore::default());
         let (c, _) = Connections::load(d, secrets.clone(), Some(PathBuf::from("/home/holz")), live);
         (c, secrets)
+    }
+
+    #[test]
+    fn forget_secrets_deletes_exactly_the_named_accounts() {
+        let d = dir("forget");
+        let (c, secrets) = manager(&d, &[]);
+        for account in ["ssh:web", "ssh:db", "ai:key", "web", "ssh:a/b", "ssh:..", "ssh:x:y"] {
+            secrets.set(account, "s3cret").unwrap();
+        }
+        c.forget_secrets(&["web".to_owned(), "gone".to_owned()]);
+        assert_eq!(secrets.get("ssh:web").unwrap(), None, "the named account goes; a missing one is fine");
+        assert_eq!(secrets.get("ssh:db").unwrap().as_deref(), Some("s3cret"));
+        assert_eq!(secrets.get("ai:key").unwrap().as_deref(), Some("s3cret"), "an account that is not a connection is never touched");
+        assert_eq!(secrets.get("web").unwrap().as_deref(), Some("s3cret"));
+        // An id that is not a safe name is ignored, whatever account it would build.
+        let long = "a".repeat(65);
+        c.forget_secrets(&["a/b".into(), "..".into(), "x:y".into(), String::new(), long, "..".into()]);
+        for account in ["ssh:a/b", "ssh:..", "ssh:x:y"] {
+            assert_eq!(secrets.get(account).unwrap().as_deref(), Some("s3cret"), "{account}");
+        }
+        c.forget_secrets(&["db".into()]);
+        assert_eq!(secrets.get("ssh:db").unwrap(), None);
     }
 
     #[test]
@@ -391,6 +547,37 @@ mod tests {
     }
 
     #[test]
+    fn apply_sets_the_connection_and_the_target() {
+        let d = dir("apply-conn");
+        let (c, _) = manager(&d, &[1, 2, 3]);
+        let id = c.save(profile("Talos"), SecretChange::Set { value: "pw".into() }).unwrap().profile.id;
+        c.assign(2, &id).unwrap();
+        c.assign(3, &id).unwrap();
+        let (mut local, mut one, mut two) = (PaneSpec::new("sh", 80, 24), PaneSpec::new("sh", 80, 24), PaneSpec::new("sh", 80, 24));
+        c.apply(1, &mut local).unwrap();
+        assert!(local.ssh.is_none() && local.ssh_connection.is_none(), "an unassigned pane stays local");
+        c.apply(2, &mut one).unwrap();
+        c.apply(3, &mut two).unwrap();
+        assert_eq!(one.ssh.as_ref().unwrap().host, "host.example.org", "the target is kept for every reader of `ssh`");
+        let (a, b) = (one.ssh_connection.clone().unwrap(), two.ssh_connection.clone().unwrap());
+        assert!(Arc::ptr_eq(&a, &b), "the panes of one profile share one connection");
+        assert!(Arc::ptr_eq(&a, &c.session(&id).unwrap()), "and it is the one the files and the commands use");
+        assert_eq!(a.target().host, "host.example.org");
+        let shown = format!("{one:?}");
+        assert!(!shown.contains("pw\""), "the Debug of a spec shows no password: {shown}");
+
+        // A Docker profile gives neither a target nor a connection.
+        let mut p = Profile::new("", "Web", "web-1");
+        p.kind = Kind::Docker;
+        let docker = c.save(p, SecretChange::Keep).unwrap().profile.id;
+        c.assign(1, &docker).unwrap();
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        c.apply(1, &mut spec).unwrap();
+        assert!(spec.ssh.is_none() && spec.ssh_connection.is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_docker_connection_changes_the_program_not_the_transport() {
         let d = dir("docker");
         let (c, _) = manager(&d, &[7]);
@@ -418,6 +605,70 @@ mod tests {
         assert_eq!(c.kind_of(&wsl), Some(Kind::Wsl));
         assert_eq!(c.kind_of("nope"), None);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    fn wsl_profile() -> Profile {
+        let mut p = Profile::new("", "Box", "Ubuntu");
+        p.kind = Kind::Wsl;
+        p
+    }
+
+    #[test]
+    fn a_wsl_connection_is_refused_off_windows() {
+        for os in [Os::Macos, Os::Linux] {
+            let d = dir(&format!("wsl-{}", os.name()));
+            let (c, _) = manager(&d, &[3, 4]);
+            let c = c.for_os(os);
+            let id = c.save(wsl_profile(), SecretChange::Keep).unwrap().profile.id;
+            let err = c.assign(3, &id).unwrap_err().to_string();
+            assert!(err.contains(WSL_ONLY_ON_WINDOWS), "{os:?}: {err}");
+            assert!(c.profile_of(3).is_none());
+            assert!(!d.join(PANES_FILE).exists(), "nothing is written for a refused assignment");
+            // The profile itself stays in the list.
+            assert_eq!(c.list().len(), 1);
+
+            // An older file (a profile that was assigned on Windows) is read, and applying it is refused.
+            fs::write(d.join(PANES_FILE), format!("{{\"4\":\"{id}\"}}")).unwrap();
+            let (again, _) = Connections::load(&d, Arc::new(MemoryStore::default()), None, &[3, 4]);
+            let again = again.for_os(os);
+            let mut spec = PaneSpec::new("sh", 80, 24);
+            let err = again.apply(4, &mut spec).unwrap_err().to_string();
+            assert!(err.contains(WSL_ONLY_ON_WINDOWS), "{os:?}: {err}");
+            assert_eq!(spec.program, "sh", "the pane stays a local shell");
+            let _ = fs::remove_dir_all(&d);
+        }
+        let d = dir("wsl-windows");
+        let (c, _) = manager(&d, &[3]);
+        let c = c.for_os(Os::Windows);
+        let id = c.save(wsl_profile(), SecretChange::Keep).unwrap().profile.id;
+        c.assign(3, &id).unwrap();
+        let mut spec = PaneSpec::new("pwsh", 80, 24);
+        c.apply(3, &mut spec).unwrap();
+        assert_eq!(spec.program, "wsl.exe");
+        assert_eq!(spec.args, ["-d", "Ubuntu"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn docker_and_ssh_connections_are_not_gated() {
+        for os in [Os::Macos, Os::Linux, Os::Windows] {
+            let d = dir(&format!("ungated-{}", os.name()));
+            let (c, _) = manager(&d, &[1, 2]);
+            let c = c.for_os(os);
+            let ssh = c.save(profile("Talos"), SecretChange::Set { value: "pw".into() }).unwrap().profile.id;
+            let mut docker = Profile::new("", "Web", "web-1");
+            docker.kind = Kind::Docker;
+            let docker = c.save(docker, SecretChange::Keep).unwrap().profile.id;
+            c.assign(1, &ssh).unwrap();
+            c.assign(2, &docker).unwrap();
+            let mut spec = PaneSpec::new("sh", 80, 24);
+            c.apply(1, &mut spec).unwrap();
+            assert!(spec.ssh.is_some());
+            let mut spec = PaneSpec::new("sh", 80, 24);
+            c.apply(2, &mut spec).unwrap();
+            assert_eq!(spec.program, "docker");
+            let _ = fs::remove_dir_all(&d);
+        }
     }
 
     #[test]

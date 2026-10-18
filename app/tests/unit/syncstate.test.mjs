@@ -1,7 +1,7 @@
 // The sync status the page reads from the core, and the words for it (src/syncstate.ts, built into dist/).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { OFF, conflictText, endpointText, lastText, readSync, syncLabel } from "../../dist/syncstate.js";
+import { OFF, conflictText, endpointText, lastText, readSync, removedText, syncLabel } from "../../dist/syncstate.js";
 
 test("anything that is not an object is the off state", () => {
   for (const raw of [null, undefined, 3, "x", []]) assert.deepEqual(readSync(raw), OFF);
@@ -31,4 +31,19 @@ test("the texts of the popover", () => {
   assert.match(conflictText({ ...OFF, conflicts: 2 }), /^2 · /);
   assert.equal(endpointText({ ...OFF, endpoint: "https://c.example/remote.php/dav/", user: "holz" }), "c.example/remote.php/dav · holz");
   assert.equal(endpointText({ ...OFF, endpoint: "nonsense", user: "u" }), "nonsense · u");
+});
+
+test("removedText is empty at zero and a sentence otherwise", () => {
+  assert.equal(removedText(OFF), "");
+  assert.equal(removedText({ ...OFF, removed: 1 }), "Removed on another computer: 1. Copies are kept in sync-conflicts.");
+  assert.equal(removedText({ ...OFF, removed: 3 }), "Removed on another computer: 3. Copies are kept in sync-conflicts.");
+});
+
+test("readSync reads removed as a non-negative whole number and defaults to 0", () => {
+  assert.equal(readSync({ configured: true }).removed, 0);
+  assert.equal(readSync({ removed: 2 }).removed, 2);
+  assert.equal(readSync({ removed: 2.9 }).removed, 2);
+  assert.equal(readSync({ removed: -4 }).removed, 0);
+  assert.equal(readSync({ removed: "7" }).removed, 0);
+  assert.equal(readSync({ removed: Number.NaN }).removed, 0);
 });

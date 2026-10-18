@@ -8,24 +8,27 @@
 //! wsh ai [--] <prompt>...      ask the model of this holzWave; text piped in is sent along; the answer is printed
 //! wsh init <bash|zsh|fish>    print the hook that feeds the history and marks where each command's output starts and ends; add `eval "$(wsh init bash)"` to the shell's rc file
 //! wsh init <shell> --ctrl-r   also bind Ctrl+R to open the history dialog; plain Ctrl+R stays with the shell without the flag
+//! wsh version                 print the version of this `wsh`; it needs no app (the install on a host compares it)
 //! ```
 //!
 //! `wsh hist add` and `wsh hist open` are for the hooks and the key binding: the first reports a command the shell ran, the
 //! second asks the app to open its history search for this pane.
 //!
-//! It finds the app through three variables holzWave sets in every pane it starts: `HOLZWAVE_IPC` (the folder of the
-//! socket), `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE`. Outside a holzWave terminal it says so and does nothing.
+//! It finds the app through variables holzWave sets in every pane it starts: `HOLZWAVE_IPC` (the folder of the socket) on this
+//! computer, or `HOLZWAVE_SOCKET` (the path of one socket: the end of a forward) on a host reached over SSH, which wins when
+//! both are set, and in both cases `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE`. Outside a holzWave terminal it says so and does nothing.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
-use holzwave_ipc::{Cmd, Request, Response};
+use holzwave_ipc::{Cmd, Endpoint, Request, Response};
 
 mod ai;
 mod b64;
 mod clean;
 
-const USAGE: &str = "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | ai [--] <prompt>... | init <bash|zsh|fish|powershell> [--ctrl-r]";
+const USAGE: &str =
+    "usage: wsh view <file> | edit <file> | setmeta title <text> | ping | ai [--] <prompt>... | init <bash|zsh|fish|powershell> [--ctrl-r] | version";
 
 /// The hooks that tell holzWave each command a shell ran and mark where its output starts and ends. They are files under
 /// `hooks/` so the shells and the tests can read the very text that `wsh init` prints. They run only inside a holzWave pane
@@ -115,15 +118,30 @@ fn parse(args: &[String], cwd: &Path) -> Result<Cmd, String> {
     }
 }
 
-/// Where the app is: the folder of its socket, the token and the pane this terminal is, from the variables holzWave sets in
-/// every pane it starts.
-fn app_env() -> Result<(PathBuf, String, Option<u64>), (u8, String)> {
-    let (Some(dir), Some(token)) = (std::env::var_os("HOLZWAVE_IPC"), std::env::var("HOLZWAVE_TOKEN").ok()) else {
-        return Err((1, "wsh: this is not a holzWave terminal (HOLZWAVE_IPC and HOLZWAVE_TOKEN are not set)".into()));
+/// The text `wsh version` prints: the name and the version of this build, which the install on a host compares.
+fn version_text() -> String {
+    format!("wsh {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Where the app is: its endpoint, the token and the pane this terminal is, from the variables holzWave sets in every pane it
+/// starts. `HOLZWAVE_SOCKET` (a path, set on a host reached over SSH) wins over `HOLZWAVE_IPC` (a folder).
+fn app_env() -> Result<(Endpoint, String, Option<u64>), (u8, String)> {
+    let socket = std::env::var_os("HOLZWAVE_SOCKET").filter(|s| !s.is_empty());
+    let dir = std::env::var_os("HOLZWAVE_IPC");
+    let endpoint = match (socket, dir) {
+        (Some(socket), _) if cfg!(unix) => Endpoint::Socket(socket.into()),
+        (_, Some(dir)) => Endpoint::Dir(dir.into()),
+        _ => return Err((1, NOT_HOLZWAVE.into())),
+    };
+    let Some(token) = std::env::var("HOLZWAVE_TOKEN").ok() else {
+        return Err((1, NOT_HOLZWAVE.into()));
     };
     let pane = std::env::var("HOLZWAVE_PANE").ok().and_then(|p| p.parse().ok());
-    Ok((PathBuf::from(dir), token, pane))
+    Ok((endpoint, token, pane))
 }
+
+/// What `wsh` says outside a holzWave terminal.
+const NOT_HOLZWAVE: &str = "wsh: this is not a holzWave terminal (HOLZWAVE_IPC or HOLZWAVE_SOCKET, and HOLZWAVE_TOKEN, are not set)";
 
 fn run() -> Result<String, (u8, String)> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -133,10 +151,14 @@ fn run() -> Result<String, (u8, String)> {
     if args[0] == "init" {
         return init_text(&args[1..]).map_err(|e| (2, e));
     }
+    // The version needs no app, no environment and no current directory: the install on a host runs it to compare.
+    if args[0] == "version" {
+        return if args.len() == 1 { Ok(version_text()) } else { Err((2, USAGE.into())) };
+    }
     let cwd = std::env::current_dir().map_err(|e| (1, format!("wsh: no current directory: {e}")))?;
     let cmd = parse(&args, &cwd).map_err(|e| (2, e))?;
-    let (dir, token, pane) = app_env()?;
-    let answer = holzwave_ipc::request(&dir, &Request { token, pane, cmd })
+    let (endpoint, token, pane) = app_env()?;
+    let answer = holzwave_ipc::request_at(&endpoint, &Request { token, pane, cmd })
         .map_err(|e| (1, format!("wsh: holzWave does not answer ({e}); is it still running?")))?;
     printable(answer)
 }

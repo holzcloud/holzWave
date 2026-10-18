@@ -310,13 +310,13 @@ fn a_saved_connection_gives_a_live_reading_through_the_fake_server() {
 
     // A monitor block may name the saved connection, and the page is told its name.
     let blocks = Blocks::load(world.dir.path(), None, &[1]);
-    let block = Block { kind: BlockKind::Monitor, source: "talos".into(), path: String::new() };
+    let block = Block { kind: BlockKind::Monitor, source: "talos".into(), path: String::new(), edit: false };
     blocks.assign(1, block).unwrap();
     let views = blocks.views(&world.connections);
     assert_eq!(views.len(), 1);
     assert_eq!((views[0].pane, views[0].source_label.as_str()), (1, "Talos"));
-    assert!(blocks.assign(2, Block { kind: BlockKind::Monitor, source: "talos".into(), path: "/x".into() }).is_err());
-    assert!(blocks.assign(2, Block { kind: BlockKind::Monitor, source: String::new(), path: String::new() }).is_err());
+    assert!(blocks.assign(2, Block { kind: BlockKind::Monitor, source: "talos".into(), path: "/x".into(), edit: false }).is_err());
+    assert!(blocks.assign(2, Block { kind: BlockKind::Monitor, source: String::new(), path: String::new(), edit: false }).is_err());
 }
 
 /// A clock that stands still until it is moved, so the sharing of young samples does not depend on the machine's speed.

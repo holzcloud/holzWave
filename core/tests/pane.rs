@@ -153,6 +153,57 @@ fn a_notice_is_the_first_output_of_the_pane_and_never_reaches_the_shell() {
 }
 
 #[test]
+fn the_pane_shows_a_notice_line_that_never_reaches_the_shell() {
+    let probe = Probe::default();
+    // The shell reads one line and prints it: whatever the pane wrongly gave the shell would be in that line.
+    let pane = spawn(spec_sh("read x; printf \"got:%s\" \"$x\"; sleep 3"), &probe);
+    pane.notice("wsh 1.2.3 was installed on Host\x1b[2J\x07\r\nnext").expect("the notice is accepted");
+    assert!(wait_until(WAIT, || probe.has_text("was installed on Host")), "{:?}", probe.events());
+    // The control characters became spaces: the screen was not cleared and the text stays on one line.
+    assert!(probe.has_text("next"));
+    let line = probe.frames().iter().flat_map(|f| f.changed.iter().map(row_text)).find(|t| t.contains("was installed on Host")).unwrap();
+    assert!(line.contains("[2J") && line.contains("next"), "the sequence is text on one line: {line:?}");
+    pane.text("q\n".into()).expect("the shell is still there");
+    assert!(wait_until(WAIT, || probe.has_text("got:q")), "{:?}", probe.events());
+    assert!(!probe.has_text("got:wsh"), "the notice is not shell input");
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn committed_text_reaches_the_shell_whatever_its_length() {
+    let probe = Probe::default();
+    let pane = spawn(PaneSpec::new("/bin/cat", 80, 24), &probe);
+    // An IME commit or a dead-key result is whole text as input, not a paste. The encoder's first buffer is small: text of
+    // more than 16 bytes, and text in a script that takes three bytes a character, must not be dropped.
+    let texts = ["hello world", "ab cd ef gh ij kl", "printf 'Z=[%s]\\n' 99", "日本語のテキストを入力します", &"x".repeat(300)];
+    for (n, text) in texts.iter().enumerate() {
+        pane.text((*text).into()).expect("the text is accepted");
+        pane.key(key("Enter", "Enter")).expect("Enter");
+        let wanted: String = text.chars().take(70).collect();
+        assert!(wait_until(WAIT, || probe.has_text(&wanted)), "text {n} ({} bytes) came back as echo: {:?}", text.len(), probe.events());
+    }
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn a_notice_is_bounded() {
+    let probe = Probe::default();
+    let pane = spawn(spec_sh("sleep 3"), &probe);
+    pane.notice(&"a".repeat(5000)).unwrap();
+    assert!(wait_until(WAIT, || probe.has_text("aaaa")), "{:?}", probe.events());
+    thread::sleep(Duration::from_millis(100));
+    // 512 bytes at most, on rows of 80 columns: no more than seven rows hold any of it.
+    let shown: usize = probe.frames().iter().flat_map(|f| f.changed.iter().map(row_text)).map(|t| t.matches('a').count()).max().unwrap_or(0);
+    assert!(shown <= 80, "a row holds at most one line's width: {shown}");
+    let rows = probe.frames().iter().flat_map(|f| f.changed.iter()).filter(|r| row_text(r).contains('a')).map(|r| r.y).collect::<std::collections::BTreeSet<_>>();
+    assert!(rows.len() <= 7, "512 characters take at most seven rows of 80: {rows:?}");
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
 fn a_key_becomes_echoed_output() {
     let probe = Probe::default();
     let pane = spawn(PaneSpec::new("/bin/cat", 80, 24), &probe);

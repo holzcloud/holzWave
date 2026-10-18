@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  baseName, blockContext, blockTitle, chatTitles, entryIcon, goneChats, humanSize, joinPath, paneBlocks, readBlocks, readListing,
+  baseName, blockContext, blockTitle, chatTitles, entryIcon, goneChats, humanSize, joinPath, paneBlocks, readBlocks, readDigest, readListing, readSaved,
   setChatTitle, setPaneBlocks, shortDate, visibleEntries,
 } from "../../dist/blockstate.js";
 
@@ -16,6 +16,18 @@ test("the list of blocks is read entry by entry and what is not well formed is d
   ]);
   assert.deepEqual(list.map((b) => b.pane), [1, 3]);
   assert.equal(list[1].source_label, "talos", "a missing label is the source's id");
+});
+
+test("readBlocks reads edit as a strict boolean, for a preview only, and leaves it out when it is not true", () => {
+  const preview = { pane: 2, kind: "preview", source: "talos", path: "/srv/notes.md", source_label: "Talos" };
+  const read = (extra, base = preview) => readBlocks([{ ...base, ...extra }])[0];
+  assert.equal(read({ edit: true }).edit, true);
+  for (const not of [false, "true", "yes", 1, 0, null, {}, []]) {
+    assert.equal("edit" in read({ edit: not }), false, `${JSON.stringify(not)} is not true`);
+  }
+  assert.equal("edit" in read({}), false, "a missing member is false");
+  assert.equal("edit" in read({ edit: true }, { ...preview, kind: "files" }), false, "only a preview has an editor to open");
+  assert.deepEqual(read({ edit: true }), { ...preview, edit: true });
 });
 
 // The object the core pins for a chat block (blocks.rs, a_chat_block_holds_a_conversation_id_and_survives_a_restart).
@@ -160,4 +172,20 @@ test("hidden entries are shown only when asked", () => {
   const list = [{ name: ".git", hidden: true }, { name: "src", hidden: false }];
   assert.deepEqual(visibleEntries(list, false).map((e) => e.name), ["src"]);
   assert.deepEqual(visibleEntries(list, true).map((e) => e.name), [".git", "src"]);
+});
+
+test("readSaved accepts the old and the new answer of a save", () => {
+  const digest = "0123456789abcdef".repeat(4);
+  assert.deepEqual(readSaved({ modified: 1760000099, digest }), { modified: 1760000099, digest });
+  assert.deepEqual(readSaved(1760000099), { modified: 1760000099, digest: null }, "a bare number is the older answer");
+  assert.deepEqual(readSaved({ modified: null, digest }), { modified: null, digest }, "a file whose time is unknown");
+  assert.deepEqual(readSaved(null), { modified: null, digest: null });
+  assert.deepEqual(readSaved({ modified: "x", digest: "XYZ" }), { modified: null, digest: null }, "anything else is dropped");
+  assert.deepEqual(readSaved(Number.NaN), { modified: null, digest: null });
+});
+
+test("a digest is 64 lowercase hex characters and nothing else", () => {
+  const ok = "ab".repeat(32);
+  assert.equal(readDigest(ok), ok);
+  for (const bad of [null, undefined, 5, "", "ab", ok.toUpperCase(), `${ok}0`, "g".repeat(64)]) assert.equal(readDigest(bad), null);
 });

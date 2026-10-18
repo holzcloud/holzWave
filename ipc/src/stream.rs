@@ -18,7 +18,7 @@ use interprocess::local_socket::traits::{RecvHalf as _, Stream as _};
 use interprocess::local_socket::{RecvHalf, SendHalf};
 use serde::{Deserialize, Serialize};
 
-use crate::{BUSY_STREAMS, Cmd, Handler, Limits, MAX_LINE, Request, Response, Slot, answer, read_bounded_line};
+use crate::{BUSY_STREAMS, Cmd, Endpoint, Handler, Limits, MAX_LINE, Request, Response, Slot, answer, read_bounded_line};
 
 /// The longest text of one `text` event, in bytes.
 pub const MAX_CHUNK: usize = 8192;
@@ -330,6 +330,16 @@ pub fn stream_request(
     input: &[u8],
     on_event: &mut dyn FnMut(&Event) -> io::Result<()>,
 ) -> io::Result<Outcome> {
+    stream_request_at(&Endpoint::from(dir), request, input, on_event)
+}
+
+/// [`stream_request`] to an [`Endpoint`].
+pub fn stream_request_at(
+    endpoint: &Endpoint,
+    request: &Request,
+    input: &[u8],
+    on_event: &mut dyn FnMut(&Event) -> io::Result<()>,
+) -> io::Result<Outcome> {
     let invalid = |why: &str| io::Error::new(io::ErrorKind::InvalidInput, why.to_owned());
     match &request.cmd {
         Cmd::Ai { stdin_bytes, .. } if *stdin_bytes as usize == input.len() => {}
@@ -341,7 +351,7 @@ pub fn stream_request(
     if line.len() > MAX_LINE {
         return Err(invalid("the request is too long"));
     }
-    let (recv, mut send) = crate::connect(dir)?.split();
+    let (recv, mut send) = crate::connect_endpoint(endpoint)?.split();
     let mut reader = BufReader::new(recv);
     send.write_all(line.as_bytes())?;
     let first = read_bounded_line(&mut reader)?;

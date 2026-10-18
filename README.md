@@ -16,8 +16,9 @@ look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, 
 Nextcloud, and an AI chat that sees your terminal only after you share that pane. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
-> **Alpha, macOS only.** holzWave is at `0.0.1-alpha2`: a preview build for Apple Silicon, unsigned (no Developer ID,
-> no notarisation). Windows and Linux builds are written but not yet tested on real machines. The window in the images below is the
+> **Alpha.** holzWave is at `0.0.1-alpha3`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
+> The macOS build (Apple Silicon) is the one the author tests; the Windows and Linux packages are cross-built on a Mac and
+> have not run on real machines yet. The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built.
 
 ## Install (macOS, Apple Silicon)
@@ -88,7 +89,8 @@ Built and tested on macOS from source:
 | SSH (reconnect, jump host, keychain), WSL and Docker panes, connection manager | built, tested against a test server, not yet against real hosts |
 | File browser, previews (Markdown, text, image, video, audio, PDF) and code editor, local and over SFTP | built, tested against a test server, not yet against real hosts |
 | Encrypted Nextcloud/WebDAV sync (XChaCha20-Poly1305, Argon2id) | built, tested against a test server, not yet against a real Nextcloud |
-| `wsh` CLI (`view`, `edit`, `setmeta title`, `ai`, the history hooks) over a private local socket | built, not yet packaged with the installers |
+| `wsh` CLI (`view`, `edit`, `setmeta title`, `ai`, the history hooks) over a private local socket | built; the macOS, Windows and Linux packages made by the release scripts carry it beside the app (not the Flatpak); no installed build has been run by the owner yet |
+| `wsh` on a Linux host over SSH (`view`, `edit`, `setmeta title` and `ping`; never the AI or the history) | built, tested against a test server and a real OpenSSH on loopback, not yet on a real Linux host. It needs three things: tick `Use wsh on this host` for the saved connection, choose `Install wsh on this host` in its pane (it uploads the bundled build to `~/.holzwave/bin`), and a server that allows Unix socket forwarding |
 | Sidebar with hosts, history search and widgets (described by a JSON Schema), a `^R` binding for the history | built, tested against test servers |
 | System monitor of this computer and of Linux hosts over SSH | built, tested against a test server, not yet against real hosts |
 | AI chat in a pane, the sidebar, the palette and `wsh ai`: Anthropic, OpenAI, Gemini, local servers and gateways; you share a pane before its text leaves, and every tool action asks first | built, tested against test servers, not yet against real providers |
@@ -121,7 +123,7 @@ connection manager), phase 4 (file browser, previews, editor), the encrypted syn
 tested against test servers. The system monitor (local and over SSH), the history search and the sidebar with widgets are
 built too, and so are the AI chat and the on-device model, whose manual checks wait for real accounts and Macs (Part 7 of
 the [test plan](docs/test-plan.md)); the native integrations and mobile follow.
-Versions go `0.0.1-alpha2`, `0.0.1-beta1`, `0.0.1`.
+Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation

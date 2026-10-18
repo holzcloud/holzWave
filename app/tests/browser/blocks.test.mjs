@@ -10,6 +10,7 @@ export default async function ({ page, url, errors }) {
   await actionsCase(page, url);
   await browserCase(page, url);
   await previewCase(page, url);
+  await editFlagCase(page, url);
   await pdfCase(page, url);
   await safeHtmlCase(page, url);
   // That case feeds the allow-list hostile markup: the policy reports the style and the handlers it parses, nothing else.
@@ -48,7 +49,7 @@ async function open(page, url, blocks, data = {}) {
       Object.assign(window, extra);
       window.__BLOCKS = b;
       window.__MOCK__.on("file_open", () => { if (window.__OPEN instanceof Object && window.__OPEN.__throw) throw window.__OPEN.__throw; return structuredClone(window.__OPEN ?? null); });
-      window.__MOCK__.on("file_save", () => { if (window.__SAVE_ERR) throw window.__SAVE_ERR; return 1760000099; });
+      window.__MOCK__.on("file_save", () => { if (window.__SAVE_ERR) throw window.__SAVE_ERR; return window.__SAVE_ANSWER ?? { modified: 1760000099, digest: "b".repeat(64) }; });
       window.__MOCK__.on("file_grant", () => structuredClone(window.__GRANT ?? null));
       window.__MOCK__.setView(view);
       window.__MOCK__.on("connections_list", () => [talos]);
@@ -137,9 +138,12 @@ async function browserCase(page, url) {
   assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("files_list"))).length, before);
 }
 
-/** Typing marks the pane unsaved, the save chord writes with the time it was read, a change on disk is said once. */
+const DIGEST_READ = "a".repeat(64);
+const DIGEST_SAVED = "b".repeat(64);
+
+/** Typing marks the pane unsaved, the save chord writes with the time and the digest it was read, a change on disk is said once. */
 async function editorCase(page, url, opened) {
-  const file = opened({ name: "main.rs", size: 3, language: "rust", text: "abc", modified: 1760000000 });
+  const file = opened({ name: "main.rs", size: 3, language: "rust", text: "abc", modified: 1760000000, digest: DIGEST_READ });
   await open(page, url, [PREVIEW("/home/holz/main.rs")], { __OPEN: file });
   await page.waitForSelector(".bk-editor .cm-content");
   const status = page.locator('.block[data-pane="2"] .bk-status');
@@ -165,15 +169,16 @@ async function editorCase(page, url, opened) {
   await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 1);
   const sent = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[0]);
-  assert.deepEqual(sent, { source: "local", path: "/home/holz/main.rs", text: "abcdef", expected_modified: 1760000000 });
+  assert.deepEqual(sent, { source: "local", path: "/home/holz/main.rs", text: "abcdef", expected_modified: 1760000000, expected_digest: DIGEST_READ });
   await page.waitForFunction(() => document.querySelector('.block[data-pane="2"] .bk-status').dataset.dirty === "false");
   assert.match(await status.textContent(), /^saved/);
 
-  // The next save carries the time the last one returned.
+  // The next save carries the time and the digest the last one returned.
   await page.keyboard.type("!");
   await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 2);
-  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_save")[1])).expected_modified, 1760000099);
+  const second = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[1]);
+  assert.deepEqual([second.expected_modified, second.expected_digest], [1760000099, DIGEST_SAVED]);
 
   // A change on disk is shown; the save after it overwrites on purpose.
   await page.evaluate(() => { window.__SAVE_ERR = "the file changed on disk since it was opened; save again to overwrite it"; });
@@ -181,10 +186,18 @@ async function editorCase(page, url, opened) {
   await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => document.querySelector('.block[data-pane="2"] .bk-status').dataset.failed === "true");
   assert.match(await status.textContent(), /changed on disk/);
-  await page.evaluate(() => { window.__SAVE_ERR = null; });
+  await page.evaluate(() => { window.__SAVE_ERR = null; window.__SAVE_ANSWER = 1760000123; });
   await page.keyboard.press("ControlOrMeta+s");
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 4);
-  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_save")[3])).expected_modified, null);
+  const fourth = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[3]);
+  assert.deepEqual([fourth.expected_modified, fourth.expected_digest], [null, null], "after a conflict both are cleared");
+
+  // An answer that is a bare number (a time only) is still understood: the next save sends the time and no digest.
+  await page.keyboard.type("!");
+  await page.keyboard.press("ControlOrMeta+s");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("file_save").length === 5);
+  const fifth = await page.evaluate(() => window.__MOCK__.callsOf("file_save")[4]);
+  assert.deepEqual([fifth.expected_modified, fifth.expected_digest], [1760000123, null]);
 
   // Escape gives the keyboard back to the terminal.
   await page.keyboard.press("Escape");
@@ -252,6 +265,56 @@ async function previewCase(page, url) {
   await open(page, url, [PREVIEW("/home/holz/a.txt")], { __OPEN: { __throw: "sftp: the request timed out" } });
   await page.waitForFunction(() => document.querySelector(".bk-status")?.textContent.includes("timed out"));
   assert.equal(await page.locator(".bk-status").getAttribute("data-failed"), "true");
+}
+
+// `wsh edit` opens a preview with the flag `edit`: a Markdown file goes to the editor at once, a text file is in the editor
+// as always, and a kind that has no editor ignores the flag. Without the flag Markdown is the rendered page.
+async function editFlagCase(page, url) {
+  const opened = (over) => ({ name: "x", size: 10, content: "text", mime: "text/plain", language: null, html: null, text: "", ...over });
+  const markdown = opened({ name: "notes.md", content: "markdown", mime: "text/markdown", html: "<h1>Phase 2</h1>", text: "# Phase 2" });
+  const flagged = (path) => ({ ...PREVIEW(path), edit: true });
+  const lines = () => page.locator(".cm-line").evaluateAll((n) => n.map((l) => l.textContent));
+
+  // Markdown with the flag: the editor, no rendered page first and no `e` needed.
+  await open(page, url, [flagged("/srv/notes.md")], { __OPEN: markdown });
+  await page.waitForSelector(".bk-editor .cm-line");
+  assert.deepEqual(await lines(), ["# Phase 2"]);
+  assert.equal(await page.locator(".md").count(), 0, "the page was never drawn");
+  assert.equal((await page.evaluate(() => window.__MOCK__.callsOf("file_open"))).length, 1, "the file was opened once");
+
+  // Leaving the editor without changes shows the page, and the page stays (the flag was for the first load only).
+  await page.locator(".cm-content").click();
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".md h1");
+  assert.equal(await page.locator(".bk-editor").count(), 0);
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator(".md h1").count(), 1, "the editor does not open again");
+
+  // Without the flag the same file is the rendered page.
+  await open(page, url, [PREVIEW("/srv/notes.md")], { __OPEN: markdown });
+  await page.waitForSelector(".md h1");
+  assert.equal(await page.locator(".bk-editor").count(), 0);
+
+  // The flag does not read as true for anything but `true`.
+  await open(page, url, [{ ...PREVIEW("/srv/notes.md"), edit: "yes" }], { __OPEN: markdown });
+  await page.waitForSelector(".md h1");
+  assert.equal(await page.locator(".bk-editor").count(), 0);
+
+  // A text file is in the editor with or without it.
+  await open(page, url, [flagged("/srv/main.rs")], { __OPEN: opened({ name: "main.rs", size: 11, language: "rust", text: "fn main() {}" }) });
+  await page.waitForSelector(".bk-editor .cm-line");
+  assert.deepEqual(await lines(), ["fn main() {}"]);
+
+  // A Markdown file the editor does not open (too large) is the page, flag or not.
+  await open(page, url, [flagged("/srv/big.md")], { __OPEN: { ...markdown, text: null } });
+  await page.waitForSelector(".md h1");
+  assert.equal(await page.locator(".bk-editor").count(), 0);
+
+  // An image has no editor: the flag changes nothing.
+  const GRANT = { url: "holzfile://localhost/0123456789abcdef0123456789abcdef", token: "0123456789abcdef0123456789abcdef", mime: "image/png", size: 5 };
+  await open(page, url, [flagged("/srv/a.png")], { __OPEN: opened({ name: "a.png", content: "image", mime: "image/png", size: 5, text: null }), __GRANT: GRANT });
+  await page.locator(".bk-image").waitFor();
+  assert.equal(await page.locator(".bk-editor").count(), 0);
 }
 
 async function safeHtmlCase(page, url) {

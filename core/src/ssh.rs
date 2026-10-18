@@ -6,8 +6,24 @@
 //! [`Reconnect::attempts`] times. A shell that ends on its own, a refused login and a changed host key end the pane
 //! at once, because trying again cannot change them.
 //!
+//! The shell runs on the session of a [`Connection`] (see [`crate::pool`]): a pane, a file browser and a command runner
+//! of one saved connection share one login. Closing a pane closes its channel and leaves the session to the others. The
+//! output of the shell is handed to the pane through a counted queue that is capped at [`MAX_BACKLOG`]: past the cap the
+//! shell's channel is closed and the pane says why, so one pane that is slow or stopped cannot stall the other channels
+//! of the host.
+//!
+//! A pane may also carry a [`Tunnel`] ([`SshLink::attach_with`]): the socket of the app is forwarded back from the host over
+//! the same login ([`crate::pool::Connection::forward`]), and the shell is started by one constant exec line that sets the
+//! three variables `wsh` finds the app by ([`wrapped_shell_command`]). What arrives through the socket is handed to the
+//! sink of the tunnel by [`bridge`], which bounds every connection (count, bytes, silence, life, queue) and never waits for
+//! the sink, so a slow or hostile peer cannot hold up the other channels of the login.
+//!
 //! Secrets (a key's passphrase, a password) are given by the caller in [`SshAuth`] and are never written to disk or
 //! to the screen here. Host keys are checked against a `known_hosts` file ([`HostKeyPolicy`]).
+//!
+//! A third way to log in is the user's ssh-agent ([`SshAuth::Agent`]): the agent signs the server's challenge, so the
+//! private key never enters this program and agent forwarding is never offered to the host. It is an explicit choice
+//! of the connection, never a fallback from a key file or a password.
 //!
 //! [`SshExec`] is the other way in: it runs one command at a time per call on the host of a saved connection, on a
 //! channel that asks for no terminal, no environment and no agent forwarding, and never types into a pane. It never
@@ -18,22 +34,36 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use russh::client::{self, Handle};
+use russh::keys::agent::AgentIdentity;
+use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, known_hosts, load_secret_key};
-use russh::{Channel, ChannelMsg, Disconnect, Sig};
+use russh::{Channel, ChannelMsg, ChannelOpenFailure, ChannelReadHalf, ChannelWriteHalf, Sig};
 use tokio::sync::{mpsc as tmpsc, watch};
 
 use crate::conn::{ConnState, Link, SharedState};
+use crate::pool::{
+    Admitted, Back, CLOSE_TIMEOUT, Connection, ForwardError, ForwardGuard, ForwardLimits, ForwardSink, ForwardedStream, Forwards, Open,
+    Place, Session, ThreadCount, valid_forward_path,
+};
 use crate::{Error, Result};
 
 /// The most input kept while the connection is down. More is dropped, so a stuck key cannot fill the memory.
 pub const MAX_BUFFERED: usize = 64 * 1024;
+
+/// The most shell output that may wait for the pane to read it, in bytes. Past it the shell's channel is closed (the
+/// connection's other channels go on) and the pane says that the output piled up faster than it could be shown.
+pub const MAX_BACKLOG: usize = 16 * 1024 * 1024;
+
+/// How long closing a shell channel may take before it is let go of.
+const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long one attempt to connect and log in may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -45,20 +75,181 @@ pub enum SshAuth {
     Key { path: PathBuf, passphrase: Option<String> },
     /// A password.
     Password(String),
+    /// The user's ssh-agent signs the login. The private key never enters this program: only the server's challenge goes
+    /// to the agent and a signature comes back. Agent forwarding is never offered to the host.
+    Agent {
+        /// Where the agent listens. `None` finds it the way `ssh` does (`SSH_AUTH_SOCK` on Unix, the OpenSSH agent pipe on
+        /// Windows) when the connection is made; `Some` is for tests and tools.
+        socket: Option<PathBuf>,
+        /// A public key file that picks one of the agent's keys; `None` offers the agent's keys in the order it lists
+        /// them, at most [`AGENT_MAX_TRIES`].
+        identity: Option<PathBuf>,
+    },
+    /// The server asks the questions (a password prompt of PAM, a one-time code, a token's challenge) and a person answers
+    /// them through the [`Prompter`]. Nothing is kept: the answers go to this one login and are gone.
+    Interactive {
+        /// Who asks the person. `None` fails the login with a sentence ([`PROMPT_NO_WINDOW`]); a profile's target has none
+        /// until [`crate::connections::Connections::set_prompter`] put one in.
+        prompter: Option<Arc<dyn Prompter>>,
+    },
 }
 
 impl std::fmt::Debug for SshAuth {
-    // A secret never reaches a log line through `{:?}`.
+    // A secret never reaches a log line through `{:?}`. The agent's socket is not a secret but names a folder, so only the
+    // name of the identity file is shown.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SshAuth::Agent { identity, .. } => {
+                let name = identity.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+                write!(f, "Agent({})", name.as_deref().unwrap_or("none"))
+            }
             SshAuth::Key { path, passphrase } => f
                 .debug_struct("Key")
                 .field("path", path)
                 .field("passphrase", &passphrase.as_ref().map(|_| "<set>"))
                 .finish(),
             SshAuth::Password(_) => f.write_str("Password(<set>)"),
+            SshAuth::Interactive { .. } => f.write_str("Interactive"),
         }
     }
+}
+
+/// How many rounds of questions a server may ask in one login. A round with no prompts does not count (it is answered
+/// without asking), but a server that sends [`PROMPT_EMPTY_ROUNDS`] of them in a row is cut off all the same.
+pub const PROMPT_ROUNDS: usize = 3;
+/// How many questions one round may hold.
+pub const PROMPT_LINES: usize = 5;
+/// The most characters of one question's text that the person sees.
+pub const PROMPT_TEXT: usize = 200;
+/// The most characters of a round's instructions that the person sees.
+pub const PROMPT_INSTRUCTIONS: usize = 300;
+/// The most characters of a round's name that the person sees.
+pub const PROMPT_NAME: usize = 60;
+/// How long the person has to answer one round.
+pub const PROMPT_WAIT: Duration = Duration::from_secs(120);
+/// How many rounds with no questions in them a server may send in a row.
+const PROMPT_EMPTY_ROUNDS: usize = 8;
+/// What a question with no text becomes.
+const PROMPT_BLANK: &str = "Answer";
+
+/// The sentences of an interactive login. Each is a constant: no answer and no text of the server can be in one.
+pub const PROMPT_CANCELLED: &str = "the login was cancelled";
+pub const PROMPT_TIMED_OUT: &str = "no answer was given in time";
+pub const PROMPT_TOO_MANY: &str = "the server asked too many questions";
+/// What a background opener (a monitor, a command) says when the connection needs a person's answer first.
+pub const PROMPT_BACKGROUND: &str = "this connection asks for a login code; open a pane on it first";
+pub const PROMPT_NO_WINDOW: &str = "this connection needs a window to ask in";
+const PROMPT_WRONG_COUNT: &str = "the answers do not match the questions";
+
+/// One question of the server, as the person sees it: cleaned and bounded by [`clean_server_text`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptLine {
+    pub text: String,
+    /// True when what the person types may be shown; false for a password or a code that must stay hidden.
+    pub echo: bool,
+}
+
+/// One round of questions of the server, for the person. Every text is already cleaned and bounded; none of it is a
+/// holzWave sentence. `connection` is the id of the saved connection (stamped by the program that owns the profiles, never
+/// by the server), so the dialog can say whose login it is from the person's own list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptRound {
+    pub connection: String,
+    /// The host the login goes to, as the person saved it.
+    pub host: String,
+    pub name: String,
+    pub instructions: String,
+    pub prompts: Vec<PromptLine>,
+}
+
+/// What the person did with a round.
+pub enum PromptAnswer {
+    /// One answer per question, in the order of the questions.
+    Answers(Vec<String>),
+    /// The person gave up, or the window that asks is gone.
+    Cancelled,
+}
+
+impl std::fmt::Debug for PromptAnswer {
+    // An answer is a password or a code: only how many there are can be printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromptAnswer::Answers(answers) => write!(f, "Answers(<{} hidden>)", answers.len()),
+            PromptAnswer::Cancelled => f.write_str("Cancelled"),
+        }
+    }
+}
+
+/// Who asks the person. Called from a blocking task and never from a runtime worker, so it may block until the person
+/// answers (the caller stops waiting after [`PROMPT_WAIT`]).
+pub trait Prompter: Send + Sync {
+    fn ask(&self, round: PromptRound) -> PromptAnswer;
+}
+
+/// Text the server wrote, made safe to show: control characters become spaces, the characters that change the direction or
+/// the look of text without a mark of their own (bidirectional controls, zero-width and invisible format characters, tag
+/// characters) are removed, runs of spaces become one, and at most four line breaks are kept (a longer run or a fifth break
+/// becomes a space). The result has at most `max_chars` characters, cut at a character boundary, and no space at either end.
+/// It is text for the person to read and never markup, a title or a holzWave sentence.
+pub fn clean_server_text(text: &str, max_chars: usize) -> String {
+    const MAX_BREAKS: usize = 4;
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut breaks = 0usize;
+    // `true` while the last thing written was a space or a break (or nothing yet), so no space is doubled or leads.
+    let mut gap = true;
+    let mut pending = text.chars().peekable();
+    while let Some(c) = pending.next() {
+        if chars >= max_chars {
+            break;
+        }
+        let c = match c {
+            '\r' if pending.peek() == Some(&'\n') => continue,
+            '\r' | '\n' | '\u{2028}' | '\u{2029}' | '\u{85}' => '\n',
+            c if c.is_control() => ' ',
+            // Bidi controls, zero-width and invisible format characters, soft hyphen, tag characters: nothing to show.
+            '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}'
+            | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{e0000}'..='\u{e007f}' => continue,
+            c if c.is_whitespace() => ' ',
+            c => c,
+        };
+        if c == '\n' {
+            // No break leads, and a run of them is one. A break after a space takes the space's place.
+            if out.is_empty() || out.ends_with('\n') {
+                continue;
+            }
+            if out.ends_with(' ') {
+                out.pop();
+                chars -= 1;
+            }
+            if breaks < MAX_BREAKS {
+                breaks += 1;
+                out.push('\n');
+            } else {
+                out.push(' ');
+            }
+            chars += 1;
+            gap = true;
+            continue;
+        }
+        if c == ' ' {
+            if gap {
+                continue;
+            }
+            gap = true;
+        } else {
+            gap = false;
+        }
+        out.push(c);
+        chars += 1;
+    }
+    out.truncate(out.trim_end().len());
+    out
+}
+
+/// A name or a question: one line.
+fn clean_line(text: &str, max_chars: usize) -> String {
+    clean_server_text(text, max_chars).replace('\n', " ")
 }
 
 /// What to do with a host key the `known_hosts` file does not know.
@@ -108,6 +299,19 @@ pub struct SshTarget {
 }
 
 impl SshTarget {
+    /// Whether a person has to answer questions to log in to this target: its own login or the login of any host of its
+    /// jump chain is [`SshAuth::Interactive`].
+    pub fn asks_a_person(&self) -> bool {
+        let mut at = Some(self);
+        while let Some(target) = at {
+            if matches!(target.auth, SshAuth::Interactive { .. }) {
+                return true;
+            }
+            at = target.jump.as_deref();
+        }
+        false
+    }
+
     pub fn new(host: impl Into<String>, user: impl Into<String>, auth: SshAuth) -> Self {
         Self {
             host: host.into(),
@@ -124,6 +328,203 @@ impl SshTarget {
     }
 }
 
+/// A pane's tunnel: the Unix socket to forward back, the environment the remote shell gets, and the code that answers what
+/// arrives through the socket. The core knows nothing of what is spoken over it ([`ForwardSink`]).
+#[derive(Clone)]
+pub struct Tunnel {
+    /// The path of the socket on the host (see [`crate::pool::valid_forward_path`]) for the first start of the shell. A start
+    /// after a lost login or a failure asks for a new path of the same form, and `HOLZWAVE_SOCKET` of that shell names it.
+    pub path: String,
+    /// `HOLZWAVE_SOCKET`, `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE`, each once, in any order ([`wrapped_shell_command`]).
+    pub env: Vec<(String, String)>,
+    pub sink: Arc<dyn ForwardSink>,
+}
+
+impl std::fmt::Debug for Tunnel {
+    // The environment holds the token and the path holds 128 random bits of its own: neither is printed, because a
+    // `PaneSpec` derives `Debug` and a debug print must never carry what authorises a request.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tunnel").finish_non_exhaustive()
+    }
+}
+
+/// The three names of the environment, in the order the start line sets them.
+const ENV_NAMES: [&str; 3] = ["HOLZWAVE_SOCKET", "HOLZWAVE_TOKEN", "HOLZWAVE_PANE"];
+/// The longest value of one of them, in bytes.
+const MAX_ENV_VALUE: usize = 128;
+
+/// Whether `name` is `HOLZWAVE_` and then capitals and underscores.
+fn is_env_name(name: &str) -> bool {
+    name.strip_prefix("HOLZWAVE_").is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
+}
+
+/// The one line that starts a pane's shell on a host with its environment, as an SSH exec request. The text is a constant
+/// with three values in it, and each value is 1 to [`MAX_ENV_VALUE`] bytes of letters, digits and `./_:-` (nothing a
+/// POSIX shell reads as more than a word), so no value can end the quotes or add a command. There is no newline, no `!`
+/// (a C shell reads it) and no backslash, and the only quotes are the two around the script. The environment is set
+/// here and never typed into the shell, so no secret reaches the history file of the host.
+///
+/// `env` must hold exactly `HOLZWAVE_SOCKET`, `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE`, once each, in any order. The error
+/// says what is wrong with the shape and never holds a value.
+pub fn wrapped_shell_command(env: &[(String, String)]) -> std::result::Result<String, String> {
+    let mut values: [Option<&str>; 3] = [None; 3];
+    for (name, value) in env {
+        if !is_env_name(name) {
+            return Err("an environment name is not HOLZWAVE_ and capitals".into());
+        }
+        let Some(index) = ENV_NAMES.iter().position(|known| known == name) else {
+            return Err("an environment name is not one of the three".into());
+        };
+        if values[index].is_some() {
+            return Err("an environment name is given twice".into());
+        }
+        let word = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'/' | b'_' | b':' | b'-');
+        if value.is_empty() || value.len() > MAX_ENV_VALUE || !value.bytes().all(word) {
+            return Err("an environment value is empty, too long or has a character outside letters, digits and ./_:-".into());
+        }
+        values[index] = Some(value);
+    }
+    let [Some(socket), Some(token), Some(pane)] = values else {
+        return Err("the environment must name exactly HOLZWAVE_SOCKET, HOLZWAVE_TOKEN and HOLZWAVE_PANE".into());
+    };
+    Ok(format!(
+        "exec sh -c 'HOLZWAVE_SOCKET={socket}; HOLZWAVE_TOKEN={token}; HOLZWAVE_PANE={pane}; \
+         PATH=\"$PATH:$HOME/.holzwave/bin\"; export HOLZWAVE_SOCKET HOLZWAVE_TOKEN HOLZWAVE_PANE PATH; \
+         exec \"${{SHELL:-/bin/sh}}\" -l'"
+    ))
+}
+
+// ---- the bridge of a forwarded socket -----------------------------------------------------------------------------
+
+/// A switch that ends both halves of a bridge.
+struct Stop(watch::Sender<bool>);
+
+impl Stop {
+    fn stop(&self) {
+        self.0.send_replace(true);
+    }
+
+    async fn stopped(&self) {
+        let mut rx = self.0.subscribe();
+        if rx.wait_for(|stopped| *stopped).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+type WriteHalf = ChannelWriteHalf<client::Msg>;
+
+/// Bridge a channel the server opened to the sink: a thread runs the sink, and two tasks on the current runtime move the
+/// bytes. The reading task never waits for the sink: it hands chunks over with `try_send` and closes the channel when the
+/// queue is full, when more than the byte bound was read or when the life of the connection is over. The writing task
+/// waits only for the remote side's window, which never holds anything else.
+pub(crate) fn bridge(channel: Channel<client::Msg>, admitted: Admitted) {
+    let Admitted { sink, limits, place } = admitted;
+    let place = Arc::new(place);
+    let (stream, to_sink, from_sink) = ForwardedStream::pair(&limits);
+    let (read, write) = channel.split();
+    let write = Arc::new(write);
+    let stop = Arc::new(Stop(watch::channel(false).0));
+    let counted = ThreadCount::new();
+    let thread_place = place.clone();
+    let spawned = thread::Builder::new().name("hw-fwd".into()).spawn(move || {
+        let _counted = counted;
+        let _place = thread_place;
+        sink.serve(stream);
+    });
+    if spawned.is_err() {
+        // The sink never ran: close the channel and let the places go.
+        let write = write.clone();
+        drop(tokio::spawn(async move {
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.close()).await;
+        }));
+        return;
+    }
+    drop(tokio::spawn(read_side(read, write.clone(), to_sink, stop.clone(), limits, place)));
+    drop(tokio::spawn(write_side(write, from_sink, stop)));
+}
+
+async fn read_side(
+    mut read: ChannelReadHalf,
+    write: Arc<WriteHalf>,
+    to_sink: mpsc::SyncSender<Vec<u8>>,
+    stop: Arc<Stop>,
+    limits: ForwardLimits,
+    _place: Arc<Place>,
+) {
+    let mut to_sink = Some(to_sink);
+    let mut total = 0usize;
+    let life = tokio::time::sleep(limits.life);
+    tokio::pin!(life);
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.stopped() => break,
+            () = &mut life => break,
+            msg = read.wait() => match msg {
+                Some(ChannelMsg::Data { data }) => {
+                    total = total.saturating_add(data.len());
+                    if total > limits.bytes {
+                        break;
+                    }
+                    if let Some(tx) = &to_sink {
+                        match tx.try_send(data.to_vec()) {
+                            Ok(()) => {}
+                            // The sink cannot keep up: the connection ends and the session goes on.
+                            Err(mpsc::TrySendError::Full(_)) => break,
+                            // The sink stopped reading (it has its request): what follows is dropped, but still counted,
+                            // and the answer that may still be on its way is not cut.
+                            Err(mpsc::TrySendError::Disconnected(_)) => to_sink = None,
+                        }
+                    }
+                }
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    total = total.saturating_add(data.len());
+                    if total > limits.bytes {
+                        break;
+                    }
+                }
+                // The remote side is done sending; it may still wait for the answer.
+                Some(ChannelMsg::Eof) => to_sink = None,
+                Some(ChannelMsg::Close) | None => break,
+                Some(_) => {}
+            },
+        }
+    }
+    stop.stop();
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.close()).await;
+}
+
+async fn write_side(write: Arc<WriteHalf>, mut from_sink: tmpsc::UnboundedReceiver<Back>, stop: Arc<Stop>) {
+    loop {
+        tokio::select! {
+            biased;
+            () = stop.stopped() => return,
+            back = from_sink.recv() => match back {
+                Some(Back::Data(bytes)) => {
+                    tokio::select! {
+                        biased;
+                        () = stop.stopped() => return,
+                        sent = write.data_bytes(bytes) => {
+                            if sent.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Back::Cut) => break,
+                // The sink is finished: what it wrote is sent, then the end.
+                None => {
+                    let _ = tokio::time::timeout(CLOSE_TIMEOUT, write.eof()).await;
+                    break;
+                }
+            },
+        }
+    }
+    stop.stop();
+}
+
+
 /// What the connection thread is told.
 enum Cmd {
     Data(Vec<u8>),
@@ -132,7 +533,7 @@ enum Cmd {
 }
 
 /// How one connected session ended.
-enum Outcome {
+pub(crate) enum Outcome {
     /// The remote shell ended with this code.
     Exit(u32),
     /// The user closed the pane.
@@ -143,11 +544,71 @@ enum Outcome {
     Fatal(String),
 }
 
+/// The hand-over of the shell's output to the pane: a standard channel (the pane's reader blocks on it) and the count of
+/// the bytes that are queued in it and not yet read.
+///
+/// The loop that owns the shell's channel is the only sender and never waits for the pane: a push that would take the
+/// queue past [`MAX_BACKLOG`] is refused instead, and the loop ends the shell. So the session task of the connection is
+/// never held by a slow pane.
+struct Backlog {
+    tx: mpsc::Sender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
+
+/// What became of a chunk of shell output.
+enum Pushed {
+    Queued,
+    /// The queue would pass [`MAX_BACKLOG`]; nothing was queued.
+    Full,
+    /// The pane no longer reads.
+    Gone,
+}
+
+/// Whether `add` more bytes on top of `queued` pass `cap`.
+fn passes_cap(queued: usize, add: usize, cap: usize) -> bool {
+    queued.saturating_add(add) > cap
+}
+
+impl Backlog {
+    fn new() -> (Self, ChanReader) {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        (Self { tx, queued: queued.clone() }, ChanReader { rx, pending: Vec::new(), pos: 0, queued })
+    }
+
+    /// Queue a chunk of the shell's output, unless it would pass the cap.
+    fn push(&self, chunk: Vec<u8>) -> Pushed {
+        // The loop is the only one that adds, so the check and the add cannot race; the reader only subtracts.
+        if passes_cap(self.queued.load(Ordering::SeqCst), chunk.len(), MAX_BACKLOG) {
+            return Pushed::Full;
+        }
+        self.queue(chunk)
+    }
+
+    fn queue(&self, chunk: Vec<u8>) -> Pushed {
+        let n = chunk.len();
+        self.queued.fetch_add(n, Ordering::SeqCst);
+        if self.tx.send(chunk).is_err() {
+            self.queued.fetch_sub(n, Ordering::SeqCst);
+            return Pushed::Gone;
+        }
+        Pushed::Queued
+    }
+
+    /// Show the pane a line of the connection's own. It is a few bytes and the pane must be told even when the queue is
+    /// full, so it is not held to the cap. `false` when the pane no longer reads.
+    fn notice(&self, text: &str) -> bool {
+        matches!(self.queue(notice(text)), Pushed::Queued)
+    }
+}
+
 /// The ends the pane reads and writes.
 struct ChanReader {
     rx: mpsc::Receiver<Vec<u8>>,
     pending: Vec<u8>,
     pos: usize,
+    /// The bytes in the queue that this reader has not handed on yet.
+    queued: Arc<AtomicUsize>,
 }
 
 impl Read for ChanReader {
@@ -165,6 +626,8 @@ impl Read for ChanReader {
         let n = buf.len().min(self.pending.len() - self.pos);
         buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
         self.pos += n;
+        // What was handed on is no longer waiting. Every byte was counted before it was queued, so this cannot underflow.
+        self.queued.fetch_sub(n, Ordering::SeqCst);
         Ok(n)
     }
 }
@@ -194,13 +657,31 @@ pub struct SshLink {
     state: SharedState,
     exit: Arc<Mutex<Option<u32>>>,
     thread: Option<JoinHandle<()>>,
+    queued: Arc<AtomicUsize>,
 }
 
 impl SshLink {
-    /// Start connecting to `target` with a grid of `cols` x `rows`. Returns at once; the connection is made on a
-    /// thread of its own and its progress is in [`SshLink::state`] and on the pane's screen.
+    /// Start connecting to `target` with a grid of `cols` x `rows`, on a connection of its own. Returns at once; the
+    /// connection is made on a thread of its own and its progress is in [`SshLink::state`] and on the pane's screen.
     pub fn connect(target: SshTarget, cols: u16, rows: u16) -> Result<Self> {
-        let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+        let label = target.host.clone();
+        Self::attach(Connection::standalone(label, target)?, cols, rows)
+    }
+
+    /// Start a shell on `connection`, the connection of a saved profile that the file browser and the command runner
+    /// share. The shell takes a channel of the connection's one login and never ends the login: closing the pane closes
+    /// the channel and leaves the session to the others. Returns at once, like [`SshLink::connect`].
+    pub fn attach(connection: Arc<Connection>, cols: u16, rows: u16) -> Result<Self> {
+        Self::attach_with(connection, cols, rows, None)
+    }
+
+    /// [`SshLink::attach`] with a tunnel: the shell starts through one constant exec line that sets `HOLZWAVE_SOCKET`,
+    /// `HOLZWAVE_TOKEN` and `HOLZWAVE_PANE` (see [`wrapped_shell_command`]) after the socket was forwarded back to the
+    /// tunnel's sink. A server that refuses the forward or the line leaves the pane a plain shell with one line that says
+    /// why. The forward is asked for again after a reconnect and cancelled when the pane closes.
+    pub fn attach_with(connection: Arc<Connection>, cols: u16, rows: u16, tunnel: Option<Tunnel>) -> Result<Self> {
+        let (backlog, reader) = Backlog::new();
+        let queued = backlog.queued.clone();
         let (cmd_tx, cmd_rx) = tmpsc::unbounded_channel::<Cmd>();
         let state = SharedState::new(ConnState::Connecting);
         let exit = Arc::new(Mutex::new(None));
@@ -211,18 +692,24 @@ impl SshLink {
         let thread = {
             let (state, exit) = (state.clone(), exit.clone());
             thread::Builder::new().name("ssh".into()).spawn(move || {
-                let code = runtime.block_on(run(target, (cols, rows), cmd_rx, out_tx, state.clone()));
+                let code = runtime.block_on(run(&connection, (cols, rows), cmd_rx, backlog, state.clone(), tunnel.as_ref()));
                 *exit.lock().unwrap_or_else(PoisonError::into_inner) = Some(code);
                 state.set(ConnState::Closed);
+                // The last owner of a connection (a link made by `connect`) ends its login now, politely, before the
+                // runtime that carries it goes. A shared connection is left to the others and to the idle reaper.
+                if Arc::strong_count(&connection) == 1 {
+                    connection.block_on(connection.close_session());
+                }
             })?
         };
         Ok(Self {
-            reader: Some(Box::new(ChanReader { rx: out_rx, pending: Vec::new(), pos: 0 })),
+            reader: Some(Box::new(reader)),
             writer: Some(Box::new(ChanWriter { tx: cmd_tx.clone() })),
             cmd: cmd_tx,
             state,
             exit,
             thread: Some(thread),
+            queued,
         })
     }
 
@@ -234,6 +721,12 @@ impl SshLink {
     /// A handle on the state that outlives the link, for the code that shows it.
     pub fn shared_state(&self) -> SharedState {
         self.state.clone()
+    }
+
+    /// How many bytes of the shell's output wait for the pane to read them. For tests and diagnostics; never above
+    /// [`MAX_BACKLOG`] plus the few bytes of a notice.
+    pub fn backlog_bytes(&self) -> usize {
+        self.queued.load(Ordering::SeqCst)
     }
 }
 
@@ -285,19 +778,25 @@ fn notice(text: &str) -> Vec<u8> {
     format!("\r\n\x1b[33m{clean}\x1b[0m\r\n").into_bytes()
 }
 
-/// The whole life of a connection: connect, run, and connect again while that makes sense. Returns the exit code.
+/// The whole life of a pane's connection: connect, run, and connect again while that makes sense. Returns the exit code.
 async fn run(
-    target: SshTarget,
+    connection: &Arc<Connection>,
     size: (u16, u16),
     mut cmd: tmpsc::UnboundedReceiver<Cmd>,
-    out: mpsc::Sender<Vec<u8>>,
+    out: Backlog,
     state: SharedState,
+    tunnel: Option<&Tunnel>,
 ) -> u32 {
+    let target = connection.target();
     let mut size = (size.0, size.1, 0u32, 0u32);
     let mut buffered: Vec<u8> = Vec::new();
     let mut attempt = 0u32;
+    // How many times a shell was tried for. A start after the first asks for a socket path that was never asked for.
+    let mut starts = 0u32;
     loop {
-        let outcome = session(&target, &mut size, &mut cmd, &out, &state, &mut buffered, &mut attempt).await;
+        let retry = starts > 0;
+        starts = starts.saturating_add(1);
+        let outcome = session(connection, &mut size, &mut cmd, &out, &state, &mut buffered, &mut attempt, tunnel, retry).await;
         match outcome {
             Outcome::Exit(code) => return code,
             Outcome::Closed => return 0,
@@ -321,9 +820,9 @@ async fn run(
                 let of = target.reconnect.attempts;
                 let in_secs = target.reconnect.delay.as_secs();
                 state.set(ConnState::Reconnecting { attempt, of, in_secs });
-                let _ = out.send(notice(&format!(
+                let _ = out.notice(&format!(
                     "Connection lost: {why}. Retrying {attempt}/{of} in {in_secs} s. What you type is kept."
-                )));
+                ));
                 // Wait, and keep listening: input is kept, a resize is remembered, a close ends it.
                 let sleep = tokio::time::sleep(target.reconnect.delay);
                 tokio::pin!(sleep);
@@ -347,13 +846,13 @@ async fn run(
 async fn wait_for_enter(
     text: &str,
     cmd: &mut tmpsc::UnboundedReceiver<Cmd>,
-    out: &mpsc::Sender<Vec<u8>>,
+    out: &Backlog,
     state: &SharedState,
     size: &mut (u16, u16, u32, u32),
     buffered: &mut Vec<u8>,
 ) -> bool {
     state.set(ConnState::Failed);
-    let _ = out.send(notice(&format!("{text} Press Enter to try again.")));
+    let _ = out.notice(&format!("{text} Press Enter to try again."));
     buffered.clear();
     loop {
         match cmd.recv().await {
@@ -381,10 +880,29 @@ pub(crate) struct Client {
     policy: HostKeyPolicy,
     /// Why the key was refused, for the message.
     refused: Arc<Mutex<Option<String>>>,
+    /// The forwarded sockets of this login: what a channel the server opens may be bridged to.
+    forwards: Arc<Forwards>,
 }
 
 impl client::Handler for Client {
     type Error = russh::Error;
+
+    /// The server opened a channel for a connection to a forwarded Unix socket. It is let in only for a path that has a
+    /// sink on this login and a free place; every other one is rejected. The bytes of an accepted one never wait for the
+    /// sink (see [`bridge`]).
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        channel: Channel<client::Msg>,
+        socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        // A dropped reply rejects the channel.
+        let Some(admitted) = self.forwards.admit(socket_path) else { return Ok(()) };
+        reply.accept().await;
+        bridge(channel, admitted);
+        Ok(())
+    }
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> std::result::Result<bool, Self::Error> {
         let refuse = |why: String| {
@@ -424,18 +942,19 @@ fn is_fatal(error: &russh::Error) -> bool {
     matches!(error, russh::Error::UnknownKey | russh::Error::NotAuthenticated | russh::Error::KeyChanged { .. })
 }
 
-/// Open a session to `target`, going through its jump host if it has one, and log in. The reason a connection cannot be
-/// made is the text of the error. Used by [`crate::files::SftpSource`], which has its own connection.
-pub(crate) async fn open_session(target: &SshTarget) -> std::result::Result<Handle<Client>, String> {
-    match open(target).await {
-        Ok(handle) => Ok(handle),
-        Err(Outcome::Lost(why) | Outcome::Fatal(why)) => Err(why),
-        Err(Outcome::Exit(_) | Outcome::Closed) => Err("the connection ended".into()),
-    }
+/// Open a session to `target`, going through its jump host if it has one, and log in. The pane's connection loop uses it
+/// directly; everything else gets its session from a [`crate::pool::Connection`], which calls it.
+pub(crate) async fn open(target: &SshTarget, forwards: &Arc<Forwards>) -> std::result::Result<Handle<Client>, Outcome> {
+    open_waiting(target, forwards, PROMPT_WAIT).await
 }
 
-/// Open a session to `target`, going through its jump host if it has one, and log in.
-async fn open(target: &SshTarget) -> std::result::Result<Handle<Client>, Outcome> {
+/// [`open`] with the time a person has for each round of questions as an argument, so that a test can shorten it; the
+/// program passes [`PROMPT_WAIT`] (through [`open`]) and nothing else.
+async fn open_waiting(
+    target: &SshTarget,
+    forwards: &Arc<Forwards>,
+    wait: Duration,
+) -> std::result::Result<Handle<Client>, Outcome> {
     let config = Arc::new(client::Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
@@ -449,12 +968,14 @@ async fn open(target: &SshTarget) -> std::result::Result<Handle<Client>, Outcome
         known_hosts: t.known_hosts.clone(),
         policy: t.host_key,
         refused: refused.clone(),
+        forwards: forwards.clone(),
     };
     let lost = |e: &dyn std::fmt::Display| Outcome::Lost(e.to_string());
     let why_refused = || refused.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
     let mut session = if let Some(jump) = &target.jump {
-        let via = Box::pin(open(jump)).await?;
+        // Only the target's own login serves forwards; a jump host's registry stays empty, so it rejects every one.
+        let via = Box::pin(open_waiting(jump, &Arc::new(Forwards::default()), wait)).await?;
         let channel = via
             .channel_open_direct_tcpip(target.host.clone(), target.port as u32, "127.0.0.1", 0)
             .await
@@ -477,48 +998,515 @@ async fn open(target: &SshTarget) -> std::result::Result<Handle<Client>, Outcome
         SshAuth::Password(password) => session
             .authenticate_password(target.user.clone(), password.clone())
             .await
-            .map_err(|e| lost(&e))?,
+            .map_err(|e| lost(&e))?
+            .success(),
         SshAuth::Key { path, passphrase } => {
             let key = load_secret_key(path, passphrase.as_deref())
-                .map_err(|e| Outcome::Fatal(format!("the key {} cannot be used: {e}", path.display())))?;
+                .map_err(|e| {
+                    let why = key_error_text(passphrase.is_some(), &e);
+                    Outcome::Fatal(format!("the key {} cannot be used: {why}", path.display()))
+                })?;
             let hash = session.best_supported_rsa_hash().await.map_err(|e| lost(&e))?.flatten();
             session
                 .authenticate_publickey(target.user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), hash))
                 .await
                 .map_err(|e| lost(&e))?
+                .success()
+        }
+        // The agent says why it failed in its own words; success is the only way out of it without an error.
+        SshAuth::Agent { socket, identity } => {
+            agent_login(&mut session, &target.user, socket.as_deref(), identity.as_deref()).await?;
+            true
+        }
+        // The same: a sentence for every way it can fail, and no answer in any of them.
+        SshAuth::Interactive { prompter } => {
+            interactive_login(&mut session, &target.user, &target.host, prompter.as_ref(), wait).await?;
+            true
         }
     };
-    if !authenticated.success() {
+    if !authenticated {
         return Err(Outcome::Fatal(format!("{}@{} refused the login", target.user, target.host)));
     }
     Ok(session)
 }
 
-/// One connected session: log in, open the shell, and pump bytes until it ends.
+/// Log in by answering the server's questions: each round with questions is shown to the person through `prompter` and
+/// answered once; a round with none is answered with nothing. At most [`PROMPT_ROUNDS`] rounds with questions, [`PROMPT_LINES`]
+/// questions in a round and `wait` for each answer. The texts are cleaned and bounded here, so whoever draws them shows
+/// text only. The answers are moved into the protocol and never copied, stored or printed.
+async fn interactive_login(
+    session: &mut Handle<Client>,
+    user: &str,
+    host: &str,
+    prompter: Option<&Arc<dyn Prompter>>,
+    wait: Duration,
+) -> std::result::Result<(), Outcome> {
+    use russh::client::KeyboardInteractiveAuthResponse as Reply;
+    let fatal = |why: &str| Outcome::Fatal(why.to_owned());
+    let Some(prompter) = prompter else { return Err(fatal(PROMPT_NO_WINDOW)) };
+    let lost = |e: russh::Error| Outcome::Lost(e.to_string());
+    let mut reply = session.authenticate_keyboard_interactive_start(user, None::<String>).await.map_err(lost)?;
+    let (mut asked, mut empty) = (0usize, 0usize);
+    loop {
+        let (name, instructions, prompts) = match reply {
+            Reply::Success => return Ok(()),
+            Reply::Failure { .. } => return Err(Outcome::Fatal(format!("{user}@{host} refused the login"))),
+            Reply::InfoRequest { name, instructions, prompts } => (name, instructions, prompts),
+        };
+        if prompts.is_empty() {
+            empty += 1;
+            if empty > PROMPT_EMPTY_ROUNDS {
+                return Err(fatal(PROMPT_TOO_MANY));
+            }
+            reply = session.authenticate_keyboard_interactive_respond(Vec::new()).await.map_err(lost)?;
+            continue;
+        }
+        asked += 1;
+        if asked > PROMPT_ROUNDS || prompts.len() > PROMPT_LINES {
+            return Err(fatal(PROMPT_TOO_MANY));
+        }
+        let lines: Vec<PromptLine> = prompts
+            .into_iter()
+            .map(|p| {
+                let text = clean_line(&p.prompt, PROMPT_TEXT);
+                PromptLine { text: if text.is_empty() { PROMPT_BLANK.to_owned() } else { text }, echo: p.echo }
+            })
+            .collect();
+        let round = PromptRound {
+            // The program that owns the profiles stamps the connection's id (see `Connections::set_prompter`).
+            connection: String::new(),
+            host: host.to_owned(),
+            name: clean_line(&name, PROMPT_NAME),
+            instructions: clean_server_text(&instructions, PROMPT_INSTRUCTIONS),
+            prompts: lines,
+        };
+        let questions = round.prompts.len();
+        let who = prompter.clone();
+        // A blocking task: the prompter may wait for a person. On a timeout the task is let go of and ends by itself.
+        let asking = tokio::task::spawn_blocking(move || who.ask(round));
+        let answers = match tokio::time::timeout(wait, asking).await {
+            Ok(Ok(PromptAnswer::Answers(answers))) => answers,
+            Ok(Ok(PromptAnswer::Cancelled) | Err(_)) => return Err(fatal(PROMPT_CANCELLED)),
+            Err(_) => return Err(fatal(PROMPT_TIMED_OUT)),
+        };
+        if answers.len() != questions {
+            let mut answers = answers;
+            for answer in &mut answers {
+                zeroize::Zeroize::zeroize(answer);
+            }
+            return Err(fatal(PROMPT_WRONG_COUNT));
+        }
+        reply = session.authenticate_keyboard_interactive_respond(answers).await.map_err(lost)?;
+    }
+}
+
+/// At most this many of the agent's keys are offered to a server, in the order the agent lists them. A server allows six
+/// attempts by default (`MaxAuthTries`), so more would lock a person with many keys out; such a person names the key to
+/// use by its public key file.
+pub const AGENT_MAX_TRIES: usize = 5;
+
+/// The sentences of an agent login. Each is a constant, so no key, no signature and no path of a socket can be in one.
+#[cfg(not(windows))]
+const AGENT_NOT_RUNNING: &str = "no ssh-agent is running (SSH_AUTH_SOCK is not set)";
+const AGENT_UNREACHABLE: &str = "the ssh-agent cannot be reached";
+const AGENT_NO_KEYS: &str = "the ssh-agent holds no keys";
+const AGENT_NO_ACCEPTED_KEY: &str = "the ssh-agent has no key that this host accepts";
+const AGENT_REFUSED: &str = "the ssh-agent refused to sign";
+const AGENT_BAD_IDENTITY: &str = "the public key file cannot be used";
+const AGENT_KEY_NOT_HELD: &str = "the public key is not in the ssh-agent";
+
+/// The OpenSSH agent of Windows listens on this named pipe.
+#[cfg(windows)]
+const AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+/// How long the agent may take to connect and to list its keys. Signing is not bound here (a key that waits for a touch
+/// may take a while); the login as a whole is bound by the pool.
+const AGENT_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most a public key file may hold; a real one is a few hundred bytes.
+const MAX_IDENTITY_FILE: u64 = 16 * 1024;
+
+/// A connection to an agent, whatever carries it (a Unix socket or a Windows pipe).
+type AgentConnection = AgentClient<Box<dyn AgentStream + Send + Unpin>>;
+
+/// Where the agent listens: `explicit` (a test or a tool), else `SSH_AUTH_SOCK` on Unix, else the OpenSSH pipe on
+/// Windows. The environment is an argument so that no test has to change the environment of the process.
+fn agent_endpoint(explicit: Option<&Path>, env: Option<std::ffi::OsString>) -> std::result::Result<PathBuf, &'static str> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let _ = env;
+        Ok(PathBuf::from(AGENT_PIPE))
+    }
+    #[cfg(not(windows))]
+    match env {
+        Some(value) if !value.is_empty() => Ok(PathBuf::from(value)),
+        _ => Err(AGENT_NOT_RUNNING),
+    }
+}
+
+/// The keys of the agent's identities in the order it listed them. A certificate is skipped: its signature would be made
+/// for the certificate, which this login does not offer.
+fn plain_keys(identities: Vec<AgentIdentity>) -> Vec<PublicKey> {
+    identities
+        .into_iter()
+        .filter_map(|identity| match identity {
+            AgentIdentity::PublicKey { key, .. } => Some(key),
+            AgentIdentity::Certificate { .. } => None,
+        })
+        .collect()
+}
+
+/// The public key in `path`, or `None` when it is not a readable public key file. A private key is never read: the first
+/// bytes of one say what it is, and the file is left unread then.
+fn read_identity(path: &Path) -> Option<PublicKey> {
+    use std::io::Read;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut text = vec![0u8; 10];
+    file.read_exact(&mut text).ok()?;
+    if text.starts_with(b"-----BEGIN") {
+        return None;
+    }
+    file.take(MAX_IDENTITY_FILE).read_to_end(&mut text).ok()?;
+    PublicKey::from_openssh(std::str::from_utf8(&text).ok()?).ok()
+}
+
+/// Connect to the agent at `path`.
+async fn connect_agent(path: &Path) -> Option<AgentConnection> {
+    #[cfg(unix)]
+    {
+        Some(AgentClient::connect_uds(path).await.ok()?.dynamic())
+    }
+    #[cfg(windows)]
+    {
+        Some(AgentClient::connect_named_pipe(path).await.ok()?.dynamic())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Why a signature could not be made: the connection to the host went (the login may be tried again) or the agent said no.
+fn agent_sign_error(error: &russh::AgentAuthError) -> Outcome {
+    use russh::keys::Error as KeyError;
+    match error {
+        russh::AgentAuthError::Send(e) => Outcome::Lost(e.to_string()),
+        russh::AgentAuthError::Key(KeyError::IO(_)) => Outcome::Fatal(AGENT_UNREACHABLE.into()),
+        russh::AgentAuthError::Key(_) => Outcome::Fatal(AGENT_REFUSED.into()),
+    }
+}
+
+/// Log in with the user's agent: the agent's keys are offered in turn (at most [`AGENT_MAX_TRIES`]) and the agent signs
+/// the server's challenge for the one the server wants. Nothing here sees a private key; nothing is stored; the agent is
+/// never forwarded.
+async fn agent_login(
+    session: &mut Handle<Client>,
+    user: &str,
+    socket: Option<&Path>,
+    identity: Option<&Path>,
+) -> std::result::Result<(), Outcome> {
+    let fatal = |why: &str| Outcome::Fatal(why.to_owned());
+    // The file the person named comes first: it is local and its fault is theirs to fix.
+    let wanted = match identity {
+        Some(file) => Some(read_identity(file).ok_or_else(|| fatal(AGENT_BAD_IDENTITY))?),
+        None => None,
+    };
+    let endpoint = agent_endpoint(socket, std::env::var_os("SSH_AUTH_SOCK")).map_err(fatal)?;
+    let listing = async {
+        let mut agent = connect_agent(&endpoint).await?;
+        let identities = agent.request_identities().await.ok()?;
+        Some((agent, identities))
+    };
+    let Ok(Some((mut agent, identities))) = tokio::time::timeout(AGENT_LIST_TIMEOUT, listing).await else {
+        return Err(fatal(AGENT_UNREACHABLE));
+    };
+    let keys = plain_keys(identities);
+    if keys.is_empty() {
+        return Err(fatal(AGENT_NO_KEYS));
+    }
+    let offered: Vec<PublicKey> = match wanted {
+        Some(wanted) => vec![keys.into_iter().find(|key| key.key_data() == wanted.key_data()).ok_or_else(|| fatal(AGENT_KEY_NOT_HELD))?],
+        None => keys.into_iter().take(AGENT_MAX_TRIES).collect(),
+    };
+    for key in offered {
+        let hash = if matches!(key.algorithm(), russh::keys::Algorithm::Rsa { .. }) {
+            session.best_supported_rsa_hash().await.map_err(|e| Outcome::Lost(e.to_string()))?.flatten()
+        } else {
+            None
+        };
+        match session.authenticate_publickey_with(user, key, hash, &mut agent).await {
+            Ok(result) if result.success() => return Ok(()),
+            Ok(_) => {}
+            Err(e) => return Err(agent_sign_error(&e)),
+        }
+    }
+    Err(fatal(AGENT_NO_ACCEPTED_KEY))
+}
+
+/// What the pane says when a key file cannot be used, in words that tell the person what to do.
+///
+/// The text is decided by the error and by whether a passphrase was given, never by a guess about the key's cipher: a
+/// wrong passphrase of an OpenSSH key and a damaged file both fail as a decoding error, so the sentence says both.
+/// The function sees no secret (the error and one flag), so no passphrase, password or key byte can be part of the text.
+fn key_error_text(passphrase_given: bool, error: &russh::keys::Error) -> String {
+    use russh::keys::Error as KeyError;
+    match error {
+        KeyError::KeyIsEncrypted if passphrase_given => "the passphrase was not accepted for this key".into(),
+        KeyError::KeyIsEncrypted => "the key is protected by a passphrase; save the passphrase in the connection".into(),
+        KeyError::IO(e) => format!("the key file cannot be read: {e}"),
+        KeyError::UnsupportedKeyType { .. } | KeyError::UnknownAlgorithm(_) => "the key type is not supported".into(),
+        // A PKCS#8 file whose encryption the library cannot read (PBKDF2 with HMAC-SHA-1, as LibreSSL and OpenSSL 1 write
+        // it) is not a wrong passphrase: saying so would send the person to retype one that is right.
+        KeyError::Pkcs8(e) if e.to_string().ends_with("is unsupported") => {
+            "the key is encrypted in a way that is not supported; save it again in the OpenSSH format".into()
+        }
+        KeyError::SshKey(_)
+        | KeyError::SshEncoding(_)
+        | KeyError::Pkcs8(_)
+        | KeyError::Pkcs1(_)
+        | KeyError::Der(_)
+        | KeyError::Spki(_)
+        | KeyError::Sec1(_)
+        | KeyError::Pad(_)
+        | KeyError::Unpad(_)
+        | KeyError::Rsa(_)
+        | KeyError::Decode(_)
+        | KeyError::Ed25519KeyError(_)
+        | KeyError::EcdsaKeyError(_)
+        | KeyError::KeyIsCorrupt
+        | KeyError::CouldNotReadKey => {
+            if passphrase_given {
+                "the passphrase is wrong or the key file is damaged".into()
+            } else {
+                "the key file is damaged".into()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+/// The sentence for a refused channel, and the text of every other error as it is.
+///
+/// A server that limits how many channels one connection may have open (OpenSSH's `MaxSessions`) refuses the next one
+/// with a bare protocol reason; the person is told what that means. The text holds no host name and no credential.
+pub(crate) fn channel_text(error: &russh::Error) -> String {
+    match error {
+        russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited | ChannelOpenFailure::ResourceShortage) => {
+            "the server refuses another channel on this connection; it limits how many can be open at once".into()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// One connected session: take the connection's login (making it when there is none), open the shell on it, and pump
+/// bytes until it ends. The login is the connection's and outlives this shell: only the shell's channel is closed.
+#[allow(clippy::too_many_arguments)]
 async fn session(
-    target: &SshTarget,
+    connection: &Arc<Connection>,
     size: &mut (u16, u16, u32, u32),
     cmd: &mut tmpsc::UnboundedReceiver<Cmd>,
-    out: &mpsc::Sender<Vec<u8>>,
+    out: &Backlog,
     state: &SharedState,
     buffered: &mut Vec<u8>,
     attempt: &mut u32,
+    tunnel: Option<&Tunnel>,
+    retry: bool,
 ) -> Outcome {
-    let handle = match open(target).await {
-        Ok(handle) => handle,
-        Err(outcome) => return outcome,
+    // The shell counts as a use of the connection, so the idle reaper never closes the login under it.
+    let _lease = connection.lease();
+    // While the login runs the pane listens: closing it must not wait for a person who is typing a code (the login goes on
+    // for the others), what is typed is kept for the shell, and a resize is remembered.
+    let login = connection.session(Open::Interactive);
+    tokio::pin!(login);
+    let session = loop {
+        tokio::select! {
+            result = &mut login => match result {
+                Ok(session) => break session,
+                Err(e) if e.fatal => return Outcome::Fatal(e.why),
+                Err(e) => return Outcome::Lost(e.why),
+            },
+            msg = cmd.recv() => match msg {
+                None | Some(Cmd::Close) => return Outcome::Closed,
+                Some(Cmd::Data(bytes)) => keep(buffered, &bytes),
+                Some(Cmd::Resize { cols, rows, px_w, px_h }) => *size = (cols, rows, px_w, px_h),
+            },
+        }
     };
-    let mut channel = match handle.channel_open_session().await {
+    let outcome = shell(connection, &session, size, cmd, out, state, buffered, attempt, tunnel, retry).await;
+    // A login that ended under the shell is replaced by the next attempt, once for every user of the connection.
+    if matches!(outcome, Outcome::Lost(_)) && session.is_closed() {
+        connection.invalidate(&session).await;
+    }
+    outcome
+}
+
+/// Close a shell's channel without waiting for the server for long. Errors do not matter: the channel is gone either way.
+async fn close_channel(channel: &Channel<client::Msg>) {
+    let _ = tokio::time::timeout(CHANNEL_CLOSE_TIMEOUT, channel.close()).await;
+}
+
+/// The start of every sentence that says why a pane has no tunnel.
+const NOT_AVAILABLE: &str = "wsh is not available on this host: ";
+/// How long the server may take to answer the start line.
+const START_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A plain shell request.
+async fn plain_shell(channel: &Channel<client::Msg>) -> std::result::Result<(), Outcome> {
+    channel.request_shell(false).await.map_err(|e| Outcome::Lost(channel_text(&e)))
+}
+
+/// How the server answered the start line.
+enum StartReply {
+    Success,
+    Failure,
+    /// The channel ended or the server said nothing in time.
+    Gone,
+}
+
+/// Wait for the answer to the exec request. Output that arrives before it is queued for the pane as usual.
+async fn start_reply(channel: &mut Channel<client::Msg>, out: &Backlog) -> StartReply {
+    let wait = async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => return StartReply::Success,
+                Some(ChannelMsg::Failure) => return StartReply::Failure,
+                Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
+                    let _ = out.push(data.to_vec());
+                }
+                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => return StartReply::Gone,
+                Some(_) => {}
+            }
+        }
+    };
+    tokio::time::timeout(START_REPLY_TIMEOUT, wait).await.unwrap_or(StartReply::Gone)
+}
+
+/// A socket path of the form [`valid_forward_path`] accepts, from 128 fresh random bits, or `None` when the system has no
+/// random numbers.
+fn fresh_forward_path() -> Option<String> {
+    use std::fmt::Write as _;
+    let mut raw = [0u8; 16];
+    getrandom::fill(&mut raw).ok()?;
+    let mut path = String::from("/tmp/holzwave-");
+    for byte in raw {
+        let _ = write!(path, "{byte:02x}");
+    }
+    path.push_str(".sock");
+    valid_forward_path(&path).then_some(path)
+}
+
+/// The socket path and the environment of one start of the shell. The first start uses the tunnel as it was made. A start
+/// after that (a reconnect, or Enter after a failure) uses a path nobody asked for before, and the new shell's environment
+/// names it: after a login that was lost without a goodbye the host may still hold the old socket, `sshd` does not unlink
+/// an existing socket path unless it is told to, and so it would refuse the same path with the old login still counted. A
+/// shell that started after a reconnect is a new process, so nothing running sees its `HOLZWAVE_SOCKET` change, and the
+/// path keeps its 128 random bits. The token and the pane are the same: the sink of the tunnel knows them, not the path.
+fn start_values(tunnel: &Tunnel, retry: bool) -> (String, Vec<(String, String)>) {
+    let same = || (tunnel.path.clone(), tunnel.env.clone());
+    // A path that is not the rule is refused as it was the first time: a retry does not make it valid.
+    if !retry || !valid_forward_path(&tunnel.path) {
+        return same();
+    }
+    let Some(path) = fresh_forward_path() else { return same() };
+    let env = tunnel.env.iter().map(|(name, value)| if name == ENV_NAMES[0] { (name.clone(), path.clone()) } else { (name.clone(), value.clone()) }).collect();
+    (path, env)
+}
+
+/// Start the remote shell on `channel`, which has its terminal. Without a tunnel that is a shell request. With one the
+/// socket is forwarded back first and the shell is started by the constant exec line that carries the environment; a
+/// refusal at any step leaves a plain shell and one notice that says why, and never the environment. Returns the forward
+/// that must live as long as the shell.
+async fn start_shell(
+    channel: &mut Channel<client::Msg>,
+    connection: &Arc<Connection>,
+    session: &Arc<Session>,
+    tunnel: Option<&Tunnel>,
+    retry: bool,
+    out: &Backlog,
+) -> std::result::Result<Option<ForwardGuard>, Outcome> {
+    let Some(tunnel) = tunnel else {
+        plain_shell(channel).await?;
+        return Ok(None);
+    };
+    let say = |why: &str| out.notice(&format!("{NOT_AVAILABLE}{why}"));
+    // The line is built before anything is asked of the server: a refused environment costs no request.
+    let (path, env) = start_values(tunnel, retry);
+    let Ok(command) = wrapped_shell_command(&env) else {
+        say("the environment was refused");
+        plain_shell(channel).await?;
+        return Ok(None);
+    };
+    let guard = match connection.forward_on(session, &path, tunnel.sink.clone(), ForwardLimits::default()).await {
+        Ok(guard) => guard,
+        Err(ForwardError::Refused) => {
+            say(&ForwardError::Refused.to_string());
+            plain_shell(channel).await?;
+            return Ok(None);
+        }
+        Err(ForwardError::Failed(why)) => {
+            let why: String = why.chars().filter(|c| !c.is_control()).take(120).collect();
+            say(&format!("the forward could not be set up: {why}"));
+            plain_shell(channel).await?;
+            return Ok(None);
+        }
+    };
+    if let Err(e) = channel.exec(true, command).await {
+        guard.cancel().await;
+        return Err(Outcome::Lost(channel_text(&e)));
+    }
+    match start_reply(channel, out).await {
+        StartReply::Success => Ok(Some(guard)),
+        StartReply::Failure => {
+            guard.cancel().await;
+            say("the server did not run the start line");
+            plain_shell(channel).await?;
+            Ok(None)
+        }
+        StartReply::Gone => {
+            guard.cancel().await;
+            Err(Outcome::Lost("the connection was reset".into()))
+        }
+    }
+}
+
+/// The shell itself, on a login that is already made.
+#[allow(clippy::too_many_arguments)]
+async fn shell(
+    connection: &Arc<Connection>,
+    session: &Arc<Session>,
+    size: &mut (u16, u16, u32, u32),
+    cmd: &mut tmpsc::UnboundedReceiver<Cmd>,
+    out: &Backlog,
+    state: &SharedState,
+    buffered: &mut Vec<u8>,
+    attempt: &mut u32,
+    tunnel: Option<&Tunnel>,
+    retry: bool,
+) -> Outcome {
+    let target = connection.target();
+    let mut channel = match session.handle().channel_open_session().await {
         Ok(channel) => channel,
-        Err(e) => return Outcome::Lost(e.to_string()),
+        Err(e) => return Outcome::Lost(channel_text(&e)),
     };
     let (cols, rows, px_w, px_h) = *size;
     if let Err(e) = channel.request_pty(false, &target.term, cols as u32, rows as u32, px_w, px_h, &[]).await {
-        return Outcome::Lost(e.to_string());
+        close_channel(&channel).await;
+        return Outcome::Lost(channel_text(&e));
     }
-    if let Err(e) = channel.request_shell(false).await {
-        return Outcome::Lost(e.to_string());
-    }
+    let guard = match start_shell(&mut channel, connection, session, tunnel, retry, out).await {
+        Ok(guard) => guard,
+        Err(outcome) => {
+            close_channel(&channel).await;
+            return outcome;
+        }
+    };
     // From here on the connection works: the count of failed attempts starts again.
     *attempt = 0;
     state.set(ConnState::Connected);
@@ -534,10 +1522,7 @@ async fn session(
     let outcome = loop {
         tokio::select! {
             msg = cmd.recv() => match msg {
-                None | Some(Cmd::Close) => {
-                    let _ = channel.close().await;
-                    break Outcome::Closed;
-                }
+                None | Some(Cmd::Close) => break Outcome::Closed,
                 Some(Cmd::Data(bytes)) => {
                     if let Err(e) = channel.data_bytes(bytes).await {
                         break Outcome::Lost(e.to_string());
@@ -551,16 +1536,13 @@ async fn session(
                 }
             },
             msg = channel.wait() => match msg {
-                Some(ChannelMsg::Data { data }) => {
-                    if out.send(data.to_vec()).is_err() {
-                        break Outcome::Closed;
-                    }
-                }
-                Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    if out.send(data.to_vec()).is_err() {
-                        break Outcome::Closed;
-                    }
-                }
+                Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => match out.push(data.to_vec()) {
+                    Pushed::Queued => {}
+                    Pushed::Gone => break Outcome::Closed,
+                    // The pane cannot keep up. Ending the shell keeps the connection's other channels moving, and trying
+                    // again would only restart the flood, so the pane fails and waits for Enter.
+                    Pushed::Full => break Outcome::Fatal("the output arrived faster than the pane could show it".into()),
+                },
                 Some(ChannelMsg::ExitStatus { exit_status }) => exit = Some(exit_status),
                 Some(ChannelMsg::ExitSignal { .. }) => exit = Some(128),
                 Some(ChannelMsg::Eof | ChannelMsg::Close) => break Outcome::Exit(exit.unwrap_or(0)),
@@ -573,7 +1555,14 @@ async fn session(
             },
         }
     };
-    let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+    // The forward ends with the shell, before its channel goes: the sink is forgotten and the server is asked to cancel.
+    if let Some(guard) = guard {
+        guard.cancel().await;
+    }
+    // Only the shell's channel ends here; the login belongs to the connection.
+    if matches!(outcome, Outcome::Closed | Outcome::Exit(_) | Outcome::Fatal(_)) {
+        close_channel(&channel).await;
+    }
     outcome
 }
 
@@ -594,8 +1583,6 @@ pub const MAX_EXEC_OUTPUT: usize = 1024 * 1024;
 pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest a command may run, whatever the caller asks for.
 pub const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-/// Connect and log in: the bound [`crate::files::SftpSource`] uses too.
-const EXEC_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Open the channel and write the request.
 const EXEC_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// The shortest time limit; a smaller one is raised to it, so a zero cannot end every command before it starts.
@@ -762,12 +1749,17 @@ impl Tail {
 /// the first contact with a host. A host can therefore be used by exec only after the user's own pane or file
 /// browser learned its key.
 fn require_pinned_hosts(target: &SshTarget) -> Result<SshTarget> {
-    fn pin(target: &mut SshTarget) -> Result<()> {
+    pin_hosts(target).map_err(exec_error)
+}
+
+/// [`require_pinned_hosts`] with the reason as plain text, for the pool's [`crate::pool::Open::Pinned`] opener.
+pub(crate) fn pin_hosts(target: &SshTarget) -> std::result::Result<SshTarget, String> {
+    fn pin(target: &mut SshTarget) -> std::result::Result<(), String> {
         if target.known_hosts.is_none() {
-            return Err(exec_error(format!("{} has no known_hosts file, so its host key cannot be checked", target.host)));
+            return Err(format!("{} has no known_hosts file, so its host key cannot be checked", target.host));
         }
         if target.host_key == HostKeyPolicy::AcceptAny {
-            return Err(exec_error(format!("{} is set to accept any host key", target.host)));
+            return Err(format!("{} is set to accept any host key", target.host));
         }
         target.host_key = HostKeyPolicy::Strict;
         match target.jump.as_deref_mut() {
@@ -780,7 +1772,7 @@ fn require_pinned_hosts(target: &SshTarget) -> Result<SshTarget> {
     Ok(pinned)
 }
 
-/// A refusal or failure of an exec: a fixed phrase or the reason `open_session` gave, never the command or a credential.
+/// A refusal or failure of an exec: a fixed phrase or the reason the login gave, never the command or a credential.
 fn exec_error(text: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("ssh exec: {text}"))
 }
@@ -835,103 +1827,80 @@ async fn stop(channel: &Channel<client::Msg>) {
 
 /// Run commands on the host of a saved connection, one channel per command, without a terminal.
 ///
-/// The connection is made on the first [`SshExec::exec`] by the same function the SFTP source uses
-/// ([`open_session`]), so jump hosts, authentication and the host key check are not repeated here. It never learns a host
-/// key (see [`require_pinned_hosts`]), is bounded in output and time, and reports how a command ended. The connection is
-/// kept for the next call.
+/// The commands run on the session of a [`Connection`] (see [`crate::pool`]), so a host that a file browser or a monitor
+/// already logged in to costs no second login. The session is opened as [`Open::Pinned`]: jump hosts, authentication and
+/// the host key check are `open`'s, and a key is never learned (see [`require_pinned_hosts`]); a session that a person's
+/// own open made serves the commands too. Output and time are bounded, and the result says how a command ended. The
+/// connection is kept for the next call.
 pub struct SshExec {
-    label: String,
-    /// The pinned copy of the target the caller gave.
-    target: SshTarget,
-    runtime: tokio::runtime::Runtime,
-    conn: tokio::sync::Mutex<Option<Arc<Handle<Client>>>>,
+    conn: Arc<Connection>,
 }
 
 impl SshExec {
-    /// Prepare an exec primitive for `target`. Opens no socket: nothing connects before the first call of
-    /// [`SshExec::exec`].
+    /// Prepare an exec primitive for `target` on a connection of its own. Opens no socket: nothing connects before the
+    /// first call of [`SshExec::exec`].
     ///
     /// Fails for a host (or jump host) without a known hosts file and for one set to accept any key: the host key of an
     /// exec connection is always checked and never learned.
     pub fn new(label: impl Into<String>, target: SshTarget) -> Result<Self> {
-        let target = require_pinned_hosts(&target)?;
-        // One worker thread drives keepalives and replies between calls (as in `SftpSource`); callers only wait.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .thread_name("hw-exec")
-            .build()
-            .map_err(|e| Error::Pty(format!("ssh exec runtime: {e}")))?;
-        Ok(Self { label: label.into(), target, runtime, conn: tokio::sync::Mutex::new(None) })
+        require_pinned_hosts(&target)?;
+        Self::on(Connection::standalone(label, target)?)
+    }
+
+    /// Prepare an exec primitive on a connection that others share (the one of a saved profile).
+    ///
+    /// Fails at once, as [`SshExec::new`] does, for a target that cannot be pinned.
+    pub fn on(conn: Arc<Connection>) -> Result<Self> {
+        require_pinned_hosts(conn.target())?;
+        Ok(Self { conn })
     }
 
     /// The name the caller gave, for its own messages.
     pub fn label(&self) -> &str {
-        &self.label
+        self.conn.label()
     }
 
     /// Run `command` on the host and return its output, its exit status and how it ended.
     ///
-    /// This blocks: never call it from an async task or from the UI thread, and never drop an `SshExec` inside an async
-    /// context (the rules of `SftpSource`). `reconnect` and `startup` of the target are ignored. The command runs in the
-    /// account's login shell exactly as given: nothing is quoted or interpreted here, and a caller that builds a command
-    /// from data quotes it for a POSIX shell itself. The run is bounded by `limits.timeout`, measured from the
-    /// moment the request was written; connecting and opening the channel have their own bounds.
+    /// This blocks: never call it from an async task or from the UI thread. `reconnect` and `startup` of the target are
+    /// ignored. The command runs in the account's login shell exactly as given: nothing is quoted or interpreted here,
+    /// and a caller that builds a command from data quotes it for a POSIX shell itself. The run is bounded by
+    /// `limits.timeout`, measured from the moment the request was written; connecting and opening the channel have
+    /// their own bounds.
     ///
     /// A command is written at most once. [`ExecEnd::Lost`] means the connection broke while it ran: it may or may not
     /// have finished, and this code never runs it again.
     pub fn exec(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
         check_command(command)?;
         let limits = limits.clamped();
-        self.runtime.block_on(self.run(command, &limits, cancel))
-    }
-
-    /// The cached connection, or a new one. The `bool` says the connection was made by this call.
-    async fn connection(&self) -> Result<(Arc<Handle<Client>>, bool)> {
-        let mut slot = self.conn.lock().await;
-        if let Some(handle) = slot.as_ref().filter(|handle| !handle.is_closed()) {
-            return Ok((handle.clone(), false));
-        }
-        let handle = tokio::time::timeout(EXEC_CONNECT_TIMEOUT, open_session(&self.target))
-            .await
-            .map_err(|_| exec_error("the connection timed out"))?
-            .map_err(exec_error)?;
-        let handle = Arc::new(handle);
-        *slot = Some(handle.clone());
-        Ok((handle, true))
-    }
-
-    /// Forget `stale` if it is still the cached connection. Compared by identity, so the connection a parallel call made
-    /// in the meantime is never thrown away.
-    async fn invalidate(&self, stale: &Arc<Handle<Client>>) {
-        let mut slot = self.conn.lock().await;
-        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, stale)) {
-            *slot = None;
-        }
+        // The connection counts this run as a use, so the idle reaper never closes it under the command.
+        let _lease = self.conn.lease();
+        self.conn.block_on(self.run(command, &limits, cancel))
     }
 
     /// The whole run of one command.
     ///
-    /// A command is written at most once. A cached connection that cannot open a channel, or cannot take the
-    /// request, is replaced once; the same failure on a connection this call just made, a refused request, and every
+    /// A command is written at most once. A cached session that cannot open a channel, or cannot take the
+    /// request, is replaced once; the same failure on a session this call just made, a refused request, and every
     /// failure after the request was written are final. A connection lost while the command runs gives
     /// [`ExecEnd::Lost`], and nothing is ever tried again after that.
     async fn run(&self, command: &str, limits: &ExecLimits, cancel: &ExecCancel) -> Result<ExecResult> {
         let nothing = |end| ExecResult { stdout: Vec::new(), stderr: Vec::new(), status: None, end, truncated: false, dropped: 0 };
         let mut replaced = false;
         loop {
-            // Connect and open the channel. A cancel here ends the run before anything is written, and the abandoned
-            // connect leaves nothing half-made in the cache.
+            // Connect and open the channel. A cancel here ends the run before anything is written; the login itself
+            // belongs to the connection and finishes for whoever asks next.
             let opening = async {
-                let (handle, fresh) = self.connection().await?;
-                let channel = match tokio::time::timeout(EXEC_OPEN_TIMEOUT, handle.channel_open_session()).await {
+                let session = self.conn.session(Open::Pinned).await.map_err(exec_error)?;
+                let fresh = session.first_use();
+                let channel = match tokio::time::timeout(EXEC_OPEN_TIMEOUT, session.handle().channel_open_session()).await {
                     Ok(Ok(channel)) => Ok(channel),
-                    Ok(Err(e)) => Err(exec_error(e)),
+                    Ok(Err(e)) => Err(exec_error(channel_text(&e))),
                     Err(_) => Err(exec_error("opening a channel timed out")),
                 };
-                Ok::<_, Error>((handle, fresh, channel))
+                Ok::<_, Error>((session, fresh, channel))
             };
-            let (handle, fresh, channel) = tokio::select! {
+            let (session, fresh, channel) = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Ok(nothing(ExecEnd::Cancelled)),
                 opening = opening => opening?,
@@ -945,7 +1914,7 @@ impl SshExec {
                         // From here the command is written: no failure below is tried again.
                         let result = pump(channel, limits, cancel).await?;
                         if result.end == ExecEnd::Lost {
-                            self.invalidate(&handle).await;
+                            self.conn.invalidate(&session).await;
                         }
                         return Ok(result);
                     }
@@ -954,13 +1923,13 @@ impl SshExec {
                 },
                 Err(why) => why,
             };
-            // The request was not written. A connection this call just made is not tried again, and a cached one is
+            // The request was not written. A session this call just made is not tried again, and a cached one is
             // replaced once.
             if fresh || replaced {
                 return Err(why);
             }
             replaced = true;
-            self.invalidate(&handle).await;
+            self.conn.invalidate(&session).await;
         }
     }
 }
@@ -1019,7 +1988,7 @@ mod tests {
     use super::*;
     use russh::keys::{Algorithm, PrivateKey};
     use russh::server::{self, Auth, Msg, Server as _, Session};
-    use russh::{Channel, ChannelId};
+    use russh::{Channel, ChannelId, Disconnect};
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
@@ -1151,6 +2120,131 @@ mod tests {
         t.port = addr.port();
         t.reconnect = Reconnect { attempts: 3, delay: Duration::from_millis(100) };
         t
+    }
+
+    #[test]
+    fn server_text_is_cleaned_and_bounded() {
+        let clean = |text: &str| clean_server_text(text, 200);
+        // Control characters (ESC, NUL, tab, DEL) become spaces; nothing of an escape sequence can act.
+        assert_eq!(clean("a\x1b[31mb\0c\td\x7fe"), "a [31mb c d e");
+        // Bidi controls and zero-width characters go, so text cannot be reordered or hidden.
+        assert_eq!(clean("pay \u{202e}0001\u{202c} now"), "pay 0001 now");
+        assert_eq!(clean("a\u{2066}b\u{2069}c\u{200b}d\u{200f}e\u{feff}f\u{e0041}g\u{ad}h\u{2060}i"), "abcdefghi");
+        // Line breaks: one at most between lines, never a leading one, four at most in all.
+        assert_eq!(clean("\n\na\r\nb\n\n\nc \n d"), "a\nb\nc\nd");
+        assert_eq!(clean("1\n2\n3\n4\n5\n6\n7"), "1\n2\n3\n4\n5 6 7");
+        assert_eq!(clean("a\u{2028}b\u{85}c"), "a\nb\nc");
+        // Spaces: no run, none at either end.
+        assert_eq!(clean("   Password:    "), "Password:");
+        assert_eq!(clean("  \u{a0}\u{3000} "), "");
+        // The bound counts characters and cuts at a character boundary.
+        let long = "\u{e9}".repeat(500);
+        assert_eq!(clean_server_text(&long, PROMPT_TEXT).chars().count(), PROMPT_TEXT);
+        assert_eq!(clean_server_text(&long, PROMPT_NAME), "\u{e9}".repeat(PROMPT_NAME));
+        assert_eq!(clean_server_text("abc", 0), "");
+        assert_eq!(clean_server_text("ab cd", 3), "ab");
+        // A name or a question is one line.
+        assert_eq!(clean_line("a\nb\n\nc", PROMPT_NAME), "a b c");
+        assert_eq!(clean_line(&"x".repeat(400), PROMPT_NAME).chars().count(), PROMPT_NAME);
+        // Cleaning twice changes nothing, whatever the input.
+        for text in ["", " \n ", "a\n \nb", "\u{202e}\n x \u{200b}\n y", "1\n2\n3\n4\n5\n6", "\u{1b}[2J\u{7}done  "] {
+            let once = clean(text);
+            assert_eq!(clean(&once), once, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_login_asks_a_person_when_it_or_a_jump_host_is_interactive() {
+        let asks = || SshAuth::Interactive { prompter: None };
+        let plain = SshTarget::new("a.example", "holz", SshAuth::Password("pw".into()));
+        assert!(!plain.asks_a_person());
+        assert!(SshTarget::new("b.example", "holz", asks()).asks_a_person());
+        let mut middle = SshTarget::new("m.example", "holz", asks());
+        middle.jump = Some(Box::new(SshTarget::new("j.example", "holz", SshAuth::Password("pw".into()))));
+        let mut outer = plain.clone();
+        outer.jump = Some(Box::new(middle));
+        assert!(outer.asks_a_person(), "a jump host that asks counts");
+        assert_eq!(format!("{:?}", outer.auth), "Password(<set>)");
+        assert_eq!(format!("{:?}", PromptAnswer::Answers(vec!["hunter2".into()])), "Answers(<1 hidden>)");
+        assert_eq!(format!("{:?}", PromptAnswer::Cancelled), "Cancelled");
+    }
+
+    /// A server that asks one question and goes on to accept whatever is answered.
+    struct AsksOnce;
+
+    impl server::Server for AsksOnce {
+        type Handler = Self;
+        fn new_client(&mut self, _: Option<SocketAddr>) -> Self {
+            Self
+        }
+    }
+
+    impl server::Handler for AsksOnce {
+        type Error = russh::Error;
+
+        async fn auth_keyboard_interactive<'a>(
+            &'a mut self,
+            _user: &str,
+            _submethods: &str,
+            response: Option<server::Response<'a>>,
+        ) -> std::result::Result<Auth, Self::Error> {
+            Ok(match response {
+                None => Auth::Partial {
+                    name: "".into(),
+                    instructions: "".into(),
+                    prompts: std::borrow::Cow::Owned(vec![("Code:".into(), false)]),
+                },
+                Some(_) => Auth::Accept,
+            })
+        }
+    }
+
+    /// A person who never answers in time.
+    struct Asleep;
+
+    impl Prompter for Asleep {
+        fn ask(&self, _round: PromptRound) -> PromptAnswer {
+            thread::sleep(Duration::from_millis(1500));
+            PromptAnswer::Answers(vec!["late".into()])
+        }
+    }
+
+    #[test]
+    fn no_answer_in_time_ends_the_login() {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let config = Arc::new(server::Config {
+            keys: vec![key],
+            auth_rejection_time: Duration::from_millis(0),
+            auth_rejection_time_initial: Some(Duration::from_millis(0)),
+            ..Default::default()
+        });
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                tx.send(socket.local_addr().unwrap()).unwrap();
+                let _ = AsksOnce.run_on_socket(config, &socket).await;
+            });
+        });
+        let addr = rx.recv().unwrap();
+        let prompter: Arc<dyn Prompter> = Arc::new(Asleep);
+        let target = {
+            let mut t = SshTarget::new("127.0.0.1", "holz", SshAuth::Interactive { prompter: Some(prompter) });
+            t.port = addr.port();
+            t
+        };
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let started = Instant::now();
+        let result = rt.block_on(open_waiting(&target, &Arc::new(Forwards::default()), Duration::from_millis(200)));
+        match result {
+            Err(Outcome::Fatal(why)) => assert_eq!(why, PROMPT_TIMED_OUT),
+            Err(Outcome::Lost(why)) => panic!("unexpected: {why}"),
+            Err(_) => panic!("unexpected outcome"),
+            Ok(_) => panic!("a login that nobody answered succeeded"),
+        }
+        // The login ends at the wait, not when the person finally answers.
+        assert!(started.elapsed() < Duration::from_millis(1200), "{:?}", started.elapsed());
     }
 
     /// The link's output, read by one helper thread, so a test can wait for text as often as it likes.
@@ -1326,6 +2420,192 @@ mod tests {
         out.until("CHANGED", 10);
         let _ = second.key;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_agent_is_told_in_words() {
+        // The environment is an argument, so no test changes the process's own.
+        let none = agent_endpoint(None, None);
+        let empty = agent_endpoint(None, Some(std::ffi::OsString::new()));
+        let set = agent_endpoint(None, Some("/run/user/1000/agent.sock".into()));
+        let given = agent_endpoint(Some(Path::new("/x/a.sock")), None);
+        #[cfg(not(windows))]
+        {
+            assert_eq!(none, Err("no ssh-agent is running (SSH_AUTH_SOCK is not set)"));
+            assert_eq!(empty, Err("no ssh-agent is running (SSH_AUTH_SOCK is not set)"), "an empty variable is no agent");
+            assert_eq!(set, Ok(PathBuf::from("/run/user/1000/agent.sock")));
+        }
+        #[cfg(windows)]
+        {
+            let pipe = Ok(PathBuf::from(r"\\.\pipe\openssh-ssh-agent"));
+            assert_eq!((none, empty, set), (pipe.clone(), pipe.clone(), pipe), "Windows has one well-known pipe");
+        }
+        // A socket that a test or a tool names wins over the environment.
+        assert_eq!(given, Ok(PathBuf::from("/x/a.sock")));
+    }
+
+    #[test]
+    fn a_certificate_is_never_offered() {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let other = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let authority = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let mut builder =
+            russh::keys::ssh_key::certificate::Builder::new(vec![1u8; 16], key.public_key().key_data().clone(), 0, u64::MAX).unwrap();
+        builder.valid_principal("holz").unwrap();
+        let certificate = builder.sign(&authority).unwrap();
+        let listed = vec![
+            AgentIdentity::Certificate { certificate, comment: "cert".into() },
+            AgentIdentity::PublicKey { key: other.public_key().clone(), comment: "plain".into() },
+            AgentIdentity::PublicKey { key: key.public_key().clone(), comment: String::new() },
+        ];
+        let kept = plain_keys(listed);
+        assert_eq!(kept.len(), 2, "only the plain keys are kept");
+        assert_eq!(kept[0].key_data(), other.public_key().key_data(), "in the order the agent listed them");
+        assert_eq!(kept[1].key_data(), key.public_key().key_data());
+    }
+
+    #[test]
+    fn a_public_key_file_is_read_and_a_private_key_never_is() {
+        let dir = std::env::temp_dir().join(format!("holzwave-ssh-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let public = dir.join("id.pub");
+        std::fs::write(&public, key.public_key().to_openssh().unwrap() + "\n").unwrap();
+        assert_eq!(read_identity(&public).unwrap().key_data(), key.public_key().key_data());
+        // A private key, a file of nonsense, a short file, a folder and a missing file are all not a public key.
+        let private = dir.join("id");
+        std::fs::write(&private, key.to_openssh(russh::keys::ssh_key::LineEnding::LF).unwrap().to_string()).unwrap();
+        assert!(read_identity(&private).is_none());
+        std::fs::write(dir.join("junk"), "hello world, this is not a key").unwrap();
+        std::fs::write(dir.join("short"), "ssh").unwrap();
+        for name in ["junk", "short", "missing"] {
+            assert!(read_identity(&dir.join(name)).is_none(), "{name}");
+        }
+        assert!(read_identity(&dir).is_none());
+        // More than the bound is cut, so a huge file cannot fill the memory.
+        std::fs::write(dir.join("huge"), "ssh-ed25519 ".to_owned() + &"A".repeat(1 << 20)).unwrap();
+        assert!(read_identity(&dir.join("huge")).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The error of really decoding `text` as a key file, for the variants a hand cannot build.
+    fn decode_error(text: &str, passphrase: Option<&str>) -> russh::keys::Error {
+        russh::keys::decode_secret_key(text, passphrase).expect_err("the text is not a usable key")
+    }
+
+    #[test]
+    fn key_errors_are_worded_by_one_function() {
+        use russh::keys::Error as KeyError;
+        use russh::keys::ssh_key;
+        const PASSPHRASE: &str = "correct horse battery staple";
+        const PROTECTED: &str = "the key is protected by a passphrase; save the passphrase in the connection";
+        const NOT_ACCEPTED: &str = "the passphrase was not accepted for this key";
+        const WRONG_OR_DAMAGED: &str = "the passphrase is wrong or the key file is damaged";
+        const DAMAGED: &str = "the key file is damaged";
+        const UNSUPPORTED: &str = "the key type is not supported";
+        const UNREADABLE: &str = "the key is encrypted in a way that is not supported; save it again in the OpenSSH format";
+        // What the old text for a wrong passphrase of an OpenSSH key was; it must never come back.
+        assert_eq!(KeyError::SshKey(ssh_key::Error::Crypto).to_string(), "SshKey: cryptographic error");
+
+        let not_found = || KeyError::IO(io::Error::from(io::ErrorKind::NotFound));
+        let unsupported = || KeyError::UnsupportedKeyType { key_type_string: "dsa".into(), key_type_raw: vec![1, 2] };
+        // Variants that only a real decode can produce: garbage in a PKCS#8 block, an unknown block, a bad base64 text.
+        let pkcs8 = decode_error("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n", None);
+        let sealed = decode_error("-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----\n", Some(PASSPHRASE));
+        let no_block = decode_error("this is not a key", None);
+        let rsa = decode_error("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n", None);
+        // An encrypted PKCS#8 file whose key derivation the library does not read (PBKDF2 with HMAC-SHA-1, which LibreSSL
+        // and OpenSSL 1 write). The bytes are a bare algorithm description and a short filler, not key material.
+        let old_pbkdf2 = decode_error(
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\n\
+             MF0wSQYJKoZIhvcNAQUNMDwwGwYJKoZIhvcNAQUMMA4ECAABAgMEBQYHAgIIADAdBglghkgBZQMEAQIEEAABAgMEBQYH\n\
+             CAkKCwwNDg8EEAABAgMEBQYHCAkKCwwNDg8=\n\
+             -----END ENCRYPTED PRIVATE KEY-----\n",
+            Some(PASSPHRASE),
+        );
+
+        let table: Vec<(&str, bool, KeyError, String)> = vec![
+            ("KeyIsEncrypted", false, KeyError::KeyIsEncrypted, PROTECTED.into()),
+            ("KeyIsEncrypted", true, KeyError::KeyIsEncrypted, NOT_ACCEPTED.into()),
+            ("KeyIsCorrupt", false, KeyError::KeyIsCorrupt, DAMAGED.into()),
+            ("KeyIsCorrupt", true, KeyError::KeyIsCorrupt, WRONG_OR_DAMAGED.into()),
+            ("CouldNotReadKey", false, KeyError::CouldNotReadKey, DAMAGED.into()),
+            ("CouldNotReadKey", true, KeyError::CouldNotReadKey, WRONG_OR_DAMAGED.into()),
+            ("SshKey(Crypto)", false, KeyError::SshKey(ssh_key::Error::Crypto), DAMAGED.into()),
+            ("SshKey(Crypto)", true, KeyError::SshKey(ssh_key::Error::Crypto), WRONG_OR_DAMAGED.into()),
+            ("UnsupportedKeyType", false, unsupported(), UNSUPPORTED.into()),
+            ("UnsupportedKeyType", true, unsupported(), UNSUPPORTED.into()),
+            ("a garbage PKCS#8 block", false, pkcs8, DAMAGED.into()),
+            ("a garbage encrypted PKCS#8 block", true, sealed, WRONG_OR_DAMAGED.into()),
+            ("a text with no key block", false, no_block, DAMAGED.into()),
+            ("a garbage PKCS#1 block", true, rsa, WRONG_OR_DAMAGED.into()),
+            ("an encrypted PKCS#8 key with an unsupported key derivation", true, old_pbkdf2, UNREADABLE.into()),
+        ];
+        for (name, given, error, sentence) in &table {
+            let text = key_error_text(*given, error);
+            assert_eq!(&text, sentence, "{name}, passphrase given: {given}");
+            assert!(!text.contains("cryptographic error"), "{name}: {text}");
+            assert!(!text.contains(PASSPHRASE), "{name}: {text}");
+        }
+        // A file that cannot be read keeps the reason of the system and says it is the file, with or without a passphrase.
+        for given in [false, true] {
+            let text = key_error_text(given, &not_found());
+            assert!(text.starts_with("the key file cannot be read: "), "{text}");
+            assert!(!text.contains(PASSPHRASE), "{text}");
+        }
+        // Anything that is none of the above is the error's own text.
+        assert_eq!(key_error_text(true, &KeyError::NoHomeDir), KeyError::NoHomeDir.to_string());
+    }
+
+    #[test]
+    fn the_cap_decision_is_exact_at_the_limit() {
+        assert!(!passes_cap(0, 0, 10));
+        assert!(!passes_cap(4, 6, 10), "exactly the cap is allowed");
+        assert!(passes_cap(4, 7, 10), "one byte over is not");
+        assert!(passes_cap(10, 1, 10));
+        assert!(!passes_cap(10, 0, 10));
+        assert!(passes_cap(usize::MAX, 1, usize::MAX - 1), "the sum saturates instead of wrapping");
+        assert!(!passes_cap(0, MAX_BACKLOG, MAX_BACKLOG));
+        assert!(passes_cap(1, MAX_BACKLOG, MAX_BACKLOG));
+    }
+
+    #[test]
+    fn the_backlog_counts_what_is_queued_and_what_is_read() {
+        let (backlog, mut reader) = Backlog::new();
+        assert!(matches!(backlog.push(vec![1; 100]), Pushed::Queued));
+        assert!(matches!(backlog.push(vec![2; 50]), Pushed::Queued));
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 150);
+        let mut buf = [0u8; 30];
+        assert_eq!(reader.read(&mut buf).unwrap(), 30);
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 120, "a partly read chunk still waits for the rest");
+        let mut rest = vec![0u8; 200];
+        assert_eq!(reader.read(&mut rest).unwrap(), 70);
+        assert_eq!(reader.read(&mut rest).unwrap(), 50);
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 0);
+        // A notice is counted too, and is not held to the cap.
+        assert!(backlog.queued.fetch_add(MAX_BACKLOG, Ordering::SeqCst) == 0);
+        assert!(matches!(backlog.push(vec![0; 1]), Pushed::Full), "a push past the cap is refused and counts nothing");
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), MAX_BACKLOG);
+        assert!(backlog.notice("full"));
+        assert!(backlog.queued.load(Ordering::SeqCst) > MAX_BACKLOG, "the notice went in past the cap");
+        // A pane that no longer reads: nothing stays counted.
+        let (backlog, reader) = Backlog::new();
+        drop(reader);
+        assert!(matches!(backlog.push(vec![0; 10]), Pushed::Gone));
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 0);
+        assert!(!backlog.notice("gone"));
+        assert_eq!(backlog.queued.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_refused_channel_is_worded_and_every_other_error_keeps_its_text() {
+        let sentence = "the server refuses another channel on this connection; it limits how many can be open at once";
+        assert_eq!(channel_text(&russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited)), sentence);
+        assert_eq!(channel_text(&russh::Error::ChannelOpenFailure(ChannelOpenFailure::ResourceShortage)), sentence);
+        let other = russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed);
+        assert_eq!(channel_text(&other), other.to_string(), "a failure of another kind is not worded as a limit");
+        assert_eq!(channel_text(&russh::Error::Disconnect), russh::Error::Disconnect.to_string());
     }
 
     #[test]
@@ -2103,9 +3383,7 @@ mod tests {
         let result = run_default(&exec, "bye");
         assert_eq!(result.stdout, b"bye\n");
         assert_eq!(result.end, ExecEnd::Finished);
-        wait_until("the cached connection to be closed", || {
-            exec.runtime.block_on(async { exec.conn.lock().await.as_ref().is_some_and(|handle| handle.is_closed()) })
-        });
+        wait_until("the cached connection to be closed", || !exec.conn.is_connected());
         // No attempt on the dead handle: the next command goes straight to a new connection.
         assert_eq!(run_default(&exec, "conn").stdout, b"conn 1\n");
         assert_eq!(server.seen.connections.load(Ordering::SeqCst), 2);

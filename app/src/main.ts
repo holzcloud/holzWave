@@ -14,6 +14,7 @@ import { initChrome } from "./chrome.js";
 import { initConnections } from "./connections.js";
 import { initSync } from "./sync.js";
 import { initHistory } from "./historyview.js";
+import { initLoginPrompt } from "./loginprompt.js";
 import { initInline } from "./inline.js";
 import { decorateReply } from "./inlinecode.js";
 import { sidebarChat } from "./aisidebar.js";
@@ -73,6 +74,7 @@ async function main() {
   // The providers dialog changes the two privacy settings through the same queue as the Settings dialog.
   initAiSettings({ change, watch: watchSettings });
   initHistory();
+  initLoginPrompt();
   await initSidebar();
   initCopyMode(renderStatus);
   await initEvents();

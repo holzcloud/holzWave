@@ -21,7 +21,7 @@
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::ExitCode;
 
-use holzwave_ipc::{Cmd, Event, MAX_STDIN, Outcome, Request, stream_request};
+use holzwave_ipc::{Cmd, Event, MAX_STDIN, Outcome, Request, stream_request_at};
 
 use crate::clean;
 
@@ -169,7 +169,7 @@ pub fn run(args: &[String]) -> ExitCode {
         }
     };
     // The environment first: outside a holzWave terminal nothing is read and no socket is opened.
-    let (dir, token, pane) = match crate::app_env() {
+    let (endpoint, token, pane) = match crate::app_env() {
         Ok(env) => env,
         Err((code, message)) => {
             say(&mut stderr, &message);
@@ -195,7 +195,7 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     let mut stdout = io::stdout().lock();
     let mut printer = Printer::new(&mut stdout, &mut stderr);
-    let outcome = stream_request(&dir, &Request { token, pane, cmd }, &input, &mut |event| printer.event(event));
+    let outcome = stream_request_at(&endpoint, &Request { token, pane, cmd }, &input, &mut |event| printer.event(event));
     ExitCode::from(printer.finish(outcome))
 }
 

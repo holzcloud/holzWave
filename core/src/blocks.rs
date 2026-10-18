@@ -61,6 +61,14 @@ pub struct Block {
     pub source: String,
     /// A directory for a browser, a file for a preview.
     pub path: String,
+    /// A preview that opens its file in the editor at once (`wsh edit`) and not as a rendered page. Only a preview has it;
+    /// it is left out of the file when false, and the preview forgets it when it moves to another file.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub edit: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// What the page is told about a block pane.
@@ -86,6 +94,23 @@ pub struct Opened {
     pub text: Option<String>,
     /// When the file was last changed (seconds since the epoch): what a save is checked against.
     pub modified: Option<i64>,
+    /// For text and Markdown the editor can open: the SHA-256 of the bytes that were read, as lowercase hex. What a
+    /// save is checked against exactly, because `modified` has a resolution of one second. `None` for everything else.
+    pub digest: Option<String>,
+}
+
+/// What a save answers: when the file was changed now and the digest of the bytes that were written, so the next save
+/// is checked against what this one wrote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Saved {
+    pub modified: Option<i64>,
+    pub digest: String,
+}
+
+/// The SHA-256 of `bytes` as 64 lowercase hex characters.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Permission to read one file through the `holzfile` scheme, which images, video, audio and PDFs are shown from.
@@ -113,7 +138,8 @@ pub struct Blocks {
     panes: Mutex<HashMap<PaneId, Block>>,
     /// One source per connection, made on first use and made again when the connection was saved.
     sources: Mutex<HashMap<String, (u64, Arc<dyn FileSource>)>>,
-    local: Arc<dyn FileSource>,
+    /// This computer's files. A mutex only so that a test can put a double in its place ([`Blocks::inject_local`]).
+    local: Mutex<Arc<dyn FileSource>>,
     grants: Mutex<HashMap<String, Granted>>,
     grant_seq: AtomicU64,
 }
@@ -130,7 +156,7 @@ impl Blocks {
         panes.retain(|pane, block| live_panes.contains(pane) && valid(block));
         Self {
             dir: dir.to_path_buf(),
-            local: Arc::new(LocalSource::new(home.clone())),
+            local: Mutex::new(Arc::new(LocalSource::new(home.clone()))),
             home,
             panes: Mutex::new(panes),
             sources: Mutex::new(HashMap::new()),
@@ -171,6 +197,8 @@ impl Blocks {
             return Err(Error::Unsupported("the path is empty, too long or has a NUL".into()));
         }
         block.path = path.to_owned();
+        // The editor was asked for one file: another file is shown the way it always is.
+        block.edit = false;
         drop(panes);
         self.save();
         Ok(())
@@ -216,7 +244,7 @@ impl Blocks {
     /// The source named `id`: this computer, or the files of a saved SSH connection.
     pub fn source(&self, connections: &Connections, id: &str) -> Result<Arc<dyn FileSource>> {
         if id == LOCAL {
-            return Ok(self.local.clone());
+            return Ok(self.local.lock().unwrap_or_else(PoisonError::into_inner).clone());
         }
         let generation = connections.generation();
         let mut sources = self.sources.lock().unwrap_or_else(PoisonError::into_inner);
@@ -225,11 +253,24 @@ impl Blocks {
                 return Ok(source.clone());
             }
         }
-        let target = connections.ssh_target(id)?;
-        let label = connections.label_of(id).unwrap_or_else(|| id.to_owned());
-        let source: Arc<dyn FileSource> = Arc::new(crate::files::SftpSource::new(label, target)?);
+        let source: Arc<dyn FileSource> = Arc::new(crate::files::SftpSource::on(connections.session(id)?));
         sources.insert(id.to_owned(), (generation, source.clone()));
         Ok(source)
+    }
+
+    /// Put `source` in the place of the one of connection `id`, as if it had been made for `generation` of the saved
+    /// connections. For the tests of code outside this crate, which have no server to reach; nothing in the product calls
+    /// it.
+    #[doc(hidden)]
+    pub fn inject_source(&self, id: &str, generation: u64, source: Arc<dyn FileSource>) {
+        self.sources.lock().unwrap_or_else(PoisonError::into_inner).insert(id.to_owned(), (generation, source));
+    }
+
+    /// Put `source` in the place of this computer's files. For the tests of code outside this crate, which use it to show
+    /// that a request never touches this computer; nothing in the product calls it.
+    #[doc(hidden)]
+    pub fn inject_local(&self, source: Arc<dyn FileSource>) {
+        *self.local.lock().unwrap_or_else(PoisonError::into_inner) = source;
     }
 
     pub fn list(&self, connections: &Connections, source: &str, path: &str) -> Result<Listing> {
@@ -251,7 +292,7 @@ impl Blocks {
         let entry = src.stat(path)?;
         let head = src.read_range(path, 0, SNIFF as u64)?;
         let class = classify(&entry.name, &head);
-        let mut opened = Opened { name: entry.name.clone(), size: entry.size, class: class.clone(), html: None, text: None, modified: entry.modified };
+        let mut opened = Opened { name: entry.name.clone(), size: entry.size, class: class.clone(), html: None, text: None, modified: entry.modified, digest: None };
         use crate::preview::Content;
         match class.content {
             Content::Markdown if entry.size <= crate::preview::MAX_MARKDOWN as u64 => {
@@ -259,11 +300,13 @@ impl Blocks {
                 let text = String::from_utf8_lossy(&bytes).into_owned();
                 opened.html = render_markdown(&text);
                 if entry.size <= EDIT_LIMIT {
+                    opened.digest = Some(sha256_hex(&bytes));
                     opened.text = Some(text);
                 }
             }
             Content::Markdown | Content::Text if entry.size <= EDIT_LIMIT => {
                 let bytes = src.read(path, EDIT_LIMIT)?;
+                opened.digest = Some(sha256_hex(&bytes));
                 opened.text = Some(String::from_utf8_lossy(&bytes).into_owned());
             }
             _ => {}
@@ -320,24 +363,51 @@ impl Blocks {
         Some(self.source(connections, &g.source).and_then(|s| s.read_range(&g.path, offset, len.min(PREVIEW_LIMIT))))
     }
 
-    /// Save the editor's text over the file and answer when it was changed now. `expected` is the change time the editor
-    /// opened the file with: a file that was changed meanwhile (by another program, or on another machine) is not
-    /// overwritten and the error says so; `None` overwrites whatever is there.
-    pub fn save_file(&self, connections: &Connections, source: &str, path: &str, text: &str, expected: Option<i64>) -> Result<Option<i64>> {
+    /// Save the editor's text over the file. A file that was changed since the editor opened it (by another program, or
+    /// on another machine) is not overwritten and the error says so.
+    ///
+    /// With `expected_digest` (the digest [`Opened`] or the last [`Saved`] carried) the check is exact: the file is read
+    /// again and refused when its bytes differ, whatever the modification time says, so two edits within one second are
+    /// caught and a touch without a change is not a conflict. Without one, `expected` (the change time) is compared as
+    /// before; `None` for both overwrites whatever is there. A file that does not exist yet has nothing to conflict with.
+    pub fn save_file(
+        &self,
+        connections: &Connections,
+        source: &str,
+        path: &str,
+        text: &str,
+        expected: Option<i64>,
+        expected_digest: Option<&str>,
+    ) -> Result<Saved> {
         if text.len() as u64 > EDIT_LIMIT {
             return Err(Error::Unsupported(format!("the text is larger than {EDIT_LIMIT} bytes")));
         }
+        if let Some(digest) = expected_digest {
+            if digest.len() != 64 || !digest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                return Err(Error::Unsupported("the expected digest is not valid".into()));
+            }
+        }
         let src = self.source(connections, source)?;
-        if let Some(expected) = expected {
-            // A file that does not exist yet has nothing to conflict with.
+        let conflict = || Error::Unsupported("the file changed on disk since it was opened; save again to overwrite it".into());
+        if let Some(digest) = expected_digest {
+            if let Ok(now) = src.stat(path) {
+                // The editor opened a file of at most EDIT_LIMIT bytes: a larger one has changed, and is not read.
+                if now.size > EDIT_LIMIT {
+                    return Err(conflict());
+                }
+                if sha256_hex(&src.read(path, EDIT_LIMIT)?) != digest {
+                    return Err(conflict());
+                }
+            }
+        } else if let Some(expected) = expected {
             if let Ok(now) = src.stat(path) {
                 if now.modified.is_some_and(|m| m != expected) {
-                    return Err(Error::Unsupported("the file changed on disk since it was opened; save again to overwrite it".into()));
+                    return Err(conflict());
                 }
             }
         }
         src.write(path, text.as_bytes())?;
-        Ok(src.stat(path).ok().and_then(|e| e.modified))
+        Ok(Saved { modified: src.stat(path).ok().and_then(|e| e.modified), digest: sha256_hex(text.as_bytes()) })
     }
 
     fn save(&self) {
@@ -349,7 +419,17 @@ impl Blocks {
     }
 }
 
+/// Whether a block makes sense on another computer, so the sync may share it with a layout: a block whose source is a
+/// saved connection, and the monitor (of this computer, whichever it is). A local folder, a local preview and a chat
+/// are tied to this computer and are not shared.
+pub fn portable(block: &Block) -> bool {
+    block.source != LOCAL || block.kind == BlockKind::Monitor
+}
+
 fn valid(block: &Block) -> bool {
+    if block.edit && block.kind != BlockKind::Preview {
+        return false;
+    }
     match block.kind {
         // The monitor looks at this computer or at a saved SSH connection and has no path. Whether the connection exists
         // and is SSH is checked when the pane is opened.
@@ -372,6 +452,17 @@ mod tests {
     use super::*;
     use crate::secrets::MemoryStore;
 
+    #[test]
+    fn portable_blocks_are_the_ones_with_a_saved_connection_or_the_monitor() {
+        let block = |kind, source: &str| Block { kind, source: source.into(), path: String::new(), edit: false };
+        for kind in [BlockKind::Files, BlockKind::Preview, BlockKind::Monitor, BlockKind::Chat] {
+            // A saved connection is the same saved connection on every computer.
+            assert!(portable(&block(kind, "web-1")), "{kind:?} of a saved connection");
+            // On this computer only the monitor makes sense elsewhere: it looks at whichever computer runs it.
+            assert_eq!(portable(&block(kind, LOCAL)), kind == BlockKind::Monitor, "{kind:?} of this computer");
+        }
+    }
+
     fn dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("holzwave-blocks-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
@@ -389,9 +480,9 @@ mod tests {
     #[test]
     fn a_block_is_assigned_changed_saved_and_restored() {
         let (d, blocks, conns) = setup("assign");
-        blocks.assign(1, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into() }).unwrap();
+        blocks.assign(1, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into(), edit: false }).unwrap();
         blocks.update(1, "/var").unwrap();
-        assert!(blocks.assign(2, Block { kind: BlockKind::Preview, source: String::new(), path: "/x".into() }).is_err());
+        assert!(blocks.assign(2, Block { kind: BlockKind::Preview, source: String::new(), path: "/x".into(), edit: false }).is_err());
         assert!(blocks.update(9, "/x").is_err());
         let views = blocks.views(&conns);
         assert_eq!(views.len(), 1);
@@ -407,7 +498,7 @@ mod tests {
     #[test]
     fn a_monitor_block_names_this_computer_or_a_saved_connection_and_has_no_path() {
         let (d, blocks, _) = setup("monitor");
-        let monitor = |source: &str, path: &str| Block { kind: BlockKind::Monitor, source: source.into(), path: path.into() };
+        let monitor = |source: &str, path: &str| Block { kind: BlockKind::Monitor, source: source.into(), path: path.into(), edit: false };
         blocks.assign(1, monitor(LOCAL, "")).unwrap();
         blocks.assign(2, monitor("talos", "")).unwrap();
         assert!(blocks.assign(3, monitor(LOCAL, "/x")).is_err(), "no path");
@@ -423,7 +514,7 @@ mod tests {
     #[test]
     fn the_hosts_that_have_a_monitor_are_listed_once() {
         let (d, blocks, _) = setup("hosts");
-        let block = |kind, source: &str, path: &str| Block { kind, source: source.into(), path: path.into() };
+        let block = |kind, source: &str, path: &str| Block { kind, source: source.into(), path: path.into(), edit: false };
         blocks.assign(1, block(BlockKind::Monitor, "talos", "")).unwrap();
         blocks.assign(2, block(BlockKind::Monitor, "talos", "")).unwrap();
         blocks.assign(3, block(BlockKind::Monitor, LOCAL, "")).unwrap();
@@ -437,7 +528,7 @@ mod tests {
     }
 
     fn chat(path: &str) -> Block {
-        Block { kind: BlockKind::Chat, source: LOCAL.into(), path: path.into() }
+        Block { kind: BlockKind::Chat, source: LOCAL.into(), path: path.into(), edit: false }
     }
 
     #[test]
@@ -468,7 +559,7 @@ mod tests {
     #[test]
     fn a_chat_block_needs_this_computer_and_a_valid_chat_id() {
         let (d, blocks, _) = setup("chatvalid");
-        let on = |source: &str, path: &str| Block { kind: BlockKind::Chat, source: source.into(), path: path.into() };
+        let on = |source: &str, path: &str| Block { kind: BlockKind::Chat, source: source.into(), path: path.into(), edit: false };
         let long = "a".repeat(65);
         let refused =
             ["../etc/passwd", "a/b", "a\\b", "a.b", "con", "NUL", long.as_str(), "chat\0", "\u{e9}", "", "a b"];
@@ -501,7 +592,7 @@ mod tests {
     fn a_chat_block_can_only_move_to_another_valid_chat_id() {
         let (d, blocks, _) = setup("chatupdate");
         blocks.assign(1, chat("chat-1")).unwrap();
-        blocks.assign(2, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into() }).unwrap();
+        blocks.assign(2, Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into(), edit: false }).unwrap();
         blocks.update(1, "chat-2").unwrap();
         assert_eq!(blocks.block_of(1).unwrap().path, "chat-2");
         assert_eq!(Blocks::load(&d, None, &[1, 2]).block_of(1).unwrap().path, "chat-2");
@@ -531,6 +622,63 @@ mod tests {
         assert_eq!(blocks.block_of(1), Some(chat("chat-1")));
         assert!(blocks.block_of(2).is_none() && blocks.block_of(3).is_none());
         assert_eq!(blocks.block_of(4).unwrap().kind, BlockKind::Files);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn preview(path: &str, edit: bool) -> Block {
+        Block { kind: BlockKind::Preview, source: "web-1".into(), path: path.into(), edit }
+    }
+
+    #[test]
+    fn an_edit_flag_is_left_out_when_false_and_valid_only_for_a_preview() {
+        let (d, blocks, conns) = setup("editflag");
+        blocks.assign(1, preview("/srv/a.md", false)).unwrap();
+        blocks.assign(2, preview("/srv/b.md", true)).unwrap();
+        let text = fs::read_to_string(d.join(BLOCKS_FILE)).unwrap();
+        assert_eq!(text.matches("\"edit\"").count(), 1, "only the flagged block writes the member: {text}");
+        let views = blocks.views(&conns);
+        assert!(serde_json::to_value(&views[0]).unwrap().get("edit").is_none(), "left out of what the page is told");
+        assert_eq!(serde_json::to_value(&views[1]).unwrap()["edit"], serde_json::json!(true));
+
+        let others = [
+            Block { kind: BlockKind::Files, source: LOCAL.into(), path: "/tmp".into(), edit: true },
+            Block { kind: BlockKind::Monitor, source: "talos".into(), path: String::new(), edit: true },
+            chat_with_edit("chat-1"),
+        ];
+        for block in others {
+            let kind = block.kind;
+            assert!(blocks.assign(3, block).is_err(), "{kind:?} has no editor to open");
+        }
+        assert!(blocks.block_of(3).is_none());
+
+        // The flag survives a restart; a file written before the member existed means false; a flagged block that is no
+        // preview is dropped like any other block that is not valid.
+        let again = Blocks::load(&d, None, &[1, 2]);
+        assert_eq!((again.block_of(1).unwrap().edit, again.block_of(2).unwrap().edit), (false, true));
+        let old = r#"{"1": {"kind": "preview", "source": "local", "path": "/a"},
+                      "2": {"kind": "files", "source": "local", "path": "/a", "edit": true},
+                      "3": {"kind": "preview", "source": "local", "path": "/b", "edit": true}}"#;
+        fs::write(d.join(BLOCKS_FILE), old).unwrap();
+        let loaded = Blocks::load(&d, None, &[1, 2, 3]);
+        assert!(!loaded.block_of(1).unwrap().edit);
+        assert!(loaded.block_of(2).is_none());
+        assert!(loaded.block_of(3).unwrap().edit);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    fn chat_with_edit(path: &str) -> Block {
+        Block { edit: true, ..chat(path) }
+    }
+
+    #[test]
+    fn moving_a_preview_to_another_file_clears_the_flag() {
+        let (d, blocks, _) = setup("editmove");
+        blocks.assign(1, preview("/srv/a.md", true)).unwrap();
+        blocks.update(1, "/srv/b.md").unwrap();
+        let block = blocks.block_of(1).unwrap();
+        assert_eq!((block.path.as_str(), block.edit), ("/srv/b.md", false));
+        assert!(!fs::read_to_string(d.join(BLOCKS_FILE)).unwrap().contains("edit"), "and the file says so");
+        assert!(!Blocks::load(&d, None, &[1]).block_of(1).unwrap().edit);
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -602,22 +750,149 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    const CONFLICT: &str = "the file changed on disk since it was opened; save again to overwrite it";
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn set_modified_secs(path: &Path, secs: i64) {
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::try_from(secs).unwrap())).unwrap();
+    }
+
+    #[test]
+    fn an_open_file_carries_its_digest() {
+        let (d, blocks, conns) = setup("digest-open");
+        fs::write(d.join("a.md"), "# Hi\n").unwrap();
+        fs::write(d.join("b.rs"), "fn main() {}").unwrap();
+        fs::write(d.join("c.bin"), [0u8, 1, 2, 255]).unwrap();
+        fs::write(d.join("d.txt"), vec![b'x'; usize::try_from(EDIT_LIMIT).unwrap() + 1]).unwrap();
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R', 1, 2, 3, 4];
+        fs::write(d.join("e.png"), png).unwrap();
+        let open = |name: &str| blocks.open(&conns, LOCAL, d.join(name).to_str().unwrap()).unwrap();
+        assert_eq!(open("a.md").digest, Some(sha256_hex(b"# Hi\n")));
+        assert_eq!(open("b.rs").digest, Some(sha256_hex(b"fn main() {}")));
+        assert_eq!(open("c.bin").digest, None);
+        let big = open("d.txt");
+        assert_eq!((big.text, big.digest), (None, None), "a file over the editor's limit has neither");
+        assert_eq!(open("e.png").digest, None);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_save_is_refused_when_the_bytes_changed_even_in_the_same_second() {
+        let (d, blocks, conns) = setup("digest-same-second");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "aaaa").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        // Someone else changes the bytes (same length) and the time is put back to the opened value.
+        fs::write(&p, "bbbb").unwrap();
+        set_modified_secs(&p, opened.modified.unwrap());
+        assert_eq!(blocks.stat(&conns, LOCAL, path).unwrap().modified, opened.modified, "the time did not move");
+        let err = blocks.save_file(&conns, LOCAL, path, "mine", opened.modified, opened.digest.as_deref()).unwrap_err().to_string();
+        assert!(err.contains(CONFLICT), "{err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "bbbb", "the file is untouched");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_touch_without_a_change_is_not_a_conflict() {
+        let (d, blocks, conns) = setup("digest-touch");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "same").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        set_modified_secs(&p, opened.modified.unwrap() + 3600);
+        blocks.save_file(&conns, LOCAL, path, "mine", opened.modified, opened.digest.as_deref()).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_save_without_a_digest_keeps_the_time_check() {
+        let (d, blocks, conns) = setup("digest-none");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "old").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        let stale = opened.modified.map(|m| m - 100);
+        let err = blocks.save_file(&conns, LOCAL, path, "mine", stale, None).unwrap_err().to_string();
+        assert!(err.contains(CONFLICT), "{err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        blocks.save_file(&conns, LOCAL, path, "mine", None, None).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_save_answers_with_the_digest_of_what_it_wrote() {
+        let (d, blocks, conns) = setup("digest-saved");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "old").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        let first = blocks.save_file(&conns, LOCAL, path, "one", opened.modified, opened.digest.as_deref()).unwrap();
+        assert_eq!(first.digest, sha256_hex(b"one"));
+        assert!(first.modified.is_some());
+        // The next save is checked against what was just written.
+        let second = blocks.save_file(&conns, LOCAL, path, "two", first.modified, Some(&first.digest)).unwrap();
+        assert_eq!(second.digest, sha256_hex(b"two"));
+        let err = blocks.save_file(&conns, LOCAL, path, "three", first.modified, Some(&first.digest)).unwrap_err().to_string();
+        assert!(err.contains(CONFLICT), "the old digest is stale now: {err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "two");
+        // A file that does not exist yet saves without a conflict.
+        let fresh = d.join("new.txt");
+        let made = blocks.save_file(&conns, LOCAL, fresh.to_str().unwrap(), "hello", None, Some(&sha256_hex(b"whatever"))).unwrap();
+        assert_eq!(made.digest, sha256_hex(b"hello"));
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "hello");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_digest_that_is_not_a_digest_is_refused_before_anything_is_read() {
+        let (d, blocks, conns) = setup("digest-bad");
+        let p = d.join("f.txt");
+        fs::write(&p, "old").unwrap();
+        for bad in ["", "abc", &"A".repeat(64), &"g".repeat(64), &"a".repeat(65)] {
+            let err = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", None, Some(bad)).unwrap_err().to_string();
+            assert!(err.contains("the expected digest is not valid"), "{bad:?}: {err}");
+        }
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_file_that_grew_past_the_editors_limit_is_a_conflict() {
+        let (d, blocks, conns) = setup("digest-grew");
+        let p = d.join("f.txt");
+        let path = p.to_str().unwrap();
+        fs::write(&p, "old").unwrap();
+        let opened = blocks.open(&conns, LOCAL, path).unwrap();
+        fs::write(&p, vec![b'x'; usize::try_from(EDIT_LIMIT).unwrap() + 1]).unwrap();
+        let err = blocks.save_file(&conns, LOCAL, path, "mine", opened.modified, opened.digest.as_deref()).unwrap_err().to_string();
+        assert!(err.contains(CONFLICT), "{err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn the_editor_saves_over_the_file_and_an_unknown_source_is_an_error() {
         let (d, blocks, conns) = setup("save");
         let p = d.join("f.txt");
         fs::write(&p, "old").unwrap();
         let opened = blocks.open(&conns, LOCAL, p.to_str().unwrap()).unwrap();
-        let saved = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "new", opened.modified).unwrap();
+        let saved = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "new", opened.modified, None).unwrap().modified;
         assert_eq!(fs::read_to_string(&p).unwrap(), "new");
         assert!(saved.is_some(), "the new change time comes back");
         // The file is changed by someone else after it was opened: the save is refused, and an overwrite is explicit.
         fs::write(&p, "theirs").unwrap();
         let stale = opened.modified.map(|m| m - 100);
-        let err = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", stale).unwrap_err().to_string();
+        let err = blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", stale, None).unwrap_err().to_string();
         assert!(err.contains("changed on disk"), "{err}");
         assert_eq!(fs::read_to_string(&p).unwrap(), "theirs", "nothing was overwritten");
-        blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", None).unwrap();
+        blocks.save_file(&conns, LOCAL, p.to_str().unwrap(), "mine", None, None).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "mine");
         let err = blocks.list(&conns, "nope", "/").unwrap_err().to_string();
         assert!(err.contains("nope"), "{err}");

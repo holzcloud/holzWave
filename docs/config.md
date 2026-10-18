@@ -37,9 +37,9 @@ against scratch directories and never touch the real one.
 | `layout.json` | workspaces, tabs, panes and split ratios | 250 ms after the first change of a burst, and on quit | no |
 | `session.json` | the working directory of each pane and the window frame | 2 s after the first change of a burst, and on quit | yes |
 | `connections.json` | the saved SSH, WSL and Docker connections, without secrets | when a connection is saved or deleted | no |
-| `pane_connections.json` | which pane runs which connection | when it changes | yes |
+| `pane_connections.json` | which pane runs which connection | when it changes | yes (the assignments travel inside the layout, see [sync.md](sync.md)) |
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
-| `pane_blocks.json` | which pane shows a file browser, a preview, the system monitor or a chat, of which source and path (for a chat the path is the id of its conversation and the messages are not in this file) | when it changes | yes |
+| `pane_blocks.json` | which pane shows a file browser, a preview, the system monitor or a chat, of which source and path (for a chat the path is the id of its conversation and the messages are not in this file) | when it changes | yes (the blocks of a saved connection and the monitor travel inside the layout, see [sync.md](sync.md)) |
 | `ai.json` | the AI provider profiles, without keys | when a profile is saved or deleted | yes |
 | `chats/<id>.json` | one AI chat per file, readable by you only; terminal context is a marker unless `ai_persist_context` is on | when a message is stored | yes |
 | `history.db` | the command history, with the host each command ran on | when a command is reported | yes |
@@ -392,7 +392,7 @@ operating system's keychain under the service `ch.holzcloud.holzwave` and the ac
   "items": [
     { "id": "talos", "name": "Talos", "kind": "ssh", "host": "10.0.4.12", "port": 22, "user": "holz",
       "auth": "key", "key_path": "~/.ssh/id_ed25519", "jump": "bastion", "startup": "tmux attach -t main",
-      "reconnect_attempts": 5, "reconnect_delay_secs": 3 }
+      "reconnect_attempts": 5, "reconnect_delay_secs": 3, "wsh": true }
   ]
 }
 ```
@@ -402,15 +402,20 @@ operating system's keychain under the service `ch.holzcloud.holzwave` and the ac
 | `id` | 1 to 64 characters of `a-z`, `0-9`, `-`, `_`; the key of the keychain entry |
 | `kind` | `ssh`, `wsl` (a distribution, Windows) or `docker` (a running container) |
 | `host` | SSH host or address; WSL distribution; Docker container. No blanks, no leading dash |
-| `auth` | `key` (file at `key_path`, `~/` is the home directory; the passphrase, if any, is in the keychain) or `password` |
+| `auth` | `key` (file at `key_path`, `~/` is the home directory; the passphrase, if any, is in the keychain), `password`, `agent` or `interactive`. `agent`: the person's ssh-agent signs the login (`SSH_AUTH_SOCK` on Linux and macOS, the OpenSSH agent pipe on Windows). The private key never enters holzWave, nothing is stored in the keychain, and agent forwarding is never offered to the host. `key_path` may then name a public key file that picks one of the agent's keys; with it empty the agent's keys are offered in the order the agent lists them, at most five, certificates skipped. It is never a fallback: a connection uses the login it names. `interactive`: the server asks the questions (a one-time code, a password prompt of PAM, a token's challenge) and the person answers them in a dialog each time a pane or a file browser connects; nothing is stored, not in the keychain and not in a file, and a connection of this kind cannot carry a saved password. At most three rounds of questions, five questions in a round and 120 s for each answer; a monitor or a command never asks (it says that the connection asks for a login code and that a pane must be opened on it first), only a pane or a file browser does |
 | `jump` | the `id` of another SSH connection to go through first (at most 3 deep, no loops) |
 | `startup` | a line typed into the shell once it runs |
 | `reconnect_attempts`, `reconnect_delay_secs` | how often and how fast a lost connection is made again; 0 attempts does not reconnect |
 | `shell` | Docker only: the shell to start; empty is `sh` |
+| `wsh` | SSH only. `true` allows the `wsh` tunnel on this connection: a program on the host can open files and rename the pane through it, and never use the AI or approve anything. Default `false`, and then it is left out of the file; WSL and Docker connections with it are dropped on load |
 
 A connection that does not validate is dropped when the file is loaded, with a note in the log, and the original is kept
 as `connections.json.bad`. A host key that is not in `known_hosts` is learned on first use; a key that **differs** from a
 known one is always refused and the pane says so.
+
+A WSL connection is kept in the file and in the sync on every OS, so one made on Windows is still there on a Mac, but it
+opens on Windows only: elsewhere opening it is refused with "WSL connections open on Windows only." and the palette does
+not list it.
 
 ## `session.json`
 
@@ -457,6 +462,10 @@ editing, but it is plain JSON and a damaged one is repaired rather than trusted:
 - limits: 64 panes per tab, 256 panes in all, a split nesting of 32, ids below 2^53 (the page receives them as JSON
   numbers);
 - a file over 1 MiB is moved to `layout.json.bad` unread.
+
+The file itself holds the layout only. In the sync it travels as a *layout unit*, together with the part of
+`pane_connections.json` and `pane_blocks.json` that makes sense on another computer; adopting a unit replaces both pane
+files here and keeps the old ones in `sync-conflicts/` (see [sync.md](sync.md)).
 
 <!-- example: layout.json -->
 ```json
@@ -553,8 +562,11 @@ own card. holzWave asks OpenAI not to store a request (`store: false`) and OpenR
 
 `sync.json` is `{"endpoint": "...", "user": "..."}`: the folder address and the account of the encrypted sync. The app
 password and the passphrase are in the keychain (`sync:password`, `sync:passphrase`), never here. `sync_state.json` is
-the device's random id and, per synced file, what the last run left behind (counter, ETag, SHA-256). `sync-incoming/`
-holds downloads until the next start, `sync-conflicts/` the local versions that lost a conflict. See [sync.md](sync.md).
+the device's random id and, per synced file, what the last run left behind (the counter, the ETag, the SHA-256 of the content and the SHA-256 of the encrypted blob). A theme or widget file name (without `.json`) may be 112 characters for a theme and 111 for a widget at most, letters, digits, `-` and `_`; a longer one is not synced and the sync says so (see [sync.md](sync.md)). `sync-incoming/`
+holds the downloads of the files the running app owns (`layout.json`, `settings.json`, `connections.json`) until the next
+start; themes, widgets and notes are moved into place right after the run, and `sync-conflicts/` holds the local versions
+that lost a conflict, were replaced by a download (among them the two pane files a downloaded layout replaced) or were
+removed because another computer deleted the theme or widget. See [sync.md](sync.md).
 
 ## `history.db`
 
@@ -606,9 +618,10 @@ reaching holzWave over an SSH tunnel, which is not built; a command that does re
 connection is stored under that connection and found from the panes that run it. An `ssh` typed in a local pane is a local
 pane: what you type after it is not recorded either. The directory of a command from another host is not recorded.
 
-**Sync.** History is not synced. The sync format has no place for `history.db`, and deletions are not synced (a deleted
-file comes back on the next run, see [sync.md](sync.md)), so a command forgotten with `Shift+Delete` would return. If
-history sync is built it will be opt-in and needs deletions in sync first.
+**Sync.** History is not synced. It is a database, not a file per item, so it cannot be carried entry by entry, and a
+command forgotten with `Shift+Delete` must not come back on another computer (deletions of themes and widgets do travel,
+see [sync.md](sync.md), but not those of single entries). If history sync is built it will be opt-in and needs deletions
+of single entries in sync first.
 
 ## Command marks
 
@@ -810,7 +823,8 @@ are accepted): `version` (1), `id` (default: the file name; lowercase letters, d
 An item has either a one-line `command` (put on the prompt, never run) or an `http`/`https` `url`. A list has 1 to 50 items,
 at most 24 widgets are shown, a file is at most 64 KiB. A file that is not valid is left out and the sidebar shows why.
 `widget_notes.json` holds the texts of the note widgets (at most 64 KiB each). Both are synced; a downloaded one is
-applied at the next start.
+applied right after the run that downloaded it, and the sidebar shows it at its next refresh (every 10 seconds while it is
+open).
 
 The files are described by [widget.schema.json](widget.schema.json), a JSON Schema (draft 2020-12) that an editor with a JSON
 Schema setting can map to `widgets/*.json` for completion and checks (in Visual Studio Code, add an entry with the file

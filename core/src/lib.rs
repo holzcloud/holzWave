@@ -19,6 +19,7 @@
 //! - [`files`]: the file browser's source of files, local and over SFTP, with bounded reads and atomic writes.
 //! - [`preview`]: the kind of a file and Markdown as sanitised HTML.
 //! - [`ssh`]: a shell on another machine over SSH, with reconnect.
+//! - [`pool`]: one SSH connection per saved connection, shared by the file browser and the command runner.
 //! - [`persist`]: atomic file writes, bounded reads and the debounced saver.
 //! - [`settings`]: `settings.json`, typed, versioned and validated.
 //! - [`theme`]: built-in and user themes, terminal palette and chrome tokens.
@@ -30,6 +31,7 @@
 //! - [`textread`]: reading a region of a terminal's text, with the byte ranges of the text the user could not see.
 //! - [`exec`]: the local runner of the agent's command tool: a separate process, a scrubbed environment, bounded output.
 //! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
+//! - [`wshinstall`]: the one explicit act that puts the bundled `wsh` on a Linux host reached over SSH, and verifies it.
 
 pub mod ai;
 pub mod blocks;
@@ -46,6 +48,7 @@ pub mod layout;
 pub mod pane;
 pub mod persist;
 pub mod platform;
+pub mod pool;
 pub mod preview;
 pub mod profiles;
 pub mod pty;
@@ -60,6 +63,7 @@ pub mod theme;
 pub mod widgets;
 pub mod wire;
 pub mod winshell;
+pub mod wshinstall;
 
 #[cfg(feature = "ghostty")]
 mod ghostty;
