@@ -686,10 +686,17 @@ impl Integration for Kube {
             "contexts" => Ok(["config", "view", "-o", "json"].map(OsString::from).to_vec()),
             "namespaces" => Ok(read_list("namespaces", selection, false)),
             "pods" => Ok(read_list("pods", selection, true)),
-            _ => {
-                let _ = args;
-                Err(ArgError::Unknown)
+            "use_context" => {
+                let context = args.context().ok_or(ArgError::Missing)?;
+                Ok(vec!["config".into(), "use-context".into(), "--".into(), context.as_str().into()])
             }
+            "set_namespace" => set_namespace(args, selection),
+            "delete_pod" => delete_pod(args, selection),
+            "exec" => exec(args, selection),
+            "logs" => logs(args, selection),
+            // The launch of the shell is the person's own shell with the overlay in its environment: no arguments.
+            "shell" => Ok(Vec::new()),
+            _ => Err(ArgError::Unknown),
         }
     }
 
@@ -725,6 +732,74 @@ fn read_list(what: &str, selection: &CheckedSelection, namespaced: bool) -> Vec<
     }
     argv.push(REQUEST_TIMEOUT.into());
     argv
+}
+
+/// The one string a shell reads in this module: it is the last argument of `exec`, run by `sh` inside the pod, and it
+/// picks `bash` when the container has it and `sh` when it has not. Nothing is interpolated into it, no name and no
+/// value; the pod, the container, the context and the namespace are separate arguments of `kubectl`.
+pub const POD_SHELL: &str = "command -v bash >/dev/null 2>&1 && exec bash || exec sh";
+
+/// The lines of a log that are asked for when the call names no number.
+const LOG_LINES: u16 = 200;
+
+fn container_flag(args: &Validated) -> Option<OsString> {
+    args.container().map(|container| flag_eq("container", container.as_str()))
+}
+
+/// `config set-context`: the namespace of the context the person selected, or of the current context when there is no
+/// selection. It rewrites the kubeconfig, which is why the verb is a local one behind a card.
+fn set_namespace(args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
+    let namespace = args.namespace().ok_or(ArgError::Missing)?;
+    let mut argv: Vec<OsString> = vec!["config".into(), "set-context".into()];
+    match &selection.context {
+        Some(context) => {
+            argv.push(flag_eq("namespace", namespace.as_str()));
+            argv.push("--".into());
+            argv.push(context.as_str().into());
+        }
+        None => {
+            argv.push("--current".into());
+            argv.push(flag_eq("namespace", namespace.as_str()));
+        }
+    }
+    Ok(argv)
+}
+
+/// `delete pod`, without waiting for the pod to go, within the time limit.
+fn delete_pod(args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
+    let pod = args.pod().ok_or(ArgError::Missing)?;
+    let mut argv: Vec<OsString> = vec!["delete".into(), "pod".into()];
+    argv.extend(context_flag(selection));
+    argv.extend(namespace_flag(selection));
+    argv.extend(["--wait=false", REQUEST_TIMEOUT, "--"].map(OsString::from));
+    argv.push(pod.as_str().into());
+    Ok(argv)
+}
+
+/// `exec` with a terminal in a pod: the pod is the one positional before `--`, and after it comes the constant that
+/// picks the shell inside the pod.
+fn exec(args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
+    let pod = args.pod().ok_or(ArgError::Missing)?;
+    let mut argv: Vec<OsString> = ["exec", "-i", "-t"].map(OsString::from).to_vec();
+    argv.extend(context_flag(selection));
+    argv.extend(namespace_flag(selection));
+    argv.extend(container_flag(args));
+    argv.push(pod.as_str().into());
+    argv.extend(["--", "sh", "-c", POD_SHELL].map(OsString::from));
+    Ok(argv)
+}
+
+/// `logs --follow` with the last lines first: 200 unless the call names a number.
+fn logs(args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
+    let pod = args.pod().ok_or(ArgError::Missing)?;
+    let tail = args.lines().unwrap_or(LOG_LINES);
+    let mut argv: Vec<OsString> = vec!["logs".into(), "--follow".into(), flag_eq("tail", &tail.to_string())];
+    argv.extend(context_flag(selection));
+    argv.extend(namespace_flag(selection));
+    argv.extend(container_flag(args));
+    argv.push("--".into());
+    argv.push(pod.as_str().into());
+    Ok(argv)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
