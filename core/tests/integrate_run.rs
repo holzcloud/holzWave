@@ -486,7 +486,7 @@ mod pure {
     }
 
     #[test]
-    fn extras_win_over_inherited_variables_and_cannot_name_a_denied_variable_or_path() {
+    fn extras_cannot_name_a_denied_variable_or_path() {
         let extra = EnvExtra {
             plain: vec![("HOME".to_owned(), "/profile".to_owned()), ("AWS_REGION".to_owned(), "eu-1".to_owned())],
             fixed: &[("AZURE_CORE_COLLECT_TELEMETRY", "false")],
