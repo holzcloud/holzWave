@@ -101,12 +101,13 @@ test("the settings view has exactly the documented keys at every level and the s
   assert.deepEqual(keys(view), ["keybindings", "settings", "theme", "themes", "warnings"]);
   assert.deepEqual(golden.events.settings, view, "the settings event payload is the settings view");
   assert.deepEqual(keys(view.settings), [
-    "ai_local_context", "ai_local_only", "ai_persist_context", "confirm_multiline_paste", "contrast", "cursor_blink",
-    "cursor_trail", "font_size", "keybindings", "motion", "option_as_alt", "scrollback_lines", "shell", "smooth_scroll",
+    "ai_local_context", "ai_local_only", "ai_persist_context", "confirm_multiline_paste", "contrast", "copy_on_select",
+    "cursor_blink", "cursor_trail", "font_size", "keybindings", "motion", "option_as_alt", "scrollback_lines", "shell", "smooth_scroll",
     "theme", "ui_scale", "version",
   ]);
   assert.equal(typeof view.settings.theme, "string");
   assert.equal(typeof view.settings.option_as_alt, "boolean");
+  assert.equal(view.settings.copy_on_select, true, "a mouse selection is copied by default");
   assert.equal(view.settings.smooth_scroll, false, "DESK-28: the effects are off by default");
   assert.equal(view.settings.cursor_trail, false, "DESK-28: the effects are off by default");
   assert.equal(view.settings.shell, "", "DESK-30: empty means the platform default; the dialog has no row for it");

@@ -85,6 +85,7 @@ export default async function ({ page, url, errors }) {
   await copyEventCase(page, url);
   await copyActionCase(page, url);
   await handlerStackCase(page, url);
+  await copyOnSelectCase(page, url);
   await wheelCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -441,4 +442,127 @@ async function wheelCase(page, url) {
   const down = (await callsOf(page, "wheel")).at(-1);
   assert.equal(down.pane, 1);
   assert.ok(down.rows > 0);
+}
+
+/** The commands of the core that concern a selection and its copy, in the order the page sent them. */
+const copyCalls = (page) =>
+  page.evaluate(() =>
+    window.__MOCK__.calls
+      .filter(([cmd]) => cmd === "select" || cmd === "copy_selection")
+      .map(([cmd, args]) => (cmd === "select" ? `select:${args.op.kind}` : `copy_selection:${args.pane}`)),
+  );
+
+/**
+ * Copy on select (the setting `copy_on_select`): the end of a drag, a double click or a triple click asks the shell to
+ * copy the core's selection of the gesture's pane, after the last select command was answered; a click that never moved
+ * copies nothing, and neither does the setting off. A shell without a native clipboard rejects the command and the
+ * page then falls back to the selection text and the web view's clipboard.
+ */
+async function copyOnSelectCase(page, url) {
+  const g = await open(page, url);
+  await page.evaluate(() => {
+    window.__done = { select: 0, copy: 0 };
+    // The answers of `select` are slow, so only a page that waits for them sees them done before it copies.
+    window.__MOCK__.on("select", () => new Promise((done) => setTimeout(() => { window.__done.select = performance.now(); done(null); }, 40)));
+    window.__MOCK__.on("copy_selection", () => { window.__done.copy = performance.now(); return true; });
+  });
+  const copies = async () => (await copyCalls(page)).filter((c) => c.startsWith("copy_selection"));
+
+  // A drag: one copy for the gesture's pane, after the last select command, which had been answered by then.
+  const [x0, y0] = g.pt(2, 1, 1);
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  await page.mouse.move(...g.pt(2, 8, 3), { steps: 6 });
+  await frames(page);
+  assert.deepEqual(await copies(page), [], "nothing is copied while the button is down");
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("copy_selection").length >= 1);
+  await frames(page);
+  let order = await copyCalls(page);
+  assert.deepEqual(order.filter((c) => c.startsWith("copy_selection")), ["copy_selection:2"], "one copy, for the pane of the drag");
+  assert.equal(order.at(-1), "copy_selection:2", "the copy comes after every select command");
+  assert.ok(order.includes("select:extend"), "the drag extended the selection");
+  const done = await page.evaluate(() => window.__done);
+  assert.ok(done.copy >= done.select, "the copy waited for the last select command to be answered");
+
+  // A double click and a triple click: the word and the line are copied once each, as they are selected.
+  await fresh(page);
+  await page.evaluate(() => window.__MOCK__.on("select", () => null));
+  await page.evaluate(() => window.__MOCK__.on("copy_selection", () => true));
+  const [x, y] = g.pt(2, 5, 1);
+  await page.mouse.click(x, y);
+  await page.waitForTimeout(60);
+  assert.deepEqual(await copies(page), [], "a click that never moved copies nothing");
+  await page.mouse.click(x, y);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("copy_selection").length >= 1);
+  assert.deepEqual(await copyCalls(page), ["select:begin", "select:clear", "select:begin", "copy_selection:2"], "a double click copies the word");
+  await page.mouse.click(x, y);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("copy_selection").length >= 2);
+  assert.deepEqual((await copyCalls(page)).slice(4), ["select:begin", "copy_selection:2"], "a triple click copies the line");
+
+  // The pane of the gesture is the pane copied, not the focused one.
+  await fresh(page);
+  await page.mouse.move(...g.pt(1, 1, 1));
+  await page.mouse.down();
+  await page.mouse.move(...g.pt(1, 6, 2), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("copy_selection").length >= 1);
+  assert.deepEqual(await callsOf(page, "copy_selection"), [{ pane: 1 }], "the copy is for pane 1, where the drag was");
+
+  // The setting off: the view the core announces says so, and nothing is copied.
+  const off = structuredClone(golden.settings_view);
+  off.settings.copy_on_select = false;
+  await emit(page, "settings", off);
+  await fresh(page);
+  await page.mouse.move(...g.pt(2, 1, 1));
+  await page.mouse.down();
+  await page.mouse.move(...g.pt(2, 8, 3), { steps: 4 });
+  await page.mouse.up();
+  await page.mouse.click(x, y);
+  await page.mouse.click(x, y);
+  await page.waitForTimeout(150);
+  assert.deepEqual(await callsOf(page, "copy_selection"), [], "copy_on_select false: no copy");
+  const on = structuredClone(golden.settings_view);
+  await emit(page, "settings", on);
+  await fresh(page);
+  await page.mouse.move(...g.pt(2, 1, 1));
+  await page.mouse.down();
+  await page.mouse.move(...g.pt(2, 8, 3), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("copy_selection").length >= 1);
+  assert.equal((await callsOf(page, "copy_selection")).length, 1, "copy_on_select true again: a copy");
+
+  // A shell with no native clipboard rejects: the page copies the selection text through the web view.
+  await fresh(page);
+  await page.evaluate(() => {
+    window.__written = [];
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (t) => { window.__written.push(t); } },
+    });
+    document.execCommand = () => false;
+    window.__MOCK__.on("copy_selection", () => { throw "this platform has no native clipboard access"; });
+    window.__MOCK__.on("selection_text", () => "from the core");
+  });
+  await page.mouse.move(...g.pt(2, 1, 1));
+  await page.mouse.down();
+  await page.mouse.move(...g.pt(2, 8, 3), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__written.length >= 1);
+  assert.deepEqual(await page.evaluate(() => window.__written), ["from the core"], "the fallback wrote the core's text");
+  assert.ok((await callsOf(page, "selection_text")).length >= 1, "the fallback asked the core for the text");
+
+  // A selection nobody had asked about (the shell answers false) changes nothing in the page.
+  await fresh(page);
+  await page.evaluate(() => {
+    window.__written.length = 0;
+    window.__MOCK__.on("copy_selection", () => false);
+  });
+  await page.mouse.move(...g.pt(2, 1, 1));
+  await page.mouse.down();
+  await page.mouse.move(...g.pt(2, 8, 3), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("copy_selection").length >= 1);
+  await frames(page);
+  assert.deepEqual(await page.evaluate(() => window.__written), [], "a false answer is not an error and writes nothing");
 }

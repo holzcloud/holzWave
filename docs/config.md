@@ -77,6 +77,7 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `contrast` | string | `"system"`, `"normal"`, `"high"` | `"system"` | at once |
 | `scrollback_lines` | number | 100 to 100000 | 10000 | for panes started afterwards; a running pane keeps its own |
 | `confirm_multiline_paste` | boolean | | `true` | at once |
+| `copy_on_select` | boolean | | `true` | at once; copies the selection to the system clipboard when a mouse selection ends (below) |
 | `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |
 | `cursor_trail` | boolean | | `false` | at once; fades a short trail behind a cursor that jumps (below) |
 | `shell` | string | one program: an absolute path or a bare name, at most 4096 bytes, no control characters; empty means the platform default; a value that cannot be started falls back to the platform default with a warning | `""` | for panes started afterwards; a running pane keeps its shell (below) |
@@ -87,6 +88,12 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 
 `option_as_alt` is off by default so that a Swiss layout types `|`, `[` and `{` with Option (D-12).
 `confirm_multiline_paste` asks before a multi-line paste into a program that did not turn on bracketed paste (D-15).
+`copy_on_select` writes the core's selection to the system clipboard the moment the mouse is released after a drag, a
+double click (a word) or a triple click (a line), with no key press. Only the mouse does this: a click that never moved
+copies nothing, and neither does a selection made in copy mode. `Cmd+C` and the clipboard chords work as before, and
+turning the setting off leaves them as the only way to copy. On macOS the shell writes the pasteboard itself, from the
+text the core holds (the page can ask for the copy, never choose its text); on Windows and Linux the page writes it
+through the web view's clipboard. The text is bounded at 16 MiB.
 `smooth_scroll` and `cursor_trail` are two optional effects of the drawing only (DESK-28); both are off by default and
 both stay off while reduced motion is in effect, whether the operating system asks for it or the `motion` setting says
 `"reduce"` (see [Accessibility](#accessibility)), and the change of either applies without a restart. With
@@ -138,6 +145,7 @@ settings dialog has no row for it; edit the file.
   "contrast": "system",
   "scrollback_lines": 20000,
   "confirm_multiline_paste": true,
+  "copy_on_select": true,
   "smooth_scroll": false,
   "cursor_trail": false,
   "keybindings": {

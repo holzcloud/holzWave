@@ -2,7 +2,8 @@
 //
 // The user's: the selection is the core's. A press sends `select` begin with the viewport cell under the pointer
 // (word on the second click, line on the third), moving sends `extend` at most once per animation frame, and a
-// click that never moved clears. Nothing about the selection is kept here.
+// click that never moved clears. Nothing about the selection is kept here. When a drag, a double click or a triple
+// click ends, the core's selection is copied to the system clipboard (`copy_on_select`, selection.ts).
 //
 // The program's: when the pane's frame header says the program tracks the mouse (`modes.mouse`) and Shift is not
 // held, press, release and motion go to the core as `mouse` commands in device pixels relative to the grid origin
@@ -19,7 +20,7 @@ import type { PxRect } from "./frame.js";
 import { cellAt, gridRect, paneAt } from "./geometry.js";
 import { gridPoint, modifierBits, wheelRows } from "./mouse.js";
 import { canvas as sceneCanvas } from "./scene.js";
-import { copySelection } from "./selection.js";
+import { copyOnSelect, copySelection } from "./selection.js";
 import { state } from "./state.js";
 import type { UnitRect, View } from "./types.js";
 
@@ -123,6 +124,8 @@ interface Gesture {
   frame: number;
   /** An extend was sent: the gesture is a drag, not a click. */
   moved: boolean;
+  /** The newest selection command sent for this gesture: copy on select waits for it, so it sees the final extend. */
+  sent: Promise<void>;
 }
 
 let gesture: Gesture | null = null;
@@ -136,9 +139,15 @@ type Op =
   | { kind: "extend"; x: number; y: number }
   | { kind: "clear" };
 
-/** Send one selection op; a command that fails is the core's to report, not an error of the page. */
-function select(pane: number, op: Op): void {
-  void call("select", { pane, op }).catch(() => {});
+/**
+ * Send one selection op; a command that fails is the core's to report, not an error of the page. The promise settles
+ * when the command has been answered and never rejects.
+ */
+function select(pane: number, op: Op): Promise<void> {
+  return call("select", { pane, op }).then(
+    () => {},
+    () => {},
+  );
 }
 
 // ---- reporting -------------------------------------------------------------------------------------
@@ -268,7 +277,7 @@ function flush(g: Gesture): void {
   if (!to || same(to, g.last)) return;
   g.last = to;
   g.moved = true;
-  select(g.pane, { kind: "extend", x: to[0], y: to[1] });
+  g.sent = select(g.pane, { kind: "extend", x: to[0], y: to[1] });
 }
 
 /** Follow the pointer: remember the newest cell and send it with the next animation frame. */
@@ -347,8 +356,8 @@ export function initPointer(applyView: (v: View) => void): void {
     const n = countClick(e, hit.pane);
     const mode: Mode = n === 1 ? "cell" : n === 2 ? "word" : "line";
     if (state.view && hit.pane !== state.view.focus) void call("focus_pane", { pane: hit.pane }).then(applyView);
-    select(hit.pane, { kind: "begin", x: hit.cell[0], y: hit.cell[1], mode });
-    gesture = { pane: hit.pane, pointer: e.pointerId, mode, last: hit.cell, pending: null, frame: 0, moved: false };
+    const sent = select(hit.pane, { kind: "begin", x: hit.cell[0], y: hit.cell[1], mode });
+    gesture = { pane: hit.pane, pointer: e.pointerId, mode, last: hit.cell, pending: null, frame: 0, moved: false, sent };
     capture(canvas, e.pointerId);
   });
 
@@ -398,7 +407,13 @@ export function initPointer(applyView: (v: View) => void): void {
       track(g, e, canvas); // the release position is the final one
       flush(g);
       // A press that never moved is a click, and a click is not a selection. Word and line stay selected.
-      if (g.mode === "cell" && !g.moved) select(g.pane, { kind: "clear" });
+      if (g.mode === "cell" && !g.moved) {
+        void select(g.pane, { kind: "clear" });
+      } else {
+        // A selection ended: copy it once the core has the last begin or extend. The highlight stays.
+        const pane = g.pane;
+        void g.sent.then(() => copyOnSelect(pane));
+      }
     }
     endGesture(canvas);
   });

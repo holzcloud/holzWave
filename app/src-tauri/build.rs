@@ -49,6 +49,7 @@ fn main() {
     "request_full",
     "select",
     "selection_text",
+    "copy_selection",
     "search",
     "copy_mode",
     "split",

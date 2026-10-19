@@ -21,6 +21,7 @@
     "allow-request-full",
     "allow-select",
     "allow-selection-text",
+    "allow-copy-selection",
     "allow-search",
     "allow-copy-mode",
     "allow-split",

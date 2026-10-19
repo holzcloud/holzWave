@@ -30,6 +30,7 @@ mod ai_host;
 mod ai_tools;
 mod ai_write;
 mod ai_exec;
+mod clipboard;
 mod commands;
 mod files_protocol;
 mod login_prompt;
@@ -451,6 +452,7 @@ pub fn run() {
             commands::request_full,
             commands::select,
             commands::selection_text,
+            commands::copy_selection,
             commands::search,
             commands::copy_mode,
             commands::split,

@@ -135,6 +135,9 @@ pub struct Settings {
     pub scrollback_lines: u32,
     /// Ask before a multi-line paste when the program did not turn on bracketed paste (D-15).
     pub confirm_multiline_paste: bool,
+    /// Copy the selection to the system clipboard when a mouse selection ends (a drag, a double click or a triple
+    /// click). On by default; a selection made with the keyboard is never copied this way.
+    pub copy_on_select: bool,
     /// Ease a scrollback jump over a fraction of a second (DESK-28). Off by default, and never while motion is
     /// reduced. Purely presentation: the core still scrolls by whole rows.
     pub smooth_scroll: bool,
@@ -167,6 +170,7 @@ impl Default for Settings {
             contrast: Contrast::System,
             scrollback_lines: 10_000,
             confirm_multiline_paste: true,
+            copy_on_select: true,
             smooth_scroll: false,
             cursor_trail: false,
             shell: String::new(),

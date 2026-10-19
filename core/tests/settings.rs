@@ -26,6 +26,7 @@ fn defaults_match_the_decisions() {
     assert_eq!(s.ui_scale, 100);
     assert!(!s.option_as_alt, "D-12: Option is not Alt by default");
     assert!(s.confirm_multiline_paste, "D-15: multi-line paste is confirmed by default");
+    assert!(s.copy_on_select, "a mouse selection is copied by default");
     assert_eq!(s.scrollback_lines, 10_000);
     assert_eq!(s.cursor_blink, Blink::System);
     assert_eq!(s.motion, Motion::System);
@@ -70,6 +71,7 @@ fn the_document_is_pretty_printed_with_a_trailing_newline_and_a_stable_key_order
         "\"contrast\"",
         "\"scrollback_lines\"",
         "\"confirm_multiline_paste\"",
+        "\"copy_on_select\"",
         "\"smooth_scroll\"",
         "\"cursor_trail\"",
         "\"shell\"",
@@ -511,6 +513,24 @@ mod validation {
     }
 
     #[test]
+    fn copy_on_select_defaults_to_on_reads_false_and_repairs_a_wrong_type() {
+        let (old, status) = Settings::from_json(r#"{"font_size": 15}"#);
+        assert_eq!(status, LoadStatus::Clean);
+        assert!(old.copy_on_select, "a file from before the key existed copies on select");
+
+        let (off, status) = Settings::from_json(r#"{"copy_on_select": false}"#);
+        assert_eq!(status, LoadStatus::Clean);
+        assert!(!off.copy_on_select);
+
+        let (bad, status) = Settings::from_json(r#"{"copy_on_select": "no", "font_size": 16}"#);
+        assert!(bad.copy_on_select, "the default for the broken key");
+        assert_eq!(bad.font_size, 16, "the other keys are kept");
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("copy_on_select"), "{notes:?}");
+    }
+
+    #[test]
     fn a_json_document_that_is_not_an_object_is_reset() {
         for text in ["[]", "null", "42", "\"theme\"", "true"] {
             let (s, status) = Settings::from_json(text);
@@ -600,6 +620,7 @@ mod validation {
         s.set_value("motion", json!("reduce")).unwrap();
         s.set_value("contrast", json!("high")).unwrap();
         s.set_value("confirm_multiline_paste", json!(false)).unwrap();
+        s.set_value("copy_on_select", json!(false)).unwrap();
         s.set_value("smooth_scroll", json!(true)).unwrap();
         s.set_value("cursor_trail", json!(true)).unwrap();
         s.set_value("ai_local_only", json!(true)).unwrap();
@@ -611,6 +632,7 @@ mod validation {
         assert!(s.option_as_alt);
         assert_eq!((s.cursor_blink, s.motion, s.contrast), (Blink::Off, Motion::Reduce, Contrast::High));
         assert!(!s.confirm_multiline_paste);
+        assert!(!s.copy_on_select);
         assert!(s.smooth_scroll && s.cursor_trail);
         assert!(s.ai_local_only && s.ai_persist_context);
         assert_eq!(s.ai_local_context, AiLocalContext::Auto);
@@ -629,6 +651,7 @@ mod validation {
             ("font_size", json!(null)),
             ("option_as_alt", json!("yes")),
             ("smooth_scroll", json!(1)),
+            ("copy_on_select", json!("yes")),
             ("cursor_trail", json!("on")),
             ("ai_local_only", json!("yes")),
             ("ai_local_only", json!(1)),

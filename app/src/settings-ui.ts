@@ -179,7 +179,7 @@ async function show(api: SettingsApi): Promise<void> {
 
     const toggle = (
       parent: Element, id: string, text: string,
-      key: "option_as_alt" | "confirm_multiline_paste" | "smooth_scroll" | "cursor_trail", describedBy?: string,
+      key: "option_as_alt" | "confirm_multiline_paste" | "copy_on_select" | "smooth_scroll" | "cursor_trail", describedBy?: string,
     ): void => {
       const row = rowOf(parent, id, text);
       const node = el("input", "", row);
@@ -239,6 +239,7 @@ async function show(api: SettingsApi): Promise<void> {
       id: "set-scrollback-hint", text: SCROLLBACK_HINT, data: "scrollback",
     });
     toggle(terminal, "set-confirm-paste", "Confirm multi-line paste", "confirm_multiline_paste");
+    toggle(terminal, "set-copy-on-select", "Copy on select", "copy_on_select");
     toggle(terminal, "set-smooth-scroll", "Smooth scrolling", "smooth_scroll", "set-effects-hint");
     toggle(terminal, "set-cursor-trail", "Cursor trail", "cursor_trail", "set-effects-hint");
     const effects = el("p", "set-hint", terminal);

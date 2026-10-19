@@ -172,7 +172,7 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 98 commands and 14 events. The tables below list the
+The webview talks to the core through a deny-by-default set of 99 commands and 14 events. The tables below list the
 commands of the terminal core and of the AI chat; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
@@ -186,7 +186,7 @@ snake_case everywhere (`cell_w`, `allow_unsafe`).
 | Pane lifecycle | `start_pane(pane, cols, rows, cell_w, cell_h)`, `resize(pane, cols, rows, cell_w, cell_h)` | nothing (`start_pane` waits for the shell to start) |
 | Input | `key(pane, code, key, mods, repeat, release, composing)`, `text(pane, text)`, `paste(pane, text, allow_unsafe)`, `mouse(pane, action, button, x, y, mods)`, `wheel(pane, rows, x, y, mods)` | nothing; `paste` answers `written`, `empty` or `rejected` |
 | Viewport and frames | `scroll(pane, rows)`, `scroll_to_bottom(pane)`, `request_full(pane)` | nothing |
-| Selection, search, copy mode | `select(pane, op)`, `selection_text(pane)`, `search(pane, op)`, `copy_mode(pane, op)` | the text, `{total, current}`, `{active, selecting, yanked}` |
+| Selection, search, copy mode | `select(pane, op)`, `selection_text(pane)`, `copy_selection(pane)`, `search(pane, op)`, `copy_mode(pane, op)` | the text, whether the core's selection was written to the system clipboard (no argument carries text), `{total, current}`, `{active, selecting, yanked}` |
 | Settings | `get_settings`, `set_setting(key, value)`, `reset_setting(key)`, `reload_settings` | the settings view |
 | System | `app_info`, `open_url(url)`, `reveal_path(path, base)` | the version, OS and host name; nothing |
 | AI conversations | `ai_conversation_new`, `ai_conversation_list`, `ai_conversation_delete(conversation)`, `ai_send(conversation, text, pane, profile, model, offer, picked)`, `ai_cancel(conversation)`, `ai_turn_snapshot(conversation)` | an id (no file exists until the first send); the stored chats with a note for each file that cannot be used; whether the chat was removed; a ticket for the turn (`ai_send` answers at once and the reply arrives as `ai` events); whether a turn was stopped; the whole state of one chat |
@@ -346,7 +346,10 @@ keys, Kitty keyboard flags, `modifyOtherKeys`). The frontend builds no escape se
   else scrolls the viewport.
 - **Selection, search and copy mode live in the core.** The page sends gestures (`select`, `search`, `copy_mode`) and
   draws what the frame header says (spans, matches, the copy cursor); copy reads the text back with
-  `selection_text`.
+  `selection_text`. When a mouse selection ends the page calls `copy_selection(pane)` (setting `copy_on_select`): the
+  shell writes the core's own selection text to the system clipboard (NSPasteboard in process on macOS, bounded at
+  16 MiB; elsewhere it answers an error and the page uses the web view's clipboard). The page never passes the text, so
+  the command is no clipboard write primitive.
 
 **Replies.** Some sequences need an answer (device attributes, size reports, colour queries). The engine collects
 them and the engine thread hands them to the PTY writer thread; a program that waits for an answer does not hang

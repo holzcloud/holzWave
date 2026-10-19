@@ -124,6 +124,21 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
             ),
             ("holzwave-core", "everything the shell shows and controls"),
             ("holzwave-ipc", "server side of the local socket that wsh talks to (lib.rs, state.rs)"),
+            (
+                "objc2",
+                "autorelease pool around the macOS pasteboard calls (clipboard.rs); already in the lock file through tao and \
+                 muda, macOS target table only",
+            ),
+            (
+                "objc2-app-kit",
+                "NSPasteboard, the system clipboard of macOS, read and written in process (clipboard.rs); already in the lock \
+                 file through tao and muda, macOS target table only, no Tauri clipboard plugin",
+            ),
+            (
+                "objc2-foundation",
+                "NSString for the pasteboard calls (clipboard.rs); already in the lock file through tao and muda, macOS \
+                 target table only",
+            ),
             ("serde", "arguments of the commands and the events to the page"),
             ("serde_json", "JSON of the event payloads and of the small app files (state.rs, sync.rs)"),
             ("tauri", "the app shell"),

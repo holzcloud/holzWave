@@ -132,6 +132,11 @@ export function writeClipboard(text: string): boolean {
 export function copySelection(): boolean {
   const pane = state.view?.focus;
   if (pane === undefined) return false;
+  return copyPaneSelection(pane);
+}
+
+/** `copySelection` for any pane: the cached text goes through `writeClipboard`, an empty cache asks the core. */
+export function copyPaneSelection(pane: number): boolean {
   const text = selectionText(pane);
   if (text !== "") return writeClipboard(text);
   void call<string | null>("selection_text", { pane }).then(
@@ -143,6 +148,21 @@ export function copySelection(): boolean {
     () => {},
   );
   return false;
+}
+
+/**
+ * Copy the pane's selection to the system clipboard when a mouse selection ends (the `copy_on_select` setting). The
+ * shell writes the core's own selection through `copy_selection`: the page never supplies the text, and a write at the
+ * end of a drag is outside any user gesture the web view would accept for `execCommand`. Where the shell has no native
+ * clipboard (it answers an error) the web view's clipboard is the second try, as for `edit.copy`.
+ */
+export async function copyOnSelect(pane: number): Promise<void> {
+  if (state.settings?.settings.copy_on_select === false) return;
+  try {
+    await call<boolean>("copy_selection", { pane });
+  } catch {
+    copyPaneSelection(pane);
+  }
 }
 
 /**

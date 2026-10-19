@@ -189,7 +189,7 @@ async function platformCase(page, url) {
     ]);
   const MAC = [
     "set-theme", "set-font-size", "set-ui-scale", "set-option-as-alt", "set-cursor-blink", "set-scrollback",
-    "set-confirm-paste", "set-smooth-scroll", "set-cursor-trail", "set-motion", "set-contrast",
+    "set-confirm-paste", "set-copy-on-select", "set-smooth-scroll", "set-cursor-trail", "set-motion", "set-contrast",
   ];
   const OTHER = MAC.filter((id) => id !== "set-option-as-alt");
 
@@ -247,20 +247,26 @@ async function controlsCase(page, url) {
   await field(page, "Confirm multi-line paste").uncheck();
   assert.deepEqual(await last(8), { key: "confirm_multiline_paste", value: false });
 
+  // Copy on select is on in the golden view: unchecking it sends false, and the dialog shows the core's answer.
+  assert.equal(await field(page, "Copy on select").isChecked(), true, "copy on select starts on");
+  await field(page, "Copy on select").uncheck();
+  assert.deepEqual(await last(9), { key: "copy_on_select", value: false });
+  assert.equal(await pageState(page, "settings.settings.copy_on_select"), false);
+
   await field(page, "Scrollback lines").fill("5000");
   await field(page, "Scrollback lines").press("Enter");
-  assert.deepEqual(await last(9), { key: "scrollback_lines", value: 5000 });
+  assert.deepEqual(await last(10), { key: "scrollback_lines", value: 5000 });
 
   // Leaving a field after Enter does not send it a second time.
   await field(page, "Scrollback lines").blur();
   await settle(page);
-  assert.equal((await settingCalls(page)).length, 9, "blur after Enter must not send again");
+  assert.equal((await settingCalls(page)).length, 10, "blur after Enter must not send again");
 
   // The two effects of DESK-28 are plain toggles: one request each, and the page's state follows the core.
   await field(page, "Smooth scrolling").check();
-  assert.deepEqual(await last(10), { key: "smooth_scroll", value: true });
+  assert.deepEqual(await last(11), { key: "smooth_scroll", value: true });
   await field(page, "Cursor trail").check();
-  assert.deepEqual(await last(11), { key: "cursor_trail", value: true });
+  assert.deepEqual(await last(12), { key: "cursor_trail", value: true });
   assert.equal(await pageState(page, "settings.settings.smooth_scroll"), true);
   assert.equal(await pageState(page, "settings.settings.cursor_trail"), true);
 
@@ -270,12 +276,13 @@ async function controlsCase(page, url) {
   assert.equal(await chosen(page, "Theme"), "Papier");
   assert.equal(await field(page, "Option as Alt").isChecked(), true);
   assert.equal(await field(page, "Confirm multi-line paste").isChecked(), false);
+  assert.equal(await field(page, "Copy on select").isChecked(), false);
   assert.equal(await pageState(page, "settings.settings.font_size"), 18);
 
   // A number beyond the range is clamped by the core, and the control shows the clamped value.
   await field(page, "Font size").fill("99");
   await field(page, "Font size").press("Enter");
-  assert.deepEqual(await last(12), { key: "font_size", value: 99 });
+  assert.deepEqual(await last(13), { key: "font_size", value: 99 });
   await page.waitForFunction(() => document.getElementById("set-font-size")?.value === "40");
   assert.equal(await field(page, "Font size").inputValue(), "40", "the control shows the core's value, not the typed one");
 
@@ -283,7 +290,7 @@ async function controlsCase(page, url) {
   await field(page, "Font size").fill("");
   await field(page, "Font size").press("Enter");
   await settle(page);
-  assert.equal((await settingCalls(page)).length, 12, "an empty number field must not be sent");
+  assert.equal((await settingCalls(page)).length, 13, "an empty number field must not be sent");
   assert.equal(await field(page, "Font size").inputValue(), "40");
 }
 

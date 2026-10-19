@@ -39,6 +39,7 @@ use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
 use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
+use crate::clipboard;
 use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
 use crate::windows::DropKind;
 
@@ -363,6 +364,21 @@ pub fn select(core: State<Arc<AppCore>>, pane: PaneId, op: SelectOpMsg) -> Resul
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn selection_text(core: State<Arc<AppCore>>, pane: PaneId) -> Result<Option<String>, String> {
     core.selection_text(pane)
+}
+
+/// Copy the core's own selection of a pane to the system clipboard: `true` when text was written, `false` when the pane
+/// has no selection or an empty one. The text comes from the core and never from the page, so this command is not a
+/// clipboard write primitive: a script in the page can ask for the selection to be copied, but never choose what is
+/// copied. Waits for the engine's answer.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn copy_selection(core: State<Arc<AppCore>>, pane: PaneId) -> Result<bool, String> {
+    match core.selection_text(pane)? {
+        Some(text) if !text.is_empty() => {
+            clipboard::write_text(&text)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Change the search and answer with its state. Waits for the engine's answer.

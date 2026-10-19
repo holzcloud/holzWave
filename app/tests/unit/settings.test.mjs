@@ -97,12 +97,27 @@ test("the golden settings view is read as it is", () => {
   assert.equal(view.settings.font_size, 14);
   assert.equal(view.settings.ui_scale, 100);
   assert.equal(view.settings.confirm_multiline_paste, true);
+  assert.equal(view.settings.copy_on_select, true);
   assert.equal(view.settings.smooth_scroll, false);
   assert.equal(view.settings.cursor_trail, false);
   assert.deepEqual(view.themes.map((t) => t.name), ["aubergine", "Schiefer", "Papier"]);
   assert.deepEqual(view.themes.map((t) => t.kind), ["dark", "dark", "light"]);
   assert.equal(view.theme.name, "aubergine");
   assert.deepEqual(view.warnings, ["settings.json: font_size 9999 is outside 8..=40; 40 is used"]);
+});
+
+test("copy_on_select is read as it is, and a view without it or with another type counts as on", () => {
+  const off = sample();
+  off.settings.copy_on_select = false;
+  assert.equal(readSettingsView(off).settings.copy_on_select, false);
+  const missing = sample();
+  delete missing.settings.copy_on_select;
+  assert.equal(readSettingsView(missing).settings.copy_on_select, true, "an older view without the key");
+  for (const odd of ["no", 0, null]) {
+    const view = sample();
+    view.settings.copy_on_select = odd;
+    assert.equal(readSettingsView(view).settings.copy_on_select, true, `${JSON.stringify(odd)} is not false`);
+  }
 });
 
 test("the AI settings are read with their defaults and a wrong type costs only that key", () => {
