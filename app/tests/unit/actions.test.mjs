@@ -154,6 +154,7 @@ const EXPECTED = {
   "Cmd+]": "pane.focus_next",
   "Cmd+[": "pane.focus_prev",
   "Cmd+C": "edit.copy",
+  "Cmd+V": "edit.paste",
   "Cmd+K": "palette.open",
   "Cmd+F": "search.open",
   "Cmd+Shift+X": "copy_mode.enter",

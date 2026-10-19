@@ -381,6 +381,15 @@ pub fn copy_selection(core: State<Arc<AppCore>>, pane: PaneId) -> Result<bool, S
     }
 }
 
+/// The text on the system clipboard (the empty string when it holds none), for the page's paste fallback. The page calls it
+/// only after the person's own paste chord, when the web view's `paste` event did not come, and the text then goes through
+/// the one `paste` path (sanitised, bracketed when asked, confirmed when it spans lines). An error means this platform has
+/// no native clipboard access and the page reads the web view's clipboard instead. Waits for the system.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn clipboard_text() -> Result<String, String> {
+    clipboard::read_text()
+}
+
 /// Change the search and answer with its state. Waits for the engine's answer.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn search(core: State<Arc<AppCore>>, pane: PaneId, op: SearchOpMsg) -> Result<SearchMsg, String> {

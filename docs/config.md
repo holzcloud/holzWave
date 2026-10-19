@@ -278,12 +278,16 @@ program (SIGINT).
 | | macOS | Windows | Linux |
 |---|---|---|---|
 | copy the selection | `Cmd+C` | `Ctrl+Shift+C`, `Ctrl+Insert` | `Ctrl+Shift+C`, `Ctrl+Insert` |
-| paste | `Cmd+V` (Edit menu) | `Ctrl+Shift+V`, `Shift+Insert`, `Ctrl+V` | `Ctrl+Shift+V`, `Shift+Insert` |
+| paste | `Cmd+V` (page chord and Edit menu) | `Ctrl+Shift+V`, `Shift+Insert`, `Ctrl+V` | `Ctrl+Shift+V`, `Shift+Insert` |
 
-A paste chord is not swallowed by the page: the web view pastes into the terminal input, and when it does not, the page
-reads the clipboard itself once. Several lines still ask first, and a program that asked for bracketed paste gets it. In
-a text field of the page (search, a name, the palette) none of these shortcuts is the page's: copy and paste are the
-field's own.
+A paste chord is not swallowed by the page, on any platform: the web view pastes into the terminal input (on macOS the
+Edit menu item Paste is a second route to the same event), and when no `paste` event comes within 100 ms, the page reads
+the clipboard itself once and pastes that. The page reads it through the shell (`clipboard_text`: on macOS the system
+pasteboard in process, bounded at 16 MiB; elsewhere the shell answers an error and the page uses the web view's own
+clipboard), because the app's web view on macOS has no `navigator.clipboard`. A macOS version that asks before an app
+reads the pasteboard may ask the first time that fallback runs; the web view's own `paste` event, which is the usual
+route, never asks. Several lines still ask first, and a program that asked for bracketed paste gets it. In a text field
+of the page (search, a name, the palette) none of these shortcuts is the page's: copy and paste are the field's own.
 
 The defaults. Windows and Linux use `Ctrl+Shift` as the terminal convention that leaves plain `Ctrl+letter` to the
 shell. Tab numbers are `Alt+Shift+digit` because `Ctrl+Alt` is AltGr on Windows; nothing uses `Ctrl+Shift+E`, which

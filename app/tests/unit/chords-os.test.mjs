@@ -17,12 +17,17 @@ test("with no OS known the fallback is the macOS table", () => {
   setOs("");
   for (const [chord, id] of CHORDS) assert.equal(actionIdFor(chord), id, chord);
   assert.equal(actionIdFor("Cmd+D"), "pane.split_right");
-  assert.equal(actionIdFor("Ctrl+Shift+V"), undefined, "no paste chord on macOS: its Edit menu pastes");
+  assert.equal(actionIdFor("Cmd+V"), "edit.paste", "the page owns Cmd+V on macOS as well");
+  assert.equal(actionIdFor("Ctrl+Shift+V"), undefined, "the Windows and Linux paste chords are not macOS chords");
 });
 
-test("macOS keeps its static table and Cmd+C", () => {
+test("macOS keeps its static table, Cmd+C and Cmd+V", () => {
   setOs("macos");
   assert.equal(actionIdFor("Cmd+C"), "edit.copy");
+  assert.equal(actionIdFor("Cmd+V"), "edit.paste");
+  assert.equal(chordFor("edit.paste"), "Cmd+V");
+  assert.equal(actionIdFor("Ctrl+V"), undefined, "plain Ctrl+V reaches the program as a key (Claude Code's image key)");
+  assert.equal(actionIdFor("Ctrl+Shift+V"), undefined);
   assert.equal(actionIdFor("Cmd+W"), "pane.close");
   assert.equal(actionIdFor("Ctrl+Shift+C"), undefined);
   assert.equal(chordFor("edit.copy"), "Cmd+C");

@@ -172,7 +172,7 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 99 commands and 14 events. The tables below list the
+The webview talks to the core through a deny-by-default set of 100 commands and 14 events. The tables below list the
 commands of the terminal core and of the AI chat; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
@@ -184,7 +184,7 @@ snake_case everywhere (`cell_w`, `allow_unsafe`).
 |---|---|---|
 | Layout | `get_layout`, `split(column)`, `new_tab`, `new_workspace(name)`, `close_pane(pane)`, `focus_pane(pane)`, `cycle_focus(step)`, `select_tab(index)`, `select_workspace(index)`, `set_ratio(split, ratio)` | the new `View` |
 | Pane lifecycle | `start_pane(pane, cols, rows, cell_w, cell_h)`, `resize(pane, cols, rows, cell_w, cell_h)` | nothing (`start_pane` waits for the shell to start) |
-| Input | `key(pane, code, key, mods, repeat, release, composing)`, `text(pane, text)`, `paste(pane, text, allow_unsafe)`, `mouse(pane, action, button, x, y, mods)`, `wheel(pane, rows, x, y, mods)` | nothing; `paste` answers `written`, `empty` or `rejected` |
+| Input | `key(pane, code, key, mods, repeat, release, composing)`, `text(pane, text)`, `paste(pane, text, allow_unsafe)`, `clipboard_text`, `mouse(pane, action, button, x, y, mods)`, `wheel(pane, rows, x, y, mods)` | nothing; `paste` answers `written`, `empty` or `rejected`; `clipboard_text` the system clipboard's text (empty when it holds none, an error where the shell has no native clipboard) |
 | Viewport and frames | `scroll(pane, rows)`, `scroll_to_bottom(pane)`, `request_full(pane)` | nothing |
 | Selection, search, copy mode | `select(pane, op)`, `selection_text(pane)`, `copy_selection(pane)`, `search(pane, op)`, `copy_mode(pane, op)` | the text, whether the core's selection was written to the system clipboard (no argument carries text), `{total, current}`, `{active, selecting, yanked}` |
 | Settings | `get_settings`, `set_setting(key, value)`, `reset_setting(key)`, `reload_settings` | the settings view |
@@ -360,6 +360,10 @@ over 64 KiB is refused as a whole, never cut, and replies are dropped when the w
 on bracketed paste (DESK-13), and answers `rejected` for text that could inject commands (a newline without bracketed
 paste, or the end marker with it) without writing anything. The engine never decides to allow it. The page then asks
 the person (`confirm_multiline_paste`, D-15) and, on yes, sends the same text again with `allow_unsafe: true`.
+Every route ends there: the web view's `paste` event, and, when that event does not come within 100 ms of a paste
+chord, the text of `clipboard_text`, which the shell reads from the system clipboard (NSPasteboard in process on macOS,
+bounded at 16 MiB, an error elsewhere so that the page falls back to the web view's clipboard). The command is called
+only from that fallback of the person's own chord and only reads.
 
 ## 9. Integrations and extensions
 

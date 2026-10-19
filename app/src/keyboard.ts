@@ -268,9 +268,10 @@ function onPaste(e: ClipboardEvent): void {
   void pasteInto(pane, text);
 }
 
-// Windows and Linux have no native Edit menu, so a paste chord is the page's. It is not prevented: the web view then
-// fires `paste` into the terminal input and `onPaste` above takes it. If no event comes, the page reads the clipboard
-// itself. Either way the text goes through `pasteInto`, and the two routes can never both paste.
+// A paste chord is the page's on every platform (Cmd+V on macOS, where the Edit menu is a second route to the same
+// event). It is not prevented: the web view then fires `paste` into the terminal input and `onPaste` above takes it. If
+// no event comes, the page reads the clipboard itself. Either way the text goes through `pasteInto`, and the two routes
+// can never both paste.
 
 /** How long a paste chord waits for the web view's own `paste` event before the page reads the clipboard. */
 const PASTE_EVENT_WAIT_MS = 100;
@@ -294,15 +295,30 @@ function awaitPasteEvent(): void {
   }, PASTE_EVENT_WAIT_MS);
 }
 
+/**
+ * The text on the system clipboard, or the empty string. The shell reads it first (`clipboard_text`, native on macOS):
+ * the page is served from a custom scheme that WebKit does not treat as a secure context, so `navigator.clipboard` is
+ * not there in the app's web view on macOS. A shell without a native clipboard (an error), or an answer that is not
+ * text, hands over to the web view's clipboard. Only ever called after the person's own paste chord.
+ */
+async function readClipboardText(): Promise<string> {
+  try {
+    const answer = await call<unknown>("clipboard_text");
+    if (typeof answer === "string") return answer;
+  } catch {
+    // no native clipboard here: the web view's is the second try
+  }
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return ""; // no permission or no clipboard: nothing to paste
+  }
+}
+
 /** The clipboard text through the one paste path. Only ever called after the person's own paste chord. */
 async function pasteFromClipboard(): Promise<void> {
   if (isConfirmingPaste() || isConfirmingClose()) return; // one question at a time
-  let text = "";
-  try {
-    text = await navigator.clipboard.readText();
-  } catch {
-    return; // no permission or no clipboard: nothing to paste
-  }
+  const text = await readClipboardText();
   const pane = state.view?.focus;
   if (text === "" || pane === undefined) return;
   await pasteInto(pane, text);
@@ -383,8 +399,8 @@ function registerEditActions(): void {
 }
 
 /**
- * Paste on a platform without a native Edit menu. macOS pastes through its menu, so the action is not registered there
- * (`edit.copy` is, in pointer.ts, on every platform).
+ * Paste on every platform: the chord keeps its default and the web view's `paste` event is the primary route, with a
+ * read of the clipboard as the fallback (`edit.copy` is registered in pointer.ts, on every platform).
  */
 function registerPasteAction(): void {
   registerAction({ id: "edit.paste", title: "Paste", keepDefault: true, run: awaitPasteEvent });
@@ -395,7 +411,7 @@ export function initKeyboard(applyView: (v: View) => void): void {
   setOs(state.os); // app_info was answered before this runs: the static chords of this platform
   registerLayoutActions(applyView);
   registerEditActions();
-  if (state.os !== "macos") registerPasteAction();
+  registerPasteAction();
   ime = createInput();
   const box = ime;
   window.addEventListener("keydown", onKeyDown);

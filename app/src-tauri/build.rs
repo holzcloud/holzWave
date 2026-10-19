@@ -50,6 +50,7 @@ fn main() {
     "select",
     "selection_text",
     "copy_selection",
+    "clipboard_text",
     "search",
     "copy_mode",
     "split",

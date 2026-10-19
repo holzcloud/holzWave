@@ -50,6 +50,34 @@ pub fn write_text(text: &str) -> Result<(), String> {
     Err(NOT_NATIVE.to_string())
 }
 
+/// The plain text on the clipboard; the empty string when it holds none (an image, a file, nothing). A text over
+/// [`MAX_BYTES`] is an error, not a prefix.
+#[cfg(target_os = "macos")]
+pub fn read_text() -> Result<String, String> {
+    use objc2::rc::autoreleasepool;
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSString;
+
+    autoreleasepool(|_| {
+        let board = NSPasteboard::generalPasteboard();
+        let kind = NSString::from_str(TEXT_TYPE);
+        match board.stringForType(&kind) {
+            None => Ok(String::new()),
+            Some(text) => {
+                // The UTF-8 length is known before the text is copied out, so an oversized text is refused without a copy.
+                check_len(text.len())?;
+                Ok(text.to_string())
+            }
+        }
+    })
+}
+
+/// The plain text on the clipboard. Only macOS has a native clipboard here.
+#[cfg(not(target_os = "macos"))]
+pub fn read_text() -> Result<String, String> {
+    Err(NOT_NATIVE.to_string())
+}
+
 #[cfg(not(target_os = "macos"))]
 const NOT_NATIVE: &str = "this platform has no native clipboard access: the web view reads and writes the clipboard";
 
@@ -73,8 +101,9 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_platform_without_a_native_clipboard_says_so() {
-        let err = write_text("x").unwrap_err();
-        assert!(err.contains("web view"), "{err}");
+        for err in [write_text("x").unwrap_err(), read_text().unwrap_err()] {
+            assert!(err.contains("web view"), "{err}");
+        }
     }
 
     #[test]

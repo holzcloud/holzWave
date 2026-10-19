@@ -50,6 +50,7 @@ export default async function ({ page, url }) {
   await markupCase(page, url);
   await windowsPasteCase(page, url);
   await fallbackCase(page, url);
+  await macosPasteCase(page, url);
   await clipboardChordsCase(page, url);
   await fieldCase(page, url);
   await chordRowsCase(page, url);
@@ -449,4 +450,138 @@ async function chordRowsCase(page, url) {
   await wait(page, 100);
   assert.equal((await callsOf(page, "split")).length, 0, "on macOS Ctrl+Shift+D is not a chord");
   assert.deepEqual((await callsOf(page, "key")).map((k) => [k.code, k.mods]), [["KeyD", 5]], "it is a key for the program");
+}
+
+// ---- macOS: the page owns Cmd+V too ----------------------------------------------------------------------
+
+const CMD_V = { code: "KeyV", key: "v", metaKey: true };
+
+/** Script the native pasteboard read: `answer` is returned (or thrown when it is a function that throws). */
+const nativeText = (page, answer) =>
+  page.evaluate((a) => {
+    window.__native = 0;
+    window.__MOCK__.on("clipboard_text", () => {
+      window.__native++;
+      if (a && a.reject) throw a.reject;
+      return a;
+    });
+  }, answer);
+const natives = (page) => page.evaluate(() => window.__native);
+
+/**
+ * macOS has the two routes of Windows and Linux: the chord keeps its default (the menu and the web view still paste), the
+ * web view's `paste` event is the primary route, and only when it does not come within 100 ms the page reads the system
+ * pasteboard through `clipboard_text` (the web view's own clipboard is no secure context under the app's scheme). Every
+ * text still ends in the one paste path.
+ */
+async function macosPasteCase(page, url) {
+  // The primary route: the event pastes once and the native read is never asked.
+  await openOn(page, url, "macos");
+  await page.evaluate(() => window.__MOCK__.on("paste", () => "written"));
+  await nativeText(page, "native text");
+  assert.equal(await keydown(page, CMD_V), false, "Cmd+V keeps its default so the menu and the web view paste");
+  assert.equal((await callsOf(page, "key")).length, 0, "Cmd+V is not terminal input");
+  assert.equal(await paste(page, "from the event"), true, "the page takes the paste event itself");
+  await wait(page, SETTLE_MS);
+  assert.deepEqual(await pastes(page), [{ pane: 2, text: "from the event", allow_unsafe: false }], "exactly one paste");
+  assert.equal(await natives(page), 0, "the pasteboard is not read when the event came");
+
+  // The fallback: no event, so the pasteboard is read once through the shell and pasted once; a late event adds nothing.
+  await openOn(page, url, "macos");
+  await page.evaluate(() => window.__MOCK__.on("paste", () => "written"));
+  await nativeText(page, "native text");
+  await stubClipboard(page, "must not be read");
+  assert.equal(await keydown(page, CMD_V), false);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("paste").length >= 1);
+  assert.deepEqual(await pastes(page), [{ pane: 2, text: "native text", allow_unsafe: false }]);
+  assert.equal(await natives(page), 1, "the native read ran once");
+  assert.equal(await reads(page), 0, "the web view's clipboard was not needed");
+  await paste(page, "late event");
+  await wait(page, SETTLE_MS);
+  assert.equal((await pastes(page)).length, 1, "a late paste event after the fallback does not paste again");
+
+  // The native read fails or answers something that is not text: the web view's clipboard is the second try.
+  for (const answer of [{ reject: "this platform has no native clipboard access" }, null, 5, { text: "x" }]) {
+    await openOn(page, url, "macos");
+    await page.evaluate(() => window.__MOCK__.on("paste", () => "written"));
+    await nativeText(page, answer);
+    await stubClipboard(page, "from readText");
+    await keydown(page, CMD_V);
+    await page.waitForFunction(() => window.__MOCK__.callsOf("paste").length >= 1);
+    assert.deepEqual(await pastes(page), [{ pane: 2, text: "from readText", allow_unsafe: false }], `${JSON.stringify(answer)}: readText answered`);
+    assert.equal(await natives(page), 1);
+    assert.equal(await reads(page), 1);
+  }
+
+  // An empty pasteboard text is no text, and a text field that both routes leave empty sends nothing.
+  await openOn(page, url, "macos");
+  await nativeText(page, "");
+  await stubClipboard(page, "");
+  await keydown(page, CMD_V);
+  await wait(page, SETTLE_MS);
+  assert.equal((await pastes(page)).length, 0, "nothing to paste: nothing is sent");
+  await nativeText(page, { reject: "denied" });
+  await page.evaluate(() => {
+    navigator.clipboard.readText = () => Promise.reject(new Error("denied"));
+  });
+  await keydown(page, CMD_V);
+  await wait(page, SETTLE_MS);
+  assert.equal((await pastes(page)).length, 0, "both reads refused: nothing is sent");
+
+  // Several lines ask first, whichever route brought them (D-15).
+  await openOn(page, url, "macos");
+  await rejectUnsafe(page);
+  await nativeText(page, SEVEN);
+  await keydown(page, CMD_V);
+  await dialog(page).waitFor({ state: "visible" });
+  assert.deepEqual(await pastes(page), [{ pane: 2, text: SEVEN, allow_unsafe: false }], "asked before anything unsafe was sent");
+  await page.keyboard.press("Escape");
+  await dialog(page).waitFor({ state: "detached" });
+  assert.equal((await pastes(page)).length, 1, "cancelled sends nothing more");
+  await nativeText(page, { reject: "denied" });
+  await stubClipboard(page, SEVEN);
+  await keydown(page, CMD_V);
+  await dialog(page).waitFor({ state: "visible" });
+  await page.keyboard.press("Escape");
+  await dialog(page).waitFor({ state: "detached" });
+
+  // A held chord pastes once: the first press keeps its default and every repeat is consumed.
+  await openOn(page, url, "macos");
+  await page.evaluate(() => window.__MOCK__.on("paste", () => "written"));
+  await nativeText(page, "once");
+  assert.equal(await keydown(page, CMD_V), false);
+  for (let i = 0; i < 5; i++) assert.equal(await keydown(page, { ...CMD_V, repeat: true }), true, "a repeat is consumed");
+  await wait(page, SETTLE_MS);
+  assert.equal((await pastes(page)).length, 1, "a held Cmd+V pastes once");
+  assert.equal(await natives(page), 1);
+  assert.equal((await callsOf(page, "key")).length, 0, "and none of it was terminal input");
+
+  // In a text field of the page Cmd+V is the field's: the default stays and nothing runs.
+  await openOn(page, url, "macos");
+  await nativeText(page, "must not be read");
+  await page.evaluate(() => {
+    const input = document.createElement("input");
+    input.id = "probe";
+    document.body.append(input);
+    input.focus();
+  });
+  const prevented = await page.evaluate((i) => {
+    const e = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...i });
+    document.getElementById("probe").dispatchEvent(e);
+    return e.defaultPrevented;
+  }, CMD_V);
+  assert.equal(prevented, false, "Cmd+V in a field keeps the browser's default");
+  await wait(page, SETTLE_MS);
+  assert.equal(await natives(page), 0, "the pasteboard is not read for a field");
+  assert.equal((await pastes(page)).length, 0);
+  assert.equal((await callsOf(page, "key")).length, 0);
+
+  // Plain Ctrl+V is the program's: a key with the Ctrl bit, no paste, no read.
+  await openOn(page, url, "macos");
+  await nativeText(page, "must not be read");
+  assert.equal(await keydown(page, CTRL_V), true, "Ctrl+V is forwarded to the program");
+  await wait(page, SETTLE_MS);
+  assert.deepEqual((await callsOf(page, "key")).map((k) => [k.code, k.mods]), [["KeyV", 4]]);
+  assert.equal((await pastes(page)).length, 0);
+  assert.equal(await natives(page), 0);
 }

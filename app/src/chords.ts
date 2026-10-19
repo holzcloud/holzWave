@@ -1,7 +1,9 @@
 // The static table from a canonical chord to an action id. Canonical form is the core's (core/src/keybindings.rs):
 // modifiers in the order Cmd, Ctrl, Alt, Shift, then the key, letters upper case, "+" as the separator.
 // `CHORDS` is the macOS table; a chord whose action nobody registered resolves and then does nothing.
-// `pane.close` is Cmd+W (D-14): the native macOS menu has no Close Window item, so the page owns the shortcut.
+// `pane.close` is Cmd+W (D-14): the native macOS menu has no Close Window item, so the page owns the shortcut. The
+// clipboard chords Cmd+C and Cmd+V are fixed here as well (no rebindable action): the page owns them, the native Edit
+// menu and the web view's own `paste` event stay a second route.
 // It is only the fallback until the core's rows arrive. On Windows and Linux it holds just the fixed clipboard chords
 // (see FIXED_CLIPBOARD): the Super key (`Cmd`) is the OS's there, so a Win-key chord must never run from this table.
 
@@ -32,6 +34,7 @@ export const CHORDS: ReadonlyMap<string, string> = new Map([
   ["Cmd+Alt+8", "workspace.select_8"],
   ["Cmd+Alt+9", "workspace.select_9"],
   ["Cmd+C", "edit.copy"],
+  ["Cmd+V", "edit.paste"],
   ["Cmd+K", "palette.open"],
   ["Cmd+F", "search.open"],
   ["Cmd+Shift+X", "copy_mode.enter"],

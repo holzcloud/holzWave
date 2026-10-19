@@ -22,6 +22,7 @@
     "allow-select",
     "allow-selection-text",
     "allow-copy-selection",
+    "allow-clipboard-text",
     "allow-search",
     "allow-copy-mode",
     "allow-split",

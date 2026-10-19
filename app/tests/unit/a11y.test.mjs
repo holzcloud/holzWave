@@ -196,7 +196,7 @@ test("the static table agrees with the core's default table for every action the
   const { index, conflicts } = bindingIndex(rows);
   assert.deepEqual(conflicts, []);
   for (const [chord, action] of CHORDS) {
-    if (action === "edit.copy") continue; // a fixed shortcut: the core has no such action to rebind
+    if (action === "edit.copy" || action === "edit.paste") continue; // fixed shortcuts: the core has no such action to rebind
     assert.equal(index.get(chord), action, `${chord} is ${action} in chords.ts but ${index.get(chord)} in the core`);
   }
   for (const r of rows) {
@@ -217,6 +217,7 @@ test("dispatch uses the core's table once it is set and the static table before 
     assert.equal(actionIdFor("Cmd+W"), undefined, "an action the core left unbound is not revived by the static table");
     assert.equal(actionIdFor("Cmd+T"), "tab.new", "the other rows are as the core said");
     assert.equal(actionIdFor("Cmd+C"), "edit.copy", "a fixed shortcut the core's table does not know stays");
+    assert.equal(actionIdFor("Cmd+V"), "edit.paste", "so does the paste chord");
     setBindingTable([]);
     assert.equal(actionIdFor("Cmd+D"), "pane.split_right", "no rows: the static table again");
   } finally {

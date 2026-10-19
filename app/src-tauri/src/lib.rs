@@ -453,6 +453,7 @@ pub fn run() {
             commands::select,
             commands::selection_text,
             commands::copy_selection,
+            commands::clipboard_text,
             commands::search,
             commands::copy_mode,
             commands::split,
