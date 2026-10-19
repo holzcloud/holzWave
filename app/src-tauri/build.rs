@@ -43,6 +43,7 @@ fn main() {
     "send_edit",
     "text",
     "paste",
+    "paste_cue",
     "resize",
     "scroll",
     "scroll_to_bottom",

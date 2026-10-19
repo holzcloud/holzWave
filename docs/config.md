@@ -289,6 +289,14 @@ reads the pasteboard may ask the first time that fallback runs; the web view's o
 route, never asks. Several lines still ask first, and a program that asked for bracketed paste gets it. In a text field
 of the page (search, a name, the palette) none of these shortcuts is the page's: copy and paste are the field's own.
 
+**Images.** The terminal never writes an image. When the clipboard holds an image and no text, `Cmd+V` makes the core send
+an empty bracketed paste (the start and the end of a bracketed paste with nothing between) to a program that asked for
+bracketed paste, the cue that iTerm2 sends too, and that Claude Code on macOS answers by reading the image from the
+clipboard itself (it shows an `[Image #1]` chip). A program that did not ask for bracketed paste, and a shell, see nothing.
+Plain `Ctrl+V` is not a paste anywhere on macOS: it reaches the program as a key, and it is Claude Code's own image key
+on macOS and Linux (`Alt+V` on Windows), so image paste works there without any help from the terminal. Windows and
+Linux are not changed for the same reason: an empty clipboard read sends nothing there.
+
 The defaults. Windows and Linux use `Ctrl+Shift` as the terminal convention that leaves plain `Ctrl+letter` to the
 shell. Tab numbers are `Alt+Shift+digit` because `Ctrl+Alt` is AltGr on Windows; nothing uses `Ctrl+Shift+E`, which
 GNOME's input method takes for emoji.

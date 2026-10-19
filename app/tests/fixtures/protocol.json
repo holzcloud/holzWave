@@ -440,6 +440,9 @@
       "text",
       "allow_unsafe"
     ],
+    "paste_cue": [
+      "pane"
+    ],
     "release_outside": [
       "pane",
       "kind"

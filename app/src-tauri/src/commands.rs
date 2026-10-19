@@ -327,6 +327,14 @@ pub fn paste(
     core.paste(pane, text, allow_unsafe).map(PasteOutcomeMsg::from)
 }
 
+/// Tell the program of a pane that something that is not text was pasted (an image on the clipboard): an empty bracketed
+/// paste when the program turned on bracketed paste, nothing otherwise. The bytes are fixed in the core, so no argument
+/// carries content. Waits for the engine's answer.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn paste_cue(core: State<Arc<AppCore>>, pane: PaneId) -> Result<PasteOutcomeMsg, String> {
+    core.paste_cue(pane).map(PasteOutcomeMsg::from)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn resize(
     core: State<Arc<AppCore>>,

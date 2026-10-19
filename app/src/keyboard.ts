@@ -252,6 +252,23 @@ async function pasteInto(pane: number, text: string): Promise<void> {
   }
 }
 
+/** Whether the clipboard data of a paste event holds an image (a file of an `image/` type), whatever else it holds. */
+function holdsImage(data: DataTransfer | null): boolean {
+  if (!data) return false;
+  for (const file of Array.from(data.files ?? [])) if (file.type.startsWith("image/")) return true;
+  for (const item of Array.from(data.items ?? [])) if (item.kind === "file" && item.type.startsWith("image/")) return true;
+  return Array.from(data.types ?? []).includes("Files");
+}
+
+/**
+ * Tell the program of `pane` that something that is not text was pasted: the core writes an empty bracketed paste when
+ * the program asked for bracketed paste and nothing otherwise. Claude Code on macOS reads that as "fetch the image from
+ * the clipboard"; the terminal never writes the image itself. The answer and a failure do not matter to the page.
+ */
+function sendPasteCue(pane: number): void {
+  void call("paste_cue", { pane }).catch(() => {});
+}
+
 function onPaste(e: ClipboardEvent): void {
   if (inOtherField(e.target)) return; // a text field of the page keeps its own paste
   e.preventDefault();
@@ -264,7 +281,12 @@ function onPaste(e: ClipboardEvent): void {
   if (isConfirmingPaste() || isConfirmingClose()) return; // one question at a time
   const text = e.clipboardData?.getData("text/plain") ?? "";
   const pane = state.view?.focus;
-  if (text === "" || pane === undefined) return;
+  if (pane === undefined) return;
+  if (text === "") {
+    // An image and no text is the cue; an event with neither does nothing.
+    if (holdsImage(e.clipboardData)) sendPasteCue(pane);
+    return;
+  }
   void pasteInto(pane, text);
 }
 
@@ -320,7 +342,14 @@ async function pasteFromClipboard(): Promise<void> {
   if (isConfirmingPaste() || isConfirmingClose()) return; // one question at a time
   const text = await readClipboardText();
   const pane = state.view?.focus;
-  if (text === "" || pane === undefined) return;
+  if (pane === undefined) return;
+  if (text === "") {
+    // The read cannot tell an image from an empty clipboard, and an empty bracketed paste is harmless to a program that
+    // ignores it. Only macOS: Claude Code takes an empty paste as its image cue there (and in WSL) and uses Alt+V or
+    // Ctrl+V as keys elsewhere, so another platform sends nothing.
+    if (state.os === "macos") sendPasteCue(pane);
+    return;
+  }
   await pasteInto(pane, text);
 }
 

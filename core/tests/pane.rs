@@ -548,7 +548,9 @@ impl TerminalEngine for CountingEngine {
 
     fn scroll(&mut self, _rows: isize) {}
 
-    fn scroll_to_bottom(&mut self) {}
+    fn scroll_to_bottom(&mut self) {
+        self.spy.record("scroll_to_bottom".into());
+    }
 
     fn screen(&mut self) -> holzwave_core::Result<Screen> {
         Ok(Screen::default())
@@ -572,6 +574,12 @@ impl TerminalEngine for CountingEngine {
     fn paste(&mut self, text: &str, _allow_unsafe: bool) -> holzwave_core::Result<PasteOutcome> {
         // Like the real engine: the pasted bytes come out through `take_replies`.
         self.replies.extend_from_slice(text.replace('\n', "\r").as_bytes());
+        Ok(PasteOutcome::Written)
+    }
+
+    fn paste_cue(&mut self) -> holzwave_core::Result<PasteOutcome> {
+        self.spy.record("paste_cue".into());
+        self.replies.extend_from_slice(b"<cue>");
         Ok(PasteOutcome::Written)
     }
 
@@ -1036,6 +1044,57 @@ fn typing_text_and_a_paste_clear_the_selection_before_they_act() {
         spy.calls(&["select"]),
         vec![begin_text.clone(), clear.clone(), begin_text.clone(), clear.clone(), begin_text, clear]
     );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn the_paste_cue_clears_the_selection_and_returns_to_the_live_screen_like_a_paste() {
+    let probe = Probe::default();
+    let (pane, spy) = spawn_counting(PaneSpec::new("/bin/cat", 80, 24), &probe, Duration::ZERO);
+    pane.select(SelectOp::Begin { x: 1, y: 2, mode: SelectMode::Word }).expect("select");
+
+    assert_eq!(pane.paste_cue().expect("the cue is answered"), PasteOutcome::Written);
+
+    assert_eq!(
+        spy.calls(&["select", "paste_cue", "scroll_to_bottom"]),
+        vec!["select Begin { x: 1, y: 2, mode: Word }", "paste_cue", "select Clear", "scroll_to_bottom"],
+        "the selection is cleared and the view scrolled once the cue was written, as for a paste"
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
+fn the_cue_bytes_reach_the_child_in_order_after_earlier_input_only_when_bracketed_paste_is_on() {
+    let probe = Probe::default();
+    // The child asks for bracketed paste (the engine sees it as output), then shows what it is sent. Echo is off and `cat
+    // -v` makes the escape visible as ^[.
+    let pane = spawn(spec_sh("stty -echo; printf '\\033[?2004h'; printf ready; exec cat -v"), &probe);
+    assert!(wait_until(WAIT, || probe.has_text("ready")), "the child never got going");
+
+    pane.key(key("KeyA", "a")).expect("key");
+    assert_eq!(pane.paste_cue().expect("the cue is answered"), PasteOutcome::Written);
+    pane.key(key("KeyB", "b")).expect("key");
+    pane.key(key("Enter", "Enter")).expect("enter");
+
+    assert!(
+        wait_until(WAIT, || probe.has_text("a^[[200~^[[201~b")),
+        "the child did not read a, the empty bracketed paste and b in order"
+    );
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+
+    // Without mode 2004 the cue is silent: nothing is written for it.
+    let probe = Probe::default();
+    let pane = spawn(spec_sh("stty -echo; printf ready; exec cat -v"), &probe);
+    assert!(wait_until(WAIT, || probe.has_text("ready")), "the child never got going");
+    pane.key(key("KeyA", "a")).expect("key");
+    assert_eq!(pane.paste_cue().expect("the cue is answered"), PasteOutcome::Empty);
+    pane.key(key("KeyB", "b")).expect("key");
+    pane.key(key("Enter", "Enter")).expect("enter");
+    assert!(wait_until(WAIT, || probe.has_text("ab")), "the child did not read a and b");
+    assert!(!probe.has_text("200~"), "the cue reached a program that did not ask for bracketed paste");
     pane.close();
     assert!(pane.join(Duration::from_secs(3)));
 }

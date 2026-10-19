@@ -137,6 +137,35 @@ fn paste_into(setup: &[u8], text: &str, allow_unsafe: bool) -> (PasteOutcome, St
     (outcome, ascii(&e.take_replies()))
 }
 
+/// The cue of a paste that is not text, into a fresh engine after `setup`: the outcome and the bytes written.
+fn paste_cue_into(setup: &[u8]) -> (PasteOutcome, String) {
+    let mut e = engine(80, 24);
+    e.feed(setup);
+    let _ = e.take_replies();
+    let outcome = e.paste_cue().expect("paste_cue");
+    (outcome, ascii(&e.take_replies()))
+}
+
+#[test]
+fn the_paste_cue_is_an_empty_bracketed_paste_when_the_program_asked_for_bracketed_paste() {
+    let (outcome, bytes) = paste_cue_into(b"\x1b[?2004h");
+    assert_eq!((outcome, bytes.as_str()), (PasteOutcome::Written, r"\x1b[200~\x1b[201~"));
+}
+
+#[test]
+fn without_bracketed_paste_the_cue_writes_nothing_and_an_empty_paste_stays_empty() {
+    let (outcome, bytes) = paste_cue_into(b"");
+    assert_eq!((outcome, bytes.as_str()), (PasteOutcome::Empty, ""), "a program that did not ask sees nothing");
+    // `paste` of an empty text is a different thing: it writes nothing in either mode.
+    for setup in [&b""[..], &b"\x1b[?2004h"[..]] {
+        let (outcome, bytes) = paste_into(setup, "", false);
+        assert_eq!((outcome, bytes.as_str()), (PasteOutcome::Empty, ""), "setup {setup:?}");
+    }
+    // Turned off again, the cue is silent again.
+    let (outcome, bytes) = paste_cue_into(b"\x1b[?2004h\x1b[?2004l");
+    assert_eq!((outcome, bytes.as_str()), (PasteOutcome::Empty, ""));
+}
+
 #[test]
 fn paste_without_bracketed_mode() {
     let (outcome, bytes) = paste_into(b"", "ls -la", false);

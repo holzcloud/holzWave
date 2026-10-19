@@ -707,6 +707,16 @@ pub trait TerminalEngine {
     /// unless `allow_unsafe` is set.
     fn paste(&mut self, text: &str, allow_unsafe: bool) -> Result<PasteOutcome>;
 
+    /// Signal that something that is not text was pasted (an image on the clipboard): an empty bracketed paste, the
+    /// start and the end of a bracketed paste with nothing between, when the program turned on mode 2004, and nothing
+    /// otherwise ([`PasteOutcome::Empty`]). Programs such as Claude Code read this as the cue to fetch the clipboard
+    /// content themselves; a program that did not ask for bracketed paste sees nothing. The bytes are queued for
+    /// [`TerminalEngine::take_replies`] like those of `paste`. [`TerminalEngine::paste`] of an empty text is a different
+    /// thing and writes nothing in either mode. An engine without bracketed paste is correct with the default.
+    fn paste_cue(&mut self) -> Result<PasteOutcome> {
+        Ok(PasteOutcome::Empty)
+    }
+
     /// Encode a mouse event the way the program asked for it (tracking mode and output format from the live terminal
     /// modes). The result is empty when the program does not track the mouse, and also for events the mode does not
     /// report (motion in normal mode, motion with no button in button mode).

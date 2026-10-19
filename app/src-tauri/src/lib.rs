@@ -446,6 +446,7 @@ pub fn run() {
             commands::send_edit,
             commands::text,
             commands::paste,
+            commands::paste_cue,
             commands::resize,
             commands::scroll,
             commands::scroll_to_bottom,

@@ -15,6 +15,7 @@
     "allow-send-edit",
     "allow-text",
     "allow-paste",
+    "allow-paste-cue",
     "allow-resize",
     "allow-scroll",
     "allow-scroll-to-bottom",

@@ -51,6 +51,7 @@ export default async function ({ page, url }) {
   await windowsPasteCase(page, url);
   await fallbackCase(page, url);
   await macosPasteCase(page, url);
+  await pasteCueCase(page, url);
   await clipboardChordsCase(page, url);
   await fieldCase(page, url);
   await chordRowsCase(page, url);
@@ -584,4 +585,119 @@ async function macosPasteCase(page, url) {
   assert.deepEqual((await callsOf(page, "key")).map((k) => [k.code, k.mods]), [["KeyV", 4]]);
   assert.equal((await pastes(page)).length, 0);
   assert.equal(await natives(page), 0);
+}
+
+// ---- an image on the clipboard: the cue ------------------------------------------------------------------
+
+/** A paste event whose clipboard holds `files` (name and type pairs) and `text`, or neither. Returns defaultPrevented. */
+const pasteData = (page, { text = null, files = [] }) =>
+  page.evaluate(
+    ({ t, f }) => {
+      const data = new DataTransfer();
+      if (t !== null) data.setData("text/plain", t);
+      for (const [name, type] of f) data.items.add(new File([new Uint8Array([137, 80, 78, 71])], name, { type }));
+      const e = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+      document.getElementById("ime").dispatchEvent(e);
+      return e.defaultPrevented;
+    },
+    { t: text, f: files },
+  );
+const cues = (page) => callsOf(page, "paste_cue");
+
+/**
+ * An image and no text is what a screenshot on the clipboard looks like. The page cannot hand the image to the program;
+ * it sends the core's cue (an empty bracketed paste when the program asked for one), which Claude Code on macOS answers by
+ * reading the image from the clipboard itself. The cue is never a `paste`, and text, or nothing, never makes one.
+ */
+async function pasteCueCase(page, url) {
+  await open(page, url);
+  await page.evaluate(() => window.__MOCK__.on("paste_cue", () => "written"));
+  await page.evaluate(() => window.__MOCK__.on("paste", () => "written"));
+
+  assert.equal(await pasteData(page, { files: [["shot.png", "image/png"]] }), true, "the page takes the event");
+  await settle(page);
+  assert.deepEqual(await cues(page), [{ pane: 2 }], "one cue, for the focused pane");
+  assert.equal((await pastes(page)).length, 0, "an image is never a paste of text");
+
+  await pasteData(page, { text: "ls" });
+  await settle(page);
+  assert.equal((await cues(page)).length, 1, "text makes no cue");
+  assert.equal((await pastes(page)).length, 1);
+
+  await pasteData(page, { text: "ls", files: [["shot.png", "image/png"]] });
+  await settle(page);
+  assert.equal((await cues(page)).length, 1, "text beside an image is the text's paste, no cue");
+  assert.equal((await pastes(page)).length, 2);
+
+  await pasteData(page, {});
+  await pasteData(page, { text: "" });
+  await settle(page);
+  assert.equal((await cues(page)).length, 1, "neither text nor files: nothing");
+  assert.equal((await pastes(page)).length, 2);
+
+  // The type list says `Files` for any file, so a file whose type the page does not know is a cue as well: the program
+  // decides what the clipboard holds.
+  await pasteData(page, { files: [["notes.bin", "application/octet-stream"]] });
+  await settle(page);
+  assert.equal((await cues(page)).length, 2, "a file on the clipboard and no text is a cue");
+
+  // A failing cue is not an error of the page (the shell reports it).
+  await page.evaluate(() => window.__MOCK__.on("paste_cue", () => { throw "the pane is closed"; }));
+  await pasteData(page, { files: [["shot.jpg", "image/jpeg"]] });
+  await settle(page);
+  assert.equal((await cues(page)).length, 3);
+
+  // One question at a time: no cue while the confirmation is open.
+  await rejectUnsafe(page);
+  await paste(page, SEVEN);
+  await dialog(page).waitFor({ state: "visible" });
+  await pasteData(page, { files: [["shot.png", "image/png"]] });
+  await settle(page);
+  assert.equal((await cues(page)).length, 3, "an image while the dialog is open is ignored");
+  await page.keyboard.press("Escape");
+  await dialog(page).waitFor({ state: "detached" });
+
+  // The fallback read that finds no text: macOS cannot tell an image from an empty clipboard and sends the cue once.
+  const CMD_V_ = { code: "KeyV", key: "v", metaKey: true };
+  await openOn(page, url, "macos");
+  await page.evaluate(() => window.__MOCK__.on("paste_cue", () => "written"));
+  await nativeText(page, "");
+  await stubClipboard(page, "");
+  await keydown(page, CMD_V_);
+  await page.waitForFunction(() => window.__MOCK__.callsOf("paste_cue").length >= 1);
+  await wait(page, SETTLE_MS);
+  assert.deepEqual(await cues(page), [{ pane: 2 }], "the empty read on macOS sends the cue once");
+  assert.equal((await pastes(page)).length, 0);
+
+  // A paste event with text that arrives first means no read and no cue.
+  await openOn(page, url, "macos");
+  await page.evaluate(() => window.__MOCK__.on("paste", () => "written"));
+  await nativeText(page, "");
+  await keydown(page, CMD_V_);
+  await paste(page, "from the event");
+  await wait(page, SETTLE_MS);
+  assert.equal((await cues(page)).length, 0);
+  assert.equal((await pastes(page)).length, 1);
+
+  // An image event is the primary route too: one cue, and the fallback does not add a second.
+  await openOn(page, url, "macos");
+  await page.evaluate(() => window.__MOCK__.on("paste_cue", () => "written"));
+  await nativeText(page, "");
+  await keydown(page, CMD_V_);
+  await pasteData(page, { files: [["shot.png", "image/png"]] });
+  await wait(page, SETTLE_MS);
+  assert.deepEqual(await cues(page), [{ pane: 2 }], "the event's cue is the only one");
+  assert.equal(await natives(page), 0, "and the pasteboard was not read");
+
+  // Windows and Linux: the same empty read sends nothing, Claude Code's image key being a key there.
+  for (const [os, chord] of [["windows", CTRL_V], ["linux", CTRL_SHIFT_V]]) {
+    await openOn(page, url, os);
+    await page.evaluate(() => window.__MOCK__.on("paste_cue", () => "written"));
+    await stubClipboard(page, "");
+    await keydown(page, chord);
+    await wait(page, SETTLE_MS);
+    assert.equal(await reads(page), 1, `${os}: the clipboard was read`);
+    assert.equal((await cues(page)).length, 0, `${os}: an empty read sends no cue`);
+    assert.equal((await pastes(page)).length, 0, `${os}: and no paste`);
+  }
 }

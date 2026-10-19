@@ -2938,6 +2938,13 @@ impl AppCore {
         self.handle_or_err(pane)?.paste(text, allow_unsafe).map_err(|e| e.to_string())
     }
 
+    /// Tell the program of a pane that something that is not text was pasted: an empty bracketed paste when it turned on
+    /// bracketed paste, [`PasteOutcome::Empty`] and no bytes otherwise. The bytes are fixed and carry nothing from the
+    /// page. Waits for the engine's answer, so the command is async.
+    pub fn paste_cue(&self, pane: PaneId) -> Result<PasteOutcome, String> {
+        self.handle_or_err(pane)?.paste_cue().map_err(|e| e.to_string())
+    }
+
     /// Change the grid of a pane. A pane that is still starting remembers the latest size and gets it when it is
     /// promoted (the page sends a size once and never again); a pane that is unknown is not an error.
     pub fn resize(&self, pane: PaneId, cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> Result<(), String> {
@@ -3973,6 +3980,24 @@ mod tests {
         assert_eq!(core.paste(pane, "one\ntwo".into(), true), Ok(PasteOutcome::Written));
         assert!(wait_until(WAIT, || rec.has_text(pane, "two")), "the allowed paste never arrived: {:?}", rec.all());
         assert!(core.paste(31_337, "x".into(), false).is_err(), "an unknown pane cannot be pasted into");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_paste_cue_is_an_error_for_an_unknown_pane_and_silent_unless_bracketed_paste_is_on() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        let pane = only_pane(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        assert_eq!(core.paste_cue(pane), Ok(PasteOutcome::Empty), "cat did not ask for bracketed paste");
+        assert!(core.paste_cue(31_337).is_err(), "an unknown pane has no program to tell");
+
+        let (core, rec, _dir) = sh("stty -echo; printf '\\033[?2004h'; printf ready; exec cat -v");
+        let pane = only_pane(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        assert!(wait_until(WAIT, || rec.has_text(pane, "ready")), "no output: {:?}", rec.all());
+        assert_eq!(core.paste_cue(pane), Ok(PasteOutcome::Written));
+        core.text(pane, "\r".into()).expect("enter");
+        assert!(wait_until(WAIT, || rec.has_text(pane, "^[[200~^[[201~")), "the cue never arrived: {:?}", rec.all());
     }
 
     #[cfg(unix)]

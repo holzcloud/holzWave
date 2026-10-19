@@ -269,6 +269,8 @@ enum Control {
     Notice(String),
     /// The engine's answer travels back over `reply`; a dropped sender tells the caller the pane is gone.
     Paste { text: String, allow_unsafe: bool, reply: Sender<Result<PasteOutcome>> },
+    /// The empty bracketed paste that tells a program something that is not text was pasted.
+    PasteCue { reply: Sender<Result<PasteOutcome>> },
     Resize { cols: u16, rows: u16, cell_px: (u32, u32) },
     Scroll(isize),
     Mouse(MouseEvent),
@@ -480,6 +482,14 @@ impl PaneHandle {
             return Err(Error::Pty(format!("paste too large (more than {MAX_PASTE_BYTES} bytes)")));
         }
         self.request(|reply| Control::Paste { text, allow_unsafe, reply })
+    }
+
+    /// Tell the program that something that is not text was pasted: an empty bracketed paste when it turned on
+    /// bracketed paste, [`PasteOutcome::Empty`] and nothing written otherwise. Like [`PaneHandle::paste`] it waits for
+    /// the engine thread's answer and must not be called on the Tauri main thread; a written cue clears the selection
+    /// and returns the view to the live screen, as a paste does.
+    pub fn paste_cue(&self) -> Result<PasteOutcome> {
+        self.request(|reply| Control::PasteCue { reply })
     }
 
     /// Change the grid. The size is clamped to a sane range first; the PTY is resized with pixel dimensions and the
@@ -831,6 +841,19 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                     self.writer.input(bytes);
                 } else {
                     // Nothing was pasted; whatever else was in the buffer is an engine reply.
+                    self.writer.reply(bytes);
+                }
+                let _ = reply.send(outcome);
+            }
+            Control::PasteCue { reply } => {
+                let outcome = self.engine.paste_cue();
+                let bytes = self.engine.take_replies();
+                if matches!(outcome, Ok(PasteOutcome::Written)) {
+                    self.clear_selection();
+                    self.engine.scroll_to_bottom();
+                    self.dirty = true;
+                    self.writer.input(bytes);
+                } else {
                     self.writer.reply(bytes);
                 }
                 let _ = reply.send(outcome);

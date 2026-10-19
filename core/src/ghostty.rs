@@ -1511,6 +1511,16 @@ impl TerminalEngine for GhosttyEngine {
         }
     }
 
+    fn paste_cue(&mut self) -> Result<PasteOutcome> {
+        // Only a program that asked for bracketed paste can read the cue; any other would see stray escape bytes. The
+        // two sequences go through the reply buffer like the output of `paste`, so the pane takes them the same way.
+        if !self.terminal.mode(Mode::BRACKETED_PASTE).map_err(eng)? {
+            return Ok(PasteOutcome::Empty);
+        }
+        self.replies.borrow_mut().extend_from_slice(b"\x1b[200~\x1b[201~");
+        Ok(PasteOutcome::Written)
+    }
+
     fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut *self.replies.borrow_mut())
     }
