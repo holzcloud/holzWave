@@ -10,7 +10,7 @@
 # WHAT THIS BUILD IS NOT (the script prints it again at the end):
 #   - It is the GNU ABI (x86_64-pc-windows-gnu, linked with mingw-w64), not the MSVC build that
 #     docs/build-windows.md and scripts/release-windows.ps1 make on a Windows host. The MSVC build is the better
-#     build and replaces this one. A GNU-ABI holzWave has never run on Windows: the owner's W rows are its first run.
+#     build and replaces this one. The owner has run this GNU-ABI holzWave on Windows (W rows of docs/test-plan.md).
 #   - It is unsigned (Windows SmartScreen warns on the first start) and it is a per-user NSIS installer.
 #
 # How it works, and why each step is there (research: .planning/phases/02.2-windows-linux/02.2-RESEARCH-10.md):
@@ -205,7 +205,7 @@ echo
 echo "release-windows-cross: built $out/$name ($size bytes)"
 echo "release-windows-cross: sha256 $sum"
 echo "release-windows-cross: this is a GNU-ABI build (mingw-w64), not the MSVC build, and it is unsigned."
-echo "release-windows-cross: it has never run on Windows: the owner's W rows of docs/test-plan.md are its first run."
+echo "release-windows-cross: a GNU-ABI cross build; the owner's W rows of docs/test-plan.md record its runs on Windows."
 echo "release-windows-cross: nothing was published; to attach it: gh release upload v$version $out/$name $out/$name.sha256"
 echo "release-windows-cross: $(( $(date +%s) - started )) seconds"
 echo "release-windows-cross: ok"

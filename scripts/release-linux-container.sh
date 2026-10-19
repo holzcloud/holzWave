@@ -14,9 +14,8 @@
 #
 # WHAT THESE PACKAGES ARE (the script prints it again at the end):
 #   - Built and inspected in an amd64 container, emulated on an Apple Silicon Mac (Docker Desktop with Rosetta). The code
-#     is real x86_64 code, but nothing of it has run on a Linux desktop or on real x86_64 hardware: the owner's L rows
-#     of docs/test-plan.md are the first run. The AppImage has not been started anywhere (the container has no FUSE and
-#     no display).
+#     is real x86_64 code; the owner has run the packages on Linux desktops (L rows of docs/test-plan.md). The container
+#     itself has no FUSE and no display, so it cannot start the AppImage.
 #   - The base image is Ubuntu 24.04, so the packages need at least glibc 2.39 and WebKitGTK 4.1 (libwebkit2gtk-4.1-0),
 #     which means Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer, and the like. An older distribution
 #     cannot install them; the build guide (docs/build-linux.md) builds from source there.
@@ -110,8 +109,8 @@ publish "$deb" "holzWave_${version}_amd64.deb"
 publish "$rpm" "holzWave_${version}_x86_64.rpm"
 publish "$appimage" "holzWave_${version}_x86_64.AppImage"
 
-echo "release-linux-container: built in an amd64 container (Ubuntu 24.04, emulated), not on Linux hardware: the owner's L rows are the first run."
-echo "release-linux-container: they need glibc 2.39 or newer and WebKitGTK 4.1; they are unsigned; the AppImage has not been started."
+echo "release-linux-container: built in an amd64 container (Ubuntu 24.04, emulated), not on Linux hardware: the owner's L rows record the runs on Linux."
+echo "release-linux-container: they need glibc 2.39 or newer and WebKitGTK 4.1; they are unsigned; the container cannot start the AppImage."
 echo "release-linux-container: nothing was published; to attach them: gh release upload v$version $out/holzWave_${version}_amd64.deb* $out/holzWave_${version}_x86_64.rpm* $out/holzWave_${version}_x86_64.AppImage*"
 echo "release-linux-container: $(( $(date +%s) - started )) seconds"
 echo "release-linux-container: ok"

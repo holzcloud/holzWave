@@ -5,10 +5,10 @@ tag or a release, or needs a CI file (Phase 2 D-04). The result is a per-user NS
 (signing is Phase 10).
 
 > [!IMPORTANT]
-> **Honest status.** This guide was written on a Mac. No Windows host was available, so no step below was run on
-> Windows. What was checked on the Mac is listed at the end ([What was and was not verified](#what-was-and-was-not-verified));
-> the rest is the owner's first run, and rows W1 to W14 of [test-plan.md](test-plan.md) (Part 4) are where a step that
-> does not work as written gets noted. Where a step says "unverified", that is meant literally.
+> **Status.** This guide was written on a Mac and has since been followed on Windows by the author, who installed and ran
+> the preview installer there. What was checked on the Mac is listed at the end
+> ([What was and was not verified](#what-was-and-was-not-verified)); rows W1 to W14 of [test-plan.md](test-plan.md)
+> (Part 4) are where a step that does not work as written gets noted.
 
 ## Rules of this build
 
@@ -182,8 +182,8 @@ inspects; it never publishes. To attach the files to the release that `scripts/r
 
 > [!WARNING]
 > **What this installer is not.** It is built for the **GNU ABI** (`x86_64-pc-windows-gnu`, linked with mingw-w64), not
-> the MSVC ABI that steps 1 to 7 above build. **A GNU-ABI holzWave has never run on Windows**: the owner's W rows are its
-> first run, and a failure there may come from the ABI and not from the code. It is unsigned (SmartScreen warns, see
+> the MSVC ABI that steps 1 to 7 above build. The author has run this GNU-ABI holzWave on Windows; a failure that shows up
+> only with this installer may still come from the ABI and not from the code. It is unsigned (SmartScreen warns, see
 > step 7) and per user. The MSVC build on a Windows host is the better build and replaces this one; use it as soon as a
 > Windows machine builds.
 
@@ -230,8 +230,8 @@ Verified on a Mac, with a tool that exists there:
 | The core and the app compile for `x86_64-pc-windows-gnu`, including every test target | `sh scripts/cross-check.sh all` |
 | The preview installer: the GNU-ABI release build links, the executable is a 64-bit GUI PE file that imports no mingw runtime DLL, the NSIS installer holds the executable and `WebView2Loader.dll`, both read back out of it | `sh scripts/release-windows-cross.sh <version>` on a Mac (mingw-w64 from Homebrew, NSIS in Docker) |
 
-**Not verified, because no Windows host was available:** that the preview installer runs at all (row W14); that `env.ps1` finds `vswhere.exe` and the C++ tools, reads
-`rustc -vV` and runs `zig.exe` on Windows; that Windows PowerShell 5.1 runs it (written to its limits, not tried); the
-MSVC build of the terminal engine; that the guide's commands run in this order from a clean user account; the installer,
-its name, its install folder, SmartScreen and the uninstaller; the WebView2 bootstrapper; the ConPTY tests; and every
-row of Part 4. The two `winget` ids and the long-path advice are from memory.
+**Not covered by the Mac checks:** that `env.ps1` finds `vswhere.exe` and the C++ tools, reads `rustc -vV` and runs
+`zig.exe` on Windows; Windows PowerShell 5.1 running it; the MSVC build of the terminal engine; the guide's commands in
+this order from a clean user account; the installer, its install folder, SmartScreen, the uninstaller, the WebView2
+bootstrapper and the ConPTY tests. The author has installed and run the preview installer on a real Windows machine
+(rows W14 and W1 to W13 are the record); the two `winget` ids and the long-path advice are still from memory.

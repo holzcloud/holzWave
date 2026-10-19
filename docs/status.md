@@ -13,22 +13,22 @@
 - **SSH that reconnects.** A pane can run a shell on another machine over SSH (`russh`), with a jump host, host key
   checks, and a reconnect that keeps the pane and what you type. Secrets are in the OS keychain only. WSL and Docker
   connections open as local panes. Tested against an in-process SSH server; not yet tried against real hosts.
-- **Your own sync (planned).** Settings, themes, profiles and layouts over WebDAV/Nextcloud, end-to-end encrypted, no
+- **Your own sync.** Settings, themes, profiles and layouts over WebDAV/Nextcloud, end-to-end encrypted, no
   server of ours.
-- **AI with consent.** A chat in a pane, in the sidebar, in the palette actions and in `wsh ai`, with Anthropic,
-  OpenAI, Gemini, local servers (Ollama, LM Studio, llama.cpp), AI gateways and, on a Mac with macOS 26 and Apple
-  Intelligence, the on-device model. You can share the selection, the screen, the last command and its output (with a
+- **AI with consent, and fully offline on a Mac.** A chat in a pane, in the sidebar, in the palette actions and in
+  `wsh ai`, with Anthropic, OpenAI, Gemini, local servers (Ollama, LM Studio, llama.cpp), AI gateways and, on a Mac with
+  macOS 26 and Apple Intelligence, the on-device model: the whole AI feature then runs on the Mac itself, offline, with no
+  account, no key and nothing leaving the computer. You can share the selection, the screen, the last command and its output (with a
   shell hook) and a file. Terminal context leaves the device only after you share that pane, every send shows what
   goes out, and every tool action asks first. Tested against test servers and scripted providers, not yet against real
-  providers, a real Apple model or Windows and Linux hardware.
+  providers or a real Apple model.
 - **Few dependencies.** No frontend framework and no bundler. Security-critical code (VT parsing, SSH) comes from
   established libraries, never hand-rolled.
 
 ## Behind today
 
-- No release, no installer, no signing. macOS from source is the only verified platform.
+- Preview releases only (`0.0.1-beta1`), unsigned: no Developer ID or notarisation on macOS, no Authenticode on Windows. The author has run it on macOS, Windows and Linux.
 - Tauri 3 and `libghostty-vt` are pre-release; their APIs move and the build pins exact versions.
-- The keyboard uses a small table until the engine's key encoder lands (Phase 2).
 - A single maintainer, and no CI by design: everything is built and tested locally.
 
 ## What it aims to do differently
@@ -52,16 +52,15 @@
 
 ## Feature status by phase
 
-Built and tested on macOS: local shell, resize, wide Unicode; tiled panes, dividers, tabs, workspaces; scrollback,
+Built and tested by the author on macOS, Windows and Linux: local shell, resize, wide Unicode; tiled panes, dividers, tabs, workspaces; scrollback,
 selection, copy, paste; saved layout; WebGL2 with Canvas 2D fallback. SSH, WSL and Docker connections with a connection manager, and file browsers and previews (Markdown, text, images,
 video, audio; local and over SFTP) are built (core and page; see the notes above). So are the AI chat with its providers and
 surfaces, the on-device model, the widgets (described by a JSON Schema), the `^R` binding, a history that follows the host of the focused pane, and the system monitor of this computer and of Linux hosts over SSH. These were tested against test
-servers and scripted providers, not yet against real providers, a real Apple model or Windows and Linux hardware; the manual
+servers and scripted providers, not yet against real providers or a real Apple model; the manual
 rows are in Part 7 of [test-plan.md](test-plan.md). Not built:
 
 | Phase | Planned |
 |---|---|
-| 2 | Key encoder, Kitty keyboard, engine replies, themes, dirty-row frames |
 | 8 | Kubernetes, Talos, Azure CLI, GAM7 blocks, and the Context section of the sidebar with them |
 | 9 | iOS (SSH) and Android (local shell and SSH), widgets on mobile, AI provider keys on mobile (they need a mobile secret store) |
 | 10 | Kitty graphics, hyperlinks, signed packages |

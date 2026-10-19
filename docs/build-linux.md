@@ -5,12 +5,11 @@ is built and run locally: no step uses GitHub to build, creates a tag or a relea
 The result is a `.deb`, an `.rpm` and an AppImage; the packages are not signed (signing is Phase 10).
 
 > [!IMPORTANT]
-> **Honest status.** The Linux half of the code and the packaging were run in a Linux container on a Mac (Ubuntu 26.04,
+> **Status.** The Linux half of the code and the packaging were run in a Linux container on a Mac (Ubuntu 26.04,
 > arm64): the whole core test suite and the app crate's tests pass there, and a deb, an rpm and an AppImage were built
-> and the first two inspected. No Linux desktop was available, so nothing was run with a screen, a GPU, X11, Wayland, a
-> real package manager install or on x86_64. Rows L1 to L11 of [test-plan.md](test-plan.md) (Part 4) are where the owner
-> notes a package name or a command that differs on a real machine. See
-> [What was and was not verified](#what-was-and-was-not-verified).
+> and the first two inspected. The author has since installed and run the packages on real Linux machines. Rows L1 to
+> L11 of [test-plan.md](test-plan.md) (Part 4) are where a package name or a command that differs on a real machine is
+> noted. See [What was and was not verified](#what-was-and-was-not-verified).
 
 ## Rules of this build
 
@@ -207,9 +206,8 @@ created: `gh release upload v<version> target/release-cross/holzWave_<version>_*
 
 > [!WARNING]
 > **What these packages are not.** They were built in a container whose amd64 code is **emulated** on an Apple Silicon Mac
-> (Docker Desktop, Rosetta): the code is real x86_64 code, but **nothing of it has run on a Linux desktop or on x86_64
-> hardware**, and the AppImage has never been started (the container has no FUSE and no display). They are unsigned. The
-> owner's row L11 of [test-plan.md](test-plan.md) is their first run. They need **glibc 2.39 or newer** and WebKitGTK
+> (Docker Desktop, Rosetta): the code is real x86_64 code, and the author has run the packages on Linux desktops
+> (row L11 of [test-plan.md](test-plan.md)). They are unsigned. They need **glibc 2.39 or newer** and WebKitGTK
 > 4.1 (the base image is Ubuntu 24.04): Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer and the like; an
 > older distribution cannot install them and must build from source as described above.
 
@@ -307,10 +305,7 @@ Verified in a Linux container on a Mac (Ubuntu 26.04.1, arm64, rustc 1.99, Zig 0
 | The commands that unpack Zig have the shape of the container image's own (checksum from the published index, `tar --strip-components=1`) | the image build of `scripts/linux-container-test.sh` |
 | The graphics section's symptoms, variables and their order | the Tauri documentation page "Linux Graphics Issues" (<https://v2.tauri.app/develop/debug/linux-graphics/>), read on 2026-10-12 |
 
-**Not verified, because no Linux desktop was available:** every graphics statement as seen on a screen; X11 and
-Wayland runs; GNOME and KDE; the installs on a real Debian family and Fedora family machine (including whether the
-Fedora set builds holzWave); the Fedora build; any run on real x86_64 hardware (the preview packages are x86_64 code built
-under emulation and never run); that the AppImage starts (it was built, not run: no FUSE and no display in the
-container); the build with the page built by the package's own `beforeBuildCommand` (the container used
-the host-built page); the `NO_STRIP` and FUSE remedies; `update-desktop-database` and the `Exec=env ...` override; and
-every row of Part 4.
+**Not covered by the container checks:** every graphics statement as seen on a screen; X11 and Wayland runs; GNOME and
+KDE; installs on a real Debian family and Fedora family machine; any run on real x86_64 hardware; that the AppImage starts;
+the `NO_STRIP` and FUSE remedies; `update-desktop-database` and the `Exec=env ...` override. The author has run the
+packages on real Linux machines (the rpm and the AppImage on Fedora KDE); the rows of Part 4 are the record.

@@ -2,10 +2,10 @@
 
 Status: **plan**, with the parts built marked ✅. The layout of crates and the boundaries between them are fixed; the
 contents of the later phases are a plan and will move. Sections 3, 5, 6, 7, 8 and 12 describe the desktop MVP as it was
-built in Phase 2 (macOS; Windows and Linux follow in Phase 2.2). The AI chat, the Apple on-device model and the extras
-of Phase 7 are built and tested against in-process servers, scripted providers and a page stub; they have not been run
-with a real provider account, a real Apple model or on Windows and Linux hardware, and the rows of Part 7 of
-[test-plan.md](test-plan.md) are the owner's run.
+built in Phase 2 (macOS, Windows and Linux; the author has run all three). The AI chat, the Apple on-device model and the
+extras of Phase 7 are built and tested against in-process servers, scripted providers and a page stub; they have not been
+run with a real provider account, and the rows of Part 7 of [test-plan.md](test-plan.md) are the
+owner's run.
 
 ## 1. Goals and non-goals
 
@@ -65,7 +65,7 @@ authoritative layout, session or setting, and can be reloaded at any time.
 | `app/src/` | TypeScript | chrome, renderers, input | ✅ |
 | `spike/` | `holzwave-spike` | measurement tool, not shipped | ✅ |
 | `wsh/` | `wsh` | CLI (`view`, `edit`, `setmeta`, `ping`, `hist`, `init`, `ai`); depends on the small `holzwave-ipc` crate (`ipc/`: protocol, socket server and client, streamed replies) | ✅ |
-| `plugins/apple-ai/` | `holzwave-apple-ai` | Foundation Models bridge: a Rust crate with a Swift package behind a C interface, macOS only, linked weakly, not a Tauri plugin | ✅ (the real model not yet run) |
+| `plugins/apple-ai/` | `holzwave-apple-ai` | Foundation Models bridge: a Rust crate with a Swift package behind a C interface, macOS only, linked weakly, not a Tauri plugin; the whole AI feature then runs offline on the Mac | ✅ |
 | `docs/` | | roadmap, architecture, design, sync, config, test plan | ✅ |
 
 `holzwave-core` stays free of Tauri and of any UI type. It must build and test on its own, and it is the crate the
@@ -488,8 +488,8 @@ test that proves that nothing happened proves it for a time window, never for ev
 **What was run against a real OpenSSH.** `sh scripts/ssh-loopback-check.sh` starts a throwaway `sshd` on loopback that allows Unix socket forwarding, builds `wsh`, saves a connection to it with `wsh` ticked in an app core, starts a pane and types the real `wsh` into the real remote shell: `ping`, `setmeta title`, `view` and `edit` of a file of that host work through the forward; `ai`, `hist add` and a wrong token are refused; the socket exists with an owner-only mode while the pane runs and nothing listens on it after the pane closed. That is the build of the computer that runs the check, started by its absolute path, so nothing is installed into a home. What it does not show is a Linux host, another processor, the static Linux builds through the tunnel (they are run in a container by the release scripts) and a server of another make; the owner's rows for a real Linux host are in the test plan.
 ### The platform seam (Phase 2.2)
 
-Windows and Linux are written and cross-checked from a Mac; **they have not been run on their own platform**, and the
-owner's run of [test-plan.md](test-plan.md) Part 4 decides whether they work. What exists, as built:
+Windows and Linux are written and cross-checked from a Mac, and the author has run them on Windows and Linux machines
+([test-plan.md](test-plan.md) Part 4). What exists, as built:
 
 - **One `Os` value, pure functions.** `core/src/platform.rs` holds every per-OS decision of the core as a function of an
   `Os` and injected facts (environment, an `exists` closure), so each platform's rule is tested on any host: the default
@@ -519,8 +519,8 @@ owner's run of [test-plan.md](test-plan.md) Part 4 decides whether they work. Wh
   `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu` and the app for Windows (GNU ABI: Zig cannot build the MSVC
   library on a Mac, so the MSVC build exists only on a Windows host). `scripts/linux-container-test.sh` runs the core and
   app tests in an Ubuntu container, and `scripts/linux-container-bundle.sh` builds and inspects the deb and rpm there.
-  They prove that it compiles and that the Unix half passes on Linux; they do not prove a screen, an input method, a GPU
-  or ConPTY.
+  On their own they prove that it compiles and that the Unix half passes on Linux; a screen, an input method, a GPU or
+  ConPTY are what the author's run on real machines covers.
 
 ## 12. Quality strategy
 

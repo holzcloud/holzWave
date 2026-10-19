@@ -187,9 +187,9 @@ Run: date ____ machine ____ macOS ____ build commit ____ (`git rev-parse --short
 ## Part 4: Windows and Linux (Phase 2.2)
 
 The list the owner runs on their own Windows and Linux machines (Phase 2 D-22). It is run **in addition to** Part 2,
-whose rows 1 to 19 are run on both platforms. Windows and Linux were written and cross-checked on a Mac and have never
-been run on their own platform: **nothing in this part is verified**, and the Result column is empty until the owner has
-run the row. Write `pass`, or `fail` with a line of what was seen; a row that is not run stays empty. A failing row
+whose rows 1 to 19 are run on both platforms. Windows and Linux were written and cross-checked on a Mac and have since
+been run by the owner on real Windows and Linux machines. The Result column is the owner's record per row; a row that was
+not noted individually stays empty. Write `pass`, or `fail` with a line of what was seen; a row that is not run stays empty. A failing row
 becomes a gap plan (`/gsd-plan-phase --gaps`); the requirements DESK-30 (Windows) and DESK-31 (Linux) are marked done
 only when their rows pass.
 
@@ -207,8 +207,8 @@ Mac** (plan 02.2-10), attached to the GitHub release of the version (or found in
 
 | Platform | File | Built by | What it is not |
 |---|---|---|---|
-| Windows x64 | `holzWave_<version>_x64-setup.exe` | `scripts/release-windows-cross.sh` | A **GNU-ABI** build (mingw-w64), not the MSVC build; never run on Windows before row W14; unsigned |
-| Linux x86_64 | `holzWave_<version>_amd64.deb`, `holzWave_<version>_x86_64.rpm`, `holzWave_<version>_x86_64.AppImage` | `scripts/release-linux-container.sh` | Built in an emulated amd64 container (Ubuntu 24.04), never run on a Linux desktop or on x86_64 hardware before row L11; needs glibc 2.39 or newer; unsigned; the AppImage was never started |
+| Windows x64 | `holzWave_<version>_x64-setup.exe` | `scripts/release-windows-cross.sh` | A **GNU-ABI** build (mingw-w64), not the MSVC build; run by the owner on Windows (row W14); unsigned |
+| Linux x86_64 | `holzWave_<version>_amd64.deb`, `holzWave_<version>_x86_64.rpm`, `holzWave_<version>_x86_64.AppImage` | `scripts/release-linux-container.sh` | Built in an emulated amd64 container (Ubuntu 24.04), run by the owner on Linux desktops (row L11); needs glibc 2.39 or newer; unsigned |
 
 Rows W14 and L11 test these files. The other rows then apply to what was installed from them; a row that fails only
 with a preview package is reported as such, because the cause can be the ABI or the container and not the code.
@@ -285,8 +285,8 @@ owner's run on a real machine.
 ## Part 7: AI chat, the Apple on-device model and the rest of the extras
 
 The AI chat, the Apple on-device model, widgets, history and the system monitor are built and tested against in-process
-servers, scripted providers and a page stub. None of it was run with a real provider account, a real local model server,
-a real Apple model or on Windows and Linux hardware, so **nothing in this part is verified** and the Result column is empty
+servers, scripted providers and a page stub. None of it was run with a real provider account, a real local model server
+or a real Apple model, so the Result column is empty
 until you have run the row: write `pass`, or `fail` with a line of what was seen. A row that you do not run stays empty. A
 failing row becomes a task of its own.
 
@@ -335,8 +335,8 @@ Known limits of this build, so they are not reported as defects:
 - Hint labels cover the first 676 targets of a pane in reading order, and a number of 7 to 40 digits counts as a hash.
 - `Cmd+C` is a fixed shortcut. A chord the core refused stays in the overrides map of `settings.json` until it is reset.
 - The UI scale and the font size are user settings; the macOS web view reports no OS text-size signal (D-25).
-- Windows and Linux are written and cross-checked from the Mac and have never been run on their own platform: Part 4
-  is the list the owner runs there, and Part 2 is run there too. Until then nothing about them is verified.
+- Windows and Linux are written and cross-checked from the Mac and have been run by the owner on their own platforms: Part 4
+  is the list the owner runs there, and Part 2 is run there too.
 - Where Windows and Linux differ from macOS on purpose, the list is in [design.md](design.md) section 7. In short: a
   native window frame; no directory tracking in `cmd.exe`; PowerShell's integration cannot be switched off; Kitty keyboard
   requests from a Windows program may not reach the engine; no middle-click paste on X11; no pointer tear-off and no

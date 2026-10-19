@@ -36,8 +36,9 @@ Done when: a shell runs in the window, the renderer is chosen with the measureme
 
 ## Phase 2 — Desktop MVP
 
-Status in `0.0.1-alpha1` (macOS, from source; there is no release): implemented and covered by the automated suites.
-What no suite can see is the human checklist in [test-plan.md](test-plan.md), and it has not been run yet.
+Status in `0.0.1-beta1` (macOS, Windows and Linux; preview packages are on the GitHub releases page): implemented and
+covered by the automated suites. What no suite can see is the human checklist in [test-plan.md](test-plan.md), which the
+owner runs on real machines.
 
 Exists: the key encoder with Kitty keyboard and application modes (Option is not Alt by default), engine replies,
 dirty-row frames with sequence numbers, bounded panes that end their shell when closed, repaired layouts, three
@@ -54,13 +55,12 @@ Does not exist yet:
 - **Phase 2.2:** Windows (ConPTY, WebView2, installer) and Linux (X11 and Wayland, Flatpak, AppImage, deb and rpm),
   with their own default key tables and the OS-driven UI font size (DESK-30, DESK-31). The owner runs the per-platform
   list of [test-plan.md](test-plan.md) on their own hardware (D-22). No `0.0.1-alpha1` is released before this is done
-  (D-21). **Status: written and cross-checked from the Mac, waiting for the owner's run; not verified on Windows or
-  Linux.** The Windows runtime (ConPTY shell, PowerShell directory tracking, exit poll, launchers, AltGr and the per-OS key
+  (D-21). **Status: written and cross-checked from the Mac, and run by the owner on Windows and Linux machines.** The Windows runtime (ConPTY shell, PowerShell directory tracking, exit poll, launchers, AltGr and the per-OS key
   tables, the OS text size), the Linux runtime, a per-user unsigned NSIS installer configuration and the deb, rpm and
   AppImage configuration exist; the code compiles for both platforms from the Mac, the Linux tests pass in a container and
   a deb, an rpm and an AppImage were built there. The build guides are [build-windows.md](build-windows.md) and
   [build-linux.md](build-linux.md), the owner's list is Part 4 of [test-plan.md](test-plan.md) (rows W1 to W14 and L1 to
-  L11, all still open), and the differences from macOS are listed once in [design.md](design.md) section 7. The Flatpak is
+  L11), and the differences from macOS are listed once in [design.md](design.md) section 7. The Flatpak is
   the last plan of the phase and conditional: its manifest and the host-shell code path exist and are checked from the Mac
   ([flatpak.md](flatpak.md)), but it was never built or run, and it ships only if it builds on the owner's machine and row
   L10 passes. DESK-30 and DESK-31 are marked done only after the owner's rows pass.
@@ -73,7 +73,7 @@ Does not exist yet:
 ## Phase 3 — Remote
 
 Status: built in the core and the page, covered by tests against an in-process SSH server. Not yet run against real
-hosts, WSL or Docker on a real machine, or the OS keychain on Windows and Linux (rows C1 to C6 of [test-plan.md](test-plan.md)).
+hosts, WSL or Docker on a real machine, or the OS keychain (rows C1 to C6 of [test-plan.md](test-plan.md)).
 
 - ✅ SSH manager with reconnect (`core/src/ssh.rs`, `core/src/connections.rs`), jump host, host key check (trust on first use). The terminal, the files and the commands of a saved connection share one login (`core/src/pool.rs`).
 - ✅ Secret store on the OS keychain (`core/src/secrets.rs`, feature `keyring`).
@@ -112,22 +112,21 @@ against an in-process SSH and SFTP server and the page stub; not yet run on real
   commands and everything that decides are refused there. The palette action `Install wsh on this host` uploads the bundled
   static build (Linux, `x86_64` and `aarch64`) to `~/.holzwave/bin` and checks it. Tested against a test server and against a
   real OpenSSH on loopback with the build of this computer; the owner has not run it on a real Linux host yet.
-- ✅ The macOS, Windows and Linux packages made by the release scripts carry `wsh` beside the app (not the Flatpak); no installed
-  build has been run by the owner yet.
+- ✅ The macOS, Windows and Linux packages made by the release scripts carry `wsh` beside the app (not the Flatpak).
 - Open: `wsh` in WSL and Docker panes (they have no SSH session to forward over), on hosts that are not Linux, an uninstall action
   and an update check at connect.
 
 ## Phase 6 — Extras
 
 Status: built in the core and the page and covered by tests against in-process servers, scripted providers and a page
-stub. Not yet run with real accounts, a real local model server or a real Apple model, nor on Windows and Linux; the
+stub. Not yet run with real accounts, or a real local model server; the
 manual rows are in Part 7 of [test-plan.md](test-plan.md).
 
 - ✅ Sidebar with hosts, history search and widgets (note, Pomodoro timer, command/link list; custom ones from `widgets/*.json`, validated, no code). The files are described by [widget.schema.json](widget.schema.json) and a test keeps the schema and the loader in step. Open: the Context section (with the integrations), widgets on mobile.
 - ✅ History with fuzzy search: SQLite (`history.db`, mode 0600, `secure_delete`), fzf-style matching (`nucleo-matcher`), fed by shell hooks through `wsh` (`wsh init bash|zsh|fish`; PowerShell panes report on their own), a best-effort filter keeps secrets and leading-space commands out, a dialog with `Cmd/Ctrl+Shift+H` and a sidebar section. `^R` is an opt-in binding (`wsh init <shell> --ctrl-r`). Open: remote hosts (a command from a pane on a saved connection is found from that pane, but nothing typed on the far side is recorded: the tunnel refuses the history commands on purpose, so a remote host cannot write into the history), optional sync (deletions of themes and widgets travel, but the history is a database that cannot be carried entry by entry, so a forgotten command would come back; it stays local until deletions of single entries can be synced).
 - ✅ System monitor block (CPU, memory, network, busiest processes; `sysinfo`). Other computers over SSH: built for Linux hosts (a fixed read-only command through the exec session of a saved connection, names and numbers only; another system is shown as not supported).
 - ✅ AI chat behind a provider abstraction: Anthropic, OpenAI, Gemini, local servers (Ollama, LM Studio, llama.cpp), AI gateways and the Apple model. Four surfaces: a chat pane, the sidebar column, the palette actions and `wsh ai`. Terminal context is sent only with consent, per pane; every tool action needs your approval; keys live in the OS keychain; none of it is synced.
-- ✅ Apple AI provider: a Rust crate with a Swift package behind a small C interface (Foundation Models, macOS 26+, Apple Silicon, Apple Intelligence switched on), linked weakly and registered only where it is available. Otherwise it cannot be chosen and you choose another provider: there is no silent fallback. Open: the launch on a Mac below macOS 26 and the real model (rows AI-A1 to AI-A4 of the test plan).
+- ✅ Apple AI provider: a Rust crate with a Swift package behind a small C interface (Foundation Models, macOS 26+, Apple Silicon, Apple Intelligence switched on), linked weakly and registered only where it is available. Otherwise it cannot be chosen and you choose another provider: there is no silent fallback. It answers on the Mac itself, offline, with no account and no key. Open: the launch on a Mac below macOS 26 (rows AI-A1 to AI-A4 of the test plan).
 
 ## Phase 6b — Native integrations (desktop)
 

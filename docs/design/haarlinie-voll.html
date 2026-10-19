@@ -465,7 +465,7 @@ const P=(dot,ico,t,ctx,body,o={})=>`<div class="pane ${o.f?'f':''}" style="${o.s
 
 const shell=(mode)=>{
   let t=`<span class="ro">❯</span> cargo test -p holzwave-core
-<span class="dim">   Compiling holzwave-core v0.0.1-alpha2</span>
+<span class="dim">   Compiling holzwave-core v0.0.1-beta1</span>
 test layout::focus_cycles_and_wraps ... <span class="ok">ok</span>
 test layout::json_roundtrip ... <span class="ok">ok</span>
 test unicode_and_wide_characters ... <span class="ok">ok</span>
@@ -474,8 +474,8 @@ test result: <span class="ok">ok</span>. 14 passed; 0 failed
 
 <span class="ro">❯</span> git log --oneline | head -3
 <span class="wa">e883222</span> fix(release): Windows cross script
-<span class="wa">7af9cc8</span> Casks: holzwave@preview 0.0.1-alpha2
-<span class="wa">6815139</span> release: version 0.0.1-alpha2
+<span class="wa">7af9cc8</span> Casks: holzwave@preview 0.0.1-beta1
+<span class="wa">6815139</span> release: version 0.0.1-beta1
 <span class="ro">❯</span> <span class="cur"></span>`;
   if(mode==='search') t=t.replace(/layout::focus_cycles_and_wraps/,'<span class="hl cur2">layout</span>::focus_cycles_and_wraps').replace('layout::json_roundtrip','<span class="hl">layout</span>::json_roundtrip').replace('release: version','<span class="hl">release</span>: version').replace('fix(release)','fix(<span class="hl">release</span>)');
   if(mode==='copy') t=t.replace('<span class="wa">e883222</span> fix(release): Windows cross script','<span class="sel"><span class="hint">a</span>e883222 fix(release): Windows cross script</span>').replace('<span class="wa">7af9cc8</span>','<span class="hint">s</span><span class="wa">7af9cc8</span>').replace('<span class="wa">6815139</span>','<span class="hint">d</span><span class="wa">6815139</span>').replace('<span class="ro">❯</span> <span class="cur"></span>','<span class="ro">❯</span> ');
@@ -507,7 +507,7 @@ const side=`<div class="side">
  <div class="sec"><div class="h lbl"><span>Context</span><span>⌘⇧C</span></div><div class="i"><span class="cy">⎈</span>talos-prod</div><div class="i"><span class="dim">ns</span>kube-system</div><div class="i"><span class="in">az</span>holz-prod</div><div class="i"><span class="dim">gam</span>holzcloud.ch</div></div>
  <div class="sec"><div class="h lbl"><span>History</span><span>⌃R</span></div><div class="input">kube<span class="cur"></span></div><div class="i pre">kubectl get nodes</div><div class="i pre">kubectl logs -f etcd…</div><div class="i pre dim">talosctl dashboard</div></div>
  <div class="sec" style="border:0"><div class="h lbl"><span>Widgets</span><span>＋</span></div><div class="i"><span class="ro">◧</span>Notes</div><div class="i"><span class="ro">◧</span>Pomodoro</div></div></div>`;
-const status=(extra='')=>`<div class="status row"><span class="on">◆ main</span><span>5 tabs · 5 panes</span><span class="cy">⎈ talos-prod/kube-system</span><span class="in">az holz-prod</span><span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-alpha2</span></div>`;
+const status=(extra='')=>`<div class="status row"><span class="on">◆ main</span><span>5 tabs · 5 panes</span><span class="cy">⎈ talos-prod/kube-system</span><span class="in">az holz-prod</span><span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta1</span></div>`;
 
 
 const OSK={mac:{n:'⌘',s:'⇧',a:'⌥'},win:{n:'Ctrl',s:'Shift',a:'Alt'},lin:{n:'Ctrl',s:'Shift',a:'Alt'}};

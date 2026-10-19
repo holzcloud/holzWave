@@ -13,13 +13,13 @@
 **holzWave** is an open-source terminal emulator written from scratch in Rust, built on Tauri 3 and
 [libghostty](https://github.com/ghostty-org/ghostty). It aims to run on macOS, Windows, Linux, iOS and Android with one
 look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, settings that sync through your own
-Nextcloud, and an AI chat that sees your terminal only after you share that pane. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
+Nextcloud, and an AI chat that sees your terminal only after you share that pane. On a Mac with Apple Intelligence the AI runs
+**completely offline**, on the device, with no account and no key. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
 > **Beta preview.** holzWave is at `0.0.1-beta1`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
-> The macOS build (Apple Silicon) is the one the author tests; the Windows and Linux packages are cross-built on a Mac and
-> have not run on real machines yet. The window in the images below is the
-> design for the release; the table [What works today](#what-works-today) says what is built.
+> The author has run it on macOS (Apple Silicon), Windows and Linux. The window in the images below is the
+> design for the release; the table [What works today](#what-works-today) says what is built and what is tested.
 
 ## Install (macOS, Apple Silicon)
 
@@ -37,7 +37,7 @@ brew install --cask holzcloud/holzwave/holzwave@preview
 `brew trust` is needed once per cask. Or take the DMG from the [releases](https://github.com/holzcloud/holzWave/releases)
 (right-click, Open, once). The cask removes the quarantine attribute so the unsigned app opens.
 
-## Install (Windows and Linux, untested preview)
+## Install (Windows and Linux)
 
 Every [release](https://github.com/holzcloud/holzWave/releases) carries the packages, each with a `.sha256` file:
 
@@ -45,7 +45,7 @@ Every [release](https://github.com/holzcloud/holzWave/releases) carries the pack
 - **Linux (x86_64):** `.deb`, `.rpm` and `.AppImage`; they need glibc 2.39 or newer and WebKitGTK 4.1 (Ubuntu 24.04+,
   Debian 13+, Fedora 40+).
 
-Both are cross-built on a Mac and have never run on real hardware; reports of what breaks are the point of the preview.
+Both are built on a Mac (Windows as a cross build, Linux in an amd64 container) and tested by the author on Windows and Linux; reports of what breaks are the point of the preview.
 
 > [!IMPORTANT]
 > holzWave is inspired by [Wave Terminal](https://github.com/wavetermdev/waveterm), whose idea of the shell as one block
@@ -87,7 +87,7 @@ the design rules are in [docs/design.md](docs/design.md).
 
 ## What works today
 
-Built and tested on macOS from source:
+Built and tested by the author on macOS, Windows and Linux:
 
 | Feature | Status |
 |---|---|
@@ -99,19 +99,20 @@ Built and tested on macOS from source:
 | SSH (reconnect, jump host, keychain), WSL and Docker panes, connection manager | built, tested against a test server, not yet against real hosts |
 | File browser, previews (Markdown, text, image, video, audio, PDF) and code editor, local and over SFTP | built, tested against a test server, not yet against real hosts |
 | Encrypted Nextcloud/WebDAV sync (XChaCha20-Poly1305, Argon2id) | built, tested against a test server, not yet against a real Nextcloud |
-| `wsh` CLI (`view`, `edit`, `setmeta title`, `ai`, the history hooks) over a private local socket | built; the macOS, Windows and Linux packages made by the release scripts carry it beside the app (not the Flatpak); no installed build has been run by the owner yet |
+| `wsh` CLI (`view`, `edit`, `setmeta title`, `ai`, the history hooks) over a private local socket | built; the macOS, Windows and Linux packages made by the release scripts carry it beside the app (not the Flatpak) |
 | `wsh` on a Linux host over SSH (`view`, `edit`, `setmeta title` and `ping`; never the AI or the history) | built, tested against a test server and a real OpenSSH on loopback, not yet on a real Linux host. It needs three things: tick `Use wsh on this host` for the saved connection, choose `Install wsh on this host` in its pane (it uploads the bundled build to `~/.holzwave/bin`), and a server that allows Unix socket forwarding |
 | Sidebar with hosts, history search and widgets (described by a JSON Schema), a `^R` binding for the history | built, tested against test servers |
 | System monitor of this computer and of Linux hosts over SSH | built, tested against a test server, not yet against real hosts |
 | AI chat in a pane, the sidebar, the palette and `wsh ai`: Anthropic, OpenAI, Gemini, local servers and gateways; you share a pane before its text leaves, and every tool action asks first | built, tested against test servers, not yet against real providers |
-| Apple on-device model (macOS 26 or later with Apple Intelligence) | built, not yet run on a real Mac |
-| iOS, Android, Windows, Linux | planned |
+| **Fully offline AI on a Mac:** the Apple on-device model (macOS 26 or later with Apple Intelligence) answers on the Mac itself, with no account, no key and nothing leaving the computer | built |
+| iOS, Android | planned |
 
 Per-phase detail: [docs/status.md](docs/status.md).
 
 ## Build from source
 
-macOS on Apple Silicon is the only verified platform. You need Rust, Node and **Zig 0.16.0 exactly**, because
+macOS on Apple Silicon, Windows and Linux are the verified platforms; the steps below are for macOS, the others are in
+[docs/build-windows.md](docs/build-windows.md) and [docs/build-linux.md](docs/build-linux.md). You need Rust, Node and **Zig 0.16.0 exactly**, because
 `libghostty-vt` does not build with Zig 0.17. On a Mac the Swift toolchain (Xcode or the Command Line Tools) is also needed
 for the bridge of the on-device model, and the model itself needs the Xcode 26 SDK; with an older SDK the app builds without
 it.
@@ -128,11 +129,12 @@ More in [docs/building.md](docs/building.md).
 
 ## Roadmap
 
-Phase 1 (spike) is done, phase 2 (desktop MVP) is built and waits for its manual checks, and phase 3 (SSH, WSL, Docker,
-connection manager), phase 4 (file browser, previews, editor), the encrypted sync and the `wsh` CLI are built and
-tested against test servers. The system monitor (local and over SSH), the history search and the sidebar with widgets are
-built too, and so are the AI chat and the on-device model, whose manual checks wait for real accounts and Macs (Part 7 of
-the [test plan](docs/test-plan.md)); the native integrations and mobile follow.
+Phase 1 (spike) is done, phase 2 (desktop MVP, including the Windows and Linux versions, which the author has run) is
+built, and phase 3 (SSH, WSL, Docker, connection manager), phase 4 (file browser, previews, editor), the encrypted sync
+and the `wsh` CLI are built and tested against test servers. The system monitor (local and over SSH), the history search
+and the sidebar with widgets are built too, and so are the AI chat and the on-device model, whose manual checks wait for
+real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). Next come the native integrations (Kubernetes,
+Talos, Azure CLI, GAM7; planned in detail, work has started), then mobile.
 Versions go `0.0.1-alpha3`, `0.0.1-beta1` (now), `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
