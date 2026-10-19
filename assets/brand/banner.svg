@@ -65,7 +65,7 @@
 
  <!-- tags -->
   <rect x="160" y="520" width="278" height="72" rx="36" fill="#FF8FB8"/>
-  <text x="299" y="567" text-anchor="middle" class="tag" fill="#14091A">Pre-alpha</text>
+  <text x="299" y="567" text-anchor="middle" class="tag" fill="#14091A">Beta</text>
   <rect x="461.5" y="521.5" width="199" height="69" rx="34.5" fill="#2A1226" stroke="#8D3F63" stroke-width="3"/>
   <text x="561" y="567" text-anchor="middle" class="tag" fill="#FF8FB8">GPL-3.0</text>
   <rect x="685.5" y="521.5" width="290" height="69" rx="34.5" fill="#2A1226" stroke="#8D3F63" stroke-width="3"/>

@@ -4,7 +4,7 @@
 
 <br>
 
-[![Status](https://img.shields.io/badge/status-0.0.1--alpha2%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
+[![Status](https://img.shields.io/badge/status-0.0.1--beta1%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
 [![License](https://img.shields.io/github/license/holzcloud/holzwave?style=for-the-badge&color=4B5563)](LICENSE)
 [![Rust](https://img.shields.io/badge/core-Rust-8D3F63?style=for-the-badge&logo=rust&logoColor=white)](docs/architecture.md)
 
@@ -16,7 +16,7 @@ look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, 
 Nextcloud, and an AI chat that sees your terminal only after you share that pane. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
-> **Alpha.** holzWave is at `0.0.1-alpha3`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
+> **Beta preview.** holzWave is at `0.0.1-beta1`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
 > The macOS build (Apple Silicon) is the one the author tests; the Windows and Linux packages are cross-built on a Mac and
 > have not run on real machines yet. The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built.
@@ -36,6 +36,16 @@ brew install --cask holzcloud/holzwave/holzwave@preview
 
 `brew trust` is needed once per cask. Or take the DMG from the [releases](https://github.com/holzcloud/holzWave/releases)
 (right-click, Open, once). The cask removes the quarantine attribute so the unsigned app opens.
+
+## Install (Windows and Linux, untested preview)
+
+Every [release](https://github.com/holzcloud/holzWave/releases) carries the packages, each with a `.sha256` file:
+
+- **Windows (x64):** `holzWave_<version>_x64-setup.exe`, per user, unsigned (SmartScreen: More info, Run anyway).
+- **Linux (x86_64):** `.deb`, `.rpm` and `.AppImage`; they need glibc 2.39 or newer and WebKitGTK 4.1 (Ubuntu 24.04+,
+  Debian 13+, Fedora 40+).
+
+Both are cross-built on a Mac and have never run on real hardware; reports of what breaks are the point of the preview.
 
 > [!IMPORTANT]
 > holzWave is inspired by [Wave Terminal](https://github.com/wavetermdev/waveterm), whose idea of the shell as one block
@@ -123,7 +133,7 @@ connection manager), phase 4 (file browser, previews, editor), the encrypted syn
 tested against test servers. The system monitor (local and over SSH), the history search and the sidebar with widgets are
 built too, and so are the AI chat and the on-device model, whose manual checks wait for real accounts and Macs (Part 7 of
 the [test plan](docs/test-plan.md)); the native integrations and mobile follow.
-Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1`.
+Versions go `0.0.1-alpha3`, `0.0.1-beta1` (now), `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation

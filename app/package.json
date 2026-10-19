@@ -36,5 +36,5 @@
     "playwright-core": "1.64.0",
     "typescript": "7.0.2"
   },
-  "version": "0.0.1-alpha3"
+  "version": "0.0.1-beta1"
 }
