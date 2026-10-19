@@ -150,7 +150,13 @@ async function pointerCase(page, url) {
   const dragKinds = kinds(dragged);
   assert.equal(dragKinds[0], "select:begin", "a drag begins a selection in the core");
   assert.ok(dragKinds.includes("select:extend"), "a drag extends it");
-  assert.ok(dragKinds.every((k) => k.startsWith("select:")), `a drag in the focused pane sends only select: ${dragKinds}`);
+  // The end of the drag also asks the shell to copy the core's selection (copy on select), after the last select.
+  assert.ok(
+    dragKinds.every((k) => k.startsWith("select:") || k === "copy_selection"),
+    `a drag in the focused pane sends only select and the copy of the selection: ${dragKinds}`,
+  );
+  assert.equal(dragKinds.filter((k) => k === "copy_selection").length, 1, "one copy at the end of the drag");
+  assert.equal(dragKinds.at(-1), "copy_selection", "the copy comes after every select");
   assert.ok(dragged.every(([, args]) => args.pane === 2), "the selection is in the pane under the pointer");
   assert.equal(await page.locator("#overlay .sel").count(), 0, "the page draws no selection of its own: the frames do");
 
@@ -166,7 +172,11 @@ async function pointerCase(page, url) {
   const last = (await sent(page)).length;
   await drag(c.left + PAD + 4, c.left + PAD + 44);
   const extra = (await sent(page)).slice(last).filter(([cmd]) => cmd !== "focus_pane" && cmd !== "select");
-  assert.deepEqual(extra, [], "a selection drag sends nothing but focus and select commands");
+  assert.deepEqual(
+    extra,
+    [["copy_selection", { pane: 1 }]],
+    "a selection drag sends nothing but focus and select commands, and the copy of its selection at the end",
+  );
 }
 
 async function wheelCase(page, url) {
