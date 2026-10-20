@@ -184,7 +184,7 @@ impl Integration for Gam {
         match verb.id {
             "users" => users_view(stdout),
             "domain" => domain_view(stdout),
-            "sections" => Ok(text_fallback(verb.label, stdout)),
+            "sections" => sections_view(stdout),
             _ => Err(ParseError::Unrecognised),
         }
     }
@@ -358,6 +358,64 @@ fn users_json(mut reader: Reader<&[u8]>, at: usize) -> Result<ViewModel, ParseEr
         note.push_str(" More rows exist than are read.");
     }
     Ok(text_view("Users", &text, TextFormat::Json).with_note(&note))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The sections.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The text of `gam showsections`, read leniently: a line that starts with `Config File:` (the file), then one indented
+/// line per section, whose name is marked with `*` before or after it when it is the selected one. This is the shape
+/// the tool printed on the recording; anything else (no file line, a name that is not indented, a name with a space or
+/// a star inside, no section at all, text that is not UTF-8, more than a text block) is shown as plain text and never
+/// read as a table of guesses. An empty output is [`ParseError::Empty`]. A row has no action: choosing a section is a
+/// per-block selection and never a change of the tool's default.
+fn sections_view(stdout: &[u8]) -> Result<ViewModel, ParseError> {
+    if stdout.iter().all(u8::is_ascii_whitespace) {
+        return Err(ParseError::Empty);
+    }
+    match read_sections(stdout) {
+        Some(sections) => {
+            let mut table = TableBuilder::new("Sections");
+            table.column("section", "Section").column("selected", "Selected");
+            for (name, selected) in &sections {
+                table.push(RowBuilder::new(name, &[name, if *selected { "*" } else { "" }]));
+            }
+            Ok(table.finish())
+        }
+        None => Ok(text_fallback("Sections", stdout)),
+    }
+}
+
+/// The sections and whether each is selected, or `None` when the text is not the shape that is known.
+fn read_sections(stdout: &[u8]) -> Option<Vec<(String, bool)>> {
+    if stdout.len() > MAX_TEXT {
+        return None;
+    }
+    let text = std::str::from_utf8(stdout).ok()?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    if !lines.next()?.starts_with("Config File:") {
+        return None;
+    }
+    let mut sections = Vec::new();
+    for line in lines {
+        if !line.starts_with([' ', '\t']) {
+            return None;
+        }
+        let word = line.trim();
+        let (name, selected) = if let Some(rest) = word.strip_prefix('*') {
+            (rest.trim(), true)
+        } else if let Some(rest) = word.strip_suffix('*') {
+            (rest.trim(), true)
+        } else {
+            (word, false)
+        };
+        if name.is_empty() || name.contains(|c: char| c.is_whitespace() || c == '*') {
+            return None;
+        }
+        sections.push((name.to_owned(), selected));
+    }
+    (!sections.is_empty()).then_some(sections)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

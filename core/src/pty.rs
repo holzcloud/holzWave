@@ -36,6 +36,7 @@ pub struct SpawnOptions {
     rows: u16,
     cell_px: (u32, u32),
     env: Vec<(String, String)>,
+    env_remove: Vec<String>,
 }
 
 impl SpawnOptions {
@@ -49,6 +50,7 @@ impl SpawnOptions {
             rows,
             cell_px: (0, 0),
             env: Vec::new(),
+            env_remove: Vec::new(),
         }
     }
 
@@ -80,6 +82,23 @@ impl SpawnOptions {
     /// [`child_env`](Self::child_env), so it overrides them, and a later pair overrides an earlier one.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Names the child does not inherit from the parent's environment. Adds to earlier removals.
+    ///
+    /// A removal applies to what the child would inherit, before any variable is set: a name that is both removed and
+    /// set ([`env`](Self::env), or a default of [`child_env`](Self::child_env)) is set. A name that is not present is
+    /// not an error, and a name that cannot be a variable name (empty, or holding `=` or NUL) is skipped, so that a
+    /// list from outside cannot make the start fail or touch another variable. [`child_env`](Self::child_env) is
+    /// unchanged: it lists what is set, and a removal sets nothing. A host-spawn pane (`flatpak-spawn --host`) lists the
+    /// child's variables itself and inherits nothing from the app, so there is nothing to remove there.
+    pub fn env_remove<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.env_remove.extend(names.into_iter().map(Into::into));
         self
     }
 
@@ -125,6 +144,23 @@ impl SpawnOptions {
             self.cell_px.0.saturating_mul(u32::from(self.cols)),
             self.cell_px.1.saturating_mul(u32::from(self.rows)),
         )
+    }
+}
+
+/// Whether `name` can be the name of an environment variable: not empty and without `=` or NUL.
+fn usable_env_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['=', '\0'])
+}
+
+/// The child's environment: what it inherits (the builder starts from the parent's) minus the usable names of
+/// [`SpawnOptions::env_remove`], then the variables of [`SpawnOptions::child_env`] on top, so a set variable wins over a
+/// removal of the same name. On Windows the builder compares names without case, so a removal does too.
+fn apply_env(cmd: &mut CommandBuilder, options: &SpawnOptions, parent: impl Fn(&str) -> Option<String>) {
+    for name in options.env_remove.iter().filter(|name| usable_env_name(name)) {
+        cmd.env_remove(name);
+    }
+    for (key, value) in options.child_env(parent) {
+        cmd.env(key, value);
     }
 }
 
@@ -245,9 +281,7 @@ impl Pty {
             cmd.cwd(dir);
         }
         let parent = |key: &str| std::env::var_os(key).map(|v| v.to_string_lossy().into_owned());
-        for (key, value) in options.child_env(parent) {
-            cmd.env(key, value);
-        }
+        apply_env(&mut cmd, options, parent);
         let child = pair.slave.spawn_command(cmd).map_err(pty)?;
         drop(pair.slave);
         let reader = pair.master.try_clone_reader().map_err(pty)?;
@@ -357,6 +391,52 @@ mod tests {
         assert_eq!(parse_lsof_cwd(b""), None);
         assert_eq!(parse_lsof_cwd(b"p1234\nfcwd\n"), None);
         assert_eq!(parse_lsof_cwd(b"p1234\nfcwd\nnrelative\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::{SpawnOptions, apply_env, usable_env_name};
+    use portable_pty::CommandBuilder;
+    use std::ffi::OsStr;
+
+    fn parent(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn the_list_of_removals_is_carried_and_the_defaults_are_unchanged() {
+        let plain = SpawnOptions::new("/bin/sh", 80, 24).env("A", "1");
+        let removing = SpawnOptions::new("/bin/sh", 80, 24).env("A", "1").env_remove(["HOME", "LD_PRELOAD"]).env_remove(["X"]);
+        assert_eq!(removing.env_remove, ["HOME", "LD_PRELOAD", "X"], "removals add up, in order");
+        assert!(plain.env_remove.is_empty());
+        assert_eq!(plain.child_env(parent), removing.child_env(parent), "a removal sets nothing");
+    }
+
+    #[test]
+    fn names_that_cannot_be_variables_are_not_usable() {
+        for bad in ["", "=", "A=B", "=A", "A\0B", "\0"] {
+            assert!(!usable_env_name(bad), "{bad:?}");
+        }
+        for good in ["HOME", "LD_PRELOAD", "a", "ProgramFiles(x86)", "A.B"] {
+            assert!(usable_env_name(good), "{good:?}");
+        }
+    }
+
+    #[test]
+    fn a_removal_applies_before_the_sets_and_skips_unusable_names() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env("HW_INHERITED", "1");
+        cmd.env("HW_BOTH", "inherited");
+        cmd.env("HW_KEPT", "kept");
+        let options = SpawnOptions::new("/bin/sh", 80, 24)
+            .env("HW_BOTH", "set")
+            .env_remove(["HW_INHERITED", "HW_BOTH", "", "HW_KEPT=x", "HW_ABSENT", "HW\0KEPT"]);
+        apply_env(&mut cmd, &options, parent);
+        assert_eq!(cmd.get_env("HW_INHERITED"), None, "the removed name is gone");
+        assert_eq!(cmd.get_env("HW_BOTH"), Some(OsStr::new("set")), "a name that is removed and set is set");
+        assert_eq!(cmd.get_env("HW_KEPT"), Some(OsStr::new("kept")), "an unusable name touches nothing");
+        assert_eq!(cmd.get_env("TERM"), Some(OsStr::new("xterm-256color")), "the defaults are set");
     }
 }
 
