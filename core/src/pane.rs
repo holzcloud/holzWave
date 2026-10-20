@@ -229,6 +229,9 @@ pub enum PaneEvent {
     Cwd(String),
     /// The program rang the bell (BEL). At most one per [`crate::attention::GAP`] per pane.
     Bell,
+    /// A command ended: the `D` mark of OSC 133 with its exit status (`None` when the mark carried none). At most one
+    /// per [`crate::attention::GAP`] per pane.
+    CommandEnd { exit: Option<u32> },
     /// The shell ended and was reaped. Exactly once per pane that started, and the last event it sends.
     /// `code` is `None` when the exit status could not be read.
     Exited { code: Option<u32> },
@@ -762,6 +765,8 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     started: Instant,
     /// Lets one bell through per [`crate::attention::GAP`], so a program that rings in a loop cannot flood the window.
     bell_gate: Gate,
+    /// The same for the end of a command.
+    end_gate: Gate,
 }
 
 impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
@@ -1124,6 +1129,11 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                         (self.sink)(PaneEvent::Bell);
                     }
                 }
+                EngineEvent::CommandEnd { exit } => {
+                    if self.end_gate.pass(Instant::now()) {
+                        (self.sink)(PaneEvent::CommandEnd { exit });
+                    }
+                }
                 EngineEvent::Pwd(raw) => {
                     // A program (a shell with integration, or something on the far side of ssh) announced its
                     // directory. Only a well-formed `file://` path counts, and on Windows only a drive path of this
@@ -1327,6 +1337,7 @@ fn engine_main<E, F, S>(
         linger: spec.linger,
         started: Instant::now(),
         bell_gate: Gate::new(),
+        end_gate: Gate::new(),
     };
     let _ = started.send(Ok(pid));
     actor.run();

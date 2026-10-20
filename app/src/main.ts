@@ -8,6 +8,7 @@
 import { call, listen } from "./bridge.js";
 import { initAiSettings } from "./aisettings.js";
 import { initAsk } from "./askcard.js";
+import { attention } from "./attentionstate.js";
 import { initBlocks, openBlock } from "./blocks.js";
 import { initChat } from "./chat.js";
 import { initChrome } from "./chrome.js";
@@ -57,6 +58,8 @@ async function main() {
   await initBlocks(document.getElementById("overlay") as HTMLElement, applyView, () => {
     renderStatus();
     renderOverlay();
+    // The list of chat blocks can change after the layout was drawn: who waits may sit in another pane now.
+    attention.changed();
   });
   // Saved connections: a palette entry for each, the manager dialog, and the state of the panes that run one.
   await initConnections(applyView, () => {

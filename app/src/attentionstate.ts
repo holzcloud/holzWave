@@ -198,5 +198,34 @@ export class Attention {
   }
 }
 
+/** What the chat module tells about one conversation: how many tool calls wait for a decision, whether a consent card asks. */
+export interface ChatWait {
+  id: string;
+  approvalsWaiting: number;
+  consentAsking: boolean;
+}
+
+/** The part of a pane's block that says which pane shows which chat. */
+export interface ChatBlock {
+  pane: number;
+  kind: string;
+  /** For a chat, the id of the conversation. */
+  path: string;
+}
+
+/**
+ * The panes whose chat waits for the person: a conversation with an approval card waiting, or a consent card in mode
+ * `ask`, marks the chat pane that shows it. Sorted and unique. A conversation with no chat pane (the sidebar form) marks
+ * nothing, and a block of another kind is not a chat pane. Only ids are read, never a card's text.
+ */
+export function chatWaitingPanes(sessions: Iterable<ChatWait>, blocks: Iterable<ChatBlock>): number[] {
+  const waiting = new Set<string>();
+  for (const s of sessions) if (s.approvalsWaiting > 0 || s.consentAsking) waiting.add(s.id);
+  const out = new Set<number>();
+  if (waiting.size === 0) return [];
+  for (const b of blocks) if (b.kind === "chat" && waiting.has(b.path) && Number.isSafeInteger(b.pane)) out.add(b.pane);
+  return [...out].sort((a, b) => a - b);
+}
+
 /** The one store of the page. */
 export const attention = new Attention();

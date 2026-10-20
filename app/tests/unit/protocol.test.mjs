@@ -50,9 +50,15 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open", "login-prompt", "login-prompt-end", "bell"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open", "login-prompt", "login-prompt-end", "bell", "command-end"]);
   // The program in a pane rang the bell: the id of the pane and nothing else.
   assert.deepEqual(golden.events.bell, { pane: 3 });
+  // A command ended in a pane: the id and the OSC 133 status (a number or null), nothing of the command or its output.
+  const ends = golden.events["command-end"];
+  assert.equal(ends.length, 2, "one sample with a status and one without");
+  for (const e of ends) assert.deepEqual(keys(e), ["code", "pane"]);
+  assert.equal(typeof ends[0].code, "number");
+  assert.equal(ends[1].code, null);
   // The shell of a pane asked for the history search: the id of the pane and nothing else.
   assert.deepEqual(golden.events["history-open"], { pane: 3 });
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
@@ -244,7 +250,7 @@ test("the login question has its events and its two commands pinned", () => {
 
 test("the ai events and the nineteen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
-  assert.deepEqual(golden.events.names.slice(-6, -4), ["ai", "ai-ask"]);
+  assert.deepEqual(golden.events.names.slice(-7, -5), ["ai", "ai-ask"]);
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
   assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
   // A request of `wsh ai` that waits for the person: the card for the window of the pane, flat, and nothing but the

@@ -2,7 +2,7 @@
 // No DOM is needed.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Attention, MARKS, MAX_LATCHED, PRIORITY, idsOf } from "../../dist/attentionstate.js";
+import { Attention, MARKS, MAX_LATCHED, PRIORITY, chatWaitingPanes, idsOf } from "../../dist/attentionstate.js";
 
 /** Two workspaces: alpha (shown) with tabs of panes [1, 2], [3] and [4]; beta with tabs [5] and [6, 7]. */
 const view = (over = {}) => ({
@@ -237,4 +237,66 @@ test("at most 256 latched panes are kept, the oldest dropped first", () => {
   assert.equal(marked.filter(Boolean).length, MAX_LATCHED);
   assert.equal(marked[0], false, "the oldest was dropped");
   assert.equal(marked[marked.length - 1], true, "the newest stays");
+});
+
+test("a finished and a failed command latch like the bell and show side by side (owner rule O-02)", () => {
+  const a = store();
+  assert.equal(a.note(3, "done"), true);
+  assert.equal(glyphs(a.marks(view()).tabs[1]), "✓");
+  assert.equal(a.marks(view()).tabs[1].words, "command finished");
+  assert.equal(a.note(3, "failed"), true);
+  // Both kinds, in the fixed order (failed before done), no one outranks the other.
+  assert.equal(glyphs(a.marks(view()).tabs[1]), "!✓");
+  assert.equal(a.marks(view()).tabs[1].words, "command failed, command finished");
+  assert.equal(a.note(3, "failed"), false, "a repeat changes nothing");
+  assert.equal(a.note(1, "failed"), false, "a pane in view latches nothing");
+  // Showing the tab clears every kind of it.
+  a.follow([3], [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(a.marks(view({ tabs: view().tabs.map((t, i) => ({ ...t, active: i === 1 })) })).tabs[1], null);
+});
+
+test("all four kinds on one tab show in the order ask, bell, failed, done", () => {
+  const a = store();
+  a.provide("chat", () => [3]);
+  a.note(3, "done");
+  a.note(3, "failed");
+  a.note(3, "bell");
+  const tab = a.marks(view()).tabs[1];
+  assert.equal(glyphs(tab), "?▲!✓");
+  assert.equal(tab.words, "waits for you, rang the bell, command failed, command finished");
+});
+
+test("the question mark is derived: it hides in view and returns when the pane is left, while it still waits", () => {
+  const a = store();
+  a.provide("chat", () => [3]);
+  assert.equal(glyphs(a.marks(view()).tabs[1]), "?");
+  a.follow([3], [1, 2, 3, 4, 5, 6, 7]);
+  const shown3 = view({ tabs: view().tabs.map((t, i) => ({ ...t, active: i === 1 })) });
+  assert.equal(a.marks(shown3).tabs[1], null);
+  a.follow([1, 2], [1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(glyphs(a.marks(view()).tabs[1]), "?", "it was never latched, so it comes back");
+});
+
+test("chatWaitingPanes names the panes of the chats that wait for an answer, sorted and unique", () => {
+  const blocks = [
+    { pane: 9, kind: "chat", path: "chat-a" },
+    { pane: 4, kind: "chat", path: "chat-b" },
+    { pane: 6, kind: "chat", path: "chat-c" },
+    { pane: 7, kind: "files", path: "chat-a" },
+    { pane: 8, kind: "preview", path: "chat-b" },
+    { pane: 2, kind: "chat", path: "chat-a" },
+  ];
+  const sessions = [
+    { id: "chat-a", approvalsWaiting: 2, consentAsking: false },
+    { id: "chat-b", approvalsWaiting: 0, consentAsking: true },
+    { id: "chat-c", approvalsWaiting: 0, consentAsking: false },
+    { id: "chat-without-pane", approvalsWaiting: 1, consentAsking: true },
+  ];
+  // chat-a waits (panes 9 and 2), chat-b waits (pane 4); chat-c does not; a session with no chat block marks nothing;
+  // the files and preview blocks of the same path are not chat panes.
+  assert.deepEqual(chatWaitingPanes(sessions, blocks), [2, 4, 9]);
+  assert.deepEqual(chatWaitingPanes([], blocks), []);
+  assert.deepEqual(chatWaitingPanes(sessions, []), []);
+  // A map's values work as the blocks, and a waiting count of zero with no consent card waits for nothing.
+  assert.deepEqual(chatWaitingPanes([{ id: "chat-c", approvalsWaiting: 0, consentAsking: false }], new Map(blocks.map((b) => [b.pane, b])).values()), []);
 });

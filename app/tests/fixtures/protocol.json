@@ -597,6 +597,16 @@
     "bell": {
       "pane": 3
     },
+    "command-end": [
+      {
+        "code": 3,
+        "pane": 3
+      },
+      {
+        "code": null,
+        "pane": 3
+      }
+    ],
     "cwd": {
       "cwd": "/Users/holz/Projects/holzWave",
       "pane": 3
@@ -679,7 +689,8 @@
       "history-open",
       "login-prompt",
       "login-prompt-end",
-      "bell"
+      "bell",
+      "command-end"
     ],
     "pane-exit": [
       {

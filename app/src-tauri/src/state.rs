@@ -380,6 +380,9 @@ pub enum Out {
     /// The program in `pane` rang the bell (BEL). At most one per half second per pane (the core's gate). Goes to the
     /// window that has the pane; the page marks the tab and the pill that hold the pane when it is out of view (design 6.23).
     Bell { pane: PaneId },
+    /// A command ended in `pane`: the `D` mark of OSC 133 with its exit status, `None` when the mark carried none. At
+    /// most one per half second per pane. Goes to the window that has the pane (design 6.23).
+    CommandEnd { pane: PaneId, code: Option<u32> },
     /// The settings, the theme or the key bindings changed (a command, or a hand edit that was picked up).
     Settings(SettingsView),
     /// A pane or a tab that was released over this window comes from another window: where in this page it goes is
@@ -424,6 +427,7 @@ impl Out {
             Out::Cwd { .. } => "cwd",
             Out::PaneExit { .. } => "pane-exit",
             Out::Bell { .. } => "bell",
+            Out::CommandEnd { .. } => "command-end",
             Out::Settings(_) => "settings",
             Out::IncomingDrop { .. } => "incoming-drop",
             Out::DragHover { .. } => "drag-hover",
@@ -447,6 +451,12 @@ struct TitlePayload<'a> {
 #[derive(Serialize)]
 struct BellPayload {
     pane: PaneId,
+}
+
+#[derive(Serialize)]
+struct CommandEndPayload {
+    pane: PaneId,
+    code: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -506,6 +516,7 @@ impl Serialize for Out {
             Out::Cwd { pane, cwd } => CwdPayload { pane: *pane, cwd }.serialize(serializer),
             Out::PaneExit { pane, code } => PaneExitPayload { pane: *pane, code: *code }.serialize(serializer),
             Out::Bell { pane } => BellPayload { pane: *pane }.serialize(serializer),
+            Out::CommandEnd { pane, code } => CommandEndPayload { pane: *pane, code: *code }.serialize(serializer),
             Out::Settings(view) => view.serialize(serializer),
             Out::IncomingDrop { kind, pane, x, y } | Out::DragHover { kind, pane, x, y } => {
                 IncomingDropPayload { kind: *kind, pane: *pane, x: *x, y: *y }.serialize(serializer)
@@ -2768,6 +2779,13 @@ impl AppCore {
                 let target = lock(&routes).target_of(pane);
                 if let Some(target) = target {
                     sink.send(target, Out::Bell { pane });
+                }
+            }
+            PaneEvent::CommandEnd { exit } => {
+                // A hint for the marks of the bar: the pane's id and the status number, to the window that has the pane.
+                let target = lock(&routes).target_of(pane);
+                if let Some(target) = target {
+                    sink.send(target, Out::CommandEnd { pane, code: exit });
                 }
             }
             PaneEvent::Exited { code } => {
@@ -6888,6 +6906,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_command_end_goes_to_the_window_that_has_the_pane() {
+        // `ESC ] 133 ; D ; 3 ESC \`, written through printf as octal escapes; the shell then waits so the pane stays.
+        let (core, rec, _dir, first, second, label) = two_windows("printf '\\033]133;D;3\\033\\\\'; sleep 30");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+
+        assert!(
+            wait_until(WAIT, || rec.sent().iter().any(|(_, o)| matches!(o, Out::CommandEnd { .. }))),
+            "no CommandEnd: {:?}",
+            rec.all()
+        );
+
+        let ends: Vec<(Target, Out)> = rec.sent().into_iter().filter(|(_, o)| matches!(o, Out::CommandEnd { .. })).collect();
+        assert_eq!(
+            ends,
+            vec![(Target::window(&label), Out::CommandEnd { pane: second, code: Some(3) })],
+            "one command end, to the window of the pane"
+        );
+        assert_ne!(first, second);
+        assert_eq!(rec.targets_of("command-end", 0), vec![Target::window(&label)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_bell_goes_to_the_window_that_has_the_pane() {
         // One BEL, written as an octal escape; the shell then waits so the pane stays.
         let (core, rec, _dir, first, second, label) = two_windows("printf '\\007'; sleep 30");
@@ -9416,6 +9457,7 @@ mod protocol {
             },
             Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::Answered },
             Out::Bell { pane: 3 },
+            Out::CommandEnd { pane: 3, code: Some(3) },
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -9470,6 +9512,10 @@ mod protocol {
                     to_value(&Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::TimedOut }),
                 ],
                 "bell": payload(14),
+                "command-end": [
+                    payload(15),
+                    to_value(&Out::CommandEnd { pane: 3, code: None }),
+                ],
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {

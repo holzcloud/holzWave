@@ -408,6 +408,29 @@ fn a_bell_the_program_rings_arrives_as_a_bell_event() {
 }
 
 #[test]
+fn a_command_end_the_program_marks_arrives_as_a_command_end_event() {
+    let probe = Probe::default();
+    // `ESC ] 133 ; D ; 3 ESC \` twice in a row (printed as octal escapes), then the shell waits.
+    let pane = spawn(spec_sh("printf '\\033]133;D;3\\033\\\\'; printf '\\033]133;D;3\\033\\\\'; sleep 3"), &probe);
+
+    let ends = || {
+        probe
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                PaneEvent::CommandEnd { exit } => Some(exit),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(wait_until(WAIT, || !ends().is_empty()), "no CommandEnd event: {:?}", probe.events());
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(ends(), vec![Some(3)], "exactly one, the second is folded or held back by the gate: {:?}", probe.events());
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
 fn the_cell_size_of_the_spec_is_in_the_first_size_report() {
     let probe = Probe::default();
     // CSI 16 t asks for the cell size. The reply is tty input and the tty echoes it (ESC as ^[) into the output, so

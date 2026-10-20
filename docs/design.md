@@ -1533,6 +1533,15 @@ the shown tab in the same row and would read as "shown"). The shape and the word
 
 There is no `x` shape: the close mark `×` sits next to the mark.
 
+**Where the kinds come from.** The bell is BEL in the output of the pane. A command that ended is the `D` mark of OSC 133
+that the shell hooks write when a command that ran ends (an empty line writes none, and a shell without the hooks writes
+no mark, so no mark appears); the mark carries the exit status, 0 or none is a finished command, any other number a failed
+one, and a status that is not a whole number counts as none. There is no minimum duration. The question mark comes from
+what the window already knows: a tool call that waits for approval in a chat pane, a consent card in mode ask, a `wsh ai`
+request that waits (it marks the pane that asked). The page closes a consent card when the terminal it asks about leaves the
+view, so in practice that card does not wait out of view; the approval card and the request do. Only the pane and the status
+number cross into the page, never the command or its output.
+
 **Several kinds at once.** A tab or a pill shows **every kind that is present, side by side, one symbol per kind**. There is
 no count and no "most urgent wins". The fixed order from left to right is ask, bell, failed, done, so the place of a symbol
 is itself a cue. A tab that holds a waiting question and a finished command shows `? ✓`; one that holds all four shows

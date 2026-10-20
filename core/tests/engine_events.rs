@@ -150,3 +150,37 @@ fn clipboard_escapes_make_no_event_and_no_reply() {
     assert!(e.take_events().is_empty());
     assert_eq!(ascii(&e.take_replies()), "");
 }
+
+#[test]
+fn a_d_mark_fed_to_the_engine_is_a_command_end_event_with_its_status() {
+    let mut e = engine(20, 3);
+    e.feed(b"\x1b]133;D;3\x1b\\");
+    assert_eq!(e.take_events(), vec![EngineEvent::CommandEnd { exit: Some(3) }]);
+    assert!(e.take_events().is_empty(), "an event is delivered once");
+
+    e.feed(b"\x1b]133;D\x07");
+    assert_eq!(e.take_events(), vec![EngineEvent::CommandEnd { exit: None }]);
+
+    // The other marks of the protocol make no event; a bell after the mark is a bell.
+    e.feed(b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+    assert!(e.take_events().is_empty());
+}
+
+#[test]
+fn two_identical_marks_in_a_row_fold_into_one_event() {
+    let mut e = engine(20, 3);
+    e.feed(b"\x1b]133;D;1\x07\x1b]133;D;1\x1b\\");
+    assert_eq!(e.take_events(), vec![EngineEvent::CommandEnd { exit: Some(1) }]);
+    e.feed(b"\x1b]133;D;1\x07\x1b]133;D;0\x07");
+    assert_eq!(
+        e.take_events(),
+        vec![EngineEvent::CommandEnd { exit: Some(1) }, EngineEvent::CommandEnd { exit: Some(0) }]
+    );
+}
+
+#[test]
+fn the_terminator_of_a_d_mark_is_no_bell() {
+    let mut e = engine(20, 3);
+    e.feed(b"\x1b]133;D;0\x07");
+    assert_eq!(e.take_events(), vec![EngineEvent::CommandEnd { exit: Some(0) }]);
+}

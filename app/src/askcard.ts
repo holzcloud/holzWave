@@ -9,6 +9,7 @@
 
 import { registerAction, unregisterAction } from "./actions.js";
 import { AskQueue } from "./ask.js";
+import { attention } from "./attentionstate.js";
 import { WORDS, findingLines, inputWords, placeWords, promptWords, routeWords } from "./askstate.js";
 import type { AskItem } from "./askstate.js";
 import { call, listen } from "./bridge.js";
@@ -189,6 +190,9 @@ export async function initAsk(): Promise<void> {
   const queue = new AskQueue({ invoke: (cmd, args) => call(cmd, args), now: () => Date.now(), say: showNotice });
   await listen("ai-ask", (raw: unknown) => queue.receive(raw));
   mountAsk(document.body, queue);
+  // The pane that asked is marked on its tab and pill while the request waits and the pane is out of view (design 6.23).
+  attention.provide("ask", () => queue.items.map((i) => i.view.pane));
+  queue.subscribe(() => attention.changed());
   // The palette entry exists only while a card waits.
   let listed = false;
   queue.subscribe(() => {

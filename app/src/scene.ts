@@ -337,6 +337,17 @@ function onBell(p: { pane: number }): void {
   attention.note(p.pane, "bell");
 }
 
+/**
+ * A command ended in a pane (the `D` mark of OSC 133): a check on its tab and its pill when it ended with status 0 or no
+ * status, an exclamation mark for any other (design 6.23). `code` that is not a non-negative whole number counts as no status.
+ */
+function onCommandEnd(p: { pane: number; code: number | null }): void {
+  if (typeof p !== "object" || p === null || !isPane(p.pane)) return;
+  if (state.exited.has(p.pane) || state.away.has(p.pane)) return;
+  const code = typeof p.code === "number" && Number.isSafeInteger(p.code) && p.code >= 0 ? p.code : null;
+  attention.note(p.pane, code === null || code === 0 ? "done" : "failed");
+}
+
 /** Listen to the events a pane produces. Call once at start-up, before the first layout is asked for. */
 export async function initEvents(): Promise<void> {
   await listen<FrameMsg>("frame", onFrame);
@@ -344,6 +355,7 @@ export async function initEvents(): Promise<void> {
   await listen<{ pane: number; cwd: string }>("cwd", onCwd);
   await listen<{ pane: number; code: number | null }>("pane-exit", onPaneExit);
   await listen<{ pane: number }>("bell", onBell);
+  await listen<{ pane: number; code: number | null }>("command-end", onCommandEnd);
 }
 
 // ---- cursor blink --------------------------------------------------------------------------------

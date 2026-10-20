@@ -17,6 +17,7 @@
 import { registerAction } from "./actions.js";
 import { onProfilesChanged, openProviders } from "./aisettings.js";
 import { Approvals } from "./approval.js";
+import { attention, chatWaitingPanes } from "./attentionstate.js";
 import { canUndo, indexResults, rowsOf, waitingLabel, waitingName } from "./approvalstate.js";
 import type { ToolResult } from "./approvalstate.js";
 import { mountApprovals, toolRowNode } from "./approvalcard.js";
@@ -288,6 +289,8 @@ function sessionFor(conversation: string): Session {
 
 /** The title-bar button says how many calls wait for a decision, over every chat of this window. */
 function updateBadge(): void {
+  // The marks of the bar follow what waits: an approval card appeared or was decided (design 6.23).
+  attention.changed();
   if (button === null) return;
   let n = 0;
   for (const s of sessions.values()) n += s.approvals.waiting();
@@ -465,6 +468,8 @@ function consentFor(s: Session): Consent {
       now: () => Date.now(),
       say: (text, kind) => sayTo(s, text, kind),
     });
+    // A consent card that asks marks the tab of its chat pane while the pane is out of view (design 6.23).
+    s.consent.subscribe(() => attention.changed());
     for (const view of s.views) view.drawConsent();
   }
   return s.consent;
@@ -1666,6 +1671,17 @@ export function releaseChat(conversation: string): boolean {
 /** Make the button, register the two actions and listen to the core's `ai` events. Call once at start-up. */
 export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void> {
   opener = open;
+  // Which chat panes wait for the person: an approval card, or a consent card that asks. Derived, never latched.
+  attention.provide("chat", () =>
+    chatWaitingPanes(
+      [...sessions.values()].map((s) => ({
+        id: s.id,
+        approvalsWaiting: s.approvals.waiting(),
+        consentAsking: s.consent?.model.mode === "ask",
+      })),
+      paneBlocks.values(),
+    ),
+  );
   sidebar = host?.sidebar ?? null;
   decorate = host?.decorate ?? null;
   try {

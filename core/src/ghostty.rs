@@ -16,6 +16,7 @@ use libghostty_vt::terminal::{
 };
 use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
+use crate::attention::CommandMarks;
 use crate::engine::{
     Cell, Color, CopyMotion, CopyOp, CopyState, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent,
     MAX_SEARCH_BYTES, MatchSpan, Modes, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, RowUpdate, Screen,
@@ -633,6 +634,8 @@ pub struct GhosttyEngine {
     sel_cache: Vec<Option<(u16, u16)>>,
     /// Titles and working directories the program set since the last `take_events`, already sanitised.
     events: Rc<RefCell<Vec<EngineEvent>>>,
+    /// Reads the `D` marks of OSC 133 with their status from the program's bytes: the library reports no status.
+    command_marks: CommandMarks,
 }
 
 impl GhosttyEngine {
@@ -724,6 +727,7 @@ impl GhosttyEngine {
             last_size: None,
             sel_cache: Vec::new(),
             events,
+            command_marks: CommandMarks::new(),
             search: None,
             match_buf: MatchBuffer::new(),
             search_memo: None,
@@ -1336,6 +1340,9 @@ impl GhosttyEngine {
 
 impl TerminalEngine for GhosttyEngine {
     fn feed(&mut self, bytes: &[u8]) {
+        // The end of a command with its status, read from the same bytes (the library reports no status).
+        let queue = &self.events;
+        self.command_marks.feed(bytes, |exit| push_event(queue, EngineEvent::CommandEnd { exit }));
         // Everything the terminal writes back while it parses program output is program-controlled: bound it.
         self.reply_cap.set(Some(REPLY_CAP));
         self.terminal.vt_write(bytes);

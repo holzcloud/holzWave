@@ -4,14 +4,23 @@
 // clears them, the side-by-side rule with all four kinds on one tab, and the second cue.
 import assert from "node:assert/strict";
 import { callsOf, emit } from "./lib.mjs";
+import { ASK, VIEW as AI_VIEW, SAVED_A, SAVED_B, TOOL_PATH, TOOL_TEXT, askView, boot, chatBlock, closeAsk, emitAsk, openCard, openContext, openSide, pickChat, saveChats, scriptTool, sendSide, sendText } from "./ai-lib.mjs";
 
 export default async function ({ page, url }) {
+  page.setDefaultTimeout(5000);
   await bellCase(page, url);
   await clearCase(page, url);
   await floodCase(page, url);
   await structureCase(page, url);
   await sideBySideCase(page, url);
   await accessibilityCase(page, url);
+  await commandEndCase(page, url);
+  await commandEndOddCase(page, url);
+  // The AI cases boot the page of the chat tests (a reset of the mock, saved profiles, a block layer).
+  await approvalCase(page, url);
+  await consentCase(page, url);
+  await requestCase(page, url);
+  await sidebarChatCase(page, url);
 }
 
 /** Two workspaces: alpha (shown) with the tabs one (pane 1), two (pane 2) and three (pane 3); beta holds pane 4. */
@@ -369,4 +378,282 @@ async function accessibilityCase(page, url) {
   const t = await page.evaluate(() => getComputedStyle(document.querySelector("#bar .attn .mk")).transitionDuration);
   assert.equal(t, "0s");
   await page.emulateMedia({ reducedMotion: null, contrast: "no-preference" });
+}
+
+// ---- the end of a command (OSC 133 D) ------------------------------------------------------------------------------------
+
+/** A command ended in a pane the way the core tells the page. */
+const ended = (page, pane, code) => emit(page, "command-end", { pane, code });
+
+async function commandEndCase(page, url) {
+  await open(page, url);
+  // A failure: the exclamation mark and its words on the tab, nothing else.
+  await ended(page, 2, 3);
+  let m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", "!", ""]);
+  assert.deepEqual(m.tabs[1].kinds, ["failed"]);
+  assert.equal(m.tabs[1].title, "2 two · command failed");
+  assert.equal(m.tabs[1].label, "2 two, command failed");
+  // Success with status 0 and with no status: the check, the same for both.
+  await ended(page, 3, 0);
+  await ended(page, 4, null);
+  m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", "!", "✓"]);
+  assert.equal(m.tabs[2].title, "3 three · command finished");
+  assert.deepEqual(m.pills.map((t) => t.glyphs), ["", "✓"], "the pill of the other workspace shows the check");
+  assert.equal(m.pills[1].title, "beta · command finished");
+
+  // A bell and a failure on one tab: both, side by side, in the fixed order (bell first), both named.
+  await bell(page, 2);
+  m = await marks(page);
+  assert.equal(m.tabs[1].glyphs, "▲!");
+  assert.deepEqual(m.tabs[1].kinds, ["bell", "failed"]);
+  assert.equal(m.tabs[1].title, "2 two · rang the bell, command failed");
+  assert.equal(m.tabs[1].label, "2 two, rang the bell, command failed");
+  // A finished command on the same tab adds the check after the others.
+  await ended(page, 2, 0);
+  m = await marks(page);
+  assert.equal(m.tabs[1].glyphs, "▲!✓");
+  assert.deepEqual(await texts(page, "#bar .tab"), ["1 one", "2 two", "3 three"], "the tab texts are unchanged by the marks");
+
+  // A command that ended in a pane in view marks nothing.
+  await ended(page, 1, 1);
+  assert.equal((await marks(page)).tabs[0].glyphs, "");
+
+  // Showing the tab clears all of its kinds at once; the others stay.
+  await page.locator("#bar .tab").nth(1).click();
+  await showView(page, shownTab(1));
+  m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", "", "✓"]);
+
+  // Sixty command ends in a row leave one mark of each kind; a pane that exits takes its marks with it.
+  await showView(page, VIEW);
+  await page.evaluate(() => {
+    for (let i = 0; i < 60; i++) window.__MOCK__.emit("command-end", { pane: 3, code: 1 });
+  });
+  m = await marks(page);
+  assert.deepEqual(m.tabs[2].kinds, ["failed", "done"], "sixty failures and the earlier check: one of each, failed first");
+  await emit(page, "pane-exit", { pane: 3, code: 0 });
+  m = await marks(page);
+  assert.equal(m.tabs[2].glyphs, "");
+}
+
+async function commandEndOddCase(page, url) {
+  await open(page, url);
+  // A status that is not a non-negative whole number counts as no status: the check, never the exclamation mark.
+  for (const code of ["3", -1, 1.5, Number.NaN, {}, [], true, Number.MAX_SAFE_INTEGER + 2]) {
+    // Show tab 2 (its marks clear), then go back to tab 1 and let the command end in the hidden pane 2.
+    await showView(page, shownTab(1));
+    await showView(page, VIEW);
+    await ended(page, 2, code);
+    const m = await marks(page);
+    assert.equal(m.tabs[1].glyphs, "✓", `code ${String(code)} is no status`);
+  }
+  // Malformed events change nothing and throw nothing.
+  await showView(page, shownTab(1));
+  await showView(page, VIEW);
+  for (const bad of [null, {}, { pane: "2" }, { pane: 1.5 }, { pane: Number.NaN }, "2", 7]) await emit(page, "command-end", bad);
+  assert.deepEqual((await marks(page)).tabs.map((t) => t.glyphs), ["", "", ""]);
+  // A large status is a failure.
+  await ended(page, 2, 4294967295);
+  assert.equal((await marks(page)).tabs[1].glyphs, "!");
+}
+
+// ---- the AI waits (approval cards, the request cards of wsh ai) ----------------------------------------------------------
+
+/**
+ * Two workspaces. Main holds the terminals 1 and 2 (tab "shell") and the chat pane 3 (tab "chat"); infra holds pane 4.
+ * `shown` is "shell", "chat" or "infra".
+ */
+function aiView(shown) {
+  const base = { ...AI_VIEW, pane_names: [], windows: 1 };
+  const inMain = shown !== "infra";
+  const panes =
+    shown === "shell" ? [[1, { x: 0, y: 0, w: 0.5, h: 1 }], [2, { x: 0.5, y: 0, w: 0.5, h: 1 }]]
+    : shown === "chat" ? [[3, { x: 0, y: 0, w: 1, h: 1 }]]
+    : [[4, { x: 0, y: 0, w: 1, h: 1 }]];
+  const tabs = inMain
+    ? [
+        { title: "shell", active: shown === "shell", focus: 2, panes: 2, pane_ids: [1, 2] },
+        { title: "chat", active: shown === "chat", focus: 3, panes: 1, pane_ids: [3] },
+      ]
+    : [{ title: "logs", active: true, focus: 4, panes: 1, pane_ids: [4] }];
+  return {
+    ...base,
+    workspaces: [
+      { name: "main", active: inMain, panes: 3, pane_ids: [1, 2, 3] },
+      { name: "infra", active: !inMain, panes: 1, pane_ids: [4] },
+    ],
+    tabs,
+    focus: panes[0][0] === 1 ? 2 : panes[0][0],
+    panes,
+    dividers: shown === "shell" ? AI_VIEW.dividers : [],
+  };
+}
+
+async function showAi(page, shown) {
+  const v = aiView(shown);
+  await page.evaluate((x) => window.__MOCK__.setView(x), v);
+  await emit(page, "layout", v);
+}
+
+const wait = (page, glyphs, tab) =>
+  page.waitForFunction(
+    ([g, i]) => (document.querySelectorAll("#bar .tab-item")[i]?.querySelector(".attn")?.textContent ?? null) === g,
+    [glyphs, tab],
+  );
+
+async function approvalCase(page, url) {
+  // The chat is pane 3 in the tab "chat", shown at first: a waiting card marks nothing while the pane is in view.
+  await boot(page, url, { view: aiView("chat"), blocks: [chatBlock("chat-x")], starts: 1, settings: true });
+  await page.waitForSelector(".block-chat textarea.chat-input");
+  await scriptTool(page, { id: "call_1", tool: "read_file", path: TOOL_PATH, result: TOOL_TEXT, answer: "Done." });
+  await sendText(page, "read my notes");
+  await openCard(page, "call_1");
+  let m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""], "the chat is in view: nothing is marked");
+  assert.deepEqual(m.pills.map((t) => t.glyphs), ["", ""]);
+
+  // Leave the chat tab for the shell tab: the question mark is on the tab of the chat, with its words.
+  await showAi(page, "shell");
+  await wait(page, "?", 1);
+  m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", "?"]);
+  assert.deepEqual(m.tabs[1].kinds, ["ask"]);
+  assert.equal(m.tabs[1].title, "2 chat · waits for you");
+  assert.equal(m.tabs[1].label, "2 chat, waits for you");
+  assert.deepEqual(m.pills.map((t) => t.glyphs), ["", ""], "the workspace is shown: its tab carries the mark, not its pill");
+
+  // Another workspace shown: the pill of main carries the question mark.
+  await showAi(page, "infra");
+  m = await marks(page);
+  assert.deepEqual(m.pills.map((t) => t.glyphs), ["?", ""]);
+  assert.equal(m.pills[0].title, "main · waits for you");
+
+  // Showing the chat hides the mark without answering; leaving again shows it while the card waits.
+  await showAi(page, "chat");
+  m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""]);
+  assert.equal(await page.locator("section.chat-approval").count(), 1, "showing the pane did not answer the card");
+  assert.deepEqual(await callsOf(page, "ai_decide"), []);
+  await showAi(page, "shell");
+  await wait(page, "?", 1);
+
+  // A bell in the same tab adds its own mark next to the question mark (the question mark first).
+  await bell(page, 3);
+  m = await marks(page);
+  assert.equal(m.tabs[1].glyphs, "?▲");
+  assert.equal(m.tabs[1].title, "2 chat · waits for you, rang the bell");
+
+  // Deny answers the card for good: the mark goes and does not come back when the pane is left again.
+  await showAi(page, "chat");
+  await page.locator("section.chat-approval .approval-deny").click();
+  await page.waitForFunction(() => document.querySelector("section.chat-approval") === null);
+  await showAi(page, "shell");
+  m = await marks(page);
+  assert.equal(m.tabs[1].glyphs, "", "answered: no question mark, and the bell was cleared when the tab was shown");
+}
+
+/**
+ * The chat, pane 3, shares its tab with the terminal pane 2 (the mock offers panes 1 and 2 as terminals, and a consent card
+ * shares a terminal); the tab "shell" holds pane 1. `shown` is "chat" or "shell".
+ */
+function consentView(shown = "chat") {
+  const v = aiView("chat");
+  const chat = shown === "chat";
+  v.tabs = [
+    { title: "shell", active: !chat, focus: 1, panes: 1, pane_ids: [1] },
+    { title: "chat", active: chat, focus: 2, panes: 2, pane_ids: [3, 2] },
+  ];
+  v.panes = chat ? [[3, { x: 0, y: 0, w: 0.5, h: 1 }], [2, { x: 0.5, y: 0, w: 0.5, h: 1 }]] : [[1, { x: 0, y: 0, w: 1, h: 1 }]];
+  v.focus = chat ? 2 : 1;
+  v.workspaces[0].panes = 3;
+  v.workspaces[0].pane_ids = [1, 3, 2];
+  v.dividers = chat ? AI_VIEW.dividers : [];
+  return v;
+}
+
+const showConsent = async (page, shown) => {
+  const v = consentView(shown);
+  await page.evaluate((x) => window.__MOCK__.setView(x), v);
+  await emit(page, "layout", v);
+};
+
+async function consentCase(page, url) {
+  // A consent card in mode ask belongs to the chat pane and to the terminal it asks to share, and the page closes it when that
+  // terminal leaves the view (followActing). So it never waits out of view: while the chat is shown nothing is marked, and the
+  // tab that is left carries no question mark afterwards. (The store marks a chat pane whose consent card asks, unit-tested
+  // in chatWaitingPanes; this case pins what a person actually sees.)
+  await boot(page, url, { view: consentView(), blocks: [chatBlock("chat-x")], starts: 1, settings: true });
+  await page.waitForSelector(".block-chat textarea.chat-input");
+  const sentence = await openContext(page, "chat-x");
+  assert.equal(sentence, null, "the card opened");
+  assert.equal(await page.locator(".chat-consent").getAttribute("data-mode"), "ask");
+  let m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""], "the chat is in view: nothing is marked");
+  await showConsent(page, "shell");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_context_state").length >= 1);
+  m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""], "the card closed with its terminal: no question mark");
+  await showConsent(page, "chat");
+  assert.equal(await page.locator(".chat-consent").count(), 0, "and it does not come back by itself");
+  m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""]);
+}
+
+async function requestCase(page, url) {
+  await boot(page, url, { view: aiView("shell"), clock: true, starts: 2 });
+  let m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""]);
+
+  // A request from a pane in view marks nothing.
+  await emitAsk(page, askView({}, ASK));
+  await page.waitForSelector("section.ask");
+  m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""], "pane 2 is in view");
+  await closeAsk(page, ASK.ask);
+  await page.waitForFunction(() => document.querySelector("section.ask") === null);
+
+  // A request from a pane of the hidden tab marks that tab while it waits, and the close event removes it.
+  const hidden = askView({ pane: 3 });
+  await emitAsk(page, hidden);
+  await page.waitForSelector("section.ask");
+  await wait(page, "?", 1);
+  m = await marks(page);
+  assert.equal(m.tabs[1].title, "2 chat · waits for you");
+  assert.deepEqual(m.pills.map((t) => t.glyphs), ["", ""]);
+  await showAi(page, "infra");
+  m = await marks(page);
+  assert.deepEqual(m.pills.map((t) => t.glyphs), ["?", ""], "the pill of the workspace that holds the pane");
+  await showAi(page, "shell");
+  await closeAsk(page, hidden.ask);
+  await page.waitForFunction(() => document.querySelector("section.ask") === null);
+  await wait(page, "", 1);
+  m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""]);
+  assert.deepEqual(m.pills.map((t) => t.glyphs), ["", ""]);
+
+  // Refusing the card removes the mark as well.
+  const second = askView({ pane: 3, ask: "0a1b2c3d4e5f60718293a4b5c6d7e8f9" });
+  await emitAsk(page, second);
+  await page.waitForSelector("section.ask");
+  await wait(page, "?", 1);
+  await page.locator("section.ask button.ask-no").click();
+  await page.waitForFunction(() => document.querySelector("section.ask") === null);
+  await wait(page, "", 1);
+}
+
+async function sidebarChatCase(page, url) {
+  // A chat in the sidebar column has no pane: its waiting card marks no tab and no pill (the title-bar button says it).
+  await boot(page, url, { view: aiView("shell"), clock: true, starts: 2 });
+  await saveChats(page, [SAVED_A, SAVED_B]);
+  await openSide(page);
+  await pickChat(page, "chat-saved-a");
+  await scriptTool(page, { id: "call_1", tool: "read_file", path: TOOL_PATH, result: TOOL_TEXT, answer: "Done." });
+  await sendSide(page, "read my notes");
+  await openCard(page, "call_1");
+  assert.equal(await page.locator(".ai-btn").getAttribute("data-waiting"), "1", "the button counts the waiting call");
+  const m = await marks(page);
+  assert.deepEqual(m.tabs.map((t) => t.glyphs), ["", ""]);
+  assert.deepEqual(m.pills.map((t) => t.glyphs), ["", ""]);
 }

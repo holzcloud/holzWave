@@ -5,7 +5,7 @@
 //! core's [`state::Out`] events into Tauri events, and it registers the commands of [`commands`].
 //!
 //! Webview contract: the events are `frame` (a frame message of the core), `layout` (the view), `title`
-//! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}`, `bell` `{pane}` (the program in that pane rang the bell; the window that has the pane), `settings` (a settings view), `ai` (one event
+//! `{pane, title}`, `cwd` `{pane, cwd}`, `pane-exit` `{pane, code}`, `bell` `{pane}` (the program in that pane rang the bell; the window that has the pane), `command-end` `{pane, code}` (a command ended in that pane, `code` is the OSC 133 status or `null`; the window that has the pane), `settings` (a settings view), `ai` (one event
 //! of a chat turn, `{conversation, turn, seq, kind, ...}`, which the page routes by conversation) and `ai-ask` (a request
 //! of `wsh ai` that waits for the person, or is over: `{kind: "waiting", view}` for the window of the pane, `{kind:
 //! "closed", ask, why}` for every window) and `history-open` `{pane}` (the shell of that pane asked for the history

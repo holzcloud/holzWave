@@ -172,7 +172,7 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 101 commands and 15 events. The tables below list the
+The webview talks to the core through a deny-by-default set of 101 commands and 16 events. The tables below list the
 commands of the terminal core and of the AI chat; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
@@ -216,6 +216,7 @@ that only bound their numbers and push to the pane's queue.
 | `cwd` | `{pane, cwd}` from OSC 7, absolute paths only |
 | `pane-exit` | `{pane, code}`, `code` is `null` when the exit status is unknown |
 | `bell` | `{pane}`: the program in that pane rang the bell (BEL), at most once per 500 ms per pane; the window that has the pane marks the tab and the pill (design 6.23) |
+| `command-end` | `{pane, code}`: a command ended in that pane (the `D` mark of OSC 133), at most once per 500 ms per pane; `code` is its exit status, `null` when the mark carried none; the window that has the pane marks the tab and the pill (design 6.23) |
 | `settings` | the settings view, after a command or a hand edit that was picked up |
 | `incoming-drop` | `{kind, pane, x, y}`: a pane or tab released over this window comes from another window; the page answers with `attach_pane` or `attach_tab`, or with nothing |
 | `drag-hover` | `{kind, pane, x, y}`: a pane or tab being dragged out of another window is over this one; the page draws the outline of the zone it would land in |

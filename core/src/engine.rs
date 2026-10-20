@@ -490,6 +490,9 @@ pub enum EngineEvent {
     /// The program rang the bell (BEL). Runs of bells are folded into one event; the pane lets one through per
     /// [`crate::attention::GAP`].
     Bell,
+    /// A command ended: the `D` mark of OSC 133 with its exit status (`None` when the mark carried none). Identical
+    /// events in a row are folded; the pane lets one through per [`crate::attention::GAP`].
+    CommandEnd { exit: Option<u32> },
 }
 
 /// The most bytes a title or working directory from a program may have (T-02-35).
@@ -776,7 +779,7 @@ pub trait TerminalEngine {
         Err(Error::Unsupported("read_text".into()))
     }
 
-    /// Take the events the program caused (title, working directory, bell) since the previous call.
+    /// Take the events the program caused (title, working directory, bell, end of a command) since the previous call.
     fn take_events(&mut self) -> Vec<EngineEvent> {
         Vec::new()
     }
