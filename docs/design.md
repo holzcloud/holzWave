@@ -501,8 +501,8 @@ status line and the composer.
   says `Apple on-device is not available. Choose another provider, or see the provider settings for the reason.` as an error
   line, like every refusal of a send (6.21). It clears when the user types.
 - **Composer.** A multi-line field (1 to 8 rows, in the chat text face) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
-  that becomes `Stop` (hairline) while a turn runs. Below the field, left: the button `Context…` (6.14; it reads
-  `Context · 1 item` while an offer is attached), then `≈ 12 tokens` (UTF-8 bytes divided by 3, rounded up, the rule of
+  that becomes `Stop` (hairline) while a turn runs. Below the field, left: the toggle `Auto` (6.14; it reads
+  `● Auto · pane 1` while it is on and `○ Auto` while it is off), then `≈ 12 tokens` (UTF-8 bytes divided by 3, rounded up, the rule of
   the core) and the keys `⏎ send · ⇧⏎ new line · Esc stop`; right: the button. Over 131072 bytes
   the count reads `too long · 131074 of 131072 bytes` (warn, underlined) and `Send` is disabled.
 
@@ -520,6 +520,7 @@ status line and the composer.
 | request leaves the computer | warn | the place word `local network` or `cloud` |
 | draft too long | warn | `too long · N of 131072 bytes` underlined, `Send` disabled |
 | chosen provider | rose wash | `●` instead of `○`, 2 px bar, `aria-checked` |
+| Auto on, off | rose wash and border while on | `● Auto · pane 1` against `○ Auto`, `aria-pressed` |
 
 **Markdown.** The preview's allow-list. `code` and fenced blocks are mono. No image is ever loaded or shown. A link opens
 in the system browser by a click only and shows its address as its tooltip. A link whose address carries a query string or
@@ -645,29 +646,49 @@ chosen row and the card get a system-colour outline.
 
 ### 6.14 Sharing context
 
-The card in which the user shares a pane with the chat, sees what would go out and sends it. Terminal and file text
-reaches a provider only through this card: the user presses `Context…`, shares the pane, ticks what to attach, sees every
-item as a label, a size and a list of what was hidden, and sends. The page never holds the text; it sends ids and the core
-sends the text it approved. A request that a program in a pane makes with `wsh ai` asks in the card of 6.20, with the same words for findings and places.
+The card in which the user shares a pane with the chat, and the toggle `Auto` that sends it. Terminal and file text
+reaches a provider only through the consent given in this card, and goes with a message only when the pane is shared or
+the core says that sharing is not required (a model on this computer with `Models on this computer › Do not ask`). The
+user sees every sent item as a label, a size and a list of what was hidden: as the card before a hand-made offer is sent,
+and as the quiet line under the message. The page never holds the text; it sends ids and the core sends the text it approved. A request that a program in a pane makes with `wsh ai` asks in the card of 6.20, with the same words for findings and places.
 
-**The pane.** The card is about the pane the chat acts for: the last pane the user focused that shows a terminal or a
-preview (a chat, a file browser or a monitor does not count). Its number and name are in the card title (`PANE 1 · shell`,
-the name cut at 40 characters). With none, `Context…` is `aria-disabled` and a press says `Focus a terminal or preview
-pane first.` in the status line. When the user focuses another such pane the card closes and an attached offer is dropped
-(the first pane stays shared). Every message the chat sends names this pane, with context or without.
+**The pane.** The chat acts for the last pane the user focused that shows a terminal or a preview (a chat, a file browser
+or a monitor does not count). Its number is on the toggle and its number and name are in the card title (`PANE 1 · shell`,
+the name cut at 40 characters). With none, the toggle reads `● Auto · no pane`, the message goes without context and the
+palette action `Explain error` says `Focus a terminal or preview pane first.` in the status line. When the user focuses
+another such pane the card closes and an attached offer is dropped (the first pane stays shared). Every message the chat
+sends names this pane, with context or without.
 
-**Opening.** `Context…` is a hairline mono button at the left of the composer foot, the size of `Providers…`: 28 px high
-on desktop, 44 px at 640 px and narrower, with `aria-expanded` and `aria-controls` the card. A press opens the card and
-only then is the core asked (it looks up a host name when it classifies a destination), so a mount, a focus or a redraw
-asks nothing. While an offer is attached the button reads `Context · 1 item` (`Context · 2 items`, `Context · none` when
-every item is unticked), so what will go out is visible next to `Send`. The palette action `Explain error` (6.19) opens the card for the pane the chat acts for with
-one item chosen and previewed and shares nothing by itself.
+**Auto.** `Auto` is a hairline mono pill at the left of the composer foot, the size of `Providers…`: 28 px high on desktop,
+44 px at 640 px and narrower. It is a toggle per chat, on by default; a new chat in the same window starts with the choice
+made last and a reload starts it on. The page stores nothing about it. Its text is a filled dot, the word and the pane
+(`● Auto · pane 2`, `● Auto · no pane`) or a hollow dot and the word (`○ Auto`); it carries `aria-pressed`, and while it is
+on it has a rose wash and a rose border. The dot shape and the words are the second cue; the accessible name is the words
+without the dot. A press asks the core nothing and never opens the card, so a mount, a focus or a redraw asks nothing.
+
+With Auto on, a send asks the core for the state of the pane the message names. When the pane is shared, or the core says
+that sharing is not required, the page reads every kind the core lists for the pane (selection, visible screen, last
+command and output, file, preview) into one offer and sends the message with it; no card appears, and the quiet line
+under the message lists what went out. When sharing is needed and not given, the card of mode `ask` opens with the Auto
+sentence, the message is not sent, the draft stays and the status line says `Share this pane with the chat to send it
+along, or switch Auto off.` `Share pane N` shares the pane, closes the card and the status line says `Pane shared. Press
+Send again to send it along.`; the page does not send by itself. `No` closes the card and the draft stays. The card asks
+once for each pane and provider; afterwards every send attaches the pane without a new card. Content equal to what the chat
+already carried is sent without it and the status line says `This pane shows nothing new since it was last sent, so this
+message went without it.` Any other refusal of the core stops the send, keeps the draft and shows the refusal sentence
+(6.14 words of the refusals); a pane with nothing to share sends a plain message. Switching Auto off closes a card that
+Auto opened. With Auto off nothing is attached.
+
+A card that the person opened by hand (the palette action `Explain error`, 6.19) decides what goes with its message: its
+offer is sent as it is, an offer with every item unticked sends a plain message, and Auto adds nothing to it. The pick
+list of that card is the only place of `Stop sharing`. The palette action opens the card for the pane the chat acts for
+with one item chosen and previewed and shares nothing by itself.
 
 **Modes.** Each mode has words, so colour is never the only cue.
 
 | Mode | Title | Bar | Second cue and content |
 |---|---|---|---|
-| `ask` | `Consent needed` | warn | the mark `!`; "Terminal content is only sent when you share it." (for a preview pane: "The file this pane shows is only sent when you share it."), the question "Share pane 1 with Local · llama3.2? It goes to localhost:11434 (this computer).", "You still see every item before a message is sent."; buttons `Share pane 1` (solid) and `No` |
+| `ask` | `Consent needed` | warn | the mark `!`; "Terminal content is only sent when you share it." (for a preview pane: "The file this pane shows is only sent when you share it."), the question "Share pane 1 with Local · llama3.2? It goes to localhost:11434 (this computer).", "You still see every item before a message is sent." (when Auto opened the card: "With Auto on, this pane goes with every message you send, and the items are listed under each message. Switch Auto off to stop."); buttons `Share pane 1` (solid) and `No` |
 | `pick` | `Shared · pane 1 · shell`, or `Pane 1 · shell` when asking is off | hairline | one checkbox per kind the core lists (`Selection`, `Visible screen`, `Last command and its output`, `File as saved`, `Preview as saved`), "Nothing is attached yet.", buttons `Preview` (solid, disabled until a kind is ticked), `Stop sharing` (only when shared) and `Close`; with asking off the line "Asking is off for models on this computer. You still see every item." |
 | `offer` | `Goes out with your next message` | hairline | the destination at the right (host in mono and the place chip), one row per item with a ticked checkbox, the label, the size and under it the findings in words; "Nothing there: Selection." for kinds that read empty; the total, the persistence line, the validity line, the best-effort sentence; buttons `Read again` and `Discard` |
 | `blocked` | `Cannot share` | danger | the mark `!`, the reason in words (underlined), `Providers…` for `local_only` and `destination`, `Close` |
@@ -735,23 +756,25 @@ page says so when the core refuses it.
 
 **Places.** The place of a destination is one of the core's four names, written `on device`, `this computer`, `local network` or `cloud`, and `unknown place` for anything else; `local network` and `cloud` are in the warn colour and underlined.
 
-**After a send.** The offer is spent and the card closes; the sent message ends with the quiet line `Context sent:` and the
-labels, sizes and place. The share stays in the core, so the next `Context…` opens the pick list at once.
+**After a send.** The offer is spent and a card closes; the sent message ends with the quiet line `Context sent:` and the
+labels, sizes and place, drawn from what the core recorded, never from the page. The share stays in the core, so the next
+send with Auto attaches the pane without asking.
 
 **When sharing ends.** The page drops what it knows of the share, and any attached offer, when the provider, the model or
 the saved address changes (the picker, or the providers dialog), when the shared pane or the chat closes, with `Stop
 sharing`, and when a privacy setting changes. The status line says so (`Sharing ended because the provider changed. Share
-again to attach context.`) and the next `Context…` asks the core again. An offer lives five minutes; an older one is never
-sent and the status line says `The attached context expired. Add it again.` The page never reads the pane again by itself.
+again to attach context.`) and the next send with Auto asks the core again. An offer lives five minutes; an older one is never
+sent and the status line says `The attached context expired. Add it again.` The page reads a pane only when a message is
+sent with Auto on or when a card is opened by hand.
 
 **Local only.** While the switch is on, the place chip of the destination in the card and the chip `local only` in the chat
 bar say so; a destination that leaves the computer is refused and the card says why, with `Providers…`.
 
-**Keys and focus.** Opening moves the focus to the first control of the card and closing returns it to `Context…`. `Escape`
+**Keys and focus.** Opening a card by hand moves the focus to the first control of the card; a card that a send opened leaves the focus in the composer. Closing a card returns the focus to the toggle `Auto` when it was in the card. `Escape`
 inside the card closes it and is not passed on; `Space` ticks; `Enter` in the composer sends with the attached offer; every
 control carries `data-field`, so a typed character reaches no terminal.
 
-**Narrow screens (640 px and narrower).** `Context…`, every button, every checkbox row and every item row are at least
+**Narrow screens (640 px and narrower).** `Auto`, every button, every checkbox row and every item row are at least
 44 px high, every button is also at least 44 px wide, the card is at most 60 % of the viewport height and scrolls inside, and
 the composer text stays at least 16 px.
 
@@ -759,7 +782,7 @@ the composer text stays at least 16 px.
 
 **Accessibility.** The card is a `group` named `Share context`, each checkbox has its visible label, the mode word is text,
 the status line is the live region, every hairline is `--hw-line` so `contrast-high` holds, and nothing moves. Under forced
-colours the card and the place chip get a system-colour outline.
+colours the card, the place chip and the pressed toggle get a system-colour outline.
 
 ### 6.15 Approving a tool call
 
