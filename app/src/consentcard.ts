@@ -52,6 +52,8 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
   /** The card opened and has not yet put the focus on a control. */
   let wantFocus = false;
   let alive = true;
+  /** The keyboard was in the card at the last draw. */
+  let kept = false;
 
   const ticks = (): void => {
     if (current === null) return;
@@ -188,7 +190,11 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
   const render = (): void => {
     if (!alive) return;
     const m = consent.model;
-    const focusInside = current?.contains(document.activeElement) ?? false;
+    // A card that rebuilds itself while it waits for the core drops the control that had the keyboard; the keyboard then rests on
+    // the page body, and the card still counts as the place it came from until the user goes somewhere else.
+    const active = document.activeElement;
+    const focusInside = (current?.contains(active) ?? false) || (kept && (active === null || active === document.body));
+    kept = focusInside;
     const wasInside = focusInside && document.activeElement !== null;
     const key = wasInside ? ((document.activeElement as HTMLElement).dataset.key ?? "") : "";
     if (m.mode === "closed") {
@@ -198,6 +204,7 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
       signature = "";
       drawnMode = "closed";
       wantFocus = false;
+      kept = false;
       if (had && focusInside) view.focusButton();
       return;
     }
