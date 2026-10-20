@@ -149,7 +149,7 @@ parts kept.
 
 The interactive source of every image in this section is [design/haarlinie-voll.html](design/haarlinie-voll.html): one
 page with a view picker (daily, palette, new block, search, copy mode, connections, settings, shortcuts, previews, sync,
-AI chat, AI chat states, AI sidebar, drag) and a platform switch. The PNGs are rendered from it.
+AI chat, AI chat states, AI sidebar, attention marks, drag) and a platform switch. The PNGs are rendered from it.
 
 **Rules**
 
@@ -190,7 +190,8 @@ holzWave has three nested levels, and each one has its own shape and place so th
 Anything that is not one of these three is **chrome around them**: the right title-bar group (sync, AI, sidebar, palette),
 the sidebar and the status line.
 
-A workspace is shown once, as a pill in the title bar; the status line does not repeat it.
+A workspace is shown once, as a pill in the title bar; the status line does not repeat it. The attention marks of 6.23 sit inside
+the pill and the tab and change neither shape: the pill stays round with its diamond and the tab stays square and numbered.
 
 ![Shortcuts](design/shortcuts.png)
 
@@ -199,7 +200,7 @@ A workspace is shown once, as a pill in the title bar; the status line does not 
 | Area | Content |
 |---|---|
 | Title bar (32 px) | window buttons (left on macOS, right on Windows and Linux), workspace pills, `＋`; right group: sync state `☁ synced`, `✦ AI`, `▥ Sidebar` toggle, `⌘K` |
-| Tab row (28 px) | numbered tabs, a `⌁` mark on tabs with a remote connection, `＋`; a hint line right-aligned |
+| Tab row (28 px) | numbered tabs, a `⌁` mark on tabs with a remote connection, the attention marks of 6.23 (`? ▲ ! ✓`) after the name of a tab that holds a pane out of view that needs you, `＋`; a hint line right-aligned |
 | Area | the split tree of the shown tab, 1 px hairlines between panes, no gaps; the focused pane has the rose line on its header |
 | Sidebar (216 px, collapsible) | **Hosts** (state dot, protocol, reconnect counter), **Context** (Kubernetes context and namespace, Azure subscription, GAM profile), **History** (fuzzy search), **Widgets**. The column has a second form, the AI chat (280 px, 6.18), that takes its place |
 | Status line (24 px) | tmux-style segments (the workspaces are not repeated here, the pills of the title bar are their place): tabs and panes, Kubernetes context, Azure subscription, git branch, SSH count, sync state, renderer, encoding, version |
@@ -244,6 +245,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | On-device states | ![](design/ai-device-states.png) | the group `On device` of the providers dialog in three states and a chat whose pinned model is gone (6.21): the reason in words, underlined and marked, the advice, `Check again`, and the sentence that keeps the draft and uses no other provider |
 | Monitor over SSH | ![](design/monitor-ssh.png) | the system monitor of a Linux host beside its shell (6.5): header `system · talos-1 · 1 s`, the same bars, rates, uptime and eight busiest processes, read from the host |
 | Monitor states | ![](design/monitor-ssh-states.png) | the line above the bars in four states (6.5): connecting, no answer with the numbers kept dimmed, not a Linux host, and a host key that is not known yet; each warn line has words, an underline and the mark `!` |
+| Attention marks | ![](design/attention.png) | the marks of 6.23 on the tab row and the title-bar pills: `?` waits for you, `▲` rang the bell, `!` command failed, `✓` command finished, each in its status colour and never rose; the tab `2 holzkube` holds all four side by side in that order, the pill `infra` shows `! ✓` (the kinds of its tabs, once each), the shown tab and the shown workspace carry none; a floating card lists the four kinds with their words and sources |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -1580,7 +1582,10 @@ nothing to remove. Under `forced-colors` the browser gives it the system text co
 The bar buttons stay 28 px high because the mark is inside the item.
 
 **On a phone.** (Design only; the app has no phone layout yet.) The mark follows the name in the bottom tab strip and in
-the rows of the sheet, in 44 px rows, and the `Sheet` opener shows the marks of anything out of view.
+the rows of the sheet, in 44 px rows, and the `Sheet` opener shows the kinds of anything out of view, once each.
+
+![Attention marks](design/attention.png)
+![On a phone](design/attention-phone.png)
 
 **Not built.** A sound, an operating-system notification, notifications from OSC 9 and OSC 777, a switch to turn marks off,
 a count, a mark on a pane header, the chat in the sidebar column (it has no pane; the `✦ AI` button of the title bar covers

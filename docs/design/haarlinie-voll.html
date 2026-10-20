@@ -58,6 +58,15 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .tab{height:100%;padding:0 12px;display:flex;align-items:center;gap:7px;color:var(--ink3);border-right:1px solid var(--edge);white-space:nowrap}
 .tab.on{color:var(--ink);background:var(--wash);box-shadow:inset 0 -2px var(--rose)}
 .tab .x{opacity:.5}
+.attn{display:inline-flex;align-items:center;gap:3px;padding:0 3px;font-weight:700;white-space:nowrap}
+.attn .mk.ask{color:var(--info)}.attn .mk.bell{color:var(--warn)}.attn .mk.fail{color:var(--danger)}.attn .mk.done{color:var(--ok)}
+.attn-card{position:absolute;left:236px;top:84px;width:560px;padding:12px 16px;border-radius:8px;display:flex;flex-direction:column;gap:5px}
+.attn-card .lbl{margin-bottom:2px}
+.attn-card .ar{display:flex;align-items:baseline;gap:10px}.attn-card .ar .g{width:14px;text-align:center;font-weight:700;flex:none}
+.attn-card .ar .g.ask{color:var(--info)}.attn-card .ar .g.bell{color:var(--warn)}.attn-card .ar .g.fail{color:var(--danger)}.attn-card .ar .g.done{color:var(--ok)}
+.attn-card .ar .w{width:128px;flex:none;color:var(--ink)}.attn-card .ar .s{color:var(--ink3)}
+.attn-card .ln{color:var(--ink2);border-top:1px solid var(--edge);padding-top:6px;margin-top:3px}
+.bn span .attn,.it .attn{padding:0 0 0 3px;gap:1px;font-size:inherit}
 .body{display:flex;flex:1;min-height:0}
 .area{display:grid;grid-template-columns:1.25fr 1fr;grid-template-rows:1.25fr 1fr;flex:1;min-width:0;background:var(--edge);gap:1px}
 .pane{background:var(--pane);display:flex;flex-direction:column;position:relative;min-height:0}
@@ -452,6 +461,10 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <p class="lead">The request card is a bottom sheet over the full width: both buttons are 44 px targets and the text is at least 16 px, and the terminal behind it is dimmed but stays where it is. Left, the request that waits (the answer cannot have left yet); right, the same sheet after Send once, with the foot Sending… and both buttons disabled until holzWave closes the card. Shown at the scale of the mock (about half).</p>
   <div class="phones" id="phones-wsh"></div>
 
+  <h2>Attention marks on a phone</h2>
+  <p class="lead">The mark follows the name in the bottom tab strip and in the rows of the sheet. The rows, the tabs and the Sheet opener are at least 44 px high, and the opener shows the kinds of everything that is out of view, once each. Left, the strip; right, the sheet with the pills and the tabs of the shown workspace. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-attn"></div>
+
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
 </div>
@@ -500,7 +513,10 @@ NET  <span class="in">↓ 1.2 MB/s</span>  <span class="up">↑ 84 KB/s</span>
 <span class="dim">PID    NAME            CPU</span>
 4121   holzwave        <span class="wa">12.4</span></div>`;
 
-const tabs=(on)=>['1 shell','2 holzkube','3 notes.md','4 layout.rs','5 sysmon'].map((t,i)=>`<div class="tab ${i==on?'on':''}">${t}${i==1?' <span class="cy">⌁</span>':''}<span class="x">×</span></div>`).join('')+'<div class="tab dim" style="border:0">＋</div>';
+/* Attention marks (docs/design.md 6.23): the kinds a tab or a pill shows, side by side, in the fixed order ask, bell, failed, done. `m` maps a tab index to its kinds. */
+const MK={ask:'?',bell:'▲',fail:'!',done:'✓'};
+const mks=(kinds)=>kinds&&kinds.length?`<span class="attn">${kinds.map(k=>`<span class="mk ${k}">${MK[k]}</span>`).join('')}</span>`:'';
+const tabs=(on,m={})=>['1 shell','2 holzkube','3 notes.md','4 layout.rs','5 sysmon'].map((t,i)=>`<div class="tab ${i==on?'on':''}">${t}${i==1?' <span class="cy">⌁</span>':''}${mks(m[i])}<span class="x">×</span></div>`).join('')+'<div class="tab dim" style="border:0">＋</div>';
 const side=`<div class="side">
  <div class="sec"><div class="h lbl"><span>Hosts</span><span>＋</span></div><div class="i"><span class="ok">●</span>talos-1<span class="dim" style="margin-left:auto">ssh</span></div><div class="i on"><span class="wa">⟳</span>talos-2<span style="margin-left:auto">2/5</span></div><div class="i"><span class="ok">●</span>nas<span class="dim" style="margin-left:auto">wsl</span></div><div class="i"><span class="dim">○</span>build-box<span class="dim" style="margin-left:auto">docker</span></div></div>
  <div class="sec"><div class="h lbl"><span>Context</span><span>⌘⇧C</span></div><div class="i"><span class="cy">⎈</span>talos-prod</div><div class="i"><span class="dim">ns</span>kube-system</div><div class="i"><span class="in">az</span>holz-prod</div><div class="i"><span class="dim">gam</span>holzcloud.ch</div></div>
@@ -549,10 +565,10 @@ function base(v){
   const searchBar=v==='search'?`<div class="ov float row" style="left:150px;top:125px;padding:4px 8px;gap:8px;border-radius:8px"><span class="ro">⌕</span><span>layout<span class="cur"></span></span><span class="dim">3/12</span><span class="kbd">Aa</span><span class="kbd">.*</span><span class="kbd">ab</span><span class="dim">▲ ▼ ✕</span></div>`:'';
   const copyBar=v==='copy'?`<div class="ov row" style="left:0;right:0;bottom:0;height:22px;background:var(--rose-deep);color:#fff;padding:0 10px;gap:14px;font-weight:700;letter-spacing:.06em"><span>COPY MODE</span><span style="font-weight:400">v select · y yank · / search · f hints · q quit</span></div>`:'';
   return `<div class="titlebar row">${wcL}
-    <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span></div><div class="ws">◇ docs <span class="n">1</span></div><div class="ws plus">＋</div>
+    <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span>${v==='attn'?mks(['fail','done']):''}</div><div class="ws">◇ docs <span class="n">1</span>${v==='attn'?mks(['done']):''}</div><div class="ws plus">＋</div>
     <span class="fill"></span>
     <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
-  <div class="tabrow row">${tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
+  <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
   <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
@@ -835,6 +851,13 @@ const ovl={
   <div class="row" style="gap:8px;margin-top:12px"><span class="btn p">Sync now</span><span class="btn">View conflict</span></div></div>`,
  kiset:`<div class="scrim"></div><div class="ov float" style="left:220px;top:8px;width:680px;height:664px;overflow:hidden;border-radius:8px">${apBox('Saved.')}</div>`,
  keys:'KEYS',
+ attn:`<div class="ov float attn-card"><div class="lbl">Attention marks</div>
+  <div class="ar"><span class="g ask">?</span><span class="w">waits for you</span><span class="s">an approval card or a wsh ai request waits</span></div>
+  <div class="ar"><span class="g bell">▲</span><span class="w">rang the bell</span><span class="s">BEL in the output of the pane</span></div>
+  <div class="ar"><span class="g fail">!</span><span class="w">command failed</span><span class="s">OSC 133 D with a status other than 0</span></div>
+  <div class="ar"><span class="g done">✓</span><span class="w">command finished</span><span class="s">OSC 133 D with status 0 or none</span></div>
+  <div class="ln">Every kind that is present shows, side by side, in this order. One symbol per kind, no count.</div>
+  <div class="ar"><span class="s">The mark goes when you show the pane. A question that still waits comes back when you leave.</span></div></div>`,
  drag:`<div class="drop" style="left:0;top:92px;width:520px;height:270px;opacity:.9">drop here: left of shell</div><div class="drop" style="right:216px;top:60px;width:270px;height:60px;border-color:var(--wood);color:var(--wood);background:rgba(201,139,79,.14)">→ as new tab</div><div class="ov float" style="left:560px;top:420px;padding:6px 14px;border-color:var(--rose);color:var(--rose);transform:rotate(-2deg);font-weight:700">⠿ notes.md</div>
   <div class="ov float" style="left:260px;top:390px;padding:4px 10px;color:var(--ink2)">Drag out of the window: new window. Wayland: palette “Move pane to new window”.</div>`
 };
@@ -898,6 +921,7 @@ const views=[
  ['kidescribe','AI chat: command from a description','A command in a reply reaches the prompt only when you press Insert at prompt, and is never run: the line sits at the prompt of pane 1 with the cursor after it. A block that holds characters that are not shown has no button and says so, with the mark ! and in words.'],
  ['kiwsh','wsh ai asks','A program in a terminal asked the model a question: the pane that asked says it waits, and the card at the top right asks the person. Nothing leaves the computer until you press Send once in the window; the card never takes the keyboard, so typing in the terminal goes on. It shows the prompt in full, the piped text by counts and findings (never as text), and where it goes with the place chip: cloud in the warn colour with the words leaves this computer.'],
  ['kiwshstates','wsh ai request states','The card in four states: asking for a model in the cloud, asking for a model on this computer (no warn colour, nothing piped in), after Send once (the foot says Sending and both buttons are disabled), and after a refusal from holzWave with a second request waiting (the fault line has the mark ! and is underlined, and the head counts 1 of 2). Every state has words besides its colour. The four cards are drawn a little narrower than the 24 rem of the app so that they fit side by side.'],
+ ['attn','Attention marks','A pane that is out of view and needs you marks its tab and the pill of its workspace: ? waits for you, ▲ rang the bell, ! command failed, ✓ command finished, each in its status colour and never rose. Every kind that is present shows, side by side, in that order, with no count: holzkube holds all four. A pill shows the kinds of all its tabs together, once each, so infra shows ! ✓ (a failed command and a finished one) and docs shows ✓. The shown tab and the shown workspace carry no mark. The tab and the pill keep their shapes (square and numbered, round with a diamond); the title and the accessible name list the kinds in words. Nothing sounds and nothing notifies.'],
  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
@@ -1014,10 +1038,18 @@ const awPhone=(sending)=>ph('<span class="wd">◆</span> main <span class="dim">
 <span class="ro">❯</span> <span class="cur"></span>`,'',{over:`<div class="scrim" style="border-radius:22px"></div>${awCard({...awCloud,sending},'aw-sheet')}`});
 $('#phones-wsh').innerHTML=awPhone(0)+awPhone(1);
 
+/* Attention marks on a phone (docs/design.md 6.23): the strip below the terminal and the sheet. The mark follows the name; the opener shows the kinds of anything out of view, once each. */
+$('#phones-attn').innerHTML=
+ ph('<span class="wd">◆</span> main <span class="dim">· 1 shell</span>',`<span class="ro">❯</span> cargo build
+<span class="dim">   Compiling holzwave-core</span>
+<span class="ro">❯</span> <span class="cur"></span>`,`<div class="acc"><span>esc</span><span>tab</span><span>ctrl</span><span>alt</span><span>↑</span><span>↓</span></div><div class="bn"><span class="on">shell</span><span style="flex:1.4">kube${mks(['ask','bell','fail','done'])}</span><span>notes${mks(['bell'])}</span><span style="flex:1.5">Sheet${mks(['ask','bell','fail','done'])}</span></div>`)
++`<div><div class="ph1"><div class="t"><span class="lbl">Workspaces</span></div><div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra${mks(['fail','done'])}</div><div class="ws" style="font-size:10px">◇ docs${mks(['done'])}</div></div>
+ <div class="cap" style="margin-top:14px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube <span class="cy">⌁</span>${mks(['ask','bell','fail','done'])}</span></div><div class="it"><span>3 notes.md${mks(['bell'])}</span></div><div class="it dim"><span>＋ New block</span></div></div><div class="bn"><span class="on">Sheet${mks(['ask','bell','fail','done'])}</span></div></div></div>`;
+
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
 const rows=[
-['Workspaces, tabs, panes','Pills on top, tab row, tiles with dividers',B],['Pane header','State dot, type icon, title, context, ⊞ ⤢ ✕',B],['Command palette','⌘K, grouped, with shortcuts',B],
+['Workspaces, tabs, panes','Pills on top, tab row, tiles with dividers',B],['Pane header','State dot, type icon, title, context, ⊞ ⤢ ✕',B],['Command palette','⌘K, grouped, with shortcuts',B],['Attention marks','Tab row and title-bar pills: ? ▲ ! ✓ for a pane out of view',B],
 ['Scrollback, selection, copy','In the terminal, copy mode',B],['Scrollback search','Bar inside the pane',B],['Links, hints, copy mode','Hint letters, status line',B],
 ['Themes, font, UI scale','Settings › Appearance',B],['Accessibility','Settings › Accessibility',B],['Key binding editor','Shortcuts view: capture, conflicts, per platform',B],
 ['Save and restore layout','Automatic, palette',B],['Drag panes, tear-off','Drag view',pl('2.1')],
