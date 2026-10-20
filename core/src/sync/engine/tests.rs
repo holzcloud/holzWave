@@ -2070,7 +2070,11 @@ fn a_local_edit_that_cannot_be_copied_is_never_replaced_by_the_winning_download(
     // A file stands where the folder of kept copies would be.
     fs::write(b.dir.join("sync-conflicts"), b"in the way").unwrap();
     let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
-    assert!(report.downloaded.is_empty() && report.errors.len() == 1, "{report:?}");
+    assert!(report.downloaded.is_empty(), "{report:?}");
+    assert!(report.uploaded.is_empty(), "the losing edit is not sent over the newer version: {report:?}");
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].0, "settings.json", "{report:?}");
+    assert!(report.errors[0].1.contains("could not keep your copy"), "{report:?}");
     assert_eq!(text(&b, "settings.json").as_deref(), Some("b edit"), "the local edit stays where it is");
     assert!(!b.dir.join("sync-incoming").join("settings.json").exists(), "nothing is staged over it");
     // With the way cleared the next run keeps the copy and applies the download as before.
