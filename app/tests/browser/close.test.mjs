@@ -65,6 +65,7 @@ export default async function ({ page, url, errors }) {
   await pressCase(page, url);
   await shortcutCase(page, url);
   await hostileCase(page, url);
+  await blockCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -467,4 +468,26 @@ async function hostileCase(page, url) {
   assert.equal(await page.locator(".dlg-close img, .dlg-close b").count(), 0);
   await page.keyboard.press("Escape");
   assert.equal(await page.evaluate(() => window.__pwned), undefined);
+}
+
+/** A block (here a chat) has no shell: its × closes it at once, while a terminal pane next to it still asks. */
+async function blockCase(page, url) {
+  await open(page, url);
+  const view = viewOf();
+  await show(page, view);
+  await page.evaluate(async () => {
+    window.__MOCK__.on("pane_blocks", () => [
+      { pane: 2, kind: "chat", source: "local", path: "chat-1", source_label: "This computer" },
+    ]);
+    await (await import(new URL("blocks.js", location.href).href)).refreshBlocks();
+  });
+  await headClose(page, 2).waitFor();
+  await headClose(page, 2).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("close_pane").length === 1);
+  assert.deepEqual(await callsOf(page, "close_pane"), [{ pane: 2 }]);
+  assert.equal(await dialog(page).count(), 0, "a chat closes without asking about a shell");
+  await headClose(page, 1).click();
+  await dialog(page).waitFor();
+  assert.equal((await page.locator(".dlg-close .dlg-title").textContent()).startsWith("Close pane"), true);
+  await page.getByRole("button", { name: "Cancel" }).click();
 }

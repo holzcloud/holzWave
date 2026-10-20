@@ -5,7 +5,7 @@
 // Every chip and tab has a × beside it that asks before it closes (confirm.ts).
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
-import { dirtyPanes } from "./blockstate.js";
+import { dirtyPanes, paneBlocks } from "./blockstate.js";
 import { type CloseAsk, confirmClose, paneAsk, tabAsk, workspaceAsk } from "./confirm.js";
 import { el, fitNodes, loadStyles, setAttr, setText } from "./dom.js";
 import { focusInput } from "./keyboard.js";
@@ -244,7 +244,15 @@ function closePaneAfterAsking(pane: number): void {
   const view = state.view;
   if (!view?.panes.some(([id]) => id === pane)) return;
   const same = (): boolean => state.view?.panes.some(([id]) => id === pane) ?? false;
-  void closeAfterAsking(paneAsk(view, paneLabel(pane), dirtyPanes.has(pane)), same, () => call("close_pane", { pane }));
+  const ask = paneAsk(view, paneLabel(pane), dirtyPanes.has(pane));
+  // A block (a chat, a file, a preview) has no shell: nothing ends when it closes, so it goes at once, unless it holds
+  // unsaved changes or it is everything the window has.
+  if (paneBlocks.has(pane) && !ask.unsaved && ask.ends === "nothing") {
+    send(call("close_pane", { pane }));
+    focusInput();
+    return;
+  }
+  void closeAfterAsking(ask, same, () => call("close_pane", { pane }));
 }
 
 /**
