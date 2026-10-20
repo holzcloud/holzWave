@@ -122,7 +122,7 @@ async function wideCase(page, url) {
   const findings = [{ rule: "hidden_text", count: 15 }, { rule: "anthropic_key", count: 1 }];
   const items = { screen: { label: "Screen of pane 2", bytes: 2457, findings, text: "t" } };
   await columnOnA(page, url, { context: { panes: { 1: { kinds: ["selection", "screen"], items }, 2: { kinds: ["selection", "screen", "last_command"], items } } } });
-  await page.locator("#sidebar button.chat-ctx").click();
+  await openContext(page, "chat-saved-a");
   await page.waitForSelector('#sidebar .chat-consent[data-mode="ask"]');
   await assertFits(page, "the consent card, ask");
   await page.locator("#sidebar .consent-share").click();
@@ -137,7 +137,7 @@ async function wideCase(page, url) {
   await scriptTool(page, { id: "call_1", tool: "read_file", path: TOOL_PATH, result: TOOL_TEXT, answer: "Done." });
   await sendSide(page, "read my notes");
   await openCard(page, "call_1");
-  await page.locator("#sidebar button.chat-ctx").click();
+  await openContext(page, "chat-saved-a");
   await page.waitForSelector("#sidebar .chat-consent");
   const strip = await page.evaluate(() => [...document.querySelector("#sidebar .chat-cards").children].map((c) => c.className.split(" ")[0]));
   assert.deepEqual(strip, ["chat-approval", "chat-consent"], "the approval card comes first");
@@ -145,7 +145,7 @@ async function wideCase(page, url) {
 
   await columnOnA(page, url);
   await page.evaluate(() => window.__MOCK__.ai.context.fail("ai_context_state", "local_only"));
-  await page.locator("#sidebar button.chat-ctx").click();
+  await openContext(page, "chat-saved-a");
   await page.waitForSelector("#sidebar .chat-consent");
   await assertFits(page, "the consent card, blocked");
 }
@@ -353,9 +353,9 @@ async function actingCase(page, url) {
   assert.deepEqual(Object.keys(second).sort(), FIVE);
 
   // The context card names the pane of the send.
-  await openContext(page);
+  await openContext(page, "chat-saved-a");
   assert.ok((await page.locator("#sidebar .chat-consent").textContent()).includes("pane 1"), "the card names the acting pane");
-  await page.locator("button.chat-ctx").click();
+  await page.locator("#sidebar .consent-no").click();
 
   // Pane 2 becomes a Files block and takes the focus: the chat still acts for the last terminal that had it.
   await page.evaluate(() => { window.__BLOCKS = [{ pane: 2, kind: "files", source: "local", path: "/", source_label: "This computer" }]; });

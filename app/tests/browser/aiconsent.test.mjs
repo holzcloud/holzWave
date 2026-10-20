@@ -1,4 +1,4 @@
-// The consent card of the chat (docs/design.md section 6.14): a press on `Context…` asks the core once, the pane is shared,
+// The consent card of the chat (docs/design.md section 6.14), opened by hand as the palette action Explain error opens it: it asks the core once, the pane is shared,
 // the screen is previewed into a chip and the message goes out with the offer id and the picked number only. The page sends
 // ids and never text, and a mock that plays the core is held to the shell's golden.
 import assert from "node:assert/strict";
@@ -38,7 +38,7 @@ async function chatBesidePane1(page, url, extra = {}) {
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profiles").length >= 1);
 }
 
-/** Press `Context…`, share pane 1 when asked, tick the screen and preview it; leaves the card in the mode `offer`. */
+/** Open the card by hand, share pane 1 when asked, tick the screen and preview it; leaves the card in the mode `offer`. */
 async function attachScreen(page) {
   await openContext(page);
   if ((await page.locator(".chat-consent").getAttribute("data-mode")) === "ask") await page.locator(".consent-share").click();
@@ -63,10 +63,8 @@ async function traceCase(page, url) {
   await page.locator(".chat-input").fill("");
   await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
   assert.deepEqual(await ctxCalls(page), [], "no context command before the first press");
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context…");
-  assert.equal(await page.locator("button.chat-ctx").getAttribute("aria-expanded"), "false");
 
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector('.chat-cards .chat-consent[data-mode="ask"]');
   const states = await calls(page, "ai_context_state");
   assert.equal(states.length, 1);
@@ -81,7 +79,6 @@ async function traceCase(page, url) {
   assert.ok(text.includes("Consent needed"), text);
   assert.ok(text.includes("Share pane 1"), text);
   assert.equal(await page.evaluate(() => document.activeElement?.className), "consent-share", "the focus is on the first control");
-  assert.equal(await page.locator("button.chat-ctx").getAttribute("aria-expanded"), "true");
 
   await page.locator(".consent-share").click();
   await page.waitForSelector('.chat-consent[data-mode="pick"]');
@@ -105,7 +102,6 @@ async function traceCase(page, url) {
   assert.equal(await item.locator(".consent-label").textContent(), "Screen of pane 1");
   assert.equal(await item.locator(".consent-size").textContent(), "2.4 KiB");
   assert.equal(await item.locator("input").isChecked(), true);
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context · 1 item");
 
   await sendText(page, "explain");
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 1);
@@ -123,7 +119,6 @@ async function traceCase(page, url) {
   assert.ok(note.startsWith("Context sent"), note);
   assert.ok(note.includes("Screen of pane 1"), note);
   assert.equal(await page.locator(".chat-cards .chat-consent").count(), 0, "the card is gone");
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context…");
   assert.equal(await page.evaluate(() => window.__MOCK__.ai.context.offers.length), 0, "the offer is spent");
   await settled(page, 2);
 
@@ -286,7 +281,6 @@ async function askCase(page, url) {
   await page.locator(".consent-no").click();
   assert.equal(await page.locator(".chat-consent").count(), 0);
   assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-ctx", "the focus returns to the button");
-  assert.equal(await page.locator("button.chat-ctx").getAttribute("aria-expanded"), "false");
   assert.equal((await calls(page, "ai_context_share")).length, 0, "No shares nothing");
   assert.equal((await calls(page, "ai_context_state")).length, 1);
 
@@ -371,7 +365,6 @@ async function switchCase(page, url) {
   assert.ok((await status(page)).startsWith("Sharing ended because the provider changed"), await status(page));
   assert.equal(await page.locator(".chat-status").getAttribute("data-kind"), "note");
   assert.equal(await ctxCount(page), calls1, "no context command by the page itself");
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context…");
   await openContext(page);
   const states = await calls(page, "ai_context_state");
   assert.equal(states[states.length - 1].profile, "other-1");
@@ -419,7 +412,7 @@ async function switchCase(page, url) {
   assert.ok((await status(page)).startsWith("A privacy setting changed"), await status(page));
   assert.equal(await ctxCount(page), calls4);
 
-  // The acting pane closes: the button cannot be used and a press says why.
+  // The acting pane closes: the toggle says there is no pane, the card cannot be opened and a message goes out plain.
   await page.evaluate(() => {
     window.__MOCK__.ai.context.closePane(1);
     const v = window.__MOCK__.view();
@@ -434,12 +427,16 @@ async function switchCase(page, url) {
     window.__MOCK__.ai.context.closePane(2);
     window.__MOCK__.emit("layout", window.__MOCK__.view());
   });
-  await page.waitForFunction(() => document.querySelector("button.chat-ctx")?.getAttribute("aria-disabled") === "true");
+  await page.locator("button.chat-ctx").click();
+  await page.waitForFunction(() => document.querySelector("button.chat-ctx")?.textContent === "● Auto · no pane");
+  assert.equal(await page.locator("button.chat-ctx").getAttribute("aria-pressed"), "true");
   const calls5 = await ctxCount(page);
-  await page.locator("button.chat-ctx").click({ force: true });
-  await page.waitForFunction(() => document.querySelector(".chat-status")?.textContent === "Focus a terminal or preview pane first.");
-  assert.equal(await ctxCount(page), calls5, "nothing was asked");
+  assert.equal(await openContext(page), "Focus a terminal or preview pane first.");
   assert.equal(await page.locator(".chat-consent").count(), 0);
+  await sendText(page, "no pane");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 2);
+  assert.deepEqual(Object.keys((await calls(page, "ai_send"))[1]), ["conversation", "text", "pane", "profile", "model"]);
+  assert.equal(await ctxCount(page), calls5, "nothing was asked");
 }
 
 async function staleCase(page, url) {
@@ -453,7 +450,6 @@ async function staleCase(page, url) {
   assert.equal(await page.locator(".chat-cards").evaluate((n) => n.children.length), 0, "the card is closed");
   assert.equal(await page.locator(".chat-msg").count(), 0, "no message was added");
   assert.ok((await status(page)).length > 10, await status(page));
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context…");
 
   // An offer older than its time is not sent: the page checks it before the send.
   await page.evaluate(() => (window.__MOCK__.ai.context.ttl = 1));
@@ -500,7 +496,7 @@ async function staleCase(page, url) {
   // Every item unticked sends a plain message.
   await attachScreen(page);
   await page.locator('li.consent-item[data-id="1"] input').uncheck();
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context · none");
+  assert.equal(await page.locator("li.consent-item input:checked").count(), 0, "nothing is ticked");
   await page.locator(".chat-input").press("Enter");
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 2);
   assert.deepEqual(Object.keys((await calls(page, "ai_send"))[1]), ["conversation", "text", "pane", "profile", "model"]);
@@ -516,7 +512,7 @@ async function staleCase(page, url) {
   await page.locator(".chat-input").press("Enter");
   await page.waitForFunction(() => document.querySelector(".chat-status")?.dataset.kind === "error");
   assert.equal(await page.locator(".chat-consent").getAttribute("data-mode"), "offer", "the offer is kept");
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context · 1 item");
+  assert.equal(await page.locator("li.consent-item input:checked").count(), 1, "the item is ticked");
   await page.locator(".chat-send").click();
   await page.waitForFunction(() => document.querySelector(".chat-send")?.dataset.mode === "send");
 
@@ -542,7 +538,7 @@ async function keysCase(page, url, engine) {
   // WebKit on macOS visits buttons with Option+Tab only, as Safari does by default.
   const tab = () => page.keyboard.press(engine === "webkit" && process.platform === "darwin" ? "Alt+Tab" : "Tab");
   await chatBesidePane1(page, url);
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector('.chat-consent[data-mode="ask"]');
   assert.equal(await page.evaluate(() => document.activeElement?.className), "consent-share", "the first control has the focus");
   assert.equal(await page.locator(".chat-consent").getAttribute("role"), "group");
@@ -579,7 +575,7 @@ async function keysCase(page, url, engine) {
   await page.locator('label.consent-kind[data-kind="selection"] input').uncheck();
   await page.locator(".chat-input").press("Enter");
   await page.waitForFunction(() => document.querySelector(".chat-send")?.dataset.mode === "stop");
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector(".chat-consent:not([aria-busy])");
   await page.locator('label.consent-kind[data-kind="screen"] input').focus();
   await page.keyboard.press("Escape");
@@ -589,13 +585,12 @@ async function keysCase(page, url, engine) {
   assert.equal(await page.locator(".chat-send").getAttribute("data-mode"), "stop");
 
   // `Escape` in the composer keeps the chat's own behaviour: the running reply stops, the card stays.
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector(".chat-consent:not([aria-busy])");
   await page.locator(".chat-input").focus();
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_cancel").length === 1);
   assert.equal(await page.locator(".chat-consent").count(), 1, "the card stays");
-  assert.equal(await page.locator("button.chat-ctx").getAttribute("aria-expanded"), "true");
 }
 
 /** The sentences of the page for the core's reasons, as the design record has them. */
@@ -620,7 +615,7 @@ async function wordsCase(page, url) {
   await chatBesidePane1(page, url);
   for (const reason of CONSENT.reasons) {
     await page.evaluate(([r]) => window.__MOCK__.ai.context.fail("ai_context_state", r, "words of the core"), [reason]);
-    await page.locator("button.chat-ctx").click();
+    await openContext(page);
     await page.waitForSelector('.chat-consent[data-mode="blocked"]');
     assert.equal(await page.locator('.chat-consent p.consent-text[data-kind="error"]').textContent(), REASON_SENTENCES[reason], reason);
     const providers = await page.locator(".consent-providers").count();
@@ -629,7 +624,7 @@ async function wordsCase(page, url) {
   }
   // A reason the table does not know is shown in the core's own text.
   await page.evaluate(() => window.__MOCK__.ai.context.fail("ai_context_state", "from_a_newer_core", "the core's own words"));
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector('.chat-consent[data-mode="blocked"]');
   assert.equal(await page.locator(".chat-consent p.consent-text").textContent(), "the core's own words");
   await page.locator(".consent-close").click();
@@ -645,7 +640,7 @@ async function wordsCase(page, url) {
 
   // `local_only`: `Providers…` opens the dialog and the keyboard comes back to the composer.
   await page.evaluate(() => window.__MOCK__.ai.context.fail("ai_context_state", "local_only"));
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector(".consent-providers");
   await page.locator(".consent-providers").click();
   await openDialog(page);
@@ -664,7 +659,7 @@ async function wordsCase(page, url) {
     ["mars", "unknown place", "false", "localhost:11434"],
   ]) {
     await chatBesidePane1(page, url, { profiles: [{ ...PROFILE, locality }] });
-    await page.locator("button.chat-ctx").click();
+    await openContext(page);
     await page.waitForSelector('.chat-consent[data-mode="ask"]');
     assert.equal(await page.locator(".consent-place").textContent(), place, locality);
     assert.equal(await page.locator(".consent-place").getAttribute("data-leaves"), leaves, locality);
@@ -673,7 +668,7 @@ async function wordsCase(page, url) {
   }
   // A destination that leaves the computer is in the warn colour, and the word is underlined: a second cue.
   await chatBesidePane1(page, url, { profiles: [{ ...PROFILE, locality: "cloud" }] });
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector(".consent-place");
   const warn = await page.evaluate(() => {
     const chip = getComputedStyle(document.querySelector(".consent-place"));
@@ -705,7 +700,7 @@ async function localOnlyCase(page, url) {
 
   // With the switch on, a destination that leaves the computer cannot be shared.
   await choose(page, "other-1");
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector('.chat-consent[data-mode="blocked"]');
   assert.equal(await page.locator("p.consent-text").textContent(), REASON_SENTENCES.local_only);
   assert.equal(await page.locator(".consent-providers").count(), 1);
@@ -723,8 +718,8 @@ async function localOnlyCase(page, url) {
 }
 
 /** Open the card, share when asked, tick `kinds` and preview them; leaves the card in the mode `offer`. */
-async function attachKinds(page, kinds) {
-  await openContext(page);
+async function attachKinds(page, kinds, conversation = "chat-mock-1") {
+  await openContext(page, conversation);
   if ((await page.locator(".chat-consent").getAttribute("data-mode")) === "ask") await page.locator(".consent-share").click();
   await page.waitForSelector('.chat-consent[data-mode="pick"]');
   for (const kind of kinds) await page.locator(`label.consent-kind[data-kind="${kind}"] input`).check();
@@ -762,9 +757,9 @@ async function reportCase(page, url) {
   // Unticking an item updates the total and the button.
   await page.locator('li.consent-item[data-id="1"] input').uncheck();
   assert.equal(await page.locator(".consent-total").textContent(), "0 items · 0 B");
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context · none");
+  assert.equal(await page.locator("li.consent-item input:checked").count(), 0);
   await page.locator('li.consent-item[data-id="1"] input').check();
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context · 1 item");
+  assert.equal(await page.locator("li.consent-item input:checked").count(), 1);
   await page.locator(".consent-discard").click();
 
   // The last command is offered only when the core lists it.
@@ -812,7 +807,6 @@ async function reportCase(page, url) {
   await page.waitForSelector('.chat-consent[data-mode="blocked"]');
   assert.equal(await page.locator("p.consent-text").textContent(), "The answer was not understood.");
   assert.equal(await page.locator("li.consent-item").count(), 0, "no part of the offer is shown");
-  assert.equal(await page.locator("button.chat-ctx").textContent(), "Context…");
 }
 
 async function noteCase(page, url) {
@@ -916,12 +910,12 @@ const targets = (page) =>
 /** Walk the card through its four modes and measure each. */
 async function everyMode(page, check) {
   await page.evaluate(() => window.__MOCK__.ai.context.fail("ai_context_state", "denied"));
-  await page.locator("button.chat-ctx").click();
+  await openContext(page, "chat-x");
   await page.waitForSelector('.chat-consent[data-mode="blocked"]');
   await check("blocked", await targets(page));
   await page.locator(".consent-close").click();
   await page.evaluate(() => window.__MOCK__.ai.context.fail("ai_context_state", null));
-  await page.locator("button.chat-ctx").click();
+  await openContext(page, "chat-x");
   await page.waitForSelector('.chat-consent[data-mode="ask"]');
   await check("ask", await targets(page));
   await page.locator(".consent-share").click();
@@ -958,7 +952,7 @@ async function narrowCase(page, url) {
     pane.kinds = ["file"];
     pane.items.file = items;
   }, many);
-  await attachKinds(page, ["file"]);
+  await attachKinds(page, ["file"], "chat-x");
   const tall = await page.locator(".chat-cards").evaluate((n) => ({ scroll: n.scrollHeight, client: n.clientHeight }));
   assert.ok(tall.scroll > tall.client, `the card scrolls (${tall.scroll} in ${tall.client})`);
   assert.equal((await targets(page)).inside, true);
@@ -984,7 +978,7 @@ async function modesCase(page, url, engine) {
   // WebKit on macOS visits buttons with Option+Tab only, as Safari does by default.
   const back = () => page.keyboard.press(engine === "webkit" && process.platform === "darwin" ? "Shift+Alt+Tab" : "Shift+Tab");
   await openSized(page, url, { width: 1000, height: 640 });
-  await page.locator("button.chat-ctx").click();
+  await openContext(page, "chat-x");
   await page.waitForSelector('.chat-consent[data-mode="ask"]');
   const root = (add, name) => page.evaluate(([a, n]) => document.documentElement.classList[a ? "add" : "remove"](n), [add, name]);
   const edge = () => page.locator(".chat-consent").evaluate((n) => getComputedStyle(n).borderTopColor);

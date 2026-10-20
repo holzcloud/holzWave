@@ -76,9 +76,9 @@ async function releaseBlockCase(page, url) {
   assert.equal(await release(page, "chat-saved-b"), false, "a chat block still holds it");
 }
 
-/** Press `Context…`, share the pane when asked, tick the screen and preview it; leaves the card in the mode `offer`. */
-async function attachScreen(page) {
-  await openContext(page);
+/** Open the card by hand, share the pane when asked, tick the screen and preview it; leaves the card in the mode `offer`. */
+async function attachScreen(page, conversation = "chat-saved-a") {
+  await openContext(page, conversation);
   if ((await page.locator("#sidebar .chat-consent").getAttribute("data-mode")) === "ask") await page.locator("#sidebar .consent-share").click();
   await page.waitForSelector('#sidebar .chat-consent[data-mode="pick"]');
   await page.locator('#sidebar label.consent-kind[data-kind="screen"] input').check();
@@ -96,13 +96,13 @@ async function isolationCase(page, url) {
   await show(page, "chat-saved-a", 2);
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profiles").length >= 1);
   await attachScreen(page);
-  assert.equal(await page.locator("#sidebar button.chat-ctx").textContent(), "Context · 1 item");
+  assert.equal(await page.locator("#sidebar li.consent-item").count(), 1);
   const before = (await ctxCalls(page)).length;
 
   // Another chat shows no card, no offer and no draft of the first, and its message leaves with the five keys only.
   await show(page, "chat-saved-b", 2);
   assert.equal(await page.locator("#sidebar .chat-consent").count(), 0, "no card");
-  assert.equal(await page.locator("#sidebar button.chat-ctx").textContent(), "Context…");
+  assert.equal(await page.locator("#sidebar button.chat-ctx").textContent(), "○ Auto");
   assert.equal(await page.locator("#sidebar .chat-input").inputValue(), "");
   assert.equal((await ctxCalls(page)).length, before, "the switch makes no context call");
   await sendText(page, "a question for the second chat");
@@ -112,10 +112,10 @@ async function isolationCase(page, url) {
   assert.equal(sent.conversation, "chat-saved-b");
   await settledAt(page, 4);
 
-  // The first chat was let go with its offer: no card and `Context…` on return, and its message has five keys too.
+  // The first chat was let go with its offer: no card and the toggle as it was on return, and its message has five keys too.
   await show(page, "chat-saved-a", 2);
   assert.equal(await page.locator("#sidebar .chat-consent").count(), 0);
-  assert.equal(await page.locator("#sidebar button.chat-ctx").textContent(), "Context…");
+  assert.equal(await page.locator("#sidebar button.chat-ctx").textContent(), "○ Auto");
   assert.equal((await ctxCalls(page)).length, before, "the return makes no context call");
   await sendText(page, "back in the first chat");
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_send").length === 2);
@@ -130,10 +130,10 @@ async function isolationCase(page, url) {
   await show(page, "chat-saved-b", 4);
   assert.equal(await page.locator("#sidebar .chat-input").inputValue(), "");
   assert.equal(await page.locator("#sidebar .chat-consent").count(), 0);
-  assert.equal(await page.locator("#sidebar button.chat-ctx").textContent(), "Context…");
+  assert.equal(await page.locator("#sidebar button.chat-ctx").textContent(), "○ Auto");
   await show(page, "chat-saved-a", 4);
   assert.equal(await page.locator("#sidebar .chat-input").inputValue(), "keep this");
-  assert.equal(await page.locator("#sidebar button.chat-ctx").textContent(), "Context · 1 item");
+  assert.equal(await page.locator("#sidebar li.consent-item").count(), 1);
 }
 
 const CANARY = "zq-chat-title-<img src=x onerror=window.__XSS=1>-6e2d";

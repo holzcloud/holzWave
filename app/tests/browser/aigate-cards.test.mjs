@@ -4,7 +4,7 @@
 // the text, `window.__XSS` unset, no polluted prototype, a page that still answers.
 import assert from "node:assert/strict";
 import {
-  ASK, PROFILE, VIEW_P1, askCard, askView, boot, closeAsk, diffOf, emitAsk, openAi, openCard, payloadOf, scriptCommand, scriptReply,
+  ASK, PROFILE, VIEW_P1, askCard, askView, boot, closeAsk, diffOf, emitAsk, openAi, openCard, openContext, payloadOf, scriptCommand, scriptReply,
   scriptTool, scriptWrite, sendText, tickClock,
 } from "./ai-lib.mjs";
 import { HOSTILE, PAGE_ADDED, armGuards, finish, surface, surfaceContext } from "./aigate-lib.mjs";
@@ -70,7 +70,7 @@ async function consentRun({ page, url }, probe) {
   for (let round = 0; round < 5; round += 1) {
     const at = round * 3;
     await answers(stateOf(S[at % 14], S[(at + 1) % 14], S[(at + 2) % 14]), offerOf(0, 1));
-    await page.locator("button.chat-ctx").click();
+    await openContext(page);
     await page.waitForSelector('.chat-consent[data-mode="ask"]');
     const put = slice(at, 3);
     const cut = put.includes("long-line") ? ["long-line"] : [];
@@ -81,7 +81,7 @@ async function consentRun({ page, url }, probe) {
 
   // The items of an offer: eight labels, then six; each with a finding whose rule is a string.
   await answers(stateOf(S[0], S[1], S[2]), offerOf(0, 8));
-  await page.locator("button.chat-ctx").click();
+  await openContext(page);
   await page.waitForSelector('.chat-consent[data-mode="ask"]');
   await page.locator(".consent-share").click();
   await page.waitForSelector('.chat-consent[data-mode="pick"]');

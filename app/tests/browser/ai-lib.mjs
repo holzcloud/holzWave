@@ -152,6 +152,9 @@ export async function boot(
  */
 export async function openContext(page, conversation = "chat-mock-1") {
   const sentence = await page.evaluate(async (id) => {
+    // The keyboard rests on the toggle of the chat, as it did when a person last pressed there; the card then takes it for its
+    // first control.
+    document.querySelector("button.chat-ctx")?.focus();
     const chat = await import(new URL("chat.js", location.href).href);
     return chat.attachContext(id, []);
   }, conversation);

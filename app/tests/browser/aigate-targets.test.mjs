@@ -3,7 +3,7 @@
 // by a scan of every visible control of the chat, and an exemption is named with its reason in `TARGET_EXEMPT`.
 import assert from "node:assert/strict";
 import {
-  OTHER_PROFILE, PROFILE, VIEW3, boot, chatBlock, openCard, scriptCommand, scriptReply, scriptTool, scriptWrite, seedFile, sendText, setPrivacy,
+  OTHER_PROFILE, PROFILE, VIEW3, boot, chatBlock, openCard, openContext, scriptCommand, scriptReply, scriptTool, scriptWrite, seedFile, sendText, setPrivacy,
   tickClock,
 } from "./ai-lib.mjs";
 import { TARGET_EXEMPT, WINDOWS, measure } from "./aigate-lib.mjs";
@@ -72,7 +72,7 @@ async function chatState(page, url, window, found) {
 /** The consent card in its three modes. */
 async function consentState(page, url, window, found) {
   await open(page, url, window);
-  await page.locator("button.chat-ctx").click();
+  await openContext(page, "chat-x");
   await page.waitForSelector('.chat-consent[data-mode="ask"]');
   await sweep(page, window, found, "consent: ask", [".consent-share", ".consent-no"]);
   await page.locator(".consent-share").click();

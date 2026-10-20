@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  OTHER_PROFILE, PROFILE, TOOL_PATH, TOOL_TEXT, VIEW3, VIEW_P1, boot, calls, chatBlock, decisionCalls, openAi, openCard, reloadKeeping,
+  OTHER_PROFILE, PROFILE, TOOL_PATH, TOOL_TEXT, VIEW3, VIEW_P1, boot, calls, chatBlock, decisionCalls, openAi, openCard, openContext, reloadKeeping,
   scriptTool, sendText, tickClock,
 } from "./ai-lib.mjs";
 
@@ -85,11 +85,10 @@ async function traceCase(page, url) {
   assert.deepEqual(await decisionCalls(page), []);
 
   // With the consent card open as well the approval card comes first, and closing the other leaves it.
-  await page.locator("button.chat-ctx").click();
-  await page.waitForSelector(".chat-consent");
+  await openContext(page);
   const strip = await page.evaluate(() => [...document.querySelector(".chat-cards").children].map((c) => c.className.split(" ")[0]));
   assert.deepEqual(strip, ["chat-approval", "chat-consent"]);
-  await page.locator("button.chat-ctx").click();
+  await page.locator(".consent-no").click();
   await page.waitForFunction(() => document.querySelector(".chat-consent") === null);
   assert.equal(await page.locator("section.chat-approval").count(), 1, "the approval card stays");
 
@@ -452,14 +451,12 @@ async function keysCase(page, url, engine) {
   await scriptTool(page, { id: "call_4", tool: "read_file", path: TOOL_PATH, answer: "Done." });
   await sendText(page, "fourth");
   await openCard(page, "call_4");
-  await page.locator("button.chat-ctx").click();
-  await page.waitForSelector(".chat-consent");
+  await openContext(page);
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => document.querySelector(".chat-consent") === null);
   assert.equal(await page.locator("section.chat-approval").count(), 1, "Escape in the consent card leaves the approval card");
   assert.equal((await decisionCalls(page)).length, 3);
-  await page.locator("button.chat-ctx").click();
-  await page.waitForSelector(".chat-consent");
+  await openContext(page);
   await page.locator(".approval-payload").focus();
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_decide").length === 4);
