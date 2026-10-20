@@ -7,9 +7,15 @@
 // The PNG uses Plus Jakarta Sans (SIL Open Font License 1.1). Pass a CSS file with
 // @font-face rules (fonts embedded as data URLs) as the first argument, or install
 // the font locally.
-const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+// `playwright`, else the playwright-core of app/node_modules (the one the app's tests pin).
+let chromium;
+try {
+  ({ chromium } = require('playwright'));
+} catch {
+  ({ chromium } = require(path.join(__dirname, '..', '..', 'app', 'node_modules', 'playwright-core')));
+}
 
 const dir = __dirname;
 const svg = fs.readFileSync(path.join(dir, 'banner.svg'), 'utf8');
