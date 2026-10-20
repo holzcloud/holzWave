@@ -61,7 +61,7 @@
  <!-- name and tagline -->
  <text x="404" y="262" class="title" fill="#F6EFE6">holzWave</text>
  <text x="160" y="410" class="tagline" fill="#D9C9D6">A terminal for every screen —</text>
- <text x="160" y="468" class="tagline" fill="#D9C9D6">macOS, Windows, Linux, iOS and Android.</text>
+ <text x="160" y="468" class="tagline" fill="#D9C9D6">macOS, Windows and Linux today, iOS and Android planned.</text>
 
  <!-- tags -->
   <rect x="160" y="520" width="278" height="72" rx="36" fill="#FF8FB8"/>
