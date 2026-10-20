@@ -92,7 +92,7 @@ default.
 | Divider | 1 px hairline, 8 px hit area, rose on hover, `col-resize` / `row-resize` |
 | Selection | rose at 35 % over the cell background, keeps glyph contrast |
 | Cursor | block, rose; hollow when the pane is unfocused; bar and underline per DECSCUSR |
-| Status bar | mono labels, uppercase: version, renderer, pane count, workspace |
+| Status bar | mono labels, uppercase: version, renderer, encoding and pane count, plus the copy-mode word and a notice while they last; no workspace segment (the workspaces are the pills of the title bar) |
 | Overlays | command palette, theme picker, connection manager, and the request card of `wsh ai` (6.20): 24 px radius, the only elements with a shadow; the request card has no backdrop and never takes the keyboard |
 | Empty state | the logo's plank with one line of text; no illustrations |
 | Chat pane | a pane of its own kind (6.12): header `chat`, a bar with the provider chip, a transcript, a status line and a composer; flat and hairline, the only shadow is the provider sheet on a phone |
@@ -118,7 +118,7 @@ while the app runs.
 | Preference | OS signal the web view reports | Effect |
 |---|---|---|
 | Motion | `prefers-reduced-motion` | no chrome transitions (root class `motion-reduce`); the terminal grid never moves |
-| Contrast | `prefers-contrast: more` and `forced-colors` | hairlines use `--hw-ink-3`, dim text uses `--hw-ink-2`, the focus line is 2 px, the shown status segment gets a 2 px outline (root class `contrast-high`); under forced colours the chrome uses system colours |
+| Contrast | `prefers-contrast: more` and `forced-colors` | hairlines use `--hw-ink-3`, dim text uses `--hw-ink-2`, the focus line is 2 px (root class `contrast-high`); under forced colours the chrome uses system colours |
 | Cursor blink | none of its own: it follows reduced motion | a cursor the program asked to blink does so with a 530 ms phase, unless the setting is `off`, or `system` with reduced motion; the phase restarts on output and on every key |
 | UI scale | **none on macOS**; Windows: the Text size setting; Linux: GNOME's `text-scaling-factor` (read by the shell, plan 02.2-09) | the user's `ui_scale` (75 to 200 %) times the OS factor, for the chrome only, and the font size actions; see below |
 
@@ -162,13 +162,13 @@ AI chat, AI chat states, AI sidebar, drag) and a platform switch. The PNGs are r
    `--hw-edge` line. Only floating layers (command palette) have a shadow and a 8 px radius.
 4. **Rose is rationed.** It is state, never decoration: it says where the user is and what the pointer is about to
    act on. It appears for the prompt chevron, the cursor, text selection, the pane focus line (the focused pane's top
-   line), the active tab marker (wash, underline and the workspace diamond), the active status segment,
+   line), the active tab marker (wash, underline and the workspace diamond),
    divider hover, button hover wash (bar, dialog and search buttons), the selected palette row (wash and left bar),
    the focus ring of the palette and search inputs, the link underline (a link under the pointer with the modifier
    held), hint labels, the key binding capture row, and the accent colour of settings checkboxes and radios.
    Everything else is warm grey.
-5. **tmux-style status line.** A bottom strip of segments (`workspace`, panes, renderer, encoding, version); the
-   active workspace is a solid rose segment.
+5. **tmux-style status line.** A bottom strip of segments (panes, renderer, encoding, version), with the mode word and
+   the notice taking a segment while they last. It does not repeat the workspaces: they are the pills of the title bar.
 6. **Numbered tabs.** Tabs carry their number (`1 shell`) so `⌘1…9` is discoverable.
 7. **Command palette first.** Actions are reachable by name with a fuzzy palette (`⌘K`); the chrome stays small.
 8. **Responsive by layout, not by style.** On a phone the same `View` shows one pane per screen, the tab strip
@@ -190,6 +190,8 @@ holzWave has three nested levels, and each one has its own shape and place so th
 Anything that is not one of these three is **chrome around them**: the right title-bar group (sync, AI, sidebar, palette),
 the sidebar and the status line.
 
+A workspace is shown once, as a pill in the title bar; the status line does not repeat it.
+
 ![Shortcuts](design/shortcuts.png)
 
 ### 6.2 Anatomy
@@ -200,7 +202,7 @@ the sidebar and the status line.
 | Tab row (28 px) | numbered tabs, a `⌁` mark on tabs with a remote connection, `＋`; a hint line right-aligned |
 | Area | the split tree of the shown tab, 1 px hairlines between panes, no gaps; the focused pane has the rose line on its header |
 | Sidebar (216 px, collapsible) | **Hosts** (state dot, protocol, reconnect counter), **Context** (Kubernetes context and namespace, Azure subscription, GAM profile), **History** (fuzzy search), **Widgets**. The column has a second form, the AI chat (280 px, 6.18), that takes its place |
-| Status line (24 px) | tmux-style segments: workspace (solid), tabs and panes, Kubernetes context, Azure subscription, git branch, SSH count, sync state, renderer, encoding, version |
+| Status line (24 px) | tmux-style segments (the workspaces are not repeated here, the pills of the title bar are their place): tabs and panes, Kubernetes context, Azure subscription, git branch, SSH count, sync state, renderer, encoding, version |
 
 The AI chat is a pane (6.12). Its second form, in the sidebar's column, replaces the sidebar while it is shown (6.18): the
 palette entry `AI chat in the sidebar` and `✦ AI` (when the tab has no chat pane) turn the shown column into the chat, and

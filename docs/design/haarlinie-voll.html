@@ -78,7 +78,6 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .input{margin:4px 12px;border:1px solid var(--edge);border-radius:6px;padding:2px 8px;color:var(--ink3)}
 .status{height:24px;background:var(--ground2);border-top:1px solid var(--edge);flex:none;font-size:10px}
 .status span{padding:0 10px;height:100%;display:flex;align-items:center;gap:5px;color:var(--ink3);letter-spacing:.08em;text-transform:uppercase;border-right:1px solid var(--edge);white-space:nowrap}
-.status span.on{background:var(--rose-deep);color:#fff;border:0}
 .status span:last-child{border:0}
 .bar{display:flex;gap:2px;height:8px;margin:2px 0}
 .bar i{flex:1;background:var(--edge);border-radius:1px}.bar i.a{background:var(--ok)}.bar i.b{background:var(--warn)}
@@ -507,7 +506,7 @@ const side=`<div class="side">
  <div class="sec"><div class="h lbl"><span>Context</span><span>⌘⇧C</span></div><div class="i"><span class="cy">⎈</span>talos-prod</div><div class="i"><span class="dim">ns</span>kube-system</div><div class="i"><span class="in">az</span>holz-prod</div><div class="i"><span class="dim">gam</span>holzcloud.ch</div></div>
  <div class="sec"><div class="h lbl"><span>History</span><span>⌃R</span></div><div class="input">kube<span class="cur"></span></div><div class="i pre">kubectl get nodes</div><div class="i pre">kubectl logs -f etcd…</div><div class="i pre dim">talosctl dashboard</div></div>
  <div class="sec" style="border:0"><div class="h lbl"><span>Widgets</span><span>＋</span></div><div class="i"><span class="ro">◧</span>Notes</div><div class="i"><span class="ro">◧</span>Pomodoro</div></div></div>`;
-const status=(extra='')=>`<div class="status row"><span class="on">◆ main</span><span>5 tabs · 5 panes</span><span class="cy">⎈ talos-prod/kube-system</span><span class="in">az holz-prod</span><span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta1</span></div>`;
+const status=(extra='')=>`<div class="status row"><span>5 tabs · 5 panes</span><span class="cy">⎈ talos-prod/kube-system</span><span class="in">az holz-prod</span><span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta1</span></div>`;
 
 
 const OSK={mac:{n:'⌘',s:'⇧',a:'⌥'},win:{n:'Ctrl',s:'Shift',a:'Alt'},lin:{n:'Ctrl',s:'Shift',a:'Alt'}};
