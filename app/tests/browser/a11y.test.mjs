@@ -140,8 +140,6 @@ async function contrastCase(page, url) {
   assert.equal(high.head, "2px", "the focused pane's top line is 2 px");
   assert.equal(high.bar, await token(page, "--hw-ink-3"), "edges use the ink-3 token");
   assert.equal(high.status, await token(page, "--hw-ink-3"));
-  const outline = await page.evaluate(() => getComputedStyle(document.querySelector("#status .seg.ws.active")).outlineStyle);
-  assert.notEqual(outline, "none", "the shown status segment has a border of its own in higher contrast");
 
   // The setting beats the OS in both directions.
   const normalView = AUBERGINE();
@@ -202,14 +200,18 @@ function ratio(a, b) {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-/** The text of the shown status segment measures at least 4.5:1 on its fill, on every theme and without a core. */
+/** The text of the shown workspace pill measures at least 4.5:1 on its fill, on every theme and without a core. */
 async function accentCase(page, url) {
-  const measure = () =>
-    page.evaluate(() => {
-      const seg = document.querySelector("#status .seg.ws.active");
-      const css = getComputedStyle(seg);
-      return { fill: css.backgroundColor, text: css.color, weight: css.fontWeight, size: css.fontSize };
+  const measure = async () => {
+    // The chip is a button and the chrome fades its colour for 160 ms: read after the transitions ended.
+    await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished)));
+    return page.evaluate(() => {
+      const pill = document.querySelector("#bar .ws-item.active");
+      const chip = pill?.querySelector(".ws-chip");
+      if (!pill || !chip) throw new Error("no shown workspace pill");
+      return { fill: getComputedStyle(pill).backgroundColor, text: getComputedStyle(chip).color };
     });
+  };
 
   await page.emulateMedia({ contrast: "no-preference", forcedColors: null, reducedMotion: null });
   await open(page, url);

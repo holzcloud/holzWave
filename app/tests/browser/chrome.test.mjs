@@ -326,42 +326,50 @@ async function statusCase(page, url) {
   }));
   assert.deepEqual(place, { after: "status", parent: "app" }, "the status line is the strip after the stage");
 
-  assert.deepEqual(await texts(page, "#status .seg.ws"), ["1 alpha", "2 beta"], "one segment per workspace");
-  assert.deepEqual(await texts(page, "#status .seg.ws.active"), ["1 alpha"]);
-  const current = await page.evaluate(() =>
-    [...document.querySelectorAll("#status .seg.ws")].map((n) => ({
-      current: n.getAttribute("aria-current"),
-      weight: getComputedStyle(n).fontWeight,
-      upper: getComputedStyle(n).textTransform,
-    })),
-  );
-  assert.equal(current[0].current, "true", "the active segment is aria-current");
-  assert.equal(current[1].current, null);
-  assert.ok(Number(current[0].weight) > Number(current[1].weight), "the active segment is bolder: a cue without colour");
-  assert.equal(current[0].upper, "uppercase");
+  // The workspaces are the pills of the title bar and are not repeated here (docs/design.md section 5, rule 5).
+  const names = BAR_VIEW.workspaces.map((w) => w.name);
+  const plain = () =>
+    page.evaluate(() => ({
+      active: document.querySelectorAll("#status .active").length,
+      current: document.querySelectorAll("#status [aria-current]").length,
+      // The version (`0.0.1-alpha1`) is left out: it is the one text that may hold a workspace name by chance.
+      text: [...document.querySelectorAll("#status .seg:not(.version)")].map((n) => n.textContent).join(" "),
+    }));
+  const seen0 = await plain();
+  assert.deepEqual([seen0.active, seen0.current], [0, 0], "no segment is the shown one, none is aria-current");
+  for (const name of names) assert.ok(!seen0.text.includes(name), `the strip does not name the workspace ${name}`);
 
   assert.deepEqual(await texts(page, "#status .seg.panes"), ["1 pane"]);
   assert.match((await texts(page, "#status .seg.renderer"))[0], /^canvas2d\b/);
   assert.deepEqual(await texts(page, "#status .seg.encoding"), ["UTF-8"]);
   assert.deepEqual(await texts(page, "#status .seg.version"), ["0.0.1-alpha1"]);
 
-  // The order is the contract of the design: workspaces, panes, renderer, encoding, version.
-  const order = await page.evaluate(() =>
-    [...document.querySelectorAll("#status .seg")].map((n) => [...n.classList].filter((c) => !["seg", "label", "active"].includes(c))[0]),
-  );
-  // The mode segment (copy mode, plan 21) and the notice (a refused tear-off) sit after the workspaces; both are empty,
-  // so not shown, outside copy mode and when nothing was refused. The connections segment (docs/design.md section 6.3) is empty
-  // while no pane runs a connection.
-  assert.deepEqual(order, ["ws", "ws", "mode", "notice", "conns", "panes", "renderer", "encoding", "version"]);
+  // The order is the contract of the design: panes, renderer, encoding, version, with the mode, the notice and the
+  // connections segment before them.
+  const order = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll("#status .seg")].map((n) => [...n.classList].filter((c) => !["seg", "label"].includes(c))[0]),
+    );
+  const ORDER = ["mode", "notice", "conns", "panes", "renderer", "encoding", "version"];
+  // The mode segment (copy mode, plan 21) and the notice (a refused tear-off) are both empty, so not shown, outside
+  // copy mode and when nothing was refused. The connections segment (docs/design.md section 6.3) is empty while no
+  // pane runs a connection.
+  assert.deepEqual(await order(), ORDER);
   assert.deepEqual(await texts(page, "#status .seg.mode"), [""], "no copy mode, no mode text");
   assert.deepEqual(await texts(page, "#status .seg.notice"), [""], "nothing refused, no notice");
 
-  // A workspace that appears and one that goes: the segments follow the view.
+  // A workspace that appears and one that goes: the pills of the title bar follow the view, the strip does not change.
   const three = { ...BAR_VIEW, workspaces: [...BAR_VIEW.workspaces, { name: "gamma", active: false }] };
   await showView(page, three);
-  assert.deepEqual(await texts(page, "#status .seg.ws"), ["1 alpha", "2 beta", "3 gamma"]);
+  assert.deepEqual(await texts(page, "#bar .ws-chip"), ["alpha", "beta", "gamma"], "three pills");
+  assert.deepEqual(await order(), ORDER, "three workspaces: the same segments");
+  const withThree = await plain();
+  assert.deepEqual([withThree.active, withThree.current], [0, 0]);
+  for (const name of [...names, "gamma"]) assert.ok(!withThree.text.includes(name), `the strip does not name ${name}`);
   await showView(page, { ...BAR_VIEW, workspaces: [{ name: "beta", active: true }] });
-  assert.deepEqual(await texts(page, "#status .seg.ws"), ["1 beta"]);
+  assert.deepEqual(await texts(page, "#bar .ws-chip"), ["beta"], "one pill");
+  assert.deepEqual(await order(), ORDER, "one workspace: the same segments");
+  assert.ok(!(await plain()).text.includes("beta"), "the strip does not name the workspace");
 
   // Two panes: the count follows the layout.
   await page.evaluate(() => window.__MOCK__.reset());

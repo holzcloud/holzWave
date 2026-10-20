@@ -140,7 +140,7 @@ export function tokenEntries(theme: unknown): [string, string][] {
     }
     const rose = parseHex(chrome.rose);
     if (rose !== null) out.push(["--hw-rose-wash", rgbOf(rose, opacity(ROSE_WASH_ALPHA))]);
-    // The text on a solid rose-deep fill (the shown status segment): white or black, whichever measures higher
+    // The text on a solid rose-deep fill (the shown workspace pill): white or black, whichever measures higher
     // against this theme's fill, so it reaches 4.5:1 whatever the fill is.
     const deep = parseHex(chrome.rose_deep);
     if (deep !== null) out.push(["--hw-on-accent", hexOf(onAccentOf(deep))]);
