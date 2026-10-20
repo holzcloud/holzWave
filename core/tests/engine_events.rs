@@ -1,5 +1,5 @@
-//! What a program tells the terminal and the shell shows: the window title (OSC 0 and 2) and the working directory
-//! (OSC 7). Both are program-controlled text, so they arrive length-capped and free of control characters (V5,
+//! What a program tells the terminal and the shell shows: the window title (OSC 0 and 2), the working directory
+//! (OSC 7) and the bell (BEL). Both are program-controlled text, so they arrive length-capped and free of control characters (V5,
 //! T-02-35), and OSC 7 is only ever turned into an absolute path without `..`.
 #![cfg(feature = "ghostty")]
 
@@ -117,11 +117,36 @@ fn parse_osc7_refuses_what_could_point_anywhere() {
 }
 
 #[test]
-fn bell_and_clipboard_escapes_make_no_event_and_no_reply() {
+fn a_lone_bell_is_one_bell_event() {
+    let mut e = engine(20, 3);
+    e.feed(b"\x07");
+    assert_eq!(e.take_events(), vec![EngineEvent::Bell]);
+    assert!(e.take_events().is_empty(), "an event is delivered once");
+}
+
+#[test]
+fn a_run_of_bells_in_one_feed_is_folded_into_one_event() {
+    let mut e = engine(20, 3);
+    e.feed(b"\x07\x07\x07");
+    assert_eq!(e.take_events(), vec![EngineEvent::Bell]);
+}
+
+#[test]
+fn the_bell_that_ends_a_title_is_a_terminator_and_makes_only_the_title_event() {
+    let mut e = engine(20, 3);
+    e.feed(b"\x1b]2;done\x07");
+    assert_eq!(e.take_events(), vec![title("done")]);
+    // ST-terminated, then a real bell after it.
+    e.feed(b"\x1b]2;again\x1b\\\x07");
+    assert_eq!(e.take_events(), vec![title("again"), EngineEvent::Bell]);
+}
+
+#[test]
+fn clipboard_escapes_make_no_event_and_no_reply() {
     let mut e = engine(20, 3);
     e.take_replies();
-    // BEL, OSC 52 write and OSC 52 read: no bell callback, no clipboard callbacks (T-02-36).
-    e.feed(b"\x07\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07");
+    // OSC 52 write and read, ended by BEL: no clipboard callbacks (T-02-36), and a terminator is no bell.
+    e.feed(b"\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07");
     assert!(e.take_events().is_empty());
     assert_eq!(ascii(&e.take_replies()), "");
 }

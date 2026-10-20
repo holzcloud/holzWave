@@ -73,6 +73,31 @@
 #bar button.close::before { content: "\00d7"; }
 #bar button.close:hover { color: var(--hw-ink); }
 
+/* Attention marks (docs/design.md section 6.23): between the name and the ×, one bold glyph of the bundled mono face
+   per kind that is present, side by side in the fixed order. Written with `span.attn` so they beat the padding rule
+   `#bar .bar-item > :not(.close)` above. The marks never shrink (the tab gives way by shortening its name), never
+   move and take no keyboard stop; a press on them is a press on the tab (chrome.ts). Four colours from the status
+   tokens, none rose: rose is the colour of the shown tab and would read as "shown". The shape is the second cue and
+   the words are in the title and the accessible name. Under forced colours the browser gives the glyphs the system
+   text colour. */
+#bar .bar-item > span.attn {
+  display: flex; flex: none; align-items: center; gap: .167rem; padding: 0 .25rem;
+  font-weight: 700; line-height: calc(28rem / 12); white-space: nowrap; cursor: pointer;
+}
+#bar .bar-item > span.attn:empty { display: none; }
+/* A tab gives way to the host label by shortening its name, down to the 4.5 rem of its minimum; with marks the minimum
+   grows by their width (a glyph is .6 rem, the gap .167 rem, the padding .25 rem on each side), so the marks and the × are
+   never clipped. All four kinds take 3.4 rem. */
+.bar-item.tab-item[data-marks="1"] { min-width: 5.7rem; }
+.bar-item.tab-item[data-marks="2"] { min-width: 6.5rem; }
+.bar-item.tab-item[data-marks="3"] { min-width: 7.3rem; }
+.bar-item.tab-item[data-marks="4"] { min-width: 8rem; }
+#bar .ws-item > span.attn { line-height: calc(20rem / 12); }
+#bar span.attn > .mk[data-kind="ask"] { color: var(--hw-info); }
+#bar span.attn > .mk[data-kind="bell"] { color: var(--hw-warn); }
+#bar span.attn > .mk[data-kind="failed"] { color: var(--hw-danger); }
+#bar span.attn > .mk[data-kind="done"] { color: var(--hw-ok); }
+
 /* The workspace pill: round, hairline, 22 px high. The diamond is drawn, so it is the same on every platform: filled
    on the shown workspace, hollow on the others. The shown pill is also a solid fill, so it reads without colour. */
 #bar .bar-item.ws-item {

@@ -594,6 +594,9 @@
         "seal": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       }
     },
+    "bell": {
+      "pane": 3
+    },
     "cwd": {
       "cwd": "/Users/holz/Projects/holzWave",
       "pane": 3
@@ -675,7 +678,8 @@
       "ai-ask",
       "history-open",
       "login-prompt",
-      "login-prompt-end"
+      "login-prompt-end",
+      "bell"
     ],
     "pane-exit": [
       {
@@ -1747,18 +1751,28 @@
       {
         "active": true,
         "focus": 5,
+        "pane_ids": [
+          3,
+          5
+        ],
         "panes": 2,
         "title": "shell"
       },
       {
         "active": false,
         "focus": 7,
+        "pane_ids": [
+          7
+        ],
         "panes": 1,
         "title": "shell"
       },
       {
         "active": false,
         "focus": 9,
+        "pane_ids": [
+          9
+        ],
         "panes": 1,
         "title": "shell"
       }
@@ -1768,11 +1782,20 @@
       {
         "active": true,
         "name": "main",
+        "pane_ids": [
+          3,
+          5,
+          7,
+          9
+        ],
         "panes": 4
       },
       {
         "active": false,
         "name": "notes",
+        "pane_ids": [
+          12
+        ],
         "panes": 1
       }
     ]

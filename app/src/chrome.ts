@@ -4,6 +4,7 @@
 // name from the core is put in with `textContent`, never parsed as markup. The bar's free space drags the window.
 // Every chip and tab has a × beside it that asks before it closes (confirm.ts).
 import { registerAction } from "./actions.js";
+import { type Marking, attention } from "./attentionstate.js";
 import { call } from "./bridge.js";
 import { dirtyPanes, paneBlocks } from "./blockstate.js";
 import { type CloseAsk, confirmClose, paneAsk, tabAsk, workspaceAsk } from "./confirm.js";
@@ -28,6 +29,8 @@ function draggable<T extends HTMLElement>(node: T): T {
 
 /** What a click on a chip, tab or plus button asks the core for; its answer is a view for `applyView`. */
 let send: (request: Promise<View>) => void = () => {};
+/** The `apply` of the last `renderBar`, so a change of the marks can draw the bar again without a new layout. */
+let lastApply: (v: View) => void = () => {};
 
 function button(cls: string, pick: (index: number) => Promise<View>): HTMLButtonElement {
   const node = el("button", cls);
@@ -71,7 +74,8 @@ const mainOf = (item: HTMLElement | undefined): HTMLButtonElement | undefined =>
   item?.firstElementChild as HTMLButtonElement | undefined;
 
 /**
- * An item of the bar: `main` (the chip or tab button) and a × button after it, always visible, named `Close <kind>`.
+ * An item of the bar: `main` (the chip or tab button), the attention marks (a span, empty until a pane the item holds
+ * needs the person, design 6.23) and a × button after them, always visible, named `Close <kind>`.
  * The × is not inside `main`, so a press on it is no press on the tab: it neither selects it, nor starts a drag
  * (dragdrop.ts looks for `.tab`), nor counts as the double click that renames. `onClose` gets the item's index.
  */
@@ -83,6 +87,10 @@ function item(
 ): HTMLElement {
   const root = el("div", `bar-item ${cls}`);
   root.append(main);
+  // The marks are not a control and take no keyboard stop (the tab is the stop): a press on them is a press on the tab.
+  const attn = el("span", "attn", root);
+  attn.setAttribute("aria-hidden", "true");
+  attn.addEventListener("click", () => main.click());
   const close = el("button", "close", root);
   close.type = "button";
   close.title = `Close ${kind}`;
@@ -92,6 +100,31 @@ function item(
     onClose(Number(root.dataset.index));
   });
   return root;
+}
+
+/** The span of the attention marks of an item: its second child. */
+const attnOf = (item: HTMLElement): HTMLElement => item.children[1] as HTMLElement;
+
+/**
+ * Show `marking` on an item: one `span.mk` per kind inside its marks span (glyph by `textContent`, the kind in
+ * `data-kind` for the colour), the kinds in the root's `data-attention` and their number in `data-marks` (the stylesheet widens a tab by it), and the words in the title and the accessible
+ * name of the main button. No mark: the span is empty, `data-attention` and `aria-label` go, and the title is `plain`.
+ */
+function setMarking(root: HTMLElement, main: HTMLButtonElement, label: string, plain: string | null, marking: Marking | null): void {
+  const attn = attnOf(root);
+  const kinds = marking ? marking.marks.map((m) => m.kind).join(" ") : null;
+  if ((root.getAttribute("data-attention") ?? null) !== kinds) {
+    attn.replaceChildren();
+    for (const m of marking?.marks ?? []) {
+      const mark = el("span", "mk", attn);
+      mark.setAttribute("data-kind", m.kind);
+      mark.textContent = m.glyph;
+    }
+    setAttr(root, "data-attention", kinds);
+    setAttr(root, "data-marks", marking ? String(marking.marks.length) : null);
+  }
+  setAttr(main, "title", marking ? `${label} \u00b7 ${marking.words}` : plain);
+  setAttr(main, "aria-label", marking ? `${label}, ${marking.words}` : null);
 }
 
 /** Mark `node` as the shown one: a class for the style and `aria-current` for assistive technology. */
@@ -106,6 +139,8 @@ function setActive(node: HTMLElement, active: boolean, current: string): void {
  */
 export function renderBar(view: View, apply: (v: View) => void): void {
   send = (request) => void request.then(apply);
+  lastApply = apply;
+  const marks = attention.marks(view);
 
   // New elements go before the plus button, which stays last in its group.
   fitNodes(
@@ -123,6 +158,7 @@ export function renderBar(view: View, apply: (v: View) => void): void {
     setText(chip, w.name);
     setActive(chip, w.active, "true");
     root.classList.toggle("active", w.active);
+    setMarking(root, chip, w.name, null, marks.workspaces[i] ?? null);
   });
 
   fitNodes(
@@ -139,9 +175,9 @@ export function renderBar(view: View, apply: (v: View) => void): void {
     setAttr(root, "data-index", String(i));
     setAttr(tab, "data-index", String(i));
     setText(tab, label);
-    setAttr(tab, "title", label);
     setActive(tab, t.active, "page");
     root.classList.toggle("active", t.active);
+    setMarking(root, tab, label, label, marks.tabs[i] ?? null);
   });
 }
 
@@ -332,6 +368,10 @@ async function loadInfo(): Promise<void> {
  * the first measurement: the bar and the status line need their sizes by then.
  */
 export async function initChrome(): Promise<void> {
+  // The marks change without a new layout (a bell, a card that waits); the bar is drawn again from the view it has.
+  attention.subscribe(() => {
+    if (state.view) renderBar(state.view, lastApply);
+  });
   registerRenameActions();
   registerCloseActions();
   setPaneRenameHandler(renamePaneTo);

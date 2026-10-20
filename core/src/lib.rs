@@ -6,6 +6,7 @@
 //!
 //! Modules:
 //!
+//! - [`attention`]: the flood gate of the events that mark a tab or a workspace (the bell).
 //! - [`ai`]: the AI chat core; [`ai::http`] builds the one HTTP client that reaches a provider.
 //! - [`engine`]: the [`TerminalEngine`] trait and the screen model it produces.
 //! - [`layout`]: the pure tab and pane layout model.
@@ -35,6 +36,7 @@
 //! - [`wshinstall`]: the one explicit act that puts the bundled `wsh` on a Linux host reached over SSH, and verifies it.
 
 pub mod ai;
+pub mod attention;
 pub mod blocks;
 pub mod conn;
 pub mod connections;

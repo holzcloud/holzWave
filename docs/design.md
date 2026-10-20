@@ -86,7 +86,7 @@ default.
 | Component | Rule |
 |---|---|
 | Window bar | traffic lights (macOS; the native title bar sits above the bar elsewhere, section 7), workspace chips, tabs, version label right-aligned in mono |
-| Workspace chip / tab | text only; selected = rose wash and rose text, with an underline for non-colour cue |
+| Workspace chip / tab | text only and, while a pane they hold needs you, one mark per kind (6.23); selected = rose wash and rose text, with an underline for non-colour cue |
 | Pane header | state dot, title, context (path, host) in mono, right-aligned |
 | Focus | 1 px rose ring plus a header cue; only shown when more than one pane exists |
 | Divider | 1 px hairline, 8 px hit area, rose on hover, `col-resize` / `row-resize` |
@@ -1386,7 +1386,7 @@ card is read again.
 | The wsh ai request from pane N was withdrawn: the pane closed. | the status line when the pane closed |
 
 **Not built.** A choice of provider on the card, an always-allow or remember-this-pane choice, an excerpt of the piped text,
-a sound or a desktop notification, a badge in the title bar, a button that shows the pane, and a kept chat or history of
+a sound or a desktop notification, a badge in the title bar (the mark on the tab and the pill of the pane that asked is built, 6.23), a button that shows the pane, and a kept chat or history of
 requests. `Send once` sends this one request.
 
 **Narrow screens (640 px and narrower).** The card is a bottom sheet over the full width; both buttons are at least 44 px
@@ -1508,3 +1508,72 @@ borders. Every size is in `rem`.
 
 **Not drawn.** A `remember this code` choice, a countdown, a second dialog for a second question at once, and any way to
 answer a question without the dialog.
+
+### 6.23 Attention marks
+
+When a pane that is out of view needs the user, the tab and the workspace pill that hold it carry a small mark, so the
+person does not open every tab to find the AI question, the finished command or the program that rang the bell. The mark
+sits **inside** the pill and the tab; it adds no fourth level and changes neither shape: the workspace is still a round
+pill with a diamond, the tab is still square and numbered, a pane is still a tile.
+
+**When a mark shows.** Only for a pane that is out of view: a pane whose tab is not the shown tab of the shown workspace.
+Every pane of the shown tab is in view, an unfocused split included, so no pane-level mark exists. The pill of the shown
+workspace carries no mark (its tabs do), and the shown tab carries none. The focus of the operating-system window is not
+considered: a bell in a pane that is in view marks nothing, also while the app is in the background.
+
+**The four kinds.** One glyph of the bundled mono face per kind, in a status token and never in rose (rose is the colour of
+the shown tab in the same row and would read as "shown"). The shape and the words are the second cue; colour is the third.
+
+| Kind | Glyph | Token | Words | Source |
+|---|---|---|---|---|
+| ask | `?` | `--hw-info` | waits for you | an approval card, a consent card in mode ask, a `wsh ai` request that waits |
+| bell | `▲` | `--hw-warn` | rang the bell | BEL in the output of the pane |
+| failed | `!` | `--hw-danger` | command failed | an OSC 133 `D` mark with a status other than 0 (the exclamation mark is the design's error mark, 6.17) |
+| done | `✓` | `--hw-ok` | command finished | an OSC 133 `D` mark with status 0 or no status |
+
+There is no `x` shape: the close mark `×` sits next to the mark.
+
+**Several kinds at once.** A tab or a pill shows **every kind that is present, side by side, one symbol per kind**. There is
+no count and no "most urgent wins". The fixed order from left to right is ask, bell, failed, done, so the place of a symbol
+is itself a cue. A tab that holds a waiting question and a finished command shows `? ✓`; one that holds all four shows
+`? ▲ ! ✓`. The title and the accessible name of the tab or the pill list every kind present in words, in the same order.
+A pill shows the kinds of all the tabs of its workspace together, once each.
+
+**Width.** The marks never shrink and never wrap: each is one glyph of the bar's own size with a small gap, so all four
+take 3.4 rem with their padding. The tab gives way to them the way it already gives way to the host label, by shortening its
+own name (the tab keeps its minimum of 3 rem for the name, and its own minimum grows by the width of the marks, so the
+marks and the close mark are never clipped); the pill grows by the same 3.4 rem and keeps its 22 px height. The item
+stays 28 px high on a desktop (44 px on a phone), the mark is inside the item, so the target does not change. With all
+four kinds present nothing overlaps the name or the close mark.
+
+**Where it sits.** After the name and before the close mark `×`, in the pill and in the tab. Bold mono text of the bar's own
+size, no box, no fill, no animation. It is hidden when empty.
+
+**Title and accessible name.** The tab's title reads `LABEL · WORDS` (`2 holzkube · rang the bell`), its accessible name
+`LABEL, WORDS`; several kinds are joined with a comma in the fixed order (`waits for you, rang the bell`). Without a mark
+both are the label alone.
+
+**Not a control.** The mark has no setting and no keyboard stop: a press on it does what a press on its tab (or pill) does,
+and the tab is the stop. A switch to turn marks off is not built.
+
+**What clears it.** Latched against level: a bell, a finished command and a failed command stay on the pane until its tab is
+shown, or the pane exits or leaves the window; showing the tab clears them. The question mark is not latched: it exists
+exactly while a card waits and the pane is out of view, so it returns when the person shows the pane and leaves again before
+answering, and it goes for good when the card is answered or withdrawn.
+
+**Floods.** A program can ring the bell or end a command as fast as it can write. A run of bells is folded in the engine,
+each pane lets at most one bell and one command end through per 500 ms, and the page keeps one set of kinds per pane, so a
+flood leaves one mark.
+
+**Accessibility.** The shape and the words are the cues; the colour is a status token of the theme, which measures 7.38:1 to
+11.27:1 on the ground (section 2), so `contrast-high` needs no rule of its own. The mark never moves, so `motion-reduce` has
+nothing to remove. Under `forced-colors` the browser gives it the system text colour and the glyph shape stays the cue.
+The bar buttons stay 28 px high because the mark is inside the item.
+
+**On a phone.** (Design only; the app has no phone layout yet.) The mark follows the name in the bottom tab strip and in
+the rows of the sheet, in 44 px rows, and the `Sheet` opener shows the marks of anything out of view.
+
+**Not built.** A sound, an operating-system notification, notifications from OSC 9 and OSC 777, a switch to turn marks off,
+a count, a mark on a pane header, the chat in the sidebar column (it has no pane; the `✦ AI` button of the title bar covers
+it), and a mark for a finished reply of the assistant (whether it is a question cannot be known, and marking every reply
+would make the mark mean nothing).

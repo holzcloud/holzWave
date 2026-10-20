@@ -3,6 +3,7 @@
 // The canvas element can be replaced once, while the renderer is chosen (see `initScene`), so nobody keeps a
 // reference to it from before: modules that listen on it ask `canvas()` after `initScene` has run.
 import { blinkSetting, cursorTrailOn, effectiveBlink, motionReduced, onPreferenceChange, smoothScrollOn } from "./a11y.js";
+import { attention } from "./attentionstate.js";
 import { call, listen } from "./bridge.js";
 import { Canvas2DRenderer } from "./canvas2d.js";
 import { renderBar } from "./chrome.js";
@@ -170,6 +171,8 @@ export function applyView(v: View): void {
   const shown = new Set(v.panes.map(([id]) => id));
   for (const id of shown) state.away.delete(id); // a pane that comes back is a first appearance (syncSizes)
   for (const id of leaving.take(shown, performance.now())) leave(id);
+  // The attention marks follow what is in view: showing a pane clears its marks, and a pane no tab holds loses them.
+  attention.follow(shown, v.workspaces.flatMap((w) => (Array.isArray(w.pane_ids) ? w.pane_ids : [])));
   renderBar(v, applyView);
   renderStatus();
   syncSizes();
@@ -199,6 +202,7 @@ function leave(pane: number): void {
   if (state.exited.has(pane)) return; // it ended, it did not move: the exit already forgot it
   leavePane(state, pane);
   forgetSelection(pane);
+  attention.forget(pane);
   waiting.delete(pane);
   motion.forget(pane);
 }
@@ -318,11 +322,19 @@ function onPaneExit(p: { pane: number; code: number | null }): void {
   if (typeof p !== "object" || p === null || !isPane(p.pane)) return;
   forgetPane(state, p.pane);
   forgetSelection(p.pane);
+  attention.forget(p.pane);
   waiting.delete(p.pane);
   motion.forget(p.pane);
   renderLabels();
   syncBlink();
   schedule();
+}
+
+/** The program in a pane rang the bell: a mark on its tab and its pill while the pane is out of view (design 6.23). */
+function onBell(p: { pane: number }): void {
+  if (typeof p !== "object" || p === null || !isPane(p.pane)) return;
+  if (state.exited.has(p.pane) || state.away.has(p.pane)) return;
+  attention.note(p.pane, "bell");
 }
 
 /** Listen to the events a pane produces. Call once at start-up, before the first layout is asked for. */
@@ -331,6 +343,7 @@ export async function initEvents(): Promise<void> {
   await listen<{ pane: number; title: string }>("title", onTitle);
   await listen<{ pane: number; cwd: string }>("cwd", onCwd);
   await listen<{ pane: number; code: number | null }>("pane-exit", onPaneExit);
+  await listen<{ pane: number }>("bell", onBell);
 }
 
 // ---- cursor blink --------------------------------------------------------------------------------

@@ -22,10 +22,10 @@ export interface Divider {
  */
 export interface View {
   rev: number;
-  /** `panes`: how many panes the tabs of the workspace hold together. */
-  workspaces: { name: string; active: boolean; panes: number }[];
-  /** `panes`: how many panes the tab holds. */
-  tabs: { title: string; active: boolean; focus: number; panes: number }[];
+  /** `panes`: how many panes the tabs of the workspace hold together; `pane_ids`: their ids (the core always sends it). */
+  workspaces: { name: string; active: boolean; panes: number; pane_ids: number[] }[];
+  /** `panes`: how many panes the tab holds; `pane_ids`: their ids (the core always sends it). */
+  tabs: { title: string; active: boolean; focus: number; panes: number; pane_ids: number[] }[];
   focus: number;
   panes: [number, UnitRect][];
   dividers: Divider[];

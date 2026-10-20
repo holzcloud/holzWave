@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::attention::Gate;
 use crate::engine::{
     CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, Mods, MouseEvent, PasteOutcome, SearchOp, SearchState,
     SelectOp, TerminalEngine, WheelEvent, WheelOutcome, parse_osc7,
@@ -226,6 +227,8 @@ pub enum PaneEvent {
     Title(String),
     /// The working directory of the shell changed.
     Cwd(String),
+    /// The program rang the bell (BEL). At most one per [`crate::attention::GAP`] per pane.
+    Bell,
     /// The shell ended and was reaped. Exactly once per pane that started, and the last event it sends.
     /// `code` is `None` when the exit status could not be read.
     Exited { code: Option<u32> },
@@ -757,6 +760,8 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     /// [`PaneSpec::linger`] and when the pane started, for the rule of the held exit.
     linger: Option<Duration>,
     started: Instant,
+    /// Lets one bell through per [`crate::attention::GAP`], so a program that rings in a loop cannot flood the window.
+    bell_gate: Gate,
 }
 
 impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
@@ -1114,6 +1119,11 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         for event in self.engine.take_events() {
             match event {
                 EngineEvent::Title(title) => (self.sink)(PaneEvent::Title(title)),
+                EngineEvent::Bell => {
+                    if self.bell_gate.pass(Instant::now()) {
+                        (self.sink)(PaneEvent::Bell);
+                    }
+                }
                 EngineEvent::Pwd(raw) => {
                     // A program (a shell with integration, or something on the far side of ssh) announced its
                     // directory. Only a well-formed `file://` path counts, and on Windows only a drive path of this
@@ -1316,6 +1326,7 @@ fn engine_main<E, F, S>(
         },
         linger: spec.linger,
         started: Instant::now(),
+        bell_gate: Gate::new(),
     };
     let _ = started.send(Ok(pid));
     actor.run();

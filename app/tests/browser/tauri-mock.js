@@ -14,7 +14,9 @@
 //     listening(name)  how many listeners `name` has
 //     failLayout(msg)  the layout commands reject with `msg` (the shell's "no such window"); failLayout(null) stops it
 //     on(cmd, fn)      script a command: fn(args) result is returned as is; on(cmd, null) removes it
-//     setView(view)    replace the default layout; set_ratio then only changes the matching divider's ratio
+//     setView(view)    replace the default layout; set_ratio then only changes the matching divider's ratio. The default
+//                      layout and a view of a test list `pane_ids` on every tab and workspace as the core does (without
+//                      it the bar marks nothing, design 6.23)
 //     view()           a copy of the layout the layout commands currently return
 //     reset()          clear calls and handlers and go back to the default layout (listeners are kept); the chat below
 //                      is reset too
@@ -201,8 +203,8 @@
   };
 
   const defaultView = () => ({
-    workspaces: [{ name: "main", active: true, panes: 2 }],
-    tabs: [{ title: "shell", active: true, focus: 2, panes: 2 }],
+    workspaces: [{ name: "main", active: true, panes: 2, pane_ids: [1, 2] }],
+    tabs: [{ title: "shell", active: true, focus: 2, panes: 2, pane_ids: [1, 2] }],
     focus: 2,
     panes: [[1, { x: 0, y: 0, w: ratio, h: 1 }], [2, { x: ratio, y: 0, w: 1 - ratio, h: 1 }]],
     dividers: [{ split: 10, axis: "Row", area: { x: 0, y: 0, w: 1, h: 1 }, ratio }],

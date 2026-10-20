@@ -25,8 +25,13 @@ test("the view has exactly the documented keys at every level", () => {
   assert.equal(view.panes.length, 2);
   assert.equal(view.dividers.length, 1);
   assert.ok(Array.isArray(view.pane_names), "the names of the shown tab's panes, as [id, name] pairs");
-  for (const w of view.workspaces) assert.deepEqual(keys(w), ["active", "name", "panes"]);
-  for (const t of view.tabs) assert.deepEqual(keys(t), ["active", "focus", "panes", "title"]);
+  for (const w of view.workspaces) assert.deepEqual(keys(w), ["active", "name", "pane_ids", "panes"]);
+  for (const t of view.tabs) assert.deepEqual(keys(t), ["active", "focus", "pane_ids", "panes", "title"]);
+  // The ids of the panes of every tab and workspace, so a pane of another tab maps to its tab and its pill (design 6.23).
+  for (const e of [...view.workspaces, ...view.tabs]) {
+    assert.equal(e.pane_ids.length, e.panes, "one id per pane");
+    for (const id of e.pane_ids) assert.ok(Number.isSafeInteger(id), `a pane id: ${id}`);
+  }
   assert.equal(view.windows, 1, "how many windows the app has: the close confirmation says what closing everything ends");
   assert.deepEqual(view.workspaces.map((w) => w.panes), [4, 1], "panes of all tabs of the workspace");
   assert.deepEqual(view.tabs.map((t) => t.panes), [2, 1, 1]);
@@ -45,7 +50,9 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open", "login-prompt", "login-prompt-end"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open", "login-prompt", "login-prompt-end", "bell"]);
+  // The program in a pane rang the bell: the id of the pane and nothing else.
+  assert.deepEqual(golden.events.bell, { pane: 3 });
   // The shell of a pane asked for the history search: the id of the pane and nothing else.
   assert.deepEqual(golden.events["history-open"], { pane: 3 });
   assert.deepEqual(keys(golden.events.title), ["pane", "title"]);
@@ -237,7 +244,7 @@ test("the login question has its events and its two commands pinned", () => {
 
 test("the ai events and the nineteen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
-  assert.deepEqual(golden.events.names.slice(-5, -3), ["ai", "ai-ask"]);
+  assert.deepEqual(golden.events.names.slice(-6, -4), ["ai", "ai-ask"]);
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
   assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
   // A request of `wsh ai` that waits for the person: the card for the window of the pane, flat, and nothing but the

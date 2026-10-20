@@ -697,9 +697,13 @@ impl GhosttyEngine {
                     }
                 })
                 .map_err(eng)?;
-            // Deliberately not installed: on_bell (nothing in the shell reacts to it yet), on_clipboard_read and
-            // on_clipboard_write (OSC 52 stays inert, and the read callback would turn on Kitty paste events), and
-            // title reports stay disabled (a program could put text into its own input with them).
+            // The bell (BEL) is an event too: a plain push, folded when it repeats; the pane gates it
+            // ([`crate::attention::Gate`]) and the window shows it as a mark on the tab (docs/design.md 6.23).
+            let queue = events.clone();
+            terminal.on_bell(move |_| push_event(&queue, EngineEvent::Bell)).map_err(eng)?;
+            // Deliberately not installed: on_clipboard_read and on_clipboard_write (OSC 52 stays inert, and the read
+            // callback would turn on Kitty paste events), and title reports stay disabled (a program could put text
+            // into its own input with them).
         }
         Ok(Self {
             terminal,

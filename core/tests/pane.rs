@@ -394,6 +394,20 @@ fn a_title_the_program_sets_arrives_as_a_title_event() {
 }
 
 #[test]
+fn a_bell_the_program_rings_arrives_as_a_bell_event() {
+    let probe = Probe::default();
+    // One BEL (printed as an octal escape so no control byte sits in the source), then the shell waits.
+    let pane = spawn(spec_sh("printf '\\007'; sleep 3"), &probe);
+
+    let bells = || probe.events().into_iter().filter(|e| matches!(e, PaneEvent::Bell)).count();
+    assert!(wait_until(WAIT, || bells() > 0), "no Bell event: {:?}", probe.events());
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(bells(), 1, "exactly one Bell: {:?}", probe.events());
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
 fn the_cell_size_of_the_spec_is_in_the_first_size_report() {
     let probe = Probe::default();
     // CSI 16 t asks for the cell size. The reply is tty input and the tty echoes it (ESC as ^[) into the output, so

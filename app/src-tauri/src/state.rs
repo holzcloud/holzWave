@@ -111,6 +111,8 @@ pub struct WorkspaceView {
     pub active: bool,
     /// How many panes the tabs of this workspace hold together (the × of a chip says what it closes).
     pub panes: usize,
+    /// The ids of those panes: the page maps a pane to its workspace pill with them (the attention marks, design 6.23).
+    pub pane_ids: Vec<PaneId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -121,6 +123,8 @@ pub struct TabView {
     pub focus: PaneId,
     /// How many panes the tab holds.
     pub panes: usize,
+    /// The ids of those panes: the page maps a pane to its tab with them (the attention marks, design 6.23).
+    pub pane_ids: Vec<PaneId>,
 }
 
 /// The layout as the webview mirrors it: the workspaces, the tabs of the active workspace, and the panes and
@@ -162,6 +166,7 @@ impl View {
                     name: w.name.clone(),
                     active: i == layout.active,
                     panes: w.tabs.iter().map(|t| t.panes().len()).sum(),
+                    pane_ids: w.tabs.iter().flat_map(|t| t.panes()).collect(),
                 })
                 .collect(),
             tabs: layout
@@ -174,6 +179,7 @@ impl View {
                     active: i == active_tab,
                     focus: t.focus,
                     panes: t.panes().len(),
+                    pane_ids: t.panes(),
                 })
                 .collect(),
             focus: layout.tab().focus,
@@ -371,6 +377,9 @@ pub enum Out {
     Title { pane: PaneId, title: String },
     Cwd { pane: PaneId, cwd: String },
     PaneExit { pane: PaneId, code: Option<u32> },
+    /// The program in `pane` rang the bell (BEL). At most one per half second per pane (the core's gate). Goes to the
+    /// window that has the pane; the page marks the tab and the pill that hold the pane when it is out of view (design 6.23).
+    Bell { pane: PaneId },
     /// The settings, the theme or the key bindings changed (a command, or a hand edit that was picked up).
     Settings(SettingsView),
     /// A pane or a tab that was released over this window comes from another window: where in this page it goes is
@@ -414,6 +423,7 @@ impl Out {
             Out::Title { .. } => "title",
             Out::Cwd { .. } => "cwd",
             Out::PaneExit { .. } => "pane-exit",
+            Out::Bell { .. } => "bell",
             Out::Settings(_) => "settings",
             Out::IncomingDrop { .. } => "incoming-drop",
             Out::DragHover { .. } => "drag-hover",
@@ -432,6 +442,11 @@ impl Out {
 struct TitlePayload<'a> {
     pane: PaneId,
     title: &'a str,
+}
+
+#[derive(Serialize)]
+struct BellPayload {
+    pane: PaneId,
 }
 
 #[derive(Serialize)]
@@ -490,6 +505,7 @@ impl Serialize for Out {
             Out::Title { pane, title } => TitlePayload { pane: *pane, title }.serialize(serializer),
             Out::Cwd { pane, cwd } => CwdPayload { pane: *pane, cwd }.serialize(serializer),
             Out::PaneExit { pane, code } => PaneExitPayload { pane: *pane, code: *code }.serialize(serializer),
+            Out::Bell { pane } => BellPayload { pane: *pane }.serialize(serializer),
             Out::Settings(view) => view.serialize(serializer),
             Out::IncomingDrop { kind, pane, x, y } | Out::DragHover { kind, pane, x, y } => {
                 IncomingDropPayload { kind: *kind, pane: *pane, x: *x, y: *y }.serialize(serializer)
@@ -2745,6 +2761,13 @@ impl AppCore {
                 let target = lock(&routes).target_of(pane);
                 if let Some(target) = target {
                     sink.send(target, Out::Cwd { pane, cwd });
+                }
+            }
+            PaneEvent::Bell => {
+                // A hint for the marks of the bar: only the pane's id, to the window that has the pane.
+                let target = lock(&routes).target_of(pane);
+                if let Some(target) = target {
+                    sink.send(target, Out::Bell { pane });
                 }
             }
             PaneEvent::Exited { code } => {
@@ -6865,6 +6888,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_bell_goes_to_the_window_that_has_the_pane() {
+        // One BEL, written as an octal escape; the shell then waits so the pane stays.
+        let (core, rec, _dir, first, second, label) = two_windows("printf '\\007'; sleep 30");
+        core.start_pane(second, 80, 24, 0, 0).expect("starts");
+
+        assert!(wait_until(WAIT, || rec.sent().iter().any(|(_, o)| matches!(o, Out::Bell { .. }))), "no Bell: {:?}", rec.all());
+
+        let bells: Vec<(Target, Out)> = rec.sent().into_iter().filter(|(_, o)| matches!(o, Out::Bell { .. })).collect();
+        assert_eq!(bells, vec![(Target::window(&label), Out::Bell { pane: second })], "one bell, to the window of the pane");
+        assert_ne!(first, second);
+        assert_eq!(rec.targets_of("bell", 0), vec![Target::window(&label)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn the_layout_event_of_a_shell_that_ends_goes_to_its_window_only() {
         // Window `main` has two panes, the other window one; a pane of `main` ends.
         let (core, rec, _dir) = sh("exit 0");
@@ -9227,6 +9265,31 @@ mod protocol {
         view
     }
 
+    #[test]
+    fn the_view_lists_the_ids_of_the_panes_of_every_tab_and_workspace() {
+        let view = sample_view();
+        for w in &view.workspaces {
+            assert_eq!(w.pane_ids.len(), w.panes, "{}", w.name);
+        }
+        for (i, t) in view.tabs.iter().enumerate() {
+            assert_eq!(t.pane_ids.len(), t.panes, "tab {i}");
+        }
+        // The pane of a tab that is not shown is named too, so the page can map it to its tab.
+        let shown: Vec<PaneId> = view.panes.iter().map(|(p, _)| *p).collect();
+        let tab_ids: Vec<PaneId> = view.tabs.iter().flat_map(|t| t.pane_ids.clone()).collect();
+        assert!(shown.iter().all(|p| view.tabs[0].pane_ids.contains(p)), "the shown tab holds the shown panes");
+        assert_eq!(tab_ids.len(), 4, "two panes in the first tab, one in each other tab");
+        let mut unique = tab_ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), tab_ids.len(), "a pane is in one tab");
+        // The active workspace holds all the panes of its tabs; the other one holds its own.
+        assert_eq!(view.workspaces[0].pane_ids.len(), 4);
+        assert!(view.workspaces[0].pane_ids.iter().all(|p| tab_ids.contains(p)));
+        assert_eq!(view.workspaces[1].pane_ids.len(), 1);
+        assert!(!view.workspaces[1].pane_ids.iter().any(|p| tab_ids.contains(p)));
+    }
+
     fn to_value<T: Serialize>(value: &T) -> Value {
         serde_json::to_value(value).expect("serialises")
     }
@@ -9352,6 +9415,7 @@ mod protocol {
                 ],
             },
             Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::Answered },
+            Out::Bell { pane: 3 },
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -9405,6 +9469,7 @@ mod protocol {
                     to_value(&Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::Cancelled }),
                     to_value(&Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::TimedOut }),
                 ],
+                "bell": payload(14),
             },
             "settings_view": to_value(&settings_view),
             "app_info": to_value(&AppInfo {
