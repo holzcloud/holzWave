@@ -162,6 +162,9 @@ export async function openContext(page, conversation = "chat-mock-1") {
   return sentence;
 }
 
+/** Press the toggle `Auto` of the chat (`scope` is a selector that holds it, for the sidebar). It asks the core nothing. */
+export const pressAuto = (page, scope = "") => page.locator(`${scope} button.chat-ctx`.trim()).click();
+
 /** The calls of the three context commands, oldest first, as `[command, args]`. */
 export const ctxCalls = (page) =>
   page.evaluate(() => window.__MOCK__.calls.filter((c) => c[0].startsWith("ai_context_")).map((c) => [c[0], structuredClone(c[1])]));

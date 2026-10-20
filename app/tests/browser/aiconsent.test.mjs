@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   OTHER_PROFILE, PANE_KEY, PANE_TEXT, PROFILE, VIEW3, VIEW_P1, boot, calls, chatBlock, ctxCalls, fillField, openAi, openContext, openDialog,
-  sendText, setPrivacy,
+  pressAuto, sendText, setPrivacy,
 } from "./ai-lib.mjs";
 
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
@@ -427,7 +427,7 @@ async function switchCase(page, url) {
     window.__MOCK__.ai.context.closePane(2);
     window.__MOCK__.emit("layout", window.__MOCK__.view());
   });
-  await page.locator("button.chat-ctx").click();
+  await pressAuto(page);
   await page.waitForFunction(() => document.querySelector("button.chat-ctx")?.textContent === "● Auto · no pane");
   assert.equal(await page.locator("button.chat-ctx").getAttribute("aria-pressed"), "true");
   const calls5 = await ctxCount(page);
