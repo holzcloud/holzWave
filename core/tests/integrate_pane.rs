@@ -277,8 +277,10 @@ fn removed_names_do_not_reach_the_child() {
 fn a_set_variable_wins_over_a_removal() {
     let dir = Scratch::new();
     let fake = FakeCli::new(&dir.0, "kubectl");
-    let seen = run_and_record(&fake, &[("HOME", "/nonexistent-home")], &["HOME"]);
-    assert_eq!(seen.get("HOME").map(String::as_str), Some("/nonexistent-home"));
+    // Not `HOME`: the pty library starts the child in the home directory when no directory is given, and a home that does
+    // not exist would stop the start for a reason that has nothing to do with the rule.
+    let seen = run_and_record(&fake, &[("HW_BOTH_8F2A", "set")], &["HW_BOTH_8F2A"]);
+    assert_eq!(seen.get("HW_BOTH_8F2A").map(String::as_str), Some("set"));
 }
 
 #[test]

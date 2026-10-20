@@ -508,7 +508,7 @@ fn parse_contexts(bytes: &[u8]) -> Option<ViewModel> {
         let line: Vec<char> = line.chars().collect();
         // Every column after the first starts after a space: a row that runs into the next column is not laid out
         // under this header, and guessing where its cells end would put one context's name in another's column.
-        if false {
+        if starts.iter().skip(1).any(|&at| line.get(at.wrapping_sub(1)).is_some_and(|c| !c.is_whitespace())) {
             return None;
         }
         let part = |n: usize| column_text(&line, starts[n], starts.get(n + 1).copied());

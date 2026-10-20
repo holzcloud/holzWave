@@ -536,6 +536,8 @@ fn section_corpus() -> Vec<String> {
     .iter()
     .map(|s| (*s).to_owned())
     .collect();
+    // Plain names in bulk, so that the sweeps over the lists look at many more than the few the words above leave.
+    out.extend((0..60).map(|n| format!("section{n}")));
     out.push("a".repeat(64));
     out.push("a".repeat(65));
     out.push("a".repeat(5000));
