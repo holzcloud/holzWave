@@ -131,14 +131,14 @@ npm --prefix app run tauri -- build --bundles nsis
 `tauri.windows.conf.json` already sets the targets to NSIS and the install mode to per user, so the `--bundles nsis`
 only repeats it. The command runs the page build itself and compiles the app in release mode (another long build).
 
-The installer lands under `target\release\bundle\nsis\`, a name like `holzWave_0.0.1-alpha1_x64-setup.exe` (the bundler
+The installer lands under `target\release\bundle\nsis\`, a name like `holzWave_0.0.1-beta1_x64-setup.exe` (the bundler
 chooses the name; look in the folder). The `target` folder is at the root of the checkout, not inside `app`.
 
 - **Per user, no administrator.** The installer installs for the current user without an administrator prompt, by
   default under `%LOCALAPPDATA%\holzWave` (the bundler's choice: unverified here, W12 shows it). An upgrade needs no
   administrator either.
 - **No MSI is built.** The bundler downloads the WiX toolset for an MSI at build time and WiX needs an optional Windows
-  feature; an MSI also cannot carry a version like `0.0.1-alpha1`. NSIS only.
+  feature; an MSI also cannot carry a version like `0.0.1-beta1`. NSIS only.
 - **WebView2.** The installer uses the default WebView2 mode: when the runtime is missing it downloads the Evergreen
   bootstrapper, so that case needs the network at install time. (An installer that carries the runtime would add about
   127 MB; not chosen.)
@@ -161,7 +161,7 @@ An unsigned file cannot be told apart from a tampered one by Windows, so a check
 user has. When an installer is ever shared:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\target\release\bundle\nsis\holzWave_0.0.1-alpha1_x64-setup.exe
+Get-FileHash -Algorithm SHA256 .\target\release\bundle\nsis\holzWave_0.0.1-beta1_x64-setup.exe
 ```
 
 Publish the hash beside the file (on the release page when there is one). No release is made by this guide.
@@ -173,7 +173,7 @@ For a test round before a Windows build host is set up, the owner builds a Windo
 ```sh
 brew install mingw-w64                       # once: the GNU-ABI linker and resource compiler (the only system install)
 rustup target add x86_64-pc-windows-gnu      # once
-sh scripts/release-windows-cross.sh 0.0.1-alpha1     # clean tree; the version of tauri.conf.json
+sh scripts/release-windows-cross.sh <version>       # clean tree; the version of tauri.conf.json
 ```
 
 The result is `target/release-cross/holzWave_<version>_x64-setup.exe` and its `.sha256` file. The script only builds and

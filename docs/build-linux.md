@@ -143,9 +143,9 @@ root of the checkout, not in `app`:
 
 | Format | Folder | Name on x86_64 (the container made the arm64 ones) |
 |---|---|---|
-| deb | `target/release/bundle/deb/` | `holzWave_0.0.1-alpha1_amd64.deb` (arm64: `..._arm64.deb`) |
-| rpm | `target/release/bundle/rpm/` | `holzWave-0.0.1-alpha1-1.x86_64.rpm` (arm64: `...aarch64.rpm`) |
-| AppImage | `target/release/bundle/appimage/` | `holzWave_0.0.1-alpha1_amd64.AppImage` (the arm64 one was `..._aarch64.AppImage`) |
+| deb | `target/release/bundle/deb/` | `holzWave_0.0.1-beta1_amd64.deb` (arm64: `..._arm64.deb`) |
+| rpm | `target/release/bundle/rpm/` | `holzWave-0.0.1-beta1-1.x86_64.rpm` (arm64: `...aarch64.rpm`) |
+| AppImage | `target/release/bundle/appimage/` | `holzWave_0.0.1-beta1_amd64.AppImage` (the arm64 one was `..._aarch64.AppImage`) |
 
 Look in the folder: the bundler chooses the names. The package's `Depends` (deb) and `Requires` (rpm) are
 WebKitGTK 4.1 and GTK 3; nothing else, and no package runs an install script (the container build checked both, and
@@ -160,9 +160,9 @@ command is the reported workaround (unverified here).
 ### Install and remove
 
 ```sh
-sudo apt install ./target/release/bundle/deb/holzWave_0.0.1-alpha1_amd64.deb      # Debian family; resolves WebKitGTK
-sudo dnf install ./target/release/bundle/rpm/holzWave-0.0.1-alpha1-1.x86_64.rpm   # Fedora family
-chmod +x ./target/release/bundle/appimage/holzWave_0.0.1-alpha1_amd64.AppImage    # AppImage: nothing is installed
+sudo apt install ./target/release/bundle/deb/holzWave_0.0.1-beta1_amd64.deb      # Debian family; resolves WebKitGTK
+sudo dnf install ./target/release/bundle/rpm/holzWave-0.0.1-beta1-1.x86_64.rpm   # Fedora family
+chmod +x ./target/release/bundle/appimage/holzWave_0.0.1-beta1_amd64.AppImage    # AppImage: nothing is installed
 ```
 
 The installed program is `holzwave-app`, the menu entry is "holzWave" under System or Terminal, and the desktop file is
@@ -196,7 +196,7 @@ Until a Linux machine builds the packages itself, the owner builds x86_64 packag
 container:
 
 ```sh
-sh scripts/release-linux-container.sh 0.0.1-alpha1     # clean tree; the version of tauri.conf.json
+sh scripts/release-linux-container.sh <version>       # clean tree; the version of tauri.conf.json
 ```
 
 The result, in `target/release-cross/` (next to the Windows installer), is `holzWave_<version>_amd64.deb`,
@@ -258,7 +258,7 @@ Set one for a single run:
 ```sh
 WEBKIT_DISABLE_DMABUF_RENDERER=1 cargo run -p holzwave-app          # from the checkout
 WEBKIT_DISABLE_DMABUF_RENDERER=1 holzwave-app                        # an installed deb or rpm
-WEBKIT_DISABLE_DMABUF_RENDERER=1 ./holzWave_0.0.1-alpha1_amd64.AppImage
+WEBKIT_DISABLE_DMABUF_RENDERER=1 ./holzWave_0.0.1-beta1_amd64.AppImage
 ```
 
 Set one for the menu entry of an installed package: copy `/usr/share/applications/holzWave.desktop` to
