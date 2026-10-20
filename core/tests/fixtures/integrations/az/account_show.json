@@ -1,0 +1,14 @@
+{
+  "environmentName": "AzureCloud",
+  "homeTenantId": "00000000-0000-4000-8000-000000000001",
+  "id": "00000000-0000-4000-8000-000000000002",
+  "isDefault": true,
+  "managedByTenants": [],
+  "name": "Item 1",
+  "state": "Enabled",
+  "tenantId": "00000000-0000-4000-8000-000000000001",
+  "user": {
+    "name": "user@example.com",
+    "type": "user"
+  }
+}

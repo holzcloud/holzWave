@@ -1,0 +1,102 @@
+{
+    "node": "192.0.2.11",
+    "metadata": {
+        "namespace": "runtime",
+        "type": "Services.v1alpha1.talos.dev",
+        "id": "apid",
+        "version": 1,
+        "owner": "v1alpha1.ServiceController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "running": true,
+        "healthy": true
+    }
+}
+{
+    "node": "192.0.2.11",
+    "metadata": {
+        "namespace": "runtime",
+        "type": "Services.v1alpha1.talos.dev",
+        "id": "etcd",
+        "version": 1,
+        "owner": "v1alpha1.ServiceController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "running": true,
+        "healthy": true
+    }
+}
+{
+    "node": "192.0.2.11",
+    "metadata": {
+        "namespace": "runtime",
+        "type": "Services.v1alpha1.talos.dev",
+        "id": "kubelet",
+        "version": 1,
+        "owner": "v1alpha1.ServiceController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "running": true,
+        "healthy": true
+    }
+}
+{
+    "node": "192.0.2.12",
+    "metadata": {
+        "namespace": "runtime",
+        "type": "Services.v1alpha1.talos.dev",
+        "id": "apid",
+        "version": 1,
+        "owner": "v1alpha1.ServiceController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "running": true,
+        "healthy": true
+    }
+}
+{
+    "node": "192.0.2.12",
+    "metadata": {
+        "namespace": "runtime",
+        "type": "Services.v1alpha1.talos.dev",
+        "id": "etcd",
+        "version": 1,
+        "owner": "v1alpha1.ServiceController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "running": true,
+        "healthy": false
+    }
+}
+{
+    "node": "192.0.2.12",
+    "metadata": {
+        "namespace": "runtime",
+        "type": "Services.v1alpha1.talos.dev",
+        "id": "kubelet",
+        "version": 1,
+        "owner": "v1alpha1.ServiceController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "running": true,
+        "healthy": true
+    }
+}

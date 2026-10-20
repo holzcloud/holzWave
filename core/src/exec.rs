@@ -304,14 +304,14 @@ fn system_root(env: &[(String, String)]) -> String {
 
 /// The child leads a process group of its own, so the group can be killed as a whole.
 #[cfg(not(windows))]
-fn isolate(child: &mut Command) {
+pub(crate) fn isolate(child: &mut Command) {
     use std::os::unix::process::CommandExt;
     child.process_group(0);
 }
 
 /// No console window appears for the child.
 #[cfg(windows)]
-fn isolate(child: &mut Command) {
+pub(crate) fn isolate(child: &mut Command) {
     use std::os::windows::process::CommandExt;
     child.creation_flags(0x0800_0000);
 }
@@ -320,7 +320,7 @@ fn isolate(child: &mut Command) {
 /// cannot have been reused. The process id is a number this code made itself, never text of the model. Answers whether
 /// the helper could be run.
 #[cfg(not(windows))]
-fn kill_tree(pid: u32) -> bool {
+pub(crate) fn kill_tree(pid: u32) -> bool {
     Command::new("/bin/sh")
         .args(["-c", "kill -s KILL -- \"-$1\"", "sh", &pid.to_string()])
         .stdin(Stdio::null())
@@ -333,7 +333,7 @@ fn kill_tree(pid: u32) -> bool {
 /// Kills the process `pid` and its children through `taskkill` from the system folder. Answers whether the helper could be
 /// run.
 #[cfg(windows)]
-fn kill_tree(pid: u32) -> bool {
+pub(crate) fn kill_tree(pid: u32) -> bool {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
     let mut helper = Command::new(format!("{root}\\System32\\taskkill.exe"));
     helper.args(["/PID", &pid.to_string(), "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -342,14 +342,14 @@ fn kill_tree(pid: u32) -> bool {
 }
 
 /// Ends the command and what it started, and reaps the leader.
-fn stop(child: &mut std::process::Child, pid: u32) {
+pub(crate) fn stop(child: &mut std::process::Child, pid: u32) {
     kill_tree(pid);
     let _ = child.kill();
     let _ = child.wait();
 }
 
 /// The exit code of a command: the code, or 128 plus the signal that ended it.
-fn exit_code(status: &std::process::ExitStatus) -> Option<u32> {
+pub(crate) fn exit_code(status: &std::process::ExitStatus) -> Option<u32> {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;

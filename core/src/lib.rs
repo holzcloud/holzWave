@@ -16,6 +16,7 @@
 //! - [`profiles`]: `connections.json`, the saved SSH, WSL and Docker connections.
 //! - [`secrets`]: the [`secrets::SecretStore`] trait over the OS keychain.
 //! - [`connections`]: the connection manager the app shell holds: profiles, secrets, which pane runs which.
+//! - [`integrate`]: the person's own command-line tools (Kubernetes, Talos, Azure, GAM), with names validated by kind.
 //! - [`files`]: the file browser's source of files, local and over SFTP, with bounded reads and atomic writes.
 //! - [`preview`]: the kind of a file and Markdown as sanitised HTML.
 //! - [`ssh`]: a shell on another machine over SSH, with reconnect.
@@ -42,6 +43,7 @@ mod error;
 pub mod exec;
 pub mod files;
 pub mod history;
+pub mod integrate;
 pub mod keybindings;
 pub mod monitor;
 pub mod layout;

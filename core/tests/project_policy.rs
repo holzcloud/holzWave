@@ -61,6 +61,12 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
             ("argon2", "Argon2id stretching of the sync passphrase into the file key (sync/crypto.rs)"),
             ("chacha20poly1305", "XChaCha20-Poly1305 authenticated encryption of every synced file (sync/crypto.rs)"),
             (
+                "csv",
+                "the reader of GAM's CSV output (integrate/gam.rs), which has quoted multi-line cells holding JSON that a \
+                 line splitter cannot read; a hand-written reader was rejected because it would parse text that other \
+                 people wrote into a directory; pinned to an exact version, it brings csv-core and ryu",
+            ),
+            (
                 "getrandom",
                 "operating-system randomness: the 128-bit tokens of file grants (blocks.rs) and the salts and nonces of \
                  the sync (sync/crypto.rs)",
@@ -291,6 +297,12 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
         "std::net",
         "the address types of the standard library: the file classifies a resolved address, pins the checked addresses \
          and asks the system resolver for the addresses of a host name; it opens no socket and listens on none",
+    ),
+    (
+        "core/src/integrate/args.rs",
+        "std::net",
+        "`IpAddr` only as the standard library's own address parser, to tell a node given as an IP literal from a host \
+         name; the file opens no socket and resolves nothing",
     ),
     (
         "core/src/ai/profiles.rs",
@@ -2465,12 +2477,11 @@ const PLAN_LABEL_SKIPPED_DIRS: [&str; 7] = ["target", "node_modules", ".build", 
 const PLAN_LABEL_ALLOWED: [(&str, &str, &str); 0] = [];
 
 /// The labels of the private planning tree in `text`, as one-based line numbers and the label text. Four shapes: a plan id
-/// (the two digits of the phase, a hyphen and two digits, alone: not inside a date, a longer number, a word, a version),
-/// a threat id, the name of the phase directory, and a test or function name that carries a spike label.
+/// (the two digits of a phase, a hyphen and two digits, alone: not inside a date, a longer number, a word, a version),
+/// a threat id, the name of the phase directory, and a test or function name that carries a spike label. The plan id, the
+/// threat id and the directory rules run for every phase of [`plan_label_phases`]; the spike rules run once per line.
 fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
-    let phase = String::from("0") + "7";
-    let threat = format!("T-{phase}-");
-    let directory = format!("{phase}-extras");
+    let phases = plan_label_phases();
     let spike = String::from("spike") + "_s";
     let spike_word = String::from("spike") + " S";
     let mut hits = Vec::new();
@@ -2482,22 +2493,25 @@ fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
             chars.len() >= i + want.len() && chars[i..i + want.len()] == want[..]
         };
         for i in 0..chars.len() {
-            // A plan id: the phase, a hyphen and two digits.
-            if at(i, &format!("{phase}-")) {
-                let before_ok = i == 0 || !(chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '-' | '_' | '.'));
-                let digits = i + 3 + 1 < chars.len() && chars[i + 3].is_ascii_digit() && chars[i + 4].is_ascii_digit();
-                let after_ok = !chars.get(i + 5).is_some_and(char::is_ascii_digit);
-                if before_ok && digits && after_ok {
-                    hits.push((number, chars[i..i + 5].iter().collect()));
+            for (phase, directory) in &phases {
+                let threat = format!("T-{phase}-");
+                // A plan id: the phase, a hyphen and two digits.
+                if at(i, &format!("{phase}-")) {
+                    let before_ok = i == 0 || !(chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '-' | '_' | '.'));
+                    let digits = i + 3 + 1 < chars.len() && chars[i + 3].is_ascii_digit() && chars[i + 4].is_ascii_digit();
+                    let after_ok = !chars.get(i + 5).is_some_and(char::is_ascii_digit);
+                    if before_ok && digits && after_ok {
+                        hits.push((number, chars[i..i + 5].iter().collect()));
+                    }
                 }
-            }
-            // A threat id: T, the phase and a digit.
-            if at(i, &threat) && chars.get(i + threat.chars().count()).is_some_and(char::is_ascii_digit) {
-                hits.push((number, chars[i..i + threat.chars().count() + 1].iter().collect()));
-            }
-            // The name of the phase directory.
-            if at(i, &directory) {
-                hits.push((number, directory.clone()));
+                // A threat id: T, the phase and a digit.
+                if at(i, &threat) && chars.get(i + threat.chars().count()).is_some_and(char::is_ascii_digit) {
+                    hits.push((number, chars[i..i + threat.chars().count() + 1].iter().collect()));
+                }
+                // The name of the phase directory.
+                if at(i, directory) {
+                    hits.push((number, directory.clone()));
+                }
             }
             // A spike label in a name or in words: the prefix, a digit from 1 to 5, and no letter or digit right after.
             for prefix in [&spike, &spike_word] {
@@ -2513,6 +2527,15 @@ fn plan_label_hits(text: &str) -> Vec<(usize, String)> {
         }
     }
     hits
+}
+
+/// The phases whose labels stay out of the public tree, as the two digits of the phase and the name of its directory.
+/// Built from pieces so that this file holds no label.
+fn plan_label_phases() -> Vec<(String, String)> {
+    vec![
+        (String::from("0") + "7", String::from("0") + "7-extras"),
+        (String::from("0") + "8", String::from("0") + "8-" + "native" + "-integrationen"),
+    ]
 }
 
 /// Every text file of the first-party directories, and `README.md`, sorted. The walk is private to this guard: it skips
@@ -2560,26 +2583,34 @@ fn no_public_file_carries_a_plan_label() {
 
 #[test]
 fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips_dates_and_longer_numbers() {
-    // Every sample is built from pieces, so that this file holds no label itself.
-    let phase = String::from("0") + "7";
-    let id = format!("{phase}-{}", 12);
+    // Every sample is built from pieces, so that this file holds no label itself. Each row runs for both phases.
+    let second_name = String::from("native") + "-integrationen";
+    for (phase, name) in [(String::from("0") + "7", "extras"), (String::from("0") + "8", second_name.as_str())] {
+        let id = format!("{phase}-{}", 12);
+        let hit = |text: &str| plan_label_hits(text).into_iter().map(|(_, label)| label).collect::<Vec<_>>();
+        assert_eq!(hit(&id), [id.clone()], "an id alone ({phase})");
+        assert_eq!(hit(&format!("see ({id})")), [id.clone()], "an id in parentheses ({phase})");
+        assert_eq!(hit(&format!("{id} starts the line")), [id.clone()], "an id at the start ({phase})");
+        assert_eq!(hit(&format!("ends the line {id}")), [id.clone()], "an id at the end ({phase})");
+        assert!(hit(&format!("on 2026-{id}")).is_empty(), "inside a date ({phase})");
+        assert!(hit(&format!("x{id}")).is_empty(), "after a letter ({phase})");
+        assert!(hit(&format!("5{id}")).is_empty(), "after a digit ({phase})");
+        assert!(hit(&format!("{id}3")).is_empty(), "before a third digit ({phase})");
+        assert!(hit(&format!("1.{id}")).is_empty(), "after a dot ({phase})");
+        assert!(hit(&format!("a_{id}")).is_empty(), "after an underscore ({phase})");
+        assert!(hit(&format!("{phase}-x")).is_empty(), "a hyphen and a letter ({phase})");
+        assert!(hit(&format!("v{phase}.1")).is_empty(), "a version number ({phase})");
+        let threat = format!("T-{phase}-024");
+        assert_eq!(hit(&format!("a bound ({threat})")), [format!("T-{phase}-0")], "a threat id ({phase})");
+        assert!(hit(&format!("T-{phase}-SC")).is_empty(), "the reserved threat name has no digit ({phase})");
+        let directory = format!("{phase}-{name}");
+        assert_eq!(hit(&format!("the folder {directory}/")), [directory.clone()], "the phase directory ({phase})");
+        assert_eq!(plan_label_hits(&format!("one\ntwo {id}\nthree")), [(2, id)], "the line number is one-based ({phase})");
+    }
+    // The shapes of the first phase and the spike labels are unchanged: only these two phases, nothing in between.
+    let other = String::from("0") + "9";
+    assert!(plan_label_hits(&format!("{other}-12 and T-{other}-1 and {other}-extras")).is_empty(), "a phase that is no label");
     let hit = |text: &str| plan_label_hits(text).into_iter().map(|(_, label)| label).collect::<Vec<_>>();
-    assert_eq!(hit(&id), [id.clone()], "an id alone");
-    assert_eq!(hit(&format!("see ({id})")), [id.clone()], "an id in parentheses");
-    assert_eq!(hit(&format!("{id} starts the line")), [id.clone()], "an id at the start");
-    assert_eq!(hit(&format!("ends the line {id}")), [id.clone()], "an id at the end");
-    assert!(hit(&format!("on 2026-{id}")).is_empty(), "inside a date");
-    assert!(hit(&format!("x{id}")).is_empty(), "after a letter");
-    assert!(hit(&format!("5{id}")).is_empty(), "after a digit");
-    assert!(hit(&format!("{id}3")).is_empty(), "before a third digit");
-    assert!(hit(&format!("1.{id}")).is_empty(), "after a dot");
-    assert!(hit(&format!("a_{id}")).is_empty(), "after an underscore");
-    assert!(hit(&format!("{phase}-x")).is_empty(), "a hyphen and a letter");
-    let threat = format!("T-{phase}-024");
-    assert_eq!(hit(&format!("a bound ({threat})")), [format!("T-{phase}-0")], "a threat id");
-    assert!(hit(&format!("T-{phase}-SC")).is_empty(), "the reserved threat name has no digit");
-    let directory = format!("{phase}-extras");
-    assert_eq!(hit(&format!("the folder {directory}/")), [directory.clone()], "the phase directory");
     let spike = String::from("spike") + "_s";
     assert_eq!(hit(&format!("fn {spike}1_first_delta()")), [format!("{spike}1")], "a spike name with a tail");
     assert_eq!(hit(&format!("fn round_trip_{spike}5()")), [format!("{spike}5")], "a spike name at the end");
@@ -2590,7 +2621,9 @@ fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips
     let words = String::from("spike") + " S";
     assert_eq!(hit(&format!("the {words}1 numbers")), [format!("{words}1")], "a spike label written as words");
     assert!(hit(&format!("the {words}6 numbers")).is_empty(), "a spike word with another digit");
-    assert_eq!(plan_label_hits(&format!("one\ntwo {id}\nthree")), [(2, id)], "the line number is one-based");
+    // A line that holds labels of both phases reports both.
+    let both = format!("{}-01 and {}-02", String::from("0") + "7", String::from("0") + "8");
+    assert_eq!(hit(&both).len(), 2, "both phases on one line");
 }
 
 // ---- the architecture and the golden of the protocol ----------------------------------------------------------
@@ -2672,6 +2705,270 @@ fn architecture_md_names_every_ai_command_and_event_as_the_golden_has_them() {
         }
     }
     assert!(missing.is_empty(), "section 6 of docs/architecture.md does not name, as the golden has them: {missing:?}");
+}
+
+// ---- the integrations: no shell, the protocol names, the wording of the design ------------------------------------
+
+/// The words that no integration source may hold in code: a shell named to run a string, and the Windows call that
+/// passes a raw command line. Compared on the lower-cased line; every one is a way for a name from a profile or a
+/// cluster to be parsed by something other than the tool.
+const INTEGRATION_SHELL_TOKENS: [&str; 6] = ["sh -c", "/bin/sh", "cmd /c", "cmd.exe", "powershell", "raw_arg"];
+
+/// A spawn that names its program as a literal: the program of an integration comes from the detector, never from a
+/// string in the source (a bare name would be looked up on a `PATH` that anything can put a file on).
+const INTEGRATION_LITERAL_SPAWNS: [&str; 2] = ["Command::new(", "CommandBuilder::new("];
+
+/// The label of a literal spawn in a report.
+const INTEGRATION_LITERAL_LABEL: &str = "a literal program name";
+
+/// A hit that is allowed in an integration source, as `(file, token, reason)`. It is empty: an entry needs a file, a
+/// token, a reason and a real hit, and a stale entry fails the guard.
+const INTEGRATION_SPAWN_ALLOWED: [(&str, &str, &str); 0] = [];
+
+/// `(line, token)` for every spawn by a literal program name and every shell word in the code of `source`: comments and
+/// the test module are not code that ships. A spawn is a literal when a quote (also `r"`, `r#"` and `b"`) follows the
+/// opening parenthesis, even on the next line.
+fn integration_spawn_hits(source: &str) -> Vec<(usize, &'static str)> {
+    let code = without_comments(production_part(source), Syntax::Rust);
+    let mut hits = Vec::new();
+    for (index, line) in code.lines().enumerate() {
+        let lower = line.to_lowercase();
+        for token in INTEGRATION_SHELL_TOKENS {
+            if contains_token(&lower, token) {
+                hits.push((index + 1, token));
+            }
+        }
+    }
+    for spawn in INTEGRATION_LITERAL_SPAWNS {
+        let mut from = 0;
+        while let Some(found) = code[from..].find(spawn) {
+            let start = from + found;
+            let after = &code[start + spawn.len()..];
+            let argument = after.trim_start();
+            let literal = argument.starts_with('"')
+                || argument.starts_with("r\"")
+                || argument.starts_with("r#")
+                || argument.starts_with("b\"");
+            let word_start = code[..start].chars().next_back().is_none_or(|c| !(is_word(c) || c == '_'));
+            if literal && word_start {
+                hits.push((code[..start].matches('\n').count() + 1, INTEGRATION_LITERAL_LABEL));
+            }
+            from = start + spawn.len();
+        }
+    }
+    hits.sort();
+    hits
+}
+
+/// What is wrong with the integration sources, one sentence each: a hit that no entry of `allowed` names, an entry
+/// without a reason, and an entry that no real hit matches (stale). `files` are `(shown path, source text)`.
+fn integration_spawn_problems(files: &[(String, String)], allowed: &[(&str, &str, &str)]) -> Vec<String> {
+    let mut hits: Vec<(String, usize, &str)> = Vec::new();
+    for (file, source) in files {
+        hits.extend(integration_spawn_hits(source).into_iter().map(|(line, token)| (file.clone(), line, token)));
+    }
+    let mut problems = Vec::new();
+    for (file, line, token) in &hits {
+        if !allowed.iter().any(|(f, t, _)| f == file && t == token) {
+            problems.push(format!("{file}:{line}: {token}"));
+        }
+    }
+    for (file, token, reason) in allowed {
+        if reason.trim().is_empty() {
+            problems.push(format!("the allowed hit {token} in {file} has no reason: say why it is no shell or name"));
+        }
+        if !hits.iter().any(|(f, _, t)| f == file && t == token) {
+            problems.push(format!(
+                "the allowed hit {token} in {file} matches nothing: it is stale, remove it from \
+                 INTEGRATION_SPAWN_ALLOWED"
+            ));
+        }
+    }
+    problems
+}
+
+/// The Rust files of the integrations that ship: every `.rs` file below `core/src/integrate` and the shell side file,
+/// minus the declared out-of-line test modules. There may be none yet.
+fn integration_source_files() -> Vec<PathBuf> {
+    let mut files = files_below("core/src/integrate", &["rs"]);
+    let host = root().join("app/src-tauri/src/integrate_host.rs");
+    if host.is_file() {
+        files.push(host);
+    }
+    files.retain(|file| !is_declared_test_module(file));
+    files.sort();
+    files
+}
+
+#[test]
+fn integration_sources_spawn_nothing_through_a_shell() {
+    let files: Vec<(String, String)> = integration_source_files()
+        .iter()
+        .map(|file| {
+            let relative = shown(file);
+            let source = fs::read_to_string(file).unwrap_or_else(|e| panic!("cannot read {relative}: {e}"));
+            (relative, source)
+        })
+        .collect();
+    let problems = integration_spawn_problems(&files, &INTEGRATION_SPAWN_ALLOWED);
+    assert!(
+        problems.is_empty(),
+        "an integration source starts a program through a shell or by a bare name: build the argument list from the \
+         detected binary; name a hit in INTEGRATION_SPAWN_ALLOWED only with a reason:\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn the_integration_source_guard_reports_a_literal_spawn_a_shell_word_and_a_raw_argument() {
+    let toy = |source: &str| vec![(String::from("core/src/integrate/toy.rs"), source.to_owned())];
+    let problems = |source: &str| integration_spawn_problems(&toy(source), &[]);
+    assert_eq!(
+        problems("fn run() { Command::new(\"kubectl\"); }"),
+        ["core/src/integrate/toy.rs:1: a literal program name"],
+        "a literal program name"
+    );
+    assert_eq!(
+        problems("fn run() {\n    let mut c = Command::new(\n        \"git\",\n    );\n}"),
+        ["core/src/integrate/toy.rs:2: a literal program name"],
+        "a literal on the next line is found, and the line is that of the call"
+    );
+    assert_eq!(problems("let c = Command::new(r#\"az\"#);").len(), 1, "a raw string literal");
+    assert!(problems("let c = Command::new(program);").is_empty(), "a program from the detector is fine");
+    assert!(problems("let c = MyCommand::new(\"x\");").is_empty(), "a longer name is no spawn");
+    assert_eq!(problems("let args = [\"sh -c\", script];"), ["core/src/integrate/toy.rs:1: sh -c"], "a shell string");
+    assert_eq!(problems("let p = \"/bin/sh\";").len(), 1, "the path of a shell");
+    assert_eq!(problems("let p = \"cmd /c\";").len(), 1, "the Windows shell with its switch");
+    assert_eq!(problems("let p = \"CMD.EXE\";").len(), 1, "the Windows shell, any case");
+    assert_eq!(problems("let p = \"PowerShell\";").len(), 1, "the other Windows shell, any case");
+    assert_eq!(problems("use std::os::windows::process::CommandExt; c.raw_arg(x);").len(), 1, "a raw command line");
+    assert!(problems("let p = \"/bin/shell\"; let q = \"ssh -cipher\";").is_empty(), "a longer word is no shell");
+    // A pod's own shell is separate elements of one argument list, never one string: no hit.
+    assert!(problems("let tail = [\"--\", \"sh\", \"-c\", POD_SCRIPT];").is_empty(), "separate elements");
+    // A comment and the test module are not code that ships.
+    assert!(problems("// never Command::new(\"x\") or sh -c\n/* raw_arg */ fn f() {}").is_empty(), "comments");
+    assert!(
+        problems("fn f() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() { Command::new(\"sh\"); }\n}").is_empty(),
+        "the test module"
+    );
+}
+
+#[test]
+fn the_integration_source_guard_accepts_an_entry_with_a_real_hit_and_reports_a_stale_one_and_an_empty_reason() {
+    let files = vec![(String::from("core/src/integrate/toy.rs"), String::from("let p = \"/bin/sh\";"))];
+    let allowed = [("core/src/integrate/toy.rs", "/bin/sh", "a test rig constant, unreachable from a profile")];
+    let accepted = integration_spawn_problems(&files, &allowed);
+    assert!(accepted.is_empty(), "an entry with a file, a token, a reason and a hit: {accepted:?}");
+    let stale = [("core/src/integrate/other.rs", "cmd.exe", "a reason")];
+    let problems = integration_spawn_problems(&files, &stale);
+    assert_eq!(problems.len(), 2, "the hit is unlisted and the entry is stale: {problems:?}");
+    assert!(problems.iter().any(|p| p.contains("stale")), "{problems:?}");
+    let bare = [("core/src/integrate/toy.rs", "/bin/sh", "  ")];
+    let problems = integration_spawn_problems(&files, &bare);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("no reason"), "{problems:?}");
+    assert!(INTEGRATION_SPAWN_ALLOWED.is_empty(), "the allow-list is empty until a real hit needs an entry");
+}
+
+/// The commands that start with `integration_` and the event `integration` that the golden has, as section 6 of the
+/// architecture must write them (the command with its argument names, the event in backticks): the ones it does not.
+fn integration_names_missing(golden: &serde_json::Value, section: &str) -> Vec<String> {
+    let mut missing = Vec::new();
+    if let Some(commands) = golden["commands"].as_object() {
+        for (name, arguments) in commands.iter().filter(|(name, _)| name.starts_with("integration_")) {
+            let arguments: Vec<String> = arguments
+                .as_array()
+                .expect("a command lists its argument names")
+                .iter()
+                .map(|a| a.as_str().expect("an argument name").to_owned())
+                .collect();
+            let written = documented_command(name, &arguments);
+            if !section.contains(&written) {
+                missing.push(written);
+            }
+        }
+    }
+    let events = golden["events"]["names"].as_array();
+    let has_event = events.is_some_and(|names| names.iter().any(|n| n.as_str() == Some("integration")));
+    if has_event && !section.contains("`integration`") {
+        missing.push(String::from("`integration`"));
+    }
+    missing
+}
+
+#[test]
+fn architecture_md_names_every_integration_command_and_the_integration_event_as_the_golden_has_them() {
+    let section = markdown_section(&read("docs/architecture.md"), "## 6.");
+    assert!(!section.is_empty(), "docs/architecture.md has no section 6");
+    let missing = integration_names_missing(&protocol_golden(), &section);
+    assert!(missing.is_empty(), "section 6 of docs/architecture.md does not name, as the golden has them: {missing:?}");
+}
+
+#[test]
+fn the_integration_names_guard_lists_a_command_and_an_event_the_section_lacks() {
+    let golden = serde_json::json!({
+        "commands": { "integration_run": ["tool", "verb"], "integration_cancel": ["ticket"], "paste": ["pane"] },
+        "events": { "names": ["frame", "integration"] }
+    });
+    let bare = "## 6. The app protocol\n\n`paste(pane)` and `frame` only.\n";
+    assert_eq!(
+        integration_names_missing(&golden, bare),
+        ["`integration_cancel(ticket)`", "`integration_run(tool, verb)`", "`integration`"],
+        "all three are listed"
+    );
+    let full = "`integration_run(tool, verb)`, `integration_cancel(ticket)` and the event `integration`.";
+    assert!(integration_names_missing(&golden, full).is_empty(), "as the golden has them");
+    let wrong = "`integration_run(verb, tool)`, `integration_cancel(ticket)` and `integration`.";
+    let order = integration_names_missing(&golden, wrong);
+    assert_eq!(order, ["`integration_run(tool, verb)`"], "the argument order counts");
+    let none = serde_json::json!({ "commands": { "paste": ["pane"] }, "events": { "names": ["frame"] } });
+    assert!(integration_names_missing(&none, bare).is_empty(), "a golden without integration names asks for none");
+}
+
+/// What is wrong with a section 9 text: it says the tools run on the active connection, or that they work on remote
+/// hosts too. That was the first sketch; the integrations run on this computer only, and a document that says otherwise
+/// misleads the next change. Whitespace is folded, so a line break inside a phrase does not hide it.
+fn integration_wording_problems(section: &str) -> Vec<String> {
+    let text = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut problems = Vec::new();
+    if text.contains("work on remote hosts too") {
+        problems.push(String::from("it says the integrations work on remote hosts too"));
+    }
+    let mut from = 0;
+    while let Some(found) = text[from..].find("on the active") {
+        let start = from + found + "on the active".len();
+        let rest = text[start..].trim_start_matches([' ', '`']);
+        if rest.starts_with("Connection") {
+            problems.push(String::from("it says the tools run on the active connection"));
+            break;
+        }
+        from = start;
+    }
+    problems
+}
+
+#[test]
+fn architecture_md_section_9_does_not_say_the_tools_run_on_the_active_connection() {
+    let section = markdown_section(&read("docs/architecture.md"), "## 9.");
+    assert!(!section.is_empty(), "docs/architecture.md has no section 9");
+    let problems = integration_wording_problems(&section);
+    assert!(
+        problems.is_empty(),
+        "section 9 of docs/architecture.md describes the first sketch, not the design: {problems:?}"
+    );
+}
+
+#[test]
+fn the_integration_wording_guard_sees_the_old_sentence_and_its_key_phrases() {
+    let old = "## 9. Integrations\n\nThey run the tool as a child process\non the active `Connection`, so they \
+               work on\nremote hosts too, and their credentials come from `SecretStore`.\n";
+    let problems = integration_wording_problems(old);
+    assert_eq!(problems.len(), 2, "both key phrases, even across line breaks: {problems:?}");
+    assert_eq!(integration_wording_problems("They run on the active Connection.").len(), 1, "without backticks");
+    assert_eq!(integration_wording_problems("They work on remote hosts too.").len(), 1, "the second phrase alone");
+    let new = "The tools run on this computer only; the active pane picks the context, and a connection is never used.";
+    assert!(integration_wording_problems(new).is_empty(), "the decided design reads clean");
+    assert!(integration_wording_problems("on the active pane, on the active tab").is_empty(), "another noun");
 }
 
 // ---- the test targets the documents name ----------------------------------------------------------------------

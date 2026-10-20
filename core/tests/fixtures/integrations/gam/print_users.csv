@@ -1,0 +1,7 @@
+primaryEmail,name.fullName,suspended,orgUnitPath,notes
+alice@example.com,Alice Example,False,/,
+bob@example.com,Bob Example,False,/Staff,"Line one, with a comma
+line two with ""quotes"""
+carol@example.com,Carol Example,True,/Former,on leave
+dave@example.com,Dave Example,False,/Staff/Sales,
+erin@example.com,Erin Example,False,/,"plain, quoted"

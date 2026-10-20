@@ -1,0 +1,40 @@
+{
+    "node": "192.0.2.11",
+    "metadata": {
+        "namespace": "cluster",
+        "type": "Members.cluster.talos.dev",
+        "id": "node-1",
+        "version": 2,
+        "owner": "cluster.MemberController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "nodeId": "node-id-1",
+        "addresses": [
+            "192.0.2.11"
+        ],
+        "hostname": "node-1.example.com",
+        "machineType": "controlplane",
+        "operatingSystem": "Talos (v1.12.0)"
+    }
+}
+{
+    "node": "192.0.2.12",
+    "metadata": {
+        "namespace": "cluster",
+        "type": "Members.cluster.talos.dev",
+        "id": "node-2",
+        "version": 2,
+        "owner": "cluster.MemberController",
+        "phase": "running",
+        "created": "2026-01-05T10:00:00Z",
+        "updated": "2026-01-05T10:00:05Z"
+    },
+    "spec": {
+        "nodeId": "node-id-2",
+        "addresses": [
+            "192.0.2.12"
+        ],
+        "hostname": "node

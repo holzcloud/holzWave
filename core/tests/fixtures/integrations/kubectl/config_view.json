@@ -1,0 +1,81 @@
+{
+    "kind": "Config",
+    "apiVersion": "v1",
+    "clusters": [
+        {
+            "name": "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+            "cluster": {
+                "server": "https://eks.example.com"
+            }
+        },
+        {
+            "name": "dev-cluster",
+            "cluster": {
+                "server": "https://dev.example.com:6443",
+                "certificate-authority-data": "DATA+OMITTED"
+            }
+        },
+        {
+            "name": "kind-test",
+            "cluster": {
+                "server": "https://127.0.0.1:6443"
+            }
+        }
+    ],
+    "users": [
+        {
+            "name": "exec-user",
+            "user": {
+                "exec": {
+                    "command": "aws",
+                    "args": [
+                        "eks",
+                        "get-token",
+                        "--cluster-name",
+                        "demo"
+                    ],
+                    "env": [
+                        {
+                            "name": "AWS_PROFILE",
+                            "value": "REDACTED"
+                        }
+                    ],
+                    "apiVersion": "client.authentication.k8s.io/v1beta1",
+                    "provideClusterInfo": false,
+                    "interactiveMode": "IfAvailable"
+                }
+            }
+        },
+        {
+            "name": "token-user",
+            "user": {
+                "token": "REDACTED"
+            }
+        }
+    ],
+    "contexts": [
+        {
+            "name": "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+            "context": {
+                "cluster": "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+                "user": "exec-user"
+            }
+        },
+        {
+            "name": "dev",
+            "context": {
+                "cluster": "dev-cluster",
+                "user": "token-user"
+            }
+        },
+        {
+            "name": "kind-test",
+            "context": {
+                "cluster": "kind-test",
+                "user": "token-user",
+                "namespace": "test"
+            }
+        }
+    ],
+    "current-context": "dev"
+}

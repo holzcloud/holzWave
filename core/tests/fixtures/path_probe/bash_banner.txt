@@ -1,0 +1,8 @@
+Welcome back!
+Last login: Mon Jan  1 00:00:00 on ttys000
+@@hw-path-begin
+/injected/bin
+user@host ~ % 
+@@hw-path-begin
+/home/user/bin:/home/user/.local/bin:/home/user/missing1:/home/user/tools/bin:/usr/bin:/bin:/usr/sbin:/sbin
+@@hw-path-end

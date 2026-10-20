@@ -1,0 +1,28 @@
+[
+  {
+    "id": "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-demo-one",
+    "location": "westeurope",
+    "managedBy": null,
+    "name": "rg-demo-one",
+    "properties": {
+      "provisioningState": "Succeeded"
+    },
+    "tags": {
+      "env": "dev"
+    },
+    "type": "Microsoft.Resources/resourceGroups"
+  },
+  {
+    "id": "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-demo-two",
+    "location": "northeurope",
+    "managedBy": null,
+    "name": "rg-demo-two",
+    "properties": {
+      "provisioningState": "Succeeded"
+    },
+    "tags": {},
+    "type": "Microsoft.Resources/resourceGroups"
+  },
+  {
+    "id": "/subscriptions/00000000-0000-4000-8000-000000000002/resourceGroups/rg-demo-three",
+    "location": "west

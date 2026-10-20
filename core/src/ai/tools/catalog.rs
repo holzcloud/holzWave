@@ -910,7 +910,8 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 }
 
 /// Whether the card has to spell out the character: controls, direction marks, zero-width and tag characters.
-fn is_hidden(c: char) -> bool {
+/// The integration names refuse the same characters, so this one rule decides both.
+pub(crate) fn is_hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c,

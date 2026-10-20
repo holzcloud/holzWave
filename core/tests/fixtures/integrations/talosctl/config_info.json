@@ -1,0 +1,13 @@
+{
+    "context": "demo-prod",
+    "nodes": [
+        "192.0.2.11",
+        "192.0.2.12"
+    ],
+    "endpoints": [
+        "192.0.2.11"
+    ],
+    "roles": [
+        "os:reader"
+    ]
+}

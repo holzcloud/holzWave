@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Integration profiles",
+  "description": "The synced file integrations.json: names and flags of connections to clusters, subscriptions and domains.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "The version of the file."
+    },
+    "profiles": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/profile"
+      },
+      "description": "At most 64 profiles."
+    }
+  },
+  "required": [
+    "version",
+    "profiles"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The id of the profile."
+        },
+        "tool": {
+          "enum": [
+            "kube",
+            "talos",
+            "azure",
+            "gam"
+          ],
+          "description": "The tool the profile is for."
+        },
+        "name": {
+          "type": "string",
+          "description": "What the person calls the profile."
+        },
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The context it pins."
+        },
+        "namespace": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The namespace it pins."
+        },
+        "subscription": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The subscription it pins."
+        },
+        "section": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The configuration section it pins."
+        },
+        "node": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The node it pins."
+        },
+        "production": {
+          "type": "boolean",
+          "description": "Whether the pinned context is production."
+        },
+        "isolated": {
+          "type": "boolean",
+          "description": "Whether the tool runs with a configuration directory of its own."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Plain environment variables."
+        },
+        "secret_env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The names of the variables whose values are in the keychain."
+        }
+      },
+      "required": [
+        "id",
+        "tool",
+        "name"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

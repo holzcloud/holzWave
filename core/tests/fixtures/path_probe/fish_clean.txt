@@ -1,0 +1,3 @@
+@@hw-path-begin
+/home/user/.local/bin:/home/user/bin:/home/user/missing1:/home/user/tools/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+@@hw-path-end

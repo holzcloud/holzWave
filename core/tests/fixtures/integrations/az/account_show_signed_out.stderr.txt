@@ -1,0 +1,1 @@
+ERROR: Please run 'az login' to setup account.

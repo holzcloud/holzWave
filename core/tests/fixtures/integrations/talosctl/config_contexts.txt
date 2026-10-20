@@ -1,0 +1,3 @@
+CURRENT   NAME        ENDPOINTS      NODES
+*         demo-prod   192.0.2.11     192.0.2.11,192.0.2.12
+          demo-lab    192.0.2.31     192.0.2.31

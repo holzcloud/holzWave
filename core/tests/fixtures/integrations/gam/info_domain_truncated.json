@@ -1,0 +1,13 @@
+{
+  "customerDomain": "example.com",
+  "creationTime": "2020-03-01T09:00:00.000Z",
+  "isVerified": true,
+  "domainAliases": [
+    {
+      "domainAliasName": "alias-one.example.com",
+      "parentDomainName": "example.com",
+      "verified": true,
+      "creationTime": "2020-03-02T09:00:00.000Z"
+    },
+    {
+      "domainAliasName": "alias-
