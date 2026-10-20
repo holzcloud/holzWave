@@ -131,19 +131,40 @@ export function decideMode(state: CtxState): "ask" | "pick" | "blocked" {
   return state.required && !state.shared ? "ask" : "pick";
 }
 
-/** What the button `Context…` shows. */
-export interface CtxButtonView {
+/** What the toggle `Auto` shows. */
+export interface AutoButtonView {
+  /** The visible text: a filled or hollow dot, the word and the pane. */
   text: string;
-  expanded: boolean;
-  disabled: boolean;
+  /** The accessible name: the visible words without the dot, so the name contains what is seen. */
+  label: string;
+  pressed: boolean;
+  title: string;
 }
 
-/** The button of the composer: its text, whether the card is open and whether no pane can be shared. */
-export function ctxButtonView(mode: Mode, picks: number, available: boolean): CtxButtonView {
-  const open = mode !== "closed";
-  let text = "Context…";
-  if (mode === "offer") text = picks === 0 ? "Context · none" : `Context · ${picks} item${picks === 1 ? "" : "s"}`;
-  return { text, expanded: open, disabled: !available };
+/**
+ * The toggle of the composer (docs/design.md section 6.14): on reads `● Auto · pane 2` or `● Auto · no pane`, off reads
+ * `○ Auto`. The dot shape and the word are the second cue besides the rose wash. A pane that is not a positive integer counts
+ * as none.
+ */
+export function autoButtonView(auto: boolean, pane: number | null): AutoButtonView {
+  const has = typeof pane === "number" && Number.isInteger(pane) && pane >= 1;
+  if (!auto) {
+    return { text: "○ Auto", label: "Auto", pressed: false, title: "Messages go without a pane. Press to switch on." };
+  }
+  if (has) {
+    return {
+      text: `● Auto · pane ${pane}`,
+      label: `Auto · pane ${pane}`,
+      pressed: true,
+      title: `Every message carries what pane ${pane} shows. Press to switch off.`,
+    };
+  }
+  return {
+    text: "● Auto · no pane",
+    label: "Auto · no pane",
+    pressed: true,
+    title: "Focus a terminal or preview pane to send it with your messages. Press to switch off.",
+  };
 }
 
 // ---- reading what the core answers ------------------------------------------------------------------------------------
@@ -363,7 +384,14 @@ export const NOTES = Object.freeze({
   previewFirst: "Preview what you ticked, or untick it, before sending.",
   wait: "Wait for the context card to finish.",
   noPane: "Focus a terminal or preview pane first.",
+  shareFirst: "Share this pane with the chat to send it along, or switch Auto off.",
+  shared: "Pane shared. Press Send again to send it along.",
+  unchanged: "This pane shows nothing new since it was last sent, so this message went without it.",
 });
+
+/** The third sentence of the consent card when Auto opened it. */
+export const AUTO_ASK_WORDS =
+  "With Auto on, this pane goes with every message you send, and the items are listed under each message. Switch Auto off to stop.";
 
 /** The longest pane name kept for a title, in characters. */
 const MAX_PANE_NAME = 40;

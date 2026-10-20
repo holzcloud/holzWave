@@ -76,14 +76,30 @@ export const VIEW_P1 = { ...VIEW, tabs: [{ title: "shell", active: true, focus: 
  * `blocks` are the blocks that exist at the start. `context` is members of `__MOCK__.ai.context` to set (`panes`,
  * `localContext`, `localOnly`, `ttl`, `persist`) before the page loads. `device` is the state of the Mac's on-device model, `{ state,
  * advice }` (default: no such model, so the answer of `ai_profiles` has no `on_device` member).
+ *
+ * `auto` is the state of the toggle `Auto` the case starts with. The product starts with it on. A case that is not about Auto
+ * leaves this false: an observer then presses each toggle once, the first time it is drawn pressed, so the case sends plain
+ * messages as it did before Auto existed. With `auto: true` nothing is installed and the page keeps its own default.
  */
 export async function boot(
   page, url,
-  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {}, clock = false, ask = {}, device = null } = {},
+  { profiles = [PROFILE], view = VIEW, blocks = [], states = {}, search = "", starts = 2, settings = false, context = {}, clock = false, ask = {}, device = null, auto = false } = {},
 ) {
   await page.addInitScript(
-    ([saved, shown, existing, chats, shared, frozen, asked, onDevice]) => {
+    ([saved, shown, existing, chats, shared, frozen, asked, onDevice, autoOn]) => {
       window.__MOCK__.reset();
+      if (!autoOn) {
+        const handled = new WeakSet();
+        const settle = () => {
+          for (const button of document.querySelectorAll("button.chat-ctx")) {
+            const pressed = button.getAttribute("aria-pressed");
+            if (pressed === null || handled.has(button)) continue;
+            handled.add(button);
+            if (pressed === "true") button.click();
+          }
+        };
+        new MutationObserver(settle).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-pressed"] });
+      }
       // A frozen clock: `Date.now` stands still and only `tickClock` moves it, so a window of the page that is measured in
       // milliseconds is the same on every machine. Off by default, so the other cases keep their page as it was.
       window.__REAL_NOW ??= Date.now;
@@ -118,7 +134,7 @@ export async function boot(
         return window.__MOCK__.view();
       });
     },
-    [profiles, view, blocks, states, context, clock, ask, device],
+    [profiles, view, blocks, states, context, clock, ask, device, auto],
   );
   // The settings of the core are played only when asked for, so the chat cases keep their page exactly as it was.
   if (settings) await settingsCore(page, typeof settings === "object" ? settings : {});
@@ -130,10 +146,17 @@ export async function boot(
   });
 }
 
-/** Press `Context…` and wait for the card. */
-export async function openContext(page) {
-  await page.locator("button.chat-ctx").click();
-  await page.waitForSelector(".chat-consent:not([aria-busy])");
+/**
+ * Open the consent card the way the palette action Explain error does (the exported `attachContext` of chat.js with no kinds)
+ * and wait for it. The toggle `Auto` no longer opens the card. Answers the sentence the call gave (null when the card opened).
+ */
+export async function openContext(page, conversation = "chat-mock-1") {
+  const sentence = await page.evaluate(async (id) => {
+    const chat = await import(new URL("chat.js", location.href).href);
+    return chat.attachContext(id, []);
+  }, conversation);
+  if (sentence === null) await page.waitForSelector(".chat-consent:not([aria-busy])");
+  return sentence;
 }
 
 /** The calls of the three context commands, oldest first, as `[command, args]`. */

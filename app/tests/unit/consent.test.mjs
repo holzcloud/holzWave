@@ -523,3 +523,178 @@ test("a prefill in order of preference ticks only the first kind the state lists
   await both.consent.open(["last_command", "screen"]);
   assert.deepEqual(both.calls[1][1].kinds, ["screen", "last_command"]);
 });
+
+// ---- Auto: a send attaches the pane without a card (attachAll) ---------------------------------------------------------------
+
+const KINDS3 = ["selection", "screen", "last_command"];
+const SHARED_STATE = () => STATE({ shared: true, kinds: KINDS3 });
+
+test("attachAll asks for the share once and makes no preview while consent is missing", async () => {
+  const { consent, calls, said } = make({ answers: { ai_context_state: () => STATE({ kinds: KINDS3 }) } });
+  const out = await consent.attachAll(1);
+  assert.deepEqual(out, { kind: "ask" });
+  assert.deepEqual(calls.map((c) => c[0]), ["ai_context_state"], "a state call only");
+  assert.deepEqual(calls[0], ["ai_context_state", { conversation: "chat-1", pane: 1, profile: "local-1", model: null }]);
+  assert.equal(consent.model.mode, "ask");
+  assert.equal(consent.model.viaAuto, true);
+  assert.equal(consent.model.pane, 1);
+  assert.equal(consent.held(), null);
+  assert.deepEqual(said, []);
+
+  // A second send with the card still open asks the state again and keeps one card.
+  assert.deepEqual(await consent.attachAll(1), { kind: "ask" });
+  assert.equal(consent.model.mode, "ask");
+  assert.deepEqual(calls.map((c) => c[0]), ["ai_context_state", "ai_context_state"]);
+});
+
+test("Share on a card that Auto opened closes it and says to press Send again; a card opened by hand is untouched", async () => {
+  const auto = make({ answers: { ai_context_state: () => STATE({ kinds: KINDS3 }), ai_context_share: () => SHARED_STATE() } });
+  await auto.consent.attachAll(1);
+  await auto.consent.share();
+  assert.equal(auto.consent.model.mode, "closed");
+  assert.equal(auto.consent.model.viaAuto, false);
+  assert.deepEqual(auto.said, [["Pane shared. Press Send again to send it along.", "note"]]);
+  assert.equal(auto.calls.filter((c) => c[0] === "ai_context_share").length, 1);
+  assert.equal(auto.calls.filter((c) => c[0] === "ai_context_preview").length, 0, "nothing is read by the share");
+
+  const hand = make({ answers: { ai_context_share: () => SHARED_STATE() } });
+  await hand.consent.open();
+  assert.equal(hand.consent.model.viaAuto, false);
+  await hand.consent.share();
+  assert.equal(hand.consent.model.mode, "pick", "the card of open() stays");
+  assert.deepEqual(hand.said, []);
+});
+
+test("attachAll on a shared pane reads every kind the state lists and answers what the send names", async () => {
+  const { consent, calls } = make({
+    answers: {
+      ai_context_state: () => SHARED_STATE(),
+      ai_context_preview: () =>
+        OFFER({ items: [1, 2, 3].map((id) => ({ id, kind: KINDS3[id - 1], label: `Item ${id}`, bytes: 10, findings: [] })) }),
+    },
+  });
+  const out = await consent.attachAll(1);
+  assert.deepEqual(out, { kind: "attach", held: { offer: OFFER_ID, picked: [1, 2, 3] } });
+  assert.deepEqual(calls.map((c) => c[0]), ["ai_context_state", "ai_context_preview"], "no share call");
+  assert.deepEqual(calls[1], [
+    "ai_context_preview", { conversation: "chat-1", pane: 1, profile: "local-1", model: null, kinds: KINDS3 },
+  ]);
+  assert.deepEqual(Object.keys(calls[1][1]), ["conversation", "pane", "profile", "model", "kinds"]);
+  assert.equal(consent.model.mode, "closed", "no card");
+  assert.equal(consent.held(), null, "held() answers only for a card opened by hand");
+});
+
+test("attachAll names the pane of the send in every call", async () => {
+  const { consent, calls } = make({ answers: { ai_context_state: () => SHARED_STATE() } });
+  await consent.attachAll(3);
+  assert.deepEqual(calls.map((c) => c[1].pane), [3, 3]);
+});
+
+test("attachAll asks nothing about sharing where the core says it is not required", async () => {
+  const { consent, calls } = make({ answers: { ai_context_state: () => STATE({ required: false, shared: false, kinds: KINDS3 }) } });
+  const out = await consent.attachAll(1);
+  assert.equal(out.kind, "attach");
+  assert.deepEqual(calls.map((c) => c[0]), ["ai_context_state", "ai_context_preview"]);
+  assert.equal(consent.model.mode, "closed");
+});
+
+test("attachAll answers none for nothing to share and ask for a share that ended", async () => {
+  const empty = make({ answers: { ai_context_state: () => STATE({ kinds: [], shared: true }) } });
+  assert.deepEqual(await empty.consent.attachAll(1), { kind: "none" });
+  assert.deepEqual(empty.calls.map((c) => c[0]), ["ai_context_state"], "no preview without a kind");
+
+  const nothing = make({
+    answers: {
+      ai_context_state: () => SHARED_STATE(),
+      ai_context_preview: () => Promise.reject({ code: "context", reason: "nothing_to_share", text: "nothing" }),
+    },
+  });
+  assert.deepEqual(await nothing.consent.attachAll(1), { kind: "none" });
+
+  const ended = make({
+    answers: {
+      ai_context_state: () => SHARED_STATE(),
+      ai_context_preview: () => Promise.reject({ code: "context", reason: "not_shared", text: "not shared" }),
+    },
+  });
+  assert.deepEqual(await ended.consent.attachAll(1), { kind: "ask" });
+  assert.equal(ended.consent.model.mode, "ask");
+  assert.equal(ended.consent.model.viaAuto, true);
+  assert.equal(ended.consent.model.state.shared, false);
+});
+
+test("attachAll turns any other refusal and an unreadable answer into a sentence and sends nothing", async () => {
+  const busy = make({
+    answers: {
+      ai_context_state: () => SHARED_STATE(),
+      ai_context_preview: () => Promise.reject({ code: "context", reason: "busy", text: "x" }),
+    },
+  });
+  assert.deepEqual(await busy.consent.attachAll(1), { kind: "fault", text: REASON_WORDS.busy });
+
+  const failed = make({ answers: { ai_context_state: () => Promise.reject({ code: "context", reason: "local_only", text: "x" }) } });
+  assert.deepEqual(await failed.consent.attachAll(1), { kind: "fault", text: REASON_WORDS.local_only });
+
+  const oddState = make({ answers: { ai_context_state: () => ({ shared: "yes" }) } });
+  assert.deepEqual(await oddState.consent.attachAll(1), { kind: "fault", text: "The answer was not understood." });
+
+  const oddOffer = make({ answers: { ai_context_state: () => SHARED_STATE(), ai_context_preview: () => ({ offer: "short" }) } });
+  assert.deepEqual(await oddOffer.consent.attachAll(1), { kind: "fault", text: "The answer was not understood." });
+});
+
+test("attachAll leaves a card the person opened by hand alone and waits for a command in flight", async () => {
+  const hand = make({ answers: { ai_context_state: () => STATE({ shared: true }) } });
+  await hand.consent.open();
+  assert.equal(hand.consent.model.mode, "pick");
+  const before = hand.calls.length;
+  assert.deepEqual(await hand.consent.attachAll(1), { kind: "none" });
+  assert.equal(hand.calls.length, before, "no call");
+  hand.consent.tick("screen", true);
+  await hand.consent.preview();
+  assert.equal(hand.consent.model.mode, "offer");
+  const again = hand.calls.length;
+  assert.deepEqual(await hand.consent.attachAll(1), { kind: "none" });
+  assert.equal(hand.calls.length, again, "no call");
+
+  let release;
+  const slow = make({ answers: { ai_context_state: () => new Promise((resolve) => (release = () => resolve(STATE()))) } });
+  const opening = slow.consent.open();
+  assert.deepEqual(await slow.consent.attachAll(1), { kind: "fault", text: "Wait for the context card to finish." });
+  assert.equal(slow.calls.length, 1);
+  release();
+  await opening;
+});
+
+test("closeAsk closes a card only when Auto opened it, and a state that needs no card drops the card of Auto", async () => {
+  const auto = make({ answers: { ai_context_state: () => STATE({ kinds: KINDS3 }) } });
+  await auto.consent.attachAll(1);
+  assert.equal(auto.consent.model.mode, "ask");
+  auto.consent.closeAsk();
+  assert.equal(auto.consent.model.mode, "closed");
+  assert.equal(auto.consent.model.viaAuto, false);
+
+  const hand = make();
+  await hand.consent.open();
+  assert.equal(hand.consent.model.mode, "ask");
+  hand.consent.closeAsk();
+  assert.equal(hand.consent.model.mode, "ask", "a card opened by hand stays");
+
+  // The pane was shared elsewhere: the next send finds the state shared and the card of Auto goes away.
+  let shared = false;
+  const moved = make({ answers: { ai_context_state: () => STATE({ kinds: KINDS3, shared }) } });
+  await moved.consent.attachAll(1);
+  assert.equal(moved.consent.model.mode, "ask");
+  shared = true;
+  assert.equal((await moved.consent.attachAll(1)).kind, "attach");
+  assert.equal(moved.consent.model.mode, "closed");
+});
+
+test("attachAll after the route changed drops what an earlier share knew", async () => {
+  const { consent, current, calls } = make({ answers: { ai_context_state: () => STATE({ kinds: KINDS3 }) } });
+  await consent.attachAll(1);
+  assert.equal(consent.model.viaAuto, true);
+  current.route = { ...current.route, profile: "other-1" };
+  await consent.attachAll(1);
+  assert.equal(consent.model.mode, "ask");
+  assert.equal(calls[1][1].profile, "other-1");
+});

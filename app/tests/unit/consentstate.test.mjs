@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { localityWord } from "../../dist/chatview.js";
 import {
-  BEST_EFFORT, KIND_WORDS, NOTES, REASON_WORDS, RULE_WORDS, cardTitle, contextArguments, contextFault, ctxButtonView, decideMode,
+  BEST_EFFORT, KIND_WORDS, NOTES, REASON_WORDS, RULE_WORDS, cardTitle, contextArguments, contextFault, autoButtonView, decideMode,
   destinationWords, findingWords, heldOf, paneWords, persistWords, pickedOf, readContextState, readOffer, routeChange, sentLine,
   ruleTag, sizeWords, tokenWordsOfBytes, totalWords, validForWords,
 } from "../../dist/consentstate.js";
@@ -176,14 +176,29 @@ test("the mode follows the core's answer", () => {
   assert.equal(decideMode(state({ required: false, shared: false })), "pick");
   assert.equal(decideMode(state({ required: false, shared: true })), "pick");
   assert.equal(decideMode(state({ kinds: [], required: false })), "blocked");
+});
 
-  assert.deepEqual(ctxButtonView("closed", 0, true), { text: "Context…", expanded: false, disabled: false });
-  assert.deepEqual(ctxButtonView("offer", 1, true), { text: "Context · 1 item", expanded: true, disabled: false });
-  assert.deepEqual(ctxButtonView("offer", 2, true), { text: "Context · 2 items", expanded: true, disabled: false });
-  assert.deepEqual(ctxButtonView("offer", 0, true), { text: "Context · none", expanded: true, disabled: false });
-  assert.deepEqual(ctxButtonView("pick", 0, true), { text: "Context…", expanded: true, disabled: false });
-  assert.deepEqual(ctxButtonView("ask", 0, true), { text: "Context…", expanded: true, disabled: false });
-  assert.deepEqual(ctxButtonView("closed", 0, false), { text: "Context…", expanded: false, disabled: true });
+test("the Auto toggle reads its state in words and a dot", () => {
+  assert.deepEqual(autoButtonView(true, 2), {
+    text: "● Auto · pane 2", label: "Auto · pane 2", pressed: true,
+    title: "Every message carries what pane 2 shows. Press to switch off.",
+  });
+  assert.deepEqual(autoButtonView(true, null), {
+    text: "● Auto · no pane", label: "Auto · no pane", pressed: true,
+    title: "Focus a terminal or preview pane to send it with your messages. Press to switch off.",
+  });
+  assert.deepEqual(autoButtonView(false, 2), {
+    text: "○ Auto", label: "Auto", pressed: false, title: "Messages go without a pane. Press to switch on.",
+  });
+  assert.deepEqual(autoButtonView(false, null), autoButtonView(false, 2));
+  for (const bad of [0, -1, 1.5, Number.NaN, "2", undefined]) {
+    assert.equal(autoButtonView(true, bad).text, "● Auto · no pane", `pane ${String(bad)}`);
+  }
+  for (const view of [autoButtonView(true, 1), autoButtonView(true, null), autoButtonView(false, 1)]) {
+    assert.ok(view.text.endsWith(view.label), "the accessible name is the visible words");
+    assert.ok(!/[●○]/u.test(view.label), "the name has no symbol");
+    assert.ok(view.title.endsWith("."), view.title);
+  }
 });
 
 test("the word tables are the core's tables", () => {
@@ -209,7 +224,7 @@ test("the word tables are the core's tables", () => {
     assert.ok(!/[<>&`]|:\/\//.test(sentence), `${reason}: no markup and no address`);
   }
   for (const word of Object.values(KIND_WORDS)) assert.ok(word.length >= 3);
-  assert.equal(Object.keys(NOTES).length, 7);
+  assert.equal(Object.keys(NOTES).length, 10);
 });
 
 test("a finding, a size, a token count and a destination are told in words", () => {

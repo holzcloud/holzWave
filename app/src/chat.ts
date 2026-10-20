@@ -35,8 +35,8 @@ import { Consent } from "./consent.js";
 import type { OpenOptions } from "./consent.js";
 import { mountCard } from "./consentcard.js";
 import type { CardView } from "./consentcard.js";
-import { NOTES, contextArguments, ctxButtonView, paneWords, sentLine } from "./consentstate.js";
-import type { CtxKind, Route as ConsentRoute } from "./consentstate.js";
+import { NOTES, autoButtonView, contextArguments, contextFault, paneWords, sentLine } from "./consentstate.js";
+import type { CtxKind, Held, Route as ConsentRoute } from "./consentstate.js";
 import { el, loadStyles } from "./dom.js";
 import { IntentSlot } from "./inlinestate.js";
 import type { ChatIntent } from "./inlinestate.js";
@@ -88,7 +88,7 @@ const MAX_RENDERED = 8 * 1024 * 1024;
 /** The longest address written after the text of a link that is not one, in characters. */
 const SHOWN_HREF = 300;
 
-/** The two sentences of the page that a send and a press of `Context…` share. */
+/** The two sentences of the page that a send and the opening of the consent card share. */
 const CHOOSE_FIRST = "Choose a provider first.";
 const REVIEW_FIRST = "Review this provider first.";
 
@@ -117,6 +117,8 @@ interface Session {
   loadingProfiles: Promise<void> | null;
   /** The profile the user chose for this chat. */
   choice: string | null;
+  /** The toggle `Auto`: every message carries the pane the chat acts for. Page memory only, never stored. */
+  auto: boolean;
   draft: string;
   /** A snapshot request is on its way. */
   fetching: boolean;
@@ -183,6 +185,8 @@ let intending: Promise<string | null> | null = null;
 let button: HTMLButtonElement | null = null;
 /** The profile chosen last in this window: a new chat starts with it. */
 let lastChoice: string | null = null;
+/** The state of `Auto` chosen last in this window: a new chat starts with it. A reload starts it on; nothing is stored. */
+let lastAuto = true;
 /** The providers that wait for the user's review (a gateway or a server of the user's own that was not allowed yet). */
 let review = new Set<string>();
 /**
@@ -243,6 +247,7 @@ function sessionFor(conversation: string): Session {
       device: null,
       loadingProfiles: null,
       choice: lastChoice,
+      auto: lastAuto,
       draft: "",
       fetching: false,
       sending: false,
@@ -640,8 +645,7 @@ class Mounted implements ChatView {
     this.ctx = el("button", "chat-ctx", foot);
     this.ctx.type = "button";
     this.ctx.dataset.field = "";
-    this.ctx.setAttribute("aria-controls", this.cards.id);
-    this.ctx.addEventListener("click", () => void this.pressContext());
+    this.ctx.addEventListener("click", () => this.pressAuto());
     this.count = el("span", "chat-count", foot);
     el("span", "chat-hint", foot).textContent = HINT;
     this.sendButton = el("button", "chat-send", foot);
@@ -782,16 +786,14 @@ class Mounted implements ChatView {
     this.drawContextButton();
   }
 
-  /** The text, the open state and the availability of `Context…`. */
+  /** The text, the pressed state and the name of the toggle `Auto`: it names the pane the chat acts for. */
   drawContextButton(): void {
     if (!this.alive) return;
-    const m = this.session.consent?.model;
-    const picks = m !== undefined && m.offer !== null ? m.offer.items.length - m.off.length : 0;
-    const view = ctxButtonView(m?.mode ?? "closed", picks, acting !== null);
+    const view = autoButtonView(this.session.auto, acting);
     if (this.ctx.textContent !== view.text) this.ctx.textContent = view.text;
-    this.ctx.setAttribute("aria-expanded", view.expanded ? "true" : "false");
-    if (view.disabled) this.ctx.setAttribute("aria-disabled", "true");
-    else this.ctx.removeAttribute("aria-disabled");
+    this.ctx.setAttribute("aria-pressed", view.pressed ? "true" : "false");
+    this.ctx.setAttribute("aria-label", view.label);
+    this.ctx.title = view.title;
   }
 
   private unmountApprovals(): void {
@@ -845,18 +847,15 @@ class Mounted implements ChatView {
   }
 
   /**
-   * The button `Context…`: closes an open card, else asks the core about the pane the chat acts for. A sentence that tells
-   * why it cannot is said under the transcript.
+   * The toggle `Auto`: switches the attaching of the pane for this chat, on every view of it. It asks the core nothing; a card
+   * that a send with Auto opened closes when Auto goes off.
    */
-  private async pressContext(): Promise<void> {
+  private pressAuto(): void {
     const s = this.session;
-    const consent = consentFor(s);
-    if (consent.model.mode !== "closed") {
-      consent.close();
-      return;
-    }
-    const sentence = await this.beginContext([]);
-    if (sentence !== null) sayTo(s, sentence, sentence === REVIEW_FIRST || sentence === DEVICE_OFF ? "error" : "note");
+    s.auto = !s.auto;
+    lastAuto = s.auto;
+    if (!s.auto) s.consent?.closeAsk();
+    for (const view of s.views) view.drawContextButton();
   }
 
   /**
@@ -1345,6 +1344,8 @@ class Mounted implements ChatView {
     const text = this.input.value.trim();
     if (text === "" || s.sending || utf8Bytes(text) > MAX_TEXT_BYTES) return;
     const pane = acting ?? this.pane();
+    // Auto attaches only the pane the focus names, never the fallback pane of a chat that has no focused terminal.
+    const focused = acting !== null;
     if (pane === null) {
       this.say("This chat has no pane to act for.", "error");
       return;
@@ -1395,28 +1396,63 @@ class Mounted implements ChatView {
           return;
         }
       }
-      const held = consent?.held() ?? null;
-      try {
-        await call("ai_send", {
+      // A card the person opened by hand decides what goes with this message. With none, Auto attaches the pane the message
+      // names: the controller asks the core, reads every kind it lists and answers what the send names, or says why not.
+      let held = consent?.held() ?? null;
+      let automatic = false;
+      if (held === null && s.auto && focused) {
+        const out = await consentFor(s).attachAll(pane);
+        if (out.kind === "attach") {
+          held = out.held;
+          automatic = true;
+        } else if (out.kind === "ask") {
+          this.say(NOTES.shareFirst, "note");
+          return;
+        } else if (out.kind === "fault") {
+          this.say(out.text, "error");
+          return;
+        }
+      }
+      const send = (named: Held | null): Promise<unknown> =>
+        call("ai_send", {
           conversation: s.id,
           text,
           pane,
           profile: pick.id === "" ? null : pick.id,
           model: null,
-          ...contextArguments(held),
+          ...contextArguments(named),
         });
+      let unchanged = false;
+      try {
+        await send(held);
       } catch (e) {
-        // A refusal that ends the offer says why itself; any other keeps the offer and is told like every refusal.
-        if (held === null || consent === null || !consent.refused(e)) this.say(faultText(e), "error");
-        return;
+        if (automatic) {
+          // The same content as the chat already carried goes without it; any other refusal stops the send and keeps the draft.
+          if (contextFault(e).code !== "context_duplicate") {
+            this.say(contextFault(e).text, "error");
+            return;
+          }
+          try {
+            await send(null);
+          } catch (again) {
+            this.say(faultText(again), "error");
+            return;
+          }
+          unchanged = true;
+        } else {
+          // A refusal that ends the offer says why itself; any other keeps the offer and is told like every refusal.
+          if (held === null || consent === null || !consent.refused(e)) this.say(faultText(e), "error");
+          return;
+        }
       }
-      consent?.sent();
+      s.consent?.sent();
       s.draft = "";
       s.notice = null;
       for (const view of s.views) {
         view.input.value = "";
         view.drawComposer();
       }
+      if (unchanged) this.say(NOTES.unchanged, "note");
       s.feed.awaitSnapshot();
       void fetchSnapshot(s);
       schedule(s);

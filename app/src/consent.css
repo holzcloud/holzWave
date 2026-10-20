@@ -1,6 +1,6 @@
 /*
  * The consent card of the chat (consentcard.ts, chat.ts, docs/design.md section 6.14): the strip between the transcript and
- * the status line, the button `Context…` in the composer, the chip `local only` in the bar and the line under a sent message.
+ * the status line, the toggle `Auto` in the composer, the chip `local only` in the bar and the line under a sent message.
  * Every colour is a `--hw-*` token, every size is in rem so the UI scale moves it with the rest of the chrome (a pixel value
  * only for 1 px hairlines, the 2 px bar and focus ring, the 28 px and 44 px touch minimums, the 16 px composer text and the
  * 640 px breakpoint). Flat and hairline: nothing here moves, fades or floats, so the motion setting has nothing to remove.
@@ -69,16 +69,14 @@
                                           opacity: 1; }
 .chat-consent[aria-busy="true"] .consent-title { color: var(--hw-dim); }
 
-/* The button of the composer and the chip of the bar, in the style of `Providers…`. */
+/* The toggle of the composer and the chip of the bar, in the style of `Providers…`. */
 .chat-composer .chat-ctx { display: inline-flex; align-items: center; flex: none; box-sizing: border-box;
                            min-height: max(28px, calc(28rem / 12)); padding: 0 .667rem; border: 1px solid var(--hw-line);
                            border-radius: 62.5rem; background: none; color: var(--hw-ink); cursor: pointer;
                            font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; letter-spacing: normal;
                            text-transform: none; white-space: nowrap; }
 .chat-composer .chat-ctx:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
-.chat-composer .chat-ctx[aria-expanded="true"] { background: var(--hw-rose-wash); border-color: var(--hw-rose); }
-.chat-composer .chat-ctx[aria-disabled="true"] { color: var(--hw-dim); cursor: default; }
-.chat-composer .chat-ctx[aria-disabled="true"]:hover { border-color: var(--hw-line); }
+.chat-composer .chat-ctx[aria-pressed="true"] { background: var(--hw-rose-wash); border-color: var(--hw-rose); }
 .chat-composer .chat-ctx:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
 .chat-bar .chat-local { display: inline-flex; align-items: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12));
                         padding: 0 .5rem; border: 1px solid var(--hw-ok); border-radius: 62.5rem; background: none;
@@ -106,9 +104,9 @@
   .consent-actions { gap: .667rem; }
 }
 
-/* ---- forced colours: system colours outline the card, the place chip and the local-only chip ----------------------- */
+/* ---- forced colours: system colours outline the card, the place chip, the local-only chip and the pressed toggle ----------------------- */
 
 @media (forced-colors: active) {
   :root .chat-consent { outline: 2px solid CanvasText; outline-offset: -2px; }
-  :root .consent-place, :root .chat-bar .chat-local { outline: 2px solid Highlight; outline-offset: -2px; }
+  :root .consent-place, :root .chat-bar .chat-local, :root .chat-composer .chat-ctx[aria-pressed="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
 }

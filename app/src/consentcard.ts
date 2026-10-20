@@ -5,13 +5,13 @@
 //
 // The card is rebuilt when the mode or its content changes and updated in place when only a tick changes, so a keyboard
 // user who ticks a box keeps the focus on it. Opening moves the focus to the first control, and closing returns it to the
-// button `Context…` when the focus was in the card. The strip also holds the approval cards (docs/design.md section 6.15),
+// toggle `Auto` when the focus was in the card. The strip also holds the approval cards (docs/design.md section 6.15),
 // so this card adds and removes only its own `section.chat-consent`, looks only inside it and answers only to events that
 // come from inside it.
 
 import type { Consent } from "./consent.js";
 import {
-  BEST_EFFORT, KIND_WORDS, cardTitle, destinationWords, findingWords, persistWords, ruleTag, ruleWords, sizeWords, totalWords, validForWords,
+  AUTO_ASK_WORDS, BEST_EFFORT, KIND_WORDS, cardTitle, destinationWords, findingWords, persistWords, ruleTag, ruleWords, sizeWords, totalWords, validForWords,
 } from "./consentstate.js";
 import type { CtxKind } from "./consentstate.js";
 import { el } from "./dom.js";
@@ -26,7 +26,7 @@ export interface CardView {
   paneKind(pane: number): "terminal" | "preview" | "other";
   /** Open the providers dialog. */
   providers(): void;
-  /** Give the keyboard to the button `Context…`. */
+  /** Give the keyboard to the toggle `Auto`. */
   focusButton(): void;
 }
 
@@ -101,7 +101,7 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
       const via = state.model === "" ? name : `${name} · ${state.model}`;
       const goes = destinationWords(state);
       el("p", "consent-text", section).textContent = `Share ${paneWords} with ${via}? It goes to ${goes.host} (${goes.place}).`;
-      el("p", "consent-text", section).textContent = "You still see every item before a message is sent.";
+      el("p", "consent-text", section).textContent = m.viaAuto ? AUTO_ASK_WORDS : "You still see every item before a message is sent.";
       button(actions, "consent-share", "share", `Share pane ${pane}`, () => void consent.share());
       button(actions, "consent-no", "no", "No", () => consent.close());
     } else if (m.mode === "pick" && state !== null) {
@@ -204,7 +204,7 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
     if (drawnMode === "closed") wantFocus = true;
     drawnMode = m.mode;
     const next = JSON.stringify([
-      m.mode, m.busy, m.pane, m.state, m.offer === null ? null : m.offer.offer, m.fault, m.state?.kinds, m.offer?.items.length,
+      m.mode, m.busy, m.pane, m.state, m.offer === null ? null : m.offer.offer, m.fault, m.state?.kinds, m.offer?.items.length, m.viaAuto,
     ]);
     if (next !== signature) {
       signature = next;
@@ -240,7 +240,7 @@ export function mountCard(host: HTMLElement, consent: Consent, view: CardView): 
     consent.close();
   };
   // A pressed control has the focus, also in a browser that does not give a pressed button the focus: the card then knows
-  // that the user is inside it, and closing it returns the focus to `Context…`. Capturing, so it runs before the control's own
+  // that the user is inside it, and closing it returns the focus to `Auto`. Capturing, so it runs before the control's own
   // handler, which may close the card.
   const onPress = (e: MouseEvent): void => {
     if (!inside(e)) return;

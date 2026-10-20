@@ -3,7 +3,8 @@
 // and nothing is asked of the core at construction.
 //
 // The controller calls a command only from a user act (`open`, `share`, `unshare`, `preview`, each reached from a press, a
-// button of the card or `attachContext`). It sends ids, kind names and a flag, never text, and it holds the labels, sizes and
+// button of the card, `attachContext` or, with Auto on, the send of a message: `attachAll`). It sends ids, kind names and a
+// flag, never text, and it holds the labels, sizes and
 // findings of an offer but never the text: the core has no command that returns one. It stores no text of any item and
 // builds no sentence from a pane, a path or a label.
 
@@ -42,7 +43,16 @@ export interface ConsentModel {
   pane: number | null;
   /** The kinds a caller asked to have ticked once the pane is shared. */
   prefill: CtxKind[];
+  /** The card was opened by a send with Auto on (`attachAll`), not by hand: it closes when the pane is shared. */
+  viaAuto: boolean;
 }
+
+/** What a send with Auto on does about the pane (`attachAll`). */
+export type AutoResult =
+  | { kind: "attach"; held: Held }
+  | { kind: "none" }
+  | { kind: "ask" }
+  | { kind: "fault"; text: string };
 
 /** How a caller wants its prefill read. */
 export interface OpenOptions {
@@ -52,6 +62,8 @@ export interface OpenOptions {
 
 /** What the card says when an answer is not one the page understands. */
 const NOT_UNDERSTOOD = "The answer was not understood.";
+/** What a send with Auto says when the chat changed under it while the pane was being read. */
+const OUT_OF_DATE = "The pane changed while its content was read. Press Send again.";
 
 /** The sharing of one chat. */
 export class Consent {
@@ -66,6 +78,7 @@ export class Consent {
     at: 0,
     pane: null,
     prefill: [],
+    viaAuto: false,
   };
   private readonly listeners = new Set<() => void>();
   /** Counts what makes an answer in flight out of date: a close, a dropped share, a disposal. */
@@ -105,6 +118,7 @@ export class Consent {
     if (route.pane === null) return;
     this.known = route;
     this.m.pane = route.pane;
+    this.m.viaAuto = false;
     this.m.offer = null;
     this.m.ticked = [];
     this.m.off = [];
@@ -165,6 +179,18 @@ export class Consent {
       return;
     }
     if (this.late(token)) return;
+    // A card that a send with Auto opened has done its work once the pane is shared: it closes, and the user presses Send
+    // again. Nothing is read and nothing is sent here.
+    if (shared && this.m.viaAuto) {
+      const state = readContextState(raw);
+      if (state !== null && decideMode(state) === "pick") {
+        this.m.state = state;
+        this.drop();
+        this.notify();
+        this.deps.say(NOTES.shared, "note");
+        return;
+      }
+    }
     this.take(raw);
     await this.follow();
   }
@@ -210,6 +236,77 @@ export class Consent {
     this.m.fault = null;
     this.m.mode = "offer";
     this.notify();
+  }
+
+  /**
+   * A send with Auto on: attach everything the core lists for `pane`, without a card. Asks the core for the state of the pane
+   * (ids only); when the pane is shared or sharing is not required, reads every kind the state lists into one offer and answers
+   * it as what the send names. When sharing is needed and not given, opens the card in mode `ask` and answers `ask`: no
+   * preview is made and nothing is read. A card the user opened by hand (pick or offer) decides its message: this answers
+   * `none` and calls nothing. Any other refusal answers `fault` with the page's sentence; the send then does not go out.
+   */
+  async attachAll(pane: number): Promise<AutoResult> {
+    this.check();
+    if (this.disposed) return { kind: "none" };
+    if (this.m.mode === "pick" || this.m.mode === "offer") return { kind: "none" };
+    if (this.m.busy !== null) return { kind: "fault", text: NOTES.wait };
+    const route: Route = { ...this.deps.route(), pane };
+    const token = this.generation;
+    let raw: unknown;
+    try {
+      raw = await this.deps.invoke("ai_context_state", {
+        conversation: this.deps.conversation(),
+        pane,
+        profile: route.profile,
+        model: route.model,
+      });
+    } catch (e) {
+      return this.late(token) ? { kind: "fault", text: OUT_OF_DATE } : { kind: "fault", text: contextFault(e).text };
+    }
+    if (this.late(token)) return { kind: "fault", text: OUT_OF_DATE };
+    const state = readContextState(raw);
+    if (state === null) return { kind: "fault", text: NOT_UNDERSTOOD };
+    const needsShare = state.required && !state.shared;
+    if (this.m.viaAuto && this.m.mode !== "closed" && (!needsShare || state.kinds.length === 0)) {
+      this.drop();
+      this.notify();
+    }
+    if (state.kinds.length === 0) return { kind: "none" };
+    if (needsShare) {
+      this.asking(route, state);
+      return { kind: "ask" };
+    }
+    const generation = this.generation;
+    let answer: unknown;
+    try {
+      answer = await this.deps.invoke("ai_context_preview", {
+        conversation: this.deps.conversation(),
+        pane,
+        profile: route.profile,
+        model: route.model,
+        kinds: [...state.kinds],
+      });
+    } catch (e) {
+      if (this.disposed || generation !== this.generation) return { kind: "fault", text: OUT_OF_DATE };
+      const fault = contextFault(e);
+      if (fault.code === "context" && fault.reason === "nothing_to_share") return { kind: "none" };
+      if (fault.code === "context" && fault.reason === "not_shared") {
+        this.asking(route, { ...state, required: true, shared: false });
+        return { kind: "ask" };
+      }
+      return { kind: "fault", text: fault.text };
+    }
+    if (this.disposed || generation !== this.generation) return { kind: "fault", text: OUT_OF_DATE };
+    const offer = readOffer(answer);
+    if (offer === null) return { kind: "fault", text: NOT_UNDERSTOOD };
+    const held = heldOf(offer, []);
+    return held === null ? { kind: "none" } : { kind: "attach", held };
+  }
+
+  /** Close the card when a send with Auto opened it (switching Auto off ends its question); a card opened by hand stays. */
+  closeAsk(): void {
+    if (this.disposed || !this.m.viaAuto || this.m.mode === "closed") return;
+    this.close();
   }
 
   // ---- the model ---------------------------------------------------------------------------------------------------
@@ -352,7 +449,23 @@ export class Consent {
     this.m.ticked = [];
     this.m.fault = null;
     this.m.prefill = [];
+    this.m.viaAuto = false;
     this.first = false;
+  }
+
+  /** Open the card in mode `ask` for `state` on behalf of a send with Auto: the pane is not shared and must be. */
+  private asking(route: Route, state: CtxState): void {
+    this.known = route;
+    this.m.pane = route.pane;
+    this.m.viaAuto = true;
+    this.m.offer = null;
+    this.m.ticked = [];
+    this.m.off = [];
+    this.m.prefill = [];
+    this.m.fault = null;
+    this.first = false;
+    this.m.busy = null;
+    this.adopt(state);
   }
 
   /** Mark a command as started and answer the token that tells later whether its answer is still wanted. */
@@ -379,6 +492,11 @@ export class Consent {
       this.notify();
       return;
     }
+    this.adopt(state);
+  }
+
+  /** Keep a readable state and let it decide the mode. */
+  private adopt(state: CtxState): void {
     this.m.state = state;
     this.m.ticked = state.kinds.filter((kind) => this.m.ticked.includes(kind));
     this.m.mode = decideMode(state);
