@@ -13,7 +13,9 @@ use std::fs;
 use std::path::Path;
 
 use holzwave_core::integrate::args::ArgError;
-use holzwave_core::integrate::context::{resolve, ContextError, ContextState, MAX_BYTES, MAX_PANES, PANES_FILE};
+use holzwave_core::integrate::context::{
+    resolve, summary, ContextError, ContextRow, ContextState, Detection, RowState, MAX_BYTES, MAX_PANES, PANES_FILE,
+};
 use holzwave_core::integrate::kube::KUBE;
 use holzwave_core::integrate::profiles::IntegrationProfiles;
 use holzwave_core::integrate::{Integration, Selection, ToolId, Validated};
@@ -400,4 +402,233 @@ fn the_state_refuses_more_panes_than_the_file_may_hold() {
     }
     assert_eq!(counted.set_pane(MAX_PANES as u64, ToolId::Kube, "pods", &ctx("a")), Err(ContextError::TooMany));
     fs::remove_dir_all(&scratch).ok();
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The production rule, the tool's defaults and the summary.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const SUBSCRIPTION: &str = "00000000-0000-0000-0000-000000000001";
+const OTHER_SUBSCRIPTION: &str = "00000000-0000-0000-0000-000000000002";
+
+fn rule_profiles() -> IntegrationProfiles {
+    profiles_from(json!([
+        { "id": "zeta", "tool": "kube", "name": "Zeta production", "context": PROD_ARN, "production": true },
+        { "id": "alpha", "tool": "kube", "name": "Alpha production", "context": PROD_ARN, "namespace": "payments", "production": true },
+        { "id": "dev", "tool": "kube", "name": "Dev", "context": "kind-dev", "namespace": "default" },
+        { "id": "soft", "tool": "kube", "name": "Soft", "context": PROD_ARN, "namespace": "soft" },
+        { "id": "talos-prod", "tool": "talos", "name": "Talos production", "context": "talos-prod", "node": "10.0.0.1", "production": true },
+        { "id": "az-prod", "tool": "azure", "name": "Azure production", "subscription": SUBSCRIPTION, "production": true },
+        { "id": "az-dev", "tool": "azure", "name": "Azure dev", "subscription": OTHER_SUBSCRIPTION },
+        { "id": "gam-prod", "tool": "gam", "name": "GAM production", "section": "corp", "production": true },
+    ]))
+}
+
+fn production_of(profiles: &IntegrationProfiles, tool: ToolId, selection: &Selection) -> Option<String> {
+    resolve(profiles, tool, selection).expect("resolves").production
+}
+
+#[test]
+fn a_context_pinned_by_a_production_profile_is_production_however_it_was_chosen() {
+    let profiles = rule_profiles();
+    let alpha = Some("Alpha production".to_owned());
+
+    // Through the profile, by a direct pick of the same context, and through another profile that does not say so.
+    assert_eq!(production_of(&profiles, ToolId::Kube, &pick(Some("alpha"), None, None)), alpha);
+    assert_eq!(production_of(&profiles, ToolId::Kube, &pick(None, Some(PROD_ARN), None)), alpha, "a direct pick");
+    assert_eq!(production_of(&profiles, ToolId::Kube, &pick(Some("soft"), None, None)), alpha, "a profile that does not say so");
+    assert_eq!(production_of(&profiles, ToolId::Kube, &pick(Some("dev"), Some(PROD_ARN), None)), alpha, "an explicit field");
+    assert_eq!(
+        production_of(&profiles, ToolId::Kube, &pick(Some("zeta"), None, Some("anything"))),
+        alpha,
+        "the first profile in id order names it, whichever profile the selection took"
+    );
+
+    // Another context, or none, is not production; a pin that an explicit field replaced no longer counts.
+    assert_eq!(production_of(&profiles, ToolId::Kube, &pick(None, Some("kind-dev"), None)), None);
+    assert_eq!(production_of(&profiles, ToolId::Kube, &pick(Some("alpha"), Some("kind-dev"), None)), None);
+    assert_eq!(production_of(&profiles, ToolId::Kube, &Selection::default()), None);
+    assert_eq!(production_of(&profiles, ToolId::Kube, &pick(None, Some("kind-dev"), Some("payments"))), None);
+
+    // A context is the context of its own tool.
+    assert_eq!(production_of(&profiles, ToolId::Talos, &pick(None, Some(PROD_ARN), None)), None);
+    assert_eq!(production_of(&profiles, ToolId::Kube, &pick(None, Some("talos-prod"), None)), None);
+    assert_eq!(
+        production_of(&profiles, ToolId::Talos, &pick(None, Some("talos-prod"), None)),
+        Some("Talos production".to_owned())
+    );
+
+    // The same rule holds for a subscription and a section, which a profile also pins.
+    let sub = |value: &str| Selection { subscription: Some(value.into()), ..Selection::default() };
+    assert_eq!(production_of(&profiles, ToolId::Azure, &sub(SUBSCRIPTION)), Some("Azure production".to_owned()));
+    assert_eq!(production_of(&profiles, ToolId::Azure, &sub(OTHER_SUBSCRIPTION)), None);
+    let section = |value: &str| Selection { section: Some(value.into()), ..Selection::default() };
+    assert_eq!(production_of(&profiles, ToolId::Gam, &section("corp")), Some("GAM production".to_owned()));
+    assert_eq!(production_of(&profiles, ToolId::Gam, &section("lab")), None);
+}
+
+#[test]
+fn a_profile_without_the_flag_pins_nothing_production() {
+    let profiles = profiles_from(json!([
+        { "id": "dev", "tool": "kube", "name": "Dev", "context": "kind-dev", "namespace": "default" },
+        { "id": "az-dev", "tool": "azure", "name": "Azure dev", "subscription": SUBSCRIPTION },
+    ]));
+    for selection in [pick(Some("dev"), None, None), pick(None, Some("kind-dev"), None), pick(Some("dev"), None, Some("x"))] {
+        let resolved = resolve(&profiles, ToolId::Kube, &selection).expect("resolves");
+        assert_eq!(resolved.production, None, "{selection:?}");
+        assert!(!profiles.production_for(ToolId::Kube, resolved.selection.context.as_ref().expect("a context")));
+    }
+    let sub = Selection { profile: Some("az-dev".into()), ..Selection::default() };
+    assert_eq!(resolve(&profiles, ToolId::Azure, &sub).expect("resolves").production, None);
+}
+
+#[test]
+fn the_default_is_stale_until_read_again() {
+    let state = ContextState::default();
+    let profiles = IntegrationProfiles::default();
+    assert!(state.default_of(ToolId::Kube).is_none());
+    assert!(!state.mark_stale(ToolId::Kube), "there is nothing to mark");
+    assert_eq!(state.seq(), 0);
+
+    // The service stores what the tool reported; a profile has no place in it.
+    let read = pick(Some("prod"), Some("kind-a"), Some("team"));
+    assert_eq!(state.set_default(ToolId::Kube, &read), Ok(true));
+    assert_eq!(state.default_of(ToolId::Kube), Some((pick(None, Some("kind-a"), Some("team")), false)));
+    assert_eq!(state.set_default(ToolId::Kube, &read), Ok(false), "the same value read again is no change");
+    assert_eq!(state.seq(), 1);
+    assert!(!summary(&state, &profiles, ToolId::Kube, None, Detection::Found).stale);
+
+    assert!(state.mark_stale(ToolId::Kube));
+    assert!(!state.mark_stale(ToolId::Kube), "marked once");
+    assert_eq!(state.seq(), 2);
+    assert!(summary(&state, &profiles, ToolId::Kube, None, Detection::Found).stale, "the shown value is the default's");
+    assert!(state.default_of(ToolId::Kube).expect("kept").1, "a stale value is kept, not dropped");
+
+    // Read again: the same value is fresh, a different one replaces it.
+    assert_eq!(state.set_default(ToolId::Kube, &pick(None, Some("kind-a"), Some("team"))), Ok(true));
+    assert!(!summary(&state, &profiles, ToolId::Kube, None, Detection::Found).stale);
+    assert_eq!(state.seq(), 3);
+    assert_eq!(state.set_default(ToolId::Kube, &ctx("kind-b")), Ok(true));
+    assert_eq!(state.default_of(ToolId::Kube), Some((ctx("kind-b"), false)));
+
+    // A value that is not valid for the tool is not stored, and the tool of another default is untouched.
+    assert!(state.set_default(ToolId::Kube, &ctx("--server=evil")).is_err());
+    assert!(state.set_default(ToolId::Azure, &ctx("kind-a")).is_err());
+    assert_eq!(state.default_of(ToolId::Kube), Some((ctx("kind-b"), false)));
+    assert!(state.default_of(ToolId::Azure).is_none());
+}
+
+fn row(state: &ContextState, profiles: &IntegrationProfiles, tool: ToolId, pane: Option<u64>, d: Detection) -> ContextRow {
+    state.summary(profiles, tool, pane, d)
+}
+
+#[test]
+fn the_summary_picks_pane_then_pick_then_default() {
+    let profiles = rule_profiles();
+    let state = ContextState::default();
+
+    // Nothing known yet.
+    let empty = row(&state, &profiles, ToolId::Kube, Some(3), Detection::Unknown);
+    assert_eq!(empty.state, RowState::Unknown);
+    assert_eq!((empty.context.clone(), empty.namespace.clone(), empty.production.clone(), empty.stale), (None, None, None, false));
+
+    // The default, as the tool reports it, is shown with its flag.
+    state.set_default(ToolId::Kube, &pick(None, Some("from-default"), Some("d"))).expect("default");
+    state.mark_stale(ToolId::Kube);
+    let shown = row(&state, &profiles, ToolId::Kube, Some(3), Detection::Found);
+    assert_eq!((shown.context.as_deref(), shown.namespace.as_deref(), shown.stale), (Some("from-default"), Some("d"), true));
+
+    // The pick replaces it, and is not stale.
+    state.set_pick(ToolId::Kube, &pick(None, Some("from-pick"), None)).expect("pick");
+    let shown = row(&state, &profiles, ToolId::Kube, Some(3), Detection::Found);
+    assert_eq!((shown.context.as_deref(), shown.namespace.as_deref(), shown.stale), (Some("from-pick"), None, false));
+
+    // The pane's own selection replaces both, and a profile fills what it leaves empty.
+    state.set_pane(3, ToolId::Kube, "pods", &pick(Some("alpha"), None, None)).expect("pane");
+    let shown = row(&state, &profiles, ToolId::Kube, Some(3), Detection::Found);
+    assert_eq!((shown.context.as_deref(), shown.namespace.as_deref(), shown.stale), (Some(PROD_ARN), Some("payments"), false));
+    assert_eq!(shown.production.as_deref(), Some("Alpha production"));
+    assert_eq!(shown.tool, ToolId::Kube);
+    // Another pane still shows the pick.
+    assert_eq!(row(&state, &profiles, ToolId::Kube, Some(4), Detection::Found).context.as_deref(), Some("from-pick"));
+    // With no pane, the pick.
+    assert_eq!(row(&state, &profiles, ToolId::Kube, None, Detection::Found).context.as_deref(), Some("from-pick"));
+
+    // The fields shown are those the tool selects.
+    state.set_pane(5, ToolId::Talos, "nodes", &Selection { context: Some("talos-prod".into()), node: Some("10.0.0.1".into()), ..Selection::default() }).expect("talos");
+    let talos = row(&state, &profiles, ToolId::Talos, Some(5), Detection::Found);
+    assert_eq!((talos.context.as_deref(), talos.node.as_deref()), (Some("talos-prod"), Some("10.0.0.1")));
+    assert_eq!((talos.namespace, talos.subscription, talos.section), (None, None, None));
+    assert_eq!(talos.production.as_deref(), Some("Talos production"));
+    let azure = Selection { subscription: Some(SUBSCRIPTION.into()), ..Selection::default() };
+    state.set_pane(6, ToolId::Azure, "subscriptions", &azure).expect("azure");
+    let azure = row(&state, &profiles, ToolId::Azure, Some(6), Detection::Found);
+    assert_eq!((azure.subscription.as_deref(), azure.context, azure.section), (Some(SUBSCRIPTION), None, None));
+    assert_eq!(azure.production.as_deref(), Some("Azure production"));
+    state.set_pane(7, ToolId::Gam, "sections", &Selection { section: Some("lab".into()), ..Selection::default() }).expect("gam");
+    let gam = row(&state, &profiles, ToolId::Gam, Some(7), Detection::Found);
+    assert_eq!((gam.section.as_deref(), gam.production), (Some("lab"), None));
+
+    // The state word: the detection decides, and a selection or a known tool is `found`.
+    for (detection, with, expected) in [
+        (Detection::NotFound, true, RowState::NotFound),
+        (Detection::NotFound, false, RowState::NotFound),
+        (Detection::SignedOut, true, RowState::SignedOut),
+        (Detection::Found, false, RowState::Found),
+        (Detection::Found, true, RowState::Found),
+        (Detection::Unknown, true, RowState::Found),
+        (Detection::Unknown, false, RowState::Unknown),
+    ] {
+        let pane = if with { Some(3) } else { Some(99) };
+        let fresh = ContextState::default();
+        if with {
+            fresh.set_pane(3, ToolId::Kube, "pods", &ctx("kind-a")).expect("pane");
+        }
+        assert_eq!(row(&fresh, &profiles, ToolId::Kube, pane, detection).state, expected, "{detection:?} with={with}");
+    }
+    assert_eq!(serde_json::to_value(RowState::NotFound).expect("json"), "not_found");
+    assert_eq!(serde_json::to_value(RowState::SignedOut).expect("json"), "signed_out");
+
+    // A profile that was deleted since the selection was stored does not break the row: the fields stay.
+    let gone = ContextState::default();
+    gone.set_pane(3, ToolId::Kube, "pods", &pick(Some("deleted"), Some(PROD_ARN), None)).expect("pane");
+    let shown = row(&gone, &profiles, ToolId::Kube, Some(3), Detection::Found);
+    assert_eq!(shown.context.as_deref(), Some(PROD_ARN));
+    assert_eq!(shown.production.as_deref(), Some("Alpha production"), "the context is still production");
+}
+
+#[test]
+fn resolve_and_summary_agree_on_production() {
+    let profiles = rule_profiles();
+    let sub = |value: &str| Selection { subscription: Some(value.into()), ..Selection::default() };
+    let section = |value: &str| Selection { section: Some(value.into()), ..Selection::default() };
+    let table: Vec<(ToolId, &str, Selection)> = vec![
+        (ToolId::Kube, "pods", pick(Some("alpha"), None, None)),
+        (ToolId::Kube, "pods", pick(Some("zeta"), None, Some("x"))),
+        (ToolId::Kube, "pods", pick(Some("soft"), None, None)),
+        (ToolId::Kube, "pods", pick(None, Some(PROD_ARN), None)),
+        (ToolId::Kube, "pods", pick(None, Some("kind-dev"), None)),
+        (ToolId::Kube, "pods", pick(Some("dev"), None, None)),
+        (ToolId::Kube, "pods", pick(Some("alpha"), Some("kind-dev"), None)),
+        (ToolId::Kube, "pods", Selection::default()),
+        (ToolId::Talos, "nodes", pick(None, Some("talos-prod"), None)),
+        (ToolId::Talos, "nodes", pick(Some("talos-prod"), None, None)),
+        (ToolId::Azure, "subscriptions", sub(SUBSCRIPTION)),
+        (ToolId::Azure, "subscriptions", sub(OTHER_SUBSCRIPTION)),
+        (ToolId::Gam, "sections", section("corp")),
+        (ToolId::Gam, "sections", section("lab")),
+    ];
+    let state = ContextState::default();
+    for (pane, (tool, view, selection)) in table.iter().enumerate() {
+        let pane = pane as u64;
+        state.set_pane(pane, *tool, view, selection).expect("stored");
+        let resolved = resolve(&profiles, *tool, selection).expect("resolves");
+        let shown = state.summary(&profiles, *tool, Some(pane), Detection::Found);
+        assert_eq!(shown.production, resolved.production, "{tool:?} {selection:?}");
+        assert_eq!(summary(&state, &profiles, *tool, Some(pane), Detection::Found), shown, "the function and the method agree");
+        // The context rule that existed before agrees for a Kubernetes context.
+        if let (ToolId::Kube, Some(context)) = (tool, resolved.selection.context.as_ref()) {
+            assert_eq!(profiles.production_for(*tool, context), resolved.production.is_some(), "{selection:?}");
+        }
+    }
 }

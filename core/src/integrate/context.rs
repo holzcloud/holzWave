@@ -22,7 +22,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::args::{ArgError, ProfileId};
@@ -169,8 +169,48 @@ pub fn resolve(profiles: &IntegrationProfiles, tool: ToolId, selection: &Selecti
         out.secret_names = profile.secret_env.clone();
         out.isolated = profile.isolated;
     }
+    out.production = production_name(profiles, tool, &checked);
     out.selection = checked;
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The production rule.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The value of a selection that decides whether it is production: the context of Kubernetes and Talos, the
+/// subscription of Azure, the section of GAM.
+fn deciding(tool: ToolId, selection: &CheckedSelection) -> Option<&str> {
+    match tool {
+        ToolId::Kube | ToolId::Talos => selection.context.as_ref().map(|name| name.as_str()),
+        ToolId::Azure => selection.subscription.as_ref().map(|name| name.as_str()),
+        ToolId::Gam => selection.section.as_ref().map(|name| name.as_str()),
+    }
+}
+
+/// The same value as a profile pins it.
+fn pinned(profile: &IntegrationProfile) -> Option<&str> {
+    match profile.tool {
+        ToolId::Kube | ToolId::Talos => profile.context.as_ref().map(|name| name.as_str()),
+        ToolId::Azure => profile.subscription.as_ref().map(|name| name.as_str()),
+        ToolId::Gam => profile.section.as_ref().map(|name| name.as_str()),
+    }
+}
+
+/// The one production rule: a selection is production when any profile of the same tool that pins the same context
+/// (subscription, section) says `production`, however the selection was made (through that profile, through another
+/// one, or by a direct pick of the name). The answer is the display name of the first such profile in id order. A
+/// profile without the flag pins nothing production, and a selection with no deciding value is not production.
+/// [`resolve`] and [`ContextState::summary`] both call this function, so the card, the header and the status line
+/// cannot disagree.
+fn production_name(profiles: &IntegrationProfiles, tool: ToolId, selection: &CheckedSelection) -> Option<String> {
+    let wanted = deciding(tool, selection)?;
+    profiles
+        .items
+        .iter()
+        .filter(|profile| profile.tool == tool && profile.production && pinned(profile) == Some(wanted))
+        .min_by(|a, b| a.id.as_str().cmp(b.id.as_str()))
+        .map(|profile| profile.name.clone())
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -499,4 +539,160 @@ fn entry(value: &Value) -> Result<PaneSelection, &'static str> {
     let selection = Selection::deserialize(selection).map_err(|_| "has a selection that is not well formed")?;
     selection.check(tool).map_err(|_| "has a selection that fails the check of the tool")?;
     Ok(PaneSelection { tool, view: view.to_owned(), selection })
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The tool's own selection and the summary.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// What the detector says about the tool, as the service fills it. This module has its own small type so that it does
+/// not depend on the detector's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detection {
+    /// The tool was found on this computer.
+    Found,
+    /// The tool was not found.
+    NotFound,
+    /// The tool is there and the person is not signed in (Azure).
+    SignedOut,
+    /// Nothing is known yet.
+    Unknown,
+}
+
+/// The state word of a [`ContextRow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowState {
+    /// The tool is found, or something is selected.
+    Found,
+    /// The tool is not found.
+    NotFound,
+    /// The person is signed out.
+    SignedOut,
+    /// Nothing is known.
+    Unknown,
+}
+
+/// What the sidebar section, the status segment and the pane chip show for a tool, derived once. Only the fields the
+/// tool selects are filled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContextRow {
+    /// The tool.
+    pub tool: ToolId,
+    /// Found, not found, signed out or unknown.
+    pub state: RowState,
+    /// The context (Kubernetes, Talos).
+    pub context: Option<String>,
+    /// The namespace (Kubernetes).
+    pub namespace: Option<String>,
+    /// The subscription (Azure).
+    pub subscription: Option<String>,
+    /// The section (GAM).
+    pub section: Option<String>,
+    /// The node (Talos).
+    pub node: Option<String>,
+    /// The display name of the profile that makes this production, or `None`.
+    pub production: Option<String>,
+    /// Whether the value shown is the tool's own selection as read a while ago.
+    pub stale: bool,
+}
+
+impl ContextState {
+    /// Stores the tool's own current selection as the service read it, with `stale` false. It never names a profile
+    /// (any profile in `selection` is left out). Says whether anything changed: a different value, or the same value
+    /// that had been marked stale.
+    ///
+    /// # Errors
+    ///
+    /// A fixed sentence when the selection is not valid for the tool.
+    pub fn set_default(&self, tool: ToolId, selection: &Selection) -> Result<bool, ContextError> {
+        selection.check(tool)?;
+        let stored = ToolDefault { selection: Selection { profile: None, ..selection.clone() }, stale: false };
+        let mut inner = self.lock();
+        if inner.defaults.get(&slot(tool)) == Some(&stored) {
+            return Ok(false);
+        }
+        inner.defaults.insert(slot(tool), stored);
+        inner.seq += 1;
+        Ok(true)
+    }
+
+    /// Marks the tool's own selection as possibly out of date. The value is kept. Says whether it changed.
+    pub fn mark_stale(&self, tool: ToolId) -> bool {
+        let mut inner = self.lock();
+        match inner.defaults.get_mut(&slot(tool)) {
+            Some(default) if !default.stale => {
+                default.stale = true;
+                inner.seq += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The tool's own current selection as last read, and whether it is stale.
+    pub fn default_of(&self, tool: ToolId) -> Option<(Selection, bool)> {
+        self.lock().defaults.get(&slot(tool)).map(|default| (default.selection.clone(), default.stale))
+    }
+
+    /// The row for `tool`, for `pane` when given: the pane's selection when it has one, else the pick, else the
+    /// tool's own current selection. `detection` is what the service knows of the tool. The state is `not_found` or
+    /// `signed_out` as the detection says, `found` when the tool is found or something is selected, and `unknown`
+    /// otherwise. `production` comes from the same rule as [`resolve`]; `stale` is true only when the value shown is
+    /// the default's and the default is stale. A profile that no longer exists does not hide the fields.
+    pub fn summary(
+        &self,
+        profiles: &IntegrationProfiles,
+        tool: ToolId,
+        pane: Option<PaneId>,
+        detection: Detection,
+    ) -> ContextRow {
+        let (chosen, from_default, default_stale) = {
+            let inner = self.lock();
+            let (chosen, from_default) = inner.chosen(tool, pane);
+            let stale = from_default && inner.defaults.get(&slot(tool)).is_some_and(|default| default.stale);
+            (chosen, from_default, stale)
+        };
+        let resolved = resolve(profiles, tool, &chosen).or_else(|_| {
+            // The profile was deleted, or belongs to another tool: show what the selection itself holds.
+            resolve(profiles, tool, &Selection { profile: None, ..chosen })
+        });
+        let (selection, production) = match resolved {
+            Ok(resolved) => (resolved.selection, resolved.production),
+            Err(_) => (CheckedSelection::default(), None),
+        };
+        let text = |value: Option<&str>| value.map(str::to_owned);
+        let row = ContextRow {
+            tool,
+            state: RowState::Unknown,
+            context: text(selection.context.as_ref().map(|name| name.as_str())),
+            namespace: text(selection.namespace.as_ref().map(|name| name.as_str())),
+            subscription: text(selection.subscription.as_ref().map(|name| name.as_str())),
+            section: text(selection.section.as_ref().map(|name| name.as_str())),
+            node: text(selection.node.as_ref().map(|name| name.as_str())),
+            production,
+            stale: from_default && default_stale,
+        };
+        let something =
+            [&row.context, &row.namespace, &row.subscription, &row.section, &row.node].iter().any(|field| field.is_some());
+        let state = match detection {
+            Detection::NotFound => RowState::NotFound,
+            Detection::SignedOut => RowState::SignedOut,
+            Detection::Found => RowState::Found,
+            Detection::Unknown if something => RowState::Found,
+            Detection::Unknown => RowState::Unknown,
+        };
+        ContextRow { state, ..row }
+    }
+}
+
+/// [`ContextState::summary`] as a function, for a caller that holds the state by reference.
+pub fn summary(
+    state: &ContextState,
+    profiles: &IntegrationProfiles,
+    tool: ToolId,
+    pane: Option<PaneId>,
+    detection: Detection,
+) -> ContextRow {
+    state.summary(profiles, tool, pane, detection)
 }
