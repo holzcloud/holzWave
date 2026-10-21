@@ -141,6 +141,8 @@ fn main() {
     "ai_ask_pending",
     "ai_ask_answer",
     "markdown_render",
+    "integration_tools",
+    "integration_run",
   ]);
   tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)).expect("tauri build failed");
 }

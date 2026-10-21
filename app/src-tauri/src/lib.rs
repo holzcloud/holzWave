@@ -33,6 +33,7 @@ mod ai_exec;
 mod clipboard;
 mod commands;
 mod files_protocol;
+mod integrate_host;
 mod local_network;
 mod login_prompt;
 mod menu;
@@ -545,6 +546,8 @@ pub fn run() {
             commands::ai_ask_pending,
             commands::ai_ask_answer,
             commands::markdown_render,
+            commands::integration_tools,
+            commands::integration_run,
         ])
         .build(tauri::generate_context!())
         .expect("error while building holzWave")

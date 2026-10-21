@@ -173,8 +173,8 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 104 commands and 16 events. The tables below list the
-commands of the terminal core and of the AI chat; the golden lists every command. The Rust types are the
+The webview talks to the core through a deny-by-default set of 106 commands and 16 events. The tables below list the
+commands of the terminal core, of the AI chat and of the integrations; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
 snake_case everywhere (`cell_w`, `allow_unsafe`).
@@ -196,6 +196,7 @@ snake_case everywhere (`cell_w`, `allow_unsafe`).
 | AI decisions | `ai_decide(conversation, call_id, decision, hash)`, `ai_undo(conversation, call_id)` | nothing; webview commands only |
 | `wsh ai` requests | `ai_ask_pending`, `ai_ask_answer(ask, verdict, seal)` | the requests that wait, nothing |
 | Markdown | `markdown_render(text)` | the cleaned HTML of a reply |
+| Integrations | `integration_tools`, `integration_run(tool, verb, pane, args)` | the four tools with where each stands on this computer (path, version, the places looked in, the verbs each has); one read of a verb that shows a view: the view model, the selection it used and when it was read. A refusal is the fault object |
 | `wsh` on a host | `wsh_install(pane)` | the sentence the pane also shows; the page names the pane, never a host |
 
 Every refusal of the AI commands is an object with `code`, `reason` and `text` (the page words its own sentence from the

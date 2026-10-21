@@ -861,3 +861,35 @@ test("the key rows hold the inline AI actions", () => {
     for (const row of rows) assert.deepEqual(keys(row), ["action", "chord", "is_default", "title"]);
   }
 });
+
+// ---- the integrations ---------------------------------------------------------------------------------------------
+
+test("the integration answers have the documented shapes", () => {
+  const sample = golden.answers.integration;
+  assert.deepEqual(keys(sample), ["fault", "run", "tools"]);
+  // A refusal is the fault object, the same for every command.
+  assert.deepEqual(keys(sample.fault), ["code", "reason", "text"]);
+  assert.equal(sample.fault.code, "refused");
+  // One entry for each tool: what the settings and the sidebar show.
+  assert.equal(sample.tools.length, 2);
+  for (const tool of sample.tools) {
+    assert.deepEqual(keys(tool), ["binary", "id", "label", "path", "place", "reason", "searched", "selects", "state", "verbs", "version"]);
+    for (const verb of tool.verbs) assert.deepEqual(keys(verb), ["args", "effect", "exit_is_state", "id", "label", "output", "refresh_secs"]);
+  }
+  const [found, missing] = sample.tools;
+  assert.equal(found.state, "found");
+  assert.equal(missing.state, "not_found");
+  assert.ok(missing.searched.length > 0 && missing.path === null);
+  // A read answers the model, the selection it used and when it was read.
+  assert.deepEqual(keys(sample.run), ["fetched", "selection", "view"]);
+  assert.deepEqual(keys(sample.run.selection), ["production", "selection"]);
+  assert.deepEqual(keys(sample.run.selection.selection), ["context", "namespace", "node", "profile", "section", "subscription"]);
+  assert.equal(sample.run.view.kind, "table");
+  assert.equal(sample.run.view.fetched, sample.run.fetched);
+});
+
+test("the first integration commands take facts only", () => {
+  assert.deepEqual(golden.commands.integration_tools, []);
+  assert.deepEqual(golden.commands.integration_run, ["tool", "verb", "pane", "args"]);
+  for (const arg of ["argv", "command", "program", "shell"]) assert.ok(!golden.commands.integration_run.includes(arg), arg);
+});

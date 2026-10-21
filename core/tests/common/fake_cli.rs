@@ -51,7 +51,10 @@ fn master() -> &'static Path {
         let hash = SCRIPT
             .bytes()
             .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fake_cli");
+        // An integration test of this crate has the build's scratch directory; the unit tests of another crate that
+        // include this file by path do not, and use the system's.
+        let base = option_env!("CARGO_TARGET_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
+        let dir = base.join("fake_cli");
         fs::create_dir_all(&dir).expect("the build's scratch directory");
         let path = dir.join(format!("base-{hash:016x}"));
         if !path.exists() {

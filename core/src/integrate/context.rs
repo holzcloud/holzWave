@@ -37,8 +37,8 @@ use super::profiles::{IntegrationProfile, IntegrationProfiles};
 use super::kube::ContextEntry;
 use super::profiles::LocalFile;
 use super::run::EnvPolicy;
-use super::{azure, gam, kube, talos};
-use super::{CheckedSelection, IntegrationSpec, Output, SelectKind, Selection, ToolId, VerbEffect};
+use super::kube;
+use super::{CheckedSelection, SelectKind, Selection, ToolId};
 use crate::layout::PaneId;
 use crate::persist::{backup_bad, bad_path, read_limited, write_atomic};
 use crate::platform::{self, Os};
@@ -228,19 +228,9 @@ fn production_name(profiles: &IntegrationProfiles, tool: ToolId, selection: &Che
 // The state.
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// The description of a tool.
-fn spec_of(tool: ToolId) -> &'static IntegrationSpec {
-    match tool {
-        ToolId::Kube => &kube::SPEC,
-        ToolId::Talos => &talos::SPEC,
-        ToolId::Azure => &azure::SPEC,
-        ToolId::Gam => &gam::SPEC,
-    }
-}
-
 /// Whether `view` is a verb of `tool` that reads and shows a view.
 fn is_view(tool: ToolId, view: &str) -> bool {
-    spec_of(tool).verb(view).is_some_and(|verb| verb.effect == VerbEffect::Read && verb.output == Output::View)
+    super::is_view_verb(tool, view)
 }
 
 /// What one pane shows and has selected.

@@ -147,6 +147,388 @@
         "yanked": "text"
       }
     ],
+    "integration": {
+      "fault": {
+        "code": "refused",
+        "reason": "tool",
+        "text": "The tool is not known."
+      },
+      "run": {
+        "fetched": 1800000000,
+        "selection": {
+          "production": "Production",
+          "selection": {
+            "context": "dev",
+            "namespace": "default",
+            "node": null,
+            "profile": null,
+            "section": null,
+            "subscription": null
+          }
+        },
+        "view": {
+          "columns": [
+            {
+              "id": "current",
+              "label": "CURRENT"
+            },
+            {
+              "id": "name",
+              "label": "NAME"
+            },
+            {
+              "id": "cluster",
+              "label": "CLUSTER"
+            },
+            {
+              "id": "user",
+              "label": "USER"
+            },
+            {
+              "id": "namespace",
+              "label": "NAMESPACE"
+            }
+          ],
+          "fetched": 1800000000,
+          "kind": "table",
+          "note": null,
+          "rows": [
+            {
+              "actions": [
+                {
+                  "args": {
+                    "context": "arn:aws:eks:eu-central-1:000000000000:cluster/demo"
+                  },
+                  "effect": "local",
+                  "label": "Use context",
+                  "verb": "use_context"
+                }
+              ],
+              "cells": [
+                "",
+                "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+                "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+                "exec-user",
+                ""
+              ],
+              "key": "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+              "tone": "normal"
+            },
+            {
+              "actions": [
+                {
+                  "args": {
+                    "context": "dev"
+                  },
+                  "effect": "local",
+                  "label": "Use context",
+                  "verb": "use_context"
+                }
+              ],
+              "cells": [
+                "*",
+                "dev",
+                "dev-cluster",
+                "token-user",
+                ""
+              ],
+              "key": "dev",
+              "tone": "normal"
+            },
+            {
+              "actions": [
+                {
+                  "args": {
+                    "context": "kind-test"
+                  },
+                  "effect": "local",
+                  "label": "Use context",
+                  "verb": "use_context"
+                }
+              ],
+              "cells": [
+                "",
+                "kind-test",
+                "kind-test",
+                "token-user",
+                "test"
+              ],
+              "key": "kind-test",
+              "tone": "normal"
+            }
+          ],
+          "title": "Contexts",
+          "truncated": null
+        }
+      },
+      "tools": [
+        {
+          "binary": null,
+          "id": "kube",
+          "label": "Kubernetes",
+          "path": "/opt/homebrew/bin/kubectl",
+          "place": "path",
+          "reason": null,
+          "searched": [],
+          "selects": [
+            "context",
+            "namespace"
+          ],
+          "state": "found",
+          "verbs": [
+            {
+              "args": [],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "contexts",
+              "label": "Contexts",
+              "output": "view",
+              "refresh_secs": null
+            },
+            {
+              "args": [],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "namespaces",
+              "label": "Namespaces",
+              "output": "view",
+              "refresh_secs": null
+            },
+            {
+              "args": [],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "pods",
+              "label": "Pods",
+              "output": "view",
+              "refresh_secs": 10
+            },
+            {
+              "args": [
+                {
+                  "kind": "context",
+                  "name": "context",
+                  "required": true
+                }
+              ],
+              "effect": "local",
+              "exit_is_state": false,
+              "id": "use_context",
+              "label": "Use context",
+              "output": "done",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "namespace",
+                  "name": "namespace",
+                  "required": true
+                }
+              ],
+              "effect": "local",
+              "exit_is_state": false,
+              "id": "set_namespace",
+              "label": "Set namespace",
+              "output": "done",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "pod",
+                  "name": "pod",
+                  "required": true
+                }
+              ],
+              "effect": "write",
+              "exit_is_state": false,
+              "id": "delete_pod",
+              "label": "Delete pod",
+              "output": "done",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "pod",
+                  "name": "pod",
+                  "required": true
+                },
+                {
+                  "kind": "container",
+                  "name": "container",
+                  "required": false
+                }
+              ],
+              "effect": "exec",
+              "exit_is_state": false,
+              "id": "exec",
+              "label": "Exec",
+              "output": "terminal",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "pod",
+                  "name": "pod",
+                  "required": true
+                },
+                {
+                  "kind": "container",
+                  "name": "container",
+                  "required": false
+                },
+                {
+                  "kind": "lines",
+                  "name": "lines",
+                  "required": false
+                }
+              ],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "logs",
+              "label": "Logs",
+              "output": "terminal",
+              "refresh_secs": null
+            },
+            {
+              "args": [],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "shell",
+              "label": "Shell",
+              "output": "terminal",
+              "refresh_secs": null
+            }
+          ],
+          "version": "1.36.1"
+        },
+        {
+          "binary": null,
+          "id": "talos",
+          "label": "Talos",
+          "path": null,
+          "place": null,
+          "reason": null,
+          "searched": [
+            "/usr/local/bin",
+            "/opt/homebrew/bin"
+          ],
+          "selects": [
+            "context",
+            "node"
+          ],
+          "state": "not_found",
+          "verbs": [
+            {
+              "args": [],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "contexts",
+              "label": "Contexts",
+              "output": "view",
+              "refresh_secs": null
+            },
+            {
+              "args": [],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "nodes",
+              "label": "Nodes",
+              "output": "view",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "node",
+                  "name": "node",
+                  "required": false
+                }
+              ],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "services",
+              "label": "Services",
+              "output": "view",
+              "refresh_secs": null
+            },
+            {
+              "args": [],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "info",
+              "label": "Info",
+              "output": "view",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "node",
+                  "name": "node",
+                  "required": false
+                }
+              ],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "machine_status",
+              "label": "Machine status",
+              "output": "view",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "context",
+                  "name": "context",
+                  "required": true
+                }
+              ],
+              "effect": "local",
+              "exit_is_state": false,
+              "id": "use_context",
+              "label": "Use context",
+              "output": "done",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "node",
+                  "name": "node",
+                  "required": false
+                }
+              ],
+              "effect": "read",
+              "exit_is_state": false,
+              "id": "dmesg",
+              "label": "Kernel log",
+              "output": "terminal",
+              "refresh_secs": null
+            },
+            {
+              "args": [
+                {
+                  "kind": "node",
+                  "name": "node",
+                  "required": false
+                }
+              ],
+              "effect": "exec",
+              "exit_is_state": false,
+              "id": "dashboard",
+              "label": "Dashboard",
+              "output": "terminal",
+              "refresh_secs": null
+            }
+          ],
+          "version": null
+        }
+      ]
+    },
     "local_network": [
       {
         "notice_due": true,
@@ -405,6 +787,13 @@
       "query",
       "limit"
     ],
+    "integration_run": [
+      "tool",
+      "verb",
+      "pane",
+      "args"
+    ],
+    "integration_tools": [],
     "key": [
       "pane",
       "code",

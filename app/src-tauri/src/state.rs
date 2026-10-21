@@ -47,6 +47,7 @@ use crate::ai_host::{AiHost, AiParts, AiPayload};
 use crate::ai_exec::RemoteExecs;
 use crate::login_prompt::{PromptEnd, PromptHost};
 use crate::ai_tools::{ExecFault, FileTarget, TerminalTarget};
+use crate::integrate_host::{IntegrationHost, IntegrationParts};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
@@ -903,6 +904,8 @@ pub struct AppCore {
     /// The questions of keyboard-interactive logins that wait for the person (see [`crate::login_prompt`]). Also the
     /// prompter of `connections`.
     prompts: Arc<PromptHost>,
+    /// The integration service (Kubernetes, Talos, Azure and GAM) and what the shell keeps beside it.
+    integrations: IntegrationHost,
     /// Writes the layout 250 ms after the first change of a burst and when flushed.
     saver: Debounced,
     /// How many times the saver job wrote the file, for tests.
@@ -1006,6 +1009,18 @@ impl AppCore {
     /// vault of their own. The two AI settings of `settings.json` are applied before the core is returned, so a
     /// hand-edited file is honoured before the first command can run.
     pub fn new_with_ai(dir: PathBuf, sink: Arc<dyn Sink>, shell: ShellSpec, ai: AiParts) -> Arc<AppCore> {
+        AppCore::new_with_parts(dir, sink, shell, ai, None)
+    }
+
+    /// [`AppCore::new_with_ai`] with the machine and the keychain of the integrations passed in as well, which is how the
+    /// tests give them a scratch computer and a store in memory. `None` is the real machine and the platform keychain.
+    pub fn new_with_parts(
+        dir: PathBuf,
+        sink: Arc<dyn Sink>,
+        shell: ShellSpec,
+        ai: AiParts,
+        integration: Option<IntegrationParts>,
+    ) -> Arc<AppCore> {
         // What the sync downloaded last time is put in place before anything is read.
         let promoted = holzwave_core::sync::engine::promote_incoming_with_report(&dir);
         let applied = promoted.applied;
@@ -1102,6 +1117,14 @@ impl AppCore {
         let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
         let host = AiHost::new(&dir, sink.clone(), ai);
         let local_network = crate::local_network::LocalNetworkHost::new(&dir, crate::local_network::system());
+        let integrations = {
+            let parts = integration.unwrap_or_else(|| {
+                let configured = lock(&config).settings.shell.clone();
+                IntegrationParts::system(&dir, resolve_system_shell(&shell, &configured).launch)
+            });
+            let live = lock(&windows).all_panes();
+            IntegrationHost::new(&dir, parts, &live)
+        };
         let core = Arc::new_cyclic(|me| {
             // A login that asks a question raises it through this host. The name and the host of the dialog are looked up in
             // the saved list by the id of the connection: the core stamps it, the server cannot.
@@ -1145,6 +1168,7 @@ impl AppCore {
                 local_network,
                 remote_execs: RemoteExecs::new(),
                 prompts,
+                integrations,
                 monitor: holzwave_core::monitor::Monitor::new(),
                 remote_monitors: holzwave_core::monitor::RemoteMonitors::new(),
                 history,
@@ -1178,6 +1202,27 @@ impl AppCore {
     /// The AI chat service of the shell.
     pub fn ai(&self) -> &AiHost {
         &self.ai
+    }
+
+    /// The integration service of the shell.
+    pub fn integrations(&self) -> &IntegrationHost {
+        &self.integrations
+    }
+
+    /// The four integration tools and where each stands on this computer. Blocking.
+    pub fn integration_tools(&self) -> Vec<holzwave_core::integrate::service::ToolView> {
+        self.integrations.tools()
+    }
+
+    /// One read of an integration verb that shows a view. Blocking.
+    pub fn integration_run(
+        &self,
+        tool: &str,
+        verb: &str,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+    ) -> Result<holzwave_core::integrate::service::RunAnswer, crate::integrate_host::IntegrationFault> {
+        self.integrations.run(tool, verb, pane, args)
     }
 
     /// The Local Network permission of macOS: the stored choice and the probe.
@@ -9887,6 +9932,58 @@ mod protocol {
         }
     }
 
+    /// The answers of the integration commands, written by the real types: the recorded output of a fake `kubectl` goes
+    /// through the real parser, and the tool entries are the real compiled-in descriptions.
+    fn integration_samples() -> Value {
+        use crate::integrate_host::IntegrationFault;
+        use holzwave_core::integrate::service::{
+            Fault, FaultCode, RunAnswer, SelectionView, ToolState, ToolView,
+        };
+        use holzwave_core::integrate::{kube, Integration, Selection, ToolId};
+
+        let spec = &kube::SPEC;
+        let verb = spec.verb("contexts").expect("the default verb of Kubernetes");
+        let recorded = include_str!("../../../core/tests/fixtures/integrations/kubectl/config_view.json");
+        let view = kube::KUBE.view(verb, recorded.as_bytes()).expect("the recorded kubeconfig is a table");
+        let selection = Selection { context: Some("dev".into()), namespace: Some("default".into()), ..Selection::default() };
+        let found = ToolView {
+            id: ToolId::Kube,
+            label: spec.label,
+            state: ToolState::Found,
+            path: Some("/opt/homebrew/bin/kubectl".into()),
+            place: Some("path"),
+            binary: None,
+            reason: None,
+            version: Some("1.36.1".into()),
+            searched: Vec::new(),
+            verbs: spec.verbs,
+            selects: spec.selects,
+        };
+        let missing = ToolView {
+            id: ToolId::Talos,
+            label: holzwave_core::integrate::spec_of(ToolId::Talos).label,
+            state: ToolState::NotFound,
+            path: None,
+            place: None,
+            binary: None,
+            reason: None,
+            version: None,
+            searched: vec!["/usr/local/bin".into(), "/opt/homebrew/bin".into()],
+            verbs: holzwave_core::integrate::spec_of(ToolId::Talos).verbs,
+            selects: holzwave_core::integrate::spec_of(ToolId::Talos).selects,
+        };
+        let refused = Fault { code: FaultCode::Refused, reason: "tool", text: "The tool is not known.".into() };
+        json!({
+            "tools": [to_value(&found), to_value(&missing)],
+            "run": to_value(&RunAnswer {
+                view: view.with_fetched(1_800_000_000),
+                selection: SelectionView { selection, production: Some("Production".into()) },
+                fetched: 1_800_000_000,
+            }),
+            "fault": to_value(&IntegrationFault::from(refused)),
+        })
+    }
+
     fn samples() -> Value {
         let frame = FrameMsg {
             pane: 3,
@@ -10108,6 +10205,7 @@ mod protocol {
                     to_value(&LocalNetworkView { supported: true, notice_due: false, state: LnState::Unknown.as_str() }),
                     to_value(&LocalNetworkView::unsupported()),
                 ],
+                "integration": integration_samples(),
                 "ai": {
                     "ticket": to_value(&TicketView { conversation: "chat-1".into(), turn: 5 }),
                     "ask_pending": [to_value(&sample_ask())],

@@ -946,3 +946,46 @@ fn the_local_socket_has_no_command_that_decides() {
     assert_eq!(deciding_variants(&found), ["AiDecide"]);
     assert_eq!(deciding_variants(&["AllowAlways".to_owned(), "Deny".to_owned(), "Consent".to_owned()]).len(), 3);
 }
+
+// ---- the integration commands ---------------------------------------------------------------------------------------
+
+/// The commands of the integrations the page may call, reviewed one by one and sorted. A command that is added to the
+/// manifest with an `integration_` name fails `the_integration_commands_are_exactly_the_reviewed_list` until someone has
+/// asked of it: can it start anything that changes something without a card the person confirmed, return a secret, an
+/// environment value or an argument list that was not on a card, or take a program, an argument list or a shell string
+/// from the page? If yes, it does not belong here.
+const INTEGRATION_COMMANDS: &[&str] = &["integration_run", "integration_tools"];
+
+#[test]
+fn the_integration_commands_are_exactly_the_reviewed_list() {
+    let handler = handler_commands(LIB_RS).expect("handler list");
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    let permissions = capability_permissions().expect("capability permissions");
+    let reviewed: BTreeSet<String> = INTEGRATION_COMMANDS.iter().map(|n| (*n).to_owned()).collect();
+    assert_eq!(reviewed.len(), INTEGRATION_COMMANDS.len(), "INTEGRATION_COMMANDS lists a command twice");
+    assert!(INTEGRATION_COMMANDS.windows(2).all(|pair| pair[0] < pair[1]), "INTEGRATION_COMMANDS is sorted");
+    let mine = |names: &BTreeSet<String>| -> BTreeSet<String> {
+        names.iter().filter(|n| n.starts_with("integration_")).cloned().collect()
+    };
+
+    for (what, found) in [("the build.rs manifest", mine(&manifest)), ("the invoke handler", mine(&handler))] {
+        let unreviewed: Vec<&String> = found.difference(&reviewed).collect();
+        assert!(
+            unreviewed.is_empty(),
+            "{what} lists integration_ commands that nobody reviewed: {unreviewed:?}. Before adding one to \
+             INTEGRATION_COMMANDS in acl.rs, ask whether it can run a verb that changes something without a confirmed \
+             card (the only command that confirms is integration_confirm), return a secret, an environment value or an \
+             argument list that was not on a card, or take a program, an argument list or a shell string"
+        );
+        let missing: Vec<&String> = reviewed.difference(&found).collect();
+        assert!(missing.is_empty(), "{what} lost reviewed integration_ commands: {missing:?}");
+    }
+    let granted: BTreeSet<String> = reviewed.iter().map(|name| permission_of(name)).collect();
+    let in_capability: BTreeSet<String> =
+        permissions.iter().filter(|p| p.starts_with("allow-integration-")).cloned().collect();
+    assert_eq!(in_capability, granted, "the capability grants the reviewed integration_ commands and no other");
+    // Every one of them is a command function of commands.rs.
+    for name in INTEGRATION_COMMANDS {
+        assert!(return_type(COMMANDS_RS, name).is_some(), "{name} is not a command function of commands.rs");
+    }
+}

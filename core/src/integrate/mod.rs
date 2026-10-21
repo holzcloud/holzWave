@@ -94,6 +94,22 @@ impl ToolId {
     }
 }
 
+/// The compiled-in description of a tool. This is the one place that lists the four descriptions; the blocks, the
+/// context state and the service all find a tool's verbs through it.
+pub fn spec_of(tool: ToolId) -> &'static IntegrationSpec {
+    match tool {
+        ToolId::Kube => &kube::SPEC,
+        ToolId::Talos => &talos::SPEC,
+        ToolId::Azure => &azure::SPEC,
+        ToolId::Gam => &gam::SPEC,
+    }
+}
+
+/// Whether `verb` is a verb of `tool` that only reads and shows a view: the one kind of verb an integration block shows.
+pub fn is_view_verb(tool: ToolId, verb: &str) -> bool {
+    spec_of(tool).verb(verb).is_some_and(|own| own.effect == VerbEffect::Read && own.output == Output::View)
+}
+
 /// What a verb does to the world, which decides whether the person sees a card first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -17,6 +17,7 @@
 //! The wire op types are internally tagged with `kind` and every variant, motion and mode name is snake_case, so the
 //! page sends `{kind: "begin", x, y, mode: "word"}` and `{kind: "move", motion: "line_start"}`.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use holzwave_core::ai::profiles::KeySlot;
@@ -26,6 +27,7 @@ use holzwave_core::ai::types::ContextKind;
 use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened, Saved};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
+use holzwave_core::integrate::service::{RunAnswer, ToolView};
 use holzwave_core::engine::{
     CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode,
     SelectOp,
@@ -40,6 +42,7 @@ use tauri::{State, WebviewWindow};
 
 use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
 use crate::clipboard;
+use crate::integrate_host::IntegrationFault;
 use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
 use crate::windows::DropKind;
 
@@ -1171,4 +1174,33 @@ pub fn ai_has_key(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -> 
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn markdown_render(text: String) -> Option<String> {
     holzwave_core::preview::render_markdown(&text)
+}
+
+// ---- the integrations ----------------------------------------------------------------------------------------------
+//
+// The page sends facts (a tool, a verb, a pane, names, a selection) and the core builds everything else: no command takes
+// a program, an argument list or a shell string. A refusal reaches the page as the object `{code, reason, text}`
+// (`IntegrationFault`). Nothing of this exists on the local socket of `wsh`.
+
+/// The four tools and where each stands on this computer: found (with its path and version), not found (with the places
+/// that were looked in), unusable or unsupported in this build, and the verbs each has. It looks for the programs and asks
+/// a found one for its version, so it is async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_tools(core: State<Arc<AppCore>>) -> Vec<ToolView> {
+    core.integration_tools()
+}
+
+/// One read of a verb that only reads and shows a view, for `pane` (or for the tool's own selection when `pane` is null).
+/// `args` is an object of strings; the core checks each value by the kind of the verb's argument. The answer is the view
+/// model, the selection the read used and the time it was read; a refusal is the fault object. It starts the tool, so it
+/// is async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_run(
+    core: State<Arc<AppCore>>,
+    tool: String,
+    verb: String,
+    pane: Option<PaneId>,
+    args: BTreeMap<String, String>,
+) -> Result<RunAnswer, IntegrationFault> {
+    core.integration_run(&tool, &verb, pane, &args)
 }

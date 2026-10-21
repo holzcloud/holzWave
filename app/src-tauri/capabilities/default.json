@@ -112,6 +112,8 @@
     "allow-markdown-render",
     "allow-ai-undo",
     "allow-ai-ask-pending",
-    "allow-ai-ask-answer"
+    "allow-ai-ask-answer",
+    "allow-integration-tools",
+    "allow-integration-run"
   ]
 }
