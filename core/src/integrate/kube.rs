@@ -1,10 +1,10 @@
 //! Kubernetes through `kubectl`: the argument lists of its verbs and the parsers of its answers.
 //!
 //! `kubectl` is run as a program by the engine of this module's neighbours; no Kubernetes client is written here, so
-//! its auth plugins, proxies and the exec transport stay `kubectl`'s own work. This file holds only argument builders
-//! and parsers: it starts no process, reads no file and keeps no state. Every argument list is built from validated
-//! names ([`super::args`]): a name that follows an option travels in the equals form, and every other name follows
-//! `--`.
+//! its auth plugins, proxies and the exec transport stay `kubectl`'s own work. This file holds argument builders,
+//! parsers and the overlay kubeconfig of a shell pane: it starts no process and keeps no state, and the only files it
+//! touches are the overlays below. Every argument list is built from validated names ([`super::args`]): a name that
+//! follows an option travels in the equals form, and every other name follows `--`.
 //!
 //! What `kubectl` prints is another party's text. Each answer is read by a typed reader that keeps only the members a
 //! table shows. A member that is not there or has another type is a `?` cell and not an error, an unknown member is
@@ -12,19 +12,36 @@
 //! of the member values in order). The credential members of a kubeconfig have no field in any type here, and a
 //! kubeconfig that cannot be read is never shown as text, because `kubectl` leaves the environment values of an exec
 //! plugin in clear in `config view`.
+//!
+//! A shell pane gets its own current context without a copy of anything secret: a small overlay file, written by
+//! [`write_overlay`], names one context, its cluster, its user and its namespace and nothing else, and
+//! [`kubeconfig_value`] lists it first in `KUBECONFIG`, ahead of the person's own files. `kubectl` merges the list and
+//! the first file that names a thing wins, so the overlay's current context and namespace apply to the pane while the
+//! person's files are never edited by a selection. Two facts belong with that: an exec plugin or a shell start-up file
+//! can still change a context (and a start-up file that exports `KUBECONFIG` replaces the pane's value), so the pane's
+//! chip says what holzWave set and not what is certain; and the tool's own files change only through the two local
+//! verbs that a card confirms. Overlays live in directories of mode 0700 as files of mode 0600, are replaced
+//! atomically, and [`sweep_overlays`] removes the ones whose pane is gone.
 
 use std::ffi::OsString;
 use std::fmt;
+use std::fs;
+use std::io;
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 
-use super::args::{flag_eq, ArgError};
+use super::args::{flag_eq, ArgError, ContextName, Namespace};
 use super::run::MAX_STDOUT;
 use super::view::{text_fallback, text_view, RowBuilder, TableBuilder, TextFormat, Tone, ViewModel};
+use crate::layout::PaneId;
+use crate::persist::write_atomic_private;
+use crate::platform::{self, Os};
+
 use super::{
     ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId, Validated,
     Verb, VerbEffect, VersionProbe,
@@ -1186,4 +1203,218 @@ fn pods_view(stdout: &[u8], now: i64) -> Result<ViewModel, ParseError> {
         table.push(row);
     }
     Ok(with_list_note(table.finish(), &list.items))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The overlay kubeconfig of a shell pane.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The most entries of the person's own `KUBECONFIG` list that follow the overlay.
+const LIST_ENTRIES_MAX: usize = 64;
+
+/// The longest entry of the person's list that is kept.
+const LIST_ENTRY_MAX: usize = 4096;
+
+/// Why an overlay, a `KUBECONFIG` value or a sweep was refused. No variant holds a name or a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayError {
+    /// A name of the entry did not validate (see [`ArgError`]).
+    Name(ArgError),
+    /// The overlay's path is not an absolute path of the system, or holds the list separator or a control character.
+    Path,
+    /// A directory of the overlays is a link or is not a directory, so nothing is written or removed there.
+    Unsafe,
+    /// The file system refused.
+    Io(io::ErrorKind),
+}
+
+impl fmt::Display for OverlayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Name(error) => write!(f, "a name of the context is refused: {}", error.as_str()),
+            Self::Path => f.write_str("the overlay path is not an absolute path that can be listed"),
+            Self::Unsafe => f.write_str("a directory of the overlays is a link or not a directory"),
+            Self::Io(kind) => write!(f, "the overlay files could not be used: {kind}"),
+        }
+    }
+}
+
+impl std::error::Error for OverlayError {}
+
+impl From<ArgError> for OverlayError {
+    fn from(error: ArgError) -> Self {
+        Self::Name(error)
+    }
+}
+
+impl From<io::Error> for OverlayError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error.kind())
+    }
+}
+
+/// The directory of the overlays below the data directory `dir`.
+fn overlay_dir(dir: &Path) -> PathBuf {
+    dir.join("run").join("kube")
+}
+
+/// Where the overlay of `pane` lives: `<dir>/run/kube/<pane>.json`.
+pub fn overlay_path(dir: &Path, pane: PaneId) -> PathBuf {
+    overlay_dir(dir).join(format!("{pane}.json"))
+}
+
+/// Makes `path` a directory for its owner only. A link, or anything that is not a directory, is refused: nothing is
+/// written through it.
+fn private_dir(path: &Path) -> Result<(), OverlayError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err(OverlayError::Unsafe),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => create_private(path)?,
+        Err(error) => return Err(error.into()),
+    }
+    narrow(path)
+}
+
+#[cfg(unix)]
+fn create_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)
+}
+
+/// Sets the mode of the directory to 0700 whatever the umask made of it, after checking again that it is no link.
+#[cfg(unix)]
+fn narrow(path: &Path) -> Result<(), OverlayError> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir() {
+        return Err(OverlayError::Unsafe);
+    }
+    if meta.permissions().mode() & 0o7777 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// The profile of a user on Windows decides who can read a directory below it; there is no mode to set.
+#[cfg(not(unix))]
+fn narrow(path: &Path) -> Result<(), OverlayError> {
+    if fs::symlink_metadata(path)?.is_dir() { Ok(()) } else { Err(OverlayError::Unsafe) }
+}
+
+/// Writes the overlay of `pane` below the data directory `dir` and returns its path. The file is JSON (which `kubectl`
+/// reads like YAML) and holds names only: `current-context` and one context with its cluster, user and namespace.
+/// Every name is checked first, so a name that could be read as an option or holds a hidden character writes nothing.
+/// The file is written atomically with mode 0600 in directories of mode 0700; a second call replaces it. A cluster or a
+/// user the context does not name is left out, and so is a namespace it does not have.
+pub fn write_overlay(dir: &Path, pane: PaneId, entry: &ContextEntry) -> Result<PathBuf, OverlayError> {
+    let name = ContextName::parse(&entry.name)?;
+    let cluster = if entry.cluster.is_empty() { None } else { Some(ContextName::parse(&entry.cluster)?) };
+    let user = if entry.user.is_empty() { None } else { Some(ContextName::parse(&entry.user)?) };
+    let namespace = entry.namespace.as_deref().map(Namespace::parse).transpose()?;
+
+    let mut body = serde_json::Map::new();
+    if let Some(cluster) = &cluster {
+        body.insert("cluster".to_owned(), cluster.as_str().into());
+    }
+    if let Some(user) = &user {
+        body.insert("user".to_owned(), user.as_str().into());
+    }
+    if let Some(namespace) = &namespace {
+        body.insert("namespace".to_owned(), namespace.as_str().into());
+    }
+    let document = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Config",
+        "current-context": name.as_str(),
+        "contexts": [{ "name": name.as_str(), "context": body }],
+    });
+    let mut bytes = serde_json::to_vec_pretty(&document).map_err(|_| OverlayError::Io(io::ErrorKind::InvalidData))?;
+    bytes.push(b'\n');
+
+    fs::create_dir_all(dir)?;
+    private_dir(&dir.join("run"))?;
+    private_dir(&overlay_dir(dir))?;
+    let path = overlay_path(dir, pane);
+    write_atomic_private(&path, &bytes)?;
+    Ok(path)
+}
+
+/// Whether one entry of the person's own list may follow the overlay: an absolute path of the system, without a
+/// control character and of a bounded length. On Windows that is a drive path, so a UNC path, a device path and a
+/// drive-relative path are not.
+fn listable(os: Os, entry: &str) -> bool {
+    entry.len() <= LIST_ENTRY_MAX && platform::is_absolute_path(os, entry) && !entry.chars().any(char::is_control)
+}
+
+/// The value of `KUBECONFIG` for a pane: the overlay first, then the person's own files, joined with `:` (Unix) or `;`
+/// (Windows). The person's files are `user_list` (their `KUBECONFIG`, when it is set and not empty) or else
+/// `<home>/.kube/config`; a relative, empty, control-character, UNC or device entry is dropped, at most 64 entries are
+/// kept, and a list with nothing left gives the default. An `overlay` that is not absolute for `os`, or holds the
+/// separator or a control character, is refused, so the list can only grow by the entries checked here.
+pub fn kubeconfig_value(overlay: &str, os: Os, user_list: Option<&str>, home: &str) -> Result<String, OverlayError> {
+    let separator = if os == Os::Windows { ';' } else { ':' };
+    if !listable(os, overlay) || overlay.contains(separator) {
+        return Err(OverlayError::Path);
+    }
+    let mut files: Vec<String> = user_list
+        .map(|list| list.split(separator).filter(|entry| listable(os, entry)).take(LIST_ENTRIES_MAX).map(str::to_owned).collect())
+        .unwrap_or_default();
+    if files.is_empty() && listable(os, home) && !home.contains(separator) {
+        files.push(platform::join_path(os, &platform::join_path(os, home, ".kube"), "config"));
+    }
+    let mut value = overlay.to_owned();
+    for file in &files {
+        value.push(separator);
+        value.push_str(file);
+    }
+    Ok(value)
+}
+
+/// The pane a file name stands for: `<number>.json` with the number written the way [`overlay_path`] writes it.
+fn pane_of(file_name: &str) -> Option<PaneId> {
+    let digits = file_name.strip_suffix(".json")?;
+    let pane: PaneId = digits.parse().ok()?;
+    (pane.to_string() == digits).then_some(pane)
+}
+
+/// Removes the overlay of every pane that is not in `live` and returns how many it removed. Only regular files named
+/// `<number>.json` go: a directory, a link (which is never followed), a temporary file and anything else stay. A
+/// directory that does not exist is nothing to sweep. A file that cannot be removed does not stop the sweep; the first
+/// such error is returned when it ends.
+pub fn sweep_overlays(dir: &Path, live: &[PaneId]) -> Result<usize, OverlayError> {
+    let kube_dir = overlay_dir(dir);
+    for directory in [dir.join("run"), kube_dir.clone()] {
+        match fs::symlink_metadata(&directory) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(OverlayError::Unsafe),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let mut removed = 0;
+    let mut failure = None;
+    for entry in fs::read_dir(&kube_dir)? {
+        let Ok(entry) = entry else { continue };
+        let file_name = entry.file_name();
+        let Some(pane) = file_name.to_str().and_then(pane_of) else { continue };
+        if live.contains(&pane) {
+            continue;
+        }
+        let path = entry.path();
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {}
+            _ => continue,
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => failure = failure.or(Some(OverlayError::from(error))),
+        }
+    }
+    failure.map_or(Ok(removed), Err)
 }

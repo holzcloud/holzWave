@@ -952,8 +952,300 @@ fn the_pod_shell_is_the_one_constant() {
     }
 }
 
-/// Keeps the helpers of later tasks used while the file grows.
-#[allow(dead_code)]
+// ---------------------------------------------------------------------------------------------------------------------
+// The overlay kubeconfig, the `KUBECONFIG` value and the sweep.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A `config view -o json` of the canary kubeconfig: the bearer token is printed here as it would be in a file, and
+/// the environment values of the exec plugin are in clear, as the real tool leaves them.
+fn canary_view() -> Vec<u8> {
+    format!(
+        r#"{{"apiVersion":"v1","kind":"Config","current-context":"dev",
+"clusters":[{{"name":"dev-cluster","cluster":{{"server":"https://dev.example.com:6443","certificate-authority-data":"Zm9v"}}}},
+  {{"name":"arn:aws:eks:eu-central-1:000000000000:cluster/demo","cluster":{{"server":"https://eks.example.com"}}}},
+  {{"name":"kind-test","cluster":{{"server":"https://127.0.0.1:6443"}}}}],
+"contexts":[
+  {{"name":"dev","context":{{"cluster":"dev-cluster","user":"token-user"}}}},
+  {{"name":"arn:aws:eks:eu-central-1:000000000000:cluster/demo","context":{{"cluster":"arn:aws:eks:eu-central-1:000000000000:cluster/demo","user":"exec-user"}}}},
+  {{"name":"kind-test","context":{{"cluster":"kind-test","user":"token-user","namespace":"test"}}}}],
+"users":[{{"name":"token-user","user":{{"token":"{CANARY_TOKEN}"}}}},
+  {{"name":"exec-user","user":{{"exec":{{"apiVersion":"client.authentication.k8s.io/v1beta1","command":"aws",
+    "args":["eks","get-token"],"env":[{{"name":"AWS_PROFILE","value":"{CANARY_EXEC_ENV}"}}]}}}}}}]}}"#
+    )
+    .into_bytes()
+}
+
+fn json_of(path: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(path).expect("read overlay")).expect("the overlay is JSON")
+}
+
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .expect("list")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn the_overlay_holds_names_only() {
+    let dir = scratch("overlay-names");
+    let data = kube::parse_contexts(&canary_view()).expect("the canary view reads");
+    let arn = "arn:aws:eks:eu-central-1:000000000000:cluster/demo";
+    let expected = [
+        serde_json::json!({"apiVersion": "v1", "kind": "Config", "current-context": "dev", "contexts": [
+            {"name": "dev", "context": {"cluster": "dev-cluster", "user": "token-user"}}]}),
+        serde_json::json!({"apiVersion": "v1", "kind": "Config", "current-context": arn, "contexts": [
+            {"name": arn, "context": {"cluster": arn, "user": "exec-user"}}]}),
+        serde_json::json!({"apiVersion": "v1", "kind": "Config", "current-context": "kind-test", "contexts": [
+            {"name": "kind-test", "context": {"cluster": "kind-test", "user": "token-user", "namespace": "test"}}]}),
+    ];
+    assert_eq!(data.contexts().len(), expected.len());
+    for (pane, (entry, want)) in (1u64..).zip(data.contexts().iter().zip(&expected)) {
+        let path = kube::write_overlay(&dir, pane, entry).expect("an overlay is written");
+        assert_eq!(path, kube::overlay_path(&dir, pane), "the path is the one overlay_path names");
+        assert_eq!(path, dir.join("run").join("kube").join(format!("{pane}.json")));
+        let text = fs::read_to_string(&path).expect("read overlay");
+        for canary in [CANARY_TOKEN, CANARY_EXEC_ENV] {
+            assert!(!text.contains(canary), "the overlay holds a canary: {text}");
+        }
+        for word in ["server", "certificate", "\"token\"", "\"exec\"", "\"env\"", "password", "client-key", "https:"] {
+            assert!(!text.contains(word), "the overlay holds {word}: {text}");
+        }
+        assert_eq!(&json_of(&path), want, "the overlay is names only");
+    }
+
+    // A second call for the same pane replaces the file, and leaves no temporary file behind.
+    let other = kube::ContextEntry::new("beta", "c2", "u2", Some("payments"));
+    let path = kube::write_overlay(&dir, 1, &other).expect("the overlay is replaced");
+    assert_eq!(json_of(&path)["current-context"], "beta");
+    assert_eq!(names_in(&dir.join("run").join("kube")), ["1.json", "2.json", "3.json"], "no temporary file is left");
+
+    // Names that could be read as an option or hold a hidden character are refused, and nothing is written.
+    let before = fs::read(&path).expect("read");
+    let refused = [
+        kube::ContextEntry::new("-evil", "c", "u", None),
+        kube::ContextEntry::new("a\x1b[2Jb", "c", "u", None),
+        kube::ContextEntry::new("ok", "--server=https://x", "u", None),
+        kube::ContextEntry::new("ok", "c", "u\nv", None),
+        kube::ContextEntry::new("ok", "c", "u", Some("Not A Namespace")),
+        kube::ContextEntry::new("", "c", "u", None),
+    ];
+    for entry in &refused {
+        assert!(kube::write_overlay(&dir, 1, entry).is_err(), "{entry:?} was written");
+    }
+    assert_eq!(fs::read(&path).expect("read"), before, "a refused entry leaves the overlay as it was");
+    assert_eq!(names_in(&dir.join("run").join("kube")), ["1.json", "2.json", "3.json"]);
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_overlay_files_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| fs::metadata(path).expect("metadata").permissions().mode() & 0o7777;
+
+    let dir = scratch("overlay-private");
+    let entry = kube::ContextEntry::new("dev", "c", "u", None);
+    let path = kube::write_overlay(&dir, 7, &entry).expect("written");
+    assert_eq!(mode(&path), 0o600, "the overlay file is for its owner only");
+    assert_eq!(mode(&dir.join("run")), 0o700);
+    assert_eq!(mode(&dir.join("run").join("kube")), 0o700);
+
+    // Directories that already exist with a wider mode are narrowed.
+    fs::set_permissions(dir.join("run"), fs::Permissions::from_mode(0o755)).expect("chmod");
+    fs::set_permissions(dir.join("run").join("kube"), fs::Permissions::from_mode(0o777)).expect("chmod");
+    let path = kube::write_overlay(&dir, 7, &entry).expect("written again");
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&dir.join("run")), 0o700);
+    assert_eq!(mode(&dir.join("run").join("kube")), 0o700);
+    fs::remove_dir_all(&dir).ok();
+
+    // A directory of the overlay that is a link is not followed: nothing is written through it.
+    let dir = scratch("overlay-link");
+    let outside = scratch("overlay-outside");
+    std::os::unix::fs::symlink(&outside, dir.join("run")).expect("symlink");
+    assert!(kube::write_overlay(&dir, 7, &entry).is_err(), "an overlay was written through a link");
+    assert_eq!(fs::read_dir(&outside).expect("list").count(), 0, "something was written outside");
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&outside).ok();
+}
+
+#[test]
+fn the_kubeconfig_value_puts_the_overlay_first_and_keeps_the_persons_list() {
+    use holzwave_core::platform::Os;
+    for os in [Os::Macos, Os::Linux] {
+        // The person's own list is kept in its order, behind the overlay.
+        let value = kube::kubeconfig_value("/data/run/kube/3.json", os, Some("/a/config:/b/config"), "/home/me")
+            .expect("a value");
+        assert_eq!(value, "/data/run/kube/3.json:/a/config:/b/config");
+        // No list, or an empty one: the default file of the home directory.
+        for none in [None, Some(""), Some("  "), Some(":")] {
+            let value = kube::kubeconfig_value("/data/run/kube/3.json", os, none, "/home/me").expect("a value");
+            assert_eq!(value, "/data/run/kube/3.json:/home/me/.kube/config", "list {none:?}");
+        }
+        // Relative and empty entries are dropped, and a list that holds nothing else gives the default.
+        let value = kube::kubeconfig_value("/o/3.json", os, Some("rel/config::/abs/config:~/x:./y"), "/home/me")
+            .expect("a value");
+        assert_eq!(value, "/o/3.json:/abs/config");
+        let value = kube::kubeconfig_value("/o/3.json", os, Some("rel/config:../x"), "/home/me").expect("a value");
+        assert_eq!(value, "/o/3.json:/home/me/.kube/config", "nothing absolute is left");
+        // A control character makes an entry unusable.
+        let value = kube::kubeconfig_value("/o/3.json", os, Some("/a\n/b:/c/config"), "/home/me").expect("a value");
+        assert_eq!(value, "/o/3.json:/c/config");
+        // The home directory may end with a separator.
+        let value = kube::kubeconfig_value("/o/3.json", os, None, "/home/me/").expect("a value");
+        assert_eq!(value, "/o/3.json:/home/me/.kube/config");
+        // An overlay path that is not absolute, is empty, holds the separator or a control character is refused.
+        for bad in ["o/3.json", "", "./3.json", "/o/a:b.json", "/o/a\nb.json", "~/3.json"] {
+            assert!(kube::kubeconfig_value(bad, os, None, "/home/me").is_err(), "{bad:?} was accepted");
+        }
+    }
+    // The list is bounded: a hostile variable cannot make a value of any size.
+    let many = (0..500).map(|n| format!("/c/{n}")).collect::<Vec<_>>().join(":");
+    let value = kube::kubeconfig_value("/o/3.json", Os::Linux, Some(&many), "/home/me").expect("a value");
+    assert!(value.split(':').count() <= 65, "the list is cut: {}", value.split(':').count());
+}
+
+#[test]
+fn windows_refuses_unc_and_device_entries_in_the_list() {
+    use holzwave_core::platform::Os;
+    let overlay = r"C:\data\holzWave\run\kube\3.json";
+    let value = kube::kubeconfig_value(
+        overlay,
+        Os::Windows,
+        Some(r"\\server\share\config;\\?\C:\config;\\.\pipe\x;//server/share/c;D:\kube\config;rel\config;;C:rel;E:/forward/config"),
+        r"C:\home\me",
+    )
+    .expect("a value");
+    assert_eq!(value, format!(r"{overlay};D:\kube\config;E:/forward/config"));
+
+    // A list with nothing usable left gives the default file of the home directory.
+    let value = kube::kubeconfig_value(overlay, Os::Windows, Some(r"\\server\share\config;\\?\C:\x"), r"C:\home\me")
+        .expect("a value");
+    assert_eq!(value, format!(r"{overlay};C:\home\me\.kube\config"));
+    let value = kube::kubeconfig_value(overlay, Os::Windows, None, r"C:\home\me\").expect("a value");
+    assert_eq!(value, format!(r"{overlay};C:\home\me\.kube\config"));
+
+    // The overlay itself must be a drive path, and must not hold the separator.
+    for bad in [r"\\server\share\3.json", r"\\?\C:\3.json", r"rel\3.json", r"C:\a;b.json", ""] {
+        assert!(kube::kubeconfig_value(bad, Os::Windows, None, r"C:\home\me").is_err(), "{bad:?} was accepted");
+    }
+}
+
+#[test]
+fn the_sweep_removes_only_overlays_of_dead_panes() {
+    let dir = scratch("overlay-sweep");
+    let entry = kube::ContextEntry::new("dev", "c", "u", None);
+    for pane in [1u64, 2, 3, 40, 18_446_744_073_709_551_615] {
+        kube::write_overlay(&dir, pane, &entry).expect("written");
+    }
+    let kube_dir = dir.join("run").join("kube");
+    // Files that are not overlay names stay, whatever they look like.
+    let foreign = ["notes.txt", "007.json", "-1.json", "x.json", "5.json.tmp", "5.JSON", "6.json.bak", ".json", "1_000.json"];
+    for name in foreign {
+        fs::write(kube_dir.join(name), b"mine").expect("write foreign");
+    }
+    fs::create_dir(kube_dir.join("99.json")).expect("a directory with an overlay name");
+    fs::write(kube_dir.join("99.json").join("keep"), b"mine").expect("write");
+
+    // A link with an overlay name for a dead pane is left alone, and its target is never touched.
+    #[cfg(unix)]
+    let outside = {
+        let outside = scratch("overlay-sweep-outside");
+        fs::write(outside.join("precious"), b"mine").expect("write outside");
+        std::os::unix::fs::symlink(outside.join("precious"), kube_dir.join("50.json")).expect("symlink");
+        outside
+    };
+
+    assert_eq!(kube::sweep_overlays(&dir, &[2, 3]).expect("sweep"), 3, "panes 1, 40 and the largest are dead");
+    let left = names_in(&kube_dir);
+    for name in ["2.json", "3.json"] {
+        assert!(left.contains(&name.to_owned()), "the live overlay {name} was removed: {left:?}");
+    }
+    for name in ["1.json", "40.json", "18446744073709551615.json"] {
+        assert!(!left.contains(&name.to_owned()), "{name} is still there: {left:?}");
+    }
+    for name in foreign.iter().chain(&["99.json"]) {
+        assert!(left.contains(&(*name).to_owned()), "{name} was removed: {left:?}");
+    }
+    assert_eq!(fs::read(kube_dir.join("99.json").join("keep")).expect("read"), b"mine");
+    #[cfg(unix)]
+    {
+        assert_eq!(fs::read(outside.join("precious")).expect("read"), b"mine", "the sweep followed a link");
+        assert!(fs::symlink_metadata(kube_dir.join("50.json")).is_ok(), "a link is not an overlay");
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    // A second sweep removes nothing; a directory that does not exist is nothing to sweep; nothing live removes all.
+    assert_eq!(kube::sweep_overlays(&dir, &[2, 3]).expect("second sweep"), 0);
+    let empty = scratch("overlay-sweep-empty");
+    assert_eq!(kube::sweep_overlays(&empty, &[]).expect("no directory"), 0);
+    assert_eq!(kube::sweep_overlays(&dir, &[]).expect("sweep all"), 2);
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&empty).ok();
+}
+
+/// `kubectl` on the `PATH` when the real-tool tests are asked for; otherwise one printed line says why not.
+fn real_kubectl() -> Option<PathBuf> {
+    if std::env::var("HW_INTEGRATION_REAL").as_deref() != Ok("1") {
+        println!("skipped: the real-tool tests run only with HW_INTEGRATION_REAL=1");
+        return None;
+    }
+    let path = std::env::var_os("PATH")?;
+    let found = std::env::split_paths(&path).filter(|dir| dir.is_absolute()).map(|dir| dir.join("kubectl")).find(|p| p.is_file());
+    if found.is_none() {
+        println!("skipped: kubectl is not installed here");
+    }
+    found
+}
+
+#[test]
+fn a_real_kubectl_reads_the_overlay() {
+    use holzwave_core::platform::Os;
+    let Some(kubectl) = real_kubectl() else { return };
+    let dir = scratch("overlay-real");
+    let base = dir.join("base-config");
+    let canary = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integrations/kubectl/config_view_canary.kubeconfig"))
+        .expect("the canary kubeconfig");
+    fs::write(&base, &canary).expect("write base");
+    let run = |value: &str, args: &[&str]| {
+        let out = std::process::Command::new(&kubectl)
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &dir)
+            .env("KUBECONFIG", value)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("run kubectl");
+        assert!(out.status.success(), "kubectl {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        out.stdout
+    };
+    let view = ["--request-timeout=5s", "config", "view", "-o", "json"];
+    let base_text = base.to_str().expect("utf-8 path");
+    let dir_text = dir.to_str().expect("utf-8 path");
+
+    // The entry is read from the real tool's own output, as the product does.
+    let plain = kube::parse_contexts(&run(base_text, &view)).expect("the real view reads");
+    assert_eq!(plain.current(), Some("dev"));
+    let kind = plain.context("kind-test").expect("the context kind-test");
+    let entry = kube::ContextEntry::new(kind.name(), kind.cluster(), kind.user(), Some("overlay-ns"));
+    let overlay = kube::write_overlay(&dir, 11, &entry).expect("overlay");
+    let text = fs::read_to_string(&overlay).expect("read overlay");
+    assert!(!text.contains(CANARY_TOKEN) && !text.contains(CANARY_EXEC_ENV), "the overlay holds a canary");
+
+    let value = kube::kubeconfig_value(overlay.to_str().expect("utf-8 path"), Os::current(), Some(base_text), dir_text)
+        .expect("a value");
+    let seen = kube::parse_contexts(&run(&value, &view)).expect("the view with the overlay reads");
+    assert_eq!(seen.current(), Some("kind-test"), "the overlay's current context wins");
+    assert_eq!(seen.context("kind-test").and_then(|c| c.namespace()), Some("overlay-ns"), "the overlay's namespace wins");
+    assert_eq!(seen.context("dev").map(|c| c.cluster()), Some("dev-cluster"), "the person's other contexts stay");
+    assert_eq!(fs::read(&base).expect("read base"), canary, "the person's own file is not changed");
+    fs::remove_dir_all(&dir).ok();
+}
+
 fn scratch(tag: &str) -> PathBuf {
     common::scratch_dir(tag)
 }
