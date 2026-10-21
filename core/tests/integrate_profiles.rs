@@ -14,15 +14,18 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use common::Xorshift64;
-use holzwave_core::integrate::args::{ContextName, ProfileId};
+use holzwave_core::integrate::args::{ContextName, EnvName, ProfileId};
 use holzwave_core::integrate::profiles::{
-    IntegrationProfile, IntegrationProfiles, APP_SET_NAMES, FILE, MAX_BYTES, MAX_ENV, MAX_NAME, MAX_PROFILES,
-    MAX_SECRET_NAMES, MAX_VALUE, PROGRAM_NAMES,
+    secret_account, IntegrationProfile, IntegrationProfiles, APP_SET_NAMES, FILE, MAX_BYTES, MAX_ENV, MAX_NAME,
+    MAX_PROFILES, MAX_SECRET, MAX_SECRET_NAMES, MAX_VALUE, PROGRAM_NAMES,
 };
 use holzwave_core::integrate::run::{EnvExtra, EnvPolicy};
 use holzwave_core::integrate::ToolId;
 use holzwave_core::platform::Os;
+use holzwave_core::secrets::{MemoryStore, SecretStore};
+use holzwave_core::Error;
 use serde_json::{json, Value};
+use zeroize::Zeroizing;
 
 const SCHEMA_PATH: &str = "docs/integrations.schema.json";
 
@@ -839,4 +842,189 @@ fn a_hostile_corpus_never_puts_a_value_into_a_note() {
         }
     }
     assert!(accepted_n >= 10 && refused_n >= 10, "the mutations reach both verdicts: {accepted_n}, {refused_n}");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Secret variables: only in the keychain.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn env_name(text: &str) -> EnvName {
+    EnvName::parse(text).expect("a valid variable name")
+}
+
+/// A set with one Kubernetes profile per id, each naming these secret variables.
+fn set_with_secrets(ids: &[&str], names: &[&str]) -> IntegrationProfiles {
+    let mut set = IntegrationProfiles::default();
+    for profile_id in ids {
+        let mut profile = IntegrationProfile::new(id(profile_id), ToolId::Kube, "A profile");
+        profile.secret_env = names.iter().map(|name| (*name).to_owned()).collect();
+        set.upsert(profile).expect("a valid profile");
+    }
+    set
+}
+
+/// A store whose every call fails with a message that holds a value, as a careless keychain binding might.
+struct FailingStore;
+
+const STORE_CANARY: &str = "HW-CANARY-STORE-0001";
+
+impl SecretStore for FailingStore {
+    fn get(&self, _account: &str) -> holzwave_core::Result<Option<String>> {
+        Err(Error::Unsupported(format!("keychain: {STORE_CANARY}")))
+    }
+
+    fn set(&self, _account: &str, _secret: &str) -> holzwave_core::Result<()> {
+        Err(Error::Unsupported(format!("keychain: {STORE_CANARY}")))
+    }
+
+    fn delete(&self, _account: &str) -> holzwave_core::Result<()> {
+        Err(Error::Unsupported(format!("keychain: {STORE_CANARY}")))
+    }
+}
+
+#[test]
+fn a_secret_is_stored_in_the_store_under_its_account_and_is_capped() {
+    assert_eq!(MAX_SECRET, 1024);
+    assert!(MAX_SECRET < holzwave_core::secrets::MAX_LEN, "the core enforces the lower bound");
+    let account = secret_account(&id("prod"), &env_name("AWS_SECRET_ACCESS_KEY"));
+    assert_eq!(account, "int:prod:AWS_SECRET_ACCESS_KEY");
+
+    let set = set_with_secrets(&["prod", "stage"], &["AWS_SECRET_ACCESS_KEY"]);
+    let store = MemoryStore::default();
+    let (prod, stage, name) = (id("prod"), id("stage"), env_name("AWS_SECRET_ACCESS_KEY"));
+    assert!(!set.has_secret(&store, &prod, &name), "nothing is stored yet");
+
+    // The cap is in bytes: 1024 fit, 1025 do not, and a refused value leaves the old one in place.
+    set.set_secret(&store, &prod, &name, "first").expect("a small value");
+    let at_the_cap = rep('k', MAX_SECRET);
+    set.set_secret(&store, &prod, &name, &at_the_cap).expect("1024 bytes");
+    assert_eq!(store.get(&account).expect("get"), Some(at_the_cap.clone()), "stored under its account");
+    set.set_secret(&store, &prod, &name, &rep('k', MAX_SECRET + 1)).expect_err("1025 bytes");
+    set.set_secret(&store, &prod, &name, &rep(ch(0xe9), MAX_SECRET / 2 + 1)).expect_err("1026 bytes of 513 characters");
+    set.set_secret(&store, &prod, &name, &rep(ch(0xe9), MAX_SECRET / 2)).expect("1024 bytes of 512 characters");
+    set.set_secret(&store, &prod, &name, &at_the_cap).expect("1024 bytes again");
+    set.set_secret(&store, &prod, &name, "").expect_err("an empty value is not a secret");
+    set.set_secret(&store, &prod, &name, &format!("a{}b", ch(0))).expect_err("a NUL");
+    assert_eq!(store.get(&account).expect("get"), Some(at_the_cap.clone()), "a refused value changes nothing");
+
+    // Only a name the profile lists, and only a profile that exists.
+    set.set_secret(&store, &prod, &env_name("OTHER"), "x").expect_err("a name that is not in secret_env");
+    assert_eq!(store.get("int:prod:OTHER").expect("get"), None);
+    set.set_secret(&store, &id("ghost"), &name, "x").expect_err("a profile that does not exist");
+    assert_eq!(store.get("int:ghost:AWS_SECRET_ACCESS_KEY").expect("get"), None);
+
+    // Present and absent are a yes and a no; the same name under another profile is its own secret.
+    assert!(set.has_secret(&store, &prod, &name));
+    assert!(!set.has_secret(&store, &stage, &name));
+    assert!(!set.has_secret(&store, &prod, &env_name("OTHER")), "a name that is not listed is a no");
+    set.set_secret(&store, &stage, &name, "stage value").expect("the other profile");
+    set.clear_secret(&store, &prod, &name).expect("clear");
+    assert!(!set.has_secret(&store, &prod, &name));
+    assert!(set.has_secret(&store, &stage, &name), "clearing one account leaves the other");
+    set.clear_secret(&store, &prod, &name).expect("clearing what is not there is not an error");
+    assert_eq!(store.get(&account).expect("get"), None);
+}
+
+#[test]
+fn secrets_are_resolved_for_a_run_and_wiped_by_type() {
+    let set = set_with_secrets(&["prod"], &["B_SECRET", "A_SECRET", "C_SECRET"]);
+    let store = MemoryStore::default();
+    let prod = id("prod");
+    set.set_secret(&store, &prod, &env_name("A_SECRET"), "a-value").expect("a");
+    set.set_secret(&store, &prod, &env_name("B_SECRET"), "b-value").expect("b");
+
+    // The values come back as wiping strings, for the names that have one, in the order of the profile.
+    let pairs: Vec<(String, Zeroizing<String>)> = set.resolve_secrets(&store, &prod).expect("resolve");
+    let names: Vec<&str> = pairs.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["B_SECRET", "A_SECRET"], "the profile's order, and no entry for C_SECRET");
+    assert_eq!(pairs[0].1.as_str(), "b-value");
+    assert_eq!(pairs[1].1.as_str(), "a-value");
+
+    // A profile without secret names has an empty list; a profile that does not exist is an error, not a silent run
+    // without credentials.
+    let plain = set_with_secrets(&["plain"], &[]);
+    assert!(plain.resolve_secrets(&store, &id("plain")).expect("resolve").is_empty());
+    assert!(set.resolve_secrets(&store, &id("ghost")).is_err());
+    // A value left in the store for a name the profile no longer lists is not handed out.
+    store.set("int:prod:D_SECRET", "stale").expect("set");
+    assert_eq!(set.resolve_secrets(&store, &prod).expect("resolve").len(), 2);
+    // A store that fails is an error, so a run never starts without the credentials the person asked for.
+    assert!(set.resolve_secrets(&FailingStore, &prod).is_err());
+}
+
+#[test]
+fn removing_a_profile_removes_its_secrets() {
+    let mut set = set_with_secrets(&["prod", "stage"], &["TOKEN", "OTHER"]);
+    let store = MemoryStore::default();
+    let (prod, stage) = (id("prod"), id("stage"));
+    for profile in [&prod, &stage] {
+        for name in ["TOKEN", "OTHER"] {
+            set.set_secret(&store, profile, &env_name(name), "v").expect("set");
+        }
+    }
+    assert_eq!(set.remove_with_secrets(&store, &prod), Ok(true));
+    assert!(set.get("prod").is_none() && set.get("stage").is_some());
+    for name in ["TOKEN", "OTHER"] {
+        assert_eq!(store.get(&format!("int:prod:{name}")).expect("get"), None, "{name} of the removed profile");
+        assert_eq!(store.get(&format!("int:stage:{name}")).expect("get").as_deref(), Some("v"), "{name} of the other");
+    }
+    assert_eq!(set.remove_with_secrets(&store, &prod), Ok(false), "a profile that is not there");
+
+    // A store that cannot delete keeps the profile, so that the next attempt finds the names again.
+    let mut set = set_with_secrets(&["prod"], &["TOKEN"]);
+    let note = set.remove_with_secrets(&FailingStore, &prod).expect_err("the keychain failed");
+    assert!(set.get("prod").is_some(), "the profile is kept while its secrets could not be removed");
+    assert!(!note.contains("CANARY") && note.contains("prod"), "{note}");
+    // A profile without secret names is removed without asking the store.
+    let mut plain = set_with_secrets(&["plain"], &[]);
+    assert_eq!(plain.remove_with_secrets(&FailingStore, &id("plain")), Ok(true));
+}
+
+#[test]
+fn no_secret_appears_in_a_file_a_debug_or_an_error() {
+    let canary = "HW-CANARY-SECRET-0001";
+    let mut set = set_with_secrets(&["prod"], &["AWS_SECRET_ACCESS_KEY"]);
+    let store = MemoryStore::default();
+    let (prod, name) = (id("prod"), env_name("AWS_SECRET_ACCESS_KEY"));
+    set.set_secret(&store, &prod, &name, canary).expect("set");
+    assert!(set.has_secret(&store, &prod, &name));
+
+    // The files: the profile file and everything else in the directory.
+    let dir = Scratch::new("profiles-secret-files");
+    set.save(dir.path()).expect("save");
+    for entry in fs::read_dir(dir.path()).expect("the directory") {
+        let bytes = fs::read(entry.expect("an entry").path()).expect("a file");
+        assert!(!String::from_utf8_lossy(&bytes).contains("CANARY"), "a file holds the secret value");
+    }
+    assert!(fs::read_to_string(dir.path().join(FILE)).expect("file").contains("AWS_SECRET_ACCESS_KEY"), "the name is kept");
+
+    // Debug of the set, of a profile and of the account.
+    for text in [format!("{set:?}"), format!("{set:#?}"), format!("{:?}", set.items[0]), format!("{:#?}", set.items[0])] {
+        assert_no_canary("debug", &text);
+    }
+    // Errors: a refused value (the canary is inside it), a failing store, a missing profile.
+    let long = format!("{canary}{}", rep('x', MAX_SECRET));
+    let errors = [
+        set.set_secret(&store, &prod, &name, &long).expect_err("too long"),
+        set.set_secret(&store, &prod, &name, &format!("{canary}{}", ch(0))).expect_err("a NUL"),
+        set.set_secret(&store, &prod, &env_name("UNLISTED"), canary).expect_err("an unlisted name"),
+        set.set_secret(&store, &id("ghost"), &name, canary).expect_err("no such profile"),
+        set.set_secret(&FailingStore, &prod, &name, canary).expect_err("the keychain failed"),
+        set.clear_secret(&FailingStore, &prod, &name).expect_err("the keychain failed"),
+        set.resolve_secrets(&FailingStore, &prod).expect_err("the keychain failed").to_string(),
+        set.clone().remove_with_secrets(&FailingStore, &prod).expect_err("the keychain failed"),
+    ];
+    for (n, error) in errors.iter().enumerate() {
+        assert_no_canary(&format!("error {n}"), error);
+        assert!(!error.contains(STORE_CANARY) && !error.contains("keychain:"), "error {n} repeats the store: {error}");
+        assert!(!error.is_empty() && error.len() < 200, "error {n} is one short sentence: {error}");
+    }
+    assert!(!set.has_secret(&FailingStore, &prod, &name), "a store that fails answers no");
+    // The refused writes did not change the stored value.
+    assert_eq!(store.get(&secret_account(&prod, &name)).expect("get").as_deref(), Some(canary));
+    // Removing the profile wipes it, and the file written afterwards has no trace either.
+    assert_eq!(set.remove_with_secrets(&store, &prod), Ok(true));
+    assert_eq!(store.get(&secret_account(&prod, &name)).expect("get"), None);
+    set.save(dir.path()).expect("save");
+    assert!(!fs::read_to_string(dir.path().join(FILE)).expect("file").contains("CANARY"));
 }

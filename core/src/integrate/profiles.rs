@@ -24,11 +24,14 @@ use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use super::args::{ContextName, EnvName, Namespace, NodeName, ProfileId, SectionName, SubscriptionId};
+use zeroize::Zeroizing;
+
 use super::run::EnvPolicy;
 use super::{CheckedSelection, SelectKind, ToolId};
 use crate::ai::tools::is_hidden;
 use crate::persist::{backup_bad, bad_path, read_limited, write_atomic};
 use crate::platform::Os;
+use crate::secrets::SecretStore;
 
 /// The synced file of profiles.
 pub const FILE: &str = "integrations.json";
@@ -48,6 +51,9 @@ pub const MAX_ENV: usize = 32;
 pub const MAX_SECRET_NAMES: usize = 8;
 /// The most bytes of a plain environment value.
 pub const MAX_VALUE: usize = 1024;
+/// The most bytes of a secret variable. The Windows credential store refuses a blob over 2560 bytes and
+/// [`crate::secrets::MAX_LEN`] allows 4096, so this module enforces the lower bound on every platform.
+pub const MAX_SECRET: usize = 1024;
 
 /// Names that a synced profile may not set because they make a tool, a pager or the shell of a pane start another
 /// program, read another start-up file or load another piece of code (a tool opens the editor for a diff, a pager
@@ -458,6 +464,108 @@ impl IntegrationProfiles {
         self.items
             .iter()
             .any(|item| item.tool == tool && item.production && item.context.as_ref() == Some(context))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Secret variables: values only in the keychain.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The account of a secret variable in the keychain: `int:<profile id>:<NAME>`. Both parts are validated types, so the
+/// account holds no control character and no separator of its own.
+pub fn secret_account(id: &ProfileId, name: &EnvName) -> String {
+    format!("int:{}:{}", id.as_str(), name.as_str())
+}
+
+/// What a store failure says. The text of the store's own error is dropped: a binding may repeat what it was given.
+const KEYCHAIN_FAILED: &str = "the keychain could not be used";
+
+impl IntegrationProfiles {
+    /// The profile with this id, or the note that it is not there.
+    fn known(&self, id: &ProfileId) -> Result<&IntegrationProfile, String> {
+        self.get(id.as_str()).ok_or_else(|| format!("profile {}: there is no such profile", id.as_str()))
+    }
+
+    /// Stores the value of one secret variable in the keychain, under [`secret_account`]. The profile must exist and
+    /// list the name in `secret_env`; the value is 1 to [`MAX_SECRET`] bytes without a NUL. A refused value changes
+    /// nothing. The error is a fixed sentence with the profile id and never the value.
+    pub fn set_secret(
+        &self,
+        store: &dyn SecretStore,
+        id: &ProfileId,
+        name: &EnvName,
+        value: &str,
+    ) -> Result<(), String> {
+        let profile = self.known(id)?;
+        let at = id.as_str();
+        if !profile.secret_env.iter().any(|listed| listed == name.as_str()) {
+            return Err(format!("profile {at}: the name is not one of its secret variables"));
+        }
+        if value.is_empty() || value.len() > MAX_SECRET || value.contains('\0') {
+            return Err(format!("profile {at}: a secret value is 1 to {MAX_SECRET} bytes without a NUL"));
+        }
+        store.set(&secret_account(id, name), value).map_err(|_| format!("profile {at}: {KEYCHAIN_FAILED}"))
+    }
+
+    /// Removes the value of one secret variable. Clearing one that is not there is not an error, and the name need not
+    /// be listed any more, so that a name that was just taken out of `secret_env` can still be wiped.
+    pub fn clear_secret(&self, store: &dyn SecretStore, id: &ProfileId, name: &EnvName) -> Result<(), String> {
+        self.known(id)?;
+        store.delete(&secret_account(id, name)).map_err(|_| format!("profile {}: {KEYCHAIN_FAILED}", id.as_str()))
+    }
+
+    /// Whether a listed secret variable of a profile has a value: a yes or a no. The value is not kept, and a store
+    /// that fails answers no.
+    pub fn has_secret(&self, store: &dyn SecretStore, id: &ProfileId, name: &EnvName) -> bool {
+        let listed = self.get(id.as_str()).is_some_and(|p| p.secret_env.iter().any(|n| n == name.as_str()));
+        listed
+            && store
+                .get(&secret_account(id, name))
+                .ok()
+                .flatten()
+                .map(Zeroizing::new)
+                .is_some_and(|value| !value.is_empty())
+    }
+
+    /// The secret variables of a profile for the moment of one run, in the profile's order: only the names that have a
+    /// value, as wiping strings that the caller drops when the child is started. A name the profile does not list is
+    /// never read. A store that fails is an error, so that a run never starts without the credentials that were asked
+    /// for.
+    pub fn resolve_secrets(
+        &self,
+        store: &dyn SecretStore,
+        id: &ProfileId,
+    ) -> Result<Vec<(String, Zeroizing<String>)>, String> {
+        let profile = self.known(id)?;
+        let mut out = Vec::with_capacity(profile.secret_env.len());
+        for listed in &profile.secret_env {
+            let name = EnvName::parse(listed)
+                .map_err(|_| format!("profile {}: a secret name is not valid", id.as_str()))?;
+            let found = store
+                .get(&secret_account(id, &name))
+                .map_err(|_| format!("profile {}: {KEYCHAIN_FAILED}", id.as_str()))?;
+            if let Some(value) = found.map(Zeroizing::new).filter(|value| !value.is_empty()) {
+                out.push((listed.clone(), value));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Removes a profile and every secret it lists. Says whether there was a profile. When a secret cannot be deleted
+    /// the profile is kept, so that the names are still known when the person tries again.
+    pub fn remove_with_secrets(&mut self, store: &dyn SecretStore, id: &ProfileId) -> Result<bool, String> {
+        let Some(profile) = self.get(id.as_str()) else { return Ok(false) };
+        let mut failed = false;
+        for listed in &profile.secret_env {
+            match EnvName::parse(listed) {
+                Ok(name) => failed |= store.delete(&secret_account(id, &name)).is_err(),
+                Err(_) => failed = true,
+            }
+        }
+        if failed {
+            return Err(format!("profile {}: {KEYCHAIN_FAILED}; the profile is kept", id.as_str()));
+        }
+        Ok(self.remove(id.as_str()))
     }
 }
 
