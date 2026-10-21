@@ -116,6 +116,10 @@
     "allow-integration-tools",
     "allow-integration-run",
     "allow-integration-select",
-    "allow-integration-context"
+    "allow-integration-context",
+    "allow-integration-prepare",
+    "allow-integration-confirm",
+    "allow-integration-cancel",
+    "allow-integration-launch"
   ]
 }

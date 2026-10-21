@@ -866,7 +866,7 @@ test("the key rows hold the inline AI actions", () => {
 
 test("the integration answers have the documented shapes", () => {
   const sample = golden.answers.integration;
-  assert.deepEqual(keys(sample), ["context", "fault", "run", "tools"]);
+  assert.deepEqual(keys(sample), ["card", "confirm", "context", "fault", "launch", "run", "tools"]);
   // A refusal is the fault object, the same for every command.
   assert.deepEqual(keys(sample.fault), ["code", "reason", "text"]);
   assert.equal(sample.fault.code, "refused");
@@ -925,4 +925,42 @@ test("the context answer has a row for every tool and an entry for every pane", 
   // The answer says whether a pane is held, and with which status; a pane that is not held has no status.
   assert.equal(answer.panes[0].held, true);
   assert.equal(answer.panes[0].status, 1);
+});
+
+test("the card, the confirm answer and the launch answer have the documented shapes", () => {
+  const { card, confirm, launch } = golden.answers.integration;
+  // Everything the person reads before a verb that changes something runs, and the hash that covers it.
+  assert.deepEqual(keys(card), ["argv", "effect", "expires_in_secs", "fields", "guard", "hash", "program", "target", "ticket", "tool", "verb"]);
+  assert.match(card.ticket, /^[0-9a-f]{32}$/);
+  assert.match(card.hash, /^[0-9a-f]{64}$/);
+  assert.deepEqual(keys(card.guard), ["production"]);
+  assert.ok(card.fields.every((pair) => Array.isArray(pair) && pair.length === 2), "the hashed fields are name and value pairs");
+  assert.deepEqual(card.fields.slice(0, 4).map(([name]) => name), ["tool", "verb", "effect", "program"]);
+  // A confirm that ran says so with the tool's first line; one that launched names the new pane and the new layout.
+  assert.equal(confirm.length, 2);
+  for (const answer of confirm) assert.deepEqual(keys(answer), ["kind", "note", "pane", "view"]);
+  assert.deepEqual([confirm[0].kind, confirm[0].pane, confirm[0].view], ["ran", null, null]);
+  assert.equal(confirm[1].kind, "launched");
+  assert.equal(typeof confirm[1].pane, "number");
+  assert.deepEqual(keys(confirm[1].view), ["dividers", "focus", "pane_names", "panes", "rev", "tabs", "windows", "workspaces"]);
+  assert.deepEqual(keys(launch), ["pane", "view"]);
+  assert.deepEqual(keys(launch.view), keys(confirm[1].view), "the same layout as block_open answers");
+});
+
+test("only integration_confirm names a ticket together with a hash, and the card has no ticket to send", () => {
+  assert.deepEqual(golden.commands.integration_confirm, ["ticket", "hash"]);
+  assert.deepEqual(golden.commands.integration_cancel, ["ticket"]);
+  assert.deepEqual(golden.commands.integration_prepare, ["tool", "verb", "pane", "args"]);
+  assert.deepEqual(golden.commands.integration_launch, ["tool", "verb", "pane", "args", "placement"]);
+  for (const [name, args] of Object.entries(golden.commands).filter(([name]) => name.startsWith("integration_"))) {
+    if (name !== "integration_confirm") assert.ok(!args.includes("hash"), `${name} names a hash`);
+    if (name !== "integration_confirm" && name !== "integration_cancel") assert.ok(!args.includes("ticket"), `${name} names a ticket`);
+  }
+  // A call site in the page, when there is one, sends exactly the ticket and the hash.
+  const sites = sources(srcDir).flatMap((file) =>
+    callSites(readFileSync(file, "utf8")).map((site) => ({ ...site, file: file.slice(srcDir.length + 1) })),
+  );
+  for (const site of sites.filter((s) => s.command === "integration_confirm")) {
+    assert.deepEqual([...site.keys].sort(), ["hash", "ticket"], `${site.file}:${site.line}`);
+  }
 });

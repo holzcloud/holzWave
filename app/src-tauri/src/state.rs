@@ -48,7 +48,8 @@ use crate::ai_exec::RemoteExecs;
 use crate::login_prompt::{PromptEnd, PromptHost};
 use crate::ai_tools::{ExecFault, FileTarget, TerminalTarget};
 use crate::integrate_host::{
-    ContextAnswer, IntegrationEvent, IntegrationFault, IntegrationHost, IntegrationParts,
+    ConfirmAnswer, ConfirmKind, ContextAnswer, IntegrationEvent, IntegrationFault, IntegrationHost, IntegrationParts,
+    LaunchAnswer, LaunchNote,
 };
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
@@ -1241,6 +1242,90 @@ impl AppCore {
         selection: &holzwave_core::integrate::Selection,
     ) -> Result<holzwave_core::integrate::service::SelectionView, IntegrationFault> {
         self.integrations.select(tool, pane, selection)
+    }
+
+    /// The card for an integration verb that changes something or opens a session; nothing is started. Blocking.
+    pub fn integration_prepare(
+        &self,
+        tool: &str,
+        verb: &str,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+    ) -> Result<holzwave_core::integrate::ticket::Card, IntegrationFault> {
+        self.integrations.prepare(tool, verb, pane, args)
+    }
+
+    /// The person closed a card.
+    pub fn integration_cancel(&self, ticket: &str) {
+        self.integrations.cancel(ticket);
+    }
+
+    /// The window `label`'s answer to a card, with the hash it was shown. The one place the person's decision enters. A
+    /// verb that changes something runs once; an exec verb opens a pane (a tab, next to the others) whose launch is
+    /// registered before the page can start it. Blocking.
+    pub fn integration_confirm(&self, label: &str, ticket: &str, hash: &str) -> Result<ConfirmAnswer, IntegrationFault> {
+        let (done, origin) = self.integrations.confirm(ticket, hash)?;
+        match done {
+            holzwave_core::integrate::service::Done::Ran { note } => {
+                Ok(ConfirmAnswer { kind: ConfirmKind::Ran, pane: None, note, view: None })
+            }
+            holzwave_core::integrate::service::Done::Launch(launch) => {
+                let note = clean_launch_label(&launch.label);
+                let from = LaunchNote { tool: origin.tool.as_str(), verb: origin.verb, from: origin.pane };
+                let (pane, view) = self.launch_in(label, "tab", launch, &from)?;
+                Ok(ConfirmAnswer { kind: ConfirmKind::Launched, pane: Some(pane), note, view: Some(view) })
+            }
+        }
+    }
+
+    /// A terminal for a verb that only reads (logs, kernel messages, a shell): a pane in the window `label`, in a tab or
+    /// beside the focused pane (`placement` is `tab`, `right` or `down`), with the launch registered for it. Blocking.
+    pub fn integration_launch(
+        &self,
+        label: &str,
+        tool: &str,
+        verb: &str,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+        placement: &str,
+    ) -> Result<LaunchAnswer, IntegrationFault> {
+        let launch = self.integrations.launch(tool, verb, pane, args)?;
+        let (opened, view) = self.launch_in(label, placement, launch, &LaunchNote { tool, verb, from: pane })?;
+        Ok(LaunchAnswer { pane: opened, view })
+    }
+
+    /// Makes the pane of a launch: the same pane creation as `block_open`, then the launch is registered for the new pane
+    /// (so that the page's `start_pane` runs the tool and not a shell) and the pane gets its selection to show. Nothing is
+    /// started here. A pane that cannot be made ready is closed again, so a refusal leaves nothing behind.
+    fn launch_in(
+        &self,
+        label: &str,
+        placement: &str,
+        launch: PaneLaunch,
+        note: &LaunchNote<'_>,
+    ) -> Result<(PaneId, View), IntegrationFault> {
+        let focused = lock(&self.windows).layout(label).map(|layout| layout.tab().focus);
+        let made = match placement {
+            "right" => self.split_in(label, false),
+            "down" => self.split_in(label, true),
+            _ => self.new_tab_in(label),
+        };
+        let view = made.map_err(|_| IntegrationFault::refused("window", "The window is not open."))?;
+        // At a limit of the layout the view comes back unchanged and its focus is still the pane that was asked to make
+        // room: that pane must not become the launch.
+        if Some(view.focus) == focused {
+            return Err(IntegrationFault::refused("no_room", "There is no room for another pane here."));
+        }
+        let pane = view.focus;
+        let ready = self
+            .register_launch(pane, launch)
+            .map_err(|why| IntegrationFault::launch(&why))
+            .and_then(|()| self.integrations.pane_launched(pane, note));
+        if let Err(fault) = ready {
+            let _ = self.close_pane_in(label, pane);
+            return Err(fault);
+        }
+        Ok((pane, view))
     }
 
     /// What the tools are set to and which panes have a selection. With `refresh` it starts the tools, so it blocks.
@@ -9981,7 +10066,9 @@ mod protocol {
     /// The answers of the integration commands, written by the real types: the recorded output of a fake `kubectl` goes
     /// through the real parser, and the tool entries are the real compiled-in descriptions.
     fn integration_samples() -> Value {
-        use crate::integrate_host::PaneAnswer;
+        use crate::integrate_host::{ConfirmAnswer, ConfirmKind, LaunchAnswer, PaneAnswer};
+        use holzwave_core::integrate::ticket::{Card, Guard};
+        use holzwave_core::integrate::VerbEffect;
         use holzwave_core::integrate::context::{ContextRow, RowState};
         use holzwave_core::integrate::service::{
             Fault, FaultCode, RunAnswer, SelectionView, ToolState, ToolView,
@@ -10028,6 +10115,56 @@ mod protocol {
                 fetched: 1_800_000_000,
             }),
             "fault": to_value(&IntegrationFault::from(refused)),
+            "card": to_value(&Card {
+                ticket: "0123456789abcdef0123456789abcdef".into(),
+                tool: ToolId::Kube,
+                verb: "delete_pod".into(),
+                effect: VerbEffect::Write,
+                program: "kubectl".into(),
+                argv: ["delete", "pod", "--wait=false", "--request-timeout=10s", "--", "api-0"].map(String::from).to_vec(),
+                target: vec![
+                    ("context".into(), "prod".into()),
+                    ("namespace".into(), "payments".into()),
+                    ("pod".into(), "api-0".into()),
+                ],
+                guard: Guard { production: Some("Production".into()) },
+                fields: [
+                    ("tool", "kube"),
+                    ("verb", "delete_pod"),
+                    ("effect", "write"),
+                    ("program", "kubectl"),
+                    ("arg 1", "delete"),
+                    ("arg 2", "pod"),
+                    ("arg 3", "--wait=false"),
+                    ("arg 4", "--request-timeout=10s"),
+                    ("arg 5", "--"),
+                    ("arg 6", "api-0"),
+                    ("context", "prod"),
+                    ("namespace", "payments"),
+                    ("pod", "api-0"),
+                    ("guard", "production"),
+                    ("production_name", "Production"),
+                ]
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .to_vec(),
+                hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                expires_in_secs: 120,
+            }),
+            "confirm": [
+                to_value(&ConfirmAnswer {
+                    kind: ConfirmKind::Ran,
+                    pane: None,
+                    note: "pod \"api-0\" deleted".into(),
+                    view: None,
+                }),
+                to_value(&ConfirmAnswer {
+                    kind: ConfirmKind::Launched,
+                    pane: Some(3),
+                    note: "Exec in pod api-0 (Production)".into(),
+                    view: Some(sample_view()),
+                }),
+            ],
+            "launch": to_value(&LaunchAnswer { pane: 3, view: sample_view() }),
             "context": to_value(&ContextAnswer {
                 rows: vec![
                     ContextRow {

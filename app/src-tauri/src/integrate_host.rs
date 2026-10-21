@@ -16,8 +16,9 @@ use std::time::Duration;
 use holzwave_core::integrate::context::ContextRow;
 use holzwave_core::integrate::kube;
 use holzwave_core::integrate::service::{
-    Fault, FaultCode, HostFacts, IntegrationService, PaneRow, RunAnswer, SelectionView, ToolView,
+    Done, Fault, FaultCode, HostFacts, IntegrationService, PaneRow, RunAnswer, SelectionView, ToolView,
 };
+use holzwave_core::integrate::ticket::Card;
 use holzwave_core::integrate::{Selection, ToolId};
 use holzwave_core::layout::PaneId;
 use holzwave_core::persist::Debounced;
@@ -25,7 +26,7 @@ use holzwave_core::platform::ShellLaunch;
 use holzwave_core::secrets::SecretStore;
 use serde::Serialize;
 
-use crate::state::{Out, Sink, Target};
+use crate::state::{Out, Sink, Target, View};
 
 /// How long the file of the pane selections waits after the first change of a burst.
 const SAVE_DELAY: Duration = Duration::from_millis(250);
@@ -63,6 +64,20 @@ pub struct IntegrationFault {
     pub code: FaultCode,
     pub reason: &'static str,
     pub text: String,
+}
+
+impl IntegrationFault {
+    /// A refusal of the shell itself (a window that is gone, a layout that has no room): a fixed word and sentence.
+    pub fn refused(reason: &'static str, text: &str) -> Self {
+        IntegrationFault { code: FaultCode::Refused, reason, text: text.to_owned() }
+    }
+
+    /// The pane of a launch could not be made ready. The sentences of the shell hold nothing of the request.
+    pub(crate) fn launch(text: &str) -> Self {
+        let mut chars = text.chars();
+        let text = chars.next().map_or_else(String::new, |first| format!("{}{}.", first.to_uppercase(), chars.as_str()));
+        IntegrationFault { code: FaultCode::Failed, reason: "launch", text }
+    }
 }
 
 impl From<Fault> for IntegrationFault {
@@ -123,6 +138,42 @@ pub struct ContextAnswer {
     pub rows: Vec<ContextRow>,
     /// One entry per pane that has an integration selection.
     pub panes: Vec<PaneAnswer>,
+}
+
+/// What the answer of `integration_confirm` is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmKind {
+    /// The verb ran once.
+    Ran,
+    /// The verb opens a session: a pane was made for it, and the page starts it.
+    Launched,
+}
+
+/// The answer of `integration_confirm`, the one command that decides. `note` is the tool's own first line of output for a
+/// verb that ran (cleaned and cut by the core), or the name of the pane for a launch; `pane` and `view` are the new pane
+/// and the layout it is in, for a launch, and `null` otherwise.
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfirmAnswer {
+    pub kind: ConfirmKind,
+    pub pane: Option<PaneId>,
+    pub note: String,
+    pub view: Option<View>,
+}
+
+/// The answer of `integration_launch`: the new pane, and the layout it is in (as `block_open` answers).
+#[derive(Clone, Debug, Serialize)]
+pub struct LaunchAnswer {
+    pub pane: PaneId,
+    pub view: View,
+}
+
+/// What a launch was made for, so that the pane it opens has a selection to show while it lives.
+pub struct LaunchNote<'a> {
+    pub tool: &'a str,
+    pub verb: &'a str,
+    /// The pane whose selection the request used.
+    pub from: Option<PaneId>,
 }
 
 /// The service and what the shell keeps beside it.
@@ -221,6 +272,53 @@ impl IntegrationHost {
         self.saver.touch();
         self.event(IntegrationChange::Context, Self::tool_of(tool), pane, None);
         Ok(answer)
+    }
+
+    /// The card for a verb that changes something or opens a session. Nothing is started: the card is described, shown and
+    /// waits for the person. It may look for the program (and ask the login shell for its `PATH` once), so it is blocking.
+    pub fn prepare(
+        &self,
+        tool: &str,
+        verb: &str,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+    ) -> Result<Card, IntegrationFault> {
+        self.service.prepare(tool, verb, pane, args).map_err(IntegrationFault::from)
+    }
+
+    /// The person closed a card. Answers nothing: a ticket that is not there is not a problem.
+    pub fn cancel(&self, ticket: &str) {
+        self.service.cancel(ticket);
+    }
+
+    /// The answer of the person to a card. A verb that changes a file, a cluster or an account runs once (blocking), and
+    /// the windows are told that what the tool is set to may have moved; an exec verb comes back as a launch that the
+    /// caller makes a pane of.
+    pub fn confirm(&self, ticket: &str, hash: &str) -> Result<(Done, holzwave_core::integrate::service::Origin), IntegrationFault> {
+        let (done, origin) = self.service.confirm_from(ticket, hash)?;
+        if matches!(done, Done::Ran { .. }) {
+            self.event(IntegrationChange::Context, Some(origin.tool), origin.pane, None);
+        }
+        Ok((done, origin))
+    }
+
+    /// A terminal for a verb that only reads and opens one. Blocking: it may read the default verb once for the overlay of
+    /// a shell.
+    pub fn launch(
+        &self,
+        tool: &str,
+        verb: &str,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+    ) -> Result<holzwave_core::integrate::run::Launch, IntegrationFault> {
+        self.service.launch(tool, verb, pane, args).map_err(IntegrationFault::from)
+    }
+
+    /// The pane `pane` was opened for a launch: it has a selection to show while it lives, and the windows are told.
+    pub fn pane_launched(&self, pane: PaneId, note: &LaunchNote<'_>) -> Result<(), IntegrationFault> {
+        self.service.note_launch(pane, note.tool, note.verb, note.from)?;
+        self.event(IntegrationChange::Context, Self::tool_of(note.tool), Some(pane), None);
+        Ok(())
     }
 
     /// The rows of the tools and the entries of the panes. With `refresh` the tools are looked for again and their
@@ -364,19 +462,22 @@ mod tests {
             Machine { root, bin, home, data, store: Arc::new(MemoryStore::default()) }
         }
 
-        pub fn parts(&self) -> IntegrationParts {
-            let facts = HostFacts::for_tests(&self.root, std::slice::from_ref(&self.bin), &self.home, &self.data);
-            IntegrationParts::new(facts, self.store.clone())
+        pub fn facts(&self) -> HostFacts {
+            HostFacts::for_tests(&self.root, std::slice::from_ref(&self.bin), &self.home, &self.data)
         }
 
         pub fn core(&self) -> (Arc<AppCore>, Arc<Rec>) {
+            self.core_over(self.facts())
+        }
+
+        pub fn core_over(&self, facts: HostFacts) -> (Arc<AppCore>, Arc<Rec>) {
             let rec = Arc::new(Rec::default());
             let core = AppCore::new_with_parts(
                 self.data.clone(),
                 rec.clone(),
                 ShellSpec::new("/bin/sh", &["-c", "cat"]),
                 AiParts::system(),
-                Some(self.parts()),
+                Some(IntegrationParts::new(facts, self.store.clone())),
             );
             (core, rec)
         }
@@ -700,6 +801,178 @@ mod tests {
         assert_eq!(core.integrations().pane_writes(), 0);
         assert!(!machine.data.join("pane_integrations.json").exists());
         assert!(rec.integration_events().is_empty());
+    }
+
+    /// A fake that also counts how often it was started.
+    #[cfg(unix)]
+    fn counted(fake: fake_cli::FakeCli) -> fake_cli::FakeCli {
+        use std::io::Write;
+        let path = format!("{}.conf", fake.path().display());
+        let mut conf = std::fs::OpenOptions::new().append(true).open(path).expect("the settings of the fake");
+        writeln!(conf, "echo run >> \"$d/$n.runs\"").expect("one more line");
+        fake
+    }
+
+    #[cfg(unix)]
+    fn runs(fake: &fake_cli::FakeCli) -> usize {
+        std::fs::read_to_string(format!("{}.runs", fake.path().display())).map_or(0, |text| text.lines().count())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_card_is_prepared_and_confirmed_into_one_run() {
+        let machine = Machine::new("card");
+        let fake = counted(fake_cli::FakeCli::new(&machine.bin, "kubectl").prints("pod \"api-0\" deleted\n"));
+        let (core, rec) = machine.core();
+        let pod = args(&[("pod", "api-0")]);
+
+        let card = core.integration_prepare("kube", "delete_pod", Some(3), &pod).expect("a card");
+        assert_eq!((card.tool, card.verb.as_str()), (ToolId::Kube, "delete_pod"));
+        assert_eq!(card.hash.len(), 64);
+        assert_eq!(runs(&fake), 0, "preparing a card starts nothing");
+        let json = serde_json::to_value(&card).expect("JSON");
+        let mut keys: Vec<&str> = json.as_object().expect("an object").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["argv", "effect", "expires_in_secs", "fields", "guard", "hash", "program", "target", "ticket", "tool", "verb"]);
+
+        // A verb that only reads needs no card.
+        let fault = core.integration_prepare("kube", "pods", None, &args(&[])).expect_err("a read");
+        assert_eq!(fault.code, FaultCode::Refused);
+
+        // The wrong hash runs nothing; the right one runs the verb once; a replay runs nothing.
+        let wrong = core.integration_confirm("main", &card.ticket, &"0".repeat(64)).expect_err("a wrong hash");
+        assert_eq!(wrong.code, FaultCode::Ticket);
+        assert_eq!(runs(&fake), 0);
+        let seen = rec.integration_events().len();
+        let done = core.integration_confirm("main", &card.ticket, &card.hash).expect("confirmed");
+        assert_eq!((done.kind, done.pane), (ConfirmKind::Ran, None));
+        assert!(done.view.is_none());
+        assert_eq!(done.note, "pod \"api-0\" deleted", "the tool's own first line");
+        assert_eq!(runs(&fake), 1);
+        assert_eq!(argv(&fake), card.argv, "exactly the argument list of the card");
+        let replay = core.integration_confirm("main", &card.ticket, &card.hash).expect_err("a replay");
+        assert_eq!(replay.code, FaultCode::Ticket);
+        assert_eq!(runs(&fake), 1, "a ticket is good once");
+        assert!(
+            rec.integration_events()[seen..].iter().any(|(_, e)| (e.kind, e.tool) == (IntegrationChange::Context, Some(ToolId::Kube))),
+            "what the tool is set to may have moved, and the windows are told"
+        );
+
+        // A selection that changed between the card and the press makes the request another one.
+        core.integration_select("kube", Some(3), &with_context("dev")).expect("a selection");
+        let card = core.integration_prepare("kube", "delete_pod", Some(3), &pod).expect("a card for dev");
+        core.integration_select("kube", Some(3), &with_context("prod")).expect("another selection");
+        let changed = core.integration_confirm("main", &card.ticket, &card.hash).expect_err("the request is another one");
+        assert_eq!(changed.code, FaultCode::Ticket);
+        assert_eq!(runs(&fake), 1, "and nothing ran");
+    }
+
+    /// The fake has started and recorded everything it records (the process id is the last of the records).
+    #[cfg(unix)]
+    fn ran(fake: &fake_cli::FakeCli) -> bool {
+        fake.parent_pid().is_some()
+    }
+
+    #[cfg(unix)]
+    fn argv(fake: &fake_cli::FakeCli) -> Vec<String> {
+        fake.argv().into_iter().map(|arg| String::from_utf8(arg).expect("text arguments")).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_forgets_the_ticket() {
+        let machine = Machine::new("cancel");
+        let fake = counted(fake_cli::FakeCli::new(&machine.bin, "kubectl").prints("deleted\n"));
+        let (core, _rec) = machine.core();
+        let card = core.integration_prepare("kube", "delete_pod", None, &args(&[("pod", "api-0")])).expect("a card");
+        core.integration_cancel(&card.ticket);
+        core.integration_cancel(&card.ticket);
+        core.integration_cancel("no-such-ticket");
+        let fault = core.integration_confirm("main", &card.ticket, &card.hash).expect_err("a cancelled card approves nothing");
+        assert_eq!(fault.code, FaultCode::Ticket);
+        assert_eq!(runs(&fake), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exec_confirm_opens_a_real_pane_with_a_clean_launch() {
+        let machine = Machine::new("exec");
+        let fake = fake_cli::FakeCli::new(&machine.bin, "kubectl");
+        let mut facts = machine.facts().with_env("HOLZWAVE_TOKEN", "app-secret").with_env("FOO", "bar");
+        // The pane inherits the environment of this very process, so the facts name it too, as the real machine's do: the
+        // names a launch removes are those of the environment the app started with.
+        let own = std::mem::take(&mut facts.inherited);
+        facts.inherited = std::env::vars_os().filter(|(name, _)| name != "PATH" && name != "HOME").chain(own).collect();
+        let (core, rec) = machine.core_over(facts);
+        // A plain pane would get the socket and the token of the app; a launch must not.
+        core.set_ipc(machine.root.clone(), "the-token-of-this-run".to_owned());
+        core.integration_select("kube", Some(3), &with_context("dev")).expect("a selection of the pane the person is in");
+
+        let card = core.integration_prepare("kube", "exec", Some(3), &args(&[("pod", "api-0")])).expect("a card");
+        assert_eq!(card.effect, holzwave_core::integrate::VerbEffect::Exec);
+        let before = core.view_in("main").expect("the main window");
+        let answer = core.integration_confirm("main", &card.ticket, &card.hash).expect("confirmed");
+        assert_eq!(answer.kind, ConfirmKind::Launched);
+        assert_eq!(answer.note, "Exec in pod api-0", "the name of the pane");
+        let (pane, view) = (answer.pane.expect("the new pane"), answer.view.expect("the new layout"));
+        assert_eq!(view.focus, pane, "the new pane has the focus");
+        assert_eq!(view.tabs.len(), before.tabs.len() + 1, "a tab, as the card was prepared without a placement");
+        assert!(!fake.started(), "the command itself starts nothing");
+
+        // The pane has a selection to show while it lives: that of the pane the person acted in.
+        let rows = core.integration_context(None, false).panes;
+        let row = rows.iter().find(|row| row.pane == pane).expect("the launched pane has a row");
+        assert_eq!((row.tool, row.view.as_str(), row.context.as_deref()), (ToolId::Kube, "exec", Some("dev")));
+
+        // The page starts the pane: it runs the tool with the argument list of the card, in a clean environment.
+        core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+        assert!(wait_until(std::time::Duration::from_secs(20), || ran(&fake)), "the tool ran in the pane");
+        assert_eq!(argv(&fake), card.argv, "exactly the argument list of the card");
+        assert_eq!(&card.argv[..5], ["exec", "-i", "-t", "--context=dev", "api-0"]);
+        let env = fake.env();
+        assert!(env.keys().all(|name| !name.starts_with("HOLZWAVE_")), "no variable of the app: {:?}", env.keys());
+        assert!(!String::from_utf8_lossy(&fake.env_bytes()).contains("app-secret"));
+        assert!(!String::from_utf8_lossy(&fake.env_bytes()).contains("the-token-of-this-run"));
+        assert!(wait_until(std::time::Duration::from_secs(20), || core.pane_held(pane).is_some()), "a tool that ends at once is held");
+        assert!(rec.integration_events().iter().any(|(_, e)| e.kind == IntegrationChange::Held && e.pane == Some(pane)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_terminal_launches_without_a_ticket_and_exec_does_not() {
+        let machine = Machine::new("launch");
+        let kubectl = fake_cli::FakeCli::new(&machine.bin, "kubectl");
+        let (core, _rec) = machine.core();
+        let before = core.view_in("main").expect("the main window");
+
+        let beside = core.integration_launch("main", "kube", "logs", None, &args(&[("pod", "api-0")]), "right").expect("logs");
+        assert_eq!(beside.view.focus, beside.pane);
+        assert_eq!(beside.view.panes.len(), before.panes.len() + 1);
+        assert_eq!(beside.view.tabs.len(), before.tabs.len(), "beside the focused pane, in the same tab");
+        let in_tab = core.integration_launch("main", "kube", "logs", None, &args(&[("pod", "api-1")]), "tab").expect("logs in a tab");
+        assert_eq!(in_tab.view.tabs.len(), before.tabs.len() + 1);
+        assert!(!kubectl.started(), "a launch registers and starts nothing");
+
+        // A verb that changes something or opens a session needs a card, and no pane is left behind.
+        let panes_now = core.view_in("main").expect("the main window").panes.len();
+        for (tool, verb, request) in [
+            ("kube", "exec", args(&[("pod", "api-0")])),
+            ("kube", "delete_pod", args(&[("pod", "api-0")])),
+            ("azure", "login", args(&[])),
+            ("kube", "pods", args(&[])),
+            ("nonesuch", "logs", args(&[])),
+        ] {
+            let fault = core.integration_launch("main", tool, verb, None, &request, "tab").expect_err("refused");
+            assert_eq!(fault.code, FaultCode::Refused, "{tool} {verb}");
+        }
+        assert_eq!(core.view_in("main").expect("the main window").panes.len(), panes_now);
+
+        // The launched panes have a row each, and the launch of the first runs its tool when the page starts it.
+        let rows = core.integration_context(None, false).panes;
+        assert!(rows.iter().any(|row| row.pane == beside.pane && row.view == "logs"));
+        core.start_pane(beside.pane, 80, 24, 0, 0).expect("the pane starts");
+        assert!(wait_until(std::time::Duration::from_secs(20), || ran(&kubectl)));
+        assert_eq!(argv(&kubectl), ["logs", "--follow", "--tail=200", "--", "api-0"].map(String::from).to_vec());
     }
 
     #[test]

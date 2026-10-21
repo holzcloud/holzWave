@@ -1289,13 +1289,21 @@ impl IntegrationService {
     /// difference from the card is a `ticket` fault and nothing runs. A verb that changes a file, a cluster or an
     /// account runs once; an exec verb comes back as a launch that the pane starts.
     pub fn confirm(&self, ticket: &str, hash: &str) -> Result<Done, Fault> {
+        self.confirm_from(ticket, hash).map(|(done, _)| done)
+    }
+
+    /// [`IntegrationService::confirm`], and what the ticket was for: the shell that opens the pane of a launch needs the
+    /// tool, the verb and the pane whose selection was used, which it did not send with the confirm.
+    pub fn confirm_from(&self, ticket: &str, hash: &str) -> Result<(Done, Origin), Fault> {
         self.ensure_enabled()?;
         let approved = self.tickets.confirm(self, ticket, hash).map_err(ticket_fault)?;
-        match approved.verb().effect {
+        let origin = Origin { tool: approved.tool(), verb: approved.verb().id, pane: approved.pane() };
+        let done = match approved.verb().effect {
             VerbEffect::Local | VerbEffect::Write => self.run_gated(&approved).map(|note| Done::Ran { note }),
             VerbEffect::Exec => self.exec_launch(&approved).map(Done::Launch),
             VerbEffect::Read => Err(Fault::refused("not_gated", "This action only reads, so it needs no approval.")),
-        }
+        }?;
+        Ok((done, origin))
     }
 
     /// The selection of an approved request as it is now, and a check that it is still the one that was approved: the
@@ -1429,6 +1437,14 @@ impl IntegrationService {
         }
         state.noted.insert(pane, Noted { tool, verb: verb.id.to_owned(), selection: selection.clone() });
         Ok(())
+    }
+
+    /// [`IntegrationService::note_pane`] for the pane a launch opened: the selection is the one the launch used, that of
+    /// `from` (the pane the person acted in), or the pick or the tool's own when there is none.
+    pub fn note_launch(&self, pane: PaneId, tool: &str, verb: &str, from: Option<PaneId>) -> Result<(), Fault> {
+        let id = self.parse_tool(tool)?;
+        let selection = self.context.selection_for(id, from);
+        self.note_pane(pane, tool, verb, &selection)
     }
 
     /// Marks a pane as held open because its tool ended with an error (or clears the mark). The core sends no event of
@@ -1883,6 +1899,17 @@ fn ticket_fault(error: TicketError) -> Fault {
         TicketError::Changed => (FaultCode::Ticket, "changed"),
     };
     Fault::new(code, reason, sentence(&error.to_string()))
+}
+
+/// What a confirmed ticket was for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Origin {
+    /// The tool.
+    pub tool: ToolId,
+    /// The verb's id.
+    pub verb: &'static str,
+    /// The pane whose selection the request used, when it named one.
+    pub pane: Option<PaneId>,
 }
 
 /// What a confirmed ticket did.

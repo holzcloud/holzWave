@@ -1131,3 +1131,54 @@ fn deferred_pane_saves_wait_for_the_host_and_an_immediate_service_still_writes_e
     let after = IntegrationService::new(&rig.data, rig.store.clone(), rig.facts(), &[3, 4]);
     assert!(after.pane_rows().iter().all(|row| row.pane != 4));
 }
+
+// ---- what the shell needs to open the pane of a launch ---------------------------------------------------------
+
+#[test]
+fn a_confirmed_ticket_says_which_tool_verb_and_pane_it_was_for() {
+    use holzwave_core::integrate::service::Origin;
+
+    let rig = Rig::new();
+    let _kubectl = FakeCli::new(&rig.bin, "kubectl").prints("pod \"api-0\" deleted\n");
+    let service = rig.service();
+    service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
+
+    let card = service.prepare("kube", "exec", Some(3), &args(&[("pod", "api-0")])).expect("a card");
+    let (done, origin) = service.confirm_from(&card.ticket, &card.hash).expect("confirmed");
+    assert!(matches!(done, Done::Launch(_)), "an exec verb launches");
+    assert_eq!(origin, Origin { tool: ToolId::Kube, verb: "exec", pane: Some(3) });
+
+    let card = service.prepare("kube", "delete_pod", None, &args(&[("pod", "api-0")])).expect("a card");
+    let (done, origin) = service.confirm_from(&card.ticket, &card.hash).expect("confirmed");
+    assert!(matches!(done, Done::Ran { .. }));
+    assert_eq!(origin, Origin { tool: ToolId::Kube, verb: "delete_pod", pane: None });
+
+    // A wrong hash and a ticket that is gone are the faults they always were, and name no origin.
+    let card = service.prepare("kube", "delete_pod", None, &args(&[("pod", "api-1")])).expect("a card");
+    assert_eq!(service.confirm_from(&card.ticket, "0".repeat(64).as_str()).expect_err("wrong hash").code, FaultCode::Ticket);
+    assert!(service.confirm_from(&card.ticket, &card.hash).is_ok(), "the right hash still works once");
+    assert_eq!(service.confirm_from(&card.ticket, &card.hash).expect_err("replay").code, FaultCode::Ticket);
+}
+
+#[test]
+fn a_pane_that_a_launch_opened_gets_the_selection_the_launch_used() {
+    let rig = Rig::new();
+    let _kubectl = FakeCli::new(&rig.bin, "kubectl");
+    let service = rig.service();
+    service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
+
+    service.note_launch(9, "kube", "logs", Some(3)).expect("the pane is noted");
+    let row = pane_row(&service, 9);
+    assert_eq!((row.tool, row.view.as_str()), (ToolId::Kube, "logs"));
+    assert_eq!((row.context.as_deref(), row.namespace.as_deref()), (Some("dev"), Some("payments")), "the selection of pane 3");
+
+    // Only a verb that opens a terminal can be noted, and only for a tool that exists.
+    for (tool, verb) in [("kube", "pods"), ("kube", "delete_pod"), ("kube", "nonesuch"), ("nonesuch", "logs")] {
+        assert_eq!(service.note_launch(10, tool, verb, None).expect_err("refused").code, FaultCode::Refused, "{tool} {verb}");
+    }
+    assert!(service.pane_rows().iter().all(|row| row.pane != 10));
+
+    // Closing the pane forgets it.
+    service.forget_pane(9);
+    assert!(service.pane_rows().iter().all(|row| row.pane != 9));
+}

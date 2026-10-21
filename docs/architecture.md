@@ -173,7 +173,7 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 108 commands and 17 events. The tables below list the
+The webview talks to the core through a deny-by-default set of 112 commands and 17 events. The tables below list the
 commands of the terminal core, of the AI chat and of the integrations; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
@@ -196,7 +196,7 @@ snake_case everywhere (`cell_w`, `allow_unsafe`).
 | AI decisions | `ai_decide(conversation, call_id, decision, hash)`, `ai_undo(conversation, call_id)` | nothing; webview commands only |
 | `wsh ai` requests | `ai_ask_pending`, `ai_ask_answer(ask, verdict, seal)` | the requests that wait, nothing |
 | Markdown | `markdown_render(text)` | the cleaned HTML of a reply |
-| Integrations | `integration_tools`, `integration_run(tool, verb, pane, args)`, `integration_select(tool, pane, selection)`, `integration_context(pane, refresh)` | the four tools with where each stands on this computer (path, version, the places looked in, the verbs each has); one read of a verb that shows a view: the view model, the selection it used and when it was read; the selection as it will be used, with the name of the production profile or `null`; `{rows, panes}`: one row for each tool, and one entry for each pane that has an integration selection, with the status of its tool when it holds the tool's last words. A refusal is the fault object |
+| Integrations | `integration_tools`, `integration_run(tool, verb, pane, args)`, `integration_select(tool, pane, selection)`, `integration_context(pane, refresh)`, `integration_prepare(tool, verb, pane, args)`, `integration_confirm(ticket, hash)`, `integration_cancel(ticket)`, `integration_launch(tool, verb, pane, args, placement)` | the four tools with where each stands on this computer (path, version, the places looked in, the verbs each has); one read of a verb that shows a view: the view model, the selection it used and when it was read; the selection as it will be used, with the name of the production profile or `null`; `{rows, panes}`: one row for each tool, and one entry for each pane that has an integration selection, with the status of its tool when it holds the tool's last words. the card of a verb that changes something or opens a session (nothing is started); `{kind, pane, note, view}`: `ran` with the tool's first line, or `launched` with the new pane and the layout it is in; nothing; `{pane, view}` of a terminal for a verb that only reads. A refusal is the fault object |
 | `wsh` on a host | `wsh_install(pane)` | the sentence the pane also shows; the page names the pane, never a host |
 
 Every refusal of the AI commands is an object with `code`, `reason` and `text` (the page words its own sentence from the
@@ -284,6 +284,13 @@ applied step by step by the TypeScript patcher, so both languages are proven aga
   request exist only as the commands `ai_decide`, `ai_undo` and `ai_ask_answer`; the local socket of `wsh` has no variant
   that can decide, approve, confirm or grant (a test reads the source for such words), and no command returns a key. The
   reviewed list `AI_COMMANDS` in `app/src-tauri/tests/acl.rs` names every AI command and is changed on purpose.
+- **An integration verb that changes something has two steps, and the window decides the second.** `integration_prepare`
+  makes a card and starts nothing; only `integration_confirm(ticket, hash)` runs the verb, once, and only while the
+  request still resolves to what the card showed. A terminal for a verb that only reads (`integration_launch`) needs no
+  card, and an exec verb is refused there. The page sends facts (a tool, a verb, a pane, names, a selection) and never a
+  program, an argument list or a shell string. The reviewed list `INTEGRATION_COMMANDS` in `acl.rs` names every integration
+  command; its rules fail when a second command names a hash or a ticket, when a command takes one of those words, and
+  when the `ipc` or `wsh` sources name an integration command, a ticket or an approval.
 - **No raw input.** The page sends facts (`key`, `text`, `paste`); the engine's encoder produces the bytes. A
   command that can write to any PTY is still the point of the product, so the guard is the strict CSP and never
   rendering untrusted HTML in the page (previews run in a separate, sandboxed frame or window).

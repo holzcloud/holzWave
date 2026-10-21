@@ -28,6 +28,7 @@ use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened, Saved};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
 use holzwave_core::integrate::service::{RunAnswer, SelectionView, ToolView};
+use holzwave_core::integrate::ticket::Card;
 use holzwave_core::integrate::Selection;
 use holzwave_core::engine::{
     CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode,
@@ -43,7 +44,7 @@ use tauri::{State, WebviewWindow};
 
 use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
 use crate::clipboard;
-use crate::integrate_host::{ContextAnswer, IntegrationFault};
+use crate::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
 use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
 use crate::windows::DropKind;
 
@@ -1228,4 +1229,60 @@ pub fn integration_select(
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn integration_context(core: State<Arc<AppCore>>, pane: Option<PaneId>, refresh: bool) -> ContextAnswer {
     core.integration_context(pane, refresh)
+}
+
+/// The card for a verb that changes something or opens a session: the ticket, the tool, the verb, what it does to the
+/// world, the program's name and every argument spelled out, the target, the guard line, every field the hash covers and
+/// the hash. Nothing is started. A verb that only reads is refused (it needs no card). The page shows the card as it is
+/// and answers it with `integration_confirm` or closes it with `integration_cancel`.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_prepare(
+    core: State<Arc<AppCore>>,
+    tool: String,
+    verb: String,
+    pane: Option<PaneId>,
+    args: BTreeMap<String, String>,
+) -> Result<Card, IntegrationFault> {
+    core.integration_prepare(&tool, &verb, pane, &args)
+}
+
+/// The person's press on a card: the ticket and the hash of the card they were shown. It is the one integration command
+/// that decides, and the one that names a ticket and a hash together; it exists for the webview only, and the local socket
+/// of `wsh` has no counterpart. A verb that changes a file, a cluster or an account runs once (`kind` `ran`, with the
+/// tool's own first line of output as `note`); an exec verb opens a pane (`kind` `launched`, with `pane`, its name as
+/// `note` and the new layout as `view`) that the page starts. A ticket that is unknown, old, answered with another hash,
+/// or no longer what the card showed is the fault object with the code `ticket`, and nothing runs.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_confirm(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    ticket: String,
+    hash: String,
+) -> Result<ConfirmAnswer, IntegrationFault> {
+    core.integration_confirm(window.label(), &ticket, &hash)
+}
+
+/// The person closed a card without answering it. The ticket is dropped; a ticket that is not there is no problem.
+#[tauri::command(rename_all = "snake_case")]
+pub fn integration_cancel(core: State<Arc<AppCore>>, ticket: String) -> Result<(), IntegrationFault> {
+    core.integration_cancel(&ticket);
+    Ok(())
+}
+
+/// A terminal for a verb that only reads and opens one (logs, kernel messages, a shell): a pane in a tab or beside the
+/// focused one (`placement` is `tab`, `right` or `down`), with the launch registered before the page starts it. The answer
+/// is the new `pane` and the layout it is in, as `block_open` answers. A verb that changes something or opens a session
+/// with the person's credentials is refused here and needs a card. It may read the tool once for the shell's overlay, so it
+/// is async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_launch(
+    core: State<Arc<AppCore>>,
+    window: WebviewWindow,
+    tool: String,
+    verb: String,
+    pane: Option<PaneId>,
+    args: BTreeMap<String, String>,
+    placement: String,
+) -> Result<LaunchAnswer, IntegrationFault> {
+    core.integration_launch(window.label(), &tool, &verb, pane, &args, &placement)
 }

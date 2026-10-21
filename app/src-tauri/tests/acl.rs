@@ -954,7 +954,16 @@ fn the_local_socket_has_no_command_that_decides() {
 /// asked of it: can it start anything that changes something without a card the person confirmed, return a secret, an
 /// environment value or an argument list that was not on a card, or take a program, an argument list or a shell string
 /// from the page? If yes, it does not belong here.
-const INTEGRATION_COMMANDS: &[&str] = &["integration_context", "integration_run", "integration_select", "integration_tools"];
+const INTEGRATION_COMMANDS: &[&str] = &[
+    "integration_cancel",
+    "integration_confirm",
+    "integration_context",
+    "integration_launch",
+    "integration_prepare",
+    "integration_run",
+    "integration_select",
+    "integration_tools",
+];
 
 #[test]
 fn the_integration_commands_are_exactly_the_reviewed_list() {
@@ -988,4 +997,174 @@ fn the_integration_commands_are_exactly_the_reviewed_list() {
     for name in INTEGRATION_COMMANDS {
         assert!(return_type(COMMANDS_RS, name).is_some(), "{name} is not a command function of commands.rs");
     }
+}
+
+// ---- the one command that decides an integration verb ---------------------------------------------------------------
+
+/// The words an integration command never takes: a program, an argument list or a shell string would let the page choose
+/// what runs. The page sends facts and the core builds the rest.
+const NEVER_FROM_THE_PAGE: [&str; 4] = ["argv", "command", "program", "shell"];
+
+/// What is wrong with the way the commands in `names` could decide an integration verb, as sentences. A verb that changes
+/// something exists only as `integration_prepare` and then `integration_confirm`: `integration_confirm` takes the calling
+/// window, the ticket and the hash, as strings and in that order, and answers `Result<ConfirmAnswer, IntegrationFault>`;
+/// `integration_cancel` takes the ticket and answers nothing; no other command names a ticket, and none other than
+/// `integration_confirm` names a hash; and no integration command takes a program, an argument list or a shell string.
+fn integration_decision_problems(commands_rs: &str, names: &BTreeSet<String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    for name in names.iter().filter(|name| name.starts_with("integration_")) {
+        let Some(args) = arguments(commands_rs, name) else {
+            problems.push(format!("{name} is in the manifest but is not a command function of commands.rs"));
+            continue;
+        };
+        let shown: Vec<(&str, &str)> = args.iter().map(|(arg, ty)| (arg.as_str(), ty.as_str())).collect();
+        let answer = return_type(commands_rs, name).unwrap_or_default();
+        for (arg, _) in &args {
+            if NEVER_FROM_THE_PAGE.contains(&arg.as_str()) {
+                problems.push(format!("{name} takes an argument named {arg}: the page sends facts, never what runs"));
+            }
+        }
+        match name.as_str() {
+            "integration_confirm" => {
+                let expected = [("window", "WebviewWindow"), ("ticket", "String"), ("hash", "String")];
+                if shown != expected {
+                    problems.push(format!("integration_confirm takes {shown:?}, not the reviewed list {expected:?}"));
+                }
+                if answer != "Result<ConfirmAnswer, IntegrationFault>" {
+                    problems.push(format!("integration_confirm answers `{answer}`, not the reviewed shape"));
+                }
+            }
+            "integration_cancel" => {
+                let expected = [("ticket", "String")];
+                if shown != expected {
+                    problems.push(format!("integration_cancel takes {shown:?}, not the reviewed list {expected:?}"));
+                }
+                if answer != "Result<(), IntegrationFault>" {
+                    problems.push(format!("integration_cancel answers `{answer}`: it answers nothing"));
+                }
+            }
+            _ => {
+                for (arg, _) in &args {
+                    if arg == "hash" {
+                        problems.push(format!("{name} takes an argument named hash: only integration_confirm names a hash"));
+                    }
+                    if arg == "ticket" {
+                        problems.push(format!(
+                            "{name} takes an argument named ticket: only integration_confirm and integration_cancel name a ticket"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn the_window_is_the_only_decider_in_the_acl() {
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    for name in ["integration_prepare", "integration_confirm", "integration_cancel", "integration_launch"] {
+        assert!(manifest.contains(name), "{name} is not a command");
+    }
+    let problems = integration_decision_problems(COMMANDS_RS, &manifest);
+    assert!(problems.is_empty(), "an integration verb could be decided in a way nobody reviewed:\n  {}", problems.join("\n  "));
+
+    // The card has no ticket argument: the core makes the ticket, and only the press on the card names it.
+    let prepare = arguments(COMMANDS_RS, "integration_prepare").expect("a command function");
+    let names: Vec<&str> = prepare.iter().map(|(arg, _)| arg.as_str()).collect();
+    assert_eq!(names, ["tool", "verb", "pane", "args"]);
+    // A terminal launch has no ticket either, and takes a placement and no more.
+    let launch = arguments(COMMANDS_RS, "integration_launch").expect("a command function");
+    let names: Vec<&str> = launch.iter().map(|(arg, _)| arg.as_str()).collect();
+    assert_eq!(names, ["window", "tool", "verb", "pane", "args", "placement"]);
+
+    // The scanner flags a second command that names a hash or a ticket, a confirm that answers data, a cancel that takes
+    // more than the ticket, and a command that takes a program, an argument list or a shell string; it accepts the real ones.
+    let source = "\
+pub fn integration_confirm(core: State<Arc<AppCore>>, window: WebviewWindow, ticket: String, hash: String) -> Result<String, IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_cancel(core: State<Arc<AppCore>>, ticket: String, hash: String) -> Result<(), IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_approve(core: State<Arc<AppCore>>, ticket: String, hash: String) -> Result<(), IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_peek(core: State<Arc<AppCore>>, ticket: String) -> Result<(), IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_run(core: State<Arc<AppCore>>, tool: String, argv: Vec<String>, shell: String) -> Result<(), IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_note(core: State<Arc<AppCore>>, pane: Option<PaneId>) -> Result<(), IntegrationFault> {\n    todo()\n}\n";
+    let all = set(&[
+        "integration_confirm",
+        "integration_cancel",
+        "integration_approve",
+        "integration_peek",
+        "integration_run",
+        "integration_note",
+    ]);
+    let flagged = integration_decision_problems(source, &all);
+    let said = |needle: &str| flagged.iter().any(|problem| problem.contains(needle));
+    assert!(said("integration_confirm answers `Result<String, IntegrationFault>`"), "{flagged:?}");
+    assert!(said("integration_cancel takes"), "{flagged:?}");
+    assert!(said("integration_approve takes an argument named hash"), "{flagged:?}");
+    assert!(said("integration_approve takes an argument named ticket"), "{flagged:?}");
+    assert!(said("integration_peek takes an argument named ticket"), "{flagged:?}");
+    assert!(said("integration_run takes an argument named argv"), "{flagged:?}");
+    assert!(said("integration_run takes an argument named shell"), "{flagged:?}");
+    assert!(!flagged.iter().any(|problem| problem.starts_with("integration_note")), "{flagged:?}");
+    let real = "\
+pub fn integration_confirm(core: State<Arc<AppCore>>, window: WebviewWindow, ticket: String, hash: String) -> Result<ConfirmAnswer, IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_cancel(core: State<Arc<AppCore>>, ticket: String) -> Result<(), IntegrationFault> {\n    todo()\n}\n";
+    assert_eq!(integration_decision_problems(real, &set(&["integration_confirm", "integration_cancel"])), Vec::<String>::new());
+}
+
+/// The words the shipped code of the socket crates never holds: an integration command, a ticket or the proof of an
+/// approval. Each is lower-cased and looked for in code, not in comments or in tests.
+const SOCKET_NEVER_NAMES: [&str; 3] = ["integration", "ticket", "approved"];
+
+/// Every file of the directories `dirs` (below the repository root) that ends in `.rs`, as (name, text).
+fn rust_files_below(dirs: &[&str]) -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in dirs {
+        for entry in std::fs::read_dir(root.join(dir)).unwrap_or_else(|e| panic!("cannot read {dir}: {e}")) {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let name = format!("{dir}/{}", path.file_name().expect("a name").to_string_lossy());
+                files.push((name, std::fs::read_to_string(&path).expect("a source file")));
+            }
+        }
+    }
+    files
+}
+
+/// The files among `files` whose shipped code names an integration command or one of [`SOCKET_NEVER_NAMES`].
+fn socket_problems(files: &[(String, String)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, source) in files {
+        let code = shipped_code(source).to_lowercase();
+        for word in SOCKET_NEVER_NAMES {
+            if code.contains(word) {
+                problems.push(format!("{name} names `{word}`: nothing of the integrations exists on the local socket"));
+            }
+        }
+        for command in INTEGRATION_COMMANDS {
+            if code.contains(command) {
+                problems.push(format!("{name} names the command {command}"));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn the_local_socket_and_wsh_know_nothing_of_the_integrations() {
+    let files = rust_files_below(&["ipc/src", "wsh/src"]);
+    assert!(files.len() >= 5, "the scan found {} files", files.len());
+    assert_eq!(socket_problems(&files), Vec::<String>::new());
+
+    // A file that names a command, a ticket or an approval is flagged; a comment and a test module are not code that ships.
+    let rogue = vec![
+        ("ipc/src/rogue.rs".to_owned(), "fn go() { send(\"integration_confirm\"); let ticket = 1; }\n".to_owned()),
+        ("wsh/src/rogue.rs".to_owned(), "use x::Approved;\n".to_owned()),
+    ];
+    let flagged = socket_problems(&rogue);
+    assert!(flagged.iter().any(|p| p.contains("ipc/src/rogue.rs names `ticket`")), "{flagged:?}");
+    assert!(flagged.iter().any(|p| p.contains("ipc/src/rogue.rs names the command integration_confirm")), "{flagged:?}");
+    assert!(flagged.iter().any(|p| p.contains("wsh/src/rogue.rs names `approved`")), "{flagged:?}");
+    let quiet = vec![("ipc/src/quiet.rs".to_owned(), "// a ticket for the integration\nfn a() {}\n#[cfg(test)]\nmod tests {\n    const T: &str = \"ticket\";\n}\n".to_owned())];
+    assert_eq!(socket_problems(&quiet), Vec::<String>::new());
 }

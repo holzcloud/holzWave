@@ -148,6 +148,205 @@
       }
     ],
     "integration": {
+      "card": {
+        "argv": [
+          "delete",
+          "pod",
+          "--wait=false",
+          "--request-timeout=10s",
+          "--",
+          "api-0"
+        ],
+        "effect": "write",
+        "expires_in_secs": 120,
+        "fields": [
+          [
+            "tool",
+            "kube"
+          ],
+          [
+            "verb",
+            "delete_pod"
+          ],
+          [
+            "effect",
+            "write"
+          ],
+          [
+            "program",
+            "kubectl"
+          ],
+          [
+            "arg 1",
+            "delete"
+          ],
+          [
+            "arg 2",
+            "pod"
+          ],
+          [
+            "arg 3",
+            "--wait=false"
+          ],
+          [
+            "arg 4",
+            "--request-timeout=10s"
+          ],
+          [
+            "arg 5",
+            "--"
+          ],
+          [
+            "arg 6",
+            "api-0"
+          ],
+          [
+            "context",
+            "prod"
+          ],
+          [
+            "namespace",
+            "payments"
+          ],
+          [
+            "pod",
+            "api-0"
+          ],
+          [
+            "guard",
+            "production"
+          ],
+          [
+            "production_name",
+            "Production"
+          ]
+        ],
+        "guard": {
+          "production": "Production"
+        },
+        "hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "program": "kubectl",
+        "target": [
+          [
+            "context",
+            "prod"
+          ],
+          [
+            "namespace",
+            "payments"
+          ],
+          [
+            "pod",
+            "api-0"
+          ]
+        ],
+        "ticket": "0123456789abcdef0123456789abcdef",
+        "tool": "kube",
+        "verb": "delete_pod"
+      },
+      "confirm": [
+        {
+          "kind": "ran",
+          "note": "pod \"api-0\" deleted",
+          "pane": null,
+          "view": null
+        },
+        {
+          "kind": "launched",
+          "note": "Exec in pod api-0 (Production)",
+          "pane": 3,
+          "view": {
+            "dividers": [
+              {
+                "area": {
+                  "h": 1.0,
+                  "w": 1.0,
+                  "x": 0.0,
+                  "y": 0.0
+                },
+                "axis": "Row",
+                "ratio": 0.5,
+                "split": 4
+              }
+            ],
+            "focus": 5,
+            "pane_names": [],
+            "panes": [
+              [
+                3,
+                {
+                  "h": 1.0,
+                  "w": 0.5,
+                  "x": 0.0,
+                  "y": 0.0
+                }
+              ],
+              [
+                5,
+                {
+                  "h": 1.0,
+                  "w": 0.5,
+                  "x": 0.5,
+                  "y": 0.0
+                }
+              ]
+            ],
+            "rev": 1,
+            "tabs": [
+              {
+                "active": true,
+                "focus": 5,
+                "pane_ids": [
+                  3,
+                  5
+                ],
+                "panes": 2,
+                "title": "shell"
+              },
+              {
+                "active": false,
+                "focus": 7,
+                "pane_ids": [
+                  7
+                ],
+                "panes": 1,
+                "title": "shell"
+              },
+              {
+                "active": false,
+                "focus": 9,
+                "pane_ids": [
+                  9
+                ],
+                "panes": 1,
+                "title": "shell"
+              }
+            ],
+            "windows": 1,
+            "workspaces": [
+              {
+                "active": true,
+                "name": "main",
+                "pane_ids": [
+                  3,
+                  5,
+                  7,
+                  9
+                ],
+                "panes": 4
+              },
+              {
+                "active": false,
+                "name": "notes",
+                "pane_ids": [
+                  12
+                ],
+                "panes": 1
+              }
+            ]
+          }
+        }
+      ],
       "context": {
         "panes": [
           {
@@ -190,6 +389,99 @@
         "code": "refused",
         "reason": "tool",
         "text": "The tool is not known."
+      },
+      "launch": {
+        "pane": 3,
+        "view": {
+          "dividers": [
+            {
+              "area": {
+                "h": 1.0,
+                "w": 1.0,
+                "x": 0.0,
+                "y": 0.0
+              },
+              "axis": "Row",
+              "ratio": 0.5,
+              "split": 4
+            }
+          ],
+          "focus": 5,
+          "pane_names": [],
+          "panes": [
+            [
+              3,
+              {
+                "h": 1.0,
+                "w": 0.5,
+                "x": 0.0,
+                "y": 0.0
+              }
+            ],
+            [
+              5,
+              {
+                "h": 1.0,
+                "w": 0.5,
+                "x": 0.5,
+                "y": 0.0
+              }
+            ]
+          ],
+          "rev": 1,
+          "tabs": [
+            {
+              "active": true,
+              "focus": 5,
+              "pane_ids": [
+                3,
+                5
+              ],
+              "panes": 2,
+              "title": "shell"
+            },
+            {
+              "active": false,
+              "focus": 7,
+              "pane_ids": [
+                7
+              ],
+              "panes": 1,
+              "title": "shell"
+            },
+            {
+              "active": false,
+              "focus": 9,
+              "pane_ids": [
+                9
+              ],
+              "panes": 1,
+              "title": "shell"
+            }
+          ],
+          "windows": 1,
+          "workspaces": [
+            {
+              "active": true,
+              "name": "main",
+              "pane_ids": [
+                3,
+                5,
+                7,
+                9
+              ],
+              "panes": 4
+            },
+            {
+              "active": false,
+              "name": "notes",
+              "pane_ids": [
+                12
+              ],
+              "panes": 1
+            }
+          ]
+        }
       },
       "run": {
         "fetched": 1800000000,
@@ -825,9 +1117,29 @@
       "query",
       "limit"
     ],
+    "integration_cancel": [
+      "ticket"
+    ],
+    "integration_confirm": [
+      "ticket",
+      "hash"
+    ],
     "integration_context": [
       "pane",
       "refresh"
+    ],
+    "integration_launch": [
+      "tool",
+      "verb",
+      "pane",
+      "args",
+      "placement"
+    ],
+    "integration_prepare": [
+      "tool",
+      "verb",
+      "pane",
+      "args"
     ],
     "integration_run": [
       "tool",
