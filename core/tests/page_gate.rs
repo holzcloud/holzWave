@@ -257,11 +257,20 @@ fn key_problems(sigs: &[Sig], manifest: &BTreeSet<String>) -> Vec<String> {
     let mut found = Vec::new();
     let words = ["key", "secret", "token", "password", "passphrase", "credential"];
     let named: BTreeSet<&str> = manifest.iter().map(String::as_str).filter(|n| words.iter().any(|w| n.contains(w))).collect();
-    let allowed: BTreeSet<&str> = ["key", "ai_key_set", "ai_key_clear", "ai_has_key"].into_iter().collect();
+    let allowed: BTreeSet<&str> =
+        ["key", "ai_key_set", "ai_key_clear", "ai_has_key", "integration_secret_set", "integration_secret_clear"]
+            .into_iter()
+            .collect();
     for name in named.difference(&allowed) {
-        found.push(format!("{name} is named for a key or a secret: only key, ai_key_set, ai_key_clear and ai_has_key may be"));
+        found.push(format!(
+            "{name} is named for a key or a secret: only key, ai_key_set, ai_key_clear, ai_has_key, integration_secret_set and integration_secret_clear may be"
+        ));
     }
     for sig in sigs {
+        // The two commands of the profiles' secret variables are write-only: a value goes in and nothing comes out.
+        if sig.name.starts_with("integration_secret_") && sig.ret != "Result<(), IntegrationFault>" {
+            found.push(format!("{} answers `{}`: a command named for a secret answers nothing", sig.name, sig.ret));
+        }
         if sig.name.contains("key") && sig.name != "key" && sig.ret != "Result<(), AiFault>" && sig.ret != "Result<bool, AiFault>" {
             found.push(format!("{} answers `{}`: a command named for a key may answer nothing or a flag, never data", sig.name, sig.ret));
         }
