@@ -247,6 +247,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Monitor over SSH | ![](design/monitor-ssh.png) | the system monitor of a Linux host beside its shell (6.5): header `system · talos-1 · 1 s`, the same bars, rates, uptime and eight busiest processes, read from the host |
 | Monitor states | ![](design/monitor-ssh-states.png) | the line above the bars in four states (6.5): connecting, no answer with the numbers kept dimmed, not a Linux host, and a host key that is not known yet; each warn line has words, an underline and the mark `!` |
 | Attention marks | ![](design/attention.png) | the marks of 6.23 on the tab row and the title-bar pills: `?` waits for you, `▲` rang the bell, `!` command failed, `✓` command finished, each in its status colour and never rose; the tab `2 holzkube` holds all four side by side in that order, the pill `infra` shows `! ✓` (the kinds of its tabs, once each), the shown tab and the shown workspace carry none; a floating card lists the four kinds with their words and sources |
+| Local network notice | ![](design/local-network.png) | the notice of 6.24 over the daily window, on a Mac with macOS 15 or later: `Allow local network access?`, the lead, the three reasons, the note that macOS asks next and that panes count as holzWave, `Not now` (hairline) and `Allow` (solid, focused) |
+| Local network states | ![](design/local-network-states.png) | the group `Local network` of the Settings dialog in four states (6.24): `allowed`, `denied` (underlined, `!`), `not asked yet` and `not known` (`?`), each with its advice and the buttons it offers; `Open System Settings` is always there |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -1661,6 +1663,10 @@ program started from Terminal is exempt from the setting, which is why no test r
 **Accessibility.** Hairlines use `--hw-line`, so `contrast-high` holds; the 2 px focus ring holds for every button and for the
 row; under forced colours the row gets a system-colour outline and the box keeps its border; nothing moves, so `motion-reduce`
 has nothing to remove. Every size is in `rem`; the buttons are at least 28 px high.
+
+![Local network notice](design/local-network.png)
+
+![Local network states](design/local-network-states.png)
 
 **Not drawn.** A switch that grants or revokes the permission (holzWave cannot change it; it says where the person can), a list
 of hosts, a badge, a notification, and a notice again at a later start.
