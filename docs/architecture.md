@@ -173,7 +173,7 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 106 commands and 16 events. The tables below list the
+The webview talks to the core through a deny-by-default set of 108 commands and 17 events. The tables below list the
 commands of the terminal core, of the AI chat and of the integrations; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
@@ -196,7 +196,7 @@ snake_case everywhere (`cell_w`, `allow_unsafe`).
 | AI decisions | `ai_decide(conversation, call_id, decision, hash)`, `ai_undo(conversation, call_id)` | nothing; webview commands only |
 | `wsh ai` requests | `ai_ask_pending`, `ai_ask_answer(ask, verdict, seal)` | the requests that wait, nothing |
 | Markdown | `markdown_render(text)` | the cleaned HTML of a reply |
-| Integrations | `integration_tools`, `integration_run(tool, verb, pane, args)` | the four tools with where each stands on this computer (path, version, the places looked in, the verbs each has); one read of a verb that shows a view: the view model, the selection it used and when it was read. A refusal is the fault object |
+| Integrations | `integration_tools`, `integration_run(tool, verb, pane, args)`, `integration_select(tool, pane, selection)`, `integration_context(pane, refresh)` | the four tools with where each stands on this computer (path, version, the places looked in, the verbs each has); one read of a verb that shows a view: the view model, the selection it used and when it was read; the selection as it will be used, with the name of the production profile or `null`; `{rows, panes}`: one row for each tool, and one entry for each pane that has an integration selection, with the status of its tool when it holds the tool's last words. A refusal is the fault object |
 | `wsh` on a host | `wsh_install(pane)` | the sentence the pane also shows; the page names the pane, never a host |
 
 Every refusal of the AI commands is an object with `code`, `reason` and `text` (the page words its own sentence from the
@@ -228,6 +228,7 @@ that only bound their numbers and push to the pane's queue.
 | `history-open` | `{pane}`: the shell of that pane asked for the history search (the `^R` binding); the window that has the pane opens the dialog |
 | `login-prompt` | `{id, connection, host, name, instructions, prompts: [{text, echo}]}`: the server of a saved connection asks a question to log in; every window. `connection` and `host` are the person's own saved connection, the rest is the server's text, cleaned and bounded, shown as text only. The page answers with `login_prompt_answer(id, answers)` or `login_prompt_cancel(id)`; an unknown or old id changes nothing |
 | `login-prompt-end` | `{id, outcome}`: the question is over (`answered`, `cancelled` or `timed_out`); every window takes its dialog away |
+| `integration` | `{seq, kind, tool, pane, code}`, to every window: something the integrations show changed. `kind` is `tools`, `context`, `profiles` or `held`; `tool` and `pane` name what it is about, `null` when it is about none; `code` is the status of the tool in a `held` event. It carries no data: the page asks (`integration_tools`, `integration_context`) and is right again even after it missed an event |
 
 **AI events.** A chat turn is a stream of `ai` events with a sequence number that starts at 1 in each turn and goes up by
 one. The webview can reload at any time, so the stream is not a channel: a page that sees a gap, opens a chat or comes back

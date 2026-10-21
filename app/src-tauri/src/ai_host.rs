@@ -1598,7 +1598,9 @@ mod tests {
             assert!(body_of(source, path).contains("self.forget_pane("), "{path} does not forget the pane");
         }
         // The settings and the end of the app reach the service too.
-        for place in ["fn new_with_ai(", "fn set_setting(", "fn reload_settings("] {
+        // `new_with_ai` hands over to `new_with_parts`, which builds the core.
+        assert!(body_of(source, "fn new_with_ai(").contains("AppCore::new_with_parts("));
+        for place in ["fn new_with_parts(", "fn set_setting(", "fn reload_settings("] {
             assert!(body_of(source, place).contains("apply_settings"), "{place} does not apply the settings");
         }
         assert!(body_of(source, "pub fn shutdown(").contains("self.ai.shutdown()"));

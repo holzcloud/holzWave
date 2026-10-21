@@ -11,6 +11,10 @@
 //!
 //! A chat pane keeps only the id of its conversation here: the messages belong to the conversation store, and the id is
 //! checked by the one definition of an id ([`ConversationId::parse`]) wherever a chat block is stored or read.
+//!
+//! An integration pane keeps the tool and the view: both are checked against the compiled-in descriptions of the tools
+//! ([`crate::integrate::is_view_verb`]) wherever the block is stored, changed or read, so a file that was edited by hand
+//! cannot make a pane show a verb that changes something.
 
 use std::collections::HashMap;
 use std::fs;
@@ -23,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::ai::store::ConversationId;
 use crate::connections::Connections;
 use crate::files::{Entry, FileSource, Listing, LocalSource};
+use crate::integrate::{self, ToolId};
 use crate::layout::PaneId;
 use crate::persist::{read_limited, write_atomic};
 use crate::preview::{Classified, SNIFF, classify, render_markdown};
@@ -51,6 +56,10 @@ pub enum BlockKind {
     /// A conversation with an AI model. Its path is the id of the conversation; the messages are kept by the
     /// conversation store, never in `pane_blocks.json`.
     Chat,
+    /// A view of an integration tool (Kubernetes, Talos, Azure, GAM): its source is the tool's id (`kube`, `talos`,
+    /// `azure`, `gam`) and its path is the id of a verb of that tool that only reads and shows a view. What the pane has
+    /// selected is kept apart, in the file of the pane selections.
+    Integration,
 }
 
 /// What a block pane shows.
@@ -193,6 +202,10 @@ impl Blocks {
             if ConversationId::parse(path).is_err() {
                 return Err(Error::Unsupported("a chat block can only name a conversation by a valid chat id".into()));
             }
+        } else if block.kind == BlockKind::Integration {
+            if !valid(&Block { path: path.to_owned(), ..block.clone() }) {
+                return Err(Error::Unsupported("an integration block can only show a view of its tool".into()));
+            }
         } else if path.is_empty() || path.len() > crate::files::MAX_PATH || path.contains('\0') {
             return Err(Error::Unsupported("the path is empty, too long or has a NUL".into()));
         }
@@ -226,7 +239,11 @@ impl Blocks {
         let mut out: Vec<BlockView> = panes
             .into_iter()
             .map(|(pane, block)| {
-                let source_label = self.label_of(&block.source, connections);
+                let source_label = match (block.kind, ToolId::parse(&block.source)) {
+                    // An integration pane's source is a tool, not a computer.
+                    (BlockKind::Integration, Ok(tool)) => integrate::spec_of(tool).label.to_owned(),
+                    _ => self.label_of(&block.source, connections),
+                };
                 BlockView { pane, block, source_label }
             })
             .collect();
@@ -421,9 +438,10 @@ impl Blocks {
 
 /// Whether a block makes sense on another computer, so the sync may share it with a layout: a block whose source is a
 /// saved connection, and the monitor (of this computer, whichever it is). A local folder, a local preview and a chat
-/// are tied to this computer and are not shared.
+/// are tied to this computer and are not shared; neither is an integration pane, whose tool is found on each computer
+/// separately and whose selection is a file of this computer.
 pub fn portable(block: &Block) -> bool {
-    block.source != LOCAL || block.kind == BlockKind::Monitor
+    block.kind != BlockKind::Integration && (block.source != LOCAL || block.kind == BlockKind::Monitor)
 }
 
 fn valid(block: &Block) -> bool {
@@ -437,6 +455,12 @@ fn valid(block: &Block) -> bool {
         // A chat lives on this computer and its path is a conversation id: the store's own rule decides (length,
         // characters, device names), so no second copy of it exists.
         BlockKind::Chat => block.source == LOCAL && ConversationId::parse(&block.path).is_ok(),
+        // The tool is one of the four and the path is a verb of it that reads and shows a view. The length cap is the
+        // longest id of a verb with room to spare; the check against the descriptions is the real one.
+        BlockKind::Integration => {
+            block.path.len() <= 64
+                && ToolId::parse(&block.source).is_ok_and(|tool| integrate::is_view_verb(tool, &block.path))
+        }
         BlockKind::Files | BlockKind::Preview => {
             !block.source.is_empty()
                 && block.source.len() <= 64
@@ -689,6 +713,7 @@ mod tests {
         assert_eq!(name(BlockKind::Preview), "\"preview\"");
         assert_eq!(name(BlockKind::Monitor), "\"monitor\"");
         assert_eq!(name(BlockKind::Chat), "\"chat\"");
+        assert_eq!(name(BlockKind::Integration), "\"integration\"");
         assert_eq!(serde_json::from_str::<BlockKind>("\"chat\"").unwrap(), BlockKind::Chat);
         assert!(serde_json::from_str::<BlockKind>("\"Chat\"").is_err());
         assert!(serde_json::from_str::<BlockKind>("\"terminal\"").is_err());
@@ -897,5 +922,95 @@ mod tests {
         let err = blocks.list(&conns, "nope", "/").unwrap_err().to_string();
         assert!(err.contains("nope"), "{err}");
         let _ = fs::remove_dir_all(&d);
+    }
+    fn integration(source: &str, path: &str) -> Block {
+        Block { kind: BlockKind::Integration, source: source.into(), path: path.into(), edit: false }
+    }
+
+    #[test]
+    fn an_integration_block_needs_a_tool_and_a_read_view_verb() {
+        // The source is a tool and the path is a verb of that tool that reads and shows a view.
+        for (tool, view) in [("kube", "pods"), ("kube", "contexts"), ("kube", "namespaces"), ("talos", "contexts"), ("azure", "account"), ("gam", "users")] {
+            assert!(valid(&integration(tool, view)), "{tool} {view}");
+        }
+        let too_long = "p".repeat(65);
+        let refused = [
+            ("docker", "pods"),
+            ("local", "pods"),
+            ("web-1", "contexts"),
+            ("", "pods"),
+            ("Kube", "pods"),
+            ("kube", "delete_pod"),
+            ("kube", "exec"),
+            ("kube", "logs"),
+            ("kube", "use_context"),
+            ("kube", "nonesuch"),
+            ("kube", ""),
+            ("kube", too_long.as_str()),
+            ("kube", "pods "),
+            ("kube", "pods\0"),
+            ("azure", "pods"),
+        ];
+        for (source, path) in refused {
+            assert!(!valid(&integration(source, path)), "{source:?} {path:?}");
+        }
+        assert!(!valid(&Block { edit: true, ..integration("kube", "pods") }), "an integration pane has no editor to open");
+
+        let (d, blocks, _) = setup("integration-valid");
+        assert!(blocks.assign(1, integration("kube", "pods")).is_ok());
+        assert!(blocks.assign(2, integration("kube", "delete_pod")).is_err());
+        assert!(blocks.assign(2, integration("docker", "pods")).is_err());
+        assert!(blocks.block_of(2).is_none(), "a refused block is not stored");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn integration_blocks_round_trip_and_invalid_ones_are_dropped() {
+        let (d, blocks, conns) = setup("integration-file");
+        blocks.assign(1, integration("kube", "pods")).unwrap();
+        blocks.assign(2, integration("azure", "account")).unwrap();
+        let text = fs::read_to_string(d.join(BLOCKS_FILE)).unwrap();
+        assert!(text.contains("\"kind\": \"integration\""), "the kind is spelled integration in the file: {text}");
+
+        let again = Blocks::load(&d, None, &[1, 2]);
+        assert_eq!(again.block_of(1), Some(integration("kube", "pods")));
+        assert_eq!(again.block_of(2), Some(integration("azure", "account")));
+        let views = blocks.views(&conns);
+        assert_eq!(views[0].source_label, "Kubernetes", "the header names the tool and not a computer");
+        assert_eq!(views[1].source_label, "Azure");
+        assert_eq!(serde_json::to_value(&views[0]).unwrap()["kind"], "integration");
+
+        // A file that was edited by hand or came from another version: what is not valid is dropped when it is read.
+        let hand = r#"{"1": {"kind": "integration", "source": "kube", "path": "pods"},
+                       "2": {"kind": "integration", "source": "kube", "path": "delete_pod"},
+                       "3": {"kind": "integration", "source": "docker", "path": "pods"},
+                       "4": {"kind": "integration", "source": "kube", "path": ""}}"#;
+        fs::write(d.join(BLOCKS_FILE), hand).unwrap();
+        let loaded = Blocks::load(&d, None, &[1, 2, 3, 4]);
+        assert_eq!(loaded.block_of(1), Some(integration("kube", "pods")));
+        for pane in [2, 3, 4] {
+            assert!(loaded.block_of(pane).is_none(), "pane {pane} named something an integration pane cannot show");
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_integration_pane_moves_to_another_view_of_its_tool_only() {
+        let (d, blocks, _) = setup("integration-update");
+        blocks.assign(1, integration("kube", "pods")).unwrap();
+        blocks.update(1, "namespaces").unwrap();
+        assert_eq!(blocks.block_of(1).unwrap().path, "namespaces");
+        for refused in ["delete_pod", "exec", "nonesuch", "", "contexts\0"] {
+            assert!(blocks.update(1, refused).is_err(), "{refused:?}");
+        }
+        assert_eq!(blocks.block_of(1).unwrap().path, "namespaces", "a refused move changes nothing");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn an_integration_block_is_tied_to_this_computer_and_is_not_shared_by_the_sync() {
+        // A tool is found per computer and a pane's selection is a file of this computer, so the sync does not carry the
+        // block to another one.
+        assert!(!portable(&integration("kube", "pods")));
     }
 }

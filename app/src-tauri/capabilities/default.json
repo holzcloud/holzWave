@@ -114,6 +114,8 @@
     "allow-ai-ask-pending",
     "allow-ai-ask-answer",
     "allow-integration-tools",
-    "allow-integration-run"
+    "allow-integration-run",
+    "allow-integration-select",
+    "allow-integration-context"
   ]
 }

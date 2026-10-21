@@ -477,6 +477,9 @@ pub struct IntegrationService {
     busy_panes: (Mutex<HashSet<PaneId>>, Condvar),
     /// Moves with every invalidation, so that a run that began before one never fills the cache after it.
     generation: AtomicU64,
+    /// The host writes the file of the pane selections itself ([`IntegrationService::save_panes`]): a change is not
+    /// written when it is made.
+    deferred_saves: bool,
 }
 
 impl fmt::Debug for IntegrationService {
@@ -603,6 +606,7 @@ impl IntegrationService {
             cache: Mutex::new(HashMap::new()),
             busy_panes: (Mutex::new(HashSet::new()), Condvar::new()),
             generation: AtomicU64::new(0),
+            deferred_saves: false,
         }
     }
 
@@ -613,6 +617,31 @@ impl IntegrationService {
     /// The notes of the files that were read at the start, once each.
     pub fn notes(&self) -> Vec<String> {
         self.lock().notes.clone()
+    }
+
+    /// The same service, but the file of the pane selections is written when the host calls
+    /// [`IntegrationService::save_panes`] and not at each change. A host that changes selections in bursts (a drag over
+    /// a list, a pane that opens and closes) coalesces them into one write.
+    #[must_use]
+    pub fn with_deferred_pane_saves(mut self) -> Self {
+        self.deferred_saves = true;
+        self
+    }
+
+    /// Writes `pane_integrations.json` now.
+    ///
+    /// # Errors
+    ///
+    /// The file system's error.
+    pub fn save_panes(&self) -> std::io::Result<()> {
+        self.context.save(&self.dir)
+    }
+
+    /// The file of the pane selections after a change: written now, or left for the host.
+    fn persist_panes(&self) {
+        if !self.deferred_saves {
+            let _ = self.context.save(&self.dir);
+        }
     }
 
     /// The same service with other limits for a read. The defaults are 15 seconds and 16 MiB; the tests lower them.
@@ -1126,7 +1155,7 @@ impl IntegrationService {
                     .map(|verb| verb.id.to_owned());
                 let view = own.or(first).ok_or_else(|| Fault::refused("view", "The tool has no view."))?;
                 if self.context.set_pane(pane, tool, &view, selection).map_err(context_fault)? {
-                    let _ = self.context.save(&self.dir);
+                    self.persist_panes();
                 }
                 self.drop_cached(None, Some(pane));
             }
@@ -1135,6 +1164,20 @@ impl IntegrationService {
             }
         }
         Ok(SelectionView { selection: selection_text(&resolved.selection), production: resolved.production })
+    }
+
+    /// Makes `pane` show `view` of `tool`: a pane that opens, or one that moves to another view of its tool. `view` must
+    /// be a verb of the tool that reads and shows a view. A pane that already has a selection for this tool keeps it;
+    /// a new one starts from the pick of the tool, or from nothing (so that it follows the tool's own selection).
+    pub fn open_pane(&self, pane: PaneId, tool: &str, view: &str) -> Result<(), Fault> {
+        let tool = self.parse_tool(tool)?;
+        let own = self.context.pane(pane).filter(|entry| entry.tool == tool).map(|entry| entry.selection);
+        let selection = own.or_else(|| self.context.pick(tool)).unwrap_or_default();
+        if self.context.set_pane(pane, tool, view, &selection).map_err(context_fault)? {
+            self.persist_panes();
+        }
+        self.drop_cached(None, Some(pane));
+        Ok(())
     }
 
     /// One row per tool for the sidebar, the status line and the pane chip: the state of the tool and what is selected
@@ -1450,7 +1493,7 @@ impl IntegrationService {
     /// answers and the overlay file that was written for it.
     pub fn forget_pane(&self, pane: PaneId) {
         if self.context.forget_pane(pane) {
-            let _ = self.context.save(&self.dir);
+            self.persist_panes();
         }
         {
             let mut state = self.lock();

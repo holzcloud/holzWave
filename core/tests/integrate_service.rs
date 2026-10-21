@@ -1063,3 +1063,71 @@ fn a_card_that_was_closed_can_be_cancelled() {
     assert_eq!(fault.code, FaultCode::Ticket);
     assert_eq!(runs(&fake), 0);
 }
+
+// ---- the panes of the shell: a view for each pane and the writes of the selections -----------------------------
+
+fn with_context(context: &str) -> Selection {
+    Selection { context: Some(context.to_owned()), ..Selection::default() }
+}
+
+fn pane_row(service: &IntegrationService, pane: u64) -> holzwave_core::integrate::service::PaneRow {
+    service.pane_rows().into_iter().find(|row| row.pane == pane).expect("a row for the pane")
+}
+
+#[test]
+fn a_pane_opens_on_a_view_of_its_tool_with_the_pick_or_nothing() {
+    let rig = Rig::new();
+    let service = rig.service();
+
+    service.open_pane(5, "kube", "pods").expect("a pane on the pods");
+    assert_eq!(pane_row(&service, 5).view, "pods");
+    assert_eq!(pane_row(&service, 5).context, None, "nothing was picked, so the pane has nothing of its own");
+
+    // The pick of the tool is what the next pane starts from; a pane that has its own selection keeps it.
+    service.select("kube", None, &with_context("dev")).expect("a pick");
+    service.open_pane(6, "kube", "pods").expect("a second pane");
+    assert_eq!(pane_row(&service, 6).context.as_deref(), Some("dev"));
+    service.select("kube", Some(6), &with_context("kind-test")).expect("the pane's own selection");
+    service.open_pane(6, "kube", "namespaces").expect("the pane moves to another view");
+    let row = pane_row(&service, 6);
+    assert_eq!((row.view.as_str(), row.context.as_deref()), ("namespaces", Some("kind-test")));
+
+    // A verb that is not a view of the tool, another tool's view and a word that is none are refused and change nothing.
+    for (tool, view) in [("kube", "delete_pod"), ("kube", "exec"), ("kube", "nonesuch"), ("azure", "pods"), ("nonesuch", "pods")] {
+        let fault = service.open_pane(7, tool, view).expect_err("refused");
+        assert_eq!(fault.code, FaultCode::Refused, "{tool} {view}");
+    }
+    assert!(service.pane_rows().iter().all(|row| row.pane != 7));
+}
+
+#[test]
+fn deferred_pane_saves_wait_for_the_host_and_an_immediate_service_still_writes_each_change() {
+    let rig = Rig::new();
+    let file = rig.data.join("pane_integrations.json");
+
+    // By default every change of a pane's selection is on disk when the call returns.
+    let service = rig.service();
+    service.open_pane(3, "kube", "pods").expect("a pane");
+    assert!(file.exists(), "an immediate service writes at once");
+    drop(service);
+    std::fs::remove_file(&file).expect("start over");
+
+    let service = rig.service().with_deferred_pane_saves();
+    service.open_pane(3, "kube", "pods").expect("a pane");
+    service.select("kube", Some(3), &with_context("dev")).expect("a selection");
+    service.open_pane(4, "talos", "contexts").expect("another pane");
+    assert!(!file.exists(), "a deferred service writes nothing until the host asks");
+
+    service.save_panes().expect("the host saves");
+    let again = IntegrationService::new(&rig.data, rig.store.clone(), rig.facts(), &[3, 4]);
+    assert_eq!(pane_row(&again, 3).context.as_deref(), Some("dev"), "a restart restores the selections of live panes");
+    assert_eq!(pane_row(&again, 4).view, "contexts");
+
+    // A pane that closed is forgotten, and the file follows only when the host saves again.
+    service.forget_pane(4);
+    let still = IntegrationService::new(&rig.data, rig.store.clone(), rig.facts(), &[3, 4]);
+    assert_eq!(pane_row(&still, 4).view, "contexts", "the file still has the pane until the host saves");
+    service.save_panes().expect("the host saves again");
+    let after = IntegrationService::new(&rig.data, rig.store.clone(), rig.facts(), &[3, 4]);
+    assert!(after.pane_rows().iter().all(|row| row.pane != 4));
+}

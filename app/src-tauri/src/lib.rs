@@ -12,8 +12,9 @@
 //! search; it goes to the one window that has the pane), `login-prompt` `{id, connection, host, name, instructions, prompts:
 //! [{text, echo}]}` (the server of a saved connection asks the person a question to log in; every window; `connection`
 //! and `host` are the person's own saved connection, the rest is the server's text as text) and `login-prompt-end` `{id,
-//! outcome}` (`answered`, `cancelled` or `timed_out`; every window); command arguments
-//! are snake_case. Every event but `settings`, `ai`, `exit`, `login-prompt`, `login-prompt-end` and the `closed` half of `ai-ask` is emitted to one window, the one that holds the pane
+//! outcome}` (`answered`, `cancelled` or `timed_out`; every window) and `integration` `{seq, kind, tool, pane, code}` (something the
+//! integrations show changed; `kind` is `tools`, `context`, `profiles` or `held`; every window, and the page asks for the data); command arguments
+//! are snake_case. Every event but `settings`, `ai`, `exit`, `login-prompt`, `login-prompt-end`, `integration` and the `closed` half of `ai-ask` is emitted to one window, the one that holds the pane
 //! (or whose layout changed), with `emit_str_to(label, ..)`; a page has to listen with its own label, because a
 //! listener without a target receives the events of every window.
 //!
@@ -546,6 +547,8 @@ pub fn run() {
             commands::ai_ask_pending,
             commands::ai_ask_answer,
             commands::markdown_render,
+            commands::integration_select,
+            commands::integration_context,
             commands::integration_tools,
             commands::integration_run,
         ])

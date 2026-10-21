@@ -27,7 +27,8 @@ use holzwave_core::ai::types::ContextKind;
 use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened, Saved};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
-use holzwave_core::integrate::service::{RunAnswer, ToolView};
+use holzwave_core::integrate::service::{RunAnswer, SelectionView, ToolView};
+use holzwave_core::integrate::Selection;
 use holzwave_core::engine::{
     CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode,
     SelectOp,
@@ -42,7 +43,7 @@ use tauri::{State, WebviewWindow};
 
 use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
 use crate::clipboard;
-use crate::integrate_host::IntegrationFault;
+use crate::integrate_host::{ContextAnswer, IntegrationFault};
 use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
 use crate::windows::DropKind;
 
@@ -1203,4 +1204,28 @@ pub fn integration_run(
     args: BTreeMap<String, String>,
 ) -> Result<RunAnswer, IntegrationFault> {
     core.integration_run(&tool, &verb, pane, &args)
+}
+
+/// The selection of a pane (or the pick of the tool, which new panes start from, when `pane` is null): the context, the
+/// namespace, the subscription, the section, the node and the profile, as far as the tool takes them. The core checks it
+/// against the tool and its profile and answers it as it will be used (the pins of the profile filled in) with the name of
+/// the production profile, or `null`. A selection the tool refuses is the fault object and changes nothing. One
+/// `integration` event follows a selection that was accepted.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_select(
+    core: State<Arc<AppCore>>,
+    tool: String,
+    pane: Option<PaneId>,
+    selection: Selection,
+) -> Result<SelectionView, IntegrationFault> {
+    core.integration_select(&tool, pane, &selection)
+}
+
+/// What the tools are set to and which panes have a selection: `{rows, panes}`. `rows` has one entry for each tool (its
+/// state, and what is selected for `pane` or for the tool), `panes` one for each pane with an integration selection (an
+/// integration block, or the terminal a launch opened), with the status of its tool when the pane holds the tool's last
+/// words. With `refresh` the tools are looked for again and their default verbs are read, which starts them, so it is async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_context(core: State<Arc<AppCore>>, pane: Option<PaneId>, refresh: bool) -> ContextAnswer {
+    core.integration_context(pane, refresh)
 }

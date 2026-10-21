@@ -148,6 +148,44 @@
       }
     ],
     "integration": {
+      "context": {
+        "panes": [
+          {
+            "context": "dev",
+            "held": true,
+            "namespace": "default",
+            "pane": 3,
+            "production": "Production",
+            "status": 1,
+            "tool": "kube",
+            "view": "pods"
+          }
+        ],
+        "rows": [
+          {
+            "context": "dev",
+            "namespace": "default",
+            "node": null,
+            "production": null,
+            "section": null,
+            "stale": false,
+            "state": "found",
+            "subscription": null,
+            "tool": "kube"
+          },
+          {
+            "context": null,
+            "namespace": null,
+            "node": null,
+            "production": null,
+            "section": null,
+            "stale": true,
+            "state": "signed_out",
+            "subscription": null,
+            "tool": "azure"
+          }
+        ]
+      },
       "fault": {
         "code": "refused",
         "reason": "tool",
@@ -787,11 +825,20 @@
       "query",
       "limit"
     ],
+    "integration_context": [
+      "pane",
+      "refresh"
+    ],
     "integration_run": [
       "tool",
       "verb",
       "pane",
       "args"
+    ],
+    "integration_select": [
+      "tool",
+      "pane",
+      "selection"
     ],
     "integration_tools": [],
     "key": [
@@ -1064,6 +1111,36 @@
         "y": 12.0
       }
     ],
+    "integration": [
+      {
+        "code": null,
+        "kind": "context",
+        "pane": 3,
+        "seq": 7,
+        "tool": "kube"
+      },
+      {
+        "code": 1,
+        "kind": "held",
+        "pane": 3,
+        "seq": 8,
+        "tool": "kube"
+      },
+      {
+        "code": null,
+        "kind": "tools",
+        "pane": null,
+        "seq": 9,
+        "tool": null
+      },
+      {
+        "code": null,
+        "kind": "profiles",
+        "pane": null,
+        "seq": 10,
+        "tool": null
+      }
+    ],
     "login-prompt": {
       "connection": "Talos",
       "host": "talos.example",
@@ -1111,7 +1188,8 @@
       "login-prompt",
       "login-prompt-end",
       "bell",
-      "command-end"
+      "command-end",
+      "integration"
     ],
     "pane-exit": [
       {

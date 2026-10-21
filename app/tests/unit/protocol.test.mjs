@@ -50,7 +50,7 @@ test("the view has exactly the documented keys at every level", () => {
 });
 
 test("the event names and the title, cwd and pane-exit payloads are pinned", () => {
-  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open", "login-prompt", "login-prompt-end", "bell", "command-end"]);
+  assert.deepEqual(golden.events.names, ["frame", "layout", "title", "cwd", "pane-exit", "settings", "incoming-drop", "drag-hover", "drag-end", "ai", "ai-ask", "history-open", "login-prompt", "login-prompt-end", "bell", "command-end", "integration"]);
   // The program in a pane rang the bell: the id of the pane and nothing else.
   assert.deepEqual(golden.events.bell, { pane: 3 });
   // A command ended in a pane: the id and the OSC 133 status (a number or null), nothing of the command or its output.
@@ -255,7 +255,7 @@ test("the login question has its events and its two commands pinned", () => {
 
 test("the ai events and the nineteen ai commands are pinned", () => {
   // One event of a chat turn, flat, for every window: the page routes it by conversation.
-  assert.deepEqual(golden.events.names.slice(-7, -5), ["ai", "ai-ask"]);
+  assert.deepEqual(golden.events.names.slice(-8, -6), ["ai", "ai-ask"]);
   assert.deepEqual(keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"]);
   assert.deepEqual(Object.keys(golden.events.ai), ["conversation", "kind", "seq", "text", "turn"].sort(), "the golden is written key-sorted");
   // A request of `wsh ai` that waits for the person: the card for the window of the pane, flat, and nothing but the
@@ -866,7 +866,7 @@ test("the key rows hold the inline AI actions", () => {
 
 test("the integration answers have the documented shapes", () => {
   const sample = golden.answers.integration;
-  assert.deepEqual(keys(sample), ["fault", "run", "tools"]);
+  assert.deepEqual(keys(sample), ["context", "fault", "run", "tools"]);
   // A refusal is the fault object, the same for every command.
   assert.deepEqual(keys(sample.fault), ["code", "reason", "text"]);
   assert.equal(sample.fault.code, "refused");
@@ -888,8 +888,41 @@ test("the integration answers have the documented shapes", () => {
   assert.equal(sample.run.view.fetched, sample.run.fetched);
 });
 
-test("the first integration commands take facts only", () => {
+test("the integration commands take facts only", () => {
   assert.deepEqual(golden.commands.integration_tools, []);
   assert.deepEqual(golden.commands.integration_run, ["tool", "verb", "pane", "args"]);
-  for (const arg of ["argv", "command", "program", "shell"]) assert.ok(!golden.commands.integration_run.includes(arg), arg);
+  assert.deepEqual(golden.commands.integration_select, ["tool", "pane", "selection"]);
+  assert.deepEqual(golden.commands.integration_context, ["pane", "refresh"]);
+  for (const [name, args] of Object.entries(golden.commands).filter(([name]) => name.startsWith("integration_"))) {
+    for (const arg of ["argv", "command", "program", "shell"]) assert.ok(!args.includes(arg), `${name} takes ${arg}`);
+  }
+});
+
+test("the integration event is small: five members, absent ones null, every window", () => {
+  assert.equal(golden.events.names.at(-1), "integration");
+  const events = golden.events.integration;
+  assert.equal(events.length, 4);
+  for (const event of events) assert.deepEqual(keys(event), ["code", "kind", "pane", "seq", "tool"]);
+  assert.deepEqual(events.map((event) => event.kind), ["context", "held", "tools", "profiles"]);
+  assert.deepEqual(events.map((event) => event.seq), [7, 8, 9, 10], "the sequence goes up by one");
+  // A held event carries the status of the tool; the others carry no status.
+  assert.equal(events[1].code, 1);
+  for (const event of events.filter((e) => e.kind !== "held")) assert.equal(event.code, null);
+  // The data is not in the event: the page asks for it.
+  for (const event of events) assert.ok(!("rows" in event) && !("view" in event) && !("selection" in event));
+});
+
+test("the context answer has a row for every tool and an entry for every pane", () => {
+  const answer = golden.answers.integration.context;
+  assert.deepEqual(keys(answer), ["panes", "rows"]);
+  for (const row of answer.rows) {
+    assert.deepEqual(keys(row), ["context", "namespace", "node", "production", "section", "stale", "state", "subscription", "tool"]);
+  }
+  assert.deepEqual(answer.rows.map((row) => row.state), ["found", "signed_out"]);
+  for (const pane of answer.panes) {
+    assert.deepEqual(keys(pane), ["context", "held", "namespace", "pane", "production", "status", "tool", "view"]);
+  }
+  // The answer says whether a pane is held, and with which status; a pane that is not held has no status.
+  assert.equal(answer.panes[0].held, true);
+  assert.equal(answer.panes[0].status, 1);
 });

@@ -141,6 +141,8 @@ fn main() {
     "ai_ask_pending",
     "ai_ask_answer",
     "markdown_render",
+    "integration_select",
+    "integration_context",
     "integration_tools",
     "integration_run",
   ]);

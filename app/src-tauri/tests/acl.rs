@@ -954,7 +954,7 @@ fn the_local_socket_has_no_command_that_decides() {
 /// asked of it: can it start anything that changes something without a card the person confirmed, return a secret, an
 /// environment value or an argument list that was not on a card, or take a program, an argument list or a shell string
 /// from the page? If yes, it does not belong here.
-const INTEGRATION_COMMANDS: &[&str] = &["integration_run", "integration_tools"];
+const INTEGRATION_COMMANDS: &[&str] = &["integration_context", "integration_run", "integration_select", "integration_tools"];
 
 #[test]
 fn the_integration_commands_are_exactly_the_reviewed_list() {

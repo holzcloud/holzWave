@@ -47,7 +47,9 @@ use crate::ai_host::{AiHost, AiParts, AiPayload};
 use crate::ai_exec::RemoteExecs;
 use crate::login_prompt::{PromptEnd, PromptHost};
 use crate::ai_tools::{ExecFault, FileTarget, TerminalTarget};
-use crate::integrate_host::{IntegrationHost, IntegrationParts};
+use crate::integrate_host::{
+    ContextAnswer, IntegrationEvent, IntegrationFault, IntegrationHost, IntegrationParts,
+};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
@@ -415,6 +417,9 @@ pub enum Out {
     LoginPrompt { id: String, connection: String, host: String, name: String, instructions: String, prompts: Vec<PromptLine> },
     /// The question `id` is over (answered, cancelled or timed out): every window takes its dialog away.
     LoginPromptEnd { id: String, outcome: PromptEnd },
+    /// Something the integrations show has changed (a selection, the tools, the profiles, a pane that holds the last words
+    /// of its tool). Small, for every window: the page asks for the data the word names.
+    Integration(IntegrationEvent),
     /// The application is to end now: the layout is on disk and every shell has been asked to close.
     Exit,
 }
@@ -439,6 +444,7 @@ impl Out {
             Out::HistoryOpen { .. } => "history-open",
             Out::LoginPrompt { .. } => "login-prompt",
             Out::LoginPromptEnd { .. } => "login-prompt-end",
+            Out::Integration(_) => "integration",
             Out::Exit => "exit",
         }
     }
@@ -537,6 +543,7 @@ impl Serialize for Out {
             }
             .serialize(serializer),
             Out::LoginPromptEnd { id, outcome } => LoginPromptEndPayload { id, outcome: *outcome }.serialize(serializer),
+            Out::Integration(event) => event.serialize(serializer),
             Out::Exit => serializer.serialize_unit(),
         }
     }
@@ -1123,7 +1130,7 @@ impl AppCore {
                 IntegrationParts::system(&dir, resolve_system_shell(&shell, &configured).launch)
             });
             let live = lock(&windows).all_panes();
-            IntegrationHost::new(&dir, parts, &live)
+            IntegrationHost::new(&dir, sink.clone(), parts, &live)
         };
         let core = Arc::new_cyclic(|me| {
             // A login that asks a question raises it through this host. The name and the host of the dialog are looked up in
@@ -1221,8 +1228,24 @@ impl AppCore {
         verb: &str,
         pane: Option<PaneId>,
         args: &BTreeMap<String, String>,
-    ) -> Result<holzwave_core::integrate::service::RunAnswer, crate::integrate_host::IntegrationFault> {
+    ) -> Result<holzwave_core::integrate::service::RunAnswer, IntegrationFault> {
         self.integrations.run(tool, verb, pane, args)
+    }
+
+    /// The selection of an integration pane (or the pick of the tool when `pane` is none), checked and resolved by the
+    /// service; one `integration` event follows and the file of the selections is saved soon after.
+    pub fn integration_select(
+        &self,
+        tool: &str,
+        pane: Option<PaneId>,
+        selection: &holzwave_core::integrate::Selection,
+    ) -> Result<holzwave_core::integrate::service::SelectionView, IntegrationFault> {
+        self.integrations.select(tool, pane, selection)
+    }
+
+    /// What the tools are set to and which panes have a selection. With `refresh` it starts the tools, so it blocks.
+    pub fn integration_context(&self, pane: Option<PaneId>, refresh: bool) -> ContextAnswer {
+        self.integrations.context(pane, refresh, &|pane| self.pane_held(pane))
     }
 
     /// The Local Network permission of macOS: the stored choice and the probe.
@@ -1687,6 +1710,15 @@ impl AppCore {
             return Err(NO_ROOM_FOR_A_PANE.into());
         }
         self.blocks.assign(view.focus, block).map_err(|e| e.to_string())?;
+        if kind == BlockKind::Integration {
+            // The pane starts from the pick of the tool. A pane that cannot be recorded (too many panes in the file) is
+            // closed again, so that a refusal leaves nothing behind.
+            let shown = self.blocks.block_of(view.focus).map(|assigned| assigned.path).unwrap_or_default();
+            if let Err(fault) = self.integrations.pane_shows(view.focus, source, &shown) {
+                let _ = self.close_pane_in(label, view.focus);
+                return Err(fault.text);
+            }
+        }
         Ok(view)
     }
 
@@ -1697,7 +1729,12 @@ impl AppCore {
 
     /// The pane's block went to `path` (a folder entered, another file shown); remembered for the next start.
     pub fn block_update(&self, pane: PaneId, path: &str) -> Result<(), String> {
-        self.blocks.update(pane, path).map_err(|e| e.to_string())
+        self.blocks.update(pane, path).map_err(|e| e.to_string())?;
+        // An integration pane that moved to another view keeps its selection and tells the service the view.
+        if let Some(block) = self.blocks.block_of(pane).filter(|block| block.kind == BlockKind::Integration) {
+            self.integrations.pane_shows(pane, &block.source, &block.path).map_err(|e| e.text)?;
+        }
+        Ok(())
     }
 
     pub fn files_list(&self, source: &str, path: &str) -> Result<Listing, String> {
@@ -2335,6 +2372,7 @@ impl AppCore {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn flush(&self) {
         self.saver.flush();
+        self.integrations.flush();
         self.flush_session();
     }
 
@@ -2405,6 +2443,8 @@ impl AppCore {
         lock(&self.starts).remove(&pane);
         lock(&self.pane_targets).remove(&pane);
         self.connections.forget(pane);
+        // The selection, the held mark and the shell overlay of an integration pane, and the page is told.
+        self.integrations.pane_closed(pane);
         // A chat pane that leaves the layout ends the shares of its chat: the block is read before it is forgotten.
         let chat = self.blocks.block_of(pane).filter(|block| block.kind == BlockKind::Chat).map(|block| block.path);
         self.blocks.forget(pane);
@@ -2701,6 +2741,7 @@ impl AppCore {
             return;
         }
         self.saver.flush();
+        self.integrations.flush();
         // Before the shells are asked to end, while their directories can still be read.
         self.flush_session();
         for handle in self.running() {
@@ -2718,6 +2759,7 @@ impl AppCore {
         // Running chat turns end now and keep the text they had, before the layout is flushed and the process ends.
         self.ai.shutdown();
         self.saver.flush();
+        self.integrations.flush();
         self.flush_session();
         let handles = self.running();
         for handle in &handles {
@@ -2770,7 +2812,7 @@ impl AppCore {
             let cwd = match block.kind {
                 BlockKind::Files => Some(block.path.clone()),
                 BlockKind::Preview => parent_folder(&block.path),
-                BlockKind::Monitor | BlockKind::Chat => return None,
+                BlockKind::Monitor | BlockKind::Chat | BlockKind::Integration => return None,
             };
             let remote = block.source != LOCAL;
             let label = if remote {
@@ -2910,9 +2952,10 @@ impl AppCore {
 
     /// A pane's tool ended and the pane stays (from its sink, on the engine thread of the pane). A pane that is already
     /// out of the table is not recorded again by a late event.
-    fn record_held(&self, pane: PaneId, code: Option<u32>) {
+    pub(crate) fn record_held(&self, pane: PaneId, code: Option<u32>) {
         if lock(&self.panes).contains_key(&pane) {
             lock(&self.held).insert(pane, code);
+            self.integrations.pane_held(pane, code);
         }
     }
 
@@ -3141,6 +3184,7 @@ impl AppCore {
     /// it. The last pane of any other window closes that window, and nobody is left to hear the exit of that pane.
     fn pane_gone(&self, pane: PaneId, code: Option<u32>) {
         lock(&self.held).remove(&pane);
+        self.integrations.pane_ended(pane);
         let mut layout_event: Option<(Arc<str>, View)> = None;
         let mut exit_to: Option<Arc<str>> = None;
         let mut gone_window: Option<String> = None;
@@ -9726,6 +9770,8 @@ mod protocol {
     use holzwave_core::ai::tools::Decision;
     use holzwave_core::ai::types::{ContextKind, Locality};
     use holzwave_core::ai::wire::Wire;
+    use crate::integrate_host::IntegrationChange;
+    use holzwave_core::integrate::ToolId;
     use holzwave_core::layout::Axis;
     use holzwave_core::wire::{ModesMsg, SearchMsg};
 
@@ -9935,11 +9981,12 @@ mod protocol {
     /// The answers of the integration commands, written by the real types: the recorded output of a fake `kubectl` goes
     /// through the real parser, and the tool entries are the real compiled-in descriptions.
     fn integration_samples() -> Value {
-        use crate::integrate_host::IntegrationFault;
+        use crate::integrate_host::PaneAnswer;
+        use holzwave_core::integrate::context::{ContextRow, RowState};
         use holzwave_core::integrate::service::{
             Fault, FaultCode, RunAnswer, SelectionView, ToolState, ToolView,
         };
-        use holzwave_core::integrate::{kube, Integration, Selection, ToolId};
+        use holzwave_core::integrate::{kube, Integration, Selection};
 
         let spec = &kube::SPEC;
         let verb = spec.verb("contexts").expect("the default verb of Kubernetes");
@@ -9981,6 +10028,42 @@ mod protocol {
                 fetched: 1_800_000_000,
             }),
             "fault": to_value(&IntegrationFault::from(refused)),
+            "context": to_value(&ContextAnswer {
+                rows: vec![
+                    ContextRow {
+                        tool: ToolId::Kube,
+                        state: RowState::Found,
+                        context: Some("dev".into()),
+                        namespace: Some("default".into()),
+                        subscription: None,
+                        section: None,
+                        node: None,
+                        production: None,
+                        stale: false,
+                    },
+                    ContextRow {
+                        tool: ToolId::Azure,
+                        state: RowState::SignedOut,
+                        context: None,
+                        namespace: None,
+                        subscription: None,
+                        section: None,
+                        node: None,
+                        production: None,
+                        stale: true,
+                    },
+                ],
+                panes: vec![PaneAnswer {
+                    pane: 3,
+                    tool: ToolId::Kube,
+                    view: "pods".into(),
+                    context: Some("dev".into()),
+                    namespace: Some("default".into()),
+                    production: Some("Production".into()),
+                    held: true,
+                    status: Some(1),
+                }],
+            }),
         })
     }
 
@@ -10042,6 +10125,13 @@ mod protocol {
             Out::LoginPromptEnd { id: "0123456789abcdef0123456789abcdef".into(), outcome: PromptEnd::Answered },
             Out::Bell { pane: 3 },
             Out::CommandEnd { pane: 3, code: Some(3) },
+            Out::Integration(IntegrationEvent {
+                seq: 7,
+                kind: IntegrationChange::Context,
+                tool: Some(ToolId::Kube),
+                pane: Some(3),
+                code: None,
+            }),
         ];
         let names: Vec<&str> = events.iter().map(Out::name).collect();
         let payload = |i: usize| to_value(&events[i]);
@@ -10099,6 +10189,30 @@ mod protocol {
                 "command-end": [
                     payload(15),
                     to_value(&Out::CommandEnd { pane: 3, code: None }),
+                ],
+                "integration": [
+                    payload(16),
+                    to_value(&Out::Integration(IntegrationEvent {
+                        seq: 8,
+                        kind: IntegrationChange::Held,
+                        tool: Some(ToolId::Kube),
+                        pane: Some(3),
+                        code: Some(1),
+                    })),
+                    to_value(&Out::Integration(IntegrationEvent {
+                        seq: 9,
+                        kind: IntegrationChange::Tools,
+                        tool: None,
+                        pane: None,
+                        code: None,
+                    })),
+                    to_value(&Out::Integration(IntegrationEvent {
+                        seq: 10,
+                        kind: IntegrationChange::Profiles,
+                        tool: None,
+                        pane: None,
+                        code: None,
+                    })),
                 ],
             },
             "settings_view": to_value(&settings_view),
