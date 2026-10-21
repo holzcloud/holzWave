@@ -1244,6 +1244,54 @@ impl AppCore {
         self.integrations.select(tool, pane, selection)
     }
 
+    /// Makes `path` the program of an integration tool (checked against the tool's own file names). Blocking.
+    pub fn integration_binary_set(
+        &self,
+        tool: &str,
+        path: &str,
+    ) -> Result<Vec<holzwave_core::integrate::service::ToolView>, IntegrationFault> {
+        self.integrations.binary_set(tool, path)
+    }
+
+    /// Forgets the program the person chose for an integration tool. Blocking.
+    pub fn integration_binary_clear(
+        &self,
+        tool: &str,
+    ) -> Result<Vec<holzwave_core::integrate::service::ToolView>, IntegrationFault> {
+        self.integrations.binary_clear(tool)
+    }
+
+    /// The integration profiles; a secret variable is a name and whether the keychain has a value. Blocking.
+    pub fn integration_profiles(&self) -> holzwave_core::integrate::service::ProfilesView {
+        self.integrations.profiles()
+    }
+
+    /// Adds or replaces an integration profile. Blocking (the keychain).
+    pub fn integration_profile_save(
+        &self,
+        profile: Value,
+    ) -> Result<holzwave_core::integrate::service::ProfilesView, IntegrationFault> {
+        self.integrations.profile_save(profile)
+    }
+
+    /// Removes an integration profile and its secrets from the keychain. Blocking.
+    pub fn integration_profile_remove(
+        &self,
+        id: &str,
+    ) -> Result<holzwave_core::integrate::service::ProfilesView, IntegrationFault> {
+        self.integrations.profile_remove(id)
+    }
+
+    /// Stores one secret variable of a profile in the keychain. Write-only. Blocking.
+    pub fn integration_secret_set(&self, profile: &str, name: &str, value: String) -> Result<(), IntegrationFault> {
+        self.integrations.secret_set(profile, name, value)
+    }
+
+    /// Removes one secret variable of a profile from the keychain. Blocking.
+    pub fn integration_secret_clear(&self, profile: &str, name: &str) -> Result<(), IntegrationFault> {
+        self.integrations.secret_clear(profile, name)
+    }
+
     /// The card for an integration verb that changes something or opens a session; nothing is started. Blocking.
     pub fn integration_prepare(
         &self,
@@ -10071,7 +10119,7 @@ mod protocol {
         use holzwave_core::integrate::VerbEffect;
         use holzwave_core::integrate::context::{ContextRow, RowState};
         use holzwave_core::integrate::service::{
-            Fault, FaultCode, RunAnswer, SelectionView, ToolState, ToolView,
+            Fault, FaultCode, ProfileView, ProfilesView, RunAnswer, SecretView, SelectionView, ToolState, ToolView,
         };
         use holzwave_core::integrate::{kube, Integration, Selection};
 
@@ -10165,6 +10213,48 @@ mod protocol {
                 }),
             ],
             "launch": to_value(&LaunchAnswer { pane: 3, view: sample_view() }),
+            "profiles": to_value(&ProfilesView {
+                profiles: vec![
+                    ProfileView {
+                        id: "prod".into(),
+                        tool: ToolId::Kube,
+                        name: "Production".into(),
+                        context: Some("prod-cluster".into()),
+                        namespace: None,
+                        subscription: None,
+                        section: None,
+                        node: None,
+                        production: true,
+                        isolated: false,
+                        env: [("AWS_PROFILE".to_owned(), "prod".to_owned())].into_iter().collect(),
+                        secret_env: vec![
+                            SecretView { name: "AWS_SECRET_ACCESS_KEY".into(), has_value: true },
+                            SecretView { name: "AWS_SESSION_TOKEN".into(), has_value: false },
+                        ],
+                    },
+                    ProfileView {
+                        id: "work".into(),
+                        tool: ToolId::Azure,
+                        name: "Work".into(),
+                        context: None,
+                        namespace: None,
+                        subscription: Some("00000000-0000-0000-0000-000000000000".into()),
+                        section: None,
+                        node: None,
+                        production: false,
+                        isolated: true,
+                        env: std::collections::BTreeMap::new(),
+                        secret_env: Vec::new(),
+                    },
+                ],
+                notes: vec!["integrations.json was not used: it has a member or a value that is not allowed (line 3, column 9)".into()],
+            }),
+            "profile_fault": to_value(&IntegrationFault::from(Fault {
+                code: FaultCode::Profile,
+                reason: "invalid",
+                text: "Profile prod: context is not valid.".into(),
+            })),
+            "nothing": to_value(&()),
             "context": to_value(&ContextAnswer {
                 rows: vec![
                     ContextRow {

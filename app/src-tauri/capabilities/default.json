@@ -120,6 +120,13 @@
     "allow-integration-prepare",
     "allow-integration-confirm",
     "allow-integration-cancel",
-    "allow-integration-launch"
+    "allow-integration-launch",
+    "allow-integration-binary-set",
+    "allow-integration-binary-clear",
+    "allow-integration-profiles",
+    "allow-integration-profile-save",
+    "allow-integration-profile-remove",
+    "allow-integration-secret-set",
+    "allow-integration-secret-clear"
   ]
 }

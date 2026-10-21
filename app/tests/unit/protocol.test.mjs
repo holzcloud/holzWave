@@ -866,7 +866,7 @@ test("the key rows hold the inline AI actions", () => {
 
 test("the integration answers have the documented shapes", () => {
   const sample = golden.answers.integration;
-  assert.deepEqual(keys(sample), ["card", "confirm", "context", "fault", "launch", "run", "tools"]);
+  assert.deepEqual(keys(sample), ["card", "confirm", "context", "fault", "launch", "nothing", "profile_fault", "profiles", "run", "tools"]);
   // A refusal is the fault object, the same for every command.
   assert.deepEqual(keys(sample.fault), ["code", "reason", "text"]);
   assert.equal(sample.fault.code, "refused");
@@ -963,4 +963,39 @@ test("only integration_confirm names a ticket together with a hash, and the card
   for (const site of sites.filter((s) => s.command === "integration_confirm")) {
     assert.deepEqual([...site.keys].sort(), ["hash", "ticket"], `${site.file}:${site.line}`);
   }
+});
+
+test("the fifteen integration commands are the ones that were reviewed, with the arguments of the protocol", () => {
+  const names = Object.keys(golden.commands).filter((name) => name.startsWith("integration_"));
+  assert.deepEqual(names, [
+    "integration_binary_clear", "integration_binary_set", "integration_cancel", "integration_confirm", "integration_context",
+    "integration_launch", "integration_prepare", "integration_profile_remove", "integration_profile_save", "integration_profiles",
+    "integration_run", "integration_secret_clear", "integration_secret_set", "integration_select", "integration_tools",
+  ]);
+  assert.deepEqual(golden.commands.integration_binary_set, ["tool", "path"]);
+  assert.deepEqual(golden.commands.integration_binary_clear, ["tool"]);
+  assert.deepEqual(golden.commands.integration_profiles, []);
+  assert.deepEqual(golden.commands.integration_profile_save, ["profile"]);
+  assert.deepEqual(golden.commands.integration_profile_remove, ["id"]);
+  assert.deepEqual(golden.commands.integration_secret_set, ["profile", "name", "value"]);
+  assert.deepEqual(golden.commands.integration_secret_clear, ["profile", "name"]);
+  // A value goes in through one command only, and no command takes a program, an argument list or a shell string.
+  for (const name of names.filter((n) => n !== "integration_secret_set")) assert.ok(!golden.commands[name].includes("value"), name);
+});
+
+test("the profile list names the secret variables and never their values", () => {
+  const { profiles, profile_fault: fault, nothing } = golden.answers.integration;
+  assert.deepEqual(keys(profiles), ["notes", "profiles"]);
+  for (const profile of profiles.profiles) {
+    assert.deepEqual(keys(profile), ["context", "env", "id", "isolated", "name", "namespace", "node", "production", "secret_env", "section", "subscription", "tool"]);
+    for (const secret of profile.secret_env) {
+      assert.deepEqual(keys(secret), ["has_value", "name"]);
+      assert.equal(typeof secret.has_value, "boolean");
+    }
+  }
+  assert.deepEqual(profiles.profiles[0].secret_env.map((s) => s.has_value), [true, false]);
+  // A refusal of a profile is the fault object; a command that answers nothing answers null.
+  assert.deepEqual(keys(fault), ["code", "reason", "text"]);
+  assert.equal(fault.code, "profile");
+  assert.equal(nothing, null);
 });

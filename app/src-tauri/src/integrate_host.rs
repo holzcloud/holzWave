@@ -15,8 +15,9 @@ use std::time::Duration;
 
 use holzwave_core::integrate::context::ContextRow;
 use holzwave_core::integrate::kube;
+use holzwave_core::integrate::profiles::IntegrationProfile;
 use holzwave_core::integrate::service::{
-    Done, Fault, FaultCode, HostFacts, IntegrationService, PaneRow, RunAnswer, SelectionView, ToolView,
+    Done, Fault, FaultCode, HostFacts, IntegrationService, PaneRow, ProfilesView, RunAnswer, SelectionView, ToolView,
 };
 use holzwave_core::integrate::ticket::Card;
 use holzwave_core::integrate::{Selection, ToolId};
@@ -24,7 +25,7 @@ use holzwave_core::layout::PaneId;
 use holzwave_core::persist::Debounced;
 use holzwave_core::platform::ShellLaunch;
 use holzwave_core::secrets::SecretStore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::state::{Out, Sink, Target, View};
 
@@ -78,6 +79,30 @@ impl IntegrationFault {
         let text = chars.next().map_or_else(String::new, |first| format!("{}{}.", first.to_uppercase(), chars.as_str()));
         IntegrationFault { code: FaultCode::Failed, reason: "launch", text }
     }
+}
+
+/// The fault for a profile the page sent that is not a profile. The sentence of the core's own conversion names the profile
+/// and the field and never a value; any other error of the parser may quote the text it was given, so it is replaced by a
+/// fixed sentence.
+fn profile_shape_fault(error: &serde_json::Error) -> IntegrationFault {
+    let note = error.to_string();
+    let first = note.split(" at line ").next().unwrap_or("");
+    let own = first.starts_with("profile ") && !first.contains(['"', '`', '\n']);
+    let text = if own {
+        let mut chars = first.chars();
+        chars.next().map_or_else(String::new, |c| format!("{}{}.", c.to_uppercase(), chars.as_str()))
+    } else {
+        "The profile is not valid.".to_owned()
+    };
+    IntegrationFault { code: FaultCode::Profile, reason: "invalid", text }
+}
+
+/// Overwrites a secret the page sent as soon as it has been stored. Best effort: the message that carried it into the
+/// process is outside this function, but the copy that this process owns does not outlive the call.
+fn wipe(value: String) {
+    let mut bytes = value.into_bytes();
+    bytes.fill(0);
+    std::hint::black_box(&bytes);
 }
 
 impl From<Fault> for IntegrationFault {
@@ -321,6 +346,65 @@ impl IntegrationHost {
         Ok(())
     }
 
+    /// Makes `path` the program of `tool`: the person chooses which `kubectl` runs and not which program, so the file
+    /// name must be one of the tool's own names and the detector must find the file usable. Answers the four tools again.
+    /// Blocking: the tool is asked for its version.
+    pub fn binary_set(&self, tool: &str, path: &str) -> Result<Vec<ToolView>, IntegrationFault> {
+        self.service.set_binary(tool, path)?;
+        let tools = self.service.tools();
+        self.event(IntegrationChange::Tools, Self::tool_of(tool), None, None);
+        Ok(tools)
+    }
+
+    /// Forgets the program the person chose for `tool`; the search applies again. Answers the four tools again.
+    pub fn binary_clear(&self, tool: &str) -> Result<Vec<ToolView>, IntegrationFault> {
+        self.service.clear_binary(tool)?;
+        let tools = self.service.tools();
+        self.event(IntegrationChange::Tools, Self::tool_of(tool), None, None);
+        Ok(tools)
+    }
+
+    /// The profiles, and for every secret variable only whether the keychain has a value. It asks the keychain, so it is
+    /// blocking.
+    pub fn profiles(&self) -> ProfilesView {
+        self.service.profiles()
+    }
+
+    /// Adds a profile or replaces the one with the same id. `profile` is the shape of the profiles file: `secret_env` is a
+    /// list of names and `env` an object of plain values. The rules of the loader decide; a refusal names the profile and
+    /// the field and never a value. Answers the profiles again.
+    pub fn profile_save(&self, profile: serde_json::Value) -> Result<ProfilesView, IntegrationFault> {
+        let profile = IntegrationProfile::deserialize(profile).map_err(|error| profile_shape_fault(&error))?;
+        let tool = profile.tool;
+        let view = self.service.save_profile(profile)?;
+        self.event(IntegrationChange::Profiles, Some(tool), None, None);
+        Ok(view)
+    }
+
+    /// Removes a profile and the values of its secret variables from the keychain. Answers the profiles again.
+    pub fn profile_remove(&self, id: &str) -> Result<ProfilesView, IntegrationFault> {
+        let view = self.service.remove_profile(id)?;
+        self.event(IntegrationChange::Profiles, None, None, None);
+        Ok(view)
+    }
+
+    /// Stores the value of one secret variable of a profile in the keychain. Write-only: no answer, event or note ever
+    /// holds the value, and the copy this process owns is overwritten when the call is over.
+    pub fn secret_set(&self, profile: &str, name: &str, value: String) -> Result<(), IntegrationFault> {
+        let stored = self.service.set_secret(profile, name, &value);
+        wipe(value);
+        stored?;
+        self.event(IntegrationChange::Profiles, None, None, None);
+        Ok(())
+    }
+
+    /// Removes the value of one secret variable of a profile from the keychain.
+    pub fn secret_clear(&self, profile: &str, name: &str) -> Result<(), IntegrationFault> {
+        self.service.clear_secret(profile, name)?;
+        self.event(IntegrationChange::Profiles, None, None, None);
+        Ok(())
+    }
+
     /// The rows of the tools and the entries of the panes. With `refresh` the tools are looked for again and their
     /// default verbs are read, which starts processes: blocking. `held` says whether a pane holds its tool's last words,
     /// and with which status.
@@ -409,7 +493,7 @@ mod tests {
     use holzwave_core::integrate::service::ToolState;
     use holzwave_core::integrate::view::ViewModel;
     use holzwave_core::integrate::{Selection, ToolId};
-    use holzwave_core::secrets::MemoryStore;
+    use holzwave_core::secrets::{MemoryStore, SecretStore};
 
     use crate::ai_host::AiParts;
     use crate::state::{AppCore, Out, ShellSpec, Sink, Target};
@@ -786,8 +870,9 @@ mod tests {
 
         // The end of the pane clears it.
         core.close_pane_in("main", pane).expect("the pane closes");
-        assert_eq!(core.pane_held(pane), None);
         assert!(core.integration_context(None, false).panes.is_empty());
+        // The shell reports its end a moment later, and that clears the mark of the core as well.
+        assert!(wait_until(std::time::Duration::from_secs(5), || core.pane_held(pane).is_none()));
     }
 
     #[cfg(unix)]
@@ -973,6 +1058,298 @@ mod tests {
         core.start_pane(beside.pane, 80, 24, 0, 0).expect("the pane starts");
         assert!(wait_until(std::time::Duration::from_secs(20), || ran(&kubectl)));
         assert_eq!(argv(&kubectl), ["logs", "--follow", "--tail=200", "--", "api-0"].map(String::from).to_vec());
+    }
+
+    // ---- profiles, secrets and the program of a tool ---------------------------------------------------------------
+
+    /// A value that must never appear in an answer, an event, a note, a fault or a file.
+    const CANARY: &str = "CANARY-8f3a91c2d7e45b60-SECRET";
+
+    fn production_profile() -> serde_json::Value {
+        serde_json::json!({
+            "id": "prod",
+            "tool": "kube",
+            "name": "Production",
+            "context": "prod-cluster",
+            "production": true,
+            "isolated": false,
+            "env": {"AWS_PROFILE": "prod"},
+            "secret_env": ["AWS_SECRET_ACCESS_KEY"]
+        })
+    }
+
+    fn keys_of(value: &serde_json::Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value.as_object().expect("an object").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn profiles_are_listed_without_secret_values() {
+        let machine = Machine::new("profiles");
+        let (core, rec) = machine.core();
+        assert!(core.integration_profiles().profiles.is_empty());
+
+        let view = core.integration_profile_save(production_profile()).expect("a profile");
+        assert_eq!(view.profiles.len(), 1);
+        let json = serde_json::to_value(&view).expect("JSON");
+        assert_eq!(keys_of(&json), ["notes", "profiles"]);
+        let profile = &json["profiles"][0];
+        assert_eq!(
+            keys_of(profile),
+            ["context", "env", "id", "isolated", "name", "namespace", "node", "production", "secret_env", "section", "subscription", "tool"]
+        );
+        assert_eq!(profile["env"], serde_json::json!({"AWS_PROFILE": "prod"}), "the plain variables are names and values");
+        assert_eq!(profile["secret_env"], serde_json::json!([{"name": "AWS_SECRET_ACCESS_KEY", "has_value": false}]));
+        assert!(rec.integration_events().iter().any(|(_, e)| e.kind == IntegrationChange::Profiles));
+
+        // A value goes in; the list says only that there is one.
+        core.integration_secret_set("prod", "AWS_SECRET_ACCESS_KEY", CANARY.to_owned()).expect("stored");
+        let listed = serde_json::to_value(core.integration_profiles()).expect("JSON");
+        assert_eq!(listed["profiles"][0]["secret_env"], serde_json::json!([{"name": "AWS_SECRET_ACCESS_KEY", "has_value": true}]));
+        assert!(!listed.to_string().contains(CANARY));
+        assert_eq!(
+            machine.store.get("int:prod:AWS_SECRET_ACCESS_KEY").expect("the store").as_deref(),
+            Some(CANARY),
+            "and the keychain has it"
+        );
+
+        // Saving again replaces the profile and keeps the value; removing it removes the value too.
+        let again = core.integration_profile_save(production_profile()).expect("saved again");
+        assert!(again.profiles[0].secret_env[0].has_value);
+        let seen = rec.integration_events().len();
+        let gone = core.integration_profile_remove("prod").expect("removed");
+        assert!(gone.profiles.is_empty());
+        assert_eq!(machine.store.get("int:prod:AWS_SECRET_ACCESS_KEY").expect("the store"), None, "its secret went with it");
+        assert!(rec.integration_events()[seen..].iter().any(|(_, e)| e.kind == IntegrationChange::Profiles));
+        // A profile that is not there is already gone; an id that cannot be one is refused.
+        assert!(core.integration_profile_remove("nonesuch").expect("nothing to remove").profiles.is_empty());
+        assert_eq!(core.integration_profile_remove("Not A Valid Id").expect_err("no such id").code, FaultCode::Profile);
+    }
+
+    #[test]
+    fn a_profile_save_refuses_a_bad_profile_with_its_field_and_no_value() {
+        let machine = Machine::new("badprofile");
+        let (core, _rec) = machine.core();
+        let with = |extra: serde_json::Value| {
+            let mut base = serde_json::json!({"id": "p1", "tool": "kube", "name": "x"});
+            base.as_object_mut().expect("an object").extend(extra.as_object().expect("an object").clone());
+            base
+        };
+        // The refusals of the loader's own rules name the profile and the field.
+        let named = [
+            (serde_json::json!({"id": "Prod!", "tool": "kube", "name": "x"}), "id"),
+            (with(serde_json::json!({"context": format!("bad context\n{CANARY}")})), "context"),
+            (with(serde_json::json!({"namespace": format!("{CANARY} x")})), "namespace"),
+            (with(serde_json::json!({"env": {"LD_PRELOAD": CANARY}})), "LD_PRELOAD"),
+            (with(serde_json::json!({"secret_env": ["not a name"]})), "env name"),
+        ];
+        for (profile, field) in named {
+            let fault = core.integration_profile_save(profile).expect_err("refused");
+            assert_eq!((fault.code, fault.reason), (FaultCode::Profile, "invalid"), "{field}");
+            assert!(fault.text.contains(field), "the sentence names the field {field}: {fault:?}");
+            assert!(fault.text.ends_with('.') && !fault.text.contains(CANARY), "{fault:?}");
+        }
+        // What is not a profile at all gets one fixed sentence that quotes nothing.
+        let shapes = [
+            serde_json::json!({"id": "p1", "tool": "nonesuch", "name": "x"}),
+            with(serde_json::json!({"surprise": CANARY})),
+            with(serde_json::json!({"production": CANARY})),
+            serde_json::json!(CANARY),
+            serde_json::json!([CANARY]),
+            serde_json::json!(null),
+        ];
+        for profile in shapes {
+            let fault = core.integration_profile_save(profile.clone()).expect_err("refused");
+            assert_eq!((fault.code, fault.reason, fault.text.as_str()), (FaultCode::Profile, "invalid", "The profile is not valid."), "{profile}");
+        }
+        assert!(core.integration_profiles().profiles.is_empty(), "nothing was saved");
+        assert!(!machine.data.join("integrations.json").exists() || !std::fs::read_to_string(machine.data.join("integrations.json")).unwrap_or_default().contains(CANARY));
+    }
+
+    #[test]
+    fn a_secret_is_write_only_and_capped() {
+        let machine = Machine::new("secret");
+        let (core, rec) = machine.core();
+        core.integration_profile_save(production_profile()).expect("a profile");
+        let account = "int:prod:AWS_SECRET_ACCESS_KEY";
+        let stored = || machine.store.get(account).expect("the store");
+
+        // The largest value is the cap; one byte more, an empty value and a NUL are refused and store nothing.
+        let largest = format!("{CANARY}{}", "x".repeat(1024 - CANARY.len()));
+        assert_eq!(largest.len(), 1024);
+        core.integration_secret_set("prod", "AWS_SECRET_ACCESS_KEY", largest.clone()).expect("1024 bytes");
+        assert_eq!(stored().as_deref(), Some(largest.as_str()));
+        for value in [format!("{largest}x"), String::new(), format!("{CANARY}\0")] {
+            let fault = core.integration_secret_set("prod", "AWS_SECRET_ACCESS_KEY", value).expect_err("refused");
+            assert_eq!((fault.code, fault.reason), (FaultCode::Profile, "secret"));
+            assert!(!fault.text.contains(CANARY) && fault.text.ends_with('.'), "{fault:?}");
+        }
+        assert_eq!(stored().as_deref(), Some(largest.as_str()), "a refused value changes nothing");
+
+        // A name the profile does not declare, a name that is not a name and a profile that is not there are refused too.
+        for (profile, name) in [("prod", "OTHER_NAME"), ("prod", "not a name"), ("nonesuch", "AWS_SECRET_ACCESS_KEY"), ("Not Valid", "X")] {
+            let fault = core.integration_secret_set(profile, name, CANARY.to_owned()).expect_err("refused");
+            assert_eq!(fault.code, FaultCode::Profile, "{profile} {name}");
+            assert!(!fault.text.contains(CANARY), "{fault:?}");
+        }
+        assert_eq!(machine.store.get("int:prod:OTHER_NAME").expect("the store"), None);
+
+        // The events say that the profiles changed and nothing else.
+        let events = rec.integration_events();
+        assert!(events.iter().any(|(_, e)| e.kind == IntegrationChange::Profiles));
+        assert!(!format!("{events:?}").contains(CANARY));
+
+        // Clearing removes the value, and clearing it again is not a problem.
+        core.integration_secret_clear("prod", "AWS_SECRET_ACCESS_KEY").expect("cleared");
+        assert_eq!(stored(), None);
+        core.integration_secret_clear("prod", "AWS_SECRET_ACCESS_KEY").expect("cleared again");
+        assert_eq!(core.integration_secret_clear("nonesuch", "X").expect_err("no such profile").code, FaultCode::Profile);
+        assert!(!core.integration_profiles().profiles[0].secret_env[0].has_value);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_path_is_checked_against_the_tools_names() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let machine = Machine::new("binary");
+        let found = fake_cli::FakeCli::new(&machine.bin, "kubectl");
+        let (core, rec) = machine.core();
+        let kube = |tools: &[ToolView]| tools.iter().find(|tool| tool.id == ToolId::Kube).expect("an entry").clone();
+        assert_eq!(kube(&core.integration_tools()).path.as_deref(), found.path().to_str());
+
+        // The person's own kubectl: right name, absolute, a file nobody else can replace.
+        let other_dir = machine.root.join("other");
+        std::fs::create_dir_all(&other_dir).expect("a directory");
+        let mine = fake_cli::FakeCli::new(&other_dir, "kubectl");
+        let seen = rec.integration_events().len();
+        let tools = core.integration_binary_set("kube", mine.path().to_str().expect("a path")).expect("set");
+        assert_eq!(tools.len(), 4, "the four tools again");
+        let entry = kube(&tools);
+        assert_eq!((entry.path.as_deref(), entry.binary.as_deref(), entry.place), (mine.path().to_str(), mine.path().to_str(), Some("override")));
+        let events = rec.integration_events();
+        assert!(events[seen..].iter().any(|(_, e)| (e.kind, e.tool) == (IntegrationChange::Tools, Some(ToolId::Kube))), "{events:?}");
+        assert_eq!(kube(&core.integration_tools()).binary.as_deref(), mine.path().to_str(), "and it stays");
+        let file = std::fs::read_to_string(machine.data.join("integration_local.json")).expect("the machine-local file");
+        assert!(file.contains("other/kubectl"), "{file}");
+
+        // Refused: a name that is not one of the tool's own, a relative path, a file that is not executable, one that
+        // everyone can write, and a tool that does not exist. Each is a fault and none changes the setting.
+        let evil = fake_cli::FakeCli::new(&other_dir, "kubectl-evil");
+        let plain_dir = machine.root.join("plain");
+        std::fs::create_dir_all(&plain_dir).expect("a directory");
+        let plain = plain_dir.join("kubectl");
+        std::fs::write(&plain, "#!/bin/sh\n").expect("a file");
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).expect("not executable");
+        let open_dir = machine.root.join("open");
+        std::fs::create_dir_all(&open_dir).expect("a directory");
+        // A copy, not a fake: the fakes are hard links of one script, and a mode set on one is the mode of all of them.
+        let open = open_dir.join("kubectl");
+        std::fs::copy(mine.path(), &open).expect("a copy of the script");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o757)).expect("everyone can write");
+        for (tool, path) in [
+            ("kube", evil.path().to_string_lossy().into_owned()),
+            ("kube", "bin/kubectl".to_owned()),
+            ("kube", "kubectl".to_owned()),
+            ("kube", plain.to_string_lossy().into_owned()),
+            ("kube", open.to_string_lossy().into_owned()),
+            ("kube", format!("{}/nonesuch/kubectl", machine.root.display())),
+            ("kube", format!("{}\n", mine.path().display())),
+            ("nonesuch", mine.path().to_string_lossy().into_owned()),
+            ("talos", mine.path().to_string_lossy().into_owned()),
+        ] {
+            let fault = core.integration_binary_set(tool, &path).expect_err("refused");
+            assert_eq!(fault.code, FaultCode::Refused, "{tool} {path}");
+            assert!(fault.text.ends_with('.'), "{fault:?}");
+        }
+        assert_eq!(kube(&core.integration_tools()).binary.as_deref(), mine.path().to_str(), "a refusal changes nothing");
+
+        // Clearing goes back to the search.
+        let tools = core.integration_binary_clear("kube").expect("cleared");
+        let entry = kube(&tools);
+        assert_eq!((entry.binary.as_deref(), entry.path.as_deref()), (None, found.path().to_str()));
+        assert_eq!(core.integration_binary_clear("nonesuch").expect_err("no such tool").code, FaultCode::Refused);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_answer_or_event_holds_the_canary() {
+        let machine = Machine::new("canary");
+        let kubectl = fake_cli::FakeCli::new(&machine.bin, "kubectl").prints(&fixture("kubectl/config_view.json"));
+        let (core, rec) = machine.core();
+        core.integration_profile_save(production_profile()).expect("a profile");
+        core.integration_secret_set("prod", "AWS_SECRET_ACCESS_KEY", CANARY.to_owned()).expect("stored");
+        let pane = 7;
+        let selection = Selection { profile: Some("prod".into()), ..Selection::default() };
+
+        // Every answer and every fault of every command, as the page would read it (JSON) and as a log would (Debug).
+        let mut seen: Vec<(String, String)> = Vec::new();
+        let mut note = |what: &str, json: serde_json::Value, debug: String| seen.push((what.to_owned(), format!("{json}\n{debug}")));
+        macro_rules! take {
+            ($what:expr, $value:expr) => {{
+                let value = $value;
+                note($what, serde_json::to_value(&value).expect("JSON"), format!("{value:?}"));
+                value
+            }};
+        }
+        take!("tools", core.integration_tools());
+        let selected = core.integration_select("kube", Some(pane), &selection);
+        take!("select", selected.expect("selected"));
+        let run = core.integration_run("kube", "contexts", Some(pane), &args(&[]));
+        take!("run", run.expect("a read with the secret's profile"));
+        assert!(
+            String::from_utf8_lossy(&kubectl.env_bytes()).contains(CANARY),
+            "the value reached the environment of the child: the canary is not vacuous"
+        );
+        take!("run refused", core.integration_run("kube", "delete_pod", Some(pane), &args(&[])).expect_err("refused"));
+        take!("context", core.integration_context(Some(pane), false));
+        let card = core.integration_prepare("kube", "delete_pod", Some(pane), &args(&[("pod", "api-0")]));
+        let card = take!("card", card.expect("a card"));
+        take!("confirm wrong", core.integration_confirm("main", &card.ticket, &"0".repeat(64)).expect_err("a wrong hash"));
+        let ran = core.integration_confirm("main", &card.ticket, &card.hash);
+        take!("confirm ran", ran.expect("ran"));
+        let exec = core.integration_prepare("kube", "exec", Some(pane), &args(&[("pod", "api-0")])).expect("a card");
+        let launched = core.integration_confirm("main", &exec.ticket, &exec.hash).expect("launched");
+        assert_eq!(launched.kind, ConfirmKind::Launched);
+        take!("confirm launched", launched);
+        let logs = core.integration_launch("main", "kube", "logs", Some(pane), &args(&[("pod", "api-0")]), "tab");
+        take!("launch", logs.expect("logs"));
+        let cancelled = core.integration_prepare("kube", "delete_pod", Some(pane), &args(&[("pod", "api-1")])).expect("a card");
+        core.integration_cancel(&cancelled.ticket);
+        take!("profiles", core.integration_profiles());
+        take!("profile saved", core.integration_profile_save(production_profile()).expect("saved"));
+        take!("profile refused", core.integration_profile_save(serde_json::json!({"id": "p2", "tool": "kube", "name": "x", "context": format!("{CANARY}\nbad")})).expect_err("refused"));
+        take!("secret refused", core.integration_secret_set("prod", "OTHER", CANARY.to_owned()).expect_err("refused"));
+        take!("binary refused", core.integration_binary_set("kube", CANARY).expect_err("refused"));
+        take!("binary cleared", core.integration_binary_clear("kube").expect("cleared"));
+        take!("context after", core.integration_context(None, false));
+
+        for (what, text) in &seen {
+            assert!(!text.contains(CANARY), "the answer of {what} holds the secret");
+        }
+        assert_eq!(seen.len(), 17, "{} answers were looked at", seen.len());
+        let events = rec.integration_events();
+        assert!(events.len() >= 6);
+        let events_json = serde_json::to_string(&events.iter().map(|(_, e)| e).collect::<Vec<_>>()).expect("JSON");
+        assert!(!events_json.contains(CANARY) && !format!("{events:?}").contains(CANARY), "an event holds the secret");
+
+        // The value is in the keychain and in no file of the data directory.
+        let mut files = vec![machine.data.clone()];
+        let mut looked_at = 0;
+        while let Some(dir) = files.pop() {
+            for entry in std::fs::read_dir(&dir).expect("a directory").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    files.push(path);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    looked_at += 1;
+                    assert!(!String::from_utf8_lossy(&bytes).contains(CANARY), "{} holds the secret", path.display());
+                }
+            }
+        }
+        assert!(looked_at >= 3, "{looked_at} files were looked at");
+        assert_eq!(machine.store.get("int:prod:AWS_SECRET_ACCESS_KEY").expect("the store").as_deref(), Some(CANARY));
     }
 
     #[test]

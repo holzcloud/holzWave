@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 const LIB_RS: &str = include_str!("../src/lib.rs");
 const COMMANDS_RS: &str = include_str!("../src/commands.rs");
 const HOST_RS: &str = include_str!("../src/ai_host.rs");
+const INTEGRATE_HOST_RS: &str = include_str!("../src/integrate_host.rs");
 const IPC_RS: &str = include_str!("../../../ipc/src/lib.rs");
 const BUILD_RS: &str = include_str!("../build.rs");
 const MENU_RS: &str = include_str!("../src/menu.rs");
@@ -955,12 +956,19 @@ fn the_local_socket_has_no_command_that_decides() {
 /// environment value or an argument list that was not on a card, or take a program, an argument list or a shell string
 /// from the page? If yes, it does not belong here.
 const INTEGRATION_COMMANDS: &[&str] = &[
+    "integration_binary_clear",
+    "integration_binary_set",
     "integration_cancel",
     "integration_confirm",
     "integration_context",
     "integration_launch",
     "integration_prepare",
+    "integration_profile_remove",
+    "integration_profile_save",
+    "integration_profiles",
     "integration_run",
+    "integration_secret_clear",
+    "integration_secret_set",
     "integration_select",
     "integration_tools",
 ];
@@ -972,6 +980,7 @@ fn the_integration_commands_are_exactly_the_reviewed_list() {
     let permissions = capability_permissions().expect("capability permissions");
     let reviewed: BTreeSet<String> = INTEGRATION_COMMANDS.iter().map(|n| (*n).to_owned()).collect();
     assert_eq!(reviewed.len(), INTEGRATION_COMMANDS.len(), "INTEGRATION_COMMANDS lists a command twice");
+    assert_eq!(INTEGRATION_COMMANDS.len(), 15, "the integrations have fifteen commands");
     assert!(INTEGRATION_COMMANDS.windows(2).all(|pair| pair[0] < pair[1]), "INTEGRATION_COMMANDS is sorted");
     let mine = |names: &BTreeSet<String>| -> BTreeSet<String> {
         names.iter().filter(|n| n.starts_with("integration_")).cloned().collect()
@@ -1167,4 +1176,174 @@ fn the_local_socket_and_wsh_know_nothing_of_the_integrations() {
     assert!(flagged.iter().any(|p| p.contains("wsh/src/rogue.rs names `approved`")), "{flagged:?}");
     let quiet = vec![("ipc/src/quiet.rs".to_owned(), "// a ticket for the integration\nfn a() {}\n#[cfg(test)]\nmod tests {\n    const T: &str = \"ticket\";\n}\n".to_owned())];
     assert_eq!(socket_problems(&quiet), Vec::<String>::new());
+}
+
+// ---- what the integration commands take and give back ----------------------------------------------------------------
+
+/// The exact answer type of every integration command. A command whose answer changes shape is reviewed again: the types
+/// named here are the ones that were read, and none of them holds a secret, an environment value that was not on a card
+/// or an argument list that was not on a card.
+const INTEGRATION_ANSWERS: &[(&str, &str)] = &[
+    ("integration_binary_clear", "Result<Vec<ToolView>, IntegrationFault>"),
+    ("integration_binary_set", "Result<Vec<ToolView>, IntegrationFault>"),
+    ("integration_cancel", "Result<(), IntegrationFault>"),
+    ("integration_confirm", "Result<ConfirmAnswer, IntegrationFault>"),
+    ("integration_context", "ContextAnswer"),
+    ("integration_launch", "Result<LaunchAnswer, IntegrationFault>"),
+    ("integration_prepare", "Result<Card, IntegrationFault>"),
+    ("integration_profile_remove", "Result<ProfilesView, IntegrationFault>"),
+    ("integration_profile_save", "Result<ProfilesView, IntegrationFault>"),
+    ("integration_profiles", "ProfilesView"),
+    ("integration_run", "Result<RunAnswer, IntegrationFault>"),
+    ("integration_secret_clear", "Result<(), IntegrationFault>"),
+    ("integration_secret_set", "Result<(), IntegrationFault>"),
+    ("integration_select", "Result<SelectionView, IntegrationFault>"),
+    ("integration_tools", "Vec<ToolView>"),
+];
+
+/// Words an answer type never has: a secret, a zeroizing string, a key or a loose JSON value.
+const NEVER_IN_AN_ANSWER: [&str; 4] = ["Secret", "Zeroizing", "ApiKey", "Value"];
+
+/// What is wrong with the arguments and the answers of the integration commands among `names`, as sentences:
+/// `integration_secret_set` is the only command with an argument named `value`, takes the profile, the name and the value as
+/// strings in that order and answers nothing; `integration_secret_clear` takes the profile and the name and answers nothing;
+/// every command answers the type that was reviewed (`INTEGRATION_ANSWERS`) and no answer type names a secret.
+fn integration_value_problems(commands_rs: &str, names: &BTreeSet<String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    for name in names.iter().filter(|name| name.starts_with("integration_")) {
+        let Some(args) = arguments(commands_rs, name) else {
+            problems.push(format!("{name} is in the manifest but is not a command function of commands.rs"));
+            continue;
+        };
+        let shown: Vec<(&str, &str)> = args.iter().map(|(arg, ty)| (arg.as_str(), ty.as_str())).collect();
+        let answer = return_type(commands_rs, name).unwrap_or_default();
+        match INTEGRATION_ANSWERS.iter().find(|(own, _)| own == name) {
+            Some((_, reviewed)) if answer == *reviewed => {}
+            Some((_, reviewed)) => problems.push(format!("{name} answers `{answer}`, not the reviewed `{reviewed}`")),
+            None => problems.push(format!("{name} has no reviewed answer type in INTEGRATION_ANSWERS")),
+        }
+        for word in NEVER_IN_AN_ANSWER {
+            if answer.contains(word) {
+                problems.push(format!("{name} answers `{answer}`, which mentions {word}"));
+            }
+        }
+        match name.as_str() {
+            "integration_secret_set" => {
+                let expected = [("profile", "String"), ("name", "String"), ("value", "String")];
+                if shown != expected {
+                    problems.push(format!("integration_secret_set takes {shown:?}, not the reviewed list {expected:?}"));
+                }
+                if answer != "Result<(), IntegrationFault>" {
+                    problems.push(format!("integration_secret_set answers `{answer}`: a value goes in and nothing comes out"));
+                }
+            }
+            "integration_secret_clear" => {
+                let expected = [("profile", "String"), ("name", "String")];
+                if shown != expected {
+                    problems.push(format!("integration_secret_clear takes {shown:?}, not the reviewed list {expected:?}"));
+                }
+                if answer != "Result<(), IntegrationFault>" {
+                    problems.push(format!("integration_secret_clear answers `{answer}`: it answers nothing"));
+                }
+            }
+            _ => {
+                if args.iter().any(|(arg, _)| arg == "value") {
+                    problems.push(format!("{name} takes an argument named value: only integration_secret_set takes a value"));
+                }
+            }
+        }
+    }
+    problems
+}
+
+/// The public fields of the structs in the part of `source` that ships, as (struct, field) pairs.
+fn public_fields(source: &str) -> Vec<(String, String)> {
+    let shipped = source.split("\n#[cfg(test)]\nmod ").next().unwrap_or(source);
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    for line in code_lines(shipped) {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("pub struct ") {
+            let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            current = if trimmed.trim_end().ends_with('{') { Some(name) } else { None };
+        } else if line.starts_with('}') {
+            current = None;
+        } else if let (Some(owner), Some(field)) = (&current, trimmed.strip_prefix("pub ")) {
+            if let Some((name, _)) = field.split_once(':') {
+                out.push((owner.clone(), name.trim().to_owned()));
+            }
+        }
+    }
+    out
+}
+
+/// What is wrong with the public fields of the answer types that the shell defines: a field that says it holds a secret, a
+/// value, a token, a password, a key, an environment, an argument list, a program or a shell string; and a `note` anywhere
+/// but in `ConfirmAnswer`, whose note is the one line of a tool's own output (cleaned and cut by the core).
+fn integration_field_problems(host_rs: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let fields = public_fields(host_rs);
+    for (owner, field) in &fields {
+        let lower = field.to_lowercase();
+        for word in ["secret", "value", "token", "password", "key", "env", "argv", "program", "shell", "command"] {
+            if lower.contains(word) {
+                problems.push(format!("{owner}.{field} could hold {word}: an answer never carries it"));
+            }
+        }
+        if field == "note" && owner != "ConfirmAnswer" {
+            problems.push(format!("{owner}.note: only ConfirmAnswer carries a tool's own words"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn only_one_command_takes_a_value_and_none_returns_a_secret() {
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    assert_eq!(INTEGRATION_ANSWERS.len(), INTEGRATION_COMMANDS.len(), "every integration command has a reviewed answer");
+    let names: Vec<&str> = INTEGRATION_ANSWERS.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, INTEGRATION_COMMANDS, "the answers are listed for exactly the reviewed commands, in the same order");
+
+    let problems = integration_value_problems(COMMANDS_RS, &manifest);
+    assert!(problems.is_empty(), "an integration command could take or give back a secret:\n  {}", problems.join("\n  "));
+    for name in &manifest {
+        if name.starts_with("integration_") && name != "integration_secret_set" {
+            let args = arguments(COMMANDS_RS, name).expect("a command function");
+            assert!(args.iter().all(|(arg, _)| arg != "value"), "{name} takes a value");
+        }
+    }
+    let fields = integration_field_problems(INTEGRATE_HOST_RS);
+    assert!(fields.is_empty(), "an answer type could hold what it must not:\n  {}", fields.join("\n  "));
+    let seen = public_fields(INTEGRATE_HOST_RS);
+    assert!(seen.iter().any(|(owner, field)| owner == "ConfirmAnswer" && field == "note"), "the scan found {seen:?}");
+
+    // The scanners flag a getter for a secret, a second command that takes a value, an answer that changed shape, a command
+    // nobody reviewed, and a field that could hold a secret; they accept the real ones.
+    let source = "\
+pub fn integration_secret_set(core: State<Arc<AppCore>>, profile: String, name: String, value: String) -> Result<String, IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_secret_clear(core: State<Arc<AppCore>>, profile: String, name: String, value: String) -> Result<(), IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_select(core: State<Arc<AppCore>>, tool: String, value: String) -> Result<SelectionView, IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_tools(core: State<Arc<AppCore>>) -> Result<Vec<ToolView>, IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_peek(core: State<Arc<AppCore>>) -> Result<Zeroizing<String>, IntegrationFault> {\n    todo()\n}\n";
+    let all = set(&["integration_secret_set", "integration_secret_clear", "integration_select", "integration_tools", "integration_peek"]);
+    let flagged = integration_value_problems(source, &all);
+    let said = |needle: &str| flagged.iter().any(|problem| problem.contains(needle));
+    assert!(said("integration_secret_set answers `Result<String, IntegrationFault>`"), "{flagged:?}");
+    assert!(said("integration_secret_clear takes"), "{flagged:?}");
+    assert!(said("integration_select takes an argument named value"), "{flagged:?}");
+    assert!(said("integration_tools answers `Result<Vec<ToolView>, IntegrationFault>`, not the reviewed `Vec<ToolView>`"), "{flagged:?}");
+    assert!(said("integration_peek has no reviewed answer type"), "{flagged:?}");
+    assert!(said("integration_peek answers `Result<Zeroizing<String>, IntegrationFault>`, which mentions Zeroizing"), "{flagged:?}");
+    let real = "\
+pub fn integration_secret_set(core: State<Arc<AppCore>>, profile: String, name: String, value: String) -> Result<(), IntegrationFault> {\n    todo()\n}\n\
+pub fn integration_secret_clear(core: State<Arc<AppCore>>, profile: String, name: String) -> Result<(), IntegrationFault> {\n    todo()\n}\n";
+    assert_eq!(integration_value_problems(real, &set(&["integration_secret_set", "integration_secret_clear"])), Vec::<String>::new());
+
+    let leaky = "pub struct Answer {\n    pub kind: u8,\n    pub secret_env: String,\n    pub note: String,\n    pub api_key: String,\n}\npub struct ConfirmAnswer {\n    pub note: String,\n}\n";
+    let flagged = integration_field_problems(leaky);
+    let said = |needle: &str| flagged.iter().any(|problem| problem.contains(needle));
+    assert!(said("Answer.secret_env could hold secret"), "{flagged:?}");
+    assert!(said("Answer.api_key could hold key"), "{flagged:?}");
+    assert!(said("Answer.note: only ConfirmAnswer"), "{flagged:?}");
+    assert!(!flagged.iter().any(|problem| problem.contains("ConfirmAnswer.")), "{flagged:?}");
 }

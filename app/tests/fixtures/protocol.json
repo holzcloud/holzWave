@@ -483,6 +483,58 @@
           ]
         }
       },
+      "nothing": null,
+      "profile_fault": {
+        "code": "profile",
+        "reason": "invalid",
+        "text": "Profile prod: context is not valid."
+      },
+      "profiles": {
+        "notes": [
+          "integrations.json was not used: it has a member or a value that is not allowed (line 3, column 9)"
+        ],
+        "profiles": [
+          {
+            "context": "prod-cluster",
+            "env": {
+              "AWS_PROFILE": "prod"
+            },
+            "id": "prod",
+            "isolated": false,
+            "name": "Production",
+            "namespace": null,
+            "node": null,
+            "production": true,
+            "secret_env": [
+              {
+                "has_value": true,
+                "name": "AWS_SECRET_ACCESS_KEY"
+              },
+              {
+                "has_value": false,
+                "name": "AWS_SESSION_TOKEN"
+              }
+            ],
+            "section": null,
+            "subscription": null,
+            "tool": "kube"
+          },
+          {
+            "context": null,
+            "env": {},
+            "id": "work",
+            "isolated": true,
+            "name": "Work",
+            "namespace": null,
+            "node": null,
+            "production": false,
+            "secret_env": [],
+            "section": null,
+            "subscription": "00000000-0000-0000-0000-000000000000",
+            "tool": "azure"
+          }
+        ]
+      },
       "run": {
         "fetched": 1800000000,
         "selection": {
@@ -1117,6 +1169,13 @@
       "query",
       "limit"
     ],
+    "integration_binary_clear": [
+      "tool"
+    ],
+    "integration_binary_set": [
+      "tool",
+      "path"
+    ],
     "integration_cancel": [
       "ticket"
     ],
@@ -1141,11 +1200,27 @@
       "pane",
       "args"
     ],
+    "integration_profile_remove": [
+      "id"
+    ],
+    "integration_profile_save": [
+      "profile"
+    ],
+    "integration_profiles": [],
     "integration_run": [
       "tool",
       "verb",
       "pane",
       "args"
+    ],
+    "integration_secret_clear": [
+      "profile",
+      "name"
+    ],
+    "integration_secret_set": [
+      "profile",
+      "name",
+      "value"
     ],
     "integration_select": [
       "tool",

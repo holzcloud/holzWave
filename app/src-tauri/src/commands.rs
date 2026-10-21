@@ -27,7 +27,7 @@ use holzwave_core::ai::types::ContextKind;
 use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened, Saved};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
-use holzwave_core::integrate::service::{RunAnswer, SelectionView, ToolView};
+use holzwave_core::integrate::service::{ProfilesView, RunAnswer, SelectionView, ToolView};
 use holzwave_core::integrate::ticket::Card;
 use holzwave_core::integrate::Selection;
 use holzwave_core::engine::{
@@ -1285,4 +1285,64 @@ pub fn integration_launch(
     placement: String,
 ) -> Result<LaunchAnswer, IntegrationFault> {
     core.integration_launch(window.label(), &tool, &verb, pane, &args, &placement)
+}
+
+/// Makes `path` the program of `tool`. The person chooses which `kubectl` runs and not which program: the path must be
+/// absolute, its file name must be one of the tool's own names, and the file must be one the core finds usable (an
+/// executable file that no one but the person's group can replace). Answers the four tools again; a path that does not
+/// pass is the fault object. It asks the tool for its version, so it is async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_binary_set(
+    core: State<Arc<AppCore>>,
+    tool: String,
+    path: String,
+) -> Result<Vec<ToolView>, IntegrationFault> {
+    core.integration_binary_set(&tool, &path)
+}
+
+/// Forgets the program the person chose for `tool`; the search of the core applies again. Answers the four tools again.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_binary_clear(core: State<Arc<AppCore>>, tool: String) -> Result<Vec<ToolView>, IntegrationFault> {
+    core.integration_binary_clear(&tool)
+}
+
+/// The profiles and the notes about the files that could not be used. A profile lists its secret variables by name, each
+/// with whether the keychain has a value (`has_value`): a yes or a no, never the value. It asks the keychain, so it is
+/// async.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_profiles(core: State<Arc<AppCore>>) -> ProfilesView {
+    core.integration_profiles()
+}
+
+/// Adds a profile or replaces the one with the same id. `profile` has the shape of the profiles file: `secret_env` is a
+/// list of names and `env` an object of plain values; the rules of the loader decide. A profile that does not pass is the
+/// fault object with the code `profile`, naming the profile and the field and never a value. Answers the profiles again.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_profile_save(core: State<Arc<AppCore>>, profile: Value) -> Result<ProfilesView, IntegrationFault> {
+    core.integration_profile_save(profile)
+}
+
+/// Removes a profile and the values of its secret variables from the keychain. Answers the profiles again.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_profile_remove(core: State<Arc<AppCore>>, id: String) -> Result<ProfilesView, IntegrationFault> {
+    core.integration_profile_remove(&id)
+}
+
+/// Stores the value of one secret variable of a profile in the system keychain. It is the one integration command that
+/// takes a value, and it answers nothing: a value goes in and never comes out. The name must be one the profile declares in
+/// `secret_env` and the value 1 to 1024 bytes; anything else is the fault object with the code `profile`.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_secret_set(
+    core: State<Arc<AppCore>>,
+    profile: String,
+    name: String,
+    value: String,
+) -> Result<(), IntegrationFault> {
+    core.integration_secret_set(&profile, &name, value)
+}
+
+/// Removes the value of one secret variable of a profile from the keychain. Answers nothing.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn integration_secret_clear(core: State<Arc<AppCore>>, profile: String, name: String) -> Result<(), IntegrationFault> {
+    core.integration_secret_clear(&profile, &name)
 }
