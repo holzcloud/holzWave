@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { readLocalNetwork } from "../../dist/localnetstate.js";
+import { GROUP, NOTICE, STATE_WORDS, describeLocalNetwork, readLocalNetwork } from "../../dist/localnetstate.js";
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
 
@@ -49,4 +49,51 @@ test("hostile input is never kept", () => {
   assert.equal(Object.hasOwn(extra, "__proto__"), false);
   assert.equal(extra.polluted, undefined);
   assert.equal(Object.keys(extra).length, 3);
+});
+
+// The sentences below are the design record's (docs/design.md 6.24); the tables of the page are held to them here and in the browser test.
+test("the notice and the group say what the design record says", () => {
+  assert.equal(NOTICE.title, "Allow local network access?");
+  assert.equal(NOTICE.lead, "holzWave reaches computers on your local network:");
+  assert.deepEqual([...NOTICE.items], [
+    "SSH to machines on your network.",
+    "Local AI servers on other computers, such as Ollama or LM Studio.",
+    "Sync with a Nextcloud on your network.",
+  ]);
+  assert.equal(NOTICE.note, "macOS asks for your permission next. Programs you run in a pane, such as ssh, count as holzWave. You can change this any time in Settings.");
+  assert.equal(NOTICE.notNow, "Not now");
+  assert.equal(NOTICE.allow, "Allow");
+  assert.deepEqual({ ...GROUP }, {
+    legend: "Local network", name: "Access", meta: "Privacy & Security", open: "Open System Settings", allow: "Allow",
+    check: "Check again", checking: "Checking\u2026", checked: "Checked.",
+    asked: "Asked. Answer the macOS question, then choose Check again.",
+  });
+});
+
+test("every state has a word, a tone, a second cue, an advice sentence and its buttons", () => {
+  assert.deepEqual(Object.keys(STATE_WORDS).sort(), ["allowed", "denied", "not_asked", "unknown"]);
+  const expected = {
+    allowed: ["allowed", "ok", false, "", "holzWave can reach computers on your local network.", false, false],
+    denied: ["denied", "warn", true, "!", "macOS blocks holzWave from your local network. Turn holzWave on in System Settings, then choose Check again.", false, true],
+    not_asked: ["not asked yet", "plain", false, "", "macOS has not been asked. Choose Allow and macOS shows its own question.", true, false],
+    unknown: ["not known", "plain", false, "?", "holzWave could not tell. macOS may still be waiting for your answer. Choose Check again.", false, true],
+  };
+  for (const [state, [word, tone, underline, mark, advice, allow, check]] of Object.entries(expected)) {
+    assert.deepEqual({ ...STATE_WORDS[state] }, { word, tone, underline, mark, advice, allow, check }, state);
+    // The state is never colour alone: the word differs for each state, and a state that needs attention has a mark or a line too.
+    assert.ok(STATE_WORDS[state].word.length > 0);
+  }
+  assert.equal(new Set(Object.values(STATE_WORDS).map((w) => w.word)).size, 4, "four different words");
+});
+
+test("describeLocalNetwork gives the entry of the state and the unknown entry for anything else", () => {
+  for (const sample of golden.answers.local_network.filter((x) => x.supported)) {
+    const view = readLocalNetwork(sample);
+    assert.deepEqual({ ...describeLocalNetwork(view) }, { state: sample.state, ...STATE_WORDS[sample.state] }, sample.state);
+  }
+  assert.equal(describeLocalNetwork(null).state, "unknown");
+  assert.equal(describeLocalNetwork(null).word, "not known");
+  const hostile = readLocalNetwork({ supported: true, notice_due: false, state: "Allowed" });
+  assert.equal(describeLocalNetwork(hostile).state, "unknown");
+  assert.equal(describeLocalNetwork({ supported: true, noticeDue: false, state: "constructor" }).state, "unknown", "a table key is never inherited");
 });

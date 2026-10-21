@@ -10,6 +10,7 @@
 // and move with the arrow keys.
 import { el, fitNodes, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
+import { mountLocalNetworkGroup } from "./localnet.js";
 import { FONT_SIZE_RANGE, SCROLLBACK_RANGE, UI_SCALE_RANGE, typedInteger } from "./settings-model.js";
 import type { SettingsValues } from "./settings-model.js";
 import { state } from "./state.js";
@@ -73,6 +74,8 @@ async function show(api: SettingsApi): Promise<void> {
   try {
     await loadStyles("./dialogs.css");
     await loadStyles("./settings.css");
+    // The group `Local network` exists on macOS only (docs/design.md 6.24).
+    if (state.os === "macos") await loadStyles("./localnet.css");
   } catch {
     // the dialog still works without its style sheets
   }
@@ -264,6 +267,8 @@ async function show(api: SettingsApi): Promise<void> {
     const close = el("button", "dlg-ok", actions);
     close.type = "button";
     close.textContent = "Close";
+    // The group sits after Accessibility and before the buttons; it reads the permission itself and leaves when the system has none.
+    const removeNetwork = state.os === "macos" ? mountLocalNetworkGroup(box, actions) : null;
 
     // ---- showing the state -----------------------------------------------------------------------
 
@@ -302,6 +307,7 @@ async function show(api: SettingsApi): Promise<void> {
     const finish = (): void => {
       if (done) return;
       done = true;
+      removeNetwork?.();
       stop();
       pop();
       backdrop.remove();

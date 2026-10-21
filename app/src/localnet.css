@@ -1,0 +1,41 @@
+/* The notice of the first start and the group of the Settings dialog for the macOS Local Network permission (localnet.ts,
+   docs/design.md section 6.24). Loaded with `loadStyles("./localnet.css")` after dialogs.css and settings.css, whose backdrop,
+   box, group and button styles it builds on. Every colour is a `--hw-*` token (the theme replaces the values) and every size is
+   in rem, so the UI scale moves it with the rest of the chrome; a pixel value appears only for the 28 px desktop minimum of a
+   target and the 2 px focus ring. Flat and hairline: the one shadow is the one the dialog box already has. Nothing here moves. */
+
+/* The notice: the box of the Settings dialog, text only. */
+.dlg.localnet { width: min(30rem, calc(100vw - 4rem)); font-size: 1rem; line-height: 1.4; }
+.localnet .dlg-title { font-size: 1rem; }
+.localnet .localnet-lead { margin: 0 0 .333rem; color: var(--hw-ink); }
+.localnet .localnet-list { margin: 0 0 .667rem; padding: 0 0 0 1.25rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.localnet .localnet-list li { margin: 0 0 .167rem; }
+.localnet .localnet-note { margin: 0 0 .5rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.localnet .localnet-status { min-height: 1.4em; margin: 0; color: var(--hw-warn); overflow-wrap: anywhere; }
+.localnet .localnet-status:empty { display: none; }
+.dlg.localnet button, .settings .set-net button { display: inline-flex; align-items: center; justify-content: center;
+                                                   min-height: max(28px, calc(28rem / 12)); font-size: calc(11rem / 12); }
+
+/* The group `.set-net`: one read-only row, the name, the dim meta and the state, then one sentence and the buttons. The state is
+   words first; a state that needs attention is also underlined (denied) or marked (denied "!", not known "?"). */
+.settings .set-net-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 .667rem; box-sizing: border-box;
+                         min-height: max(28px, calc(28rem / 12)); }
+.settings .set-net-row:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.settings .set-net-name { flex: none; color: var(--hw-ink); }
+.settings .set-net-meta { min-width: 0; color: var(--hw-dim); }
+.settings .set-net-state { min-width: 0; margin-left: auto; color: var(--hw-dim); text-align: right; overflow-wrap: anywhere; }
+.settings .set-net-row[data-tone="ok"] .set-net-state { color: var(--hw-ok); }
+.settings .set-net-row[data-tone="warn"] .set-net-state { color: var(--hw-warn); text-decoration: underline; }
+.settings .set-net-row[data-tone="warn"] .set-net-state::before { content: "! "; font-weight: 700; }
+.settings .set-net-row[data-state="unknown"] .set-net-state::before { content: "? "; font-weight: 700; }
+.settings .set-net-advice { flex: 1 0 100%; margin: .167rem 0 .333rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.settings .set-net-advice:empty { display: none; }
+.settings .set-net-buttons { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: .333rem .5rem; }
+.settings .set-net-buttons button { flex: none; }
+.settings .set-net-line { min-height: 1.4em; margin: .333rem 0 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+
+/* ---- forced colours: system colours outline the row; the box and the group keep their borders ---------------------------------- */
+
+@media (forced-colors: active) {
+  :root .settings .set-net-row { outline: 2px solid CanvasText; outline-offset: -2px; }
+}

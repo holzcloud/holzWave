@@ -16,6 +16,7 @@ import { initConnections } from "./connections.js";
 import { initSync } from "./sync.js";
 import { initHistory } from "./historyview.js";
 import { initLoginPrompt } from "./loginprompt.js";
+import { initLocalNetwork } from "./localnet.js";
 import { initInline } from "./inline.js";
 import { decorateReply } from "./inlinecode.js";
 import { sidebarChat } from "./aisidebar.js";
@@ -89,5 +90,7 @@ async function main() {
   // Every window says so once it has drawn its first layout and listens: the shell shows a window it built hidden (a
   // torn off or restored one) now, and tells it the last title and directory of its panes. A no-op for a shown one.
   await call("window_ready").catch(() => {});
+  // The first window of a Mac asks once, after its first layout is on screen, whether holzWave may use the local network (docs/design.md 6.24).
+  void initLocalNetwork();
 }
 void main();

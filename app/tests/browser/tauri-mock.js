@@ -19,7 +19,21 @@
 //                      it the bar marks nothing, design 6.23)
 //     view()           a copy of the layout the layout commands currently return
 //     reset()          clear calls and handlers and go back to the default layout (listeners are kept); the chat below
-//                      is reset too
+//                      and the local network hook are reset too
+//     localNetwork     the macOS Local Network permission of the shell (docs/design.md 6.24): the commands `local_network_status`,
+//                      `local_network_answer` and `local_network_open_settings`, answered from this hook. The default says the
+//                      system has no such setting, so no other test sees a notice or a group
+//       view           a copy of the answer of the first two commands: `{ supported, notice_due, state }`, by default
+//                      `{ supported: false, notice_due: false, state: "not_asked" }`
+//       set(partial)   change members of `view`
+//       afterAllow     the state `local_network_answer` with `allow` true moves to (default `unknown`; the shell never answers `denied`
+//                      to it). With `allow` true or false the answer sets `notice_due` to false. A call while `supported` is false
+//                      rejects with `not supported on this system`, as the core's
+//       calls          every call of the three commands as `[command, args]`, oldest first
+//       hold(), release()  the answer of `local_network_status` waits until `release()`; the call is recorded at once
+//       openFails(text)    `local_network_open_settings` rejects with `text` (a string, as the shell's error); openFails(null) stops it
+//       answerFails(text)  `local_network_answer` rejects with `text` and changes nothing; answerFails(null) stops it
+//       reset()        back to the default
 //     ai               the AI chat of the core, played from the shapes of app/tests/fixtures/ai_stream.json:
 //       profiles       the `profiles` member of the answer of `ai_profiles` (default none). A profile view carries the
 //                      members of the core's `ProfileView` and the mock-only member `locality` (`on_device`,
@@ -1540,6 +1554,67 @@
     },
   };
 
+  // The Local Network permission of the shell: one view, the calls, and the knobs of the header comment.
+  const netStart = () => ({
+    view: { supported: false, notice_due: false, state: "not_asked" }, afterAllow: "unknown", calls: [], held: false, waiters: [],
+    openError: null, answerError: null,
+  });
+  let net = netStart();
+  const netCommands = {
+    async local_network_status(args) {
+      net.calls.push(["local_network_status", args]);
+      if (net.held) await new Promise((go) => net.waiters.push(go));
+      return structuredClone(net.view);
+    },
+    async local_network_answer(args) {
+      net.calls.push(["local_network_answer", args]);
+      if (net.answerError !== null) throw net.answerError;
+      if (!net.view.supported) throw "not supported on this system";
+      net.view.notice_due = false;
+      if (args.allow === true) net.view.state = net.afterAllow;
+      return structuredClone(net.view);
+    },
+    async local_network_open_settings(args) {
+      net.calls.push(["local_network_open_settings", args]);
+      if (net.openError !== null) throw net.openError;
+      return null;
+    },
+  };
+  const localNetwork = {
+    get view() {
+      return structuredClone(net.view);
+    },
+    set(partial) {
+      Object.assign(net.view, structuredClone(partial));
+    },
+    get afterAllow() {
+      return net.afterAllow;
+    },
+    set afterAllow(state) {
+      net.afterAllow = state;
+    },
+    get calls() {
+      return structuredClone(net.calls);
+    },
+    hold() {
+      net.held = true;
+    },
+    release() {
+      net.held = false;
+      for (const go of net.waiters.splice(0)) go();
+    },
+    openFails(text) {
+      net.openError = text ?? null;
+    },
+    answerFails(text) {
+      net.answerError = text ?? null;
+    },
+    reset() {
+      for (const go of net.waiters.splice(0)) go();
+      net = netStart();
+    },
+  };
+
   const mock = {
     calls,
     label,
@@ -1565,9 +1640,13 @@
       custom = null;
       layoutError = null;
       mockAi.reset();
+      localNetwork.reset();
     },
     get ai() {
       return mockAi;
+    },
+    get localNetwork() {
+      return localNetwork;
     },
   };
 
@@ -1579,6 +1658,7 @@
         const handler = handlers.get(cmd);
         if (handler) return (await handler(args)) ?? null;
         if (Object.hasOwn(aiCommands, cmd)) return aiCommands[cmd](args ?? {}) ?? null;
+        if (Object.hasOwn(netCommands, cmd)) return netCommands[cmd](args ?? {});
         if (LAYOUT_COMMANDS.has(cmd) && layoutError !== null) throw layoutError; // Tauri rejects with the error text
         if (cmd === "set_ratio") setRatio(args);
         if (cmd === "release_outside") return { outcome: "cancelled" };
