@@ -87,6 +87,7 @@ The modules of `holzwave-core` as built (`core/src/`):
 | `theme` | built-in and user themes, terminal palette and chrome tokens, contrast helpers | ✅ |
 | `keybindings` | action ids, chord grammar, default table, resolution of overrides | ✅ |
 | `session` | `session.json`: per-pane working directory and window geometry, machine-local | ✅ |
+| `local_network` | `local_network.json`: the choice made at the notice for the macOS Local Network permission (`unasked`, `declined`, `requested`), machine-local and never synced, and the rule that nothing probes the network before `Allow` | ✅ |
 | `ai` | the AI chat core (`core/src/ai/`, below): the `Provider` trait and `HttpProvider` over five wire adapters in `ai/wire/` (`anthropic.rs`, `gemini.rs`, `ollama.rs`, `openai_chat.rs`, `openai_responses.rs`), the one HTTP chokepoint `ai/http.rs`, the context gate `gate.rs` and `redact.rs`, tools and approval in `tools/`, the agent loop `agent.rs`, the conversation store `store.rs`, profiles and keys `profiles.rs`, the service facade `service.rs` with `service/` | ✅ |
 | `textread` | reads the screen, the selection, the last rows or the last command's output as text, with the cells nobody could read marked | ✅ |
 | `exec` | runs one command in a separate process with a scrubbed environment, a time limit and a kill of everything it started | ✅ |
@@ -108,7 +109,7 @@ The AI chat in the shell and the page (`holzwave-core` itself stays free of Taur
 | `ai_ask.rs`, `ai_device.rs` | the confirmation of `wsh ai` requests, and the one question the shell asks of the Apple model (`DeviceSource`) |
 | `wsh/src/ai.rs`, `ipc/src/stream.rs` | `wsh ai` and the streamed reply of the local socket |
 | `plugins/apple-ai/` | `src/{backend,native,prompt,provider,pump,scripted}.rs` over `swift/Sources/AppleAI/` |
-| `app/src/` | the chat (`chat`, `chatview`, `chatstate`, `chatlist`), the sidebar form (`aisidebar`), the providers dialog (`aisettings`, `aistate`, `ondevice`), consent (`consent*`), approval and undo (`approval*`, `undo`), `wsh ai` requests (`ask*`), the palette actions (`inline*`), and the monitor and history views (`monitorstate`, `historystate`, `historyview`) |
+| `app/src/` | the chat (`chat`, `chatview`, `chatstate`, `chatlist`), the sidebar form (`aisidebar`), the providers dialog (`aisettings`, `aistate`, `ondevice`), the macOS local network notice and Settings group (`localnet`, `localnetstate`, `localnet.css`), consent (`consent*`), approval and undo (`approval*`, `undo`), `wsh ai` requests (`ask*`), the palette actions (`inline*`), and the monitor and history views (`monitorstate`, `historystate`, `historyview`) |
 
 The app shell keeps one more type of its own, `AppCore` (`app/src-tauri/src/state.rs`): it holds the layout, the
 running panes, the settings and the session, has no Tauri type in it, and is tested headless with a recording sink
@@ -310,6 +311,7 @@ applied step by step by the TypeScript patcher, so both languages are proven aga
 | Settings, key binding overrides | `settings.json` ✅ → SQLite later | yes | read key by key, one bad value costs one key; formats in [config.md](config.md) |
 | Themes | `themes/*.json` ✅ | yes | one file per theme, validated; `#rrggbb` colours only |
 | Working directories, window frame | `session.json` ✅ | no | machine-local hints; a damaged file costs the hint, never the start |
+| Local network notice | `local_network.json` ✅ | no | the choice of the macOS notice (macOS 15 or later only); machine-local, so another Mac asks for itself; a damaged file costs the choice, never the start |
 | Connection profiles | SQLite | yes | secret fields hold a keychain key, never the secret |
 | Command history | `history.db` ✅, SQLite, owner-only, deleted rows overwritten | no | fuzzy search (`nucleo-matcher`); each use carries the label of the host it ran on (`local`, `ssh:{id}`, `wsl:{id}`, `docker:{id}`). Only commands typed in a pane of this computer or of a saved connection reach it, nothing is recorded from a far shell. It is not synced: deletions of themes and widgets travel (see [sync.md](sync.md)), but the history is a database that cannot be carried entry by entry, so a forgotten command would come back |
 | Widgets | `widgets/<id>.json`, `widget_notes.json` ✅ | yes | data only, checked by the loader and described by `docs/widget.schema.json` |

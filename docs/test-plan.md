@@ -325,6 +325,38 @@ Machines the rows need:
 - M2: a Linux host over SSH, and a Mac or a BSD host. H2: the shells the row names. H3: a Windows machine. H4: a saved
   connection next to a local pane.
 
+## Part 8: local network on macOS
+
+The notice and the Settings group `Local network` (docs/design.md section 6.24) are built and tested against a page stub and
+a scripted source. Nothing here is claimed verified. A program started from Terminal is exempt from the macOS privacy
+setting, so a test run from Terminal (`cargo test`, the example probe) reads `allowed` whatever the setting is: the system
+question, the denial and the Settings anchor can only be seen with the app bundle started from Finder. The Result column
+is empty until you have run the row: write `pass`, or `fail` with a line of what was seen. A row that you do not run stays
+empty. A failing row becomes a task of its own.
+
+Build the bundle with `npm --prefix app run tauri -- build --bundles app` and start it from Finder. The choice of the
+notice is kept in `local_network.json` in the data directory: `unasked`, `declined` or `requested`. Delete the file to be
+asked again.
+
+| # | Area | What to do | Expected | Result |
+|---|---|---|---|---|
+| LN1 | First start | On a Mac with macOS 15 or later, start the bundle from Finder on a fresh data directory (no `local_network.json`). (1) Read the notice. (2) Press `Not now`. (3) Quit and start again. (4) Open Settings and read the group `Local network`. | The notice `Allow local network access?` appears once with the three reasons and the two buttons, `Allow` focused. `Not now` shows no macOS question. The restart shows no notice. The group says `not asked yet` and offers `Open System Settings` and `Allow`. `local_network.json` holds `declined`. | |
+| LN2 | The Allow path | Start from a fresh state (a rebuilt, re-signed bundle is expected to be a new app for macOS; if the old answer is kept, use a new macOS user). Press `Allow` in the notice or in the Settings row. Read the macOS question, allow it, then press `Check again` in the Settings. Open a pane and run `ssh` to a host on your LAN. | macOS shows its own question with the usage text of the plist (`holzWave connects to computers on your local network: ...`). The Settings line first says `Asked. Answer the macOS question, then choose Check again.`; after `Check again` the row reads `allowed`. `ssh` to the LAN host connects. `local_network.json` holds `requested`. | |
+| LN3 | The deny path | Start from a fresh state again. Press `Allow`, answer `Don't Allow`. Press `Check again`. Run `ssh` to a LAN host in a pane. Then press `Open System Settings`, switch holzWave on there and return to the holzWave window without pressing a button. | The row reads `denied` with the underline and the mark `!` and the advice to turn holzWave on in System Settings. `ssh` fails with `No route to host`. After the switch and the return to the window the row reads `allowed` by itself (the window focus reads once). | |
+| LN4 | The Settings anchor | Press `Open System Settings` in the group. Write down what is seen: Privacy & Security > Local Network, Privacy & Security only, or elsewhere. Do it on every macOS version you have. | System Settings opens on Privacy & Security > Local Network. If the anchor `Privacy_LocalNetwork` is unknown to the system it is expected to open on the Privacy & Security pane (assumed, not confirmed); anything else is a defect of the link constant in `app/src-tauri/src/state.rs`. | |
+| LN5 | The bridge by hand | On the Mac, from `. scripts/env.sh`, run `cargo run -p holzwave-local-network --example probe`. | It prints `applies: true` and `reading: allowed`. This proves the link and the C ABI, not the denial (Terminal is exempt). | |
+| LN6 | Windows and Linux | On a Windows machine and on a Linux machine start holzWave once and open the Settings dialog. | No group `Local network`, no notice at start, and no `local_network.json` in the data directory. | |
+| LN7 | The pending question | Start from a fresh state, press `Allow` and, while the macOS question is still on screen, switch to the holzWave window if you can (or open Settings first and press `Check again` before answering). Write down what the row says. Answer the question, return to the window and read the row. | Records the limit that the state may read `not known` or `denied` for a moment while the question is open (docs/design.md section 6.24, limits). After the answer and a return to the window the row settles on `allowed` or `denied`. | |
+| LN8 | The pictures | Open `docs/design/local-network.png` and `docs/design/local-network-states.png` at full size next to docs/design.md section 6.24. Compare them with the running notice and the group at UI scale 100 % and 200 % and with Contrast High. | Same words, same order, same marks (`!` for denied, `?` for not known), hairlines still visible with Contrast High, buttons at least 28 px high. | |
+
+Machines the rows need:
+
+- LN1 to LN4 and LN7: a Mac with macOS 15 or later and a host on your LAN that accepts SSH (LN2 and LN3). LN4: every macOS
+  version you have.
+- LN5: the Mac that builds the app. LN6: a Windows machine and a Linux desktop. LN8: your Mac.
+- The browser file `app/tests/browser/localnet.test.mjs` runs with the rest of `npm run test:browser` (or alone with
+  `--only localnet`) and needs no Mac.
+
 ## What to expect
 
 Known limits of this build, so they are not reported as defects:

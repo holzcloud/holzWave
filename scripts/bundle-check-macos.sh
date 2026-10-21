@@ -16,6 +16,9 @@
 #   - with the second argument (the file scripts/wsh-sidecar.sh wrote), `wsh` in the bundle is byte-identical to it
 #     and the two Linux resources are identical to the files of the same folder (the package holds what was built,
 #     not a stale or planted file).
+#   - `Contents/Info.plist` holds a non-empty `NSLocalNetworkUsageDescription` (the text of the macOS Local Network
+#     question) and the Bonjour type `_holzwave-probe._tcp` in `NSBonjourServices`; both come from
+#     `app/src-tauri/Info.plist`, which the Tauri bundler merges into the bundle.
 #
 # Exit status: 0 and the last line `bundle-check-macos: ok`, 1 when a check failed, 2 for a bad argument or a
 # missing tool.
@@ -103,4 +106,15 @@ for f in "$exe" "$wsh"; do
     [ -z "$(find "$f" -perm -002 2>/dev/null)" ] || fail "$f is world-writable"
 done
 echo "bundle-check-macos: the executables are not world-writable"
+
+usage=$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$app/Contents/Info.plist" 2>/dev/null) ||
+    fail "no NSLocalNetworkUsageDescription in Info.plist: macOS would ask about the local network without a reason"
+[ -n "$usage" ] || fail "NSLocalNetworkUsageDescription is empty"
+bonjour=$(plutil -extract NSBonjourServices json -o - "$app/Contents/Info.plist" 2>/dev/null) ||
+    fail "no NSBonjourServices in Info.plist"
+case "$bonjour" in
+    *'"_holzwave-probe._tcp"'*) ;;
+    *) fail "NSBonjourServices does not name _holzwave-probe._tcp: $bonjour" ;;
+esac
+echo "bundle-check-macos: Info.plist declares the local network use (usage text, Bonjour type _holzwave-probe._tcp)"
 echo "bundle-check-macos: ok"

@@ -9,7 +9,7 @@ a Nextcloud in Docker; two real computers, your own server and its app-password 
 
 `layout.json`, `settings.json`, `connections.json`, `themes/<name>.json`, `widgets/<name>.json` and `widget_notes.json`,
 plus the connection secrets (passwords and key passphrases from the OS keychain) as one virtual file, `secrets.json`, which
-is never written to disk. Machine-local state (`session.json`, `known_hosts`) is not synced. The two pane files
+is never written to disk. Machine-local state (`session.json`, `local_network.json`, `known_hosts`) is not synced. The two pane files
 (`pane_connections.json` and `pane_blocks.json`) are machine-local too, but their shared part travels inside the layout:
 
 `layout.json` is synced as a **layout unit**: the layout, which panes run which saved connection, and the blocks whose
