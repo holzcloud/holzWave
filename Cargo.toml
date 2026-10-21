@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "ipc", "wsh", "spike", "app/src-tauri", "plugins/apple-ai"]
+members = ["core", "ipc", "wsh", "spike", "app/src-tauri", "plugins/apple-ai", "plugins/local-network"]
 
 [workspace.package]
 version = "0.0.1-beta1"

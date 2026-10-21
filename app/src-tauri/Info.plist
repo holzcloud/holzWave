@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>holzWave connects to computers on your local network: SSH hosts, AI servers such as Ollama or LM Studio, and a Nextcloud for sync. Programs you run in a pane count as holzWave.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_holzwave-probe._tcp</string>
+	</array>
+</dict>
+</plist>

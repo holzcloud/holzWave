@@ -875,6 +875,29 @@ pub fn sync_off(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
     core.sync_off()
 }
 
+/// The Local Network permission of macOS as the page needs it: `{supported, notice_due, state}`. Where the system has no such
+/// setting (Windows, Linux, macOS below 15) `supported` is false and nothing is read. With the choice `requested` it
+/// browses the local network for a moment and may answer `denied`; otherwise it touches nothing. Async: it waits.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn local_network_status(core: State<Arc<AppCore>>) -> crate::local_network::LocalNetworkView {
+    core.local_network().view()
+}
+
+/// The person answered the notice of the Local Network permission (or pressed `Allow` in the Settings row). `allow` true
+/// stores the choice and makes the app touch the network once, which makes macOS show its own question; false stores
+/// `Not now`. Async: it waits.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn local_network_answer(core: State<Arc<AppCore>>, allow: bool) -> Result<crate::local_network::LocalNetworkView, String> {
+    core.local_network().answer(allow)
+}
+
+/// Open System Settings at Privacy & Security, Local Network (macOS only). Takes nothing from the page. Async: it starts a
+/// process.
+#[tauri::command(async, rename_all = "snake_case")]
+pub fn local_network_open_settings(core: State<Arc<AppCore>>) -> Result<(), String> {
+    core.open_local_network_settings()
+}
+
 /// What the computer of a monitor pane is doing: CPU, memory, network and the busiest processes, or the word that it is
 /// not a computer this monitor can read. The page names a pane and never an address: the pane's block names the source.
 #[tauri::command(async, rename_all = "snake_case")]

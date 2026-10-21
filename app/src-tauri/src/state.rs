@@ -818,6 +818,8 @@ pub struct AppCore {
     sync: crate::sync::SyncRuntime,
     /// The AI chat service and the calls the commands make on it. It owns its threads and takes no lock of the core.
     ai: AiHost,
+    /// The Local Network permission of macOS: the person's stored choice and the probe of the system. Inert elsewhere.
+    local_network: crate::local_network::LocalNetworkHost,
     /// The exec primitive of each saved connection a command ran on, kept for the life of the connection list.
     remote_execs: RemoteExecs<SshExec>,
     /// The questions of keyboard-interactive logins that wait for the person (see [`crate::login_prompt`]). Also the
@@ -1011,6 +1013,7 @@ impl AppCore {
         });
         let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
         let host = AiHost::new(&dir, sink.clone(), ai);
+        let local_network = crate::local_network::LocalNetworkHost::new(&dir, crate::local_network::system());
         let core = Arc::new_cyclic(|me| {
             // A login that asks a question raises it through this host. The name and the host of the dialog are looked up in
             // the saved list by the id of the connection: the core stamps it, the server cannot.
@@ -1048,6 +1051,7 @@ impl AppCore {
                 blocks,
                 sync,
                 ai: host,
+                local_network,
                 remote_execs: RemoteExecs::new(),
                 prompts,
                 monitor: holzwave_core::monitor::Monitor::new(),
@@ -1083,6 +1087,18 @@ impl AppCore {
     /// The AI chat service of the shell.
     pub fn ai(&self) -> &AiHost {
         &self.ai
+    }
+
+    /// The Local Network permission of macOS: the stored choice and the probe.
+    pub fn local_network(&self) -> &crate::local_network::LocalNetworkHost {
+        &self.local_network
+    }
+
+    /// Opens System Settings at Privacy & Security, Local Network. One fixed program with one fixed argument and nothing
+    /// from the page; where the platform has no such setting nothing is started and the answer is an error.
+    pub fn open_local_network_settings(&self) -> Result<(), String> {
+        let launch = settings_launch(std::env::consts::OS)?;
+        self.launch(&launch)
     }
 
     /// Whether `pane` is in a layout of some window. The lock of the table of routes is released before this returns.
@@ -3227,6 +3243,25 @@ fn open_launch(os: &str, url: &str, env: &dyn Fn(&str) -> Option<String>) -> Res
             Ok(Launch::plain(&rundll32, vec!["url.dll,FileProtocolHandler".into(), url.to_owned()]))
         }
         other => Err(format!("opening links is not supported on {other}")),
+    }
+}
+
+/// The link that opens System Settings at Privacy & Security, Local Network (macOS).
+///
+/// The scheme `x-apple.systempreferences:` and the legacy identifier `com.apple.preference.security` of the Privacy &
+/// Security pane are what several shipping apps use, and on macOS 27.0.1 the Privacy & Security settings extension still
+/// declares `allowsXAppleSystemPreferencesURLScheme = true` with `legacyBundleIdentifier = com.apple.preference.security`.
+/// The anchor `Privacy_LocalNetwork` is NOT documented by Apple and could not be confirmed from files on that system; a
+/// system that does not know it is expected to open the Privacy & Security pane (test-plan row LN4 looks).
+const LOCAL_NETWORK_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork";
+
+/// How the platform opens the Local Network privacy setting: macOS only, `/usr/bin/open` by absolute path with the one
+/// constant link as its only argument. It takes nothing from the page and does not go through [`check_link`], which allows
+/// web links only. Every other platform has no such setting and gets an error.
+fn settings_launch(os: &str) -> Result<Launch, String> {
+    match os {
+        "macos" => Ok(Launch::plain("/usr/bin/open", vec![LOCAL_NETWORK_SETTINGS_URL.to_owned()])),
+        other => Err(format!("there is no local network setting on {other}")),
     }
 }
 
@@ -6411,6 +6446,40 @@ mod tests {
     }
 
     #[test]
+    fn the_local_network_settings_open_through_one_fixed_program_on_macos_only() {
+        assert_eq!(
+            settings_launch("macos"),
+            Ok(Launch::plain(
+                "/usr/bin/open",
+                vec!["x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork".to_owned()]
+            ))
+        );
+        for other in ["windows", "linux", "plan9", ""] {
+            assert!(settings_launch(other).is_err(), "{other:?} has no such setting");
+        }
+    }
+
+    #[test]
+    fn opening_the_local_network_settings_starts_one_launch_on_macos_and_none_elsewhere() {
+        let (core, _rec, _dir) = recording_core();
+        let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork";
+        let before = launches_with(url).len();
+
+        let result = core.open_local_network_settings();
+
+        if OS == "macos" {
+            assert_eq!(result, Ok(()));
+            assert_eq!(launches_with(url).len(), before + 1, "exactly one launch");
+            let launch = launches_with(url).pop().expect("a launch");
+            assert_eq!(launch.program, "/usr/bin/open");
+            assert_eq!(launch.args, [url]);
+        } else {
+            assert!(result.is_err());
+            assert_eq!(launches_with(url).len(), before, "nothing is started where there is no setting");
+        }
+    }
+
+    #[test]
     fn windows_launch_of_a_link_is_rundll32_with_the_link_unchanged_as_the_second_argument() {
         let url = "https://example.org/a?b=1&c=2^d";
 
@@ -9179,6 +9248,8 @@ mod protocol {
     use serde_json::{Value, json};
 
     use crate::ai_device::{DeviceState, DeviceView};
+    use crate::local_network::LocalNetworkView;
+    use holzwave_core::local_network::State as LnState;
     use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
     use crate::commands::{
         CopyMotionMsg, CopyOpMsg, CopyStateMsg, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg, SearchOpMsg,
@@ -9613,6 +9684,13 @@ mod protocol {
                     to_value(&Released::TornOff { label: "window-12".into() }),
                     to_value(&Released::Handed { to: "main".into() }),
                     to_value(&Released::Cancelled),
+                ],
+                "local_network": [
+                    to_value(&LocalNetworkView { supported: true, notice_due: true, state: LnState::NotAsked.as_str() }),
+                    to_value(&LocalNetworkView { supported: true, notice_due: false, state: LnState::Allowed.as_str() }),
+                    to_value(&LocalNetworkView { supported: true, notice_due: false, state: LnState::Denied.as_str() }),
+                    to_value(&LocalNetworkView { supported: true, notice_due: false, state: LnState::Unknown.as_str() }),
+                    to_value(&LocalNetworkView::unsupported()),
                 ],
                 "ai": {
                     "ticket": to_value(&TicketView { conversation: "chat-1".into(), turn: 5 }),

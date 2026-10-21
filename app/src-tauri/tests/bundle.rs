@@ -288,3 +288,19 @@ fn the_linux_container_build_is_amd64_and_says_what_it_is_not() {
     }
     assert!(BUILD_LINUX_DOC.contains("glibc 2.39") && BUILD_LINUX_DOC.contains("emulated"), "docs/build-linux.md lacks the limits");
 }
+
+const INFO_PLIST: &str = include_str!("../Info.plist");
+
+#[test]
+fn the_plist_declares_the_use_of_the_local_network() {
+    // The Tauri bundler merges Info.plist (next to tauri.conf.json) into the app, and tauri-codegen embeds it into a
+    // development binary. macOS shows its Local Network question with the usage description as text, and lets an app
+    // browse only the Bonjour types listed in NSBonjourServices. Plain string checks: no plist crate.
+    assert!(INFO_PLIST.contains("<key>NSLocalNetworkUsageDescription</key>"));
+    assert!(INFO_PLIST.contains("<key>NSBonjourServices</key>"));
+    let after = INFO_PLIST.split("<key>NSLocalNetworkUsageDescription</key>").nth(1).expect("the key is there");
+    let text = after.split("<string>").nth(1).and_then(|rest| rest.split("</string>").next()).unwrap_or("");
+    assert!(!text.trim().is_empty(), "the usage description is empty");
+    assert!(text.len() <= 400, "the usage description is a sentence, not a page");
+    assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join("Info.plist").is_file(), "Info.plist sits next to tauri.conf.json");
+}

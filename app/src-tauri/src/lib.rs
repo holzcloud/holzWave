@@ -33,6 +33,7 @@ mod ai_exec;
 mod clipboard;
 mod commands;
 mod files_protocol;
+mod local_network;
 mod login_prompt;
 mod menu;
 mod state;
@@ -512,6 +513,9 @@ pub fn run() {
             commands::sync_save,
             commands::sync_now,
             commands::sync_off,
+            commands::local_network_status,
+            commands::local_network_answer,
+            commands::local_network_open_settings,
             commands::monitor_sample,
             commands::wsh_install,
             commands::history_search,

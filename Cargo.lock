@@ -2100,6 +2100,7 @@ dependencies = [
  "holzwave-apple-ai",
  "holzwave-core",
  "holzwave-ipc",
+ "holzwave-local-network",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -2160,6 +2161,13 @@ dependencies = [
  "interprocess",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "holzwave-local-network"
+version = "0.0.1-beta1"
+dependencies = [
+ "swift-rs",
 ]
 
 [[package]]

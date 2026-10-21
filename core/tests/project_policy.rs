@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use holzwave_core::ai::profiles::AiConfig;
 use holzwave_core::keybindings::{Keybindings, actions_for};
 use holzwave_core::layout::{Layout, LoadStatus};
+use holzwave_core::local_network::{Choice, LocalNetwork};
 use holzwave_core::session::Session;
 use holzwave_core::settings::Settings;
 use holzwave_core::theme::{ThemeRegistry, blend, contrast};
@@ -131,6 +132,11 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
             ("holzwave-core", "everything the shell shows and controls"),
             ("holzwave-ipc", "server side of the local socket that wsh talks to (lib.rs, state.rs)"),
             (
+                "holzwave-local-network",
+                "the Local Network privacy probe of macOS: a Swift package behind a C ABI of two integer functions; the \
+                 dependency sits in the macOS target table so Windows, Linux and mobile builds never compile it",
+            ),
+            (
                 "objc2",
                 "autorelease pool around the macOS pasteboard calls (clipboard.rs); already in the lock file through tao and \
                  muda, macOS target table only",
@@ -174,6 +180,14 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
                  the version the Tauri build tooling already locks",
             ),
         ],
+    ),
+    (
+        "holzwave-local-network",
+        &[(
+            "swift-rs",
+            "builds the first-party Swift package of the Local Network probe and links the Swift runtime from build.rs; \
+             macOS targets only; the version the Tauri build tooling already locks",
+        )],
     ),
     ("holzwave-spike", &[("holzwave-core", "the Phase 1 measurements run the real PTY and engine")]),
     ("wsh", &[("holzwave-ipc", "the client of the local socket")]),
@@ -1369,8 +1383,9 @@ fn tls_guard_reports_a_rustls_without_ring() {
 
 // ---- the Apple bridge -------------------------------------------------------------------------------------
 
-/// The packages of the Apple bridge: the crate and the build tool that compiles its Swift package.
-const BRIDGE_PACKAGES: &[&str] = &["holzwave-apple-ai", "swift-rs"];
+/// The packages of the Apple bridges: the two crates (the on-device model and the Local Network probe) and the build tool
+/// that compiles their Swift packages.
+const BRIDGE_PACKAGES: &[&str] = &["holzwave-apple-ai", "holzwave-local-network", "swift-rs"];
 
 /// The crates that must never reach the bridge, each with the reason.
 const BRIDGE_KEEP_OUT: &[(&str, &str)] = &[
@@ -1439,7 +1454,14 @@ fn bridge_guard_reports_a_transitive_bridge() {
 /// `apple-darwin` in the header). Comment lines are skipped. A crate that names the bridge ungated could not be built
 /// on Windows or Linux, and the Cargo lock would pull the Swift tooling into those builds.
 fn macos_gating_problems(manifest: &str) -> Vec<String> {
-    const BRIDGE: &str = "holzwave-apple-ai";
+    BRIDGE_CRATES.iter().flat_map(|bridge| gating_problems_for(manifest, bridge)).collect()
+}
+
+/// The crates of the Apple bridges, each of which a member manifest may name only under a table gated to macOS.
+const BRIDGE_CRATES: &[&str] = &["holzwave-apple-ai", "holzwave-local-network"];
+
+/// [`macos_gating_problems`] for one bridge crate.
+fn gating_problems_for(manifest: &str, bridge: &str) -> Vec<String> {
     let gated = |header: &str| header.contains("target_os = \"macos\"") || header.contains("apple-darwin");
     let mut problems = Vec::new();
     let mut header = String::new();
@@ -1451,16 +1473,16 @@ fn macos_gating_problems(manifest: &str) -> Vec<String> {
         if line.starts_with('[') {
             header = line.to_owned();
             let names_dependency_table = header.contains("dependencies");
-            let is_bridge_table = header.trim_end_matches(']').trim_end_matches('"').ends_with(&format!(".{BRIDGE}"));
+            let is_bridge_table = header.trim_end_matches(']').trim_end_matches('"').ends_with(&format!(".{bridge}"));
             if names_dependency_table && is_bridge_table && !gated(&header) {
                 problems.push(format!(
-                    "line {}: {header} names {BRIDGE} outside a table gated to macOS (target_os = \"macos\")",
+                    "line {}: {header} names {bridge} outside a table gated to macOS (target_os = \"macos\")",
                     index + 1
                 ));
             }
-        } else if header.contains("dependencies") && !header.trim_end_matches(']').ends_with(&format!(".{BRIDGE}")) {
+        } else if header.contains("dependencies") && !header.trim_end_matches(']').ends_with(&format!(".{bridge}")) {
             let key = line.split(['=', '.']).next().unwrap_or_default().trim().trim_matches('"');
-            if key == BRIDGE && !gated(&header) {
+            if key == bridge && !gated(&header) {
                 problems.push(format!(
                     "line {}: {line} sits under {header}, which is not gated to macOS (target_os = \"macos\")",
                     index + 1
@@ -1503,6 +1525,20 @@ fn gating_guard_reports_an_ungated_dev_dependency_and_header_form() {
 
     let ungated_target = "[target.'cfg(unix)'.dependencies]\nholzwave-apple-ai = \"1\"\n";
     assert_eq!(macos_gating_problems(ungated_target).len(), 1);
+}
+
+#[test]
+fn gating_guard_covers_the_local_network_bridge_too() {
+    let ungated = "[dependencies]\nholzwave-local-network = { path = \"../plugins/local-network\" }\n";
+    let problems = macos_gating_problems(ungated);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("holzwave-local-network"), "{problems:?}");
+
+    let header = "[dependencies.holzwave-local-network]\npath = \"../plugins/local-network\"\n";
+    assert_eq!(macos_gating_problems(header).len(), 1);
+
+    let gated = "[target.'cfg(target_os = \"macos\")'.dependencies]\nholzwave-local-network = { path = \"../plugins/local-network\" }\n";
+    assert_eq!(macos_gating_problems(gated), Vec::<String>::new());
 }
 
 #[test]
@@ -1671,8 +1707,10 @@ fn floor_problems(conf: &str, bridge_build_rs: &str) -> Vec<String> {
 
 #[test]
 fn bundle_minimum_macos_equals_the_floor_of_the_bridge() {
-    let problems = floor_problems(&read("app/src-tauri/tauri.conf.json"), &read("plugins/apple-ai/build.rs"));
-    assert!(problems.is_empty(), "the minimum macOS of the bundle:\n  {}", problems.join("\n  "));
+    for build_rs in ["plugins/apple-ai/build.rs", "plugins/local-network/build.rs"] {
+        let problems = floor_problems(&read("app/src-tauri/tauri.conf.json"), &read(build_rs));
+        assert!(problems.is_empty(), "the minimum macOS of the bundle against {build_rs}:\n  {}", problems.join("\n  "));
+    }
 }
 
 const TOY_FLOOR: &str = "const MACOS_FLOOR: &str = \"13.0\";\n";
@@ -1745,6 +1783,27 @@ const SWIFT_FORBIDDEN: &[(&str, &str)] = &[
         "a tool declaration: the framework would run its own tool loop and skip the approval of the core",
     ),
     ("@Generable", "typed generation and tool schemas are outside a chat-only bridge"),
+];
+
+/// Names that must not appear in the Swift sources of the Local Network probe, each with the reason. The probe is allowed
+/// exactly one network API: `NWBrowser`, a Bonjour browse. Everything that opens a connection, listens, publishes, loads a
+/// URL or writes to a console or a log stays forbidden, so a reading of the permission can never grow into traffic.
+const LOCAL_NETWORK_SWIFT_FORBIDDEN: &[(&str, &str)] = &[
+    ("URLSession", "a network API: the probe browses Bonjour and loads nothing"),
+    ("URLRequest", "a network API: the probe browses Bonjour and loads nothing"),
+    ("NSURLConnection", "a network API: the probe browses Bonjour and loads nothing"),
+    ("NWConnection", "a connection: the probe must open none, it would send data to a machine on the network"),
+    ("NWListener", "a listener: it would open a port on the local network"),
+    ("NWConnectionGroup", "a connection: the probe must open none"),
+    ("NetService", "publishing a service would announce this computer on the local network"),
+    ("NSNetService", "publishing a service would announce this computer on the local network"),
+    ("CFSocket", "a socket: the probe must open none"),
+    ("print(", "a console sink"),
+    ("NSLog", "a log sink"),
+    ("os_log", "a log sink"),
+    ("Logger(", "a log sink"),
+    ("dump(", "a console sink"),
+    ("debugPrint", "a console sink"),
 ];
 
 /// Names that must not appear in `Package.swift`, each with the reason: `swift build` runs in a build script and must
@@ -1891,6 +1950,40 @@ fn swift_sources_use_no_network_apis_no_cloud_model_and_no_package_dependencies(
 
     assert!(files_read >= 3, "only {files_read} Swift files read: is the walk broken?");
     assert!(problems.is_empty(), "the Swift side of the Apple bridge broke the policy:\n  {}", problems.join("\n  "));
+}
+
+#[test]
+fn swift_sources_of_the_local_network_probe_browse_only() {
+    let package_tokens: Vec<(&str, &str)> =
+        LOCAL_NETWORK_SWIFT_FORBIDDEN.iter().chain(PACKAGE_FORBIDDEN.iter()).copied().collect();
+    let mut problems = Vec::new();
+    let mut files_read = 0;
+
+    let package = "plugins/local-network/swift/Package.swift";
+    problems.extend(swift_source_problems(package, &read(package), &package_tokens));
+    files_read += 1;
+
+    for file in files_below("plugins/local-network/swift/Sources", &["swift"]) {
+        let relative = shown(&file);
+        let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("cannot read {relative}: {e}"));
+        problems.extend(swift_source_problems(&relative, &source, LOCAL_NETWORK_SWIFT_FORBIDDEN));
+        files_read += 1;
+    }
+
+    assert!(files_read >= 2, "only {files_read} Swift files read: is the walk broken?");
+    assert!(problems.is_empty(), "the Swift side of the Local Network probe broke the policy:\n  {}", problems.join("\n  "));
+}
+
+#[test]
+fn local_network_swift_guard_allows_a_browser_and_reports_everything_else() {
+    let browse = "import Network\nlet browser = NWBrowser(for: .bonjour(type: t, domain: nil), using: NWParameters())\n";
+    assert_eq!(swift_source_problems("A.swift", browse, LOCAL_NETWORK_SWIFT_FORBIDDEN), Vec::<String>::new());
+
+    let traffic = "let c = NWConnection(host: h, port: p, using: .tcp)\nlet l = try NWListener(using: .tcp)\nlet s = NetService(domain: \"\", type: t, name: \"\", port: 1)\nprint(1)\n";
+    let problems = swift_source_problems("B.swift", traffic, LOCAL_NETWORK_SWIFT_FORBIDDEN);
+    for token in ["NWConnection", "NWListener", "NetService", "print("] {
+        assert!(problems.iter().any(|p| p.contains(token)), "{token} not reported: {problems:?}");
+    }
 }
 
 #[test]
@@ -2294,6 +2387,10 @@ fn the_examples_of_config_md_load_cleanly_through_the_real_loaders() {
     assert_eq!(status, LoadStatus::Clean, "the session example is not clean");
     assert_eq!(session.cwds.len(), 1);
     assert!(session.window.is_some());
+
+    let (local_network, status) = LocalNetwork::from_json(&documented_example("local_network.json"));
+    assert_eq!(status, LoadStatus::Clean, "the local_network.json example is not clean");
+    assert_eq!(local_network.choice, Choice::Requested);
 
     let (layout, status) = Layout::from_json(&documented_example("layout.json"));
     assert_eq!(status, LoadStatus::Clean, "the layout example is not clean");

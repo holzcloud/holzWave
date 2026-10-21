@@ -49,6 +49,7 @@ pub mod integrate;
 pub mod keybindings;
 pub mod monitor;
 pub mod layout;
+pub mod local_network;
 pub mod pane;
 pub mod persist;
 pub mod platform;

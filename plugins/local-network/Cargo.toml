@@ -1,0 +1,16 @@
+[package]
+name = "holzwave-local-network"
+description = "The Local Network privacy probe of holzWave: a Swift package behind a C ABI of two integer functions, macOS only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+# Names the native library of the Swift package (the build script links it).
+links = "holzwave_local_network"
+
+# No dependencies: the crate is plain Rust and one static Swift library.
+
+# Build dependencies are built for the host, so Linux and Windows hosts never compile this one.
+[target.'cfg(target_os = "macos")'.build-dependencies]
+swift-rs = { version = "1.0.8", features = ["build"] }

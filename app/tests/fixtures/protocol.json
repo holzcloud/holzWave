@@ -147,6 +147,33 @@
         "yanked": "text"
       }
     ],
+    "local_network": [
+      {
+        "notice_due": true,
+        "state": "not_asked",
+        "supported": true
+      },
+      {
+        "notice_due": false,
+        "state": "allowed",
+        "supported": true
+      },
+      {
+        "notice_due": false,
+        "state": "denied",
+        "supported": true
+      },
+      {
+        "notice_due": false,
+        "state": "unknown",
+        "supported": true
+      },
+      {
+        "notice_due": false,
+        "state": "unknown",
+        "supported": false
+      }
+    ],
     "monitor": [
       {
         "cores": 4,
@@ -387,6 +414,11 @@
       "release",
       "composing"
     ],
+    "local_network_answer": [
+      "allow"
+    ],
+    "local_network_open_settings": [],
+    "local_network_status": [],
     "login_prompt_answer": [
       "id",
       "answers"

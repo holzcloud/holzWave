@@ -157,6 +157,11 @@ test("the app info and the pointer commands are pinned", () => {
   assert.deepEqual(golden.commands.app_info, []);
   assert.deepEqual(golden.commands.open_url, ["url"]);
   assert.deepEqual(golden.commands.reveal_path, ["path", "base"]);
+  // The Local Network permission of macOS: the page asks the state, answers the notice with one boolean and opens the system
+  // settings with nothing from the page (the shell has one fixed link).
+  assert.deepEqual(golden.commands.local_network_status, []);
+  assert.deepEqual(golden.commands.local_network_answer, ["allow"]);
+  assert.deepEqual(golden.commands.local_network_open_settings, []);
   assert.deepEqual(golden.commands.mouse, ["pane", "action", "button", "x", "y", "mods"]);
   assert.deepEqual(golden.commands.wheel, ["pane", "rows", "x", "y", "mods"]);
   for (const name of ["note_window", "placement"]) {

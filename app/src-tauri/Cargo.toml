@@ -27,6 +27,9 @@ serde_json = "1"
 # depend on it, so the build script of this crate repeats them (build.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 holzwave-apple-ai = { path = "../../plugins/apple-ai" }
+# The Local Network privacy probe of macOS (local_network.rs): a Swift package behind a C ABI of two integer functions. It uses
+# the Network framework and the Swift runtime that the apple-ai crate's run path already covers.
+holzwave-local-network = { path = "../../plugins/local-network" }
 
 # The system pasteboard of macOS, read and written in process (clipboard.rs). All three crates are in the lock file already,
 # through tao and muda; they are named here so the app can call them directly, pinned with `=` like every other direct

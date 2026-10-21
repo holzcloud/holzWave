@@ -10,6 +10,7 @@ change that forgets the document fails a test.
 - [Themes](#themes)
 - [Key bindings](#key-bindings)
 - [`session.json`](#sessionjson)
+- [`local_network.json`](#local_networkjson)
 - [`layout.json`](#layoutjson)
 - [Accessibility](#accessibility)
 - [Privacy](#privacy)
@@ -36,6 +37,7 @@ against scratch directories and never touch the real one.
 | `themes/*.json` | one user theme per file | by you, never by the app | no |
 | `layout.json` | workspaces, tabs, panes and split ratios | 250 ms after the first change of a burst, and on quit | no |
 | `session.json` | the working directory of each pane and the window frame | 2 s after the first change of a burst, and on quit | yes |
+| `local_network.json` | whether the notice about the Local Network permission of macOS was answered (macOS 15 or later only) | when you answer the notice | yes |
 | `connections.json` | the saved SSH, WSL and Docker connections, without secrets | when a connection is saved or deleted | no |
 | `pane_connections.json` | which pane runs which connection | when it changes | yes (the assignments travel inside the layout, see [sync.md](sync.md)) |
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
@@ -465,6 +467,44 @@ not belong on another machine. Everything in it is a hint: a damaged file costs 
   "version": 1,
   "window": { "x": 120, "y": 80, "width": 1000, "height": 640, "maximized": false },
   "cwds": { "3": "/Users/me/src/holzWave" }
+}
+```
+
+## `local_network.json`
+
+Written on macOS 15 or later only, and only when you answer the notice about the local network. macOS lets you switch,
+per app, the access to computers on your local network (SSH hosts, AI servers such as Ollama or LM Studio on other
+computers, a Nextcloud for sync), and it shows its own question the first time an app tries. holzWave shows its own notice
+first, once per computer, and the file keeps what you chose. Windows and Linux never write it.
+
+```json
+{
+  "version": 1,
+  "choice": "requested"
+}
+```
+
+- `choice` is one of three words. `unasked` is the state of a computer where the notice was not answered yet (it is also
+  what a missing file means). `requested` means you chose **Allow**: from then on holzWave may touch the local network, which
+  is what makes macOS show its question, and the Settings row reads the answer. `declined` means you chose **Not now**,
+  pressed Escape or clicked outside the notice.
+- **Shown once per computer.** Nothing asks again by itself, not at a later start and not after an update. The way back is
+  the **Allow** button of the row `Local network` in the Settings, which is offered while the state reads `not asked yet`.
+  To see the notice itself again, quit holzWave and delete `local_network.json`. A `declined` never replaces a `requested`.
+- **Machine-local, and not a setting.** The file is not part of `settings.json` and is never synced. `settings.json` travels
+  to every computer, and a second Mac must not inherit "already asked": its first status read would then raise the macOS
+  question with no notice.
+- A damaged file costs the choice (it reads `unasked`) and never the start: text that is not JSON, a choice that is not one of
+  the three words, or a file over 4 KiB is replaced by the default and the original bytes are kept as
+  `local_network.json.bad`. An unknown key is ignored.
+- macOS holds the real permission. This file records only that holzWave has asked you; to change the permission itself use
+  **System Settings > Privacy & Security > Local Network**, which the row opens for you.
+
+<!-- example: local_network.json -->
+```json
+{
+  "version": 1,
+  "choice": "requested"
 }
 ```
 
