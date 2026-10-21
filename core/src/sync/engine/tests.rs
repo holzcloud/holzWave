@@ -2083,3 +2083,71 @@ fn a_local_edit_that_cannot_be_copied_is_never_replaced_by_the_winning_download(
     assert_eq!(report.conflicts, vec!["settings.json"], "{report:?}");
     assert!(kept_copies(&b).iter().any(|(_, c)| c == "b edit"), "{:?}", kept_copies(&b));
 }
+
+// ---- the integration profiles ------------------------------------------------------------------------------------
+
+use crate::integrate::ToolId;
+use crate::integrate::args::{EnvName, ProfileId};
+use crate::integrate::profiles::{self, IntegrationProfile, IntegrationProfiles};
+
+/// Write an `integrations.json` with these profiles (id and declared secret names) in the folder of `d`.
+fn save_integrations(d: &Device, items: &[(&str, &[&str])]) {
+    let mut set = IntegrationProfiles::default();
+    for (id, names) in items {
+        let mut profile = IntegrationProfile::new(ProfileId::parse(id).unwrap(), ToolId::Azure, id);
+        profile.secret_env = names.iter().map(|n| (*n).to_owned()).collect();
+        set.upsert(profile).unwrap();
+    }
+    set.save(&d.dir).unwrap();
+}
+
+/// The keychain account of a secret variable of a profile.
+fn int_account(id: &str, name: &str) -> String {
+    profiles::secret_account(&ProfileId::parse(id).unwrap(), &EnvName::parse(name).unwrap())
+}
+
+#[test]
+fn a_profile_file_travels_between_two_devices() {
+    let srv = server();
+    let (a, b) = (device("a-prof"), device("b-prof"));
+    save_integrations(&a, &[("prod", &[])]);
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["integrations.json"], "{report:?}");
+    {
+        let store = srv.store.lock().unwrap();
+        assert!(store.files.contains_key("files/integrations.json.hwx"));
+        assert!(store.files.values().all(|(blob, _)| !blob.windows(4).any(|w| w == b"prod")), "the server sees no profile");
+    }
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["integrations.json"], "{report:?}");
+    assert!(!b.dir.join("integrations.json").exists(), "a download is staged and applied at the next start");
+    assert!(b.dir.join("sync-incoming").join("integrations.json").is_file());
+    assert_eq!(promote_incoming(&b.dir), vec!["integrations.json"]);
+    let (loaded, notes) = IntegrationProfiles::load(&b.dir);
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(loaded, IntegrationProfiles::load(&a.dir).0);
+    assert_eq!(loaded.items.len(), 1);
+    // A second run on either device changes nothing and writes nothing.
+    let puts = srv.counts().puts;
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(srv.counts().puts, puts);
+}
+
+#[test]
+fn only_the_profile_file_of_the_integrations_is_an_allowed_name() {
+    assert_eq!(FIXED.len(), 6);
+    assert!(FIXED.contains(&profiles::FILE) && allowed("integrations.json"));
+    assert_eq!(logical_name("integrations.json.hwx").as_deref(), Some("integrations.json"));
+    for local in ["integration_local.json", "pane_integrations.json", "pane_launches.json", "run/kube/3.json", "integrations.json.bad", "integrations.json/x", "Integrations.json"] {
+        assert!(!allowed(local), "{local}");
+    }
+    // Without a profile file the sync lists nothing for it.
+    let d = device("a-noprof");
+    put(&d, "settings.json", "{}");
+    let names = ConfigSource::new(&d.dir, d.secrets.clone()).names().unwrap();
+    assert_eq!(names, vec!["settings.json"]);
+    let srv = server();
+    let report = connect(&srv, &d, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["settings.json"]);
+}

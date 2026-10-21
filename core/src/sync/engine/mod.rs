@@ -45,7 +45,11 @@ const META: &str = "meta.json";
 const MAX_FILE: u64 = 4 * 1024 * 1024;
 /// The name of the virtual file that carries the connection secrets.
 pub const SECRETS: &str = "secrets.json";
-const FIXED: [&str; 5] = ["layout.json", "settings.json", "connections.json", "widget_notes.json", SECRETS];
+/// The synced names that are not in a folder. The sixth is the profile file of the integrations, named from the module
+/// that reads it so the two cannot drift; the machine-local integration files are deliberately not here.
+const FIXED: [&str; 6] = ["layout.json", "settings.json", "connections.json", "widget_notes.json", INTEGRATIONS, SECRETS];
+/// The synced name of the integration profiles.
+const INTEGRATIONS: &str = crate::integrate::profiles::FILE;
 /// The folders whose `<name>.json` files are synced one by one.
 const DIRS: [&str; 2] = ["themes", "widgets"];
 const STATE: &str = "sync_state.json";
