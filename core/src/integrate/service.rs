@@ -33,16 +33,17 @@ use super::args::ArgError;
 use super::context::{self, ContextError, ContextRow, ContextState, Detection as ContextDetection, Resolved};
 use super::detect::{self, Detection, Found, UnusableReason};
 use super::kube::ContextEntry;
-use super::profiles::{IntegrationProfiles, LocalFile};
+use super::profiles::{IntegrationProfile, IntegrationProfiles, LocalFile};
 use super::run::{
-    spawn_supported, Env, EnvExtra, EnvPolicy, RunCancel, RunEnd, RunError, RunLimits, RunResult, Runner,
+    spawn_supported, Env, EnvExtra, EnvPolicy, Launch, RunCancel, RunEnd, RunError, RunLimits, RunResult, Runner,
     DEFAULT_STDOUT, DEFAULT_TIMEOUT,
 };
+use super::ticket::{Approved, Card, Resolution, Resolve, TicketError, TicketTable};
 use super::view::{clean_cell, text_fallback, ViewModel};
 use crate::ai::redact;
 use super::{
-    CheckedSelection, Integration, IntegrationSpec, ParseError, SelectKind, Selection, ToolId, Validated, Verb,
-    VerbEffect,
+    CheckedSelection, Integration, IntegrationSpec, LaunchProgram, Output, ParseError, SelectKind, Selection, ToolId,
+    Validated, Verb, VerbEffect,
 };
 use crate::layout::PaneId;
 use crate::platform::{self, Os, ProgramCheck, ShellLaunch};
@@ -54,6 +55,8 @@ use crate::secrets::SecretStore;
 
 /// The most characters of a tool's own message that a fault holds.
 pub const FAULT_MESSAGE_MAX: usize = 240;
+/// The time a verb that changes something may take, and the most standard output it may write (one line is expected).
+const GATED_LIMITS: RunLimits = RunLimits { max_stdout: 1024 * 1024, timeout: Duration::from_secs(30) };
 /// How long the version probe of a tool may take.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most bytes of the answer to a version probe that are read.
@@ -405,6 +408,7 @@ pub struct IntegrationService {
     limits: RunLimits,
     tools: Vec<&'static dyn Integration>,
     context: ContextState,
+    tickets: TicketTable,
     state: Mutex<State>,
 }
 
@@ -421,6 +425,45 @@ struct Request {
     verb: &'static Verb,
     validated: Validated,
     resolved: Resolved,
+}
+
+/// The three ways a verb can be started, and the only verbs each admits. A verb that is not a lane's is refused before
+/// its arguments are looked at, so no lane can be used to run what belongs to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    /// A read that shows a view: `run_view`.
+    View,
+    /// A read that opens a terminal: `launch`.
+    Terminal,
+    /// A verb that changes something or opens a session: `prepare`, then `confirm`.
+    Card,
+}
+
+impl Lane {
+    fn admits(self, verb: &Verb) -> Result<(), Fault> {
+        let read = verb.effect == VerbEffect::Read;
+        match self {
+            Lane::View if read && verb.output == Output::View => Ok(()),
+            Lane::View => Err(Fault::refused("not_a_view", "This action does not show a view.")),
+            Lane::Terminal if read && verb.output == Output::Terminal => Ok(()),
+            Lane::Terminal if read => Err(Fault::refused("not_a_terminal", "This action does not open a terminal.")),
+            Lane::Terminal => Err(Fault::refused(
+                "needs_card",
+                "This action changes something or opens a session, so it needs an approval first.",
+            )),
+            Lane::Card if !read => Ok(()),
+            Lane::Card => Err(Fault::refused("not_gated", "This action only reads, so it needs no approval.")),
+        }
+    }
+}
+
+/// How the environment of a child is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvMode {
+    /// A run by the service: the inherited environment is filtered by the policy.
+    Run,
+    /// A launch: the pane inherits by itself, so only what is added is built; the overlay of a shell pane optionally.
+    Launch { overlay: bool },
 }
 
 fn now_seconds() -> u32 {
@@ -468,6 +511,7 @@ impl IntegrationService {
             limits: RunLimits { max_stdout: DEFAULT_STDOUT, timeout: DEFAULT_TIMEOUT },
             tools,
             context,
+            tickets: TicketTable::new(),
             state: Mutex::new(State { profiles, local, slots, contexts, notes }),
         }
     }
@@ -649,22 +693,21 @@ impl IntegrationService {
 
     // ---- reads -----------------------------------------------------------------------------------------------------
 
-    /// Checks a request against the closed catalogue and resolves the selection of the pane.
+    /// Checks a request against the closed catalogue, the lane it came in by, and resolves the selection of the pane.
     fn request(
         &self,
         tool: ToolId,
         verb: &str,
         args: &BTreeMap<String, String>,
         selection: &Selection,
+        lane: Lane,
     ) -> Result<Request, Fault> {
         let integration = self.integration(tool);
         let verb = integration
             .spec()
             .verb(verb)
             .ok_or_else(|| Fault::refused("verb", "The action is not known for this tool."))?;
-        if verb.effect != VerbEffect::Read || verb.output != super::Output::View {
-            return Err(Fault::refused("not_a_view", "This action does not show a view."));
-        }
+        lane.admits(verb)?;
         let validated = Validated::parse(verb, args).map_err(arg_fault)?;
         let resolved = {
             let state = self.lock();
@@ -683,16 +726,30 @@ impl IntegrationService {
     ) -> Result<RunAnswer, Fault> {
         let tool = self.parse_tool(tool)?;
         let selection = self.context.selection_for(tool, pane);
-        let request = self.request(tool, verb, args, &selection)?;
+        let request = self.request(tool, verb, args, &selection, Lane::View)?;
         self.run_read(&request, pane)
     }
 
-    /// The environment of a child for a request.
-    fn child_env(&self, request: &Request, found: &Found, pane: Option<PaneId>) -> Result<Env, Fault> {
-        let spec = request.integration.spec();
+    /// The environment of a child: the inherited one (for a run), the rebuilt `PATH`, the profile's variables, the tool's
+    /// fixed ones and the isolation variable of the selection.
+    fn build_env(
+        &self,
+        tool: ToolId,
+        resolved: &Resolved,
+        found: &Found,
+        pane: Option<PaneId>,
+        mode: EnvMode,
+    ) -> Result<Env, Fault> {
+        let spec = self.integration(tool).spec();
+        let overlay = matches!(mode, EnvMode::Launch { overlay: true });
+        // The overlay of a shell pane names the cluster and the user of the selected context, which only the list of
+        // contexts knows: read it once if the service has not.
+        if overlay && resolved.selection.context.is_some() && self.lock().contexts[slot_of(tool)].is_empty() {
+            let _ = self.refresh_default(tool);
+        }
         let (local, contexts) = {
             let state = self.lock();
-            (state.local.clone(), state.contexts[slot_of(request.tool)].clone())
+            (state.local.clone(), state.contexts[slot_of(tool)].clone())
         };
         let home = self.facts.home.clone().unwrap_or_default();
         let user_env = |name: &str| self.facts.env(name);
@@ -704,18 +761,20 @@ impl IntegrationService {
             user_env: &user_env,
             contexts: &contexts,
         };
-        let applied = context::apply_env(request.tool, &request.resolved, &local, &at, false);
+        let applied = context::apply_env(tool, resolved, &local, &at, overlay);
         if applied.failed {
-            return Err(Fault::new(FaultCode::Failed, "isolation", "The private configuration directory could not be made, so nothing was started."));
+            let text = "The private configuration directory could not be made, so nothing was started.";
+            return Err(Fault::new(FaultCode::Failed, "isolation", text));
         }
-        let path = self.child_path(found);
         let extra = EnvExtra {
-            plain: request.resolved.env_plain.clone(),
+            plain: resolved.env_plain.clone(),
             fixed: spec.env_set,
             isolation: applied.env,
             secrets: Vec::new(),
         };
-        EnvPolicy::build(self.facts.inherited.iter().cloned(), self.facts.os, path, extra)
+        let run = mode == EnvMode::Run;
+        let inherited = self.facts.inherited.iter().filter(|_| run).cloned();
+        EnvPolicy::build(inherited, self.facts.os, self.child_path(found), extra)
             .map_err(|error| Fault::new(FaultCode::Failed, "environment", error.to_string()))
     }
 
@@ -726,12 +785,12 @@ impl IntegrationService {
     fn run_read(&self, request: &Request, pane: Option<PaneId>) -> Result<RunAnswer, Fault> {
         let found = self.found(request.tool)?;
         let argv = request.integration.argv(request.verb, &request.validated, &request.resolved.selection).map_err(arg_fault)?;
-        let env = self.child_env(request, &found, pane)?;
+        let env = self.build_env(request.tool, &request.resolved, &found, pane, EnvMode::Run)?;
         let result = self
             .runner
             .run_argv(Path::new(&found.path), &argv, env, &self.limits, &RunCancel::default())
             .map_err(|error| self.run_fault(error))?;
-        let stdout = self.read_stdout(request, result)?;
+        let stdout = self.finish(request.integration.spec().label, request.verb.exit_is_state, result)?;
         self.learn_default(request, &stdout);
         let view = match request.integration.view(request.verb, &stdout) {
             Ok(view) => view,
@@ -750,8 +809,7 @@ impl IntegrationService {
     }
 
     /// The standard output of a run that gave an answer, or the fault for the way it ended.
-    fn read_stdout(&self, request: &Request, result: RunResult) -> Result<Vec<u8>, Fault> {
-        let label = request.integration.spec().label;
+    fn finish(&self, label: &str, exit_is_state: bool, result: RunResult) -> Result<Vec<u8>, Fault> {
         match result.end {
             RunEnd::Finished => {}
             RunEnd::TimedOut => {
@@ -771,7 +829,7 @@ impl IntegrationService {
         }
         // A verb whose non-zero exit with nothing on standard output is a state (the account of a signed-out Azure
         // tool) is read by its parser as that state.
-        let state = request.verb.exit_is_state && result.stdout.is_empty() && result.status.is_some();
+        let state = exit_is_state && result.stdout.is_empty() && result.status.is_some();
         if result.status == Some(0) || state {
             return Ok(result.stdout);
         }
@@ -857,28 +915,299 @@ impl IntegrationService {
     /// Reads the default verb of a tool with an empty selection, which is how the service learns the tool's own state.
     fn refresh_default(&self, tool: ToolId) -> Result<(), Fault> {
         let first = self.integration(tool).spec().verbs.first().ok_or_else(|| Fault::refused("verb", "The tool has no verbs."))?;
-        let request = self.request(tool, first.id, &BTreeMap::new(), &Selection::default())?;
+        let request = self.request(tool, first.id, &BTreeMap::new(), &Selection::default(), Lane::View)?;
         self.run_read(&request, None).map(|_| ())
     }
 }
 
-/// The fault for a tool that ran and failed: its label and, when it said anything on standard error, the first line of
-/// it, cleaned of escape sequences, controls and invisible characters, on one line, at most [`FAULT_MESSAGE_MAX`]
-/// characters. The message is shown and kept nowhere else.
-fn tool_fault(label: &str, stderr: &[u8]) -> Fault {
-    let cleaned = redact::sanitise(&String::from_utf8_lossy(stderr)).text;
-    let first = cleaned.lines().map(clean_cell).find(|line| !line.is_empty());
-    match first {
-        Some(line) => {
-            let shown = if line.chars().count() > FAULT_MESSAGE_MAX {
-                let mut cut: String = line.chars().take(FAULT_MESSAGE_MAX - 1).collect();
-                cut.push('\u{2026}');
-                cut
-            } else {
-                line
-            };
-            Fault::new(FaultCode::Failed, "exit_status", format!("{label} reported an error: {shown}"))
+impl IntegrationService {
+    // ---- verbs with a card and launches -----------------------------------------------------------------------------
+
+    /// The facts the card and the label show: the context, namespace, subscription, section and node that apply, the
+    /// pod and the container of the call. A verb that changes the tool's own configuration shows what the call names
+    /// and the context of the selection; the other selection fields do not apply to it.
+    fn target_pairs(&self, request: &Request) -> Vec<(String, String)> {
+        let selection = &request.resolved.selection;
+        let args = &request.validated;
+        let local = request.verb.effect == VerbEffect::Local;
+        let text = |value: Option<&str>| value.map(str::to_owned);
+        // The selection's own fact, which a verb that changes the tool's configuration shows only for the context.
+        let chosen = |value: Option<&str>, kept: bool| if kept { text(value) } else { None };
+        let rows = [
+            ("context", text(args.context().map(|v| v.as_str())).or_else(|| text(selection.context.as_ref().map(|v| v.as_str())))),
+            (
+                "namespace",
+                text(args.namespace().map(|v| v.as_str()))
+                    .or_else(|| chosen(selection.namespace.as_ref().map(|v| v.as_str()), !local)),
+            ),
+            (
+                "subscription",
+                text(args.subscription().map(|v| v.as_str()))
+                    .or_else(|| chosen(selection.subscription.as_ref().map(|v| v.as_str()), !local)),
+            ),
+            (
+                "section",
+                text(args.section().map(|v| v.as_str()))
+                    .or_else(|| chosen(selection.section.as_ref().map(|v| v.as_str()), !local)),
+            ),
+            (
+                "node",
+                text(args.node().map(|v| v.as_str())).or_else(|| chosen(selection.node.as_ref().map(|v| v.as_str()), !local)),
+            ),
+            ("pod", text(args.pod().map(|v| v.as_str()))),
+            ("container", text(args.container().map(|v| v.as_str()))),
+        ];
+        rows.into_iter().filter_map(|(label, value)| value.map(|value| (label.to_owned(), value))).collect()
+    }
+
+    /// The card for a verb that changes something or opens a session. Nothing is started.
+    pub fn prepare(
+        &self,
+        tool: &str,
+        verb: &str,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+    ) -> Result<Card, Fault> {
+        let tool = self.parse_tool(tool)?;
+        let selection = self.context.selection_for(tool, pane);
+        // The same checks that the table makes, first, so that a wrong lane, a bad argument or a missing program is
+        // reported as itself and not as a card that could not be made.
+        self.request(tool, verb, args, &selection, Lane::Card)?;
+        self.found(tool)?;
+        self.tickets.prepare(self, tool, verb, pane, args).map_err(ticket_fault)
+    }
+
+    /// The answer of the window to a card. The ticket is resolved again from the person's selection as it is now; any
+    /// difference from the card is a `ticket` fault and nothing runs. A verb that changes a file, a cluster or an
+    /// account runs once; an exec verb comes back as a launch that the pane starts.
+    pub fn confirm(&self, ticket: &str, hash: &str) -> Result<Done, Fault> {
+        let approved = self.tickets.confirm(self, ticket, hash).map_err(ticket_fault)?;
+        match approved.verb().effect {
+            VerbEffect::Local | VerbEffect::Write => self.run_gated(&approved).map(|note| Done::Ran { note }),
+            VerbEffect::Exec => self.exec_launch(&approved).map(Done::Launch),
+            VerbEffect::Read => Err(Fault::refused("not_gated", "This action only reads, so it needs no approval.")),
         }
+    }
+
+    /// The selection of an approved request as it is now, and a check that it is still the one that was approved: the
+    /// production name is the same and so is every selection fact of a verb that does not name its own.
+    fn unchanged(&self, approved: &Approved) -> Result<Resolved, Fault> {
+        let changed = || Fault::new(FaultCode::Ticket, "changed", "The request is not the one the card showed.");
+        let selection = self.context.selection_for(approved.tool(), approved.pane());
+        let resolved = {
+            let state = self.lock();
+            context::resolve(&state.profiles, approved.tool(), &selection).map_err(|_| changed())?
+        };
+        let shown = approved.resolution();
+        if resolved.production != shown.production {
+            return Err(changed());
+        }
+        if approved.verb().effect != VerbEffect::Local {
+            let now = [
+                ("context", resolved.selection.context.as_ref().map(|v| v.as_str())),
+                ("namespace", resolved.selection.namespace.as_ref().map(|v| v.as_str())),
+                ("subscription", resolved.selection.subscription.as_ref().map(|v| v.as_str())),
+                ("section", resolved.selection.section.as_ref().map(|v| v.as_str())),
+            ];
+            for (label, value) in now {
+                let was = shown.target.iter().find(|(own, _)| own == label).map(|(_, v)| v.as_str());
+                if was != value {
+                    return Err(changed());
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Runs a confirmed Local or Write verb once and answers its one-line outcome.
+    fn run_gated(&self, approved: &Approved) -> Result<String, Fault> {
+        let (tool, verb) = (approved.tool(), approved.verb());
+        let resolved = self.unchanged(approved)?;
+        let found = self.found(tool)?;
+        let env = self.build_env(tool, &resolved, &found, approved.pane(), EnvMode::Run)?;
+        let result = self
+            .runner
+            .run_argv(Path::new(&found.path), approved.argv(), env, &GATED_LIMITS, &RunCancel::default())
+            .map_err(|error| self.run_fault(error))?;
+        // The tool may have changed something even when it then failed or was cut off, so what was read before is
+        // no longer to be trusted either way.
+        self.changed(tool);
+        let label = self.integration(tool).spec().label;
+        let stdout = self.finish(label, false, result)?;
+        Ok(first_line(&stdout).unwrap_or_else(|| format!("{} done.", verb.label)))
+    }
+
+    /// What follows a run that may have changed the tool's own state: its default selection is marked as possibly out of
+    /// date (the value is kept).
+    fn changed(&self, tool: ToolId) {
+        self.context.mark_stale(tool);
+    }
+
+    /// The launch of a confirmed exec verb.
+    fn exec_launch(&self, approved: &Approved) -> Result<Launch, Fault> {
+        let (tool, verb) = (approved.tool(), approved.verb());
+        let resolved = self.unchanged(approved)?;
+        let shown = approved.resolution();
+        let label = launch_label(verb, &shown.target, shown.production.as_deref());
+        self.assemble_launch(tool, verb, approved.pane(), &resolved, approved.argv().to_vec(), label)
+    }
+
+    /// A terminal for a read verb that opens one (`logs`, `dmesg`, `shell`), without a card: it changes nothing and
+    /// runs nothing inside the target. A verb that opens a session with the person's credentials needs a card.
+    pub fn launch(
+        &self,
+        tool: &str,
+        verb: &str,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+    ) -> Result<Launch, Fault> {
+        let tool = self.parse_tool(tool)?;
+        let selection = self.context.selection_for(tool, pane);
+        let request = self.request(tool, verb, args, &selection, Lane::Terminal)?;
+        let argv = request.integration.argv(request.verb, &request.validated, &request.resolved.selection).map_err(arg_fault)?;
+        let label = launch_label(request.verb, &self.target_pairs(&request), request.resolved.production.as_deref());
+        self.assemble_launch(tool, request.verb, pane, &request.resolved, argv, label)
+    }
+
+    /// Describes the pane: the tool or the person's shell, the arguments, the rebuilt `PATH` and the variables of the
+    /// selection, and the names the pane must remove from what it inherits. Nothing is started.
+    fn assemble_launch(
+        &self,
+        tool: ToolId,
+        verb: &'static Verb,
+        pane: Option<PaneId>,
+        resolved: &Resolved,
+        argv: Vec<OsString>,
+        label: String,
+    ) -> Result<Launch, Fault> {
+        let found = self.found(tool)?;
+        let kind = self.integration(tool).launch_program(verb);
+        let env = self.build_env(tool, resolved, &found, pane, EnvMode::Launch { overlay: kind == LaunchProgram::UserShell })?;
+        let (program, args) = match kind {
+            LaunchProgram::Tool => (PathBuf::from(&found.path), argv),
+            LaunchProgram::UserShell => {
+                let shell = &self.facts.shell;
+                if !platform::is_absolute_path(self.facts.os, &shell.program) {
+                    let text = "The shell of this computer is not given as an absolute path.";
+                    return Err(Fault::new(FaultCode::Failed, "shell", text));
+                }
+                (PathBuf::from(&shell.program), shell.args.iter().map(OsString::from).collect())
+            }
+        };
+        let inherited = self.facts.inherited.iter().map(|(name, _)| name.clone());
+        Ok(Launch::new(program, args, env, inherited, self.facts.os, None, label))
+    }
+
+    // ---- profiles --------------------------------------------------------------------------------------------------
+
+    /// Adds a profile or replaces the one with the same id, and writes the file. A profile that does not pass the rules
+    /// of the loader, or a file that cannot be written, changes nothing.
+    pub fn save_profile(&self, profile: IntegrationProfile) -> Result<(), Fault> {
+        let mut state = self.lock();
+        let mut next = state.profiles.clone();
+        next.upsert(profile).map_err(|note| Fault::new(FaultCode::Profile, "invalid", format!("{note}.")))?;
+        next.save(&self.dir)
+            .map_err(|_| Fault::new(FaultCode::Profile, "save", "The profiles could not be saved."))?;
+        state.profiles = next;
+        Ok(())
+    }
+}
+
+impl Resolve for IntegrationService {
+    /// The request as it would run now, for the table of tickets: the same checks as the other lanes, the argument list
+    /// of the tool module, the binary's name, the facts of the target and, for a local verb, what it changes.
+    fn resolve(
+        &self,
+        tool: ToolId,
+        verb: &str,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+    ) -> Result<Resolution, TicketError> {
+        let selection = self.context.selection_for(tool, pane);
+        let request = self.request(tool, verb, args, &selection, Lane::Card).map_err(|_| TicketError::Refused)?;
+        let Detection::Found(found) = self.locate(tool) else { return Err(TicketError::Refused) };
+        let argv = request
+            .integration
+            .argv(request.verb, &request.validated, &request.resolved.selection)
+            .map_err(|_| TicketError::Refused)?;
+        let program = Path::new(&found.path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut target = self.target_pairs(&request);
+        if request.verb.effect == VerbEffect::Local {
+            if let Some(sentence) = request.integration.changes(request.verb) {
+                target.push(("changes".to_owned(), sentence.to_owned()));
+            }
+        }
+        Ok(Resolution { verb: request.verb, argv, program, target, production: request.resolved.production.clone() })
+    }
+}
+
+/// The first line of a tool's text, cleaned of escape sequences, controls and invisible characters, on one line, at most
+/// [`FAULT_MESSAGE_MAX`] characters (cut with an ellipsis); `None` when there is none.
+fn first_line(bytes: &[u8]) -> Option<String> {
+    let cleaned = redact::sanitise(&String::from_utf8_lossy(bytes)).text;
+    let line = cleaned.lines().map(clean_cell).find(|line| !line.is_empty())?;
+    if line.chars().count() <= FAULT_MESSAGE_MAX {
+        return Some(line);
+    }
+    let mut cut: String = line.chars().take(FAULT_MESSAGE_MAX - 1).collect();
+    cut.push('\u{2026}');
+    Some(cut)
+}
+
+/// The fault for a tool that ran and failed: its label and, when it said anything on standard error, the first line of
+/// it. The message is shown and kept nowhere else.
+fn tool_fault(label: &str, stderr: &[u8]) -> Fault {
+    match first_line(stderr) {
+        Some(line) => Fault::new(FaultCode::Failed, "exit_status", format!("{label} reported an error: {line}")),
         None => Fault::new(FaultCode::Failed, "exit_status", format!("{label} reported an error.")),
     }
+}
+
+/// A fixed sentence of the ticket table as a sentence: first letter capital, a full stop.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}.", first.to_uppercase(), chars.as_str()),
+        None => String::new(),
+    }
+}
+
+fn ticket_fault(error: TicketError) -> Fault {
+    let (code, reason) = match error {
+        TicketError::NotGated => (FaultCode::Refused, "not_gated"),
+        TicketError::Refused => (FaultCode::Refused, "card"),
+        TicketError::Unknown => (FaultCode::Ticket, "unknown"),
+        TicketError::Expired => (FaultCode::Ticket, "expired"),
+        TicketError::Mismatch => (FaultCode::Ticket, "mismatch"),
+        TicketError::Changed => (FaultCode::Ticket, "changed"),
+    };
+    Fault::new(code, reason, sentence(&error.to_string()))
+}
+
+/// What a confirmed ticket did.
+#[derive(Debug)]
+pub enum Done {
+    /// A verb that changes a file, a cluster or an account ran once; the line is the tool's own first line of output,
+    /// cleaned, or a fixed sentence when it said nothing.
+    Ran {
+        /// The one-line outcome.
+        note: String,
+    },
+    /// An exec verb was confirmed: the pane starts this launch. Nothing was started yet.
+    Launch(Launch),
+}
+
+/// The name of a pane that runs a tool: the verb, where it runs, and the production profile's name.
+fn launch_label(verb: &Verb, target: &[(String, String)], production: Option<&str>) -> String {
+    let get = |label: &str| target.iter().find(|(own, _)| own == label).map(|(_, value)| value.as_str());
+    let mut label = verb.label.to_owned();
+    if let Some(pod) = get("pod") {
+        label = format!("{label} in pod {pod}");
+    } else if let (Some(node), true) = (get("node"), verb.args.iter().any(|arg| arg.name == "node")) {
+        label = format!("{label} on node {node}");
+    }
+    if let Some(name) = production {
+        label = format!("{label} ({})", clean_cell(name));
+    }
+    label.chars().take(128).collect()
 }

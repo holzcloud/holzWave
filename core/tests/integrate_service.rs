@@ -12,6 +12,7 @@ mod common;
 mod fake_cli;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -313,4 +314,279 @@ fn the_version_a_tool_prints_is_shown_and_a_failing_probe_does_not_make_it_unusa
     let azure = tools.iter().find(|tool| tool.id == ToolId::Azure).expect("an entry");
     assert_eq!(azure.state, ToolState::Found, "a failing version probe is no reason to refuse the tool");
     assert!(azure.version.is_none());
+}
+
+// ---- the verbs with a card, the launches and the three trait methods in use --------------------------------------------
+
+use holzwave_core::integrate::args::{ContextName, ProfileId};
+use holzwave_core::integrate::kube::POD_SHELL;
+use holzwave_core::integrate::profiles::IntegrationProfile;
+use holzwave_core::integrate::service::Done;
+use holzwave_core::integrate::{ArgKind, IntegrationSpec, Selection};
+
+/// Makes a fake count its starts: the rig's script sources `<name>.conf` before it records anything, so one more line
+/// there appends to `<name>.runs` at every start. Call it after the last builder method (a builder rewrites the file).
+fn counted(fake: FakeCli) -> FakeCli {
+    use std::io::Write;
+    let path = format!("{}.conf", fake.path().display());
+    let mut conf = std::fs::OpenOptions::new().append(true).open(path).expect("the settings of the fake");
+    writeln!(conf, "echo run >> \"$d/$n.runs\"").expect("one more line");
+    fake
+}
+
+/// How many times a counted fake was started.
+fn runs(fake: &FakeCli) -> usize {
+    std::fs::read_to_string(format!("{}.runs", fake.path().display())).map_or(0, |text| text.lines().count())
+}
+
+fn selecting(context: &str, namespace: &str) -> Selection {
+    Selection { context: Some(context.into()), namespace: Some(namespace.into()), ..Selection::default() }
+}
+
+#[test]
+fn a_pod_deletion_runs_once_after_its_card_is_confirmed() {
+    let rig = Rig::new();
+    let fake = counted(FakeCli::new(&rig.bin, "kubectl").prints("pod \"api-0\" deleted\n"));
+    let service = rig.service();
+    service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
+
+    let card = service.prepare("kube", "delete_pod", Some(3), &args(&[("pod", "api-0")])).expect("a card");
+    let want = ["delete", "pod", "--context=dev", "--namespace=payments", "--wait=false", "--request-timeout=10s", "--", "api-0"];
+    assert_eq!(card.argv, want, "the card shows the argument list the tool module built");
+    assert!(card.target.contains(&("context".to_owned(), "dev".to_owned())), "{:?}", card.target);
+    assert!(card.target.contains(&("namespace".to_owned(), "payments".to_owned())), "{:?}", card.target);
+    assert_eq!(runs(&fake), 0, "a card starts nothing");
+
+    let done = service.confirm(&card.ticket, &card.hash).expect("the confirm runs it");
+    let Done::Ran { note } = done else { panic!("a write verb runs, got {done:?}") };
+    assert_eq!(note, "pod \"api-0\" deleted", "the outcome is the first line of the tool's answer");
+    assert_eq!(runs(&fake), 1);
+    assert_eq!(argv_of(&fake), card.argv, "what ran is what the card showed");
+
+    let again = service.confirm(&card.ticket, &card.hash).expect_err("a ticket approves once");
+    assert_eq!(again.code, FaultCode::Ticket);
+    assert_eq!(runs(&fake), 1, "and the second confirm ran nothing");
+}
+
+#[test]
+fn a_changed_selection_between_card_and_click_runs_nothing() {
+    let rig = Rig::new();
+    let fake = counted(FakeCli::new(&rig.bin, "kubectl").prints("deleted\n"));
+    let service = rig.service();
+    service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
+    let card = service.prepare("kube", "delete_pod", Some(3), &args(&[("pod", "api-0")])).expect("a card");
+
+    let wrong = service.confirm(&card.ticket, &"0".repeat(64)).expect_err("a hash that is not the card's");
+    assert_eq!(wrong.code, FaultCode::Ticket);
+
+    service.select("kube", Some(3), &selecting("kind-test", "payments")).expect("another cluster");
+    let fault = service.confirm(&card.ticket, &card.hash).expect_err("the request is not the one that was shown");
+    assert_eq!(fault.code, FaultCode::Ticket);
+    assert_eq!(runs(&fake), 0, "nothing ran");
+}
+
+#[test]
+fn a_production_profile_makes_the_card_say_so() {
+    let rig = Rig::new();
+    let _fake = FakeCli::new(&rig.bin, "kubectl");
+    let service = rig.service();
+    let mut profile = IntegrationProfile::new(ProfileId::parse("prod-eu").expect("an id"), ToolId::Kube, "Prod EU");
+    profile.context = Some(ContextName::parse("dev").expect("a name"));
+    profile.production = true;
+    service.save_profile(profile).expect("a profile");
+    service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
+    let card = service.prepare("kube", "delete_pod", Some(3), &args(&[("pod", "api-0")])).expect("a card");
+    assert_eq!(card.guard.production.as_deref(), Some("Prod EU"));
+    assert!(card.fields.contains(&("guard".to_owned(), "production".to_owned())));
+    assert!(card.fields.contains(&("production_name".to_owned(), "Prod EU".to_owned())));
+
+    service.select("kube", Some(4), &selecting("kind-test", "payments")).expect("a selection");
+    let card = service.prepare("kube", "delete_pod", Some(4), &args(&[("pod", "api-0")])).expect("a card");
+    assert_eq!(card.guard.production, None, "another context is not production");
+}
+
+#[test]
+fn a_local_verb_names_what_it_changes_and_marks_the_default_stale() {
+    let rig = Rig::new();
+    let _fake = counted(FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/config_view.json")));
+    let service = rig.service();
+    service.run_view("kube", "contexts", None, &args(&[])).expect("the default read");
+    let rows = service.context_rows(None, false);
+    let kube = rows.iter().find(|row| row.tool == ToolId::Kube).expect("a row");
+    assert!(!kube.stale, "a value that was just read is not stale");
+
+    let fake = counted(FakeCli::new(&rig.bin, "kubectl").prints("Switched to context \"kind-test\".\n"));
+    let card = service.prepare("kube", "use_context", None, &args(&[("context", "kind-test")])).expect("a card");
+    let changes = "the kubeconfig files named by KUBECONFIG, by default ~/.kube/config";
+    assert!(card.target.contains(&("changes".to_owned(), changes.to_owned())), "{:?}", card.target);
+    assert!(card.target.contains(&("context".to_owned(), "kind-test".to_owned())), "the context it switches to");
+    assert_eq!(card.argv, ["config", "use-context", "--", "kind-test"]);
+
+    let read = service.prepare("kube", "pods", None, &args(&[])).expect_err("a read needs no card");
+    assert_eq!(read.code, FaultCode::Refused);
+
+    let before = runs(&fake);
+    let done = service.confirm(&card.ticket, &card.hash).expect("the confirm runs it");
+    let Done::Ran { note } = done else { panic!("a local verb runs, got {done:?}") };
+    assert_eq!(note, "Switched to context \"kind-test\".");
+    assert_eq!(runs(&fake), before + 1);
+    let rows = service.context_rows(None, false);
+    let kube = rows.iter().find(|row| row.tool == ToolId::Kube).expect("a row");
+    assert!(kube.stale, "the tool's own selection may have changed, so it is marked");
+    assert_eq!(kube.context.as_deref(), Some("dev"), "the value is kept");
+}
+
+#[test]
+fn every_local_verb_names_what_it_changes() {
+    let rig = Rig::new();
+    for program in ["kubectl", "talosctl", "az", "gam"] {
+        let _ = FakeCli::new(&rig.bin, program);
+    }
+    let service = rig.service();
+    let cases = [
+        ("kube", "use_context", args(&[("context", "dev")])),
+        ("kube", "set_namespace", args(&[("namespace", "payments")])),
+        ("talos", "use_context", args(&[("context", "demo-prod")])),
+        ("azure", "set_subscription", args(&[("subscription", "00000000-0000-4000-8000-000000000002")])),
+    ];
+    for (tool, verb, request) in cases {
+        let card = service.prepare(tool, verb, None, &request).unwrap_or_else(|e| panic!("{tool} {verb}: {e}"));
+        let changes = card.target.iter().find(|(label, _)| label == "changes").unwrap_or_else(|| panic!("{tool} {verb}: {:?}", card.target));
+        assert!(changes.1.len() > 20, "{tool} {verb}: a sentence: {}", changes.1);
+    }
+}
+
+#[test]
+fn exec_confirms_into_a_clean_launch_and_starts_nothing() {
+    let rig = Rig::new();
+    let fake = FakeCli::new(&rig.bin, "kubectl");
+    let facts = rig.facts().with_env("HOLZWAVE_TOKEN", "app-secret").with_env("LD_PRELOAD", "/tmp/x.so").with_env("FOO", "bar");
+    let service = rig.service_over(facts);
+    service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
+    let card = service.prepare("kube", "exec", Some(3), &args(&[("pod", "api-0")])).expect("a card");
+    assert_eq!(card.guard.production, None);
+
+    let done = service.confirm(&card.ticket, &card.hash).expect("the confirm gives a launch");
+    let Done::Launch(launch) = done else { panic!("an exec verb launches, got {done:?}") };
+    assert!(!fake.started(), "the confirm started nothing: the pane does");
+    assert_eq!(launch.program, fake.path());
+    let mut want: Vec<OsString> = ["exec", "-i", "-t", "--context=dev", "--namespace=payments", "api-0", "--", "sh", "-c"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    want.push(OsString::from(POD_SHELL));
+    assert_eq!(launch.args, want, "the argument list of the card");
+    assert!(launch.env.iter().all(|(name, _)| !name.starts_with("HOLZWAVE_")), "no variable of the app: {:?}", launch.env);
+    let path = launch.env.iter().find(|(name, _)| name == "PATH").expect("the rebuilt PATH");
+    assert!(path.1.starts_with(&format!("{}:", rig.bin.display())), "the tool's directory first: {}", path.1);
+    assert_eq!(launch.env_remove, ["HOLZWAVE_TOKEN", "LD_PRELOAD"], "the pane removes what it inherits");
+    assert_eq!(launch.label, "Exec in pod api-0");
+}
+
+#[test]
+fn read_terminals_launch_without_a_ticket_and_exec_cannot() {
+    let rig = Rig::new();
+    let kubectl = FakeCli::new(&rig.bin, "kubectl");
+    let talosctl = FakeCli::new(&rig.bin, "talosctl");
+    let _az = FakeCli::new(&rig.bin, "az");
+    let service = rig.service();
+
+    let logs = service.launch("kube", "logs", None, &args(&[("pod", "api-0")])).expect("logs launch");
+    let want: Vec<OsString> = ["logs", "--follow", "--tail=200", "--", "api-0"].iter().map(OsString::from).collect();
+    assert_eq!(logs.args, want);
+    assert_eq!(logs.label, "Logs in pod api-0");
+    let dmesg = service.launch("talos", "dmesg", None, &args(&[])).expect("dmesg launches");
+    assert_eq!(dmesg.program, talosctl.path());
+    assert_eq!(dmesg.args, [OsString::from("dmesg"), OsString::from("--follow")]);
+
+    for (tool, verb, request) in [
+        ("kube", "exec", args(&[("pod", "api-0")])),
+        ("azure", "login", args(&[])),
+        ("talos", "dashboard", args(&[])),
+        ("kube", "delete_pod", args(&[("pod", "api-0")])),
+        ("kube", "use_context", args(&[("context", "dev")])),
+        ("kube", "contexts", args(&[])),
+        ("nonesuch", "shell", args(&[])),
+    ] {
+        let fault = service.launch(tool, verb, None, &request).expect_err("not a launch without a card");
+        assert_eq!(fault.code, FaultCode::Refused, "{tool} {verb}");
+    }
+    assert!(!kubectl.started(), "a launch only describes the program");
+}
+
+#[test]
+fn the_shell_launch_gets_the_overlay() {
+    let rig = Rig::new();
+    let _fake = FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/config_view.json"));
+    let shell = holzwave_core::platform::ShellLaunch { program: "/bin/zsh".to_owned(), args: vec!["-l".to_owned()] };
+    let service = rig.service_over(rig.facts().with_shell(shell));
+    service.select("kube", Some(7), &selecting("kind-test", "payments")).expect("a selection");
+
+    let launch = service.launch("kube", "shell", Some(7), &args(&[])).expect("the shell launches");
+    assert_eq!(launch.program, PathBuf::from("/bin/zsh"), "the person's own shell");
+    assert_eq!(launch.args, [OsString::from("-l")]);
+    let overlay = rig.data.join("run").join("kube").join("7.json");
+    let kubeconfig = launch.env.iter().find(|(name, _)| name == "KUBECONFIG").expect("KUBECONFIG is set");
+    assert_eq!(kubeconfig.1, format!("{}:{}", overlay.display(), rig.home.join(".kube").join("config").display()));
+    let text = std::fs::read_to_string(&overlay).expect("the overlay exists below the data directory");
+    assert!(text.contains("kind-test") && text.contains("payments"), "it names the context and the namespace: {text}");
+    for secret in ["REDACTED", "\"token\"", "certificate-authority-data", "client-key", "exec", "server"] {
+        assert!(!text.contains(secret), "the overlay holds names only, not {secret}: {text}");
+    }
+    assert!(launch.env.iter().all(|(name, _)| !name.starts_with("HOLZWAVE_")));
+}
+
+/// A value for every argument a verb declares, so that a refusal can only come from the lane.
+fn valid_args(spec: &IntegrationSpec, verb: &str) -> BTreeMap<String, String> {
+    let verb = spec.verb(verb).expect("a verb of the spec");
+    verb.args
+        .iter()
+        .map(|arg| {
+            let value = match arg.kind {
+                ArgKind::Context => "dev".to_owned(),
+                ArgKind::Namespace => "payments".to_owned(),
+                ArgKind::Pod => "api-0".to_owned(),
+                ArgKind::Container => "app".to_owned(),
+                ArgKind::Node => "192.0.2.11".to_owned(),
+                ArgKind::Subscription => "00000000-0000-4000-8000-000000000002".to_owned(),
+                ArgKind::Section => "DEFAULT".to_owned(),
+                ArgKind::Lines => "10".to_owned(),
+                ArgKind::Flag => "true".to_owned(),
+                ArgKind::Choice(words) => words[0].to_owned(),
+            };
+            (arg.name.to_owned(), value)
+        })
+        .collect()
+}
+
+#[test]
+fn no_gated_verb_runs_without_a_ticket() {
+    use holzwave_core::integrate::{azure, gam, kube, talos, Output, VerbEffect};
+    let rig = Rig::new();
+    let fakes: Vec<FakeCli> = ["kubectl", "talosctl", "az", "gam"].iter().map(|name| FakeCli::new(&rig.bin, name)).collect();
+    let service = rig.service();
+    let mut checked = 0;
+    for spec in [&kube::SPEC, &talos::SPEC, &azure::SPEC, &gam::SPEC] {
+        let tool = spec.id.as_str();
+        for verb in spec.verbs {
+            let request = valid_args(spec, verb.id);
+            if verb.effect != VerbEffect::Read || verb.output != Output::View {
+                let fault = service.run_view(tool, verb.id, None, &request).expect_err("only a read with a view");
+                assert_eq!(fault.code, FaultCode::Refused, "run_view {tool} {}", verb.id);
+                checked += 1;
+            }
+            if verb.effect != VerbEffect::Read || verb.output != Output::Terminal {
+                let fault = service.launch(tool, verb.id, None, &request).expect_err("only a read with a terminal");
+                assert_eq!(fault.code, FaultCode::Refused, "launch {tool} {}", verb.id);
+                checked += 1;
+            }
+            if verb.effect == VerbEffect::Read {
+                let fault = service.prepare(tool, verb.id, None, &request).expect_err("a read has no card");
+                assert_eq!(fault.code, FaultCode::Refused, "prepare {tool} {}", verb.id);
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 40, "the matrix was walked: {checked}");
+    assert!(fakes.iter().all(|fake| !fake.started()), "no lane started a process for another lane's verb");
 }
