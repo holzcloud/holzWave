@@ -20,23 +20,25 @@
 //! The environment of a child is the inherited one without the app's own and the hijackable names, the rebuilt `PATH`,
 //! the profile's variables, the tool's fixed ones, the isolation variable of the selection and the secrets.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use zeroize::Zeroizing;
 
-use super::args::ArgError;
+use super::args::{ArgError, EnvName, ProfileId};
 use super::context::{self, ContextError, ContextRow, ContextState, Detection as ContextDetection, Resolved};
-use super::detect::{self, Detection, Found, UnusableReason};
+use super::detect::{self, Detection, Found, Place, UnusableReason};
 use super::kube::ContextEntry;
-use super::profiles::{IntegrationProfile, IntegrationProfiles, LocalFile};
+use super::profiles::{secret_account, IntegrationProfile, IntegrationProfiles, LocalFile};
 use super::run::{
     spawn_supported, Env, EnvExtra, EnvPolicy, Launch, RunCancel, RunEnd, RunError, RunLimits, RunResult, Runner,
-    DEFAULT_STDOUT, DEFAULT_TIMEOUT,
+    DEFAULT_STDOUT, DEFAULT_TIMEOUT, SLOT_WAIT,
 };
 use super::ticket::{Approved, Card, Resolution, Resolve, TicketError, TicketTable};
 use super::view::{clean_cell, text_fallback, ViewModel};
@@ -53,6 +55,14 @@ use crate::secrets::SecretStore;
 // The machine.
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// How long an answer is served again, and how many answers are kept.
+pub const CACHE_TTL: Duration = Duration::from_secs(1);
+/// The most answers the cache keeps.
+pub const CACHE_MAX: usize = 64;
+/// The sentence of every refusal in a Flatpak build.
+pub const FLATPAK_SENTENCE: &str = "The integrations are not available in the Flatpak build.";
+/// The most panes a service notes besides the ones with a view.
+const MAX_NOTED: usize = 256;
 /// The most characters of a tool's own message that a fault holds.
 pub const FAULT_MESSAGE_MAX: usize = 240;
 /// The time a verb that changes something may take, and the most standard output it may write (one line is expected).
@@ -137,7 +147,8 @@ impl HostFacts {
         let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
         let lookup = |name: &str| std::env::var(name).ok();
         let in_flatpak = platform::in_flatpak(&lookup, &|path| Path::new(path).exists());
-        let home = if os == Os::Windows { lookup("USERPROFILE") } else { lookup("HOME") }.filter(|home| !home.is_empty());
+        let home_variable = if os == Os::Windows { "USERPROFILE" } else { "HOME" };
+        let home = lookup(home_variable).filter(|home| !home.is_empty());
         let login_path: Arc<LoginFn> = {
             let once: Arc<std::sync::OnceLock<Vec<String>>> = Arc::new(std::sync::OnceLock::new());
             let probe_env: Vec<(OsString, OsString)> = ["HOME", "USER", "SHELL"]
@@ -225,8 +236,8 @@ impl HostFacts {
 fn login_shell_path(os: Os, in_flatpak: bool, shell: Option<&str>, probe_env: &[(OsString, OsString)]) -> Vec<String> {
     let Some(probe) = detect::login_probe(os, shell, &|path| Path::new(path).is_file()) else { return Vec::new() };
     let runner = Runner::new(spawn_supported(std::env::consts::OS, in_flatpak));
-    let Ok(env) = EnvPolicy::build(probe_env.iter().cloned(), os, detect::LOGIN_PROBE_PATH.to_owned(), EnvExtra::default())
-    else {
+    let path = detect::LOGIN_PROBE_PATH.to_owned();
+    let Ok(env) = EnvPolicy::build(probe_env.iter().cloned(), os, path, EnvExtra::default()) else {
         return Vec::new();
     };
     let args: Vec<OsString> = probe.args.iter().map(OsString::from).collect();
@@ -346,6 +357,10 @@ pub enum ToolState {
     Found,
     /// Not found.
     NotFound,
+    /// A path is there (the one the person set, or a file on the search path) and cannot be used; `reason` says why.
+    Unusable,
+    /// The integrations do not run in this build; `reason` says so.
+    Unsupported,
 }
 
 /// One tool as the settings and the sidebar show it.
@@ -357,8 +372,14 @@ pub struct ToolView {
     pub label: &'static str,
     /// Found or not.
     pub state: ToolState,
-    /// The absolute path of the program, when found.
+    /// The absolute path of the program, when found or when it is the unusable one.
     pub path: Option<String>,
+    /// Where the program was found: `override`, `path`, `login_path` or `fixed_dir`.
+    pub place: Option<&'static str>,
+    /// The path the person set in the machine-local file, when there is one.
+    pub binary: Option<String>,
+    /// Why the tool is unusable or unsupported, as a sentence.
+    pub reason: Option<String>,
     /// The version the tool printed, when it was asked and said.
     pub version: Option<String>,
     /// The directories that were looked in, when it was not found.
@@ -396,6 +417,47 @@ struct State {
     slots: Vec<Slot>,
     contexts: Vec<Vec<ContextEntry>>,
     notes: Vec<String>,
+    /// Panes that a launch opened, with what they were opened for.
+    noted: BTreeMap<PaneId, Noted>,
+    /// Panes whose tool ended with an error and is held open.
+    held: BTreeSet<PaneId>,
+}
+
+/// A pane that a launch opened.
+struct Noted {
+    tool: ToolId,
+    verb: String,
+    selection: Selection,
+}
+
+/// The identity of a read: the same tool, verb, pane, selection and arguments are the same request.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Key {
+    tool: ToolId,
+    verb: &'static str,
+    pane: Option<PaneId>,
+    selection: [Option<String>; 6],
+    args: Vec<(String, String)>,
+}
+
+impl Key {
+    fn of(request: &Request, pane: Option<PaneId>, args: &BTreeMap<String, String>) -> Self {
+        let s = selection_text(&request.resolved.selection);
+        Key {
+            tool: request.tool,
+            verb: request.verb.id,
+            pane,
+            selection: [s.profile, s.context, s.namespace, s.subscription, s.section, s.node],
+            args: args.iter().map(|(name, value)| (name.clone(), value.clone())).collect(),
+        }
+    }
+}
+
+/// A run that is in flight: the leader fills the result and wakes the others.
+#[derive(Default)]
+struct Flight {
+    result: Mutex<Option<Result<RunAnswer, Fault>>>,
+    done: Condvar,
 }
 
 /// The integration service. It is `Send + Sync`: the shell shares one behind an `Arc`.
@@ -410,6 +472,11 @@ pub struct IntegrationService {
     context: ContextState,
     tickets: TicketTable,
     state: Mutex<State>,
+    flights: Mutex<HashMap<Key, Arc<Flight>>>,
+    cache: Mutex<HashMap<Key, (Instant, RunAnswer)>>,
+    busy_panes: (Mutex<HashSet<PaneId>>, Condvar),
+    /// Moves with every invalidation, so that a run that began before one never fills the cache after it.
+    generation: AtomicU64,
 }
 
 impl fmt::Debug for IntegrationService {
@@ -466,8 +533,18 @@ enum EnvMode {
     Launch { overlay: bool },
 }
 
+fn place_word(place: Place) -> &'static str {
+    match place {
+        Place::Override => "override",
+        Place::Path => "path",
+        Place::LoginPath => "login_path",
+        Place::FixedDir => "fixed_dir",
+    }
+}
+
 fn now_seconds() -> u32 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX))
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+    u32::try_from(elapsed).unwrap_or(u32::MAX)
 }
 
 fn slot_of(tool: ToolId) -> usize {
@@ -487,9 +564,9 @@ fn selection_text(checked: &CheckedSelection) -> Selection {
 }
 
 impl IntegrationService {
-    /// A service over the data directory `dir`: it reads the profiles, the machine-local file and the pane selections of
-    /// `live_panes` (what could not be used is kept as `.bad` and named in [`IntegrationService::notes`]), and builds
-    /// the runner, which is disabled when `facts.in_flatpak` is set.
+    /// A service over the data directory `dir`: it reads the profiles, the machine-local file and the pane selections
+    /// of `live_panes` (what could not be used is kept as `.bad` and named in [`IntegrationService::notes`]), and
+    /// builds the runner, which is disabled when `facts.in_flatpak` is set.
     pub fn new(dir: &Path, secrets: Arc<dyn SecretStore>, facts: HostFacts, live_panes: &[PaneId]) -> Self {
         let mut notes = Vec::new();
         let (profiles, found) = IntegrationProfiles::load(dir);
@@ -499,7 +576,8 @@ impl IntegrationService {
         let (context, found) = ContextState::load(dir, live_panes);
         notes.extend(found);
         let enabled = spawn_supported(std::env::consts::OS, facts.in_flatpak);
-        let tools: Vec<&'static dyn Integration> = vec![&super::kube::KUBE, &super::talos::TALOS, &super::azure::AZURE, &super::gam::GAM];
+        let tools: Vec<&'static dyn Integration> =
+            vec![&super::kube::KUBE, &super::talos::TALOS, &super::azure::AZURE, &super::gam::GAM];
         let slots = tools.iter().map(|_| Slot::default()).collect();
         let contexts = tools.iter().map(|_| Vec::new()).collect();
         Self {
@@ -512,7 +590,19 @@ impl IntegrationService {
             tools,
             context,
             tickets: TicketTable::new(),
-            state: Mutex::new(State { profiles, local, slots, contexts, notes }),
+            state: Mutex::new(State {
+                profiles,
+                local,
+                slots,
+                contexts,
+                notes,
+                noted: BTreeMap::new(),
+                held: BTreeSet::new(),
+            }),
+            flights: Mutex::new(HashMap::new()),
+            cache: Mutex::new(HashMap::new()),
+            busy_panes: (Mutex::new(HashSet::new()), Condvar::new()),
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -577,7 +667,8 @@ impl IntegrationService {
         let slot = &mut state.slots[slot_of(tool)];
         match detection {
             Detection::Found(found) => {
-                let version = slot.found.as_ref().filter(|old| old.path == found.path).and_then(|old| old.version.clone());
+                let same = slot.found.as_ref().filter(|old| old.path == found.path);
+                let version = same.and_then(|old| old.version.clone());
                 let found = found.with_version(version);
                 slot.found = Some(found.clone());
                 slot.state = ContextDetection::Found;
@@ -624,33 +715,64 @@ impl IntegrationService {
         names.first().copied().unwrap_or(spec.label)
     }
 
-    /// One entry per tool, in the order the person sees them. A tool that is found and was never asked for its version is
-    /// asked once (a short run through the runner), so call it off the UI thread.
+    /// One entry per tool, in the order the person sees them. A tool that is found and was never asked for its
+    /// version is asked once (a short run through the runner), so call it off the UI thread. In a build that runs no
+    /// integration every entry says so and nothing is looked for.
     pub fn tools(&self) -> Vec<ToolView> {
-        ToolId::ALL
-            .iter()
-            .map(|tool| {
-                let spec = self.integration(*tool).spec();
-                let (state, path, version, searched) = match self.locate(*tool) {
-                    Detection::Found(found) => {
-                        let found = self.with_version(*tool, found);
-                        (ToolState::Found, Some(found.path), found.version, Vec::new())
-                    }
-                    Detection::NotFound { searched } => (ToolState::NotFound, None, None, searched),
-                    Detection::Unusable { path, .. } => (ToolState::NotFound, Some(path), None, Vec::new()),
-                };
-                ToolView {
-                    id: *tool,
-                    label: spec.label,
-                    state,
-                    path,
-                    version,
-                    searched,
-                    verbs: spec.verbs,
-                    selects: spec.selects,
-                }
-            })
-            .collect()
+        ToolId::ALL.iter().map(|tool| self.tool_view(*tool)).collect()
+    }
+
+    fn tool_view(&self, tool: ToolId) -> ToolView {
+        let spec = self.integration(tool).spec();
+        let binary = self.lock().local.binary(tool).and_then(Path::to_str).map(str::to_owned);
+        let mut view = ToolView {
+            id: tool,
+            label: spec.label,
+            state: ToolState::NotFound,
+            path: None,
+            place: None,
+            binary,
+            reason: None,
+            version: None,
+            searched: Vec::new(),
+            verbs: spec.verbs,
+            selects: spec.selects,
+        };
+        if !self.enabled {
+            view.state = ToolState::Unsupported;
+            view.reason = Some(self.unsupported_sentence().to_owned());
+            return view;
+        }
+        match self.locate(tool) {
+            Detection::Found(found) => {
+                let found = self.with_version(tool, found);
+                view.state = ToolState::Found;
+                view.place = Some(place_word(found.place));
+                view.path = Some(found.path);
+                view.version = found.version;
+            }
+            Detection::NotFound { searched } => view.searched = searched,
+            Detection::Unusable { path, reason } => {
+                view.state = ToolState::Unusable;
+                view.path = Some(path);
+                view.reason = Some(format!("{} cannot be used: {}.", self.binary_name(spec), reason.as_str()));
+            }
+        }
+        view
+    }
+
+    /// The sentence of every refusal when the integrations do not run.
+    fn unsupported_sentence(&self) -> &'static str {
+        if self.facts.in_flatpak { FLATPAK_SENTENCE } else { "The integrations are not available in this build." }
+    }
+
+    /// `Ok` when this build runs the integrations, else the `unsupported` fault. Checked first by every call that would
+    /// find, run or launch a tool.
+    fn ensure_enabled(&self) -> Result<(), Fault> {
+        if self.enabled {
+            return Ok(());
+        }
+        Err(Fault::new(FaultCode::Unsupported, "unsupported", self.unsupported_sentence()))
     }
 
     /// `found` with its version, asking the tool for it the first time. A tool that does not answer keeps no version
@@ -674,7 +796,8 @@ impl IntegrationService {
         let spec = self.integration(tool).spec();
         let probe = detect::version_probe(spec, found);
         let extra = EnvExtra { fixed: spec.env_set, ..EnvExtra::default() };
-        let env = EnvPolicy::build(self.facts.inherited.iter().cloned(), self.facts.os, self.child_path(found), extra).ok()?;
+        let inherited = self.facts.inherited.iter().cloned();
+        let env = EnvPolicy::build(inherited, self.facts.os, self.child_path(found), extra).ok()?;
         let args: Vec<OsString> = probe.args.iter().map(OsString::from).collect();
         let limits = RunLimits { max_stdout: VERSION_STDOUT, timeout: VERSION_TIMEOUT };
         let result = self.runner.run_argv(Path::new(&probe.program), &args, env, &limits, &RunCancel::default()).ok()?;
@@ -724,14 +847,113 @@ impl IntegrationService {
         pane: Option<PaneId>,
         args: &BTreeMap<String, String>,
     ) -> Result<RunAnswer, Fault> {
+        self.ensure_enabled()?;
         let tool = self.parse_tool(tool)?;
         let selection = self.context.selection_for(tool, pane);
         let request = self.request(tool, verb, args, &selection, Lane::View)?;
-        self.run_read(&request, pane)
+        self.read(&request, pane, args)
     }
 
-    /// The environment of a child: the inherited one (for a run), the rebuilt `PATH`, the profile's variables, the tool's
-    /// fixed ones and the isolation variable of the selection.
+    /// A read with single flight: identical requests that are in flight share one run and its answer, an answer younger
+    /// than [`CACHE_TTL`] is served again, and a pane never has two runs at once.
+    fn read(
+        &self,
+        request: &Request,
+        pane: Option<PaneId>,
+        args: &BTreeMap<String, String>,
+    ) -> Result<RunAnswer, Fault> {
+        let key = Key::of(request, pane, args);
+        let flight = {
+            let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(flight) = flights.get(&key) {
+                let flight = Arc::clone(flight);
+                drop(flights);
+                return self.follow(&flight);
+            }
+            // A leader fills the cache before it leaves the table, so an answer that was just finished is found here.
+            if let Some(answer) = self.cached(&key) {
+                return Ok(answer);
+            }
+            let flight = Arc::new(Flight::default());
+            flights.insert(key.clone(), Arc::clone(&flight));
+            flight
+        };
+        let generation = self.generation.load(Ordering::SeqCst);
+        let mut leading = Leading { service: self, key, flight, finished: false };
+        let result = match self.hold_pane(pane) {
+            Ok(hold) => {
+                let result = self.run_read(request, pane);
+                drop(hold);
+                result
+            }
+            Err(fault) => Err(fault),
+        };
+        leading.finish(&result, generation);
+        result
+    }
+
+    /// Waits for the run another call leads and takes its answer.
+    fn follow(&self, flight: &Flight) -> Result<RunAnswer, Fault> {
+        let until = Instant::now() + self.limits.timeout * 2 + SLOT_WAIT * 2 + Duration::from_secs(2);
+        let mut result = flight.result.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(done) = result.as_ref() {
+                return done.clone();
+            }
+            let Some(left) = until.checked_duration_since(Instant::now()) else {
+                return Err(Fault::new(FaultCode::Timeout, "timeout", "The request took too long."));
+            };
+            result = flight.done.wait_timeout(result, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+
+    fn cached(&self, key: &Key) -> Option<RunAnswer> {
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        match cache.get(key) {
+            Some((at, answer)) if at.elapsed() < CACHE_TTL => Some(answer.clone()),
+            Some(_) => {
+                cache.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn cache_put(&self, key: Key, answer: RunAnswer) {
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+        while cache.len() >= CACHE_MAX {
+            let Some(oldest) = cache.iter().min_by_key(|(_, (at, _))| *at).map(|(key, _)| key.clone()) else { break };
+            cache.remove(&oldest);
+        }
+        cache.insert(key, (Instant::now(), answer));
+    }
+
+    /// Drops the cached answers of a tool and of a pane, and makes the runs that are in flight not fill the cache.
+    fn drop_cached(&self, tool: Option<ToolId>, pane: Option<PaneId>) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.retain(|key, _| !(tool == Some(key.tool) || (pane.is_some() && key.pane == pane)));
+    }
+
+    /// Takes the pane for one run, waiting for an earlier run of it; none for a request that has no pane.
+    fn hold_pane(&self, pane: Option<PaneId>) -> Result<Option<PaneHold<'_>>, Fault> {
+        let Some(pane) = pane else { return Ok(None) };
+        let until = Instant::now() + self.limits.timeout + SLOT_WAIT;
+        let mut busy = self.busy_panes.0.lock().unwrap_or_else(PoisonError::into_inner);
+        while busy.contains(&pane) {
+            let Some(left) = until.checked_duration_since(Instant::now()) else {
+                let text = "This pane is still waiting for an earlier request. Try again in a moment.";
+                return Err(Fault::new(FaultCode::Busy, "pane", text));
+            };
+            busy = self.busy_panes.1.wait_timeout(busy, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+        busy.insert(pane);
+        Ok(Some(PaneHold { service: self, pane }))
+    }
+
+    /// The environment of a child: the inherited one (for a run), the rebuilt `PATH`, the profile's variables, the
+    /// tool's fixed ones and the isolation variable of the selection.
     fn build_env(
         &self,
         tool: ToolId,
@@ -770,7 +992,7 @@ impl IntegrationService {
             plain: resolved.env_plain.clone(),
             fixed: spec.env_set,
             isolation: applied.env,
-            secrets: Vec::new(),
+            secrets: self.secret_values(resolved)?,
         };
         let run = mode == EnvMode::Run;
         let inherited = self.facts.inherited.iter().filter(|_| run).cloned();
@@ -778,13 +1000,37 @@ impl IntegrationService {
             .map_err(|error| Fault::new(FaultCode::Failed, "environment", error.to_string()))
     }
 
+    /// The values of the profile's secret variables, read from the keychain for this one run and wiped when the
+    /// environment is dropped right after the start. A name without a value is left out; a keychain that cannot be
+    /// used is a fault, so a run never starts without the credentials that were asked for.
+    fn secret_values(&self, resolved: &Resolved) -> Result<Vec<(String, Zeroizing<String>)>, Fault> {
+        let Some(id) = &resolved.profile else { return Ok(Vec::new()) };
+        let mut values = Vec::with_capacity(resolved.secret_names.len());
+        for listed in &resolved.secret_names {
+            let keychain = || Fault::new(FaultCode::Profile, "keychain", "The keychain could not be used.");
+            let name = EnvName::parse(listed).map_err(|_| keychain())?;
+            let found = self.secrets.get(&secret_account(id, &name)).map_err(|_| keychain())?;
+            if let Some(value) = found.map(Zeroizing::new).filter(|value| !value.is_empty()) {
+                values.push((listed.clone(), value));
+            }
+        }
+        Ok(values)
+    }
+
     fn run_fault(&self, error: RunError) -> Fault {
-        Fault::new(FaultCode::Failed, "start", error.to_string())
+        match error {
+            RunError::Busy => {
+                Fault::new(FaultCode::Busy, "slots", "Too many tools are running at once. Try again in a moment.")
+            }
+            RunError::Unsupported => Fault::new(FaultCode::Unsupported, "unsupported", self.unsupported_sentence()),
+            other => Fault::new(FaultCode::Failed, "start", sentence(&other.to_string())),
+        }
     }
 
     fn run_read(&self, request: &Request, pane: Option<PaneId>) -> Result<RunAnswer, Fault> {
         let found = self.found(request.tool)?;
-        let argv = request.integration.argv(request.verb, &request.validated, &request.resolved.selection).map_err(arg_fault)?;
+        let (verb, validated, selection) = (request.verb, &request.validated, &request.resolved.selection);
+        let argv = request.integration.argv(verb, validated, selection).map_err(arg_fault)?;
         let env = self.build_env(request.tool, &request.resolved, &found, pane, EnvMode::Run)?;
         let result = self
             .runner
@@ -877,6 +1123,7 @@ impl IntegrationService {
                 if self.context.set_pane(pane, tool, &view, selection).map_err(context_fault)? {
                     let _ = self.context.save(&self.dir);
                 }
+                self.drop_cached(None, Some(pane));
             }
             None => {
                 self.context.set_pick(tool, selection).map_err(context_fault)?;
@@ -914,9 +1161,11 @@ impl IntegrationService {
 
     /// Reads the default verb of a tool with an empty selection, which is how the service learns the tool's own state.
     fn refresh_default(&self, tool: ToolId) -> Result<(), Fault> {
-        let first = self.integration(tool).spec().verbs.first().ok_or_else(|| Fault::refused("verb", "The tool has no verbs."))?;
-        let request = self.request(tool, first.id, &BTreeMap::new(), &Selection::default(), Lane::View)?;
-        self.run_read(&request, None).map(|_| ())
+        let verbs = self.integration(tool).spec().verbs;
+        let first = verbs.first().ok_or_else(|| Fault::refused("verb", "The tool has no verbs."))?;
+        let args = BTreeMap::new();
+        let request = self.request(tool, first.id, &args, &Selection::default(), Lane::View)?;
+        self.read(&request, None, &args).map(|_| ())
     }
 }
 
@@ -934,7 +1183,11 @@ impl IntegrationService {
         // The selection's own fact, which a verb that changes the tool's configuration shows only for the context.
         let chosen = |value: Option<&str>, kept: bool| if kept { text(value) } else { None };
         let rows = [
-            ("context", text(args.context().map(|v| v.as_str())).or_else(|| text(selection.context.as_ref().map(|v| v.as_str())))),
+            (
+                "context",
+                text(args.context().map(|v| v.as_str()))
+                    .or_else(|| text(selection.context.as_ref().map(|v| v.as_str()))),
+            ),
             (
                 "namespace",
                 text(args.namespace().map(|v| v.as_str()))
@@ -952,7 +1205,8 @@ impl IntegrationService {
             ),
             (
                 "node",
-                text(args.node().map(|v| v.as_str())).or_else(|| chosen(selection.node.as_ref().map(|v| v.as_str()), !local)),
+                text(args.node().map(|v| v.as_str()))
+                    .or_else(|| chosen(selection.node.as_ref().map(|v| v.as_str()), !local)),
             ),
             ("pod", text(args.pod().map(|v| v.as_str()))),
             ("container", text(args.container().map(|v| v.as_str()))),
@@ -968,6 +1222,7 @@ impl IntegrationService {
         pane: Option<PaneId>,
         args: &BTreeMap<String, String>,
     ) -> Result<Card, Fault> {
+        self.ensure_enabled()?;
         let tool = self.parse_tool(tool)?;
         let selection = self.context.selection_for(tool, pane);
         // The same checks that the table makes, first, so that a wrong lane, a bad argument or a missing program is
@@ -981,6 +1236,7 @@ impl IntegrationService {
     /// difference from the card is a `ticket` fault and nothing runs. A verb that changes a file, a cluster or an
     /// account runs once; an exec verb comes back as a launch that the pane starts.
     pub fn confirm(&self, ticket: &str, hash: &str) -> Result<Done, Fault> {
+        self.ensure_enabled()?;
         let approved = self.tickets.confirm(self, ticket, hash).map_err(ticket_fault)?;
         match approved.verb().effect {
             VerbEffect::Local | VerbEffect::Write => self.run_gated(&approved).map(|note| Done::Ran { note }),
@@ -1025,6 +1281,7 @@ impl IntegrationService {
         let resolved = self.unchanged(approved)?;
         let found = self.found(tool)?;
         let env = self.build_env(tool, &resolved, &found, approved.pane(), EnvMode::Run)?;
+        let _hold = self.hold_pane(approved.pane())?;
         let result = self
             .runner
             .run_argv(Path::new(&found.path), approved.argv(), env, &GATED_LIMITS, &RunCancel::default())
@@ -1037,10 +1294,11 @@ impl IntegrationService {
         Ok(first_line(&stdout).unwrap_or_else(|| format!("{} done.", verb.label)))
     }
 
-    /// What follows a run that may have changed the tool's own state: its default selection is marked as possibly out of
-    /// date (the value is kept).
+    /// What follows a run that may have changed the tool's own state: its default selection is marked as possibly out
+    /// of date (the value is kept) and the views that were read before are dropped.
     fn changed(&self, tool: ToolId) {
         self.context.mark_stale(tool);
+        self.drop_cached(Some(tool), None);
     }
 
     /// The launch of a confirmed exec verb.
@@ -1061,10 +1319,12 @@ impl IntegrationService {
         pane: Option<PaneId>,
         args: &BTreeMap<String, String>,
     ) -> Result<Launch, Fault> {
+        self.ensure_enabled()?;
         let tool = self.parse_tool(tool)?;
         let selection = self.context.selection_for(tool, pane);
         let request = self.request(tool, verb, args, &selection, Lane::Terminal)?;
-        let argv = request.integration.argv(request.verb, &request.validated, &request.resolved.selection).map_err(arg_fault)?;
+        let (verb, validated, selection) = (request.verb, &request.validated, &request.resolved.selection);
+        let argv = request.integration.argv(verb, validated, selection).map_err(arg_fault)?;
         let label = launch_label(request.verb, &self.target_pairs(&request), request.resolved.production.as_deref());
         self.assemble_launch(tool, request.verb, pane, &request.resolved, argv, label)
     }
@@ -1082,7 +1342,8 @@ impl IntegrationService {
     ) -> Result<Launch, Fault> {
         let found = self.found(tool)?;
         let kind = self.integration(tool).launch_program(verb);
-        let env = self.build_env(tool, resolved, &found, pane, EnvMode::Launch { overlay: kind == LaunchProgram::UserShell })?;
+        let overlay = kind == LaunchProgram::UserShell;
+        let env = self.build_env(tool, resolved, &found, pane, EnvMode::Launch { overlay })?;
         let (program, args) = match kind {
             LaunchProgram::Tool => (PathBuf::from(&found.path), argv),
             LaunchProgram::UserShell => {
@@ -1098,19 +1359,405 @@ impl IntegrationService {
         Ok(Launch::new(program, args, env, inherited, self.facts.os, None, label))
     }
 
-    // ---- profiles --------------------------------------------------------------------------------------------------
+    // ---- panes -----------------------------------------------------------------------------------------------------
 
-    /// Adds a profile or replaces the one with the same id, and writes the file. A profile that does not pass the rules
-    /// of the loader, or a file that cannot be written, changes nothing.
-    pub fn save_profile(&self, profile: IntegrationProfile) -> Result<(), Fault> {
+    /// Records the selection of a pane that a launch opened (a log, a shell, an exec), so that the shell can show a
+    /// chip for it. The verb must open a terminal; the selection is checked against the tool and its profile.
+    pub fn note_pane(&self, pane: PaneId, tool: &str, verb: &str, selection: &Selection) -> Result<(), Fault> {
+        let tool = self.parse_tool(tool)?;
+        let known = self.integration(tool).spec().verb(verb);
+        let verb = known
+            .filter(|verb| verb.output == Output::Terminal)
+            .ok_or_else(|| Fault::refused("verb", "The action is not known for this tool."))?;
         let mut state = self.lock();
-        let mut next = state.profiles.clone();
-        next.upsert(profile).map_err(|note| Fault::new(FaultCode::Profile, "invalid", format!("{note}.")))?;
-        next.save(&self.dir)
-            .map_err(|_| Fault::new(FaultCode::Profile, "save", "The profiles could not be saved."))?;
-        state.profiles = next;
+        context::resolve(&state.profiles, tool, selection).map_err(context_fault)?;
+        if !state.noted.contains_key(&pane) && state.noted.len() >= MAX_NOTED {
+            return Err(Fault::refused("too_many", "There are more panes than are kept."));
+        }
+        state.noted.insert(pane, Noted { tool, verb: verb.id.to_owned(), selection: selection.clone() });
         Ok(())
     }
+
+    /// Marks a pane as held open because its tool ended with an error (or clears the mark). The core sends no event of
+    /// its own for it: the shell calls this and reads [`IntegrationService::pane_rows`].
+    pub fn set_held(&self, pane: PaneId, held: bool) {
+        let mut state = self.lock();
+        if held {
+            state.held.insert(pane);
+        } else {
+            state.held.remove(&pane);
+        }
+    }
+
+    /// Every pane that has a selection, with what it resolves to: a pane with a view, and a pane that a launch opened.
+    pub fn pane_rows(&self) -> Vec<PaneRow> {
+        let state = self.lock();
+        let mut rows: BTreeMap<PaneId, PaneRow> = BTreeMap::new();
+        let row = |pane: PaneId, tool: ToolId, view: &str, selection: &Selection| {
+            let without_profile = Selection { profile: None, ..selection.clone() };
+            let resolved = context::resolve(&state.profiles, tool, selection)
+                .or_else(|_| context::resolve(&state.profiles, tool, &without_profile));
+            let (fact, namespace, production) = match resolved {
+                Ok(resolved) => {
+                    let picked = &resolved.selection;
+                    let fact = [
+                        picked.context.as_ref().map(|v| v.as_str()),
+                        picked.subscription.as_ref().map(|v| v.as_str()),
+                        picked.section.as_ref().map(|v| v.as_str()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .map(str::to_owned);
+                    (fact, picked.namespace.as_ref().map(|v| v.as_str().to_owned()), resolved.production)
+                }
+                Err(_) => (None, None, None),
+            };
+            PaneRow {
+                pane,
+                tool,
+                view: view.to_owned(),
+                context: fact,
+                namespace,
+                production,
+                held: state.held.contains(&pane),
+            }
+        };
+        for tool in ToolId::ALL {
+            for pane in self.context.panes_of(tool) {
+                if let Some(entry) = self.context.pane(pane) {
+                    rows.insert(pane, row(pane, tool, &entry.view, &entry.selection));
+                }
+            }
+        }
+        for (pane, noted) in &state.noted {
+            rows.entry(*pane).or_insert_with(|| row(*pane, noted.tool, &noted.verb, &noted.selection));
+        }
+        rows.into_values().collect()
+    }
+
+    /// Forgets everything about a pane that closed: its selection, what a launch noted, its held mark, its cached
+    /// answers and the overlay file that was written for it.
+    pub fn forget_pane(&self, pane: PaneId) {
+        if self.context.forget_pane(pane) {
+            let _ = self.context.save(&self.dir);
+        }
+        {
+            let mut state = self.lock();
+            state.noted.remove(&pane);
+            state.held.remove(&pane);
+        }
+        self.drop_cached(None, Some(pane));
+        remove_pane_files(&self.facts.data_dir, pane);
+    }
+
+    // ---- the program the person chose ------------------------------------------------------------------------------
+
+    /// Makes `path` the program of a tool. The person chooses which `kubectl` runs and not which program: the path must
+    /// be absolute, its file name must be one of the tool's own names, and the detector must find it usable (an
+    /// executable file that no one but the person's group can replace). It is kept in the machine-local file.
+    pub fn set_binary(&self, tool: &str, path: &str) -> Result<ToolView, Fault> {
+        self.ensure_enabled()?;
+        let tool = self.parse_tool(tool)?;
+        let spec = self.integration(tool).spec();
+        let os = self.facts.os;
+        if !platform::is_absolute_path(os, path) || path.chars().any(char::is_control) {
+            return Err(Fault::refused("path", "The path of the program must be an absolute path."));
+        }
+        let windows = os == Os::Windows;
+        let name = if windows { path.rsplit(['/', '\\']).next() } else { path.rsplit('/').next() }.unwrap_or("");
+        let names = if windows { spec.windows_binaries } else { spec.binaries };
+        let named = names.iter().any(|own| if windows { own.eq_ignore_ascii_case(name) } else { *own == name });
+        if !named {
+            let text = format!("The file must be named {}.", names.join(" or "));
+            return Err(Fault::refused("name", text));
+        }
+        match self.detect_facts(|facts| detect::detect(spec, facts, Some(path))) {
+            Detection::Found(_) => {}
+            Detection::Unusable { reason, .. } => {
+                let text = format!("{name} cannot be used: {}.", reason.as_str());
+                return Err(Fault::refused("unusable", text));
+            }
+            Detection::NotFound { .. } => {
+                return Err(Fault::refused("unusable", format!("{name} cannot be used: not found.")));
+            }
+        }
+        self.keep_binary(tool, |local| local.set_binary(tool, Path::new(path)).map_err(|_| "path"))?;
+        Ok(self.tool_view(tool))
+    }
+
+    /// Forgets the program the person chose for a tool; the search applies again.
+    pub fn clear_binary(&self, tool: &str) -> Result<ToolView, Fault> {
+        self.ensure_enabled()?;
+        let tool = self.parse_tool(tool)?;
+        self.keep_binary(tool, |local| {
+            local.clear_binary(tool);
+            Ok(())
+        })?;
+        Ok(self.tool_view(tool))
+    }
+
+    /// Changes the machine-local file, writes it, and forgets what was found for the tool.
+    fn keep_binary(
+        &self,
+        tool: ToolId,
+        change: impl FnOnce(&mut LocalFile) -> Result<(), &'static str>,
+    ) -> Result<(), Fault> {
+        {
+            let mut state = self.lock();
+            let mut next = state.local.clone();
+            change(&mut next).map_err(|reason| Fault::refused(reason, "The path of the program cannot be kept."))?;
+            next.save(&self.dir).map_err(|_| Fault::new(FaultCode::Failed, "save", "The setting could not be saved."))?;
+            state.local = next;
+            let slot = &mut state.slots[slot_of(tool)];
+            slot.found = None;
+            slot.probed = None;
+        }
+        self.drop_cached(Some(tool), None);
+        Ok(())
+    }
+
+    // ---- profiles --------------------------------------------------------------------------------------------------
+
+    /// The profiles with, for every secret variable, whether the keychain has a value: a yes or a no, never the value.
+    pub fn profiles(&self) -> ProfilesView {
+        let (snapshot, notes) = {
+            let state = self.lock();
+            (state.profiles.clone(), state.notes.clone())
+        };
+        let profiles = snapshot
+            .items
+            .iter()
+            .map(|profile| ProfileView {
+                id: profile.id.as_str().to_owned(),
+                tool: profile.tool,
+                name: profile.name.clone(),
+                context: profile.context.as_ref().map(|v| v.as_str().to_owned()),
+                namespace: profile.namespace.as_ref().map(|v| v.as_str().to_owned()),
+                subscription: profile.subscription.as_ref().map(|v| v.as_str().to_owned()),
+                section: profile.section.as_ref().map(|v| v.as_str().to_owned()),
+                node: profile.node.as_ref().map(|v| v.as_str().to_owned()),
+                production: profile.production,
+                isolated: profile.isolated,
+                env: profile.env.clone(),
+                secret_env: profile
+                    .secret_env
+                    .iter()
+                    .map(|name| {
+                        let has = |own: EnvName| snapshot.has_secret(self.secrets.as_ref(), &profile.id, &own);
+                        SecretView { name: name.clone(), has_value: EnvName::parse(name).is_ok_and(has) }
+                    })
+                    .collect(),
+            })
+            .collect();
+        ProfilesView { profiles, notes }
+    }
+
+    /// Adds a profile or replaces the one with the same id, and writes the file. A profile that does not pass the rules
+    /// of the loader, or a file that cannot be written, changes nothing. The cached views of the tool are dropped.
+    pub fn save_profile(&self, profile: IntegrationProfile) -> Result<ProfilesView, Fault> {
+        let tool = profile.tool;
+        {
+            let mut state = self.lock();
+            let mut next = state.profiles.clone();
+            next.upsert(profile).map_err(|note| profile_fault("invalid", &note))?;
+            next.save(&self.dir)
+                .map_err(|_| Fault::new(FaultCode::Profile, "save", "The profiles could not be saved."))?;
+            state.profiles = next;
+        }
+        self.drop_cached(Some(tool), None);
+        Ok(self.profiles())
+    }
+
+    /// Removes a profile and every secret value it listed from the keychain. A secret that cannot be deleted keeps the
+    /// profile, so that its names are still known when the person tries again.
+    pub fn remove_profile(&self, id: &str) -> Result<ProfilesView, Fault> {
+        let id = ProfileId::parse(id).map_err(|_| bad_id())?;
+        let mut scratch = self.lock().profiles.clone();
+        let tool = scratch.get(id.as_str()).map(|profile| profile.tool);
+        scratch.remove_with_secrets(self.secrets.as_ref(), &id).map_err(|note| profile_fault("remove", &note))?;
+        {
+            let mut state = self.lock();
+            let mut next = state.profiles.clone();
+            next.remove(id.as_str());
+            next.save(&self.dir)
+                .map_err(|_| Fault::new(FaultCode::Profile, "save", "The profiles could not be saved."))?;
+            state.profiles = next;
+        }
+        if let Some(tool) = tool {
+            self.drop_cached(Some(tool), None);
+        }
+        Ok(self.profiles())
+    }
+
+    /// Stores the value of one secret variable of a profile in the keychain. It is write-only: nothing reads it back
+    /// except a run, for the child's environment.
+    pub fn set_secret(&self, profile: &str, name: &str, value: &str) -> Result<(), Fault> {
+        let (id, name, snapshot) = self.secret_target(profile, name)?;
+        snapshot.set_secret(self.secrets.as_ref(), &id, &name, value).map_err(|note| profile_fault("secret", &note))?;
+        if let Some(tool) = snapshot.get(id.as_str()).map(|profile| profile.tool) {
+            self.drop_cached(Some(tool), None);
+        }
+        Ok(())
+    }
+
+    /// Removes the value of one secret variable of a profile from the keychain.
+    pub fn clear_secret(&self, profile: &str, name: &str) -> Result<(), Fault> {
+        let (id, name, snapshot) = self.secret_target(profile, name)?;
+        snapshot.clear_secret(self.secrets.as_ref(), &id, &name).map_err(|note| profile_fault("secret", &note))?;
+        if let Some(tool) = snapshot.get(id.as_str()).map(|profile| profile.tool) {
+            self.drop_cached(Some(tool), None);
+        }
+        Ok(())
+    }
+
+    fn secret_target(&self, profile: &str, name: &str) -> Result<(ProfileId, EnvName, IntegrationProfiles), Fault> {
+        let id = ProfileId::parse(profile).map_err(|_| bad_id())?;
+        let name = EnvName::parse(name)
+            .map_err(|_| Fault::new(FaultCode::Profile, "name", "The name of the variable is not valid."))?;
+        Ok((id, name, self.lock().profiles.clone()))
+    }
+}
+
+/// The leader of a run that is in flight. Dropping it before [`Leading::finish`] (a panic) answers the followers.
+struct Leading<'a> {
+    service: &'a IntegrationService,
+    key: Key,
+    flight: Arc<Flight>,
+    finished: bool,
+}
+
+impl Leading<'_> {
+    /// Fills the cache (unless an invalidation came while the run was in flight), gives the result to the followers and
+    /// leaves the table. In this order, so that a call that finds no flight finds the cached answer.
+    fn finish(&mut self, result: &Result<RunAnswer, Fault>, generation: u64) {
+        if let Ok(answer) = result {
+            if self.service.generation.load(Ordering::SeqCst) == generation {
+                self.service.cache_put(self.key.clone(), answer.clone());
+            }
+        }
+        *self.flight.result.lock().unwrap_or_else(PoisonError::into_inner) = Some(result.clone());
+        self.flight.done.notify_all();
+        self.service.flights.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.key);
+        self.finished = true;
+    }
+}
+
+impl Drop for Leading<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let lost = Fault::new(FaultCode::Failed, "interrupted", "The request was interrupted.");
+            self.finish(&Err(lost), 0);
+        }
+    }
+}
+
+/// A pane that has a run; dropping it lets the next run of the pane begin.
+struct PaneHold<'a> {
+    service: &'a IntegrationService,
+    pane: PaneId,
+}
+
+impl Drop for PaneHold<'_> {
+    fn drop(&mut self) {
+        self.service.busy_panes.0.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.pane);
+        self.service.busy_panes.1.notify_all();
+    }
+}
+
+/// Removes the file `<pane>.json` from each directory below `<data>/run` (the overlays of the shell panes). A link is
+/// never followed and only a regular file goes.
+fn remove_pane_files(data_dir: &Path, pane: PaneId) {
+    let run = data_dir.join("run");
+    if !std::fs::symlink_metadata(&run).is_ok_and(|meta| meta.is_dir()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(&run) else { return };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        let file = dir.join(format!("{pane}.json"));
+        if std::fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file()) {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+}
+
+fn bad_id() -> Fault {
+    Fault::new(FaultCode::Profile, "id", "The profile id is not valid.")
+}
+
+/// A note of the profile rules as a fault. The notes name the profile and the field and never a value.
+fn profile_fault(reason: &'static str, note: &str) -> Fault {
+    Fault::new(FaultCode::Profile, reason, sentence(note))
+}
+
+/// One pane that has a selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PaneRow {
+    /// The pane.
+    pub pane: PaneId,
+    /// The tool of the pane.
+    pub tool: ToolId,
+    /// The view the pane shows, or the verb a launch opened.
+    pub view: String,
+    /// The context, subscription or section the pane resolves to.
+    pub context: Option<String>,
+    /// The namespace (Kubernetes).
+    pub namespace: Option<String>,
+    /// The display name of the production profile, or `None`.
+    pub production: Option<String>,
+    /// The tool ended with an error and the pane is held open.
+    pub held: bool,
+}
+
+/// One secret variable of a profile: its name and whether the keychain has a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SecretView {
+    /// The variable's name.
+    pub name: String,
+    /// Whether there is a value.
+    pub has_value: bool,
+}
+
+/// A profile as the dialog reads it: no secret value, only whether there is one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfileView {
+    /// The id.
+    pub id: String,
+    /// The tool.
+    pub tool: ToolId,
+    /// The name the person gave it.
+    pub name: String,
+    /// The context it pins.
+    pub context: Option<String>,
+    /// The namespace it pins.
+    pub namespace: Option<String>,
+    /// The subscription it pins.
+    pub subscription: Option<String>,
+    /// The section it pins.
+    pub section: Option<String>,
+    /// The node it pins.
+    pub node: Option<String>,
+    /// Whether the pinned context is production.
+    pub production: bool,
+    /// Whether the tool runs with a configuration directory of its own for this profile.
+    pub isolated: bool,
+    /// The plain variables.
+    pub env: BTreeMap<String, String>,
+    /// The secret variables, by name.
+    pub secret_env: Vec<SecretView>,
+}
+
+/// The profiles and the notes of the files that were read at the start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfilesView {
+    /// The profiles.
+    pub profiles: Vec<ProfileView>,
+    /// The notes of the files that could not be used.
+    pub notes: Vec<String>,
 }
 
 impl Resolve for IntegrationService {
@@ -1130,7 +1777,8 @@ impl Resolve for IntegrationService {
             .integration
             .argv(request.verb, &request.validated, &request.resolved.selection)
             .map_err(|_| TicketError::Refused)?;
-        let program = Path::new(&found.path).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = Path::new(&found.path).file_name();
+        let program = name.map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         let mut target = self.target_pairs(&request);
         if request.verb.effect == VerbEffect::Local {
             if let Some(sentence) = request.integration.changes(request.verb) {
@@ -1141,8 +1789,8 @@ impl Resolve for IntegrationService {
     }
 }
 
-/// The first line of a tool's text, cleaned of escape sequences, controls and invisible characters, on one line, at most
-/// [`FAULT_MESSAGE_MAX`] characters (cut with an ellipsis); `None` when there is none.
+/// The first line of a tool's text, cleaned of escape sequences, controls and invisible characters, on one line, at
+/// most [`FAULT_MESSAGE_MAX`] characters (cut with an ellipsis); `None` when there is none.
 fn first_line(bytes: &[u8]) -> Option<String> {
     let cleaned = redact::sanitise(&String::from_utf8_lossy(bytes)).text;
     let line = cleaned.lines().map(clean_cell).find(|line| !line.is_empty())?;

@@ -737,7 +737,9 @@ impl Integration for Kube {
 
     fn changes(&self, verb: &Verb) -> Option<&'static str> {
         match own(verb).ok()?.id {
-            "use_context" | "set_namespace" => Some("the kubeconfig files named by KUBECONFIG, by default ~/.kube/config"),
+            "use_context" | "set_namespace" => {
+                Some("the kubeconfig files named by KUBECONFIG, by default ~/.kube/config")
+            }
             _ => None,
         }
     }

@@ -69,6 +69,16 @@ fn args(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
 }
 
+/// A machine whose environment holds a variable of the app, a loader variable and a harmless one.
+fn dirty_facts(rig: &Rig) -> HostFacts {
+    rig.facts().with_env("HOLZWAVE_TOKEN", "app-secret").with_env("LD_PRELOAD", "/tmp/x.so").with_env("FOO", "bar")
+}
+
+/// A fake for each of the four tools.
+fn all_four_fakes(rig: &Rig) -> Vec<FakeCli> {
+    ["kubectl", "talosctl", "az", "gam"].iter().map(|name| FakeCli::new(&rig.bin, name)).collect()
+}
+
 fn argv_of(fake: &FakeCli) -> Vec<String> {
     fake.argv().into_iter().map(|a| String::from_utf8(a).expect("text arguments")).collect()
 }
@@ -156,7 +166,7 @@ fn kind(answer: &RunAnswer) -> &'static str {
 #[test]
 fn every_tool_reads_through_the_same_path() {
     let rig = Rig::new();
-    let facts = rig.facts().with_env("HOLZWAVE_TOKEN", "app-secret").with_env("LD_PRELOAD", "/tmp/x.so").with_env("FOO", "bar");
+    let facts = dirty_facts(&rig);
     let service = rig.service_over(facts);
     let cases: [(&str, &str, &str, &str, &str); 10] = [
         ("kubectl", "kube", "contexts", "kubectl/config_view.json", "table"),
@@ -180,7 +190,8 @@ fn every_tool_reads_through_the_same_path() {
         assert!(!env.contains_key("HOLZWAVE_TOKEN"), "{tool} {verb}: the app's own variables never reach a child");
         assert!(!env.contains_key("LD_PRELOAD"), "{tool} {verb}: nor does a loader variable");
         let path = env.get("PATH").expect("a PATH");
-        assert!(path.starts_with(&format!("{}:", rig.bin.display())), "{tool} {verb}: the tool's directory is first: {path}");
+        let first = format!("{}:", rig.bin.display());
+        assert!(path.starts_with(&first), "{tool} {verb}: the tool's directory is first: {path}");
         if tool == "azure" {
             let telemetry = env.get("AZURE_CORE_COLLECT_TELEMETRY").map(String::as_str);
             assert_eq!(telemetry, Some("false"), "{tool} {verb}: the tool's fixed variable reaches the child");
@@ -202,7 +213,7 @@ fn signed_out_is_a_state_for_the_account_verb_only() {
         view.rows().iter().any(|row| row.label() == "State" && row.value() == "Signed out"),
         "the model says Signed out"
     );
-    let fault = service.run_view("azure", "subscriptions", None, &args(&[])).expect_err("the same exit elsewhere fails");
+    let fault = service.run_view("azure", "subscriptions", None, &args(&[])).expect_err("the same exit elsewhere");
     assert_eq!(fault.code, FaultCode::Failed);
     let rows = service.context_rows(None, false);
     let azure = rows.iter().find(|row| row.tool == ToolId::Azure).expect("an Azure row");
@@ -257,7 +268,8 @@ fn a_failing_tool_gives_a_cleaned_bounded_fault() {
     let shown = &fault.text[prefix.len()..];
     assert!(shown.chars().count() <= 240, "at most 240 characters of the message: {}", shown.chars().count());
     assert!(shown.starts_with("Error from server: xxx"), "the first line, cleaned: {shown}");
-    assert!(!fault.text.contains('\u{1b}') && !fault.text.contains('\n') && !fault.text.contains('\u{7}'), "one clean line");
+    let dirty = |c: char| fault.text.contains(c);
+    assert!(!dirty('\u{1b}') && !dirty('\n') && !dirty('\u{7}'), "one clean line");
     assert!(!fault.text.contains("second line"), "only the first line");
     let debugged = format!("{fault:?}");
     assert!(!debugged.contains("Error from server"), "the debug text does not carry the tool's message: {debugged}");
@@ -293,7 +305,8 @@ fn timeout_overflow_and_unreadable_output_are_distinct() {
 #[test]
 fn a_kubeconfig_that_cannot_be_read_is_not_shown_as_text() {
     let rig = Rig::new();
-    let _kubectl = FakeCli::new(&rig.bin, "kubectl").prints("{\"token\": \"CANARY-TOKEN-VALUE\", \"not\": \"a config\"}");
+    let output = "{\"token\": \"CANARY-TOKEN-VALUE\", \"not\": \"a config\"}";
+    let _kubectl = FakeCli::new(&rig.bin, "kubectl").prints(output);
     let service = rig.service();
     let answer = service.run_view("kube", "contexts", None, &args(&[])).expect("an answer");
     let shown = format!("{:?}", answer.view);
@@ -316,7 +329,7 @@ fn the_version_a_tool_prints_is_shown_and_a_failing_probe_does_not_make_it_unusa
     assert!(azure.version.is_none());
 }
 
-// ---- the verbs with a card, the launches and the three trait methods in use --------------------------------------------
+// ---- the verbs with a card, the launches and the three trait methods in use ---------------------------------------
 
 use holzwave_core::integrate::args::{ContextName, ProfileId};
 use holzwave_core::integrate::kube::POD_SHELL;
@@ -351,7 +364,16 @@ fn a_pod_deletion_runs_once_after_its_card_is_confirmed() {
     service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
 
     let card = service.prepare("kube", "delete_pod", Some(3), &args(&[("pod", "api-0")])).expect("a card");
-    let want = ["delete", "pod", "--context=dev", "--namespace=payments", "--wait=false", "--request-timeout=10s", "--", "api-0"];
+    let want = [
+        "delete",
+        "pod",
+        "--context=dev",
+        "--namespace=payments",
+        "--wait=false",
+        "--request-timeout=10s",
+        "--",
+        "api-0",
+    ];
     assert_eq!(card.argv, want, "the card shows the argument list the tool module built");
     assert!(card.target.contains(&("context".to_owned(), "dev".to_owned())), "{:?}", card.target);
     assert!(card.target.contains(&("namespace".to_owned(), "payments".to_owned())), "{:?}", card.target);
@@ -434,6 +456,9 @@ fn a_local_verb_names_what_it_changes_and_marks_the_default_stale() {
     let kube = rows.iter().find(|row| row.tool == ToolId::Kube).expect("a row");
     assert!(kube.stale, "the tool's own selection may have changed, so it is marked");
     assert_eq!(kube.context.as_deref(), Some("dev"), "the value is kept");
+    let after = runs(&fake);
+    service.run_view("kube", "contexts", None, &args(&[])).expect("a read");
+    assert_eq!(runs(&fake), after + 1, "the cached views of the tool were dropped, so the read runs again");
 }
 
 #[test]
@@ -451,7 +476,8 @@ fn every_local_verb_names_what_it_changes() {
     ];
     for (tool, verb, request) in cases {
         let card = service.prepare(tool, verb, None, &request).unwrap_or_else(|e| panic!("{tool} {verb}: {e}"));
-        let changes = card.target.iter().find(|(label, _)| label == "changes").unwrap_or_else(|| panic!("{tool} {verb}: {:?}", card.target));
+        let found = card.target.iter().find(|(label, _)| label == "changes");
+        let changes = found.unwrap_or_else(|| panic!("{tool} {verb}: {:?}", card.target));
         assert!(changes.1.len() > 20, "{tool} {verb}: a sentence: {}", changes.1);
     }
 }
@@ -460,7 +486,7 @@ fn every_local_verb_names_what_it_changes() {
 fn exec_confirms_into_a_clean_launch_and_starts_nothing() {
     let rig = Rig::new();
     let fake = FakeCli::new(&rig.bin, "kubectl");
-    let facts = rig.facts().with_env("HOLZWAVE_TOKEN", "app-secret").with_env("LD_PRELOAD", "/tmp/x.so").with_env("FOO", "bar");
+    let facts = dirty_facts(&rig);
     let service = rig.service_over(facts);
     service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
     let card = service.prepare("kube", "exec", Some(3), &args(&[("pod", "api-0")])).expect("a card");
@@ -470,13 +496,12 @@ fn exec_confirms_into_a_clean_launch_and_starts_nothing() {
     let Done::Launch(launch) = done else { panic!("an exec verb launches, got {done:?}") };
     assert!(!fake.started(), "the confirm started nothing: the pane does");
     assert_eq!(launch.program, fake.path());
-    let mut want: Vec<OsString> = ["exec", "-i", "-t", "--context=dev", "--namespace=payments", "api-0", "--", "sh", "-c"]
-        .iter()
-        .map(OsString::from)
-        .collect();
+    let head = ["exec", "-i", "-t", "--context=dev", "--namespace=payments", "api-0", "--", "sh", "-c"];
+    let mut want: Vec<OsString> = head.iter().map(OsString::from).collect();
     want.push(OsString::from(POD_SHELL));
     assert_eq!(launch.args, want, "the argument list of the card");
-    assert!(launch.env.iter().all(|(name, _)| !name.starts_with("HOLZWAVE_")), "no variable of the app: {:?}", launch.env);
+    let names: Vec<&String> = launch.env.iter().map(|(name, _)| name).collect();
+    assert!(names.iter().all(|name| !name.starts_with("HOLZWAVE_")), "no variable of the app: {names:?}");
     let path = launch.env.iter().find(|(name, _)| name == "PATH").expect("the rebuilt PATH");
     assert!(path.1.starts_with(&format!("{}:", rig.bin.display())), "the tool's directory first: {}", path.1);
     assert_eq!(launch.env_remove, ["HOLZWAVE_TOKEN", "LD_PRELOAD"], "the pane removes what it inherits");
@@ -563,7 +588,7 @@ fn valid_args(spec: &IntegrationSpec, verb: &str) -> BTreeMap<String, String> {
 fn no_gated_verb_runs_without_a_ticket() {
     use holzwave_core::integrate::{azure, gam, kube, talos, Output, VerbEffect};
     let rig = Rig::new();
-    let fakes: Vec<FakeCli> = ["kubectl", "talosctl", "az", "gam"].iter().map(|name| FakeCli::new(&rig.bin, name)).collect();
+    let fakes = all_four_fakes(&rig);
     let service = rig.service();
     let mut checked = 0;
     for spec in [&kube::SPEC, &talos::SPEC, &azure::SPEC, &gam::SPEC] {
@@ -589,4 +614,412 @@ fn no_gated_verb_runs_without_a_ticket() {
     }
     assert!(checked > 40, "the matrix was walked: {checked}");
     assert!(fakes.iter().all(|fake| !fake.started()), "no lane started a process for another lane's verb");
+}
+
+// ---- single flight and the cache, secret variables, the Flatpak refusal and cleanup -------------------------------
+
+use std::sync::Barrier;
+
+use holzwave_core::integrate::service::ProfilesView;
+
+/// Makes a fake log `start` and `end` around a pause of `secs` seconds (the pause is in the settings the script
+/// sources, so it replaces nothing of the rig). The log shows whether two runs overlapped.
+fn logged(fake: FakeCli, secs: u32) -> FakeCli {
+    use std::io::Write;
+    let path = format!("{}.conf", fake.path().display());
+    let mut conf = std::fs::OpenOptions::new().append(true).open(path).expect("the settings of the fake");
+    writeln!(conf, "echo start >> \"$d/$n.log\"; sleep {secs}; echo end >> \"$d/$n.log\"").expect("one more line");
+    fake
+}
+
+fn log(fake: &FakeCli) -> Vec<String> {
+    std::fs::read_to_string(format!("{}.log", fake.path().display()))
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+fn starts(fake: &FakeCli) -> usize {
+    log(fake).iter().filter(|line| *line == "start").count()
+}
+
+#[test]
+fn identical_requests_share_one_run_and_a_young_answer_is_served_again() {
+    let rig = Rig::new();
+    let fake = logged(FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/pods.json")), 1);
+    let service = rig.service();
+    let request = args(&[]);
+
+    let gate = Barrier::new(20);
+    let answers: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..20)
+            .map(|_| {
+                scope.spawn(|| {
+                    gate.wait();
+                    service.run_view("kube", "pods", Some(3), &request)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|handle| handle.join().expect("a thread")).collect()
+    });
+    assert_eq!(starts(&fake), 1, "twenty identical requests at the same moment cause one run");
+    let first = answers[0].as_ref().expect("an answer");
+    assert!(answers.iter().all(|answer| answer.as_ref().ok() == Some(first)), "and all get the same answer");
+
+    std::thread::sleep(Duration::from_millis(200));
+    let again = service.run_view("kube", "pods", Some(3), &request).expect("served from the cache");
+    assert_eq!(starts(&fake), 1, "a young answer is served again");
+    assert_eq!(&again, first);
+
+    std::thread::sleep(Duration::from_millis(1200));
+    service.run_view("kube", "pods", Some(3), &request).expect("a new run");
+    assert_eq!(starts(&fake), 2, "an old answer is not");
+
+    // Two panes are two requests, and they run side by side.
+    let before = log(&fake).len();
+    let gate = Barrier::new(2);
+    std::thread::scope(|scope| {
+        for pane in [4, 5] {
+            let (service, gate, request) = (&service, &gate, &request);
+            scope.spawn(move || {
+                gate.wait();
+                service.run_view("kube", "pods", Some(pane), request).expect("a read");
+            });
+        }
+    });
+    let added: Vec<String> = log(&fake)[before..].to_vec();
+    assert_eq!(added, ["start", "start", "end", "end"], "different panes run at the same time");
+}
+
+#[test]
+fn one_pane_never_has_two_runs_at_once() {
+    let rig = Rig::new();
+    let fake = logged(FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/pods.json")), 1);
+    let service = rig.service();
+    let gate = Barrier::new(2);
+    std::thread::scope(|scope| {
+        for verb in ["pods", "namespaces"] {
+            let (service, gate) = (&service, &gate);
+            scope.spawn(move || {
+                gate.wait();
+                service.run_view("kube", verb, Some(3), &args(&[])).expect("a read");
+            });
+        }
+    });
+    assert_eq!(log(&fake), ["start", "end", "start", "end"], "the second request of a pane waits for the first");
+}
+
+#[test]
+fn a_busy_runner_is_a_busy_fault() {
+    let rig = Rig::new();
+    let _fake = logged(FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/pods.json")), 2);
+    let service = rig.service();
+    let gate = Barrier::new(5);
+    let results: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (10..15)
+            .map(|pane| {
+                let (service, gate) = (&service, &gate);
+                scope.spawn(move || {
+                    gate.wait();
+                    service.run_view("kube", "pods", Some(pane), &args(&[]))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|handle| handle.join().expect("a thread")).collect()
+    });
+    let is_busy = |result: &&Result<_, holzwave_core::integrate::service::Fault>| {
+        result.as_ref().is_err_and(|fault| fault.code == FaultCode::Busy)
+    };
+    let busy = results.iter().filter(is_busy).count();
+    let ok = results.iter().filter(|result| result.is_ok()).count();
+    let codes: Vec<_> = results.iter().map(|result| result.as_ref().map(|_| ()).map_err(|fault| fault.code)).collect();
+    assert_eq!((busy, ok), (1, 4), "four slots, so the fifth call is told to try again: {codes:?}");
+}
+
+/// Longer than the time an answer is served again.
+const CACHE_PAUSE: Duration = Duration::from_millis(1100);
+
+const CANARY: &str = "CANARY-8f3a91c2d7e45b60-SECRET";
+
+fn aws_profile() -> IntegrationProfile {
+    let mut profile = IntegrationProfile::new(ProfileId::parse("aws-prod").expect("an id"), ToolId::Kube, "AWS prod");
+    profile.env.insert("AWS_PROFILE".to_owned(), "prod".to_owned());
+    profile.secret_env.push("AWS_SECRET_ACCESS_KEY".to_owned());
+    profile
+}
+
+#[test]
+fn a_secret_variable_reaches_the_child_environment_only() {
+    let rig = Rig::new();
+    let fake = FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/pods.json"));
+    let facts = rig.facts();
+    let service = rig.service_over(rig.facts());
+    service.save_profile(aws_profile()).expect("a profile");
+    service.set_secret("aws-prod", "AWS_SECRET_ACCESS_KEY", CANARY).expect("a value in the keychain");
+    let with_profile = Selection { profile: Some("aws-prod".into()), ..Selection::default() };
+    service.select("kube", Some(3), &with_profile).expect("a selection");
+
+    let answer = service.run_view("kube", "pods", Some(3), &args(&[])).expect("a read");
+    let env = fake.env();
+    assert_eq!(env.get("AWS_SECRET_ACCESS_KEY").map(String::as_str), Some(CANARY), "the child has the value");
+    assert_eq!(env.get("AWS_PROFILE").map(String::as_str), Some("prod"), "and the plain variable of the profile");
+
+    // A failing run, a card, a launch: every output the value could reach.
+    let failing = FakeCli::new(&rig.bin, "kubectl").prints_stderr("boom: the server said no").exits(1);
+    let fault = service.run_view("kube", "namespaces", Some(3), &args(&[])).expect_err("a failure");
+    let card = service.prepare("kube", "delete_pod", Some(3), &args(&[("pod", "api-0")])).expect("a card");
+    let exec = service.prepare("kube", "exec", Some(3), &args(&[("pod", "api-0")])).expect("a card");
+    let done = service.confirm(&exec.ticket, &exec.hash).expect("a launch");
+    let Done::Launch(launch) = done else { panic!("an exec verb launches") };
+    let logs = service.launch("kube", "logs", Some(3), &args(&[("pod", "api-0")])).expect("a launch");
+    let profiles = service.profiles();
+    let tools = service.tools();
+    let outputs: Vec<(&str, String)> = vec![
+        ("the argument log of the fake", argv_of(&failing).join(" ")),
+        ("the answer", format!("{answer:?} {}", serde_json::to_string(&answer).expect("json"))),
+        ("the fault", format!("{fault:?} {} {}", fault.text, serde_json::to_string(&fault).expect("json"))),
+        ("the card", format!("{card:?} {}", serde_json::to_string(&card).expect("json"))),
+        ("the card of the exec", serde_json::to_string(&exec).expect("json")),
+        ("the launch (without its secrets)", format!("{launch:?} {:?} {:?}", launch.args, launch.env)),
+        ("the launch of the logs", format!("{logs:?} {:?} {:?}", logs.args, logs.env)),
+        ("the service", format!("{service:?}")),
+        ("the host facts", format!("{facts:?}")),
+        ("the profiles", format!("{profiles:?} {}", serde_json::to_string(&profiles).expect("json"))),
+        ("the tools", format!("{tools:?}")),
+        ("the notes", service.notes().join(" ")),
+        ("the pane rows", format!("{:?}", service.pane_rows())),
+        ("the context rows", format!("{:?}", service.context_rows(Some(3), false))),
+    ];
+    for (what, text) in &outputs {
+        assert!(!text.contains(CANARY), "the secret value is in {what}");
+    }
+    // The files of the data directory hold no value either.
+    let mut stack = vec![rig.data.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a directory").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("a file");
+                assert!(!String::from_utf8_lossy(&bytes).contains(CANARY), "{} holds the secret value", path.display());
+            }
+        }
+    }
+    // The launch is the one place the value goes besides a run: into the pane's environment, as a wiped string.
+    assert_eq!(launch.secrets.len(), 1, "the exec pane gets the value in its environment");
+
+    // After the run the profile API shows that there is a value and nothing more.
+    let view: &ProfilesView = &profiles;
+    let secret = &view.profiles[0].secret_env[0];
+    assert_eq!((secret.name.as_str(), secret.has_value), ("AWS_SECRET_ACCESS_KEY", true));
+}
+
+#[test]
+fn a_flatpak_build_runs_nothing_and_says_so() {
+    let rig = Rig::new();
+    let fakes = all_four_fakes(&rig);
+    let sentence = "The integrations are not available in the Flatpak build.";
+    for with_profile in [false, true] {
+        let service = rig.service_over(rig.facts().with_flatpak(true));
+        if with_profile {
+            service.save_profile(aws_profile()).expect("a profile");
+            service.set_secret("aws-prod", "AWS_SECRET_ACCESS_KEY", CANARY).expect("a value");
+        }
+        let tools = service.tools();
+        assert_eq!(tools.len(), 4);
+        for tool in &tools {
+            assert_eq!(tool.state, ToolState::Unsupported, "{:?}", tool.id);
+            assert_eq!(tool.reason.as_deref(), Some(sentence));
+            assert!(tool.path.is_none());
+        }
+        let faults = [
+            service.run_view("kube", "pods", None, &args(&[])).expect_err("nothing runs"),
+            service.prepare("kube", "delete_pod", None, &args(&[("pod", "api-0")])).expect_err("no card"),
+            service.confirm(&"0".repeat(32), &"0".repeat(64)).expect_err("no confirm"),
+            service.launch("kube", "logs", None, &args(&[("pod", "api-0")])).expect_err("no launch"),
+        ];
+        for fault in faults {
+            assert_eq!((fault.code, fault.text.as_str()), (FaultCode::Unsupported, sentence), "{fault:?}");
+        }
+        let _ = service.context_rows(None, true);
+    }
+    assert!(fakes.iter().all(|fake| !fake.started()), "no process was started");
+}
+
+#[test]
+fn forgetting_a_pane_removes_its_selection_overlay_and_cache() {
+    let rig = Rig::new();
+    let fake = logged(FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/config_view.json")), 0);
+    let service = rig.service();
+    service.select("kube", Some(4), &selecting("dev", "payments")).expect("a selection");
+    service.launch("kube", "shell", Some(4), &args(&[])).expect("a shell launch");
+    let overlay = rig.data.join("run").join("kube").join("4.json");
+    assert!(overlay.is_file(), "the shell pane has an overlay");
+    service
+        .note_pane(9, "kube", "logs", &selecting("dev", "payments"))
+        .expect("a pane that a launch opened is noted");
+    let rows = service.pane_rows();
+    let panes: Vec<u64> = rows.iter().map(|row| row.pane).collect();
+    assert_eq!(panes, [4, 9], "both kinds of pane are listed");
+    assert_eq!(rows[0].context.as_deref(), Some("dev"));
+    assert_eq!(rows[0].namespace.as_deref(), Some("payments"));
+    assert!(!rows[0].held && !rows[1].held, "the slot for a held status starts empty");
+    service.set_held(9, true);
+    assert!(service.pane_rows().iter().any(|row| row.pane == 9 && row.held));
+
+    service.run_view("kube", "pods", Some(6), &args(&[])).expect("a read");
+    let before = starts(&fake);
+    service.run_view("kube", "pods", Some(6), &args(&[])).expect("served from the cache");
+    assert_eq!(starts(&fake), before, "the answer is cached");
+
+    for pane in [4, 6, 9] {
+        service.forget_pane(pane);
+    }
+    assert!(service.pane_rows().is_empty(), "nothing is listed any more");
+    assert!(!overlay.exists(), "the overlay of the pane is removed");
+    service.run_view("kube", "pods", Some(6), &args(&[])).expect("a new run");
+    assert_eq!(starts(&fake), before + 1, "its cached answers are gone");
+}
+
+#[test]
+fn selecting_changes_only_that_panes_next_argument_list() {
+    let rig = Rig::new();
+    let fake = FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/pods.json"));
+    let service = rig.service();
+    service.select("kube", Some(3), &selecting("dev", "payments")).expect("a selection");
+    service.select("kube", Some(4), &selecting("kind-test", "test")).expect("a selection");
+
+    service.run_view("kube", "pods", Some(3), &args(&[])).expect("a read");
+    assert_eq!(argv_of(&fake)[4..6], ["--context=dev", "--namespace=payments"]);
+    service.run_view("kube", "pods", Some(4), &args(&[])).expect("a read");
+    assert_eq!(argv_of(&fake)[4..6], ["--context=kind-test", "--namespace=test"]);
+
+    service.select("kube", Some(3), &selecting("kind-test", "ops")).expect("another selection");
+    service.run_view("kube", "pods", Some(3), &args(&[])).expect("a read");
+    assert_eq!(argv_of(&fake)[4..6], ["--context=kind-test", "--namespace=ops"], "the pane that was changed");
+    std::thread::sleep(CACHE_PAUSE);
+    let answer = service.run_view("kube", "pods", Some(4), &args(&[])).expect("a read");
+    assert_eq!(argv_of(&fake)[4..6], ["--context=kind-test", "--namespace=test"], "the other pane is as it was");
+    assert_eq!(answer.selection.selection.namespace.as_deref(), Some("test"));
+
+    let refused = service.select("kube", Some(3), &Selection { node: Some("n".into()), ..Selection::default() });
+    assert_eq!(refused.expect_err("a field the tool does not select").code, FaultCode::Refused);
+}
+
+#[test]
+fn a_set_binary_must_name_the_tool_and_be_usable() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = Rig::new();
+    let on_path = FakeCli::new(&rig.bin, "kubectl");
+    let other_dir = rig.root.join("other");
+    std::fs::create_dir(&other_dir).expect("a directory");
+    let chosen = FakeCli::new(&other_dir, "kubectl").prints(&fixture("kubectl/pods.json"));
+    let service = rig.service();
+
+    let view = service.set_binary("kube", chosen.path().to_str().expect("text")).expect("a usable kubectl");
+    assert_eq!(view.path.as_deref(), chosen.path().to_str());
+    assert_eq!(view.place, Some("override"));
+    assert_eq!(view.binary.as_deref(), chosen.path().to_str());
+    service.run_view("kube", "pods", None, &args(&[])).expect("a read");
+    assert!(chosen.started() && !on_path.started(), "the person chose which kubectl runs");
+    let again = rig.service();
+    assert_eq!(
+        again.tools().iter().find(|tool| tool.id == ToolId::Kube).and_then(|tool| tool.path.clone()).as_deref(),
+        chosen.path().to_str(),
+        "the choice is kept in the machine-local file"
+    );
+
+    let evil = FakeCli::new(&other_dir, "kubectl-evil");
+    let plain = other_dir.join("plain");
+    std::fs::write(&plain, "x").expect("a file");
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).expect("a mode");
+    let quiet = rig.root.join("quiet");
+    std::fs::create_dir(&quiet).expect("a directory");
+    let not_exec = quiet.join("kubectl");
+    std::fs::write(&not_exec, "x").expect("a file");
+    std::fs::set_permissions(&not_exec, std::fs::Permissions::from_mode(0o644)).expect("a mode");
+    let open = rig.root.join("open");
+    std::fs::create_dir(&open).expect("a directory");
+    let _inside = FakeCli::new(&open, "kubectl");
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).expect("a mode");
+    let refusals: [(&str, String); 7] = [
+        ("kube", evil.path().display().to_string()),
+        ("kube", "kubectl".to_owned()),
+        ("kube", "other/kubectl".to_owned()),
+        ("kube", other_dir.join("nothing").join("kubectl").display().to_string()),
+        ("kube", not_exec.display().to_string()),
+        ("kube", open.join("kubectl").display().to_string()),
+        ("talos", chosen.path().display().to_string()),
+    ];
+    for (tool, path) in &refusals {
+        let fault = service.set_binary(tool, path).expect_err(&format!("{tool} {path} is refused"));
+        assert_eq!(fault.code, FaultCode::Refused, "{tool} {path}");
+    }
+    let tools = service.tools();
+    let kube = tools.iter().find(|tool| tool.id == ToolId::Kube).expect("an entry");
+    assert_eq!(kube.path.as_deref(), chosen.path().to_str(), "a refused path changes nothing");
+
+    std::fs::remove_file(chosen.path()).expect("the program goes away");
+    let tools = service.tools();
+    let kube = tools.iter().find(|tool| tool.id == ToolId::Kube).expect("an entry");
+    assert_eq!(kube.state, ToolState::Unusable, "a set path that stopped working is not silently replaced");
+    assert_eq!(kube.reason.as_deref(), Some("kubectl cannot be used: not found."));
+
+    let view = service.clear_binary("kube").expect("cleared");
+    assert_eq!(view.state, ToolState::Found);
+    assert_eq!(view.path.as_deref(), on_path.path().to_str(), "back to the search");
+    assert_eq!(view.binary, None);
+}
+
+#[test]
+fn profile_operations_pass_through_and_a_saved_profile_drops_the_tools_cache() {
+    let rig = Rig::new();
+    let fake = logged(FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/pods.json")), 0);
+    let service = rig.service();
+    service.run_view("kube", "pods", None, &args(&[])).expect("a read");
+    service.run_view("kube", "pods", None, &args(&[])).expect("a cached read");
+    assert_eq!(starts(&fake), 1);
+    service.save_profile(aws_profile()).expect("a profile");
+    service.run_view("kube", "pods", None, &args(&[])).expect("a read");
+    assert_eq!(starts(&fake), 2, "a saved profile drops the cached views of its tool");
+
+    let mut bad = aws_profile();
+    bad.env.insert("LD_PRELOAD".to_owned(), "/tmp/x.so".to_owned());
+    let fault = service.save_profile(bad).expect_err("a name the runner denies");
+    assert_eq!(fault.code, FaultCode::Profile);
+    assert!(!fault.text.contains("/tmp/x.so"), "{}", fault.text);
+    let kept = service.profiles();
+    assert_eq!(kept.profiles.len(), 1);
+    assert!(!kept.profiles[0].env.contains_key("LD_PRELOAD"), "a refused profile changes nothing");
+
+    let unlisted = service.set_secret("aws-prod", "OTHER_NAME", CANARY).expect_err("not a listed name");
+    assert_eq!(unlisted.code, FaultCode::Profile);
+    assert!(!unlisted.text.contains(CANARY));
+    service.set_secret("aws-prod", "AWS_SECRET_ACCESS_KEY", CANARY).expect("a value");
+    assert!(service.profiles().profiles[0].secret_env[0].has_value);
+    service.clear_secret("aws-prod", "AWS_SECRET_ACCESS_KEY").expect("cleared");
+    assert!(!service.profiles().profiles[0].secret_env[0].has_value);
+
+    service.set_secret("aws-prod", "AWS_SECRET_ACCESS_KEY", CANARY).expect("a value");
+    let left = service.remove_profile("aws-prod").expect("removed with its secrets");
+    assert!(left.profiles.is_empty());
+    use holzwave_core::secrets::SecretStore;
+    let left = rig.store.get("int:aws-prod:AWS_SECRET_ACCESS_KEY").expect("the store");
+    assert_eq!(left, None, "the value left the keychain");
+}
+
+#[test]
+fn nothing_that_starts_a_process_is_outside_the_runner() {
+    let source = |name: &str| {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/integrate").join(name);
+        std::fs::read_to_string(path).expect(name)
+    };
+    let service = source("service.rs");
+    let production = service.split("\n#[cfg(test)]\nmod ").next().expect("a production part");
+    for forbidden in ["Command::new", ".spawn()", "std::process", "tokio::process"] {
+        assert!(!production.contains(forbidden), "the service starts a process itself: {forbidden}");
+    }
+    let run = source("run.rs");
+    let gate = "#[cfg(not(any(target_os = \"ios\", target_os = \"android\")))]\nmod spawn {";
+    assert!(run.contains(gate), "the runner's spawn code is behind the mobile gate the service relies on");
 }

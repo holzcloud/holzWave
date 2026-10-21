@@ -809,11 +809,11 @@ impl Integration for Azure {
             return None;
         }
         match login_state(stdout) {
-            LoginState::SignedIn { subscription_id, .. } => Some(DefaultRead {
-                selection: Selection { subscription: Some(subscription_id.as_str().to_owned()), ..Selection::default() },
-                signed_out: false,
-                contexts: Vec::new(),
-            }),
+            LoginState::SignedIn { subscription_id, .. } => {
+                let subscription = Some(subscription_id.as_str().to_owned());
+                let selection = Selection { subscription, ..Selection::default() };
+                Some(DefaultRead { selection, signed_out: false, contexts: Vec::new() })
+            }
             LoginState::SignedOut => Some(DefaultRead { signed_out: true, ..DefaultRead::default() }),
             LoginState::Unknown => None,
         }
