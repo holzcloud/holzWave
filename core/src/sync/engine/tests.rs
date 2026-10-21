@@ -2151,3 +2151,211 @@ fn only_the_profile_file_of_the_integrations_is_an_allowed_name() {
     let report = connect(&srv, &d, "pw").unwrap().sync_once().unwrap();
     assert_eq!(report.uploaded, vec!["settings.json"]);
 }
+
+// ---- the integration secrets -------------------------------------------------------------------------------------
+
+/// A value that must never show up in a message, a blob or a file.
+const CANARY: &str = "canary-Zq81-vT4w-never-printed";
+
+/// A `secrets.json` payload of these account and value pairs.
+fn payload(pairs: &[(&str, &str)]) -> Vec<u8> {
+    let map: BTreeMap<&str, &str> = pairs.iter().copied().collect();
+    serde_json::to_vec(&map).unwrap()
+}
+
+/// Whether a device holds a value for the account.
+fn holds(d: &Device, account: &str) -> bool {
+    d.secrets.get(account).unwrap().is_some()
+}
+
+#[test]
+fn a_profile_and_its_secret_travel_between_two_devices() {
+    let srv = server();
+    let (a, b) = (device("a-int"), device("b-int"));
+    save_integrations(&a, &[("prod", &["AWS_SECRET_ACCESS_KEY", "OTHER_TOKEN"])]);
+    let account = int_account("prod", "AWS_SECRET_ACCESS_KEY");
+    a.secrets.set(&account, CANARY).unwrap();
+    save_connections(&a, &["web"]);
+    a.secrets.set("ssh:web", "hunter2hunter2").unwrap();
+    // The source lists and reads the virtual file with both kinds of account; a declared name without a value adds nothing.
+    let source = ConfigSource::new(&a.dir, a.secrets.clone());
+    assert!(source.names().unwrap().contains(&SECRETS.to_owned()));
+    let read: BTreeMap<String, String> = serde_json::from_slice(&source.read(SECRETS).unwrap().unwrap()).unwrap();
+    assert_eq!(read.keys().map(String::as_str).collect::<Vec<_>>(), vec![account.as_str(), "ssh:web"]);
+    assert_eq!(read[&account], CANARY);
+
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert!(report.uploaded.contains(&SECRETS.to_owned()) && report.uploaded.contains(&"integrations.json".to_owned()), "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(secret_accounts(&srv, &a), vec![account.clone(), "ssh:web".to_owned()]);
+    {
+        let store = srv.store.lock().unwrap();
+        assert!(store.files.values().all(|(blob, _)| !blob.windows(CANARY.len()).any(|w| w == CANARY.as_bytes())), "no secret in clear on the server");
+    }
+
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.downloaded.contains(&SECRETS.to_owned()) && report.downloaded.contains(&"integrations.json".to_owned()), "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(b.secrets.get(&account).unwrap().as_deref(), Some(CANARY), "the secret is applied at once");
+    assert!(!b.dir.join("integrations.json").exists(), "the profile file waits for the start");
+    // Before the start the staged profile file decides the accounts: a second run changes nothing.
+    let puts = srv.counts().puts;
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(promote_incoming(&b.dir), vec!["connections.json", "integrations.json"]);
+    let (loaded, notes) = IntegrationProfiles::load(&b.dir);
+    assert!(notes.is_empty(), "{notes:?}");
+    let id = ProfileId::parse("prod").unwrap();
+    let resolved = loaded.resolve_secrets(b.secrets.as_ref(), &id).unwrap();
+    assert_eq!(resolved.len(), 1, "only the name with a value");
+    assert_eq!((resolved[0].0.as_str(), resolved[0].1.as_str()), ("AWS_SECRET_ACCESS_KEY", CANARY));
+    // After the start, and on A, nothing changes either.
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(connect(&srv, &a, "pw").unwrap().sync_once().unwrap(), Report::default());
+    assert_eq!(srv.counts().puts, puts);
+    assert!(fs::read_dir(&b.dir).unwrap().flatten().all(|e| !fs::read(e.path()).is_ok_and(|c| c.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()))), "no secret in a file");
+}
+
+#[test]
+fn a_declared_secret_without_a_value_adds_nothing() {
+    let srv = server();
+    let a = device("a-novalue");
+    save_integrations(&a, &[("prod", &["AWS_SECRET_ACCESS_KEY"])]);
+    let source = ConfigSource::new(&a.dir, a.secrets.clone());
+    assert_eq!(source.read(SECRETS).unwrap(), None);
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["integrations.json"], "{report:?}");
+    assert!(!srv.store.lock().unwrap().files.contains_key("files/secrets.json.hwx"));
+}
+
+#[test]
+fn the_integration_accounts_come_from_the_profile_file_and_never_from_the_keychain() {
+    let d = device("a-listed");
+    save_integrations(&d, &[("prod", &["LISTED_ONE"]), ("dev", &[])]);
+    // Values that the keychain holds but no profile lists are never read or sent.
+    for account in [int_account("prod", "LISTED_ONE"), int_account("prod", "UNLISTED"), int_account("ghost", "LISTED_ONE"), "kube:x".to_owned(), "ai:x".to_owned()] {
+        d.secrets.set(&account, CANARY).unwrap();
+    }
+    let source = ConfigSource::new(&d.dir, d.secrets.clone());
+    let read: BTreeMap<String, String> = serde_json::from_slice(&source.read(SECRETS).unwrap().unwrap()).unwrap();
+    assert_eq!(read.keys().cloned().collect::<Vec<_>>(), vec![int_account("prod", "LISTED_ONE")]);
+    // A damaged profile file lists nothing, and reading it for the sync writes nothing (no `.bad` copy).
+    fs::write(d.dir.join("integrations.json"), br#"{"version":1,"profiles":[{"id":"x","tool":"azure","name":"x","env":{"LD_PRELOAD":"x"}}]}"#).unwrap();
+    assert_eq!(source.read(SECRETS).unwrap(), None);
+    assert!(!source.names().unwrap().contains(&SECRETS.to_owned()));
+    assert!(!d.dir.join("integrations.json.bad").exists(), "the sync only reads the profile file");
+}
+
+/// The error text of a payload that must be refused; the whole payload applies nothing.
+fn refused(d: &Device, label: &str, pairs: &[(&str, &str)]) -> String {
+    let source = ConfigSource::new(&d.dir, d.secrets.clone());
+    let e = source.write(SECRETS, &payload(pairs)).expect_err(label).to_string();
+    for (account, _) in pairs {
+        assert!(!holds(d, account), "{label}: {account} was set");
+    }
+    e
+}
+
+#[test]
+fn a_hostile_secrets_payload_applies_nothing() {
+    let d = device("a-hostile");
+    let big = "v".repeat(1025);
+    let nul = "a\0b";
+    let good = ("int:prod:GOOD_ONE", "fine");
+    let shapes: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        ("a path-like profile", vec![("int:../x:NAME", CANARY)]),
+        ("a slash in the profile", vec![("int:a/b:NAME", CANARY)]),
+        ("an upper-case profile", vec![("int:Prod:NAME", CANARY)]),
+        ("a lower-case name", vec![("int:prod:lower", CANARY)]),
+        ("a missing name part", vec![("int:prod", CANARY)]),
+        ("an empty profile", vec![("int::NAME", CANARY)]),
+        ("an empty name", vec![("int:prod:", CANARY)]),
+        ("a third part", vec![("int:prod:A:B", CANARY)]),
+        ("a leading dash", vec![("int:-x:NAME", CANARY)]),
+        ("nothing after the prefix", vec![("int:", CANARY)]),
+        ("another case of the prefix", vec![("INT:prod:NAME", CANARY)]),
+        ("a space before the prefix", vec![(" int:prod:NAME", CANARY)]),
+        ("a profile over 32 characters", vec![("int:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:NAME", CANARY)]),
+        ("a name over 64 characters", vec![("int:prod:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", CANARY)]),
+        ("1025 bytes", vec![("int:prod:NAME", big.as_str())]),
+        ("a NUL", vec![("int:prod:NAME", nul)]),
+        ("an empty value", vec![("int:prod:NAME", "")]),
+        ("a keychain prefix", vec![("kube:x", CANARY)]),
+        ("an ai prefix", vec![("ai:x", CANARY)]),
+        ("no prefix", vec![("prod:NAME", CANARY)]),
+        ("an unsafe ssh id", vec![("ssh:../x", CANARY)]),
+        ("an empty ssh id", vec![("ssh:", CANARY)]),
+        ("a valid entry before an invalid one", vec![good, ("kube:x", CANARY)]),
+        ("a valid entry after an invalid one", vec![("ai:x", CANARY), good]),
+        ("a valid ssh entry and an invalid int entry", vec![("ssh:ok", "x"), ("int:prod:lower", CANARY), good]),
+        ("a valid int entry and an unsafe ssh entry", vec![good, ("ssh:a b", CANARY)]),
+    ];
+    assert!(shapes.len() >= 12);
+    for (label, pairs) in &shapes {
+        let text = refused(&d, label, pairs);
+        assert!(!text.contains(CANARY) && !text.contains(&big), "{label}: the error holds input: {text}");
+        assert!(text.contains("synced secrets"), "{label}: {text}");
+    }
+    // Nothing else of the keychain was reached either.
+    assert!(!holds(&d, "kube:x") && !holds(&d, "ai:x") && !holds(&d, "ssh:ok"));
+    // A payload that is not a map of text is damaged, and says so without the input.
+    let source = ConfigSource::new(&d.dir, d.secrets.clone());
+    for damaged in [&b"not json"[..], br#"{"int:prod:NAME":5}"#, br#"["int:prod:NAME"]"#, br#"{"int:prod:NAME":{"a":"b"}}"#] {
+        let e = source.write(SECRETS, damaged).expect_err("damaged").to_string();
+        assert!(e.contains("damaged"), "{e}");
+        assert!(!holds(&d, "int:prod:NAME"));
+    }
+}
+
+#[test]
+fn too_many_integration_accounts_in_one_payload_are_refused() {
+    let d = device("a-many");
+    let names: Vec<String> = (0..513).map(|i| format!("int:p{}:V{}", i / 8, i % 8)).collect();
+    let pairs: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "x")).collect();
+    let text = refused(&d, "513 accounts", &pairs);
+    assert!(text.contains("synced secrets"), "{text}");
+    // Exactly 64 profiles of 8 secret names are the most a profile file can declare.
+    let source = ConfigSource::new(&d.dir, d.secrets.clone());
+    source.write(SECRETS, &payload(&pairs[..512])).unwrap();
+    assert!(holds(&d, "int:p0:V0") && holds(&d, "int:p63:V7"));
+}
+
+#[test]
+fn valid_accounts_are_applied_and_applying_twice_changes_nothing() {
+    let d = device("a-valid");
+    let source = ConfigSource::new(&d.dir, d.secrets.clone());
+    let edge = "é".repeat(512); // 1024 bytes
+    assert_eq!(edge.len(), 1024);
+    let pairs = [
+        ("int:prod:AWS_SECRET_ACCESS_KEY", CANARY),
+        ("int:my-prof_1:_A1", edge.as_str()),
+        // A profile this device does not know yet: its file may arrive in the same run, in either order.
+        ("int:unknown:SOME_TOKEN", "x"),
+        ("ssh:web-1", "hunter2hunter2"),
+    ];
+    source.write(SECRETS, &payload(&pairs)).unwrap();
+    for (account, value) in pairs {
+        assert_eq!(d.secrets.get(account).unwrap().as_deref(), Some(value));
+    }
+    source.write(SECRETS, &payload(&pairs)).unwrap();
+    for (account, value) in pairs {
+        assert_eq!(d.secrets.get(account).unwrap().as_deref(), Some(value));
+    }
+}
+
+#[test]
+fn a_hostile_secrets_blob_on_the_server_applies_nothing_on_a_device() {
+    let srv = server();
+    let (a, b) = (device("a-blob"), device("b-blob"));
+    // A device with the passphrase uploads a payload that names accounts outside the two shapes.
+    save_connections(&a, &["web"]);
+    a.secrets.set("ssh:web", "hunter2hunter2").unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    let hostile = payload(&[("int:prod:GOOD_ONE", CANARY), ("kube:x", CANARY)]);
+    let syncer = connect(&srv, &a, "pw").unwrap();
+    let stamp = Stamp { counter: 99, device: [7; 16], time: 0 };
+    let blob = syncer.key.seal(SECRETS, stamp, &hostile).unwrap();
+    srv.store.lock().unwrap().files.insert("files/secrets.json.hwx".to_owned(), (blob, 500));
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.errors.iter().any(|(n, e)| n == SECRETS && e.contains("synced secrets") && !e.contains(CANARY)), "{report:?}");
+    assert!(!holds(&b, "int:prod:GOOD_ONE") && !holds(&b, "kube:x"));
+}

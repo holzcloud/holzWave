@@ -31,6 +31,8 @@ use super::crypto::{self, Kdf, Key, Stamp};
 use super::webdav::{Backend, CONFLICT, Cond, MAX_SEGMENT, safe_segment, sha256_hex};
 use crate::blocks::{self, BLOCKS_FILE, Block};
 use crate::connections::PANES_FILE;
+use crate::integrate::args::{EnvName, ProfileId};
+use crate::integrate::profiles::{self, IntegrationProfiles};
 use crate::layout::PaneId;
 use crate::persist::{read_limited, write_atomic};
 use crate::profiles::Profiles;
@@ -49,7 +51,7 @@ pub const SECRETS: &str = "secrets.json";
 /// that reads it so the two cannot drift; the machine-local integration files are deliberately not here.
 const FIXED: [&str; 6] = ["layout.json", "settings.json", "connections.json", "widget_notes.json", INTEGRATIONS, SECRETS];
 /// The synced name of the integration profiles.
-const INTEGRATIONS: &str = crate::integrate::profiles::FILE;
+const INTEGRATIONS: &str = profiles::FILE;
 /// The folders whose `<name>.json` files are synced one by one.
 const DIRS: [&str; 2] = ["themes", "widgets"];
 const STATE: &str = "sync_state.json";
@@ -669,8 +671,70 @@ impl ConfigSource {
     fn accounts(&self) -> Vec<String> {
         let staged = read_limited(&self.dir.join(INCOMING).join(CONNECTIONS), MAX_FILE).ok().flatten().and_then(|b| usable_list(&b));
         let list = staged.unwrap_or_else(|| Profiles::load(&self.dir).0);
-        list.items.iter().map(|p| p.secret_account()).collect()
+        let mut accounts: Vec<String> = list.items.iter().map(|p| p.secret_account()).collect();
+        accounts.extend(self.integration_accounts());
+        accounts
     }
+
+    /// The keychain accounts (`int:<profile id>:<NAME>`) of the secret variables that the integration profiles declare.
+    /// They come from the profile file and never from the keychain's own listing, so an entry that no profile names is
+    /// never read or sent. Like the connection list, a downloaded `integrations.json` that waits in `sync-incoming/` is the
+    /// local version of its name and decides, when it passes the loader's validation; otherwise the live file does, and a
+    /// file that fails validation names nothing. The file is only read here: the loader's own entry point would keep a
+    /// `.bad` copy of a damaged file, and a sync must not be what writes that.
+    fn integration_accounts(&self) -> Vec<String> {
+        let read = |path: PathBuf| read_limited(&path, profiles::MAX_BYTES).ok().flatten().and_then(|b| usable_profiles(&b));
+        let set = read(self.dir.join(INCOMING).join(INTEGRATIONS)).or_else(|| read(self.dir.join(INTEGRATIONS))).unwrap_or_default();
+        set.items
+            .iter()
+            .flat_map(|profile| {
+                profile.secret_env.iter().filter_map(|listed| EnvName::parse(listed).ok()).map(|name| profiles::secret_account(&profile.id, &name))
+            })
+            .collect()
+    }
+}
+
+/// The profiles `bytes` holds when the loader's whole-file validation accepts them; `None` otherwise (not text, not valid,
+/// empty). Nothing is written, whatever the bytes are.
+fn usable_profiles(bytes: &[u8]) -> Option<IntegrationProfiles> {
+    IntegrationProfiles::parse(std::str::from_utf8(bytes).ok()?).ok()
+}
+
+/// What a refused account says. The sentences name no account and no value.
+const NOT_AN_ACCOUNT: &str = "the synced secrets name an account that is not a connection";
+const BAD_VALUE: &str = "the synced secrets hold an integration value that is empty, larger than 1024 bytes or not text";
+const TOO_MANY: &str = "the synced secrets name more integration variables than the profiles can declare";
+/// The most `int:` accounts one payload may hold: 64 profiles of 8 secret names, the most a profile file can declare.
+const MAX_INT_ACCOUNTS: usize = profiles::MAX_PROFILES * profiles::MAX_SECRET_NAMES;
+
+/// Whether every entry of a payload from another device is one this device accepts, before any of them is applied. Exactly
+/// two account shapes exist: `ssh:<safe segment>` (a saved connection) and `int:<profile id>:<ENV NAME>` (a secret variable
+/// of an integration profile, parsed by the validators of the integrate module), the latter with a value of 1 to 1024
+/// bytes without a NUL and at most [`MAX_INT_ACCOUNTS`] of them. Anything else refuses the whole payload, so a mixed one
+/// applies nothing and no other keychain entry (a provider key, a kubeconfig token) can be reached from a synced file.
+fn check_secrets(map: &BTreeMap<String, String>) -> Result<()> {
+    let mut integration = 0usize;
+    for (account, value) in map {
+        if let Some(id) = account.strip_prefix("ssh:") {
+            if !safe_segment(id) {
+                return Err(err(NOT_AN_ACCOUNT));
+            }
+        } else if let Some((profile, name)) = account.strip_prefix("int:").and_then(|rest| rest.split_once(':')) {
+            if ProfileId::parse(profile).is_err() || EnvName::parse(name).is_err() {
+                return Err(err(NOT_AN_ACCOUNT));
+            }
+            integration += 1;
+            if integration > MAX_INT_ACCOUNTS {
+                return Err(err(TOO_MANY));
+            }
+            if value.is_empty() || value.len() > profiles::MAX_SECRET || value.contains('\0') {
+                return Err(err(BAD_VALUE));
+            }
+        } else {
+            return Err(err(NOT_AN_ACCOUNT));
+        }
+    }
+    Ok(())
 }
 
 /// The connection list `bytes` holds, or `None` when it is not one the loader would use: not text, not a list of this
@@ -747,14 +811,13 @@ impl Source for ConfigSource {
             return Err(err("not a synced file"));
         }
         if name == SECRETS {
-            let map: BTreeMap<String, String> =
-                serde_json::from_slice(bytes).map_err(|e| err(format!("the synced secrets are damaged: {e}")))?;
+            // The error says where, never what: serde's own text may quote a value.
+            let map: BTreeMap<String, String> = serde_json::from_slice(bytes)
+                .map_err(|e| err(format!("the synced secrets are damaged (line {}, column {})", e.line(), e.column())))?;
+            // Everything is checked before anything is applied: a hostile payload cannot reach any other entry, and a
+            // payload with one bad entry applies none of them.
+            check_secrets(&map)?;
             for (account, secret) in map {
-                // Only the accounts of connection profiles: a hostile payload cannot reach any other entry.
-                let id = account.strip_prefix("ssh:").filter(|id| safe_segment(id));
-                if id.is_none() {
-                    return Err(err("the synced secrets name an account that is not a connection"));
-                }
                 self.secrets.set(&account, &secret)?;
             }
             return Ok(());
