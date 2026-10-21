@@ -7,10 +7,11 @@ a Nextcloud in Docker; two real computers, your own server and its app-password 
 
 ## What is synced
 
-`layout.json`, `settings.json`, `connections.json`, `themes/<name>.json`, `widgets/<name>.json` and `widget_notes.json`,
-plus the connection secrets (passwords and key passphrases from the OS keychain) as one virtual file, `secrets.json`, which
-is never written to disk. Machine-local state (`session.json`, `local_network.json`, `known_hosts`) is not synced. The two pane files
-(`pane_connections.json` and `pane_blocks.json`) are machine-local too, but their shared part travels inside the layout:
+`layout.json`, `settings.json`, `connections.json`, `integrations.json`, `themes/<name>.json`, `widgets/<name>.json` and
+`widget_notes.json`, plus the connection secrets (passwords and key passphrases from the OS keychain) and the secret
+variables of the integration profiles (small values, at most 1 KiB each, from the OS keychain) as one virtual file,
+`secrets.json`, which is never written to disk. Machine-local state (`session.json`, `local_network.json`, `known_hosts`) is
+not synced. The two pane files (`pane_connections.json` and `pane_blocks.json`) are machine-local too, but their shared part travels inside the layout:
 
 `layout.json` is synced as a **layout unit**: the layout, which panes run which saved connection, and the blocks whose
 source is a saved connection (a remote file browser or preview) or the monitor of this computer. A local folder, a local
@@ -23,8 +24,23 @@ on the server is at most 128 characters. A file with a longer name is not synced
 actual length (the popover shows the first problem of a run, and it stays until the file is renamed); every other file
 syncs. A file whose name holds another character (a space, a dot) is not synced either, and says nothing.
 
-Also not synced: `history.db` (see "The history stays local" below), `ai.json` and `chats/`
-(the AI providers and the chats), and the keychain entries of the AI providers (a provider key stays on the computer where
+`integrations.json` holds the integration profiles: names and flags, never a credential or a path. Its secret variables are
+listed there by name, and the values travel in `secrets.json` under the account `int:<profile id>:<NAME>`. A device that
+receives `secrets.json` accepts exactly two account shapes, `ssh:<id>` for a saved connection and `int:<profile id>:<NAME>`
+for a secret variable (the profile id and the variable name must be valid as the profile file defines them, the value is
+1 to 1024 bytes without a NUL, and a payload holds at most 512 of them). One entry that does not fit refuses the whole
+payload and nothing of it is applied, so a payload from another computer cannot set any other keychain entry. The accounts a
+run sends are the ones the profile file declares, never a listing of the keychain. A downloaded `integrations.json` waits in
+`sync-incoming/` like the other files the running app owns and is read at the next start by the same whole-file validation
+as a file you wrote yourself: a file that breaks any rule (for example one that sets a variable that changes how a program
+loads code) is kept as `integrations.json.bad` and holzWave starts without profiles. A device without this version ignores
+the file, because its list of names does not have it.
+
+Not synced: the machine-local integration files (`integration_local.json` with the paths of the tools on this
+computer, `pane_integrations.json` and `pane_launches.json`), the private files holzWave writes for a running pane (the
+overlay configuration under `run/`), and the tools' own credential files and configurations (the kubeconfig, the
+talosconfig, the Azure and GAM directories), which holzWave refers to and never copies. Also not synced: `history.db`
+(see "The history stays local" below), `ai.json` and `chats/` (the AI providers and the chats), and the keychain entries of the AI providers (a provider key stays on the computer where
 you typed it, so enter it again on another one). The three AI settings (`ai_local_only`, `ai_local_context` and
 `ai_persist_context`) are part of `settings.json` and do travel with it.
 
@@ -72,7 +88,7 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   or a note shows on the sidebar at its next refresh (every 10 seconds while the sidebar is open). A note save and the
   replacement of `widget_notes.json` never run together, so a note typed during a download is not lost to a
   half-replaced file. Connection secrets also apply at once.
-- **What waits for a start:** `layout.json`, `settings.json` and `connections.json` stay in `sync-incoming/` and are
+- **What waits for a start:** `layout.json`, `settings.json`, `connections.json` and `integrations.json` stay in `sync-incoming/` and are
   moved into place when the app starts again, because the running app rewrites them from memory and would overwrite a
   file replaced under it. The popover asks for a restart only while such a download waits (or a staged file could not
   be applied).
@@ -94,7 +110,7 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   stages it as a theme or widget file sees an invalid file and leaves it out. A computer that finds a tombstone over a
   file it has not changed since the last run copies the file to `sync-conflicts/` and removes it (the staged download of
   it goes too); a computer that never had the file records the tombstone and creates nothing. Tombstones exist for
-  `themes/` and `widgets/` only: `layout.json`, `settings.json`, `connections.json`, `widget_notes.json` and the secrets
+  `themes/` and `widgets/` only: `layout.json`, `settings.json`, `connections.json`, `integrations.json`, `widget_notes.json` and the secrets
   are never deleted by the sync, and a tombstone for one of them is refused as an error of that name. An edit beats a
   delete on either side: a file changed on one computer while another deleted it is kept and comes back to the other
   (listed as a conflict), and a file created again after a deletion supersedes the tombstone. The safety rules:
@@ -128,7 +144,10 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
 
 ## Not yet
 
-- A downloaded `layout.json`, `settings.json` or `connections.json` is still staged in `sync-incoming/` and moved into
+- Deleting an integration profile on one computer does not delete its secret variables on another: deletions are synced
+  only for themes and widgets, and the value of a secret variable stays in the other computer's keychain until you remove
+  it there.
+- A downloaded `layout.json`, `settings.json`, `connections.json` or `integrations.json` is still staged in `sync-incoming/` and moved into
   place at the next start (the running app owns these files); the popover says so. A local edit made in between is kept
   as a copy in `sync-conflicts/`. Applying them while the app runs would need the settings, the layout and the
   connection list to be reloaded from their files, which nothing asks for yet.

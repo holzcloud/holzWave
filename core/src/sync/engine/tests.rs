@@ -2257,7 +2257,7 @@ fn refused(d: &Device, label: &str, pairs: &[(&str, &str)]) -> String {
 
 #[test]
 fn a_hostile_secrets_payload_applies_nothing() {
-    let d = device("a-hostile");
+    let d = device("a-hostile-payload");
     let big = "v".repeat(1025);
     let nul = "a\0b";
     let good = ("int:prod:GOOD_ONE", "fine");
@@ -2358,4 +2358,141 @@ fn a_hostile_secrets_blob_on_the_server_applies_nothing_on_a_device() {
     let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
     assert!(report.errors.iter().any(|(n, e)| n == SECRETS && e.contains("synced secrets") && !e.contains(CANARY)), "{report:?}");
     assert!(!holds(&b, "int:prod:GOOD_ONE") && !holds(&b, "kube:x"));
+}
+
+// ---- what the integrations never send, and what a hostile profile file does ---------------------------------------------
+
+/// Put a validly sealed blob of `plain` on the server under the remote file name `remote`, as a device that holds the
+/// passphrase would: only the name can keep it out.
+fn plant(srv: &Server, d: &Device, remote: &str, plain: &[u8]) {
+    let syncer = connect(srv, d, "pw").unwrap();
+    let name = remote.strip_suffix(".hwx").unwrap_or(remote);
+    let blob = syncer.key.seal(name, Stamp { counter: 77, time: 0, device: [9; 16] }, plain).unwrap();
+    srv.store.lock().unwrap().files.insert(format!("{FILES}/{remote}"), (blob, 900));
+}
+
+#[test]
+fn machine_local_integration_files_are_never_listed_read_or_applied() {
+    let srv = server();
+    let (a, b) = (device("a-mlocal"), device("b-mlocal"));
+    put(&a, "settings.json", "{}");
+    let local = [
+        ("integration_local.json", r#"{"version":1,"binaries":{"kube":"/usr/local/bin/kubectl"}}"#),
+        ("pane_integrations.json", "{}"),
+        ("pane_launches.json", "{}"),
+        ("run/kube/3.json", "{}"),
+        ("kubeconfig", "apiVersion: v1"),
+        ("talosconfig", "context: x"),
+        ("azure/msal_token_cache.json", "{}"),
+        ("gam/oauth2.txt", "x"),
+        ("integrations.json.bad", "{}"),
+    ];
+    for (file, text) in local {
+        let path = a.dir.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let source = ConfigSource::new(&a.dir, a.secrets.clone());
+    assert_eq!(source.names().unwrap(), vec!["settings.json"], "none of them is listed");
+    for (file, _) in local {
+        assert!(source.read(file).unwrap_err().to_string().contains("not a synced file"), "{file}");
+        assert!(source.write(file, b"{}").unwrap_err().to_string().contains("not a synced file"), "{file}");
+    }
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["settings.json"], "{report:?}");
+    let uploaded: Vec<String> = srv.store.lock().unwrap().files.keys().cloned().collect();
+    assert_eq!(uploaded, vec!["files/settings.json.hwx", "meta.json"], "nothing but the synced file reached the server");
+
+    // A server that holds a validly sealed file of each of those names (as another build might leave it): skipped, with
+    // no error and nothing applied, staged or kept.
+    for remote in [
+        "integration_local.json.hwx",
+        "pane_integrations.json.hwx",
+        "pane_launches.json.hwx",
+        "run.kube.3.json.hwx",
+        "kubeconfig.hwx",
+        "integrations.json.bad.hwx",
+        "integration_local.json",
+    ] {
+        plant(&srv, &a, remote, b"{\"version\":1}");
+    }
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["settings.json"], "{report:?}");
+    assert!(report.errors.is_empty() && report.conflicts.is_empty(), "{report:?}");
+    assert_eq!(promote_incoming(&b.dir), vec!["settings.json"]);
+    let mut left: Vec<String> = fs::read_dir(&b.dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    left.sort();
+    assert_eq!(left, vec!["settings.json", "sync_state.json"], "no machine-local file appeared");
+
+    // The same names planted in the staging folder are not applied either.
+    for (file, _) in local {
+        stage(&b, file, "{\"version\":1}");
+    }
+    stage(&b, "integration_local.json", "{\"version\":1}");
+    assert!(promote_incoming(&b.dir).is_empty());
+    assert!(local.iter().all(|(file, _)| !b.dir.join(file).exists()));
+}
+
+#[test]
+fn a_remote_name_this_version_does_not_know_is_skipped() {
+    // What an older device does with `integrations.json`: its list has no such name, so the remote file is none of its business.
+    assert_eq!(logical_name("future_thing.json.hwx"), None);
+    assert_eq!(logical_name("integrations.json.hwx").as_deref(), Some("integrations.json"));
+    let srv = server();
+    let (a, b) = (device("a-future"), device("b-future"));
+    put(&a, "settings.json", "{}");
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    plant(&srv, &a, "future_thing.json.hwx", b"{\"anything\":true}");
+    plant(&srv, &a, "futures.hwx", b"x");
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.downloaded, vec!["settings.json"], "{report:?}");
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(!b.dir.join("sync-incoming").join("future_thing.json").exists());
+    // Nothing is uploaded back or reported later either.
+    assert_eq!(connect(&srv, &b, "pw").unwrap().sync_once().unwrap(), Report::default());
+}
+
+#[test]
+fn a_hostile_profile_file_is_quarantined_after_promotion() {
+    let hostile = format!(
+        r#"{{"version":1,"profiles":[{{"id":"prod","tool":"azure","name":"Prod","env":{{"LD_PRELOAD":"{CANARY}"}}}}]}}"#
+    );
+    // Staged straight into the incoming folder, then the app's start order: promote, then load.
+    let d = device("a-quarantine");
+    stage(&d, "integrations.json", &hostile);
+    assert_eq!(promote_incoming(&d.dir), vec!["integrations.json"]);
+    let (loaded, notes) = IntegrationProfiles::load(&d.dir);
+    assert!(loaded.items.is_empty(), "the app starts without profiles");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("LD_PRELOAD") && !notes[0].contains(CANARY), "{notes:?}");
+    assert_eq!(fs::read_to_string(d.dir.join("integrations.json.bad")).unwrap(), hostile, "the damaged file is kept");
+
+    // The whole way: a device with the passphrase uploads it, another device downloads it. No account of it is read before
+    // the start, and the secrets of the profile file that was valid before are still the ones that are meant.
+    let srv = server();
+    let (a, b) = (device("a-q2"), device("b-q2"));
+    save_integrations(&b, &[("dev", &["DEV_TOKEN"])]);
+    b.secrets.set(&int_account("dev", "DEV_TOKEN"), "dev-value").unwrap();
+    connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    promote_incoming(&a.dir);
+    fs::write(a.dir.join("integrations.json"), &hostile).unwrap();
+    let report = connect(&srv, &a, "pw").unwrap().sync_once().unwrap();
+    assert_eq!(report.uploaded, vec!["integrations.json"], "{report:?}");
+    let report = connect(&srv, &b, "pw").unwrap().sync_once().unwrap();
+    assert!(report.downloaded.contains(&"integrations.json".to_owned()), "{report:?}");
+    let source = ConfigSource::new(&b.dir, b.secrets.clone());
+    let read: BTreeMap<String, String> = serde_json::from_slice(&source.read(SECRETS).unwrap().unwrap()).unwrap();
+    assert_eq!(read.keys().cloned().collect::<Vec<_>>(), vec![int_account("dev", "DEV_TOKEN")], "the live file still decides");
+    assert_eq!(promote_incoming(&b.dir), vec!["integrations.json"]);
+    let (loaded, notes) = IntegrationProfiles::load(&b.dir);
+    assert!(loaded.items.is_empty() && notes.len() == 1, "{notes:?}");
+    assert!(!notes[0].contains(CANARY));
+    assert!(b.dir.join("integrations.json.bad").is_file());
+    // The sync never writes that copy itself: a device that only reads the damaged file keeps none.
+    let c = device("c-q2");
+    fs::write(c.dir.join("integrations.json"), &hostile).unwrap();
+    let _ = ConfigSource::new(&c.dir, c.secrets.clone()).read(SECRETS).unwrap();
+    let _ = ConfigSource::new(&c.dir, c.secrets.clone()).names().unwrap();
+    assert!(!c.dir.join("integrations.json.bad").exists());
 }
