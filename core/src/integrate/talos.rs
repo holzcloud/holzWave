@@ -24,6 +24,10 @@
 //! are the ones of the closed catalogue below. Talos' own role model is the defence in depth for read-only use: an
 //! `os:reader` configuration cannot change a node, so the `info` view says in words what the role of the current
 //! context allows, and the documents recommend a reader configuration.
+//!
+//! A name never becomes an option: a node or a context is a validated type, a flag that carries one is built in the
+//! equals form, and the context of `use_context` stands behind `--`. A row of the `nodes` table offers its buttons only
+//! for a name that passes the node check.
 
 use std::ffi::OsString;
 
@@ -291,7 +295,7 @@ fn nodes_view(bytes: &[u8]) -> ViewModel {
             let address_cell = list_cell(item.pointer("/spec/addresses"));
             let node = text(item, "/node");
             let key = hostname.or(node).map_or_else(|| format!("object-{}", index + 1), str::to_owned);
-            RowBuilder::new(
+            let mut row = RowBuilder::new(
                 &key,
                 &[
                     cell(node),
@@ -299,7 +303,17 @@ fn nodes_view(bytes: &[u8]) -> ViewModel {
                     cell(text(item, "/spec/machineType")),
                     &address_cell,
                 ],
-            )
+            );
+            // The buttons name the address that the tool reported, or else the host name, and only when the name
+            // passes the node check: a hostile name gives a row with no buttons, never a button with a bad argument.
+            if let Some(target) = [node, hostname].into_iter().flatten().find(|name| NodeName::parse(name).is_ok()) {
+                for id in ["services", "machine_status", "dmesg", "dashboard"] {
+                    if let Some(verb) = SPEC.verb(id) {
+                        row.action(verb, &[("node", target)]);
+                    }
+                }
+            }
+            row
         },
     )
 }
@@ -561,6 +575,14 @@ impl Integration for Talos {
             "nodes" => Ok(with_flags(&["get", "members", "-o", "json"], context, node)),
             "services" => Ok(with_flags(&["get", "services", "-o", "json"], context, node)),
             "machine_status" => Ok(with_flags(&["get", "machinestatus", "-o", "json"], context, node)),
+            // The context is named after `--`, so it cannot be read as an option, and nothing of the selection is used:
+            // the verb changes the person's own current context and no other.
+            "use_context" => {
+                let context = args.context().ok_or(ArgError::Missing)?;
+                Ok(vec!["config".into(), "context".into(), "--".into(), context.as_str().into()])
+            }
+            "dmesg" => Ok(with_flags(&["dmesg", "--follow"], context, node)),
+            "dashboard" => Ok(with_flags(&["dashboard"], context, node)),
             _ => Err(ArgError::Unknown),
         }
     }

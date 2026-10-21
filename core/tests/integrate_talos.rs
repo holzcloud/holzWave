@@ -5,6 +5,8 @@
 //! run. An assertion that rests on such a fixture says so in a comment (`written fixture`): it holds the parser to a
 //! shape that nobody has seen the real tool print yet, and a real capture replaces the fixture later.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +14,7 @@ use holzwave_core::integrate::talos::{
     parse_version, read_objects, StreamEnd, ACCESS_FULL, ACCESS_LIMITED, ACCESS_READ_ONLY, MAX_OBJECTS, TALOS,
 };
 use holzwave_core::integrate::view::{KvView, TableView, TextView, Tone, ViewModel};
-use holzwave_core::integrate::{CheckedSelection, Integration, Selection, Validated, Verb, VerbEffect};
+use holzwave_core::integrate::{CheckedSelection, Integration, Selection, ToolId, Validated, Verb, VerbEffect};
 use serde_json::{json, Value};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -658,9 +660,413 @@ fn shapes_nobody_has_seen_degrade_to_unknown_cells() {
     assert!(row.iter().all(|c| c.len() <= 4096), "a cell is bounded");
     assert_eq!(row[2], "controlplane");
     assert_eq!(row[3], "192.0.2.1 SECOND LINE");
-    assert!(table_of(&model).rows()[0].actions().is_empty(), "no button for a name that does not validate");
+    // The address validates, so the row has its buttons; the hostile host name is never an argument of one of them.
+    let row = &table_of(&model).rows()[0];
+    assert_eq!(row.actions().len(), 4);
+    assert!(row.actions().iter().all(|a| a.args().collect::<Vec<_>>() == [("node", "192.0.2.1")]), "{row:?}");
 }
 
 fn table_of(model: &ViewModel) -> &TableView {
     table(model)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The terminal and Local verbs, hostile names and the forbidden flags.
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn the_terminal_and_local_verbs_build_their_exact_argument_lists() {
+    // `use_context` names the context after `--` and takes nothing from the selection. Whether `config context` writes
+    // the file is an assumption of the documents, not something a recording shows.
+    let none = selection(None, None);
+    assert_eq!(argv("use_context", &[("context", "talos-prod")], &none), ["config", "context", "--", "talos-prod"]);
+    let both = selection(Some("other"), Some("192.0.2.9"));
+    assert_eq!(argv("use_context", &[("context", "talos-prod")], &both), ["config", "context", "--", "talos-prod"]);
+    // The name is one argument whatever it holds inside.
+    assert_eq!(argv("use_context", &[("context", "a b=c")], &none), ["config", "context", "--", "a b=c"]);
+    let map = BTreeMap::new();
+    assert!(Validated::parse(verb("use_context"), &map).is_err(), "the context is required");
+    assert_eq!(verb("use_context").effect, VerbEffect::Local);
+
+    // `dmesg` follows; `dashboard` is the terminal UI. Absent flags are left out, a context comes before a node.
+    assert_eq!(argv("dmesg", &[], &none), ["dmesg", "--follow"]);
+    assert_eq!(argv("dashboard", &[], &none), ["dashboard"]);
+    let context = selection(Some("talos-prod"), None);
+    assert_eq!(argv("dmesg", &[], &context), ["dmesg", "--follow", "--context=talos-prod"]);
+    assert_eq!(argv("dashboard", &[], &context), ["dashboard", "--context=talos-prod"]);
+    let node = selection(None, Some("node-1.example.com"));
+    assert_eq!(argv("dmesg", &[], &node), ["dmesg", "--follow", "--nodes=node-1.example.com"]);
+    assert_eq!(argv("dashboard", &[], &node), ["dashboard", "--nodes=node-1.example.com"]);
+    let all = selection(Some("talos-prod"), Some("192.0.2.9"));
+    assert_eq!(argv("dmesg", &[], &all), ["dmesg", "--follow", "--context=talos-prod", "--nodes=192.0.2.9"]);
+    assert_eq!(argv("dashboard", &[], &all), ["dashboard", "--context=talos-prod", "--nodes=192.0.2.9"]);
+    // The node of the verb's own argument wins over the node of the selection.
+    assert_eq!(
+        argv("dmesg", &[("node", "::1")], &all),
+        ["dmesg", "--follow", "--context=talos-prod", "--nodes=::1"]
+    );
+    assert_eq!(
+        argv("dashboard", &[("node", "node-2.example.com")], &all),
+        ["dashboard", "--context=talos-prod", "--nodes=node-2.example.com"]
+    );
+    assert_eq!((verb("dmesg").effect, verb("dashboard").effect), (VerbEffect::Read, VerbEffect::Exec));
+
+    // The reads take the same two flags in the same order, and the node of the argument wins here too.
+    assert_eq!(
+        argv("services", &[("node", "192.0.2.2")], &all),
+        ["get", "services", "-o", "json", "--context=talos-prod", "--nodes=192.0.2.2"]
+    );
+    assert_eq!(
+        argv("machine_status", &[], &all),
+        ["get", "machinestatus", "-o", "json", "--context=talos-prod", "--nodes=192.0.2.9"]
+    );
+    assert_eq!(argv("info", &[], &context), ["config", "info", "-o", "json", "--context=talos-prod"]);
+    assert_eq!(argv("contexts", &[], &all), ["config", "contexts"]);
+    assert_eq!(TALOS.spec().verbs.len(), 8);
+}
+
+/// Inputs that try to become an option, a second argument or a spoof; some are valid names for some kinds.
+fn corpus() -> Vec<String> {
+    let mut out: Vec<String> = [
+        "-",
+        "--",
+        "-e",
+        "-n",
+        "-x",
+        "--endpoints=x",
+        "--endpoints=192.0.2.1",
+        "--talosconfig=/etc/passwd",
+        "--insecure",
+        "--cluster=x",
+        "--nodes=1.2.3.4",
+        "--context=prod",
+        "a\nb",
+        "a\tb",
+        "a\rb",
+        "a\u{0}b",
+        "a\u{1b}[31mb",
+        "a\u{7f}b",
+        "a\u{202e}b",
+        "a\u{2066}b",
+        "a\u{200b}b",
+        "\u{feff}a",
+        "a\u{ad}b",
+        "a\u{e0041}b",
+        "a\u{a0}b",
+        "a\u{3000}b",
+        "a b",
+        " a",
+        "a ",
+        "a=b",
+        "a,b",
+        "a;b",
+        "a'b",
+        "a\"b",
+        "a\\b",
+        "$(id)",
+        "`id`",
+        "a|b",
+        "a&&b",
+        "a>b",
+        "../x",
+        "",
+        " ",
+        "1.2.3.4.5",
+        "10.0.4.12/24",
+        "10.0.4.12:50000",
+        "[::1]",
+        "::1",
+        "fe80::1%en0",
+        "2001:db8::1",
+        "192.0.2.1",
+        "256.1.1.1",
+        "0",
+        "UPPER",
+        "a_b",
+        "a..b",
+        "node-1.example.com",
+        "node-1",
+        "talos-prod",
+        "admin@talos-prod",
+        "user@cluster:443",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    for length in [62, 63, 64, 252, 253, 254, 255, 4096, 4097] {
+        out.push("a".repeat(length));
+    }
+    out
+}
+
+/// Every way a text can be put into a verb call: (label, verb, arguments, selected context, selected node).
+type Call = (String, &'static str, Vec<(&'static str, String)>, Option<String>, Option<String>);
+
+fn calls_with(text: &str) -> Vec<Call> {
+    let t = || text.to_owned();
+    let mut calls: Vec<Call> = Vec::new();
+    let mut add = |label: &str, id: &'static str, pairs: Vec<(&'static str, String)>, c: Option<String>, n: Option<String>| {
+        calls.push((format!("{label} {text:?}"), id, pairs, c, n));
+    };
+    add("use_context arg", "use_context", vec![("context", t())], None, None);
+    for id in ["services", "machine_status", "dmesg", "dashboard"] {
+        add(&format!("{id} node arg"), id, vec![("node", t())], None, None);
+        add(&format!("{id} node arg with selection"), id, vec![("node", t())], Some("talos-prod".into()), Some("192.0.2.9".into()));
+    }
+    for id in ["contexts", "info", "nodes", "services", "machine_status", "dmesg", "dashboard"] {
+        add(&format!("{id} selected context"), id, vec![], Some(t()), None);
+        add(&format!("{id} selected node"), id, vec![], None, Some(t()));
+    }
+    calls
+}
+
+/// Builds a call; `None` when a validator refused the text before an argument list existed.
+fn try_build(id: &str, pairs: &[(&str, String)], context: Option<&str>, node: Option<&str>) -> Option<Vec<String>> {
+    let map: BTreeMap<String, String> = pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect();
+    let validated = Validated::parse(verb(id), &map).ok()?;
+    let checked = Selection {
+        context: context.map(str::to_owned),
+        node: node.map(str::to_owned),
+        ..Selection::default()
+    }
+    .check(ToolId::Talos)
+    .ok()?;
+    let list = TALOS.argv(verb(id), &validated, &checked).expect("a validated call builds");
+    Some(list.iter().map(|a| a.to_str().expect("UTF-8 arguments").to_owned()).collect())
+}
+
+/// The words and flags of the module's own catalogue: nothing else may start with a dash or stand alone.
+const FIXED: [&str; 12] =
+    ["config", "context", "contexts", "info", "get", "members", "services", "machinestatus", "dmesg", "dashboard", "-o", "json"];
+const FIXED_FLAGS: [&str; 2] = ["--follow", "--"];
+
+/// What a list of arguments may hold: every element is a fixed word, a fixed flag, `--context=` or `--nodes=` with a
+/// value that is one of the `names` of the call, or the one name that follows `--`.
+fn assert_shape(argv: &[String], names: &[&str], label: &str) {
+    let dashes = argv.iter().position(|a| a == "--");
+    for (at, element) in argv.iter().enumerate() {
+        if FIXED.contains(&element.as_str()) || FIXED_FLAGS.contains(&element.as_str()) {
+            // A name that equals a fixed word is still only a fixed word here, except after `--`.
+            if !dashes.is_some_and(|d| at == d + 1) {
+                continue;
+            }
+        }
+        if let Some(value) = element.strip_prefix("--context=").or_else(|| element.strip_prefix("--nodes=")) {
+            assert!(names.contains(&value), "{label}: {element:?} carries a value that no name of the call has: {argv:?}");
+            continue;
+        }
+        assert!(dashes.is_some_and(|d| at == d + 1), "{label}: {element:?} is no flag of ours and not after `--`: {argv:?}");
+        assert!(names.contains(&element.as_str()), "{label}: {element:?} is no name of the call: {argv:?}");
+    }
+    // A node is always inside `--nodes=`: no element equals a name of the call except behind `--`.
+    for name in names {
+        let bare = argv.iter().enumerate().filter(|(at, e)| e == name && !dashes.is_some_and(|d| *at == d + 1)).count();
+        let fixed = FIXED.contains(name) || FIXED_FLAGS.contains(name);
+        assert!(bare == 0 || fixed, "{label}: the name {name:?} stands alone in {argv:?}");
+    }
+}
+
+#[test]
+fn a_hostile_name_never_changes_the_talosctl_argument_list() {
+    let (mut accepted, mut refused) = (0, 0);
+    for text in corpus() {
+        for (label, id, pairs, context, node) in calls_with(&text) {
+            match try_build(id, &pairs, context.as_deref(), node.as_deref()) {
+                None => refused += 1,
+                Some(argv) => {
+                    accepted += 1;
+                    let mut names: Vec<&str> = pairs.iter().map(|(_, v)| v.as_str()).collect();
+                    names.extend(context.as_deref());
+                    names.extend(node.as_deref());
+                    assert_shape(&argv, &names, &label);
+                    // A name that starts with a dash is never accepted, so it is never an element of the list.
+                    assert!(!text.starts_with('-') || !argv.iter().any(|a| a.contains(text.as_str()) && a != "--"), "{label}: {argv:?}");
+                }
+            }
+        }
+    }
+    assert!(accepted > 150 && refused > 400, "the corpus must exercise both sides: {accepted} accepted, {refused} refused");
+
+    // Spot checks of what is refused, what is whole and the exact list that results.
+    for bad in [
+        "--endpoints=x",
+        "-e",
+        "a\nb",
+        "a\u{202e}b",
+        "a\u{200b}b",
+        "1.2.3.4.5",
+        "10.0.4.12/24",
+        "[::1]",
+        "a b",
+        &"a".repeat(254),
+    ] {
+        for id in ["services", "machine_status", "dmesg", "dashboard"] {
+            assert!(try_build(id, &[("node", bad.to_owned())], None, None).is_none(), "{id} node {bad:?} was accepted");
+            assert!(try_build(id, &[], None, Some(bad)).is_none(), "{id} selected node {bad:?} was accepted");
+        }
+    }
+    for bad in ["--endpoints=x", "-e", "a\nb", "a\u{202e}b", " a", "a ", &"a".repeat(254)] {
+        assert!(try_build("use_context", &[("context", bad.to_owned())], None, None).is_none(), "context {bad:?}");
+        assert!(try_build("dmesg", &[], Some(bad), None).is_none(), "selected context {bad:?}");
+    }
+    assert_eq!(
+        try_build("dmesg", &[("node", "::1".to_owned())], None, None).expect("an IPv6 literal is a node"),
+        ["dmesg", "--follow", "--nodes=::1"]
+    );
+    assert_eq!(
+        try_build("dashboard", &[], Some("a b"), None).expect("a space inside a context name is allowed"),
+        ["dashboard", "--context=a b"],
+        "a name with a space is one argument"
+    );
+    assert_eq!(
+        try_build("use_context", &[("context", "a=b".to_owned())], None, None).expect("an equals sign is allowed"),
+        ["config", "context", "--", "a=b"]
+    );
+    assert_eq!(
+        try_build("use_context", &[("context", "talos-prod".to_owned())], Some("x"), Some("1.2.3.4")),
+        Some(["config", "context", "--", "talos-prod"].map(str::to_owned).to_vec())
+    );
+
+    // Generated names: whatever mix of dashes, equals signs, quotes and control characters, an accepted list keeps its shape.
+    let mut rng = common::Xorshift64::new(0x7461_6c6f);
+    let alphabet: Vec<char> = "-=aZ09_. /@:'\"$`|&;<>[]\n\t\u{0}\u{1b}\u{202e}\u{200b}\u{a0}\u{e9}".chars().collect();
+    for _ in 0..4000 {
+        let length = 1 + rng.below(12);
+        let name: String = (0..length).map(|_| alphabet[rng.below(alphabet.len())]).collect();
+        for (label, id, pairs, context, node) in calls_with(&name) {
+            if let Some(argv) = try_build(id, &pairs, context.as_deref(), node.as_deref()) {
+                let mut names: Vec<&str> = pairs.iter().map(|(_, v)| v.as_str()).collect();
+                names.extend(context.as_deref());
+                names.extend(node.as_deref());
+                assert_shape(&argv, &names, &label);
+            }
+        }
+    }
+}
+
+#[test]
+fn no_argument_list_holds_a_config_or_endpoint_flag() {
+    const FORBIDDEN: [&str; 6] = ["--talosconfig", "--endpoints", "-e", "--insecure", "--cluster", "-n"];
+    let mut lists = 0;
+    let mut check = |argv: &[String], label: &str| {
+        lists += 1;
+        for element in argv {
+            for flag in FORBIDDEN {
+                let equals = format!("{flag}=");
+                assert!(element != flag && !element.starts_with(&equals), "{label}: {flag} is in {argv:?}");
+            }
+            let own = FIXED.contains(&element.as_str())
+                || FIXED_FLAGS.contains(&element.as_str())
+                || element.starts_with("--context=")
+                || element.starts_with("--nodes=");
+            let name_behind_dashes = argv.iter().position(|a| a == "--").is_some_and(|d| argv.get(d + 1) == Some(element));
+            assert!(own || name_behind_dashes || !element.starts_with('-'), "{label}: the flag {element:?} is not in the catalogue");
+            assert!(!element.contains("talosconfig") || element.starts_with("--context="), "{label}: {element:?}");
+        }
+    };
+    // Every verb, with every valid name of the corpus in every role and with no name at all.
+    for text in corpus() {
+        for (label, id, pairs, context, node) in calls_with(&text) {
+            if let Some(argv) = try_build(id, &pairs, context.as_deref(), node.as_deref()) {
+                check(&argv, &label);
+            }
+        }
+    }
+    for verb_listed in TALOS.spec().verbs {
+        for (context, node) in [(None, None), (Some("talos-prod"), None), (None, Some("192.0.2.9")), (Some("a b"), Some("::1"))] {
+            let id = verb_listed.id;
+            let pairs: Vec<(&str, String)> = verb_listed.args.iter().map(|spec| (spec.name, "talos-prod".to_owned())).collect();
+            let argv = try_build(id, &pairs, context, node).unwrap_or_else(|| panic!("{id} with valid names was refused"));
+            check(&argv, id);
+        }
+    }
+    assert!(lists > 150, "the sweep looked at {lists} argument lists");
+
+    // The module never names a forbidden flag as an argument of its own: the sweep above is the proof for what it
+    // builds, and this holds the source to it. The talosconfig reaches the tool through the environment.
+    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/integrate/talos.rs")).expect("source");
+    let code = source.split("#[cfg(test)]").next().expect("code");
+    for flag in ["\"--talosconfig", "\"--endpoints", "\"-e\"", "\"-e=", "\"--insecure", "\"--cluster", "\"-n\"", "\"--nodes\""] {
+        let hits = code.lines().filter(|l| !l.trim_start().starts_with("//") && l.contains(flag)).count();
+        assert_eq!(hits, 0, "the source builds {flag}");
+    }
+}
+
+#[test]
+fn node_rows_carry_actions_only_for_valid_names() {
+    let summary = |model: &ViewModel| -> Vec<Vec<(String, VerbEffect, Vec<(String, String)>)>> {
+        table_of(model)
+            .rows()
+            .iter()
+            .map(|row| {
+                row.actions()
+                    .iter()
+                    .map(|a| {
+                        let args = a.args().map(|(k, v)| (k.to_owned(), v.to_owned())).collect();
+                        (a.verb().to_owned(), a.effect(), args)
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    let node_actions = |node: &str| -> Vec<(String, VerbEffect, Vec<(String, String)>)> {
+        [
+            ("services", VerbEffect::Read),
+            ("machine_status", VerbEffect::Read),
+            ("dmesg", VerbEffect::Read),
+            ("dashboard", VerbEffect::Exec),
+        ]
+        .iter()
+        .map(|(id, effect)| ((*id).to_owned(), *effect, vec![("node".to_owned(), node.to_owned())]))
+        .collect()
+    };
+
+    // Written fixture: each member row gets the four node verbs for its address, the address being what `--nodes` takes.
+    let model = view("nodes", &fixture("get_members.json"));
+    let rows = summary(&model);
+    assert_eq!(rows, [node_actions("192.0.2.11"), node_actions("192.0.2.12"), node_actions("192.0.2.13")]);
+    assert!(model.check().is_ok());
+
+    let one = |node: Value, hostname: Value| {
+        let object = json!({"node": node, "spec": {"hostname": hostname, "machineType": "worker", "addresses": []}});
+        summary(&view("nodes", object.to_string().as_bytes()))[0].clone()
+    };
+    // An IPv6 literal validates; the bracket form and a mask do not.
+    assert_eq!(one(json!("2001:db8::1"), json!(null)), node_actions("2001:db8::1"));
+    assert_eq!(one(json!("::1"), json!(null)), node_actions("::1"));
+    // Without a valid address the host name stands in, and without either there is no button.
+    assert_eq!(one(json!(null), json!("node-9.example.com")), node_actions("node-9.example.com"));
+    assert_eq!(one(json!("[::1]"), json!("node-9")), node_actions("node-9"));
+    assert_eq!(one(json!("192.0.2.5"), json!("evil\u{202e}host")), node_actions("192.0.2.5"));
+    let hostile = [
+        "-x",
+        "--endpoints=x",
+        "-e",
+        "1.2.3.4.5",
+        "10.0.4.12/24",
+        "[::1]",
+        "a b",
+        "a\nb",
+        "a\u{1b}[31mb",
+        "a\u{202e}b",
+        "a\u{200b}b",
+        "",
+        "UPPER",
+        "a_b",
+    ];
+    for bad in hostile {
+        assert!(one(json!(bad), json!(bad)).is_empty(), "{bad:?} offered an action");
+        assert!(one(json!(bad), json!(null)).is_empty(), "{bad:?} offered an action");
+    }
+    let long = "a".repeat(254);
+    assert!(one(json!(long), json!(long)).is_empty(), "254 bytes offered an action");
+    assert!(one(json!(5), json!(["x"])).is_empty(), "wrong-typed members offered an action");
+
+    // The other tables carry the actions they carried before: context rows have `use_context`, the rest none.
+    let contexts = view("contexts", &fixture("config_contexts.txt"));
+    assert!(table_of(&contexts).rows().iter().all(|r| r.actions().iter().all(|a| a.verb() == "use_context")));
+    for (id, name) in [("services", "get_services.json"), ("machine_status", "get_machinestatus.json")] {
+        let model = view(id, &fixture(name));
+        assert!(table_of(&model).rows().iter().all(|r| r.actions().is_empty()), "{id}");
+    }
 }
