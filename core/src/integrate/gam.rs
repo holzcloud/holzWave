@@ -36,8 +36,8 @@ use super::view::{
     MAX_COLUMNS, MAX_ROWS, MAX_TEXT,
 };
 use super::{
-    ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId,
-    Validated, Verb, VerbEffect, VersionProbe,
+    ArgKind, ArgSpec, CheckedSelection, DefaultRead, Integration, IntegrationSpec, Output, ParseError, SelectKind,
+    Selection, ToolId, Validated, Verb, VerbEffect, VersionProbe,
 };
 
 /// The most standard output this module reads; the runner's own cap is at most as large by default, and a longer
@@ -187,6 +187,19 @@ impl Integration for Gam {
             "sections" => sections_view(stdout),
             _ => Err(ParseError::Unrecognised),
         }
+    }
+
+    fn read_default(&self, verb: &Verb, stdout: &[u8]) -> Option<DefaultRead> {
+        if SPEC.verb(verb.id) != Some(verb) || verb.id != "sections" {
+            return None;
+        }
+        let sections = read_sections(stdout)?;
+        let (name, _) = sections.into_iter().find(|(_, selected)| *selected)?;
+        Some(DefaultRead {
+            selection: Selection { section: Some(name), ..Selection::default() },
+            signed_out: false,
+            contexts: Vec::new(),
+        })
     }
 }
 

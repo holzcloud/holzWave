@@ -43,8 +43,8 @@ use crate::persist::write_atomic_private;
 use crate::platform::{self, Os};
 
 use super::{
-    ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId, Validated,
-    Verb, VerbEffect, VersionProbe,
+    ArgKind, ArgSpec, CheckedSelection, DefaultRead, Integration, IntegrationSpec, LaunchProgram, Output, ParseError,
+    SelectKind, Selection, ToolId, Validated, Verb, VerbEffect, VersionProbe,
 };
 
 /// The most bytes of one answer that are read; the runner caps standard output below this.
@@ -719,6 +719,31 @@ impl Integration for Kube {
 
     fn view(&self, verb: &Verb, stdout: &[u8]) -> Result<ViewModel, ParseError> {
         self.view_at(verb, stdout, SystemTime::now())
+    }
+
+    fn read_default(&self, verb: &Verb, stdout: &[u8]) -> Option<DefaultRead> {
+        if own(verb).ok()?.id != "contexts" {
+            return None;
+        }
+        let data = parse_contexts(stdout).ok()?;
+        let current = data.current().and_then(|name| data.context(name));
+        let selection = Selection {
+            context: data.current().map(str::to_owned),
+            namespace: current.and_then(ContextEntry::namespace).map(str::to_owned),
+            ..Selection::default()
+        };
+        Some(DefaultRead { selection, signed_out: false, contexts: data.contexts().to_vec() })
+    }
+
+    fn changes(&self, verb: &Verb) -> Option<&'static str> {
+        match own(verb).ok()?.id {
+            "use_context" | "set_namespace" => Some("the kubeconfig files named by KUBECONFIG, by default ~/.kube/config"),
+            _ => None,
+        }
+    }
+
+    fn launch_program(&self, verb: &Verb) -> LaunchProgram {
+        if own(verb).is_ok_and(|own| own.id == "shell") { LaunchProgram::UserShell } else { LaunchProgram::Tool }
     }
 }
 

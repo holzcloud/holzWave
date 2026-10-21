@@ -44,6 +44,7 @@ use args::{
     flag_value, lines, ArgError, ContainerName, ContextName, Namespace, NodeName, PodName, ProfileId, SectionName,
     SubscriptionId,
 };
+use kube::ContextEntry;
 use view::ViewModel;
 
 /// The most bytes any one argument value may have, checked before its kind is looked at.
@@ -497,4 +498,46 @@ pub trait Integration: Send + Sync {
 
     /// The view model of the standard output of `verb`.
     fn view(&self, verb: &Verb, stdout: &[u8]) -> Result<ViewModel, ParseError>;
+
+    /// The tool's own current selection, read from the standard output of its default verb: the first verb of the
+    /// spec (`contexts` for Kubernetes and Talos, `account` for Azure, `sections` for GAM). The answer is `None` for
+    /// every other verb and for output that does not say. It reads bytes and starts nothing.
+    fn read_default(&self, verb: &Verb, stdout: &[u8]) -> Option<DefaultRead> {
+        let _ = (verb, stdout);
+        None
+    }
+
+    /// The sentence that names what a verb with the effect [`VerbEffect::Local`] changes, which the approval card
+    /// shows next to the request; `None` for a verb that changes no file of this computer.
+    fn changes(&self, verb: &Verb) -> Option<&'static str> {
+        let _ = verb;
+        None
+    }
+
+    /// Which program a terminal launch of `verb` starts: the tool by default.
+    fn launch_program(&self, verb: &Verb) -> LaunchProgram {
+        let _ = verb;
+        LaunchProgram::Tool
+    }
+}
+
+/// The tool's own current selection as its default verb printed it. The selection holds plain text that the context
+/// state validates when it stores it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefaultRead {
+    /// The context, namespace, subscription or section the tool is set to.
+    pub selection: Selection,
+    /// The person is not signed in (the account of Azure).
+    pub signed_out: bool,
+    /// The contexts the answer listed, which the overlay of a shell pane needs (Kubernetes).
+    pub contexts: Vec<ContextEntry>,
+}
+
+/// What a terminal launch starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchProgram {
+    /// The tool, with the argument list its module builds.
+    Tool,
+    /// The person's own shell, with the selection in its environment (the shell of a Kubernetes pane).
+    UserShell,
 }

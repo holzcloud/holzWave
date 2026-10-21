@@ -25,12 +25,12 @@ use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use super::args::ArgError;
-use super::context::{self, ContextError, ContextState, Detection as ContextDetection, Resolved};
+use super::context::{self, ContextError, ContextRow, ContextState, Detection as ContextDetection, Resolved};
 use super::detect::{self, Detection, Found, UnusableReason};
 use super::kube::ContextEntry;
 use super::profiles::{IntegrationProfiles, LocalFile};
@@ -38,7 +38,8 @@ use super::run::{
     spawn_supported, Env, EnvExtra, EnvPolicy, RunCancel, RunEnd, RunError, RunLimits, RunResult, Runner,
     DEFAULT_STDOUT, DEFAULT_TIMEOUT,
 };
-use super::view::{text_fallback, ViewModel};
+use super::view::{clean_cell, text_fallback, ViewModel};
+use crate::ai::redact;
 use super::{
     CheckedSelection, Integration, IntegrationSpec, ParseError, SelectKind, Selection, ToolId, Validated, Verb,
     VerbEffect,
@@ -50,6 +51,13 @@ use crate::secrets::SecretStore;
 // ---------------------------------------------------------------------------------------------------------------------
 // The machine.
 // ---------------------------------------------------------------------------------------------------------------------
+
+/// The most characters of a tool's own message that a fault holds.
+pub const FAULT_MESSAGE_MAX: usize = 240;
+/// How long the version probe of a tool may take.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most bytes of the answer to a version probe that are read.
+const VERSION_STDOUT: usize = 64 * 1024;
 
 type CheckFn = dyn Fn(&str) -> ProgramCheck + Send + Sync;
 type ModeFn = dyn Fn(&str) -> Option<u32> + Send + Sync;
@@ -348,6 +356,8 @@ pub struct ToolView {
     pub state: ToolState,
     /// The absolute path of the program, when found.
     pub path: Option<String>,
+    /// The version the tool printed, when it was asked and said.
+    pub version: Option<String>,
     /// The directories that were looked in, when it was not found.
     pub searched: Vec<String>,
     /// The verbs the tool has.
@@ -365,11 +375,15 @@ struct Slot {
     found: Option<Found>,
     state: ContextDetection,
     searched: Vec<String>,
+    /// The path whose version was asked for, so that a tool without a version is asked once.
+    probed: Option<String>,
+    /// The person is not signed in (read from the default verb).
+    signed_out: bool,
 }
 
 impl Default for Slot {
     fn default() -> Self {
-        Self { found: None, state: ContextDetection::Unknown, searched: Vec::new() }
+        Self { found: None, state: ContextDetection::Unknown, searched: Vec::new(), probed: None, signed_out: false }
     }
 }
 
@@ -467,6 +481,13 @@ impl IntegrationService {
         self.lock().notes.clone()
     }
 
+    /// The same service with other limits for a read. The defaults are 15 seconds and 16 MiB; the tests lower them.
+    #[must_use]
+    pub fn with_limits(mut self, limits: RunLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
     fn integration(&self, tool: ToolId) -> &'static dyn Integration {
         // The table holds every tool, so the first branch always answers; the second keeps the function total.
         self.tools.iter().copied().find(|own| own.spec().id == tool).unwrap_or(self.tools[0])
@@ -510,24 +531,28 @@ impl IntegrationService {
         let detection = self.detect_facts(|facts| detect::detect(spec, facts, set_path.as_deref()));
         let mut state = self.lock();
         let slot = &mut state.slots[slot_of(tool)];
-        match &detection {
+        match detection {
             Detection::Found(found) => {
+                let version = slot.found.as_ref().filter(|old| old.path == found.path).and_then(|old| old.version.clone());
+                let found = found.with_version(version);
                 slot.found = Some(found.clone());
                 slot.state = ContextDetection::Found;
                 slot.searched.clear();
+                return Detection::Found(found);
             }
             Detection::NotFound { searched } => {
                 slot.found = None;
                 slot.state = ContextDetection::NotFound;
-                slot.searched = searched.clone();
+                slot.searched.clone_from(&searched);
+                Detection::NotFound { searched }
             }
-            Detection::Unusable { .. } => {
+            Detection::Unusable { path, reason } => {
                 slot.found = None;
                 slot.state = ContextDetection::NotFound;
                 slot.searched.clear();
+                Detection::Unusable { path, reason }
             }
         }
-        detection
     }
 
     /// The program of the tool, or the fault that says why there is none.
@@ -555,21 +580,71 @@ impl IntegrationService {
         names.first().copied().unwrap_or(spec.label)
     }
 
-    /// One entry per tool, in the order the person sees them.
+    /// One entry per tool, in the order the person sees them. A tool that is found and was never asked for its version is
+    /// asked once (a short run through the runner), so call it off the UI thread.
     pub fn tools(&self) -> Vec<ToolView> {
         ToolId::ALL
             .iter()
             .map(|tool| {
                 let spec = self.integration(*tool).spec();
-                let detection = self.locate(*tool);
-                let (state, path, searched) = match detection {
-                    Detection::Found(found) => (ToolState::Found, Some(found.path), Vec::new()),
-                    Detection::NotFound { searched } => (ToolState::NotFound, None, searched),
-                    Detection::Unusable { path, .. } => (ToolState::NotFound, Some(path), Vec::new()),
+                let (state, path, version, searched) = match self.locate(*tool) {
+                    Detection::Found(found) => {
+                        let found = self.with_version(*tool, found);
+                        (ToolState::Found, Some(found.path), found.version, Vec::new())
+                    }
+                    Detection::NotFound { searched } => (ToolState::NotFound, None, None, searched),
+                    Detection::Unusable { path, .. } => (ToolState::NotFound, Some(path), None, Vec::new()),
                 };
-                ToolView { id: *tool, label: spec.label, state, path, searched, verbs: spec.verbs, selects: spec.selects }
+                ToolView {
+                    id: *tool,
+                    label: spec.label,
+                    state,
+                    path,
+                    version,
+                    searched,
+                    verbs: spec.verbs,
+                    selects: spec.selects,
+                }
             })
             .collect()
+    }
+
+    /// `found` with its version, asking the tool for it the first time. A tool that does not answer keeps no version
+    /// and stays usable.
+    fn with_version(&self, tool: ToolId, found: Found) -> Found {
+        if !self.enabled || self.lock().slots[slot_of(tool)].probed.as_deref() == Some(found.path.as_str()) {
+            return found;
+        }
+        let version = self.probe_version(tool, &found);
+        let mut state = self.lock();
+        let slot = &mut state.slots[slot_of(tool)];
+        slot.probed = Some(found.path.clone());
+        let found = found.with_version(version);
+        if slot.found.as_ref().is_some_and(|own| own.path == found.path) {
+            slot.found = Some(found.clone());
+        }
+        found
+    }
+
+    fn probe_version(&self, tool: ToolId, found: &Found) -> Option<String> {
+        let spec = self.integration(tool).spec();
+        let probe = detect::version_probe(spec, found);
+        let extra = EnvExtra { fixed: spec.env_set, ..EnvExtra::default() };
+        let env = EnvPolicy::build(self.facts.inherited.iter().cloned(), self.facts.os, self.child_path(found), extra).ok()?;
+        let args: Vec<OsString> = probe.args.iter().map(OsString::from).collect();
+        let limits = RunLimits { max_stdout: VERSION_STDOUT, timeout: VERSION_TIMEOUT };
+        let result = self.runner.run_argv(Path::new(&probe.program), &args, env, &limits, &RunCancel::default()).ok()?;
+        if result.end != RunEnd::Finished || result.status != Some(0) {
+            return None;
+        }
+        detect::read_version(spec, &String::from_utf8_lossy(&result.stdout))
+    }
+
+    /// The `PATH` of a child: the tool's directory, the process directories, the login shell's.
+    fn child_path(&self, found: &Found) -> String {
+        let process_path = self.facts.env("PATH").unwrap_or_default();
+        let login = (self.facts.login_path)();
+        detect::child_path(self.facts.os, &found.dir, &process_path, &login)
     }
 
     // ---- reads -----------------------------------------------------------------------------------------------------
@@ -633,9 +708,7 @@ impl IntegrationService {
         if applied.failed {
             return Err(Fault::new(FaultCode::Failed, "isolation", "The private configuration directory could not be made, so nothing was started."));
         }
-        let process_path = self.facts.env("PATH").unwrap_or_default();
-        let login = (self.facts.login_path)();
-        let path = detect::child_path(self.facts.os, &found.dir, &process_path, &login);
+        let path = self.child_path(found);
         let extra = EnvExtra {
             plain: request.resolved.env_plain.clone(),
             fixed: spec.env_set,
@@ -659,6 +732,7 @@ impl IntegrationService {
             .run_argv(Path::new(&found.path), &argv, env, &self.limits, &RunCancel::default())
             .map_err(|error| self.run_fault(error))?;
         let stdout = self.read_stdout(request, result)?;
+        self.learn_default(request, &stdout);
         let view = match request.integration.view(request.verb, &stdout) {
             Ok(view) => view,
             Err(ParseError::Unrecognised) => text_fallback(request.verb.label, &stdout),
@@ -675,11 +749,136 @@ impl IntegrationService {
         })
     }
 
+    /// The standard output of a run that gave an answer, or the fault for the way it ended.
     fn read_stdout(&self, request: &Request, result: RunResult) -> Result<Vec<u8>, Fault> {
         let label = request.integration.spec().label;
-        if result.end == RunEnd::Finished && result.status == Some(0) {
+        match result.end {
+            RunEnd::Finished => {}
+            RunEnd::TimedOut => {
+                return Err(Fault::new(FaultCode::Timeout, "timeout", format!("{label} did not answer in time.")));
+            }
+            RunEnd::Overflow => {
+                let text = format!("The answer of {label} is larger than is read.");
+                return Err(Fault::new(FaultCode::Overflow, "overflow", text));
+            }
+            RunEnd::Cancelled => {
+                return Err(Fault::new(FaultCode::Failed, "cancelled", format!("The call to {label} was cancelled.")));
+            }
+            RunEnd::Lost => {
+                let text = format!("The answer of {label} could not be read to the end.");
+                return Err(Fault::new(FaultCode::Failed, "lost", text));
+            }
+        }
+        // A verb whose non-zero exit with nothing on standard output is a state (the account of a signed-out Azure
+        // tool) is read by its parser as that state.
+        let state = request.verb.exit_is_state && result.stdout.is_empty() && result.status.is_some();
+        if result.status == Some(0) || state {
             return Ok(result.stdout);
         }
-        Err(Fault::new(FaultCode::Failed, "exit_status", format!("{label} reported an error.")))
+        Err(tool_fault(label, &result.stderr))
+    }
+
+    /// Stores the tool's own selection when this read was a read of the tool's own state: the default verb, with no
+    /// profile and no selection of its own (a selection changes what the verb shows, so it would not be the tool's).
+    fn learn_default(&self, request: &Request, stdout: &[u8]) {
+        let Some(read) = request.integration.read_default(request.verb, stdout) else { return };
+        if request.resolved.selection != CheckedSelection::default() {
+            return;
+        }
+        if read.selection != Selection::default() {
+            let _ = self.context.set_default(request.tool, &read.selection);
+        }
+        let mut state = self.lock();
+        let slot = slot_of(request.tool);
+        state.slots[slot].signed_out = read.signed_out;
+        state.contexts[slot] = read.contexts;
+    }
+
+    // ---- selections and the rows of the sidebar ---------------------------------------------------------------------
+
+    /// Selects for a pane, or for the next blocks of the tool when `pane` is none. The selection is checked against the
+    /// tool and its profile; the answer is the selection as it will be used (the pins of the profile filled in) and the
+    /// production name. A pane that has no view of this tool yet gets the first view of the tool.
+    pub fn select(&self, tool: &str, pane: Option<PaneId>, selection: &Selection) -> Result<SelectionView, Fault> {
+        let tool = self.parse_tool(tool)?;
+        let resolved = {
+            let state = self.lock();
+            context::resolve(&state.profiles, tool, selection).map_err(context_fault)?
+        };
+        match pane {
+            Some(pane) => {
+                let own = self.context.pane(pane).filter(|entry| entry.tool == tool).map(|entry| entry.view);
+                let first = self
+                    .integration(tool)
+                    .spec()
+                    .verbs
+                    .iter()
+                    .find(|verb| verb.effect == VerbEffect::Read && verb.output == super::Output::View)
+                    .map(|verb| verb.id.to_owned());
+                let view = own.or(first).ok_or_else(|| Fault::refused("view", "The tool has no view."))?;
+                if self.context.set_pane(pane, tool, &view, selection).map_err(context_fault)? {
+                    let _ = self.context.save(&self.dir);
+                }
+            }
+            None => {
+                self.context.set_pick(tool, selection).map_err(context_fault)?;
+            }
+        }
+        Ok(SelectionView { selection: selection_text(&resolved.selection), production: resolved.production })
+    }
+
+    /// One row per tool for the sidebar, the status line and the pane chip: the state of the tool and what is selected
+    /// for `pane` (the pick and the tool's own selection when the pane has none). With `refresh` the tools are looked
+    /// for again and their default verbs are read, four at a time: that starts processes, so call it off the UI thread.
+    pub fn context_rows(&self, pane: Option<PaneId>, refresh: bool) -> Vec<ContextRow> {
+        if refresh && self.enabled {
+            std::thread::scope(|scope| {
+                for tool in ToolId::ALL {
+                    scope.spawn(move || {
+                        let _ = self.refresh_default(tool);
+                    });
+                }
+            });
+        }
+        let state = self.lock();
+        ToolId::ALL
+            .iter()
+            .map(|tool| {
+                let slot = &state.slots[slot_of(*tool)];
+                let detection = match slot.state {
+                    ContextDetection::Found if slot.signed_out => ContextDetection::SignedOut,
+                    other => other,
+                };
+                self.context.summary(&state.profiles, *tool, pane, detection)
+            })
+            .collect()
+    }
+
+    /// Reads the default verb of a tool with an empty selection, which is how the service learns the tool's own state.
+    fn refresh_default(&self, tool: ToolId) -> Result<(), Fault> {
+        let first = self.integration(tool).spec().verbs.first().ok_or_else(|| Fault::refused("verb", "The tool has no verbs."))?;
+        let request = self.request(tool, first.id, &BTreeMap::new(), &Selection::default())?;
+        self.run_read(&request, None).map(|_| ())
+    }
+}
+
+/// The fault for a tool that ran and failed: its label and, when it said anything on standard error, the first line of
+/// it, cleaned of escape sequences, controls and invisible characters, on one line, at most [`FAULT_MESSAGE_MAX`]
+/// characters. The message is shown and kept nowhere else.
+fn tool_fault(label: &str, stderr: &[u8]) -> Fault {
+    let cleaned = redact::sanitise(&String::from_utf8_lossy(stderr)).text;
+    let first = cleaned.lines().map(clean_cell).find(|line| !line.is_empty());
+    match first {
+        Some(line) => {
+            let shown = if line.chars().count() > FAULT_MESSAGE_MAX {
+                let mut cut: String = line.chars().take(FAULT_MESSAGE_MAX - 1).collect();
+                cut.push('\u{2026}');
+                cut
+            } else {
+                line
+            };
+            Fault::new(FaultCode::Failed, "exit_status", format!("{label} reported an error: {shown}"))
+        }
+        None => Fault::new(FaultCode::Failed, "exit_status", format!("{label} reported an error.")),
     }
 }

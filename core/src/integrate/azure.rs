@@ -46,8 +46,8 @@ use serde::Deserialize;
 use super::args::{flag_eq, ArgError, SubscriptionId};
 use super::view::{clean_cell, text_fallback, KvBuilder, RowBuilder, TableBuilder, Tone, ViewModel};
 use super::{
-    ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId, Validated,
-    Verb, VerbEffect, VersionProbe,
+    ArgKind, ArgSpec, CheckedSelection, DefaultRead, Integration, IntegrationSpec, Output, ParseError, SelectKind,
+    Selection, ToolId, Validated, Verb, VerbEffect, VersionProbe,
 };
 
 /// What a cell shows for a member that is missing or of the wrong type.
@@ -802,5 +802,25 @@ impl Integration for Azure {
             "groups" => groups_view(stdout),
             _ => Err(ParseError::Unrecognised),
         }
+    }
+
+    fn read_default(&self, verb: &Verb, stdout: &[u8]) -> Option<DefaultRead> {
+        if SPEC.verb(verb.id) != Some(verb) || verb.id != "account" {
+            return None;
+        }
+        match login_state(stdout) {
+            LoginState::SignedIn { subscription_id, .. } => Some(DefaultRead {
+                selection: Selection { subscription: Some(subscription_id.as_str().to_owned()), ..Selection::default() },
+                signed_out: false,
+                contexts: Vec::new(),
+            }),
+            LoginState::SignedOut => Some(DefaultRead { signed_out: true, ..DefaultRead::default() }),
+            LoginState::Unknown => None,
+        }
+    }
+
+    fn changes(&self, verb: &Verb) -> Option<&'static str> {
+        (SPEC.verb(verb.id) == Some(verb) && verb.id == "set_subscription")
+            .then_some("the Azure CLI configuration of this computer (azureProfile.json)")
     }
 }

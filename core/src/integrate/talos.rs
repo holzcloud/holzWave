@@ -36,8 +36,8 @@ use serde_json::Value;
 use super::args::{flag_eq, ArgError, ContextName, NodeName};
 use super::view::{self, KvBuilder, RowBuilder, TableBuilder, Tone, ViewModel};
 use super::{
-    ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId, Validated,
-    Verb, VerbEffect, VersionProbe,
+    ArgKind, ArgSpec, CheckedSelection, DefaultRead, Integration, IntegrationSpec, Output, ParseError, SelectKind,
+    Selection, ToolId, Validated, Verb, VerbEffect, VersionProbe,
 };
 use crate::ai::redact;
 
@@ -596,5 +596,19 @@ impl Integration for Talos {
             "machine_status" => Ok(machine_status_view(stdout)),
             _ => Err(ParseError::Unrecognised),
         }
+    }
+
+    fn read_default(&self, verb: &Verb, stdout: &[u8]) -> Option<DefaultRead> {
+        if SPEC.verb(verb.id) != Some(verb) || verb.id != "contexts" {
+            return None;
+        }
+        let ViewModel::Table(table) = parse_contexts(stdout)? else { return None };
+        let current = table.rows().iter().find(|row| row.cells().next() == Some("*"));
+        let selection = Selection { context: current.map(|row| row.key().to_owned()), ..Selection::default() };
+        Some(DefaultRead { selection, signed_out: false, contexts: Vec::new() })
+    }
+
+    fn changes(&self, verb: &Verb) -> Option<&'static str> {
+        (SPEC.verb(verb.id) == Some(verb) && verb.id == "use_context").then_some("the talosconfig of this computer")
     }
 }
