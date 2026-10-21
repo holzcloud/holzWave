@@ -6,7 +6,7 @@
 //! windows are calls on the sink too. That is what makes the shell testable headless, with a recording sink (that
 //! can refuse to open a window) and real shells.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -17,6 +17,7 @@ use holzwave_core::ai::service::AskEvent;
 use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened, Saved};
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
 use holzwave_core::files::{Entry, FileSource, Listing};
+use holzwave_core::integrate::run::Launch as PaneLaunch;
 use holzwave_core::engine::{
     CopyOp, CopyState, DomKey, EngineTheme, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, SearchOp,
     SearchState, SelectOp, WheelEvent,
@@ -755,6 +756,73 @@ impl Routes {
     }
 }
 
+/// The file that remembers, per pane that was started from a terminal launch, what it was called. Machine-local, and
+/// read with a size limit like every file of the app.
+const LAUNCHES_FILE: &str = "pane_launches.json";
+/// The most bytes of `pane_launches.json` that are read or written.
+const MAX_LAUNCH_MARKS_BYTES: u64 = 16 * 1024;
+/// The most panes `pane_launches.json` names.
+const MAX_LAUNCH_MARKS: usize = 256;
+/// The most characters of a pane's label that are kept.
+const MAX_LAUNCH_LABEL: usize = 64;
+
+/// A launch's label as it is kept and shown: control characters removed, the ends trimmed, at most
+/// [`MAX_LAUNCH_LABEL`] characters. An empty result is `a tool`.
+fn clean_launch_label(label: &str) -> String {
+    let cleaned: String = label.chars().filter(|c| !c.is_control()).collect();
+    let cut: String = cleaned.trim().chars().take(MAX_LAUNCH_LABEL).collect();
+    let cut = cut.trim_end();
+    if cut.is_empty() { "a tool".to_owned() } else { cut.to_owned() }
+}
+
+/// The text of `pane_launches.json` for these markers: a map from the pane's number to its label.
+fn launch_marks_json(marks: &BTreeMap<PaneId, String>) -> String {
+    let map: BTreeMap<String, &String> = marks.iter().map(|(pane, label)| (pane.to_string(), label)).collect();
+    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// Write the markers. A failure is logged without any label.
+fn write_launch_marks(dir: &Path, marks: &BTreeMap<PaneId, String>) {
+    if let Err(e) = persist::write_atomic(&dir.join(LAUNCHES_FILE), launch_marks_json(marks).as_bytes()) {
+        eprintln!("holzwave: cannot save {LAUNCHES_FILE}: {e}");
+    }
+}
+
+/// The markers of `pane_launches.json` that name a pane in `live`, labels cleaned again (the file is not trusted). A file
+/// that is missing, too large, not a map of strings or damaged gives none and is logged without its content; markers of
+/// panes that are not in a layout are dropped and the file is written again without them.
+fn load_launch_marks(dir: &Path, live: &[PaneId]) -> BTreeMap<PaneId, String> {
+    let path = dir.join(LAUNCHES_FILE);
+    let bytes = match persist::read_limited(&path, MAX_LAUNCH_MARKS_BYTES) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return BTreeMap::new(),
+        Err(e) => {
+            eprintln!("holzwave: {LAUNCHES_FILE} was ignored ({:?})", e.kind());
+            return BTreeMap::new();
+        }
+    };
+    let map = match serde_json::from_slice::<BTreeMap<String, String>>(&bytes) {
+        Ok(map) => map,
+        Err(e) => {
+            // The class of the error only: the message of a parser can quote the text.
+            eprintln!("holzwave: {LAUNCHES_FILE} was ignored ({:?})", e.classify());
+            return BTreeMap::new();
+        }
+    };
+    let total = map.len();
+    let marks: BTreeMap<PaneId, String> = map
+        .into_iter()
+        .filter_map(|(pane, label)| pane.parse::<PaneId>().ok().map(|pane| (pane, label)))
+        .filter(|(pane, _)| live.contains(pane))
+        .take(MAX_LAUNCH_MARKS)
+        .map(|(pane, label)| (pane, clean_launch_label(&label)))
+        .collect();
+    if marks.len() != total {
+        write_launch_marks(dir, &marks);
+    }
+    marks
+}
+
 /// The state of the app: the layouts of every window, the running panes, and what is needed to start a pane.
 ///
 /// Lock order: `windows` first, then `panes` or `routes`; `panes` and `routes` are never held while waiting for
@@ -799,6 +867,16 @@ pub struct AppCore {
     connections: Connections,
     /// The panes that show a file browser or a preview instead of a terminal.
     blocks: Blocks,
+    /// The terminal launches registered for panes that have not started yet: `start_pane` takes the entry of its pane
+    /// and starts that tool in place of the shell. The entry holds secrets, so it is dropped as soon as it is applied.
+    launches: Mutex<HashMap<PaneId, PaneLaunch>>,
+    /// What each pane that was started from a launch was called, kept in `pane_launches.json` while the pane lives. A
+    /// pane in this table at the next start was a tool session, which is not started again (see [`LAUNCHES_FILE`]). A leaf
+    /// lock: held across the write of the file and nothing else.
+    launch_marks: Mutex<BTreeMap<PaneId, String>>,
+    /// The panes that hold their tool's last words on the screen until the person presses Enter, with the status of the
+    /// tool when there was one ([`PaneEvent::Held`]). Cleared by `pane_gone`.
+    held: Mutex<BTreeMap<PaneId, Option<u32>>>,
     /// Where `wsh` finds the app, set once the socket listens: the folder and the secret of this run.
     ipc: Mutex<Option<(PathBuf, String)>>,
     /// Where the saved SSH connection of each running pane pointed when the pane started, so that a connection edited
@@ -975,6 +1053,16 @@ impl AppCore {
             Blocks::load(&dir, user_home(), &live)
         };
 
+        // The panes that ran a tool last time (a tool session is never started again). Pane ids are small per-device
+        // counters, so the markers of a layout that sync replaced belong to other panes and are dropped.
+        let launch_marks = if adopted_layout {
+            write_launch_marks(&dir, &BTreeMap::new());
+            BTreeMap::new()
+        } else {
+            let live = lock(&windows).all_panes();
+            load_launch_marks(&dir, &live)
+        };
+
         let panes = Arc::new(Mutex::new(HashMap::new()));
         let last_cwd = Arc::new(Mutex::new(HashMap::new()));
         let routes = {
@@ -1049,6 +1137,9 @@ impl AppCore {
                 shell,
                 connections,
                 blocks,
+                launches: Mutex::new(HashMap::new()),
+                launch_marks: Mutex::new(launch_marks),
+                held: Mutex::new(BTreeMap::new()),
                 sync,
                 ai: host,
                 local_network,
@@ -2237,6 +2328,13 @@ impl AppCore {
         if probe.set_cwd(pane, &inherited) { probe.cwd_for(pane) } else { None }
     }
 
+    /// Write `pane_launches.json` from the table, now. A failure is logged and changes nothing else: the marker is a note
+    /// for the next start, never a condition of this one.
+    fn save_launch_marks(&self) {
+        let marks = lock(&self.launch_marks);
+        write_launch_marks(&self.dir, &marks);
+    }
+
     /// A pane reported its working directory (from its sink, on the engine thread of the pane).
     fn cwd_reported(&self, pane: PaneId, cwd: &str) {
         // A pane that is already out of the map (closed) is not remembered again by a late event, and once the app
@@ -2251,6 +2349,12 @@ impl AppCore {
     /// A pane left the layout: what is remembered of its directory and title goes, and the session is written
     /// without it.
     fn forget_pane(&self, pane: PaneId) {
+        // The launch of a pane that never started is dropped with its secrets; the marker of one that ran goes too.
+        lock(&self.launches).remove(&pane);
+        let had_marker = lock(&self.launch_marks).remove(&pane).is_some();
+        if had_marker {
+            self.save_launch_marks();
+        }
         lock(&self.last_cwd).remove(&pane);
         lock(&self.last_title).remove(&pane);
         lock(&self.starts).remove(&pane);
@@ -2710,6 +2814,63 @@ impl AppCore {
         self.handle(pane).ok_or_else(|| "no such pane".to_owned())
     }
 
+    /// Register a terminal launch for `pane`: when the webview starts the pane, it runs the tool of the launch (with a clean
+    /// environment, see [`PaneLaunch::apply_to`]) in place of the shell. The pane must be in a layout and must not have
+    /// started: a launch for a running pane would never be used. The pane's label is remembered in `pane_launches.json`
+    /// while the pane lives, so that the next start can say what the pane was and does not run it again.
+    ///
+    /// Called by the service after the person confirmed the action or clicked a read verb; nothing here asks, and nothing
+    /// is run until the pane starts.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn register_launch(&self, pane: PaneId, launch: PaneLaunch) -> Result<(), String> {
+        if self.exiting.load(Ordering::SeqCst) {
+            return Err("the app is closing".into());
+        }
+        if !self.pane_is_open(pane) {
+            return Err("no such pane".into());
+        }
+        if lock(&self.panes).contains_key(&pane) {
+            return Err("this pane has started already".into());
+        }
+        let label = clean_launch_label(&launch.label);
+        {
+            let mut marks = lock(&self.launch_marks);
+            let before = marks.insert(pane, label);
+            let text = launch_marks_json(&marks);
+            let fits = marks.len() <= MAX_LAUNCH_MARKS && text.len() as u64 <= MAX_LAUNCH_MARKS_BYTES;
+            if !fits || persist::write_atomic(&self.dir.join(LAUNCHES_FILE), text.as_bytes()).is_err() {
+                match before {
+                    Some(old) => marks.insert(pane, old),
+                    None => marks.remove(&pane),
+                };
+                return Err(if fits { "the launch could not be recorded" } else { "too many tool panes are open" }.into());
+            }
+        }
+        // Replaces an earlier launch of the same pane, which is dropped (and its secrets wiped) here.
+        lock(&self.launches).insert(pane, launch);
+        Ok(())
+    }
+
+    /// The panes that hold their tool's last words until Enter, with the status of the tool.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn held_panes(&self) -> Vec<(PaneId, Option<u32>)> {
+        lock(&self.held).iter().map(|(pane, code)| (*pane, *code)).collect()
+    }
+
+    /// The status a held pane's tool ended with (`Some(None)`: held with no status), or `None` for a pane that is not held.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pane_held(&self, pane: PaneId) -> Option<Option<u32>> {
+        lock(&self.held).get(&pane).copied()
+    }
+
+    /// A pane's tool ended and the pane stays (from its sink, on the engine thread of the pane). A pane that is already
+    /// out of the table is not recorded again by a late event.
+    fn record_held(&self, pane: PaneId, code: Option<u32>) {
+        if lock(&self.panes).contains_key(&pane) {
+            lock(&self.held).insert(pane, code);
+        }
+    }
+
     /// Start the shell of a pane if it has none yet. The webview calls this once it knows the pane's size. A pane
     /// that is not in the layout is refused; a second call for a pane that runs (or is starting) changes nothing.
     ///
@@ -2725,27 +2886,46 @@ impl AppCore {
         let (cols, rows) = clamp_grid(cols, rows);
         let mut spec = self.pane_spec(cols, rows, (clamp_cell(cell_w), clamp_cell(cell_h)));
         spec.cwd = self.start_dir(pane);
-        if let Some((dir, token)) = lock(&self.ipc).clone() {
-            spec.env = vec![
-                ("HOLZWAVE_IPC".into(), dir.to_string_lossy().into_owned()),
-                ("HOLZWAVE_TOKEN".into(), token),
-                ("HOLZWAVE_PANE".into(), pane.to_string()),
-            ];
-            // `wsh` is installed beside the app; the panes find it by name.
-            if let Some(path) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent).and_then(|bin| {
-                path_with_wsh(bin, std::env::var_os("PATH").as_deref())
-            }) {
-                spec.env.push(("PATH".into(), path.to_string_lossy().into_owned()));
-            }
-        }
-        // A pane that runs a saved connection starts that instead of a local shell. A connection that cannot be made up
-        // (a missing jump host, an unreadable keychain) is said on the pane's screen, and the pane is a local shell.
-        // A pane that shows a file browser or a preview runs no process: the page draws its content.
-        spec.blank = self.blocks.block_of(pane).is_some();
-        if spec.blank {
-            spec.notice = None;
+        // A registered launch is consumed by this start: it replaces the shell, the connection and the environment of the
+        // app (no socket, no token, no `wsh` folder in `PATH`), and its secrets are dropped as soon as they were copied.
+        let launch = lock(&self.launches).remove(&pane);
+        if let Some(launch) = launch {
+            launch.apply_to(&mut spec);
+            drop(launch);
         } else {
-            self.apply_connection(pane, &mut spec);
+            if let Some((dir, token)) = lock(&self.ipc).clone() {
+                spec.env = vec![
+                    ("HOLZWAVE_IPC".into(), dir.to_string_lossy().into_owned()),
+                    ("HOLZWAVE_TOKEN".into(), token),
+                    ("HOLZWAVE_PANE".into(), pane.to_string()),
+                ];
+                // `wsh` is installed beside the app; the panes find it by name.
+                if let Some(path) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent).and_then(|bin| {
+                    path_with_wsh(bin, std::env::var_os("PATH").as_deref())
+                }) {
+                    spec.env.push(("PATH".into(), path.to_string_lossy().into_owned()));
+                }
+            }
+            // A pane that runs a saved connection starts that instead of a local shell. A connection that cannot be made up
+            // (a missing jump host, an unreadable keychain) is said on the pane's screen, and the pane is a local shell.
+            // A pane that shows a file browser or a preview runs no process: the page draws its content.
+            spec.blank = self.blocks.block_of(pane).is_some();
+            if spec.blank {
+                spec.notice = None;
+            } else {
+                self.apply_connection(pane, &mut spec);
+            }
+            // A pane that ran a tool when the app last ended is a shell now. Nothing is run again; the pane says what it
+            // was, once.
+            let ran = lock(&self.launch_marks).remove(&pane);
+            if let Some(label) = ran {
+                let note = format!("holzWave: this pane ran {label}; it is not started again");
+                spec.notice = Some(match spec.notice.take() {
+                    Some(earlier) => format!("{earlier}; {note}"),
+                    None => note,
+                });
+                self.save_launch_marks();
+            }
         }
         lock(&self.starts).remove(&pane);
         // What the shell is started with; a settings change while it starts is pushed once it runs.
@@ -2809,8 +2989,13 @@ impl AppCore {
                     core.pane_gone(pane, code);
                 }
             }
-            // The pane stays open with its last words on the screen; nothing to do until it ends.
-            PaneEvent::Held { .. } => {}
+            // The pane stays open with its last words on the screen until Enter or a close: it is recorded, so that the
+            // shell can tell the page, and cleared by `pane_gone`.
+            PaneEvent::Held { code } => {
+                if let Some(core) = me.upgrade() {
+                    core.record_held(pane, code);
+                }
+            }
             PaneEvent::Failed(reason) => {
                 // The reason names the failure (no program, no PTY), never terminal content.
                 eprintln!("holzwave: pane {pane} did not start: {reason}");
@@ -2910,6 +3095,7 @@ impl AppCore {
     /// now, so this cannot end the app a second time (RESEARCH Pitfall 4); only the last pane of the last window ends
     /// it. The last pane of any other window closes that window, and nobody is left to hear the exit of that pane.
     fn pane_gone(&self, pane: PaneId, code: Option<u32>) {
+        lock(&self.held).remove(&pane);
         let mut layout_event: Option<(Arc<str>, View)> = None;
         let mut exit_to: Option<Arc<str>> = None;
         let mut gone_window: Option<String> = None;
@@ -3571,6 +3757,7 @@ mod tests {
     use holzwave_core::engine::Mods;
     #[cfg(unix)]
     use holzwave_core::engine::{CopyMotion, SelectMode};
+    use holzwave_core::integrate::run::EnvPolicy;
     use holzwave_core::layout::Axis;
 
     #[cfg(unix)]
@@ -9232,6 +9419,235 @@ mod tests {
         // The two names are fixed: nothing in this function reads a name that came from anywhere else.
         let source = include_str!("state.rs");
         assert_eq!(source.matches("\"linux-x86_64\"").count(), 2, "the two fixed names appear in the reader and in this test only");
+    }
+
+    // ---- terminal launches ----------------------------------------------------------------------------------------
+
+    /// A fake tool: it records its environment next to itself (`<name>.env`, NUL-terminated `NAME=VALUE` entries, put in
+    /// place whole), prints one line and exits with `exit`.
+    #[cfg(unix)]
+    fn fake_tool(dir: &Scratch, name: &str, exit: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let env = dir.0.join(format!("{name}.env"));
+        let script = format!(
+            "#!/bin/sh\n/usr/bin/env -0 > \"{env}.tmp\" && mv \"{env}.tmp\" \"{env}\"\nprintf 'tool says no\\n'\nexit {exit}\n",
+            env = env.display()
+        );
+        let path = dir.0.join(name);
+        std::fs::write(&path, script).expect("write the tool");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("make the tool executable");
+        path
+    }
+
+    /// The environment the fake tool `name` recorded, once it has.
+    #[cfg(unix)]
+    fn recorded_env(dir: &Scratch, name: &str) -> std::collections::BTreeMap<String, String> {
+        let file = dir.0.join(format!("{name}.env"));
+        // The first start of a new executable can take a while on a Mac whose system policy daemon is busy.
+        assert!(wait_until(Duration::from_secs(60), || file.is_file()), "the tool did not run");
+        std::fs::read(&file)
+            .expect("the record")
+            .split(|b| *b == 0)
+            .filter(|entry| !entry.is_empty())
+            .filter_map(|entry| {
+                let text = String::from_utf8_lossy(entry).into_owned();
+                text.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned()))
+            })
+            .collect()
+    }
+
+    /// A launch of `program` the way the service builds one: a `PATH` of its own, the inherited names it must lose
+    /// (the app's own and the loader's that this process has) and `HOME` to prove a removal.
+    #[cfg(unix)]
+    fn tool_launch(program: PathBuf, label: &str) -> PaneLaunch {
+        let mut env_remove = EnvPolicy::removals(std::env::vars_os().map(|(name, _)| name), Os::current());
+        env_remove.push("HOME".into());
+        PaneLaunch {
+            program,
+            args: Vec::new(),
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            env_remove,
+            cwd: None,
+            label: label.into(),
+            secrets: Vec::new(),
+        }
+    }
+
+    /// What `pane_launches.json` holds now (nothing when there is no file).
+    fn launch_file(dir: &Scratch) -> std::collections::BTreeMap<String, String> {
+        match std::fs::read(dir.0.join("pane_launches.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes).expect("the markers file is a map of strings"),
+            Err(_) => std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn enter_key() -> DomKey {
+        DomKey { code: "Enter".into(), key: "Enter".into(), mods: Mods::NONE, release: false, ..DomKey::default() }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn started_launch_has_no_socket_token_and_no_wsh_path() {
+        let (core, rec, dir) = sh("sleep 5");
+        // The core has a socket and a token, which is what every ordinary pane gets in its environment.
+        core.set_ipc(dir.0.clone(), "app-token".into());
+        let pane = only_pane(&core);
+        let tool = fake_tool(&dir, "kubectl", 1);
+        core.register_launch(pane, tool_launch(tool, "Exec in pod api-0")).expect("the launch is registered");
+
+        core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+
+        let seen = recorded_env(&dir, "kubectl");
+        let names: Vec<&String> = seen.keys().collect();
+        for name in ["HOLZWAVE_IPC", "HOLZWAVE_TOKEN", "HOLZWAVE_PANE"] {
+            assert!(!seen.contains_key(name), "{name} reached the tool: {names:?}");
+        }
+        assert!(!names.iter().any(|name| name.starts_with("HOLZWAVE_")), "{names:?}");
+        assert_eq!(seen.get("PATH").map(String::as_str), Some("/usr/bin:/bin"), "the launch's PATH, with no wsh folder");
+        assert!(!seen.contains_key("HOME"), "the launch removed HOME");
+        // A lingering pane: the failing tool stays on the screen with its words and is recorded as held.
+        assert!(wait_until(WAIT, || core.held_panes() == [(pane, Some(1))]), "not held: {:?}", core.held_panes());
+        assert!(wait_until(WAIT, || rec.has_text(pane, "tool says no")), "no output: {:?}", rec.all());
+        assert!(rec.pane_exits().is_empty(), "a held pane does not end by itself: {:?}", rec.pane_exits());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_is_consumed_by_its_pane_start() {
+        let (core, _rec, dir) = sh("sleep 5");
+        let pane = only_pane(&core);
+        let tool = fake_tool(&dir, "kubectl", 1);
+
+        assert!(core.register_launch(9_999, tool_launch(tool.clone(), "x")).is_err(), "a pane that is in no layout");
+        assert!(lock(&core.launches).is_empty() && launch_file(&dir).is_empty(), "nothing was kept for it");
+        core.register_launch(pane, tool_launch(tool.clone(), "x")).expect("registered");
+        assert_eq!(lock(&core.launches).len(), 1);
+
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+        assert!(lock(&core.launches).is_empty(), "the start consumed the entry");
+        let _ = recorded_env(&dir, "kubectl");
+        std::fs::remove_file(dir.0.join("kubectl.env")).unwrap();
+
+        // The second start changes nothing: the pane has its slot, and the tool is not run again.
+        core.start_pane(pane, 80, 24, 0, 0).expect("a second start is not an error");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(!dir.0.join("kubectl.env").exists(), "the tool was run a second time");
+        assert!(
+            core.register_launch(pane, tool_launch(tool, "again")).is_err(),
+            "a pane that has started takes no launch: it would never be used"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_label_marker_is_written_cleaned_and_removed() {
+        let (core, _rec, dir) = sh("sleep 5");
+        let first = only_pane(&core);
+        let second = core.split(true).focus;
+        let tool = fake_tool(&dir, "kubectl", 1);
+        assert!(launch_file(&dir).is_empty() && !dir.0.join("pane_launches.json").exists());
+
+        // Control characters go, and the label is cut to 64 characters.
+        let label = format!("Exec\u{7} in\u{1b}[31m pod {}", "x".repeat(100));
+        core.register_launch(first, tool_launch(tool.clone(), &label)).expect("registered");
+        core.register_launch(second, tool_launch(tool, "Logs")).expect("registered");
+
+        let marks = launch_file(&dir);
+        assert_eq!(marks.len(), 2, "{marks:?}");
+        assert_eq!(marks[&first.to_string()], format!("Exec in[31m pod {}", "x".repeat(48)));
+        assert_eq!(marks[&first.to_string()].chars().count(), 64);
+        assert_eq!(marks[&second.to_string()], "Logs");
+        assert!(std::fs::metadata(dir.0.join("pane_launches.json")).unwrap().len() <= 16 * 1024);
+
+        // A pane that leaves the layout takes its launch and its marker with it, started or not.
+        core.close_pane_in(MAIN_WINDOW, second).expect("the pane closes");
+        assert_eq!(launch_file(&dir).keys().cloned().collect::<Vec<_>>(), [first.to_string()]);
+        assert_eq!(lock(&core.launches).keys().copied().collect::<Vec<_>>(), [first]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exec_pane_is_not_restored_and_says_what_it_was() {
+        let dir = Scratch::new("restore");
+        let tool = fake_tool(&dir, "kubectl", 1);
+        let pane = {
+            let (core, _rec) = core_in(&dir, "/bin/sh", &["-c", "sleep 5"]);
+            let pane = only_pane(&core);
+            core.register_launch(pane, tool_launch(tool, "Exec in pod api-0 (prod-eu)")).expect("registered");
+            core.shutdown();
+            pane
+        };
+        // A marker of a pane that is in no layout, and one with a label that carries a control character.
+        let mut marks = launch_file(&dir);
+        assert_eq!(marks.len(), 1, "{marks:?}");
+        marks.insert("9999".into(), "ghost".into());
+        std::fs::write(dir.0.join("pane_launches.json"), serde_json::to_vec(&marks).unwrap()).unwrap();
+
+        // The next start: the pane is a normal shell, it says what it was, and nothing is run.
+        let (core, rec) = core_in(&dir, "/bin/sh", &["-c", "sleep 5"]);
+        assert_eq!(only_pane(&core), pane, "the layout came back");
+        assert_eq!(lock(&core.launch_marks).keys().copied().collect::<Vec<_>>(), [pane], "the ghost marker is dropped");
+        assert!(lock(&core.launches).is_empty(), "nothing is registered from a file");
+
+        core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+
+        let notice = "holzWave: this pane ran Exec in pod api-0 (prod-eu); it is not started again";
+        assert!(wait_until(WAIT, || rec.has_text(pane, notice)), "no notice: {:?}", rec.all());
+        assert!(core.pid(pane).is_some(), "a normal shell runs");
+        assert!(core.held_panes().is_empty());
+        assert!(launch_file(&dir).is_empty(), "the marker is one-shot: {:?}", launch_file(&dir));
+        assert!(lock(&core.launch_marks).is_empty());
+        assert!(!dir.0.join("kubectl.env").exists(), "the tool was not run again");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_damaged_or_oversized_markers_file_is_ignored() {
+        for (tag, bytes) in [
+            ("damaged", br#"{"1": "a secret-looking label"#.to_vec()),
+            ("oversized", format!(r#"{{"1": "{}"}}"#, "x".repeat(20 * 1024)).into_bytes()),
+            ("notmap", br#"["a secret-looking label"]"#.to_vec()),
+        ] {
+            let dir = Scratch::new(tag);
+            std::fs::write(dir.0.join("pane_launches.json"), bytes).unwrap();
+            let (core, rec) = core_in(&dir, "/bin/sh", &["-c", "printf started; sleep 5"]);
+            let pane = only_pane(&core);
+            assert!(lock(&core.launch_marks).is_empty(), "{tag}");
+
+            core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+
+            assert!(wait_until(WAIT, || rec.has_text(pane, "started")), "{tag}: {:?}", rec.all());
+            assert!(!rec.has_text(pane, "this pane ran"), "{tag}: no notice from a file that cannot be read");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_held_pane_is_recorded_until_it_is_gone() {
+        let (core, rec, dir) = sh("sleep 5");
+        let first = only_pane(&core);
+        let second = core.split(true).focus;
+        let tool = fake_tool(&dir, "talosctl", 2);
+        core.register_launch(second, tool_launch(tool, "Talos dashboard")).expect("registered");
+        assert_eq!(core.pane_held(second), None, "not held before it ran");
+
+        core.start_pane(second, 80, 24, 0, 0).expect("the pane starts");
+
+        assert!(wait_until(Duration::from_secs(60), || core.pane_held(second).is_some()), "{:?}", rec.all());
+        assert_eq!(core.pane_held(second), Some(Some(2)), "held, with the status of the tool");
+        assert_eq!(core.held_panes(), [(second, Some(2))]);
+        assert_eq!(core.pane_held(first), None);
+        assert_eq!(launch_file(&dir).get(&second.to_string()).map(String::as_str), Some("Talos dashboard"));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(rec.pane_exits().is_empty(), "held: the pane did not end");
+
+        // Enter ends it: the held record, the launch marker and the pane go together.
+        core.key(second, enter_key()).expect("a held pane takes Enter");
+        assert!(wait_until(WAIT, || rec.pane_exits() == [(second, Some(2))]), "{:?}", rec.pane_exits());
+        assert!(core.held_panes().is_empty(), "cleared when the pane is gone");
+        assert_eq!(core.pane_held(second), None);
+        assert!(launch_file(&dir).is_empty(), "the marker went with the pane: {:?}", launch_file(&dir));
     }
 }
 

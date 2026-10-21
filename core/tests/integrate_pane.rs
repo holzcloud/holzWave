@@ -293,3 +293,64 @@ fn an_unusable_removal_is_ignored() {
     assert!(!seen.contains_key("HOME"), "the valid removal next to the unusable ones still applies");
     assert!(seen.contains_key("PATH") || seen.contains_key("TERM"), "the child ran with the rest of its environment");
 }
+
+#[test]
+fn a_launch_applied_to_a_pane_spec_runs_the_tool_with_its_own_environment() {
+    use holzwave_core::integrate::run::{EnvPolicy, LAUNCH_LINGER, Launch};
+    use holzwave_core::platform::Os;
+    use zeroize::Zeroizing;
+
+    let dir = Scratch::new();
+    // The removals a real launch carries: the app's own names and the loader's, among those this process has (a test run
+    // from a holzWave pane has the app's socket variables, which is the case the removal is for), and `HOME` to prove it.
+    let mut removals = EnvPolicy::removals(std::env::vars_os().map(|(name, _)| name), Os::current());
+    removals.push("HOME".into());
+    let fake = FakeCli::new(&dir.0, "kubectl").prints(NOTFOUND).exits(1);
+    let launch = Launch {
+        program: fake.path(),
+        args: vec!["exec".into(), "-it".into(), "api-0".into()],
+        env: vec![("HW_PLAIN".into(), "1".into())],
+        env_remove: removals.clone(),
+        cwd: Some(dir.0.clone()),
+        label: "Exec in pod api-0".into(),
+        secrets: vec![("HW_SECRET".into(), Zeroizing::new("s3cret".to_owned()))],
+    };
+
+    // What the shell had put in the spec before is replaced; the size, the cell, the scrollback and the theme are not.
+    let mut spec = PaneSpec::new("/bin/zsh", 100, 24);
+    spec.cell_px = (9, 18);
+    spec.scrollback = 123;
+    spec.blank = true;
+    spec.notice = Some("holzWave: an old notice".into());
+    spec.env = vec![("HOLZWAVE_TOKEN".into(), "app-token".into())];
+    launch.apply_to(&mut spec);
+
+    assert_eq!(spec.program, fake.path().to_string_lossy());
+    assert_eq!(spec.args, ["exec", "-it", "api-0"]);
+    assert_eq!(spec.cwd.as_deref(), Some(dir.0.as_path()));
+    assert_eq!(
+        spec.env,
+        [("HW_PLAIN".to_owned(), "1".to_owned()), ("HW_SECRET".to_owned(), "s3cret".to_owned())],
+        "the launch's pairs and only those"
+    );
+    assert_eq!(spec.env_remove, removals);
+    assert_eq!(spec.linger, Some(LAUNCH_LINGER));
+    assert_eq!(LAUNCH_LINGER, Duration::from_secs(3));
+    assert!(!spec.blank);
+    assert_eq!(spec.notice, None);
+    assert_eq!((spec.cols, spec.rows, spec.cell_px, spec.scrollback), (100, 24, (9, 18), 123));
+
+    let probe = Probe::default();
+    let pane = spawn(spec, &probe);
+    assert!(wait_until(WAIT, || !probe.helds().is_empty()), "the failing tool is held: {:?}", probe.events());
+    let seen = fake.env();
+    let names: Vec<&String> = seen.keys().collect();
+    assert!(!seen.contains_key("HOME"), "{names:?}");
+    assert!(!names.iter().any(|name| name.starts_with("HOLZWAVE_")), "no socket variable of the app: {names:?}");
+    assert_eq!(seen.get("HW_PLAIN").map(String::as_str), Some("1"));
+    assert_eq!(seen.get("HW_SECRET").map(String::as_str), Some("s3cret"));
+    let argv: Vec<String> = fake.argv().iter().map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    assert_eq!(argv, ["exec", "-it", "api-0"]);
+    pane.close();
+    assert!(pane.join(Duration::from_secs(5)));
+}

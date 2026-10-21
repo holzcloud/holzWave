@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use super::args::EnvName;
+use crate::pane::PaneSpec;
 use crate::platform::Os;
 
 /// The most bytes of standard output kept by default.
@@ -710,6 +711,10 @@ mod spawn {
     }
 }
 
+/// How long a terminal launch lingers: a tool that ends with a status that is not zero, or within this time, leaves its
+/// pane open so the error line can be read ([`PaneSpec::linger`]).
+pub const LAUNCH_LINGER: Duration = Duration::from_secs(3);
+
 /// A terminal launch: what a pane needs to start a tool in a terminal of its own, described and not started. The pane
 /// inherits the app's environment minus `env_remove`, then gets `env` and `secrets` on top. `Debug` prints counts.
 pub struct Launch {
@@ -743,6 +748,24 @@ impl Launch {
     ) -> Self {
         let (env, secrets) = env.into_parts();
         Self { program, args, env, env_remove: EnvPolicy::removals(inherited_names, os), cwd, label, secrets }
+    }
+
+    /// Make `spec` the pane of this launch: the program, its arguments and its directory, the environment pairs of the
+    /// launch (the secrets copied in) and only those, the inherited names to remove, [`LAUNCH_LINGER`], no placeholder
+    /// pane and no notice. The size, the cell, the scrollback and the theme of `spec` stay as they are. The pane gets
+    /// nothing of the app's own environment: what the shell would have put in `spec.env` (the socket and the token of the
+    /// app, the folder of `wsh`) is replaced, never added to. This is the one place a terminal launch becomes a pane, for
+    /// the shell and for the tests.
+    pub fn apply_to(&self, spec: &mut PaneSpec) {
+        spec.program = self.program.to_string_lossy().into_owned();
+        spec.args = self.args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        spec.cwd = self.cwd.clone();
+        spec.env = self.env.clone();
+        spec.env.extend(self.secrets.iter().map(|(name, value)| (name.clone(), value.as_str().to_owned())));
+        spec.env_remove = self.env_remove.clone();
+        spec.linger = Some(LAUNCH_LINGER);
+        spec.blank = false;
+        spec.notice = None;
     }
 }
 
