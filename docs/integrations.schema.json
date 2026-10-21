@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Integration profiles",
-  "description": "The synced file integrations.json: names and flags of connections to clusters, subscriptions and domains.",
+  "description": "The synced file integrations.json: names and flags of connections to clusters, subscriptions and domains, never a credential and never a path of one computer. Limits: at most 64 profiles, the whole file is at most 256 KiB, at most 32 variables and at most 8 secret names per profile, at most 1024 bytes for the value of a variable, at most 64 characters for the name of a profile and for the name of a variable. A kube profile pins a context and a namespace, a talos profile a context and a node, an azure profile a subscription and a gam profile a section; only azure and gam profiles can be isolated. What a schema cannot say is checked by the loader, and a file that fails any rule is refused as a whole: profile ids are unique; the environment names that the runner denies, that the app sets itself or that start another program are refused; a plain value that looks like a path is refused; a secret name is listed once and is not also a plain variable; invisible and space-like characters other than control characters are refused; every cap above counts bytes in the loader and characters in this schema; a section is not a word that GAM reads as a keyword; a node is an address or a DNS name; the same key twice in an object is refused.",
   "type": "object",
   "properties": {
     "version": {
@@ -14,7 +14,7 @@
       "items": {
         "$ref": "#/$defs/profile"
       },
-      "description": "At most 64 profiles."
+      "description": "The profiles, in the order the person sees them."
     }
   },
   "required": [
@@ -28,7 +28,9 @@
       "properties": {
         "id": {
           "type": "string",
-          "description": "The id of the profile."
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_][a-z0-9_-]*$",
+          "description": "The id: lower-case letters, digits, underscore and dash, not starting with a dash."
         },
         "tool": {
           "enum": [
@@ -41,6 +43,9 @@
         },
         "name": {
           "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "$ref": "#/$defs/noControl",
           "description": "What the person calls the profile."
         },
         "context": {
@@ -48,35 +53,44 @@
             "string",
             "null"
           ],
-          "description": "The context it pins."
+          "maxLength": 253,
+          "pattern": "^[^\\x00-\\x20\\x7f-\\x9f\\-]([^\\x00-\\x1f\\x7f-\\x9f]*[^\\x00-\\x20\\x7f-\\x9f])?$",
+          "description": "The context it pins (kube and talos): no leading dash, no leading or trailing space."
         },
         "namespace": {
           "type": [
             "string",
             "null"
           ],
-          "description": "The namespace it pins."
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "description": "The namespace it pins (kube): one DNS label."
         },
         "subscription": {
           "type": [
             "string",
             "null"
           ],
-          "description": "The subscription it pins."
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+          "description": "The subscription it pins (azure), by its GUID."
         },
         "section": {
           "type": [
             "string",
             "null"
           ],
-          "description": "The configuration section it pins."
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$",
+          "description": "The configuration section it pins (gam)."
         },
         "node": {
           "type": [
             "string",
             "null"
           ],
-          "description": "The node it pins."
+          "maxLength": 253,
+          "pattern": "^([0-9A-Fa-f:.]+|[a-z0-9][a-z0-9.-]*)$",
+          "description": "The node it pins (talos): an address or a DNS name."
         },
         "production": {
           "type": "boolean",
@@ -84,21 +98,28 @@
         },
         "isolated": {
           "type": "boolean",
-          "description": "Whether the tool runs with a configuration directory of its own."
+          "description": "Whether the tool runs with a configuration directory of its own (azure and gam)."
         },
         "env": {
           "type": "object",
-          "additionalProperties": {
-            "type": "string"
+          "maxProperties": 32,
+          "propertyNames": {
+            "$ref": "#/$defs/envName"
           },
-          "description": "Plain environment variables."
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 1024,
+            "$ref": "#/$defs/noControl"
+          },
+          "description": "Plain environment variables: the name and the value, no control character."
         },
         "secret_env": {
           "type": "array",
+          "maxItems": 8,
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/envName"
           },
-          "description": "The names of the variables whose values are in the keychain."
+          "description": "The names, never the values, of the variables whose values are in the keychain."
         }
       },
       "required": [
@@ -106,7 +127,140 @@
         "tool",
         "name"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "kube"
+              }
+            },
+            "required": [
+              "tool"
+            ]
+          },
+          "then": {
+            "properties": {
+              "subscription": {
+                "$ref": "#/$defs/unused"
+              },
+              "section": {
+                "$ref": "#/$defs/unused"
+              },
+              "node": {
+                "$ref": "#/$defs/unused"
+              },
+              "isolated": {
+                "const": false
+              }
+            }
+          },
+          "description": "A kube profile pins a context and a namespace; the other selection fields stay empty, and it cannot be isolated."
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "talos"
+              }
+            },
+            "required": [
+              "tool"
+            ]
+          },
+          "then": {
+            "properties": {
+              "namespace": {
+                "$ref": "#/$defs/unused"
+              },
+              "subscription": {
+                "$ref": "#/$defs/unused"
+              },
+              "section": {
+                "$ref": "#/$defs/unused"
+              },
+              "isolated": {
+                "const": false
+              }
+            }
+          },
+          "description": "A talos profile pins a context and a node; the other selection fields stay empty, and it cannot be isolated."
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "azure"
+              }
+            },
+            "required": [
+              "tool"
+            ]
+          },
+          "then": {
+            "properties": {
+              "context": {
+                "$ref": "#/$defs/unused"
+              },
+              "namespace": {
+                "$ref": "#/$defs/unused"
+              },
+              "section": {
+                "$ref": "#/$defs/unused"
+              },
+              "node": {
+                "$ref": "#/$defs/unused"
+              }
+            }
+          },
+          "description": "A azure profile pins a subscription; the other selection fields stay empty."
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "gam"
+              }
+            },
+            "required": [
+              "tool"
+            ]
+          },
+          "then": {
+            "properties": {
+              "context": {
+                "$ref": "#/$defs/unused"
+              },
+              "namespace": {
+                "$ref": "#/$defs/unused"
+              },
+              "subscription": {
+                "$ref": "#/$defs/unused"
+              },
+              "node": {
+                "$ref": "#/$defs/unused"
+              }
+            }
+          },
+          "description": "A gam profile pins a section; the other selection fields stay empty."
+        }
+      ]
+    },
+    "envName": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Z_][A-Z0-9_]*$",
+      "description": "The name of an environment variable."
+    },
+    "noControl": {
+      "type": "string",
+      "pattern": "^[^\\x00-\\x1f\\x7f-\\x9f]*$",
+      "description": "A text without a control character."
+    },
+    "unused": {
+      "type": "null",
+      "description": "A selection field that the tool does not take."
     }
   }
 }

@@ -17,7 +17,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::marker::PhantomData;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
@@ -51,6 +51,10 @@ pub const MAX_ENV: usize = 32;
 pub const MAX_SECRET_NAMES: usize = 8;
 /// The most bytes of a plain environment value.
 pub const MAX_VALUE: usize = 1024;
+/// The most paths one tool may list as configuration files in the machine-local file.
+pub const MAX_PATHS: usize = 8;
+/// The most bytes of one path in the machine-local file.
+pub const MAX_PATH: usize = 4096;
 /// The most bytes of a secret variable. The Windows credential store refuses a blob over 2560 bytes and
 /// [`crate::secrets::MAX_LEN`] allows 4096, so this module enforces the lower bound on every platform.
 pub const MAX_SECRET: usize = 1024;
@@ -163,10 +167,22 @@ struct RawProfile {
     secret_env: Vec<String>,
 }
 
+/// The first look at the text of a file: not too large, a JSON object, and exactly the version this code reads.
+fn check_version(file: &str, text: &str) -> Result<(), String> {
+    if text.len() as u64 > MAX_BYTES {
+        return Err(format!("{file} is larger than {MAX_BYTES} bytes"));
+    }
+    let probe: Object<Probe> = serde_json::from_str(text).map_err(|e| read_note(file, &e))?;
+    if probe.0.version != Some(serde_json::json!(VERSION)) {
+        return Err(format!("{file} does not have the version {VERSION}"));
+    }
+    Ok(())
+}
+
 /// What a read error says: where, and never what. The text of a `serde_json` error holds the offending value.
-fn read_note(error: &serde_json::Error) -> String {
+fn read_note(file: &str, error: &serde_json::Error) -> String {
     let what = if error.is_data() { "has a member or a value that is not allowed" } else { "is not valid JSON" };
-    format!("{FILE} {what} (line {}, column {})", error.line(), error.column())
+    format!("{file} {what} (line {}, column {})", error.line(), error.column())
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -378,14 +394,8 @@ impl IntegrationProfiles {
 
     /// Reads the text of a file. `Err` is the note: a fixed sentence built from a position, an id and a field name.
     pub fn parse(text: &str) -> Result<Self, String> {
-        if text.len() as u64 > MAX_BYTES {
-            return Err(format!("{FILE} is larger than {MAX_BYTES} bytes"));
-        }
-        let probe: Object<Probe> = serde_json::from_str(text).map_err(|e| read_note(&e))?;
-        if probe.0.version != Some(serde_json::json!(VERSION)) {
-            return Err(format!("{FILE} does not have the version {VERSION}"));
-        }
-        let Object(raw): Object<RawFile> = serde_json::from_str(text).map_err(|e| read_note(&e))?;
+        check_version(FILE, text)?;
+        let Object(raw): Object<RawFile> = serde_json::from_str(text).map_err(|e| read_note(FILE, &e))?;
         if raw.profiles.len() > MAX_PROFILES {
             return Err(format!("the file holds more than {MAX_PROFILES} profiles"));
         }
@@ -409,28 +419,7 @@ impl IntegrationProfiles {
     /// Reads `<dir>/integrations.json`. A missing file is an empty set with no note. A file that cannot be read or
     /// fails any rule is copied to `.bad`, the set is empty and the one note says why, without a value.
     pub fn load(dir: &Path) -> (Self, Vec<String>) {
-        let path = dir.join(FILE);
-        let note = match read_limited(&path, MAX_BYTES) {
-            Ok(None) => return (Self::default(), Vec::new()),
-            Ok(Some(bytes)) if bytes.is_empty() => return (Self::default(), Vec::new()),
-            Ok(Some(bytes)) => match String::from_utf8(bytes) {
-                Ok(text) => match Self::parse(&text) {
-                    Ok(set) => return (set, Vec::new()),
-                    Err(note) => note,
-                },
-                Err(_) => format!("{FILE} is not UTF-8 text"),
-            },
-            Err(e) => match e.kind() {
-                io::ErrorKind::InvalidData => format!("{FILE} is larger than {MAX_BYTES} bytes"),
-                io::ErrorKind::InvalidInput => return (Self::default(), vec![format!("{FILE} is not a regular file")]),
-                _ => return (Self::default(), vec![format!("{FILE} cannot be read")]),
-            },
-        };
-        let mut notes = vec![note];
-        if !keep_bad(&path) {
-            notes.push(format!("a copy of {FILE} could not be kept"));
-        }
-        (Self::default(), notes)
+        load_file(dir, FILE, Self::parse)
     }
 
     /// Writes `<dir>/integrations.json` atomically. A set that would not load again is not written.
@@ -569,6 +558,33 @@ impl IntegrationProfiles {
     }
 }
 
+/// Reads one of the two files of this module: absent or empty is the default with no note; a file that cannot be read,
+/// is too large or fails `parse` is kept as `.bad` and gives the default and one note that holds no value of the file.
+fn load_file<T: Default>(dir: &Path, file: &str, parse: fn(&str) -> Result<T, String>) -> (T, Vec<String>) {
+    let path = dir.join(file);
+    let note = match read_limited(&path, MAX_BYTES) {
+        Ok(None) => return (T::default(), Vec::new()),
+        Ok(Some(bytes)) if bytes.is_empty() => return (T::default(), Vec::new()),
+        Ok(Some(bytes)) => match String::from_utf8(bytes) {
+            Ok(text) => match parse(&text) {
+                Ok(value) => return (value, Vec::new()),
+                Err(note) => note,
+            },
+            Err(_) => format!("{file} is not UTF-8 text"),
+        },
+        Err(e) => match e.kind() {
+            io::ErrorKind::InvalidData => format!("{file} is larger than {MAX_BYTES} bytes"),
+            io::ErrorKind::InvalidInput => return (T::default(), vec![format!("{file} is not a regular file")]),
+            _ => return (T::default(), vec![format!("{file} cannot be read")]),
+        },
+    };
+    let mut notes = vec![note];
+    if !keep_bad(&path) {
+        notes.push(format!("a copy of {file} could not be kept"));
+    }
+    (T::default(), notes)
+}
+
 /// Keeps what could not be used next to the file. A file over [`MAX_BAD_COPY`] is renamed, not copied. Says whether
 /// the damaged content is still on disk.
 fn keep_bad(path: &Path) -> bool {
@@ -676,4 +692,184 @@ fn check_profile(profile: &IntegrationProfile) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The machine-local file.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Why a path cannot be kept in the machine-local file, as the end of a note. The path itself is never named.
+fn path_problem(path: &Path) -> Option<&'static str> {
+    let Some(text) = path.to_str() else { return Some("is not text") };
+    if text.len() > MAX_PATH {
+        Some("is longer than the limit")
+    } else if text.chars().any(char::is_control) {
+        Some("has a control character")
+    } else if text.starts_with("\\\\") || text.starts_with("//") {
+        // A UNC path (`\\server\share`), a device path (`\\?\C:\x`, `\\.\COM1`) and their slash forms: a program on
+        // another computer or a device is not a binary of this one.
+        Some("is a network or device path")
+    } else if !path.is_absolute() {
+        Some("is not an absolute path")
+    } else {
+        None
+    }
+}
+
+/// The machine-specific values of one computer: where each tool's program is and which configuration files it reads.
+/// The file is read by this computer only and is not in the sync file list; a synced profile never holds a path.
+/// Paths are validated by this computer's own rule for an absolute path.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct LocalFile {
+    /// The program of each tool, by the tool's name.
+    binaries: BTreeMap<String, PathBuf>,
+    /// The configuration files of each tool, by the tool's name.
+    config_paths: BTreeMap<String, Vec<PathBuf>>,
+}
+
+impl fmt::Debug for LocalFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LocalFile({} binaries, {} configuration lists)", self.binaries.len(), self.config_paths.len())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLocal {
+    #[allow(dead_code)]
+    version: u32,
+    #[serde(default)]
+    binaries: BTreeMap<String, String>,
+    #[serde(default)]
+    config_paths: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct WireLocal<'a> {
+    version: u32,
+    binaries: &'a BTreeMap<String, PathBuf>,
+    config_paths: &'a BTreeMap<String, Vec<PathBuf>>,
+}
+
+impl LocalFile {
+    /// The note for a path that is not allowed: the tool and the member, never the path.
+    fn refuse(tool: &str, member: &str, problem: &str) -> String {
+        format!("{LOCAL_FILE}: the {member} of {tool} {problem}")
+    }
+
+    /// Why the file cannot be used, or `Ok`: every tool is one of the four, every path passes [`path_problem`], at most
+    /// [`MAX_PATHS`] configuration paths per tool.
+    fn validate(&self) -> Result<(), String> {
+        for (name, path) in &self.binaries {
+            let tool = ToolId::parse(name).map_err(|_| format!("{LOCAL_FILE} names a tool that does not exist"))?;
+            if let Some(problem) = path_problem(path) {
+                return Err(Self::refuse(tool.as_str(), "binary path", problem));
+            }
+        }
+        for (name, paths) in &self.config_paths {
+            let tool = ToolId::parse(name).map_err(|_| format!("{LOCAL_FILE} names a tool that does not exist"))?;
+            if paths.len() > MAX_PATHS {
+                return Err(Self::refuse(tool.as_str(), "configuration paths", "are more than the limit"));
+            }
+            if let Some(problem) = paths.iter().find_map(|path| path_problem(path)) {
+                return Err(Self::refuse(tool.as_str(), "configuration path", problem));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the file of this set stays within [`MAX_BYTES`] (escaping can double a Windows path).
+    fn fits(&self) -> Result<(), String> {
+        if self.to_json().len() as u64 > MAX_BYTES {
+            return Err(format!("{LOCAL_FILE} would be larger than {MAX_BYTES} bytes"));
+        }
+        Ok(())
+    }
+
+    /// Reads the text of a file. `Err` is the note: a fixed sentence built from a position, a tool and a member name.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        check_version(LOCAL_FILE, text)?;
+        let Object(raw): Object<RawLocal> = serde_json::from_str(text).map_err(|e| read_note(LOCAL_FILE, &e))?;
+        let set = Self {
+            binaries: raw.binaries.into_iter().map(|(tool, path)| (tool, PathBuf::from(path))).collect(),
+            config_paths: raw
+                .config_paths
+                .into_iter()
+                .map(|(tool, paths)| (tool, paths.into_iter().map(PathBuf::from).collect()))
+                .collect(),
+        };
+        set.validate()?;
+        Ok(set)
+    }
+
+    /// The text of the file: pretty JSON with a newline at the end.
+    pub fn to_json(&self) -> String {
+        let file = WireLocal { version: VERSION, binaries: &self.binaries, config_paths: &self.config_paths };
+        let mut text = serde_json::to_string_pretty(&file).unwrap_or_else(|_| format!("{{\"version\":{VERSION}}}"));
+        text.push('\n');
+        text
+    }
+
+    /// Reads `<dir>/integration_local.json`. A missing file is an empty set with no note. A file that cannot be read
+    /// or fails any rule is copied to `.bad`, the set is empty and the one note says why, without a path.
+    pub fn load(dir: &Path) -> (Self, Vec<String>) {
+        load_file(dir, LOCAL_FILE, Self::parse)
+    }
+
+    /// Writes `<dir>/integration_local.json` atomically. A set that would not load again is not written.
+    pub fn save(&self, dir: &Path) -> io::Result<()> {
+        if self.validate().and_then(|()| self.fits()).is_err() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "the local paths are not valid and are not written"));
+        }
+        fs::create_dir_all(dir)?;
+        write_atomic(&dir.join(LOCAL_FILE), self.to_json().as_bytes())
+    }
+
+    /// Remembers where the program of a tool is. The path must be absolute on this computer; the set is left as it was
+    /// when it is not.
+    pub fn set_binary(&mut self, tool: ToolId, path: &Path) -> Result<(), String> {
+        if let Some(problem) = path_problem(path) {
+            return Err(Self::refuse(tool.as_str(), "binary path", problem));
+        }
+        let before = self.binaries.insert(tool.as_str().to_owned(), path.to_path_buf());
+        self.fits().inspect_err(|_| match before {
+            Some(old) => drop(self.binaries.insert(tool.as_str().to_owned(), old)),
+            None => drop(self.binaries.remove(tool.as_str())),
+        })
+    }
+
+    /// Forgets the program of a tool; says whether there was one.
+    pub fn clear_binary(&mut self, tool: ToolId) -> bool {
+        self.binaries.remove(tool.as_str()).is_some()
+    }
+
+    /// The program of a tool on this computer, if the person pinned one.
+    pub fn binary(&self, tool: ToolId) -> Option<&Path> {
+        self.binaries.get(tool.as_str()).map(PathBuf::as_path)
+    }
+
+    /// Remembers the configuration files of a tool (a kubeconfig, a talosconfig): at most [`MAX_PATHS`], each absolute
+    /// on this computer. An empty list forgets them. The set is left as it was when the list is not valid.
+    pub fn set_config_paths(&mut self, tool: ToolId, paths: &[PathBuf]) -> Result<(), String> {
+        if paths.len() > MAX_PATHS {
+            return Err(Self::refuse(tool.as_str(), "configuration paths", "are more than the limit"));
+        }
+        if let Some(problem) = paths.iter().find_map(|path| path_problem(path)) {
+            return Err(Self::refuse(tool.as_str(), "configuration path", problem));
+        }
+        let before = if paths.is_empty() {
+            self.config_paths.remove(tool.as_str())
+        } else {
+            self.config_paths.insert(tool.as_str().to_owned(), paths.to_vec())
+        };
+        self.fits().inspect_err(|_| match before {
+            Some(old) => drop(self.config_paths.insert(tool.as_str().to_owned(), old)),
+            None => drop(self.config_paths.remove(tool.as_str())),
+        })
+    }
+
+    /// The configuration files of a tool on this computer; empty when none is pinned.
+    pub fn config_paths(&self, tool: ToolId) -> &[PathBuf] {
+        self.config_paths.get(tool.as_str()).map_or(&[], Vec::as_slice)
+    }
 }
