@@ -261,14 +261,15 @@ fn the_cross_release_scripts_name_the_artifacts_by_one_scheme() {
 
 #[test]
 fn the_windows_cross_build_is_the_gnu_abi_and_says_so() {
-    // Honest labelling: this build is not the MSVC build and has never run on Windows. The script prints it, the build
-    // guide says it, and the target is the GNU one (the MSVC engine cannot be built from a Mac).
+    // Honest labelling: this build is not the MSVC build, and its runs on Windows are the owner's, recorded in the W rows
+    // of the test plan. The script prints it, the build guide says it, and the target is the GNU one (the MSVC engine
+    // cannot be built from a Mac).
     assert!(WINDOWS_CROSS.contains("TARGET=x86_64-pc-windows-gnu"), "the target is not the GNU ABI");
     assert!(!WINDOWS_CROSS.contains("windows-msvc"), "the cross build names the MSVC target");
-    for text in ["GNU-ABI build", "not the MSVC build", "unsigned", "never run on Windows"] {
+    for text in ["GNU-ABI build", "not the MSVC build", "unsigned", "W rows of docs/test-plan.md"] {
         assert!(WINDOWS_CROSS.contains(text), "release-windows-cross.sh does not say `{text}`");
     }
-    for text in ["GNU ABI", "never run on Windows", "unsigned", "MSVC build"] {
+    for text in ["GNU ABI", "run this GNU-ABI holzWave on Windows", "unsigned", "MSVC build"] {
         assert!(BUILD_WINDOWS_DOC.contains(text), "docs/build-windows.md does not say `{text}`");
     }
     // The link fix and the NSIS route the research found; losing either breaks the build or the installer.
@@ -282,7 +283,7 @@ fn the_windows_cross_build_is_the_gnu_abi_and_says_so() {
 fn the_linux_container_build_is_amd64_and_says_what_it_is_not() {
     assert!(LINUX_CONTAINER.contains("HOLZWAVE_LINUX_ARCH=amd64"), "the build is not the amd64 container");
     assert!(LINUX_CONTAINER.contains("HOLZWAVE_BUNDLE_APPIMAGE=required"), "a missing AppImage must fail the release");
-    for text in ["emulated", "glibc 2.39", "unsigned", "has not been started"] {
+    for text in ["emulated", "glibc 2.39", "unsigned", "not on Linux hardware", "L rows record the runs on Linux"] {
         assert!(LINUX_CONTAINER.contains(text), "release-linux-container.sh does not say `{text}`");
     }
     assert!(BUILD_LINUX_DOC.contains("glibc 2.39") && BUILD_LINUX_DOC.contains("emulated"), "docs/build-linux.md lacks the limits");
