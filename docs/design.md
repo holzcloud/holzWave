@@ -104,6 +104,7 @@ default.
 | Diff box | a hairline box in mono inside an approval card (6.16): a head line with the kind, the counts and the sizes, then the changed lines with their line numbers and a `+` or `-` sign as the cue; no fill, wraps and scrolls inside, at most 16 rem high |
 | Shell request card | a floating layer without a backdrop (6.20): the prompt of a `wsh ai` request in full, the piped text by counts and findings, the destination and whether it leaves this computer, `Don't send` and `Send once`; it never takes the keyboard, and only a real press after half a second can send |
 | On-device row | a read-only group row in the providers dialog (6.21): the name `Apple on-device`, a state word, one sentence of advice and, when the model cannot answer, a hairline `Check again`; in the chat picker it is an ordinary row with no host; shown only on a Mac, flat and hairline, no shadow |
+| Local network notice and row | a text-only floating layer on the first start of a Mac (6.24): the reason, `Not now` and `Allow`; and a read-only group row `Local network` in the Settings dialog with the state in words, one sentence of advice and the buttons `Open System Settings`, `Allow` and `Check again`; macOS 15 or later only, flat and hairline, the one shadow is the layer's |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
 No motion in the terminal grid itself. `prefers-reduced-motion` removes all transitions.
@@ -395,6 +396,7 @@ and have since been run by the author on Windows and Linux machines: a row here 
 | **In the Flatpak the shell runs on the host and its panes track the directory only when the shell announces it (OSC 7).** The app asks for `--talk-name=org.freedesktop.Flatpak`, which removes the sandbox for it; the process in the sandbox is `flatpak-spawn`, whose own directory means nothing, so it is not looked up. Whether the host shell gets a controlling terminal (job control, `sudo`) is an assumption until row L10. **Unverified; if the Flatpak does not ship it is not part of 0.0.1** | a terminal in a sandbox sees none of the user's tools (plan 02.2-08; [flatpak.md](flatpak.md)) | `host-spawn` if L10 shows no job control; or moving Flatpak out of 0.0.1 |
 | **WebKitGTK may need a graphics workaround** (a blank or flickering window, mostly on NVIDIA). holzWave sets none by default | an unconditional override disables the fast path for everybody; owner decision of 2026-10-12: none until a failure is reproduced on hardware ([build-linux.md](build-linux.md)) | a follow-up plan if row L2 finds one |
 | **The on-device model row and the group `On device` exist only on macOS 26 or later with Apple Intelligence**; nothing of them is drawn on Windows and Linux | Apple's model exists only there and the bridge to it is not compiled elsewhere; the chat picker and the providers dialog look the same on every platform otherwise (6.21) | none planned |
+| **The notice and the group `Local network` exist only on macOS 15 or later**; nothing of them is drawn on Windows and Linux, and `local_network.json` is never written there | the privacy setting `Local Network` is a macOS feature and the probe behind it is not compiled elsewhere (6.24) | none planned |
 
 ### 6.9 Sync
 
@@ -1591,3 +1593,74 @@ the rows of the sheet, in 44 px rows, and the `Sheet` opener shows the kinds of 
 a count, a mark on a pane header, the chat in the sidebar column (it has no pane; the `✦ AI` button of the title bar covers
 it), and a mark for a finished reply of the assistant (whether it is a question cannot be known, and marking every reply
 would make the mark mean nothing).
+
+### 6.24 Local network on macOS
+
+On a Mac with macOS 15 or later, the system keeps a privacy setting `Local Network` for every app: a program that connects to
+another computer on the local network (an SSH host, an AI server such as Ollama or LM Studio on another computer, a
+Nextcloud on the LAN) is blocked until the person allows it. holzWave tells the person why before macOS asks, and shows the
+state in the Settings. On macOS 13 and 14 the system has no such setting and never asks, so nothing here is drawn. On Windows
+and Linux neither the notice nor the group exists at all (section 7). There is no phone drawing, because the feature exists
+only on a Mac.
+
+**The rule.**
+
+1. The notice is shown **once per computer**, at the first start, in the first window only (the window labelled `main`; a
+   torn-off window never shows it). The choice is kept in `local_network.json`, a file of this computer that is never synced:
+   another Mac must ask for itself.
+2. `Allow` is the only thing that makes holzWave touch the local network, and so the only thing that makes macOS show its own
+   question. Nothing reads or probes the network before it was pressed: until then the state is `not asked yet`.
+3. `Not now`, Escape and a click outside end the notice for good on this computer. Nothing asks again by itself. The way back
+   is the button `Allow` of the group below, which stays while the state is `not asked yet`.
+4. A denial is shown only by a read of the state (the dialog opening, the window gaining focus, `Check again`), never right
+   after `Allow`: macOS may refuse an operation before the person has answered its question, so the line after `Allow` says
+   that the question is open and asks the person to read again. There is no timer.
+
+**The notice.** A floating layer with the box of the Settings dialog: a hairline, the 8 px radius, the one shadow of a floating
+layer, 30 rem wide, the title style of the other dialogs. Text only, top to bottom:
+
+- Title `Allow local network access?`
+- Lead `holzWave reaches computers on your local network:` and a bulleted list: `SSH to machines on your network.`,
+  `Local AI servers on other computers, such as Ollama or LM Studio.`, `Sync with a Nextcloud on your network.`
+- Note `macOS asks for your permission next. Programs you run in a pane, such as ssh, count as holzWave. You can change this
+  any time in Settings.` A server on this Mac is loopback and needs no permission, which is why the list says "other computers".
+- The buttons `Not now` (hairline) and `Allow` (the solid one, focused first), at the right. A status line above the buttons
+  stays empty unless `Allow` could not be stored; it then says the reason in the warn colour and the notice stays.
+
+Tab moves between the two buttons, Enter presses the focused one, Space too, Escape is `Not now`. A Cmd chord is swallowed and
+no key reaches the terminal while the notice is open. While `Allow` waits for the answer (up to about 3 s) the two buttons ignore
+presses. When the notice closes the keyboard goes back to the terminal.
+
+**The group `Local network`.** In the Settings dialog, after Accessibility and before the buttons, on macOS only (and removed
+when the shell says the system has no such setting). A `fieldset` with `role="group"` labelled by its legend, in the manner
+of the group of 6.21: one row with the name `Access`, the dim meta `Privacy & Security`, the state at the right, one sentence
+of advice below it and the buttons. The state is words first; a state that needs attention is also underlined or marked.
+
+| State word | Shown as | Tone and second cue | Advice |
+|---|---|---|---|
+| `allowed` | allowed | ok; the word | holzWave can reach computers on your local network. |
+| `denied` | denied | warn; the word, an underline and the mark `!` | macOS blocks holzWave from your local network. Turn holzWave on in System Settings, then choose Check again. |
+| `not_asked` | not asked yet | plain; the word | macOS has not been asked. Choose Allow and macOS shows its own question. |
+| `unknown` | not known | plain; the word and the mark `?` | holzWave could not tell. macOS may still be waiting for your answer. Choose Check again. |
+
+The buttons: `Open System Settings` always (it opens the Privacy & Security pane of System Settings through the system's own
+opener, with no text of the page); `Allow` only while the state is `not asked yet`; `Check again` while it is `denied` or
+`not known`. A line of the group (`role="status"`) says `Checking…` while a read runs, `Checked.` after `Check again`, and after
+`Allow` `Asked. Answer the macOS question, then choose Check again.`; a refusal of a button is said there in words. The page
+shows no state word until the first answer. The state is read when the Settings dialog opens, when the window gains focus while
+the dialog is open (at most once a second) and after a button; never by a timer. When the pressed button goes away (`Allow`
+becomes `Check again`, or `Check again` goes when the state turns allowed) the keyboard moves to the row. The words come from a
+table of the page keyed by the shell's state word; a word that is in no table reads as `unknown`.
+
+**Limits a reader must know.** Reading the state is itself a local network operation, so the page reads only after `Allow`
+(a state read before that answers `not asked yet` without touching the network). The system can refuse an operation before the
+person answered its question, so `denied` is reported only by a read. An ad hoc signed build may be asked about again after an
+update, and the question then comes without the notice; the text of the question is the one of the app's `Info.plist`. A
+program started from Terminal is exempt from the setting, which is why no test run from a terminal can see it.
+
+**Accessibility.** Hairlines use `--hw-line`, so `contrast-high` holds; the 2 px focus ring holds for every button and for the
+row; under forced colours the row gets a system-colour outline and the box keeps its border; nothing moves, so `motion-reduce`
+has nothing to remove. Every size is in `rem`; the buttons are at least 28 px high.
+
+**Not drawn.** A switch that grants or revokes the permission (holzWave cannot change it; it says where the person can), a list
+of hosts, a badge, a notification, and a notice again at a later start.

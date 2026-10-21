@@ -366,6 +366,20 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ad-row[data-tone=warn] .ad-state::before{content:"! ";font-weight:700}
 .ad-adv{flex:1 0 100%;margin:2px 0 4px;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
 .ad-check{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border-radius:5px;font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+/* The notice and the group Local network (docs/design.md 6.24). `lan` is the notice over the daily window; `lanstates` is the group in four states on the ad-* grid. The state is
+   words first; warn is underlined and marked !, unknown is marked ?, so no state rests on colour. The notice has the box of the Settings dialog: hairline, 8 px radius, the one shadow. */
+.ln-list{margin:0 0 0 18px;padding:0;color:var(--ink2)}.ln-list li{margin:0 0 3px}
+.ln-row{display:flex;flex-wrap:wrap;align-items:center;gap:0 10px;min-height:22px;font:400 12px/1.4 var(--mono)}
+.ln-name{color:var(--ink)}.ln-meta{color:var(--ink3)}
+.ln-state{margin-left:auto;color:var(--ink3);text-align:right}
+.ln-row[data-tone=ok] .ln-state{color:var(--ok)}
+.ln-row[data-tone=warn] .ln-state{color:var(--warn);text-decoration:underline}
+.ln-row[data-tone=warn] .ln-state::before{content:"! ";font-weight:700}
+.ln-row[data-state=unknown] .ln-state::before{content:"? ";font-weight:700}
+.ln-adv{flex:1 0 100%;margin:2px 0 4px;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
+.ln-btns{display:flex;flex:1 0 100%;flex-wrap:wrap;gap:6px 8px;margin:0 0 4px}
+.ln-btn{display:inline-flex;flex:none;align-items:center;white-space:nowrap;min-height:24px;padding:0 10px;border:1px solid var(--edge);border-radius:5px;color:var(--ink2);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.ln-line{min-height:17px;margin:0;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
 /* The monitor of another computer (docs/design.md 6.5, On another computer). `kimon` is the monitor of a Linux host beside its shell; `kimonstates` is the ground only: the
    line above the bars while the pane connects, when the host does not answer (the last numbers stay, dimmed), when it is not Linux and when its key is not known yet.
    The warn line has the words, an underline and the mark ! besides its colour; rose is only the focus line of the focused pane. */
@@ -569,7 +583,7 @@ function base(v){
     <span class="fill"></span>
     <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
   <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
+  <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -577,7 +591,7 @@ function base(v){
       ${P('in','◧','notes.md','preview',md)}
       ${P('','◔','system','local · 1 s',sysmon)}
     </div>${searchBar}
-  </div>`}${v==='kiwsh'?side:v==='kiwshstates'||v==='kidevicestates'||v==='kimonstates'?'':v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||status()}${awOver(v)}`;
+  </div>`}${v==='kiwsh'?side:v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='kimonstates'?'':v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||status()}${awOver(v)}`;
 }
 /* The chat pane (docs/design.md 6.12). Two states of one conversation: `kipane` streams a reply, `kistates` shows the picker, a stopped
    reply, a failed turn and a long draft. The words are the ones of the page: the status words, the end row, the count. */
@@ -800,6 +814,16 @@ const adChat=`<div class="ad-frame chat"><div class="c-chat"><div class="c-bar">
  <div class="c-comp"><div class="c-in fo">Explain this error<span class="cur"></span></div><div class="c-foot">${cxBtn()}<span class="keys">⏎ send</span>${cSend}</div></div></div></div>`;
 const adStates=()=>`<div class="ad-grid">${[['On device · available',adFrame(adRow('ok','available','The model runs on this Mac.',0))],['Apple Intelligence switched off',adFrame(adRow('warn','Apple Intelligence is switched off.','Turn it on in System Settings, then choose Check again.',1))],['Needs macOS 26',adFrame(adRow('warn','This needs macOS 26 or later.','Update macOS, then choose Check again.',1))],['Chat pinned to a model that is gone',adChat]].map(([cap,frame])=>`<div class="ad-cell"><div class="cap">${cap}</div>${frame}</div>`).join('')}</div>`;
 
+/* The group Local network (docs/design.md 6.24) in the four states the shell can report. The words, tones and sentences are the design record's. */
+const lnRow=(state,tone,word,line,btns,note)=>`<div class="ln-row" data-state="${state}" data-tone="${tone}"><span class="ln-name">Access</span><span class="ln-meta">Privacy &amp; Security</span><span class="ln-state">${word}</span><p class="ln-adv">${line}</p><div class="ln-btns">${btns.map(b=>`<span class="ln-btn">${b}</span>`).join('')}</div></div><p class="ln-line">${note}</p>`;
+const lnFrame=row=>`<div class="ad-frame"><div class="ap">${apG('Local network',row)}</div></div>`;
+const lnStates=()=>`<div class="ad-grid">${[
+ ['Allowed',lnFrame(lnRow('allowed','ok','allowed','holzWave can reach computers on your local network.',['Open System Settings'],'Checked.'))],
+ ['Denied',lnFrame(lnRow('denied','warn','denied','macOS blocks holzWave from your local network. Turn holzWave on in System Settings, then choose Check again.',['Open System Settings','Check again'],'&nbsp;'))],
+ ['Not asked yet',lnFrame(lnRow('not_asked','plain','not asked yet','macOS has not been asked. Choose Allow and macOS shows its own question.',['Open System Settings','Allow'],'&nbsp;'))],
+ ['Not known',lnFrame(lnRow('unknown','plain','not known','holzWave could not tell. macOS may still be waiting for your answer. Choose Check again.',['Open System Settings','Check again'],'Asked. Answer the macOS question, then choose Check again.'))]
+].map(([cap,frame])=>`<div class="ad-cell"><div class="cap">${cap}</div>${frame}</div>`).join('')}</div>`;
+
 const ovl={
  history:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:560px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">⌕</span>kgp<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
   <div class="it on"><span><span class="ro">k</span>ubectl <span class="ro">g</span>et <span class="ro">p</span>ods -n kube-system</span><span class="dim">~/infra · 2 h ago · ×14</span></div>
@@ -830,6 +854,12 @@ const ovl={
    <div class="field" style="grid-template-columns:110px 1fr auto"><span class="dim">Code:</span><span class="v">482913<span class="cur"></span></span><span class="lbl dim">shown</span></div></div>
   <div class="dim" style="margin:10px 0 0">Your answer goes to this login only. Nothing is stored.</div>
   <div class="row" style="gap:8px;margin-top:14px;justify-content:flex-end"><span class="btn">Cancel</span><span class="btn p">Send</span></div></div>`,
+ lan:`<div class="scrim"></div><div class="ov float modal" role="dialog" aria-label="Allow local network access?" style="left:330px;top:150px;width:460px;padding:18px 22px;border-radius:8px">
+  <b style="font-size:15px">Allow local network access?</b>
+  <div style="margin:10px 0 6px">holzWave reaches computers on your local network:</div>
+  <ul class="ln-list"><li>SSH to machines on your network.</li><li>Local AI servers on other computers, such as Ollama or LM Studio.</li><li>Sync with a Nextcloud on your network.</li></ul>
+  <div class="dim" style="margin:10px 0 0">macOS asks for your permission next. Programs you run in a pane, such as ssh, count as holzWave. You can change this any time in Settings.</div>
+  <div class="row" style="gap:8px;margin-top:14px;justify-content:flex-end"><span class="btn">Not now</span><span class="btn p">Allow</span></div></div>`,
  settings:`<div class="scrim"></div><div class="ov float modal" style="left:170px;top:50px;width:780px;height:580px;display:flex;overflow:hidden">
   <div style="width:190px;border-right:1px solid var(--edge);padding:16px 0"><div class="it on"><span>Appearance</span></div><div class="it"><span>Terminal</span></div><div class="it"><span>Shortcuts</span></div><div class="it"><span>Accessibility</span></div><div class="it"><span>Sync</span></div><div class="it"><span>AI</span></div><div class="it"><span>Integrations</span></div><div class="it"><span>Privacy</span></div></div>
   <div class="fill" style="padding:20px 24px"><div class="grp lbl" style="padding:0">Theme</div>
@@ -837,7 +867,8 @@ const ovl={
    <div class="field"><span class="dim">Font</span><span class="v">JetBrains Mono · 14 px · ligatures off</span></div><div class="field"><span class="dim">UI scale</span><span class="v">100 % × system 125 %</span></div>
    <div class="grp lbl" style="padding:14px 0 4px">Accessibility</div>
    <div class="field"><span class="dim">Motion</span><span class="seg" style="border-radius:6px"><button aria-pressed="true">System</button><button aria-pressed="false">On</button><button aria-pressed="false">Off</button></span></div><div class="field"><span class="dim">Contrast</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">High</button><button aria-pressed="false">Normal</button></span></div><div class="field"><span class="dim">Cursor blink</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">On</button><button aria-pressed="false">Off</button></span></div>
-   <div class="field"><span class="dim">Option as Alt</span><span class="v">off (macOS only)</span></div></div></div>`,
+   <div class="field"><span class="dim">Option as Alt</span><span class="v">off (macOS only)</span></div>
+   <div class="field"><span class="dim">Local network</span><span class="v">allowed · macOS only</span></div></div></div>`,
  sync:`<div class="ov float" style="right:510px;top:36px;width:340px;padding:14px;border-radius:16px"><div class="row" style="gap:8px"><b>Nextcloud</b><span class="chip">not set up</span></div>
   <div class="dim" style="margin:4px 0 10px">Same settings, themes, connections and layouts on every computer. Encrypted here before it leaves.</div>
   <div class="field"><span class="dim">Folder address</span><span class="v">…/dav/holz/holzwave</span></div><div class="field"><span class="dim">User</span><span class="v">holz</span></div><div class="field"><span class="dim">App password</span><span class="v">••••••••••</span></div><div class="field"><span class="dim">Passphrase</span><span class="v">••••••••••••••••</span></div>
@@ -894,6 +925,8 @@ const views=[
  ['copy','Copy mode','Keyboard selection as in tmux. Hint letters (a, s, d) grab hashes, paths and links. The status line shows the keys.'],
  ['conn','Connections','Connection manager: SSH, WSL, Docker. Login by key file, password, the ssh-agent (it signs, nothing is stored) or a code or password prompt (the server asks, you answer, nothing is stored); passwords and passphrases in the OS keychain, jump host, automatic reconnect with visible state.'],
  ['login','Login prompt','The server of a saved connection asks a question to log in (a one-time code, a PAM prompt). The title and the host line are your own saved connection; everything the server wrote sits in the bordered block under the fixed sentence that says where it comes from. A hidden field is a password or a code, a shown field echoes; Enter sends, Esc cancels, and nothing is stored.'],
+ ['lan','Local network notice','The notice of the first start on a Mac with macOS 15 or later: why holzWave needs the local network (SSH, AI servers on other computers, a Nextcloud) and that macOS asks next. Allow is the only button that touches the network; Not now, Escape and a click outside end it for good. Text only, the box of the Settings dialog.'],
+ ['lanstates','Local network states','The group Local network of the Settings dialog in four states: allowed, denied (underlined and marked !), not asked yet, and not known (marked ?). The state is words first; the buttons are Open System Settings always, Allow when macOS has not been asked, Check again when the state is denied or not known. macOS only.'],
  ['settings','Settings','Themes (including custom), font, UI scale, accessibility (system or explicit), key binding editor, sync, AI, privacy.'],
  ['keys','Shortcuts','The key binding editor. Grouped by pane, tab, workspace and tools. Always shows the keys of the running platform (see the platform switch). Capture, conflicts and fixed shortcuts are visible.'],
  ['preview','Previews','File browser (local and SFTP) with image, PDF and video as panes of their own. Markdown and the editor are in Daily. Space in the browser opens the preview beside it.'],
@@ -927,7 +960,7 @@ const views=[
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='lanstates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }
