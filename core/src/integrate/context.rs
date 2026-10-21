@@ -11,6 +11,13 @@
 //! 3. **An explicit Local verb** changes the tool's own configuration, behind a card. No function here calls one, and
 //!    none writes below a tool's own directory.
 //!
+//! Three facts belong with the application of a selection ([`apply_env`]). The overlay's lifetime is the pane's: it is
+//! written when a shell pane starts, replaced when the pane's selection changes, and removed by the sweep of the shell
+//! plan when the pane is gone ([`kube::sweep_overlays`]); this module never removes one. A shell's start-up file can
+//! export `KUBECONFIG` again and replace the value, so what a pane shows is what holzWave set and not a promise about
+//! what the shell then did. And isolation means that the person signs in again inside the private directory of a
+//! profile: Azure and GAM keep their tokens in the directory the variable names, which is empty the first time.
+//!
 //! No process is started and no tool is asked in this module: the defaults of a tool (its own current selection) are
 //! stored by the service when it has read them, and this module is state, resolution and application. A profile's
 //! secret values never pass through it; it reports the names only.
@@ -27,10 +34,14 @@ use serde_json::{json, Map, Value};
 
 use super::args::{ArgError, ProfileId};
 use super::profiles::{IntegrationProfile, IntegrationProfiles};
+use super::kube::ContextEntry;
+use super::profiles::LocalFile;
+use super::run::EnvPolicy;
 use super::{azure, gam, kube, talos};
 use super::{CheckedSelection, IntegrationSpec, Output, SelectKind, Selection, ToolId, VerbEffect};
 use crate::layout::PaneId;
 use crate::persist::{backup_bad, bad_path, read_limited, write_atomic};
+use crate::platform::{self, Os};
 
 /// The machine-local file of pane selections. It is not in the sync file list.
 pub const PANES_FILE: &str = "pane_integrations.json";
@@ -695,4 +706,257 @@ pub fn summary(
     detection: Detection,
 ) -> ContextRow {
     state.summary(profiles, tool, pane, detection)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Application: the variables a run needs and the directories they name.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The longest path that becomes the value of a variable.
+const PATH_MAX: usize = 4096;
+
+/// Why a path of the machine-local file cannot become the value of a variable for `os`, as a fixed phrase that never
+/// holds the path: it is not text, is empty or too long, holds a control character, is a network or device path (a
+/// program on another computer or a device is not a configuration of this one), or is not an absolute path of the
+/// system. On Windows only a path that starts with a drive letter, a colon and a separator is absolute.
+pub fn unsafe_path_reason(os: Os, path: &Path) -> Option<&'static str> {
+    let Some(text) = path.to_str() else { return Some("is not text") };
+    if text.is_empty() {
+        Some("is empty")
+    } else if text.len() > PATH_MAX {
+        Some("is longer than the limit")
+    } else if text.chars().any(char::is_control) {
+        Some("has a control character")
+    } else if text.starts_with("\\\\") || text.starts_with("//") {
+        Some("is a network or device path")
+    } else if !platform::is_absolute_path(os, text) {
+        Some("is not an absolute path")
+    } else {
+        None
+    }
+}
+
+/// Where and for whom a selection is applied.
+pub struct AppliedFor<'a> {
+    /// The system the run is for.
+    pub os: Os,
+    /// The person's home directory, for the default kubeconfig that follows an overlay.
+    pub home: &'a str,
+    /// The data directory of the app: the only place anything is written, below `run` and `integrations`.
+    pub data_dir: &'a Path,
+    /// The pane the run is for. An overlay needs one.
+    pub pane: Option<PaneId>,
+    /// The environment of the person, read for `KUBECONFIG` only.
+    pub user_env: &'a dyn Fn(&str) -> Option<String>,
+    /// The contexts of the person's kubeconfig as read, to find the cluster and user names of the selected context.
+    pub contexts: &'a [ContextEntry],
+}
+
+/// What to set for a run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Applied {
+    /// The variables, as name and value. No name is one the runner denies.
+    pub env: Vec<(String, String)>,
+    /// Fixed sentences about what could not be applied. They hold no name, no path and no value.
+    pub notes: Vec<String>,
+    /// Isolation was asked for and could not be set up: the caller must not start the run, because a run without its
+    /// own directory would use the person's default account.
+    pub failed: bool,
+}
+
+/// What a selection needs in the environment of a run, per tool, and the directories those variables name.
+///
+/// - **Kubernetes** with `want_overlay` and a pane: the overlay of the selected context is written at
+///   `<data>/run/kube/<pane>.json` (the cluster and user names come from `at.contexts`; the pane's namespace replaces
+///   the one the context names) and `KUBECONFIG` is the overlay, then the person's files. Those are the configuration
+///   paths of the machine-local file, else the person's own `KUBECONFIG`, else `<home>/.kube/config`. A context that
+///   is not in `at.contexts` gets no overlay and a note. Without `want_overlay`, `KUBECONFIG` is the configuration
+///   paths of the machine-local file joined, and no variable at all when it lists none.
+/// - **Talos**: `TALOSCONFIG` is the first configuration path of the machine-local file, else nothing.
+/// - **Azure** and **GAM**: with `isolated` and a profile, `AZURE_CONFIG_DIR` or `GAMCFGDIR` is
+///   `<data>/integrations/<azure|gam>/<profile id>`, a directory of mode 0700 made here and never followed through a
+///   link; if it cannot be made, `failed` is set and no variable is. Not isolated, the first configuration path of
+///   the machine-local file, else nothing.
+///
+/// A path that is relative, empty, too long, has a control character or (on Windows) is a UNC or device path is
+/// dropped with a note and no variable is set from it. Nothing is written outside `<data>/run` and
+/// `<data>/integrations`, and nothing below a tool's own directory. Starting no process, reading no secret and
+/// calling no Local verb is part of the contract.
+pub fn apply_env(tool: ToolId, resolved: &Resolved, local: &LocalFile, at: &AppliedFor<'_>, want_overlay: bool) -> Applied {
+    let mut out = Applied::default();
+    match tool {
+        ToolId::Kube => kube_env(resolved, local, at, want_overlay, &mut out),
+        ToolId::Talos => {
+            if let Some(path) = first_path(tool, local, at.os, &mut out.notes) {
+                out.env.push(("TALOSCONFIG".to_owned(), path));
+            }
+        }
+        ToolId::Azure => directory_env("AZURE_CONFIG_DIR", "azure", resolved, local, at, &mut out),
+        ToolId::Gam => directory_env("GAMCFGDIR", "gam", resolved, local, at, &mut out),
+    }
+    // The runner refuses these names anyway; none of the variables above is one of them.
+    out.env.retain(|(name, _)| !EnvPolicy::is_denied(name, at.os));
+    out
+}
+
+const NOTE_PATH: &str = "a configuration path of the machine-local file cannot be used and is left out";
+const NOTE_OVERLAY_NO_PANE: &str = "an overlay needs a pane, so none was written";
+const NOTE_OVERLAY_NO_CONTEXT_LISTED: &str =
+    "the selected context is not in the list that was read, so no overlay was written";
+const NOTE_OVERLAY_FAILED: &str = "the overlay could not be written";
+const NOTE_DATA_DIR: &str = "the data directory is not an absolute path of this system, so nothing was written there";
+const NOTE_ISOLATION_NO_PROFILE: &str = "an isolated configuration needs a profile";
+const NOTE_ISOLATION_FAILED: &str = "the private configuration directory could not be made, so the run is not started";
+
+/// The configuration paths of the machine-local file for `tool` that pass [`unsafe_path_reason`] as text; the others
+/// leave one note each.
+fn local_paths(tool: ToolId, local: &LocalFile, os: Os, notes: &mut Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for path in local.config_paths(tool) {
+        match (unsafe_path_reason(os, path), path.to_str()) {
+            (None, Some(text)) => out.push(text.to_owned()),
+            _ => notes.push(format!("{}: {NOTE_PATH}", tool.as_str())),
+        }
+    }
+    out
+}
+
+fn first_path(tool: ToolId, local: &LocalFile, os: Os, notes: &mut Vec<String>) -> Option<String> {
+    local_paths(tool, local, os, notes).into_iter().next()
+}
+
+fn kube_env(resolved: &Resolved, local: &LocalFile, at: &AppliedFor<'_>, want_overlay: bool, out: &mut Applied) {
+    let separator = if at.os == Os::Windows { ";" } else { ":" };
+    let paths = local_paths(ToolId::Kube, local, at.os, &mut out.notes);
+    let own_list = if paths.is_empty() { None } else { Some(paths.join(separator)) };
+
+    if want_overlay {
+        if let Some(value) = overlay_value(resolved, at, own_list.as_deref(), &mut out.notes) {
+            out.env.push(("KUBECONFIG".to_owned(), value));
+            return;
+        }
+    }
+    if let Some(list) = own_list {
+        out.env.push(("KUBECONFIG".to_owned(), list));
+    }
+}
+
+/// Writes the overlay and returns the value of `KUBECONFIG` that lists it first, or `None` with a note.
+fn overlay_value(resolved: &Resolved, at: &AppliedFor<'_>, own_list: Option<&str>, notes: &mut Vec<String>) -> Option<String> {
+    let Some(pane) = at.pane else {
+        notes.push(NOTE_OVERLAY_NO_PANE.to_owned());
+        return None;
+    };
+    // With no context selected the tool's own current context applies, and there is nothing to overlay.
+    let context = resolved.selection.context.as_ref()?;
+    let Some(entry) = at.contexts.iter().find(|entry| entry.name() == context.as_str()) else {
+        notes.push(NOTE_OVERLAY_NO_CONTEXT_LISTED.to_owned());
+        return None;
+    };
+    if unsafe_path_reason(at.os, at.data_dir).is_some() {
+        notes.push(NOTE_DATA_DIR.to_owned());
+        return None;
+    }
+    let namespace = resolved.selection.namespace.as_ref().map(|name| name.as_str()).or(entry.namespace());
+    let wanted = ContextEntry::new(entry.name(), entry.cluster(), entry.user(), namespace);
+    let path = match kube::write_overlay(at.data_dir, pane, &wanted) {
+        Ok(path) => path,
+        Err(_) => {
+            notes.push(NOTE_OVERLAY_FAILED.to_owned());
+            return None;
+        }
+    };
+    let user_list = own_list.map(str::to_owned).or_else(|| (at.user_env)("KUBECONFIG")).filter(|list| !list.is_empty());
+    let value = path
+        .to_str()
+        .and_then(|overlay| kube::kubeconfig_value(overlay, at.os, user_list.as_deref(), at.home).ok());
+    if value.is_none() {
+        notes.push(NOTE_OVERLAY_FAILED.to_owned());
+    }
+    value
+}
+
+fn directory_env(
+    variable: &str,
+    directory: &str,
+    resolved: &Resolved,
+    local: &LocalFile,
+    at: &AppliedFor<'_>,
+    out: &mut Applied,
+) {
+    if !resolved.isolated {
+        let tool = resolved.tool;
+        if let Some(path) = first_path(tool, local, at.os, &mut out.notes) {
+            out.env.push((variable.to_owned(), path));
+        }
+        return;
+    }
+    let Some(profile) = &resolved.profile else {
+        out.notes.push(NOTE_ISOLATION_NO_PROFILE.to_owned());
+        out.failed = true;
+        return;
+    };
+    if unsafe_path_reason(at.os, at.data_dir).is_some() {
+        out.notes.push(NOTE_DATA_DIR.to_owned());
+        out.failed = true;
+        return;
+    }
+    // The profile id is `[a-z0-9_-]`, so it is one safe path component.
+    let leaf = at.data_dir.join("integrations").join(directory).join(profile.as_str());
+    match make_private(at.data_dir, &leaf).ok().and_then(|()| leaf.to_str().map(str::to_owned)) {
+        Some(path) => out.env.push((variable.to_owned(), path)),
+        None => {
+            out.notes.push(NOTE_ISOLATION_FAILED.to_owned());
+            out.failed = true;
+        }
+    }
+}
+
+/// Makes `leaf` and every directory between the data directory and it, each for its owner only. A link, or anything
+/// that is not a directory, is refused: nothing is made or written through it.
+fn make_private(data_dir: &Path, leaf: &Path) -> Result<(), ()> {
+    fs::create_dir_all(data_dir).map_err(|_| ())?;
+    let mut path = data_dir.to_path_buf();
+    for component in leaf.strip_prefix(data_dir).map_err(|_| ())?.components() {
+        path.push(component);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => create_private(&path).map_err(|_| ())?,
+            Err(_) => return Err(()),
+        }
+        narrow(&path)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)
+}
+
+/// Sets the mode to 0700 whatever the umask made of it, after looking again that it is a directory and no link.
+#[cfg(unix)]
+fn narrow(path: &Path) -> Result<(), ()> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = fs::symlink_metadata(path).map_err(|_| ())?;
+    if !meta.is_dir() {
+        return Err(());
+    }
+    if meta.permissions().mode() & 0o7777 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+/// The profile of a user on Windows decides who can read a directory below it; there is no mode to set.
+#[cfg(not(unix))]
+fn narrow(path: &Path) -> Result<(), ()> {
+    if fs::symlink_metadata(path).map_err(|_| ())?.is_dir() { Ok(()) } else { Err(()) }
 }

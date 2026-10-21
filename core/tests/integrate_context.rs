@@ -10,14 +10,17 @@ mod common;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use holzwave_core::integrate::args::ArgError;
 use holzwave_core::integrate::context::{
-    resolve, summary, ContextError, ContextRow, ContextState, Detection, RowState, MAX_BYTES, MAX_PANES, PANES_FILE,
+    apply_env, resolve, summary, unsafe_path_reason, Applied, AppliedFor, ContextError, ContextRow, ContextState,
+    Detection, RowState, MAX_BYTES, MAX_PANES, PANES_FILE,
 };
-use holzwave_core::integrate::kube::KUBE;
-use holzwave_core::integrate::profiles::IntegrationProfiles;
+use holzwave_core::integrate::kube::{overlay_path, ContextEntry, KUBE};
+use holzwave_core::integrate::profiles::{IntegrationProfiles, LocalFile};
+use holzwave_core::integrate::run::EnvPolicy;
+use holzwave_core::platform::Os;
 use holzwave_core::integrate::{Integration, Selection, ToolId, Validated};
 use serde_json::json;
 
@@ -630,5 +633,368 @@ fn resolve_and_summary_agree_on_production() {
         if let (ToolId::Kube, Some(context)) = (tool, resolved.selection.context.as_ref()) {
             assert_eq!(profiles.production_for(*tool, context), resolved.production.is_some(), "{selection:?}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Application: the overlay, the isolated directories and the machine-local configuration paths.
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn an_unsafe_path_is_named_by_a_fixed_reason() {
+    let linux = |p: &str| unsafe_path_reason(Os::Linux, Path::new(p));
+    let windows = |p: &str| unsafe_path_reason(Os::Windows, Path::new(p));
+    for ok in ["/home/u/.kube/config", "/a"] {
+        assert_eq!(linux(ok), None, "{ok}");
+        assert_eq!(unsafe_path_reason(Os::Macos, Path::new(ok)), None, "{ok}");
+    }
+    for bad in ["", "relative/config", "./config", "../config", "~/config", "//server/share/x", "\\\\server\\share", "/a\nb", "/a\u{0}b", "/a\u{1b}[31mb"] {
+        assert!(linux(bad).is_some(), "{bad:?} must be refused on Linux");
+    }
+    assert!(linux(&format!("/{}", "a".repeat(5000))).is_some(), "a path over 4096 bytes");
+
+    for ok in ["C:\\Users\\u\\.kube\\config", "d:/data/x", "C:\\a"] {
+        assert_eq!(windows(ok), None, "{ok}");
+    }
+    for bad in [
+        "",
+        "\\\\server\\share\\x",
+        "//server/share/x",
+        "\\\\?\\C:\\x",
+        "\\\\.\\COM1",
+        "C:x",
+        "\\bin",
+        "bin\\x",
+        "/unix/absolute",
+        "C:\\a\nb",
+    ] {
+        assert!(windows(bad).is_some(), "{bad:?} must be refused on Windows");
+    }
+    // The reason is a sentence about the kind of fault and never the path.
+    let reason = linux("relative/secret-name").expect("refused");
+    assert!(!reason.contains("secret-name"));
+}
+
+#[cfg(unix)]
+mod apply {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn walk(root: &Path, at: &Path, out: &mut BTreeMap<String, Option<Vec<u8>>>) {
+        for entry in fs::read_dir(at).expect("read_dir") {
+            let path = entry.expect("entry").path();
+            let relative = path.strip_prefix(root).expect("below the root").to_string_lossy().into_owned();
+            let meta = fs::symlink_metadata(&path).expect("metadata");
+            if meta.is_dir() {
+                out.insert(relative, None);
+                walk(root, &path, out);
+            } else {
+                out.insert(relative, Some(fs::read(&path).unwrap_or_default()));
+            }
+        }
+    }
+
+    /// Every path below `root` (directories as `None`) with the bytes of every file.
+    fn snapshot(root: &Path) -> BTreeMap<String, Option<Vec<u8>>> {
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    fn value<'a>(applied: &'a Applied, name: &str) -> Option<&'a str> {
+        applied.env.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).expect("metadata").permissions().mode() & 0o7777
+    }
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    /// The home of the person with the files that belong to the tools, which no application may touch.
+    fn tool_home() -> PathBuf {
+        let home = common::scratch_dir("context-home");
+        for (file, bytes) in [(".kube/config", "tool-owned kubeconfig"), (".talos/config", "tool-owned talosconfig"), (".azure/azureProfile.json", "tool-owned azure"), (".gam/gam.cfg", "tool-owned gam")] {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().expect("a parent")).expect("dirs");
+            fs::write(path, bytes).expect("file");
+        }
+        home
+    }
+
+    fn at<'a>(
+        data: &'a Path,
+        home: &'a str,
+        pane: Option<u64>,
+        user_env: &'a dyn Fn(&str) -> Option<String>,
+        contexts: &'a [ContextEntry],
+    ) -> AppliedFor<'a> {
+        AppliedFor { os: Os::current(), home, data_dir: data, pane, user_env, contexts }
+    }
+
+    fn prod_entry() -> ContextEntry {
+        ContextEntry::new(PROD_ARN, "cluster-prod", "user-prod", Some("old"))
+    }
+
+    #[test]
+    fn a_kubernetes_shell_gets_an_overlay_and_a_kubeconfig_value() {
+        let data = common::scratch_dir("context-overlay");
+        let home = tool_home();
+        let home_text = home.to_str().expect("text").to_owned();
+        let tool_files = snapshot(&home);
+        let contexts = [prod_entry(), ContextEntry::new("kind-dev", "kind-dev", "kind-dev", None)];
+        let user_list = |name: &str| (name == "KUBECONFIG").then(|| "/home/u/a:/home/u/b".to_owned());
+        let local = LocalFile::default();
+
+        // The pinned context and namespace are in the overlay, and the person's list follows it.
+        let resolved = resolve(&prod_profiles(), ToolId::Kube, &pick(Some("prod"), None, None)).expect("resolves");
+        let applied = apply_env(ToolId::Kube, &resolved, &local, &at(&data, &home_text, Some(3), &user_list, &contexts), true);
+        let overlay = overlay_path(&data, 3);
+        assert!(applied.notes.is_empty() && !applied.failed, "{:?}", applied.notes);
+        assert_eq!(value(&applied, "KUBECONFIG"), Some(format!("{}:/home/u/a:/home/u/b", overlay.display()).as_str()));
+        assert_eq!(applied.env.len(), 1, "KUBECONFIG and nothing else");
+        let document: serde_json::Value = serde_json::from_slice(&fs::read(&overlay).expect("the overlay")).expect("JSON");
+        assert_eq!(document["current-context"], PROD_ARN);
+        assert_eq!(
+            document["contexts"][0]["context"],
+            json!({ "cluster": "cluster-prod", "user": "user-prod", "namespace": "payments" }),
+            "the pane's namespace replaces the one the context names"
+        );
+        assert_eq!((mode(&data.join("run")), mode(&data.join("run/kube")), mode(&overlay)), (0o700, 0o700, 0o600));
+
+        // Without the person's variable the default file follows; a context's own namespace stays when none is selected.
+        let resolved = resolve(&prod_profiles(), ToolId::Kube, &pick(None, Some(PROD_ARN), None)).expect("resolves");
+        let applied = apply_env(ToolId::Kube, &resolved, &local, &at(&data, &home_text, Some(4), &no_env, &contexts), true);
+        assert_eq!(
+            value(&applied, "KUBECONFIG"),
+            Some(format!("{}:{home_text}/.kube/config", overlay_path(&data, 4).display()).as_str())
+        );
+        let document: serde_json::Value = serde_json::from_slice(&fs::read(overlay_path(&data, 4)).expect("overlay")).expect("JSON");
+        assert_eq!(document["contexts"][0]["context"]["namespace"], "old");
+
+        // A second application for the pane replaces the file and names the new context.
+        let resolved = resolve(&prod_profiles(), ToolId::Kube, &pick(None, Some("kind-dev"), None)).expect("resolves");
+        apply_env(ToolId::Kube, &resolved, &local, &at(&data, &home_text, Some(3), &no_env, &contexts), true);
+        let document: serde_json::Value = serde_json::from_slice(&fs::read(&overlay).expect("overlay")).expect("JSON");
+        assert_eq!(document["current-context"], "kind-dev");
+        assert!(document["contexts"][0]["context"].get("namespace").is_none(), "no namespace to name");
+
+        // A context that is not in the list that was read gets no overlay, and says so without naming it.
+        let resolved = resolve(&prod_profiles(), ToolId::Kube, &pick(None, Some("not-in-the-list"), None)).expect("resolves");
+        let applied = apply_env(ToolId::Kube, &resolved, &local, &at(&data, &home_text, Some(5), &no_env, &contexts), true);
+        assert!(!overlay_path(&data, 5).exists());
+        assert_eq!(value(&applied, "KUBECONFIG"), None);
+        assert_eq!(applied.notes.len(), 1, "{:?}", applied.notes);
+        assert!(!applied.notes[0].contains("not-in-the-list") && !applied.failed);
+
+        // No pane, or no selected context, or no wish for an overlay: no overlay and no variable from it.
+        let nothing = resolve(&prod_profiles(), ToolId::Kube, &Selection::default()).expect("resolves");
+        for (resolved, pane, want) in [(&resolved, None, true), (&nothing, Some(6), true), (&resolved, Some(7), false)] {
+            let applied = apply_env(ToolId::Kube, resolved, &local, &at(&data, &home_text, pane, &user_list, &contexts), want);
+            assert_eq!(value(&applied, "KUBECONFIG"), None, "pane {pane:?} want {want}");
+        }
+        assert!(!overlay_path(&data, 6).exists() && !overlay_path(&data, 7).exists());
+
+        assert_eq!(snapshot(&home), tool_files, "the tools' own files are byte-identical");
+        fs::remove_dir_all(&data).ok();
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn config_paths_from_the_local_file_become_the_tools_variables() {
+        let data = common::scratch_dir("context-local");
+        let home = tool_home();
+        let home_text = home.to_str().expect("text").to_owned();
+        let contexts = [prod_entry()];
+        let mut local = LocalFile::default();
+        local.set_config_paths(ToolId::Kube, &[PathBuf::from("/home/u/.kube/a"), PathBuf::from("/home/u/.kube/b")]).expect("kube");
+        local.set_config_paths(ToolId::Talos, &[PathBuf::from("/home/u/talos/config")]).expect("talos");
+        local.set_config_paths(ToolId::Azure, &[PathBuf::from("/home/u/az")]).expect("azure");
+        local.set_config_paths(ToolId::Gam, &[PathBuf::from("/home/u/gam")]).expect("gam");
+        let user_list = |name: &str| (name == "KUBECONFIG").then(|| "/home/u/ignored".to_owned());
+        let profiles = profiles_from(json!([
+            { "id": "plain", "tool": "azure", "name": "Plain" },
+            { "id": "plain-gam", "tool": "gam", "name": "Plain GAM" },
+        ]));
+        let resolve_for = |tool, profile: Option<&str>| {
+            resolve(&profiles, tool, &Selection { profile: profile.map(str::to_owned), ..Selection::default() }).expect("resolves")
+        };
+
+        let used = |tool: ToolId, profile: Option<&str>, local: &LocalFile, want_overlay: bool| {
+            apply_env(tool, &resolve_for(tool, profile), local, &at(&data, &home_text, Some(3), &user_list, &contexts), want_overlay)
+        };
+        assert_eq!(value(&used(ToolId::Kube, None, &local, false), "KUBECONFIG"), Some("/home/u/.kube/a:/home/u/.kube/b"));
+        assert_eq!(value(&used(ToolId::Talos, None, &local, false), "TALOSCONFIG"), Some("/home/u/talos/config"));
+        assert_eq!(value(&used(ToolId::Azure, Some("plain"), &local, false), "AZURE_CONFIG_DIR"), Some("/home/u/az"));
+        assert_eq!(value(&used(ToolId::Gam, Some("plain-gam"), &local, false), "GAMCFGDIR"), Some("/home/u/gam"));
+
+        // With an overlay the paths of this computer are the list that follows it, ahead of the shell's variable.
+        let resolved = resolve(&profiles, ToolId::Kube, &pick(None, Some(PROD_ARN), None)).expect("resolves");
+        let applied = apply_env(ToolId::Kube, &resolved, &local, &at(&data, &home_text, Some(3), &user_list, &contexts), true);
+        assert_eq!(
+            value(&applied, "KUBECONFIG"),
+            Some(format!("{}:/home/u/.kube/a:/home/u/.kube/b", overlay_path(&data, 3).display()).as_str())
+        );
+
+        // Nothing is invented when the file lists nothing.
+        let empty = LocalFile::default();
+        for tool in ToolId::ALL {
+            let applied = used(tool, None, &empty, false);
+            assert!(applied.env.is_empty() && applied.notes.is_empty(), "{tool:?}: {applied:?}");
+        }
+        fs::remove_dir_all(&data).ok();
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn isolation_gives_a_private_directory_per_profile() {
+        let data = common::scratch_dir("context-isolation");
+        let home = tool_home();
+        let home_text = home.to_str().expect("text").to_owned();
+        let tool_files = snapshot(&home);
+        let profiles = profiles_from(json!([
+            { "id": "acme", "tool": "azure", "name": "Acme", "subscription": SUBSCRIPTION, "isolated": true },
+            { "id": "other", "tool": "azure", "name": "Other", "isolated": true },
+            { "id": "plain", "tool": "azure", "name": "Plain" },
+            { "id": "corp", "tool": "gam", "name": "Corp", "section": "corp", "isolated": true },
+        ]));
+        let mut local = LocalFile::default();
+        local.set_config_paths(ToolId::Azure, &[PathBuf::from("/home/u/az")]).expect("azure");
+        local.set_config_paths(ToolId::Gam, &[PathBuf::from("/home/u/gam")]).expect("gam");
+        let run = |tool: ToolId, profile: &str| {
+            let resolved = resolve(&profiles, tool, &Selection { profile: Some(profile.into()), ..Selection::default() }).expect("resolves");
+            apply_env(tool, &resolved, &local, &at(&data, &home_text, Some(3), &no_env, &[]), false)
+        };
+
+        let acme = run(ToolId::Azure, "acme");
+        let acme_dir = data.join("integrations/azure/acme");
+        assert_eq!(value(&acme, "AZURE_CONFIG_DIR"), Some(acme_dir.to_str().expect("text")));
+        assert!(acme.notes.is_empty() && !acme.failed);
+        let other = run(ToolId::Azure, "other");
+        assert_eq!(value(&other, "AZURE_CONFIG_DIR"), Some(data.join("integrations/azure/other").to_str().expect("text")));
+        let corp = run(ToolId::Gam, "corp");
+        assert_eq!(value(&corp, "GAMCFGDIR"), Some(data.join("integrations/gam/corp").to_str().expect("text")));
+        for dir in ["integrations", "integrations/azure", "integrations/azure/acme", "integrations/azure/other", "integrations/gam", "integrations/gam/corp"] {
+            assert_eq!(mode(&data.join(dir)), 0o700, "{dir}");
+        }
+        // Asking again changes nothing and keeps what the tool wrote there.
+        fs::write(acme_dir.join("azureProfile.json"), "written by the tool after sign-in").expect("tool file");
+        assert_eq!(run(ToolId::Azure, "acme").env, acme.env);
+        assert_eq!(fs::read(acme_dir.join("azureProfile.json")).expect("kept"), b"written by the tool after sign-in");
+
+        // A profile that is not isolated uses this computer's path, and no directory is made for it.
+        let plain = run(ToolId::Azure, "plain");
+        assert_eq!(value(&plain, "AZURE_CONFIG_DIR"), Some("/home/u/az"));
+        assert!(!data.join("integrations/azure/plain").exists());
+
+        // A link in the way is never followed, and the variable is not set from the person's own directory instead.
+        let target = common::scratch_dir("context-isolation-target");
+        std::os::unix::fs::symlink(&target, data.join("integrations/azure/linked")).expect("link");
+        let linked_profiles = profiles_from(json!([{ "id": "linked", "tool": "azure", "name": "Linked", "isolated": true }]));
+        let resolved = resolve(&linked_profiles, ToolId::Azure, &Selection { profile: Some("linked".into()), ..Selection::default() }).expect("resolves");
+        let refused = apply_env(ToolId::Azure, &resolved, &local, &at(&data, &home_text, Some(3), &no_env, &[]), false);
+        assert!(refused.failed && refused.env.is_empty(), "{refused:?}");
+        assert_eq!(refused.notes.len(), 1);
+        assert!(fs::read_dir(&target).expect("target").next().is_none(), "nothing was written through the link");
+
+        assert_eq!(snapshot(&home), tool_files);
+        for dir in [data, home, target] {
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn unsafe_config_paths_are_refused_with_a_note() {
+        let data = common::scratch_dir("context-unsafe");
+        let home = tool_home();
+        let home_text = home.to_str().expect("text").to_owned();
+        let profiles = profiles_from(json!([{ "id": "acme", "tool": "azure", "name": "Acme", "isolated": true }]));
+        let mut local = LocalFile::default();
+        for tool in ToolId::ALL {
+            local.set_config_paths(tool, &[PathBuf::from("/home/u/fine")]).expect("a path of this computer");
+        }
+        let contexts = [prod_entry()];
+
+        // Read as a Windows computer: a Unix path is not a drive path there, so none of these may become a variable.
+        let windows = |tool: ToolId, profile: Option<&str>, data_dir: &Path, want_overlay: bool| {
+            let resolved = resolve(&profiles, tool, &Selection { profile: profile.map(str::to_owned), context: (tool == ToolId::Kube).then(|| PROD_ARN.to_owned()), ..Selection::default() }).expect("resolves");
+            let for_windows = AppliedFor { os: Os::Windows, home: "C:\\Users\\u", data_dir, pane: Some(3), user_env: &no_env, contexts: &contexts };
+            apply_env(tool, &resolved, &local, &for_windows, want_overlay)
+        };
+        for tool in ToolId::ALL {
+            let applied = windows(tool, None, &data, false);
+            assert!(applied.env.is_empty(), "{tool:?}: {applied:?}");
+            assert_eq!(applied.notes.len(), 1, "{tool:?}: {:?}", applied.notes);
+            assert!(!applied.notes[0].contains("/home/u/fine"), "the note does not name the path");
+        }
+        // A data directory that is not a drive path on Windows gets neither an overlay nor an isolated directory.
+        let overlay = windows(ToolId::Kube, None, &data, true);
+        assert!(overlay.env.is_empty() && !overlay_path(&data, 3).exists(), "{overlay:?}");
+        let isolated = windows(ToolId::Azure, Some("acme"), &data, false);
+        assert!(isolated.failed && isolated.env.is_empty(), "{isolated:?}");
+        assert!(fs::read_dir(&data).expect("data").next().is_none(), "nothing was created");
+
+        // One bad entry among good ones is dropped; the rest are used.
+        let mut mixed = LocalFile::default();
+        mixed.set_config_paths(ToolId::Kube, &[PathBuf::from("/home/u/a"), PathBuf::from("/home/u/b")]).expect("kube");
+        let resolved = resolve(&profiles, ToolId::Kube, &Selection::default()).expect("resolves");
+        let on_linux = apply_env(ToolId::Kube, &resolved, &mixed, &at(&data, &home_text, None, &no_env, &[]), false);
+        assert_eq!(value(&on_linux, "KUBECONFIG"), Some("/home/u/a:/home/u/b"));
+
+        // No variable that the runner denies is ever set, whatever is asked.
+        let profiles = profiles_from(json!([
+            { "id": "iso-az", "tool": "azure", "name": "A", "isolated": true },
+            { "id": "iso-gam", "tool": "gam", "name": "G", "isolated": true },
+        ]));
+        for (tool, profile) in [(ToolId::Kube, None), (ToolId::Talos, None), (ToolId::Azure, Some("iso-az")), (ToolId::Gam, Some("iso-gam"))] {
+            let resolved = resolve(&profiles, tool, &Selection { profile: profile.map(str::to_owned), context: (tool == ToolId::Kube).then(|| PROD_ARN.to_owned()), ..Selection::default() }).expect("resolves");
+            let applied = apply_env(tool, &resolved, &local, &at(&data, &home_text, Some(3), &no_env, &contexts), true);
+            for (name, value) in &applied.env {
+                for os in [Os::Linux, Os::Macos, Os::Windows] {
+                    assert!(!EnvPolicy::is_denied(name, os), "{name} is denied on {os:?}");
+                }
+                assert!(!value.is_empty() && !value.contains('\0'));
+            }
+            assert!(!applied.env.is_empty(), "{tool:?} sets its variable");
+        }
+        fs::remove_dir_all(&data).ok();
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn application_writes_only_below_the_data_directory() {
+        let data = common::scratch_dir("context-writes");
+        let home = tool_home();
+        let home_text = home.to_str().expect("text").to_owned();
+        let tool_files = snapshot(&home);
+        let contexts = [prod_entry()];
+        let profiles = profiles_from(json!([
+            { "id": "acme", "tool": "azure", "name": "Acme", "isolated": true },
+            { "id": "corp", "tool": "gam", "name": "Corp", "isolated": true },
+        ]));
+        let mut local = LocalFile::default();
+        local.set_config_paths(ToolId::Kube, &[home.join(".kube/config")]).expect("kube");
+        local.set_config_paths(ToolId::Talos, &[home.join(".talos/config")]).expect("talos");
+
+        for (tool, profile) in [(ToolId::Kube, None), (ToolId::Talos, None), (ToolId::Azure, Some("acme")), (ToolId::Gam, Some("corp"))] {
+            for want_overlay in [false, true] {
+                let selection = Selection { profile: profile.map(str::to_owned), context: (tool == ToolId::Kube).then(|| PROD_ARN.to_owned()), ..Selection::default() };
+                let resolved = resolve(&profiles, tool, &selection).expect("resolves");
+                apply_env(tool, &resolved, &local, &at(&data, &home_text, Some(3), &no_env, &contexts), want_overlay);
+            }
+        }
+
+        let written = snapshot(&data);
+        assert!(!written.is_empty());
+        for path in written.keys() {
+            assert!(path == "run" || path.starts_with("run/") || path == "integrations" || path.starts_with("integrations/"), "unexpected {path}");
+        }
+        assert!(written.contains_key("run/kube/3.json") && written.contains_key("integrations/azure/acme") && written.contains_key("integrations/gam/corp"));
+        assert_eq!(snapshot(&home), tool_files, "no tool's own file or directory changed, and nothing new appeared there");
+        fs::remove_dir_all(&data).ok();
+        fs::remove_dir_all(&home).ok();
     }
 }
