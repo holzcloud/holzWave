@@ -762,7 +762,7 @@ impl Integration for Azure {
         &SPEC
     }
 
-    fn argv(&self, verb: &Verb, _args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
+    fn argv(&self, verb: &Verb, args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
         // Only the verbs of the closed catalogue, by value: a verb of another description with the same id is refused.
         let known = SPEC.verb(verb.id).filter(|known| *known == verb).ok_or(ArgError::Unknown)?;
         let mut argv: Vec<OsString> = Vec::new();
@@ -781,6 +781,15 @@ impl Integration for Azure {
                 argv.extend(JSON_ONLY.map(OsString::from));
                 selected(selection, &mut argv);
             }
+            "set_subscription" => {
+                // The subscription is the validated argument (a GUID), never the selection and never a name.
+                let subscription = args.subscription().ok_or(ArgError::Missing)?;
+                argv.extend(["account", "set"].map(OsString::from));
+                argv.push(flag_eq("subscription", subscription.as_str()));
+                argv.push(OsString::from("--only-show-errors"));
+            }
+            // The sign-in has no flag: no tenant, no device-code switch. The terminal shows what the tool prints.
+            "login" => argv.push(OsString::from("login")),
             _ => return Err(ArgError::Unknown),
         }
         Ok(argv)

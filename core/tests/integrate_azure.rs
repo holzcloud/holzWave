@@ -488,3 +488,186 @@ fn an_array_is_no_account() {
     assert_eq!(login_state(b"{\"id\": \"x\"}"), LoginState::Unknown);
     assert_eq!(parse_version("[\"2.90.0\"]"), None);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The Local and Exec verbs, the batch-file charset and the hostile subscriptions.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn with_subscription(id: &str, text: &str) -> Result<Validated, holzwave_core::integrate::args::ArgError> {
+    let pairs = BTreeMap::from([("subscription".to_owned(), text.to_owned())]);
+    Validated::parse(verb(id), &pairs)
+}
+
+fn texts(list: Vec<OsString>) -> Vec<String> {
+    list.into_iter().map(|arg| arg.into_string().expect("an argument that is text")).collect()
+}
+
+/// Every argument list the module can build from `guid`: every verb, with and without a selected subscription.
+fn every_list(guid: &str) -> Vec<(String, Vec<OsString>)> {
+    let mut lists = Vec::new();
+    for known in SPEC.verbs {
+        for chosen in [None, Some(guid)] {
+            let args = if known.args.is_empty() { bare(known.id) } else { with_subscription(known.id, guid).expect("a guid") };
+            let list = AZURE.argv(known, &args, &selection(chosen)).expect("an argument list");
+            lists.push((format!("{} (selection {chosen:?})", known.id), list));
+        }
+    }
+    lists
+}
+
+#[test]
+fn the_local_and_exec_verbs_build_their_exact_argument_lists() {
+    let set = verb("set_subscription");
+    assert_eq!(set.effect, VerbEffect::Local, "it writes the tool's own configuration, so it goes through a card");
+    let login = verb("login");
+    assert_eq!(login.effect, VerbEffect::Exec);
+
+    let args = with_subscription("set_subscription", SUBSCRIPTION).expect("a guid");
+    let list = texts(AZURE.argv(set, &args, &selection(None)).expect("an argument list"));
+    assert_eq!(list, ["account", "set", &format!("--subscription={SUBSCRIPTION}"), "--only-show-errors"]);
+
+    // The argument names the subscription; a selection never replaces it, and an upper-case guid is written in lower case.
+    let other = "00000000-0000-4000-8000-0000000000AB";
+    let args = with_subscription("set_subscription", other).expect("a guid");
+    let list = texts(AZURE.argv(set, &args, &selection(Some(SUBSCRIPTION))).expect("an argument list"));
+    assert_eq!(list, ["account", "set", "--subscription=00000000-0000-4000-8000-0000000000ab", "--only-show-errors"]);
+
+    // The sign-in has no flag: no tenant, no device-code switch; the terminal shows what the tool prints.
+    assert_eq!(argv("login", None), ["login"]);
+    assert_eq!(argv("login", Some(SUBSCRIPTION)), ["login"]);
+
+    // The subscription argument is required.
+    assert!(AZURE.argv(set, &bare("login"), &selection(None)).is_err(), "no subscription, no argument list");
+    assert!(with_subscription("login", SUBSCRIPTION).is_err(), "the sign-in declares no argument");
+
+    // The six lists of the reads and the two others, as built.
+    assert_eq!(argv("subscriptions", Some(SUBSCRIPTION)), ["account", "list", "-o", "json", "--only-show-errors"]);
+    assert_eq!(
+        argv("groups", Some(SUBSCRIPTION)),
+        ["group", "list", "-o", "json", "--only-show-errors", &format!("--subscription={SUBSCRIPTION}")]
+    );
+    assert_eq!(argv("groups", None), ["group", "list", "-o", "json", "--only-show-errors"]);
+
+    // A verb of another description with the id of one of ours is refused.
+    let mut forged = *set;
+    forged.effect = VerbEffect::Read;
+    assert!(AZURE.argv(&forged, &args, &selection(None)).is_err());
+}
+
+#[test]
+fn a_hostile_subscription_never_changes_the_az_argument_list() {
+    let bad_guid_only = [
+        "My Subscription".to_owned(),
+        format!("{{{SUBSCRIPTION}}}"),
+        format!("{SUBSCRIPTION} "),
+        format!(" {SUBSCRIPTION}"),
+        format!("{SUBSCRIPTION}\n"),
+        format!("{SUBSCRIPTION}\u{0}"),
+        "--subscription=x".to_owned(),
+        format!("--subscription={SUBSCRIPTION}"),
+        format!("-{SUBSCRIPTION}"),
+        format!("{SUBSCRIPTION}0"),
+        SUBSCRIPTION[..35].to_owned(),
+        SUBSCRIPTION.replace('-', ""),
+        SUBSCRIPTION.replace("0000", "zzzz"),
+        format!("{SUBSCRIPTION}{}", ch(0x1b)),
+        format!("{}{SUBSCRIPTION}", ch(0x202e)),
+        format!("{}{}", &SUBSCRIPTION[..35], ch(0x200b)),
+        format!("{SUBSCRIPTION}&calc"),
+        format!("{SUBSCRIPTION}%PATH%"),
+        format!("{SUBSCRIPTION}^"),
+        format!("{SUBSCRIPTION}\" --debug"),
+        "x".repeat(5000),
+        String::new(),
+    ];
+    assert_eq!(SUBSCRIPTION.len(), 36);
+    for text in &bad_guid_only {
+        assert!(with_subscription("set_subscription", text).is_err(), "{text:?} must not be an argument");
+        let chosen = Selection { subscription: Some(text.clone()), ..Selection::default() };
+        assert!(chosen.check(ToolId::Azure).is_err(), "{text:?} must not be a selection");
+    }
+    // 37 and 35 characters.
+    assert!(with_subscription("set_subscription", &format!("{SUBSCRIPTION}a")).is_err());
+    assert!(with_subscription("set_subscription", &SUBSCRIPTION[1..]).is_err());
+    // A hostile value for a verb without that argument is refused as unknown.
+    for known in ["account", "subscriptions", "groups", "login"] {
+        assert!(with_subscription(known, "--subscription=x").is_err());
+    }
+    // The only text that is let through is a guid, and it ends up as one element of the exact shape.
+    let args = with_subscription("set_subscription", &SUBSCRIPTION.to_uppercase()).expect("a guid in upper case");
+    let list = texts(AZURE.argv(verb("set_subscription"), &args, &selection(None)).expect("an argument list"));
+    assert_eq!(list.len(), 4);
+    assert_eq!(list[2], format!("--subscription={SUBSCRIPTION}"));
+}
+
+#[test]
+fn every_argument_list_passes_the_batch_file_charset() {
+    use holzwave_core::integrate::run::check_batch_args;
+    use holzwave_core::platform::Os;
+
+    let mut count = 0;
+    for guid in [SUBSCRIPTION, "ABCDEF01-2345-4789-8ABC-DEF012345678", "ffffffff-ffff-4fff-8fff-ffffffffffff"] {
+        for (what, list) in every_list(guid) {
+            assert!(check_batch_args("az.cmd", &list, Os::Windows).is_ok(), "{what}: {list:?}");
+            assert!(check_batch_args("C:\\Tools\\AZ.CMD", &list, Os::Windows).is_ok(), "{what}: {list:?}");
+            assert!(!list.iter().any(|arg| arg.is_empty()), "{what} holds an empty argument");
+            count += 1;
+        }
+    }
+    assert_eq!(count, 3 * SPEC.verbs.len() * 2, "every verb and both selections were swept");
+    // The sweep would catch an argument outside the charset.
+    let spaced = [OsString::from("--subscription=my sub")];
+    assert!(check_batch_args("az.cmd", &spaced, Os::Windows).is_err());
+}
+
+#[test]
+fn no_argument_list_holds_a_token_clear_refresh_or_verbose_flag() {
+    let guid_flag = format!("--subscription={SUBSCRIPTION}");
+    let allowed = [
+        "account",
+        "show",
+        "list",
+        "set",
+        "group",
+        "login",
+        "-o",
+        "json",
+        "--only-show-errors",
+        guid_flag.as_str(),
+    ];
+    let never = [
+        "get-access-token",
+        "clear",
+        "--refresh",
+        "-v",
+        "--verbose",
+        "--debug",
+        "--query",
+        "--output=table",
+        "--output",
+        "--tenant",
+        "--use-device-code",
+        "--service-principal",
+        "--password",
+        "-p",
+        "--yes",
+        "-y",
+        "delete",
+        "logout",
+        "rest",
+    ];
+    for (what, list) in every_list(SUBSCRIPTION) {
+        let list = texts(list);
+        for arg in &list {
+            assert!(allowed.contains(&arg.as_str()), "{what}: {arg:?} is not in the catalogue of the module");
+            assert!(!never.contains(&arg.as_str()), "{what}: {arg:?}");
+        }
+        // Every read asks for JSON and errors only; the two others never carry the format.
+        let is_read = list.first().is_some_and(|first| first == "account" || first == "group")
+            && list.get(1).is_some_and(|second| second == "show" || second == "list");
+        if is_read {
+            assert!(list.windows(2).any(|pair| pair == ["-o", "json"]), "{what}");
+            assert!(list.iter().any(|arg| arg == "--only-show-errors"), "{what}");
+        }
+    }
+}
