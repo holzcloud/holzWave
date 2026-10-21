@@ -30,7 +30,7 @@ use std::ffi::OsString;
 use serde_json::Value;
 
 use super::args::{flag_eq, ArgError, ContextName, NodeName};
-use super::view::{self, RowBuilder, TableBuilder, ViewModel};
+use super::view::{self, KvBuilder, RowBuilder, TableBuilder, Tone, ViewModel};
 use super::{
     ArgKind, ArgSpec, CheckedSelection, Integration, IntegrationSpec, Output, ParseError, SelectKind, ToolId, Validated,
     Verb, VerbEffect, VersionProbe,
@@ -56,6 +56,15 @@ const LIST_SHOWN: usize = 8;
 
 /// What a cell shows when the output has no value for it or the value has the wrong type.
 const UNKNOWN: &str = "?";
+
+/// What the `info` view says of a role set that holds only `os:reader`.
+pub const ACCESS_READ_ONLY: &str = "read-only (os:reader)";
+
+/// What the `info` view says of a role set that includes `os:admin`.
+pub const ACCESS_FULL: &str = "full access (os:admin)";
+
+/// What the `info` view says of a role set that includes `os:operator` and not `os:admin`.
+pub const ACCESS_LIMITED: &str = "limited (os:operator)";
 
 /// The longest version text that is kept.
 const VERSION_MAX: usize = 64;
@@ -182,11 +191,11 @@ fn text<'a>(item: &'a Value, pointer: &str) -> Option<&'a str> {
     item.pointer(pointer).and_then(Value::as_str).filter(|text| !text.is_empty())
 }
 
-/// The strings of the array at `pointer`; the elements that are not strings are left out. `None` when the member is
-/// absent or not an array.
-fn strings<'a>(item: &'a Value, pointer: &str) -> Option<Vec<&'a str>> {
-    let array = item.pointer(pointer)?.as_array()?;
-    Some(array.iter().filter_map(Value::as_str).filter(|text| !text.is_empty()).collect())
+/// The non-empty strings of an array; the elements that are not strings are left out. Empty when `value` is absent or
+/// is not an array.
+fn strings(value: Option<&Value>) -> Vec<&str> {
+    let array = value.and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    array.iter().filter_map(Value::as_str).filter(|text| !text.is_empty()).collect()
 }
 
 /// The first entries of a list joined with a comma, and how many more there were. An empty list is `none`.
@@ -199,6 +208,26 @@ fn joined(list: &[&str]) -> String {
         0 => shown,
         more => format!("{shown}, +{more} more"),
     }
+}
+
+/// The cell of a list member: its strings joined, `none` for an empty array, `?` for a member that is absent, is not
+/// an array or holds elements but no string.
+fn list_cell(value: Option<&Value>) -> String {
+    let names = strings(value);
+    match value.and_then(Value::as_array) {
+        Some(array) if !array.is_empty() && names.is_empty() => String::from(UNKNOWN),
+        Some(_) => joined(&names),
+        None => String::from(UNKNOWN),
+    }
+}
+
+/// The text of a single-valued member, or `?`.
+fn text_cell(value: &Value) -> &str {
+    value.as_str().filter(|text| !text.is_empty()).unwrap_or(UNKNOWN)
+}
+
+fn flag(item: &Value, pointer: &str) -> Option<bool> {
+    item.pointer(pointer).and_then(Value::as_bool)
 }
 
 /// The text of a cell: the value, or `?`.
@@ -259,8 +288,7 @@ fn nodes_view(bytes: &[u8]) -> ViewModel {
         &[("node", "NODE"), ("hostname", "HOSTNAME"), ("type", "TYPE"), ("addresses", "ADDRESSES")],
         |item, index| {
             let hostname = text(item, "/spec/hostname");
-            let addresses = strings(item, "/spec/addresses");
-            let address_cell = addresses.as_deref().map(joined);
+            let address_cell = list_cell(item.pointer("/spec/addresses"));
             let node = text(item, "/node");
             let key = hostname.or(node).map_or_else(|| format!("object-{}", index + 1), str::to_owned);
             RowBuilder::new(
@@ -269,11 +297,237 @@ fn nodes_view(bytes: &[u8]) -> ViewModel {
                     cell(node),
                     cell(hostname),
                     cell(text(item, "/spec/machineType")),
-                    cell(address_cell.as_deref()),
+                    &address_cell,
                 ],
             )
         },
     )
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Services and machine status.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn services_view(bytes: &[u8]) -> ViewModel {
+    stream_table(
+        "Talos services",
+        bytes,
+        &[("node", "NODE"), ("service", "SERVICE"), ("state", "STATE"), ("health", "HEALTH")],
+        |item, index| {
+            let node = text(item, "/node");
+            let service = text(item, "/metadata/id");
+            let running = flag(item, "/spec/running");
+            let healthy = flag(item, "/spec/healthy");
+            // A service that reports no health says so. `unknown` is a member that is believed to exist; where it is
+            // absent the member reads as no claim.
+            let health_unknown = flag(item, "/spec/unknown") == Some(true);
+            let state = match running {
+                Some(true) => "running",
+                Some(false) => "stopped",
+                None => UNKNOWN,
+            };
+            let health = match (healthy, health_unknown) {
+                (Some(false), false) => "unhealthy",
+                (Some(true), false) => "healthy",
+                _ => "unknown",
+            };
+            let key = match (node, service) {
+                (None, None) => format!("object-{}", index + 1),
+                _ => format!("{}/{}", cell(node), cell(service)),
+            };
+            let mut row = RowBuilder::new(&key, &[cell(node), cell(service), state, health]);
+            // The output does not say which service is expected to run, so none is `danger`. A service that says it is
+            // unhealthy is a warning even when it is stopped: nothing that reports a fault is dimmed.
+            if health == "unhealthy" {
+                row.tone(Tone::Warn);
+            } else if running == Some(false) {
+                row.tone(Tone::Dim);
+            }
+            row
+        },
+    )
+}
+
+fn machine_status_view(bytes: &[u8]) -> ViewModel {
+    stream_table(
+        "Talos machine status",
+        bytes,
+        &[("node", "NODE"), ("stage", "STAGE"), ("ready", "READY")],
+        |item, index| {
+            let node = text(item, "/node");
+            let ready = flag(item, "/spec/status/ready");
+            let key = node.map_or_else(|| format!("object-{}", index + 1), str::to_owned);
+            let ready_word = match ready {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => UNKNOWN,
+            };
+            let mut row = RowBuilder::new(&key, &[cell(node), cell(text(item, "/spec/stage")), ready_word]);
+            if ready == Some(false) {
+                row.tone(Tone::Warn);
+            }
+            row
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The current context and its role.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The roles of a `roles` member and whether every element of it could be read: an array of strings, or one text of
+/// roles separated by commas or spaces. Each role is cleaned like a cell, so a role cannot be spelled with characters
+/// that the page would not show.
+fn read_roles(roles: &Value) -> (Vec<String>, bool) {
+    let clean = |text: &str| view::clean_cell(text);
+    match roles {
+        Value::Array(items) => {
+            let names = items.iter().filter_map(Value::as_str).map(clean).filter(|name| !name.is_empty()).collect();
+            (names, items.iter().all(Value::is_string))
+        }
+        Value::String(text) => {
+            let split = |c: char| c == ',' || c.is_whitespace();
+            (text.split(split).map(clean).filter(|name| !name.is_empty()).collect(), true)
+        }
+        _ => (Vec::new(), false),
+    }
+}
+
+/// What a role set allows, in words and with a tone, or `None` when nothing is claimed. A set that names the admin
+/// role is full access whatever else it holds, in any case and with any padding; read-only is only said of a set that
+/// was read in full and holds nothing but `os:reader`.
+fn access(names: &[String], readable: bool) -> Option<(String, Tone)> {
+    let has = |role: &str| names.iter().any(|name| name.trim().eq_ignore_ascii_case(role));
+    if has("os:admin") {
+        Some((String::from(ACCESS_FULL), Tone::Warn))
+    } else if has("os:operator") {
+        Some((String::from(ACCESS_LIMITED), Tone::Normal))
+    } else if !readable || names.is_empty() {
+        None
+    } else if names.iter().all(|name| name == "os:reader") {
+        Some((String::from(ACCESS_READ_ONLY), Tone::Normal))
+    } else {
+        Some((names.join(", "), Tone::Normal))
+    }
+}
+
+fn info_view(bytes: &[u8]) -> ViewModel {
+    const TITLE: &str = "Talos context";
+    let parsed = if bytes.len() <= MAX_SMALL_BYTES { serde_json::from_slice::<Value>(bytes).ok() } else { None };
+    let Some(Value::Object(object)) = parsed else {
+        return fallback(TITLE, bytes);
+    };
+    if !["context", "nodes", "endpoints", "roles"].iter().any(|member| object.contains_key(*member)) {
+        return fallback(TITLE, bytes);
+    }
+    let mut list = KvBuilder::new(TITLE);
+    if let Some(context) = object.get("context") {
+        list.row("Context", text_cell(context), Tone::Normal);
+    }
+    for (member, label) in [("nodes", "Nodes"), ("endpoints", "Endpoints")] {
+        if let Some(value) = object.get(member) {
+            list.row(label, &list_cell(Some(value)), Tone::Normal);
+        }
+    }
+    if let Some(roles) = object.get("roles") {
+        let (names, readable) = read_roles(roles);
+        let shown: Vec<&str> = names.iter().map(String::as_str).collect();
+        let roles_text = match (shown.is_empty(), readable) {
+            (true, true) => String::from("none"),
+            (true, false) => String::from(UNKNOWN),
+            _ => joined(&shown),
+        };
+        list.row("Roles", &roles_text, Tone::Normal);
+        if let Some((words, tone)) = access(&names, readable) {
+            list.row("Access", &words, tone);
+        }
+    }
+    list.finish()
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The contexts of the talosconfig.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The columns of the plain table of `config contexts`, in order.
+const CONTEXT_HEADER: [&str; 4] = ["CURRENT", "NAME", "ENDPOINTS", "NODES"];
+
+/// The words of a header line and the column where each starts. A word ends at two spaces or at the end of the line.
+fn header_columns(line: &[char]) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < line.len() {
+        if line[at] == ' ' {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        let mut end = at;
+        while at < line.len() && !(line[at] == ' ' && line.get(at + 1).is_none_or(|next| *next == ' ')) {
+            at += 1;
+            end = at;
+        }
+        out.push((start, line[start..end].iter().collect()));
+    }
+    out
+}
+
+/// The text of one column of a line, trimmed: from `from` to `to`, or to the end of the line.
+fn column_text(line: &[char], from: usize, to: Option<usize>) -> String {
+    let end = to.map_or(line.len(), |to| to.min(line.len()));
+    if from >= end {
+        return String::new();
+    }
+    line[from..end].iter().collect::<String>().trim().to_owned()
+}
+
+/// The table of `config contexts`, or `None` when the output is not that table: a header that is not exactly the four
+/// words, a row that is not laid out under its columns, a mark in the first column that is not `*`, a row with no name,
+/// a tab, or text that is not UTF-8.
+fn parse_contexts(bytes: &[u8]) -> Option<ViewModel> {
+    if bytes.len() > MAX_SMALL_BYTES {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    if text.contains('\t') {
+        return None;
+    }
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let header: Vec<char> = lines.next()?.chars().collect();
+    let columns = header_columns(&header);
+    if columns.len() != CONTEXT_HEADER.len() || columns.iter().zip(CONTEXT_HEADER).any(|((_, word), want)| word != want) {
+        return None;
+    }
+    let starts: Vec<usize> = columns.iter().map(|(start, _)| *start).collect();
+    let switch = SPEC.verb("use_context");
+    let mut table = TableBuilder::new("Talos contexts");
+    for (id, label) in [("current", "CURRENT"), ("name", "NAME"), ("endpoints", "ENDPOINTS"), ("nodes", "NODES")] {
+        table.column(id, label);
+    }
+    for line in lines {
+        let line: Vec<char> = line.chars().collect();
+        // Every column after the first starts after a space: a row that runs into the next column is not laid out
+        // under this header, and guessing where its cells end would put one context's name in another's column.
+        if starts.iter().skip(1).any(|&at| line.get(at.wrapping_sub(1)).is_some_and(|c| !c.is_whitespace())) {
+            return None;
+        }
+        let part = |n: usize| column_text(&line, starts[n], starts.get(n + 1).copied());
+        let current = match part(0).as_str() {
+            "*" => "*",
+            "" => "",
+            _ => return None,
+        };
+        let name = part(1);
+        if name.is_empty() {
+            return None;
+        }
+        let mut row = RowBuilder::new(&name, &[current, &name, &part(2), &part(3)]);
+        if let Some(verb) = switch {
+            row.action(verb, &[("context", &name)]);
+        }
+        table.push(row);
+    }
+    Some(table.finish())
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -297,17 +551,27 @@ impl Integration for Talos {
         &SPEC
     }
 
-    fn argv(&self, verb: &Verb, _args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
+    fn argv(&self, verb: &Verb, args: &Validated, selection: &CheckedSelection) -> Result<Vec<OsString>, ArgError> {
         let context = selection.context.as_ref();
+        // The node of the verb's own argument first, the node of the selection second.
+        let node = args.node().or(selection.node.as_ref());
         match verb.id {
-            "nodes" => Ok(with_flags(&["get", "members", "-o", "json"], context, selection.node.as_ref())),
+            "contexts" => Ok(with_flags(&["config", "contexts"], None, None)),
+            "info" => Ok(with_flags(&["config", "info", "-o", "json"], context, None)),
+            "nodes" => Ok(with_flags(&["get", "members", "-o", "json"], context, node)),
+            "services" => Ok(with_flags(&["get", "services", "-o", "json"], context, node)),
+            "machine_status" => Ok(with_flags(&["get", "machinestatus", "-o", "json"], context, node)),
             _ => Err(ArgError::Unknown),
         }
     }
 
     fn view(&self, verb: &Verb, stdout: &[u8]) -> Result<ViewModel, ParseError> {
         match verb.id {
+            "contexts" => Ok(parse_contexts(stdout).unwrap_or_else(|| fallback("Talos contexts", stdout))),
+            "info" => Ok(info_view(stdout)),
             "nodes" => Ok(nodes_view(stdout)),
+            "services" => Ok(services_view(stdout)),
+            "machine_status" => Ok(machine_status_view(stdout)),
             _ => Err(ParseError::Unrecognised),
         }
     }

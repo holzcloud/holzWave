@@ -6,13 +6,15 @@
 //! real tool is present and `HW_INTEGRATION_REAL=1`, that the chained meta commands parse in a scratch configuration
 //! directory. The module starts no process: the tests feed it recorded and written fixtures.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use holzwave_core::integrate::gam::{domain_json_text, parse_version, GAM, MAX_INPUT, SPEC};
+use holzwave_core::integrate::args::{ArgError, SectionName};
+use holzwave_core::integrate::gam::{domain_json_text, parse_version, GAM, MAX_INPUT, ROW_LIMIT, SPEC};
 use holzwave_core::integrate::view::{
-    TableView, TextFormat, ViewModel, MAX_CELL, MAX_COLUMNS, MAX_ROWS, MAX_TEXT,
+    TableView, TextFormat, Tone, ViewModel, MAX_CELL, MAX_COLUMNS, MAX_ROWS, MAX_TEXT,
 };
-use holzwave_core::integrate::{Integration, ParseError, Verb};
+use holzwave_core::integrate::{Integration, ParseError, Selection, ToolId, Validated, Verb, VerbEffect};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/integrations/gam").join(name);
@@ -345,7 +347,7 @@ fn the_domain_is_a_key_value_view() {
     let ViewModel::Kv(view) = &model else { panic!("kv") };
     assert_eq!(view.note(), Some("2 other members are not shown."));
     assert!(every_text(&model).iter().all(|t| !t.contains("SECRET") && !t.contains("TOKEN")));
-    assert_eq!(view.rows().iter().find(|r| r.label() == "Verified").map(|r| r.tone()), Some(holzwave_core::integrate::view::Tone::Warn));
+    assert_eq!(view.rows().iter().find(|r| r.label() == "Verified").map(|r| r.tone()), Some(Tone::Warn));
 
     // Hostile values are cleaned.
     let doc = "{\"customerDomain\":\"ex\\u001b[31mam\u{202e}ple.com\"}".as_bytes();
@@ -380,4 +382,339 @@ fn the_domain_is_a_key_value_view() {
 
 fn doc_with_secret() -> Vec<u8> {
     br#"{"customerDomain":"example.com","oauthClientSecret":"SECRET-VALUE","domainAliases":[{"domainAliasName":"a.example.com","verified":true,"extra":1}]}"#.to_vec()
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The sections.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn sections(text: &str) -> ViewModel {
+    GAM.view(verb("sections"), text.as_bytes()).expect("the sections output is read")
+}
+
+#[test]
+fn sections_are_read_leniently() {
+    // The fixture is recorded: an empty configuration directory still has a selected section.
+    let view = table(sections(&String::from_utf8(fixture("showsections.txt")).expect("text")));
+    let ids: Vec<&str> = view.columns().iter().map(|c| c.id()).collect();
+    assert_eq!(ids, ["section", "selected"]);
+    assert_eq!(view.title(), "Sections");
+    assert_eq!(view.rows().len(), 1);
+    assert_eq!(cells(&view, 0), ["DEFAULT", "*"]);
+    assert_eq!(view.rows()[0].key(), "DEFAULT");
+    assert!(view.rows()[0].actions().is_empty(), "there is no verb that switches the default of the tool");
+
+    // The mark may lead or trail, the line ends may be CRLF, blank lines do not matter.
+    let view = table(sections("Config File: /x/gam.cfg\r\n\r\n  alpha\r\n  * beta\r\n  gamma *\r\n  delta\r\n"));
+    let rows: Vec<Vec<String>> = (0..view.rows().len()).map(|r| cells(&view, r)).collect();
+    assert_eq!(rows, [["alpha", ""], ["beta", "*"], ["gamma", "*"], ["delta", ""]]);
+
+    // A path with spaces in the header line is only a header line.
+    let view = table(sections("Config File: /my files/gam.cfg\n  one *\n"));
+    assert_eq!(cells(&view, 0), ["one", "*"]);
+
+    // Any other shape is the plain-text model, never a table of guesses.
+    for (label, text) in [
+        ("no header line", "  alpha *\n"),
+        ("no section", "Config File: /x/gam.cfg\n"),
+        ("a name that is not indented", "Config File: /x/gam.cfg\nalpha\n"),
+        ("a name with a space", "Config File: /x/gam.cfg\n  my section\n"),
+        ("a star inside a name", "Config File: /x/gam.cfg\n  al*pha\n"),
+        ("only a star", "Config File: /x/gam.cfg\n  *\n"),
+        ("a sentence", "Error: no such file\n"),
+    ] {
+        let model = sections(text);
+        assert!(matches!(model, ViewModel::Text(_)), "{label}: a text model");
+        assert_clean(&model, label);
+    }
+    assert_eq!(GAM.view(verb("sections"), b"").err(), Some(ParseError::Empty));
+    assert_eq!(GAM.view(verb("sections"), b" \n\n").err(), Some(ParseError::Empty));
+
+    // Hostile names are cleaned, and a huge listing is cut at the row cap and says so.
+    let model = sections("Config File: /x\n  a\u{202e}b\u{1b}[31m *\n");
+    assert_clean(&model, "hostile name");
+    let mut long = String::from("Config File: /x\n");
+    for n in 0..3000 {
+        long.push_str(&format!("  s{n}\n"));
+    }
+    let view = table(sections(&long));
+    assert_eq!(view.rows().len(), MAX_ROWS);
+    assert!(view.truncated().is_some());
+    // Output over the text cap is not parsed.
+    let big = format!("Config File: /x\n{}", "  a\n".repeat(MAX_TEXT / 4));
+    assert!(matches!(sections(&big), ViewModel::Text(_)));
+    // Bytes that are not text give the text model.
+    assert!(matches!(GAM.view(verb("sections"), b"Config File: x\n  \xff\xfe\n"), Ok(ViewModel::Text(_))));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The argument lists.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn selection(section: Option<&str>) -> Selection {
+    Selection { section: section.map(str::to_owned), ..Selection::default() }
+}
+
+/// The argument list of a verb with its arguments and the selected section, or why it was refused.
+fn argv(id: &str, pairs: &[(&str, &str)], section: Option<&str>) -> Result<Vec<String>, ArgError> {
+    let verb = verb(id);
+    let pairs: BTreeMap<String, String> = pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+    let args = Validated::parse(verb, &pairs)?;
+    let checked = selection(section).check(ToolId::Gam)?;
+    let list = GAM.argv(verb, &args, &checked)?;
+    Ok(list.into_iter().map(|a| a.into_string().expect("every argument is text")).collect())
+}
+
+fn strings(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| (*w).to_owned()).collect()
+}
+
+#[test]
+fn the_argument_lists_put_select_and_the_row_limit_before_the_command() {
+    let fields = "primaryemail,name,suspended,orgunitpath,lastlogintime";
+    assert_eq!(
+        argv("users", &[], Some("work")),
+        Ok(strings(&["select", "work", "config", "csv_output_row_limit", "2001", "print", "users", "fields", fields]))
+    );
+    assert_eq!(
+        argv("users", &[("as_json", "true")], Some("work")),
+        Ok(strings(&[
+            "select", "work", "config", "csv_output_row_limit", "2001", "print", "users", "fields", fields,
+            "formatjson"
+        ]))
+    );
+    assert_eq!(
+        argv("users", &[("as_json", "false")], None),
+        Ok(strings(&["config", "csv_output_row_limit", "2001", "print", "users", "fields", fields]))
+    );
+    assert_eq!(argv("domain", &[], Some("work")), Ok(strings(&["select", "work", "info", "domain", "formatjson"])));
+    assert_eq!(argv("domain", &[], None), Ok(strings(&["info", "domain", "formatjson"])));
+    assert_eq!(argv("sections", &[], Some("work")), Ok(strings(&["showsections"])));
+    assert_eq!(argv("sections", &[], None), Ok(strings(&["showsections"])));
+    // The row limit is the reader's cap plus one.
+    assert_eq!(ROW_LIMIT, MAX_ROWS + 1);
+
+    // Every verb is a read that shows a view, and the catalogue is the three of the outline.
+    let ids: Vec<&str> = SPEC.verbs.iter().map(|v| v.id).collect();
+    assert_eq!(ids, ["sections", "domain", "users"]);
+    assert!(SPEC.verbs.iter().all(|v| v.effect == VerbEffect::Read && v.refresh_secs.is_none()));
+    assert_eq!(SPEC.binaries, ["gam"]);
+    assert_eq!(SPEC.windows_binaries, ["gam.exe"]);
+    assert!(SPEC.fixed_dirs.contains(&"$HOME/bin/gam7") && SPEC.fixed_dirs.contains(&"C:\\GAM7"));
+    assert_eq!(SPEC.version_probe.argv, ["version"]);
+
+    // An argument the verb does not declare, a value that is not a flag, a verb that is not the catalogue's.
+    assert_eq!(argv("users", &[("save", "true")], None), Err(ArgError::Unknown));
+    assert_eq!(argv("users", &[("as_json", "yes")], None), Err(ArgError::Shape));
+    assert_eq!(argv("domain", &[("as_json", "true")], None), Err(ArgError::Unknown));
+    let mut forged = *verb("users");
+    forged.effect = VerbEffect::Write;
+    let args = Validated::parse(&forged, &BTreeMap::new()).expect("no arguments");
+    let checked = selection(None).check(ToolId::Gam).expect("empty");
+    assert_eq!(GAM.argv(&forged, &args, &checked), Err(ArgError::Unknown));
+    let mut other = *verb("users");
+    other.id = "delete_user";
+    let args = Validated::parse(&other, &BTreeMap::new()).expect("no arguments");
+    assert_eq!(GAM.argv(&other, &args, &checked), Err(ArgError::Unknown));
+    // A selection field the tool does not select never reaches the list.
+    let wrong = Selection { context: Some("dev".to_owned()), ..Selection::default() };
+    assert_eq!(wrong.check(ToolId::Gam), Err(ArgError::NotForTool));
+}
+
+/// The words that write the tool's state or a domain, or save a choice.
+const WRITE_WORDS: &[&str] = &["save", "oauth", "create", "update", "delete", "add", "remove", "todrive"];
+
+/// Section names that an attacker, a typo or an odd file could produce.
+fn section_corpus() -> Vec<String> {
+    let mut out: Vec<String> = [
+        "work", "default", "DEFAULT", "a-b_c.d", "x", "-x", "--config", "-", "save", "SAVE", "Save", "sAvE", "verify",
+        "Verify", "default save", "work save", "work verify", "a b", ".hidden", "..", "a/b", "a;b", "a\nb", "a\0b",
+        "a\u{1b}[31m", "a\u{202e}b", "a\u{200b}b", "\u{feff}a", "a\u{a0}b", "a\tb", "", " ", "oauth", "create",
+        "update", "delete", "add", "remove", "todrive", "config", "select", "formatjson", "print", "users", "ADD",
+        "ToDrive", "save=true", "a,b", "a\"b", "a'b", "$(id)", "`id`", "a=b", "\u{e9}",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    // Plain names in bulk, so that the sweeps over the lists look at many more than the few the words above leave.
+    out.extend((0..60).map(|n| format!("section{n}")));
+    out.push("a".repeat(64));
+    out.push("a".repeat(65));
+    out.push("a".repeat(5000));
+    out
+}
+
+#[test]
+fn a_hostile_section_never_changes_the_gam_argument_list() {
+    // A section named like a keyword of the tool is refused: the tool reads the word after the name as `save` or
+    // `verify`, and a name that is a write word would put that word in the list.
+    for word in WRITE_WORDS.iter().chain(&["verify", "config", "select"]) {
+        for spelled in [(*word).to_owned(), word.to_ascii_uppercase(), format!("{}{}", &word[..1].to_ascii_uppercase(), &word[1..])] {
+            assert!(SectionName::parse(&spelled).is_err(), "{spelled} must not be a section");
+        }
+    }
+    // Words that only look like them are names.
+    for fine in ["saved", "my-save", "verify2", "work", "a.b"] {
+        assert!(SectionName::parse(fine).is_ok(), "{fine}");
+    }
+    for section in section_corpus() {
+        for id in ["users", "domain", "sections"] {
+            match argv(id, &[], Some(&section)) {
+                Err(error) => assert!(matches!(error, ArgError::Shape | ArgError::Hidden | ArgError::LeadingDash | ArgError::TooLong | ArgError::Empty), "{section:?}: {error:?}"),
+                Ok(list) => {
+                    // Only a plain word can be there, once, right after `select`, and the list does not end with `save`.
+                    if id == "sections" {
+                        assert_eq!(list, ["showsections"]);
+                    } else {
+                        assert_eq!(&list[..2], ["select", section.as_str()], "{section:?}");
+                        assert!(!list.iter().skip(2).any(|a| a == &section) || list.iter().filter(|a| *a == &section).count() >= 1);
+                        assert!(section.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-')));
+                        assert!(!section.starts_with('-') && !section.starts_with('.'));
+                    }
+                    assert!(!list.last().is_some_and(|last| last.eq_ignore_ascii_case("save")), "{section:?}");
+                }
+            }
+        }
+    }
+    // The ones the plan names.
+    assert!(argv("users", &[], Some("save")).is_err());
+    assert!(argv("users", &[], Some("default save")).is_err());
+    assert!(argv("users", &[], Some("-x")).is_err());
+    assert!(argv("users", &[], Some(&"a".repeat(65))).is_err());
+    assert!(argv("users", &[], Some(&"a".repeat(64))).is_ok());
+}
+
+#[test]
+fn no_argument_list_holds_a_write_or_save_word() {
+    let mut checked = 0;
+    let sections: Vec<Option<String>> =
+        std::iter::once(None).chain(section_corpus().into_iter().map(Some)).collect();
+    for id in ["sections", "domain", "users"] {
+        let flags: &[&[(&str, &str)]] = if id == "users" {
+            &[&[], &[("as_json", "true")], &[("as_json", "false")]]
+        } else {
+            &[&[]]
+        };
+        for pairs in flags {
+            for section in &sections {
+                let Ok(list) = argv(id, pairs, section.as_deref()) else { continue };
+                checked += 1;
+                for (at, word) in list.iter().enumerate() {
+                    assert!(
+                        !WRITE_WORDS.iter().any(|w| word.eq_ignore_ascii_case(w)),
+                        "{id} {section:?}: {word:?} at {at} in {list:?}"
+                    );
+                    assert!(!word.starts_with('-'), "{id}: no option-like word, {list:?}");
+                }
+                // `config` only ever as the one row-limit variable, `select` only first.
+                let configs: Vec<usize> = list.iter().enumerate().filter(|(_, w)| *w == "config").map(|(i, _)| i).collect();
+                match id {
+                    "users" => {
+                        assert_eq!(configs.len(), 1, "{list:?}");
+                        let at = configs[0];
+                        assert_eq!(list[at..at + 3], ["config", "csv_output_row_limit", "2001"], "{list:?}");
+                    }
+                    _ => assert!(configs.is_empty(), "{list:?}"),
+                }
+                let selects: Vec<usize> = list.iter().enumerate().filter(|(_, w)| *w == "select").map(|(i, _)| i).collect();
+                assert!(selects.is_empty() || selects == [0], "{list:?}");
+                // The first word that is not a meta command is a command the module knows.
+                let command = match id {
+                    "sections" => "showsections",
+                    "domain" => "info",
+                    _ => "print",
+                };
+                assert!(list.iter().any(|w| w == command), "{list:?}");
+            }
+        }
+    }
+    assert!(checked > 100, "the sweep looked at {checked} lists");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The real tool, offline and in a scratch configuration directory (gated).
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// GAM is a shell alias on many machines: `HW_GAM`, then the `PATH`, then `~/bin/gam7/gam`.
+fn find_gam() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |path: &Path| {
+        path.is_file() && std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    };
+    if let Some(path) = std::env::var_os("HW_GAM").map(PathBuf::from).filter(|p| p.is_absolute() && executable(p)) {
+        return Some(path);
+    }
+    let on_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("gam"))
+        .find(|candidate| executable(candidate));
+    on_path.or_else(|| {
+        let path = PathBuf::from(std::env::var_os("HOME")?).join("bin/gam7/gam");
+        executable(&path).then_some(path)
+    })
+}
+
+#[test]
+fn the_chained_meta_commands_parse_in_a_real_gam() {
+    if std::env::var("HW_INTEGRATION_REAL").ok().as_deref() != Some("1") {
+        println!("skipped: set HW_INTEGRATION_REAL=1 to run the real GAM in a scratch directory");
+        return;
+    }
+    let Some(gam) = find_gam() else {
+        println!("skipped: GAM is not installed here");
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("holzwave-gam-chain-{}", std::process::id()));
+    let (config, home) = (scratch.join("cfg"), scratch.join("home"));
+    std::fs::create_dir_all(&config).expect("scratch config directory");
+    std::fs::create_dir_all(&home).expect("scratch home directory");
+    // Only the scratch directory is ever the tool's configuration; the real one of the person is never named.
+    let run = |args: &[&str]| {
+        std::process::Command::new(&gam)
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("GAMCFGDIR", &config)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("start GAM")
+    };
+    let snapshot = || -> BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(&config)
+            .expect("list the scratch directory")
+            .map(|entry| {
+                let entry = entry.expect("entry");
+                let path = entry.path();
+                let bytes = if path.is_file() { std::fs::read(&path).unwrap_or_default() } else { Vec::new() };
+                (entry.file_name().to_string_lossy().into_owned(), bytes)
+            })
+            .collect()
+    };
+    // The first run initialises the scratch directory (it writes `gam.cfg` itself): the state to compare against.
+    let first = run(&["version"]);
+    assert!(first.status.success(), "gam version: {}", String::from_utf8_lossy(&first.stderr));
+    let before = snapshot();
+    assert!(before.contains_key("gam.cfg"), "the first run wrote the scratch gam.cfg");
+
+    // The row limit is a meta command in front of a command, applied to this process only.
+    let chained = run(&["config", "csv_output_row_limit", "5", "version"]);
+    println!("config ... version: {:?} {}", chained.status.code(), String::from_utf8_lossy(&chained.stderr));
+    assert!(chained.status.success(), "the chained meta command parses: {}", String::from_utf8_lossy(&chained.stderr));
+    assert!(String::from_utf8_lossy(&chained.stdout).starts_with("GAM "), "and the command after it runs");
+
+    // A section that does not exist is refused and named.
+    let missing = run(&["select", "zzz", "version"]);
+    let message = format!("{}{}", String::from_utf8_lossy(&missing.stdout), String::from_utf8_lossy(&missing.stderr));
+    println!("select zzz version: {:?} {message}", missing.status.code());
+    assert!(!missing.status.success(), "an unknown section is an error");
+    assert!(message.contains("zzz"), "the error names the section: {message}");
+
+    // The existing one is selected for the one process, and the tool's files are byte for byte what they were.
+    let selected = run(&["select", "default", "config", "csv_output_row_limit", "5", "version"]);
+    assert!(selected.status.success(), "select and config chain: {}", String::from_utf8_lossy(&selected.stderr));
+    assert_eq!(snapshot(), before, "no meta command in front of a command wrote the configuration directory");
+    std::fs::remove_dir_all(&scratch).ok();
 }

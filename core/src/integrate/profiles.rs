@@ -23,9 +23,12 @@ use serde::de::value::MapAccessDeserializer;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
-use super::args::{ContextName, Namespace, NodeName, ProfileId, SectionName, SubscriptionId};
+use super::args::{ContextName, EnvName, Namespace, NodeName, ProfileId, SectionName, SubscriptionId};
+use super::run::EnvPolicy;
 use super::{CheckedSelection, SelectKind, ToolId};
+use crate::ai::tools::is_hidden;
 use crate::persist::{backup_bad, bad_path, read_limited, write_atomic};
+use crate::platform::Os;
 
 /// The synced file of profiles.
 pub const FILE: &str = "integrations.json";
@@ -37,6 +40,42 @@ pub const MAX_BYTES: u64 = 256 * 1024;
 pub const MAX_PROFILES: usize = 64;
 /// The version of both files.
 pub const VERSION: u32 = 1;
+/// The most characters in the display name of a profile.
+pub const MAX_NAME: usize = 64;
+/// The most plain environment variables of a profile.
+pub const MAX_ENV: usize = 32;
+/// The most secret variable names of a profile.
+pub const MAX_SECRET_NAMES: usize = 8;
+/// The most bytes of a plain environment value.
+pub const MAX_VALUE: usize = 1024;
+
+/// Names that a synced profile may not set because they make a tool, a pager or the shell of a pane start another
+/// program, read another start-up file or load another piece of code (a tool opens the editor for a diff, a pager
+/// runs a command, the shell reads the file `ZDOTDIR` names, `AZURE_EXTENSION_DIR` is Python code the Azure tool
+/// imports, `SSLKEYLOGFILE` writes the keys of every connection to a file). They are refused in the values and the
+/// secret names of a synced profile only: the runner's own deny rule ([`EnvPolicy::is_denied`]) leaves them alone, so
+/// the person's own `EDITOR` or `HOME` still reaches the child from the inherited environment.
+pub const PROGRAM_NAMES: [&str; 15] = [
+    "BROWSER",
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "SHELL",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PROMPT_COMMAND",
+    "ZDOTDIR",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "KUBE_EDITOR",
+    "KUBECTL_EXTERNAL_DIFF",
+    "AZURE_EXTENSION_DIR",
+    "SSLKEYLOGFILE",
+];
+
+/// The names the app sets itself from its own state (the isolation of a pane, the pinned selection). The runner refuses
+/// them in a profile too; the runner keeps its own copy, and a test holds the two lists equal.
+pub const APP_SET_NAMES: [&str; 5] = ["KUBECONFIG", "TALOSCONFIG", "AZURE_CONFIG_DIR", "GAMCFGDIR", "GAMCFGSECTION"];
 
 /// The most bytes of a damaged file that are copied to `.bad`; a larger one is renamed instead of copied, so that a
 /// hostile file cannot fill the disk twice.
@@ -203,28 +242,12 @@ impl fmt::Debug for IntegrationProfile {
     }
 }
 
-/// Whether a tool takes a selection field.
-fn belongs(tool: ToolId, kind: SelectKind) -> bool {
-    tool.selects().contains(&kind)
-}
-
-/// A raw profile as a typed one. A note names the profile and the field and never a value; the id is named only when
-/// it is valid, otherwise the position stands in for it.
+/// A raw profile as a typed one: every value goes through the validator of its kind. A note names the profile and the
+/// field and never a value; the id is named only when it is valid, otherwise the position stands in for it. The rules
+/// that look at the profile as a whole are [`check_profile`]'s.
 fn convert(raw: RawProfile, nth: usize) -> Result<IntegrationProfile, String> {
     let id = ProfileId::parse(&raw.id).map_err(|_| format!("profile {nth}: the id is not valid"))?;
     let tool = raw.tool;
-    let fields = [
-        (SelectKind::Context, "context", &raw.context),
-        (SelectKind::Namespace, "namespace", &raw.namespace),
-        (SelectKind::Subscription, "subscription", &raw.subscription),
-        (SelectKind::Section, "section", &raw.section),
-        (SelectKind::Node, "node", &raw.node),
-    ];
-    for (kind, field, value) in fields {
-        if value.is_some() && !belongs(tool, kind) {
-            return Err(format!("profile {}: {field} does not belong to a {} profile", id.as_str(), tool.as_str()));
-        }
-    }
     let bad = |field: &str| format!("profile {}: {field} is not valid", id.as_str());
     Ok(IntegrationProfile {
         context: raw.context.as_deref().map(ContextName::parse).transpose().map_err(|_| bad("context"))?,
@@ -322,18 +345,44 @@ impl IntegrationProfiles {
         self.items.iter().find(|profile| profile.id.as_str() == id)
     }
 
-    /// Why the set cannot be used, or `Ok`. The note names profile ids and fields and never a value.
+    /// Why the set cannot be used, or `Ok`: at most 64 profiles, every id once, and every profile by
+    /// [`check_profile`]. The note names profile ids and fields and never a value.
     pub fn validate(&self) -> Result<(), String> {
+        if self.items.len() > MAX_PROFILES {
+            return Err(format!("the file holds more than {MAX_PROFILES} profiles"));
+        }
+        for (at, profile) in self.items.iter().enumerate() {
+            if self.items[..at].iter().any(|earlier| earlier.id == profile.id) {
+                return Err(format!("profile {}: the id is used twice", profile.id.as_str()));
+            }
+            check_profile(profile)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the file of this set stays within [`MAX_BYTES`]. Every field is bounded, and a set that is within every
+    /// bound can still be larger than the file may be, so a set that does not fit is never written: the next start
+    /// would refuse the whole file.
+    fn fits(&self) -> Result<(), String> {
+        if self.to_json().len() as u64 > MAX_BYTES {
+            return Err(format!("the profiles would be larger than {MAX_BYTES} bytes"));
+        }
         Ok(())
     }
 
     /// Reads the text of a file. `Err` is the note: a fixed sentence built from a position, an id and a field name.
     pub fn parse(text: &str) -> Result<Self, String> {
+        if text.len() as u64 > MAX_BYTES {
+            return Err(format!("{FILE} is larger than {MAX_BYTES} bytes"));
+        }
         let probe: Object<Probe> = serde_json::from_str(text).map_err(|e| read_note(&e))?;
         if probe.0.version != Some(serde_json::json!(VERSION)) {
             return Err(format!("{FILE} does not have the version {VERSION}"));
         }
         let Object(raw): Object<RawFile> = serde_json::from_str(text).map_err(|e| read_note(&e))?;
+        if raw.profiles.len() > MAX_PROFILES {
+            return Err(format!("the file holds more than {MAX_PROFILES} profiles"));
+        }
         let mut items = Vec::with_capacity(raw.profiles.len());
         for (at, Object(profile)) in raw.profiles.into_iter().enumerate() {
             items.push(convert(profile, at + 1)?);
@@ -357,6 +406,7 @@ impl IntegrationProfiles {
         let path = dir.join(FILE);
         let note = match read_limited(&path, MAX_BYTES) {
             Ok(None) => return (Self::default(), Vec::new()),
+            Ok(Some(bytes)) if bytes.is_empty() => return (Self::default(), Vec::new()),
             Ok(Some(bytes)) => match String::from_utf8(bytes) {
                 Ok(text) => match Self::parse(&text) {
                     Ok(set) => return (set, Vec::new()),
@@ -366,7 +416,7 @@ impl IntegrationProfiles {
             },
             Err(e) => match e.kind() {
                 io::ErrorKind::InvalidData => format!("{FILE} is larger than {MAX_BYTES} bytes"),
-                io::ErrorKind::InvalidInput => format!("{FILE} is not a regular file"),
+                io::ErrorKind::InvalidInput => return (Self::default(), vec![format!("{FILE} is not a regular file")]),
                 _ => return (Self::default(), vec![format!("{FILE} cannot be read")]),
             },
         };
@@ -379,7 +429,7 @@ impl IntegrationProfiles {
 
     /// Writes `<dir>/integrations.json` atomically. A set that would not load again is not written.
     pub fn save(&self, dir: &Path) -> io::Result<()> {
-        if self.validate().is_err() {
+        if self.validate().and_then(|()| self.fits()).is_err() {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "the profiles are not valid and are not written"));
         }
         fs::create_dir_all(dir)?;
@@ -393,7 +443,7 @@ impl IntegrationProfiles {
             Some(slot) => *slot = profile,
             None => self.items.push(profile),
         }
-        self.validate().inspect_err(|_| self.items = before)
+        self.validate().and_then(|()| self.fits()).inspect_err(|_| self.items = before)
     }
 
     /// Removes the profile with this id; says whether there was one.
@@ -419,4 +469,103 @@ fn keep_bad(path: &Path) -> bool {
         Ok(meta) if meta.is_file() => fs::rename(path, bad_path(path)).is_ok(),
         _ => false,
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The rules of one profile.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Whether a synced profile may not use `name` for a variable: not a variable name, denied by the runner's rule for
+/// either operating-system family (the file is valid on every platform or on none, and Windows reads names without
+/// regard to case), one the app sets itself, or one that starts another program. The deny rule is asked before the
+/// shape, so that a name Windows would fold onto a denied one is refused for that reason too.
+fn name_refused(name: &str) -> bool {
+    EnvPolicy::is_denied(name, Os::Windows)
+        || EnvPolicy::is_denied(name, Os::Macos)
+        || APP_SET_NAMES.contains(&name)
+        || PROGRAM_NAMES.contains(&name)
+        || EnvName::parse(name).is_err()
+}
+
+/// How a variable is named in a note: by its name when that is a valid variable name (which holds no hostile text),
+/// otherwise as "an env name".
+fn named(label: &str, name: &str) -> String {
+    if EnvName::parse(name).is_ok() { format!("{label} {name}") } else { "an env name".to_owned() }
+}
+
+/// Whether a value looks like the path of this computer or another: it starts with `/`, `~/`, two backslashes, or a
+/// drive letter, a colon and a separator. Paths belong in the machine-local file and never travel.
+fn looks_like_a_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.starts_with('/')
+        || value.starts_with("~/")
+        || value.starts_with("\\\\")
+        || (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\'))
+}
+
+/// What is wrong with a plain value, as the end of a note.
+fn value_problem(value: &str) -> Option<&'static str> {
+    if value.len() > MAX_VALUE {
+        Some("a value that is too long")
+    } else if value.chars().any(is_hidden) {
+        Some("a value with a control or invisible character")
+    } else if looks_like_a_path(value) {
+        Some("a value that looks like a path")
+    } else {
+        None
+    }
+}
+
+/// The rules of a profile on its own, in this order: the name, the selection fields the tool does not take, `isolated`,
+/// the plain variables, the secret names. The note names the profile and the field and never a value.
+fn check_profile(profile: &IntegrationProfile) -> Result<(), String> {
+    let at = profile.id.as_str();
+    let fail = |what: String| Err(format!("profile {at}: {what}"));
+    let tool = profile.tool;
+
+    let name_chars = profile.name.chars().count();
+    if name_chars == 0 || name_chars > MAX_NAME || profile.name.chars().any(is_hidden) {
+        return fail("name is not valid".into());
+    }
+    let selection = [
+        (SelectKind::Context, "context", profile.context.is_some()),
+        (SelectKind::Namespace, "namespace", profile.namespace.is_some()),
+        (SelectKind::Subscription, "subscription", profile.subscription.is_some()),
+        (SelectKind::Section, "section", profile.section.is_some()),
+        (SelectKind::Node, "node", profile.node.is_some()),
+    ];
+    for (kind, field, set) in selection {
+        if set && !tool.selects().contains(&kind) {
+            return fail(format!("{field} is not used by {} profiles", tool.as_str()));
+        }
+    }
+    if profile.isolated && !matches!(tool, ToolId::Azure | ToolId::Gam) {
+        return fail("isolated is only for azure and gam profiles".into());
+    }
+    if profile.env.len() > MAX_ENV {
+        return fail(format!("env has more than {MAX_ENV} variables"));
+    }
+    for (name, value) in &profile.env {
+        if name_refused(name) {
+            return fail(format!("{} is not allowed", named("env", name)));
+        }
+        if let Some(problem) = value_problem(value) {
+            return fail(format!("env {name} has {problem}"));
+        }
+    }
+    if profile.secret_env.len() > MAX_SECRET_NAMES {
+        return fail(format!("secret_env has more than {MAX_SECRET_NAMES} names"));
+    }
+    for (index, name) in profile.secret_env.iter().enumerate() {
+        if name_refused(name) {
+            return fail(format!("{} is not allowed", named("secret_env", name)));
+        }
+        if profile.secret_env[..index].contains(name) {
+            return fail(format!("secret_env {name} is listed twice"));
+        }
+        if profile.env.contains_key(name) {
+            return fail(format!("secret_env {name} is also a plain variable"));
+        }
+    }
+    Ok(())
 }

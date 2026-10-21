@@ -172,6 +172,9 @@ pub struct PaneSpec {
     /// holds: the pane ends with its program. It is for a pane whose program is a tool and whose last line explains a
     /// failure: a pane that vanished with it would leave nothing to read.
     pub linger: Option<Duration>,
+    /// Names the program does not inherit from the app's environment (see [`SpawnOptions::env_remove`]): applied before
+    /// `env`, so a name that is in both is set. Empty (the default) removes nothing. Not used for an SSH pane.
+    pub env_remove: Vec<String>,
 }
 
 impl PaneSpec {
@@ -198,6 +201,7 @@ impl PaneSpec {
             blank: false,
             env: Vec::new(),
             linger: None,
+            env_remove: Vec::new(),
         }
     }
 
@@ -1227,6 +1231,13 @@ where
         return Ok((engine, Box::new(link)));
     }
     let (program, args, cwd) = spawn_command(spec, &|key| std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()));
+    let pty = Pty::spawn_with(&spawn_options(spec, program, args, cwd))?;
+    Ok((engine, Box::new(pty)))
+}
+
+/// The options the local program of `spec` is started with: the command from [`spawn_command`], the grid, the extra
+/// variables of the spec and the names it removes.
+fn spawn_options(spec: &PaneSpec, program: String, args: Vec<String>, cwd: Option<PathBuf>) -> SpawnOptions {
     let mut options = SpawnOptions::new(program, spec.cols, spec.rows).args(args).cell_px(spec.cell_px.0, spec.cell_px.1);
     if let Some(dir) = cwd {
         options = options.cwd(dir);
@@ -1234,8 +1245,7 @@ where
     for (key, value) in &spec.env {
         options = options.env(key, value);
     }
-    let pty = Pty::spawn_with(&options)?;
-    Ok((engine, Box::new(pty)))
+    options.env_remove(spec.env_remove.iter().cloned())
 }
 
 /// The program, the arguments and the working directory the child process is started with. As the spec says them, except
@@ -1449,6 +1459,33 @@ mod tests {
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn a_pane_spec_without_the_new_fields_builds_the_same_spawn_options() {
+        let mut spec = PaneSpec::new("/bin/zsh", 80, 24).args(["-l"]).cwd("/home/a");
+        spec.cell_px = (9, 18);
+        spec.env = vec![("HOLZWAVE_PANE".into(), "3".into())];
+        assert_eq!((spec.linger, spec.env_remove.len()), (None, 0), "the new fields default to nothing");
+
+        let (program, args, cwd) = spawn_command(&spec, &no_env);
+        let built = spawn_options(&spec, program, args, cwd);
+        // What `start` built before the fields existed, written out.
+        let before = SpawnOptions::new("/bin/zsh", 80, 24)
+            .args(["-l"])
+            .cell_px(9, 18)
+            .cwd("/home/a")
+            .env("HOLZWAVE_PANE", "3");
+        let (built_text, before_text) = (format!("{built:?}"), format!("{before:?}"));
+        assert_eq!(built_text.replace(", env_remove: []", ""), before_text.replace(", env_remove: []", ""));
+        assert_eq!(built.child_env(no_env), before.child_env(no_env));
+
+        // With removals the same options carry them, and nothing else changes.
+        spec.env_remove = vec!["HOME".into()];
+        let (program, args, cwd) = spawn_command(&spec, &no_env);
+        let removing = spawn_options(&spec, program, args, cwd);
+        assert_eq!(removing.child_env(no_env), before.child_env(no_env));
+        assert_ne!(format!("{removing:?}"), before_text);
     }
 
     #[test]

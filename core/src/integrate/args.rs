@@ -245,8 +245,16 @@ impl SubscriptionId {
     }
 }
 
+/// Words that are never a section name, in any letter case. GAM reads the word after `select <section>` as `save` or
+/// `verify`, so a section with such a name would be read as a keyword; the other words are the ones no argument list of
+/// the tool may hold (they write a domain or the tool's own state, or are the meta commands the lists are built from),
+/// so a section cannot put one of them into a list either.
+const RESERVED_SECTION_WORDS: &[&str] =
+    &["save", "verify", "config", "select", "oauth", "create", "update", "delete", "add", "remove", "todrive"];
+
 name_kind! {
-    /// A section of a GAM configuration file: 1 to 64 of letters, digits, `_`, `.` and `-`, not starting with `.`.
+    /// A section of a GAM configuration file: 1 to 64 of letters, digits, `_`, `.` and `-`, not starting with `.`, and
+    /// not one of the words GAM reads as a keyword (`save`, `verify`) or that no argument list may hold.
     SectionName
 }
 
@@ -256,6 +264,9 @@ impl SectionName {
         base(value, SECTION_MAX)?;
         let charset = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-');
         if value.starts_with('.') || !value.bytes().all(charset) {
+            return Err(ArgError::Shape);
+        }
+        if RESERVED_SECTION_WORDS.iter().any(|word| value.eq_ignore_ascii_case(word)) {
             return Err(ArgError::Shape);
         }
         Ok(Self(value.to_owned()))

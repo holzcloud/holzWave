@@ -239,3 +239,57 @@ fn a_held_wait_after_the_end_of_the_output_waits_for_a_control_message_and_does_
     queue.close();
     assert_eq!(queue.pop_held(Duration::from_secs(1)), Popped::Closed);
 }
+
+/// Run `fake` in a pane with this environment handling and return the environment the fake recorded.
+fn run_and_record(
+    fake: &FakeCli,
+    env: &[(&str, &str)],
+    env_remove: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let probe = Probe::default();
+    let spec = PaneSpec {
+        env: env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+        env_remove: env_remove.iter().map(|name| (*name).to_owned()).collect(),
+        ..tool_spec(fake, None)
+    };
+    let pane = spawn(spec, &probe);
+    assert!(wait_until(WAIT, || !probe.exits().is_empty()), "the tool did not finish: {:?}", probe.events());
+    assert!(pane.join(Duration::from_secs(5)));
+    fake.env()
+}
+
+#[test]
+fn removed_names_do_not_reach_the_child() {
+    assert!(std::env::var_os("HOME").is_some(), "the test needs a variable that always exists");
+    let dir = Scratch::new();
+    let fake = FakeCli::new(&dir.0, "kubectl");
+
+    let without = run_and_record(&fake, &[("HW_PROBE", "1")], &["HOME"]);
+    assert!(!without.contains_key("HOME"), "HOME was removed: {:?}", without.keys().collect::<Vec<_>>());
+    assert_eq!(without.get("HW_PROBE").map(String::as_str), Some("1"), "the set variable arrives");
+    assert_eq!(without.get("TERM").map(String::as_str), Some("xterm-256color"), "the pane's own variables stay");
+
+    let with = run_and_record(&fake, &[("HW_PROBE", "1")], &[]);
+    assert!(with.contains_key("HOME"), "without a removal the child inherits HOME");
+}
+
+#[test]
+fn a_set_variable_wins_over_a_removal() {
+    let dir = Scratch::new();
+    let fake = FakeCli::new(&dir.0, "kubectl");
+    // Not `HOME`: the pty library starts the child in the home directory when no directory is given, and a home that does
+    // not exist would stop the start for a reason that has nothing to do with the rule.
+    let seen = run_and_record(&fake, &[("HW_BOTH_8F2A", "set")], &["HW_BOTH_8F2A"]);
+    assert_eq!(seen.get("HW_BOTH_8F2A").map(String::as_str), Some("set"));
+}
+
+#[test]
+fn an_unusable_removal_is_ignored() {
+    let dir = Scratch::new();
+    let fake = FakeCli::new(&dir.0, "kubectl");
+    // An empty name, a name with `=` and a name with NUL are no variable names: they are skipped, the valid name next to
+    // them is applied, and a name that is not present is not an error.
+    let seen = run_and_record(&fake, &[], &["", "A=B", "HOME=/x", "WITH\0NUL", "HW_NOT_THERE_8F2A", "HOME"]);
+    assert!(!seen.contains_key("HOME"), "the valid removal next to the unusable ones still applies");
+    assert!(seen.contains_key("PATH") || seen.contains_key("TERM"), "the child ran with the rest of its environment");
+}
