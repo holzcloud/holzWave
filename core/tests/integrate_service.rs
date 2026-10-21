@@ -1023,3 +1023,43 @@ fn nothing_that_starts_a_process_is_outside_the_runner() {
     let gate = "#[cfg(not(any(target_os = \"ios\", target_os = \"android\")))]\nmod spawn {";
     assert!(run.contains(gate), "the runner's spawn code is behind the mobile gate the service relies on");
 }
+
+// ---- found while reading the finished service back ----------------------------------------------------------
+
+#[test]
+fn a_later_read_of_the_default_verb_updates_the_default() {
+    let rig = Rig::new();
+    let original = fixture("kubectl/config_view.json");
+    let _kubectl = FakeCli::new(&rig.bin, "kubectl").prints(&original);
+    let service = rig.service();
+    service.run_view("kube", "contexts", None, &args(&[])).expect("the first read");
+    let kube = |service: &IntegrationService| {
+        service.context_rows(None, false).into_iter().find(|row| row.tool == ToolId::Kube).expect("a row")
+    };
+    assert_eq!(kube(&service).context.as_deref(), Some("dev"));
+
+    // The person changes the current context with kubectl itself. The next read of the default verb starts from the
+    // default the first read learned, and that is still the tool's own selection, not a choice of the person's.
+    let changed = original.replace("\"current-context\": \"dev\"", "\"current-context\": \"kind-test\"");
+    assert_ne!(changed, original, "the fixture names its current context the way the test expects");
+    let _kubectl = FakeCli::new(&rig.bin, "kubectl").prints(&changed);
+    std::thread::sleep(CACHE_PAUSE);
+    service.run_view("kube", "contexts", None, &args(&[])).expect("the second read");
+    let row = kube(&service);
+    assert_eq!(row.context.as_deref(), Some("kind-test"), "the default follows the tool");
+    assert_eq!(row.namespace.as_deref(), Some("test"));
+    assert!(!row.stale);
+}
+
+#[test]
+fn a_card_that_was_closed_can_be_cancelled() {
+    let rig = Rig::new();
+    let fake = counted(FakeCli::new(&rig.bin, "kubectl").prints("deleted\n"));
+    let service = rig.service();
+    let card = service.prepare("kube", "delete_pod", None, &args(&[("pod", "api-0")])).expect("a card");
+    assert!(service.cancel(&card.ticket), "there was a ticket");
+    assert!(!service.cancel(&card.ticket), "and now there is none");
+    let fault = service.confirm(&card.ticket, &card.hash).expect_err("a cancelled card approves nothing");
+    assert_eq!(fault.code, FaultCode::Ticket);
+    assert_eq!(runs(&fake), 0);
+}

@@ -1083,10 +1083,15 @@ impl IntegrationService {
     }
 
     /// Stores the tool's own selection when this read was a read of the tool's own state: the default verb, with no
-    /// profile and no selection of its own (a selection changes what the verb shows, so it would not be the tool's).
+    /// profile and no selection of the person's own (a selection changes what the verb shows, so it would not be the
+    /// tool's). A selection that is only the default the service learned earlier still is the tool's own, so a later
+    /// read follows the tool when it was changed outside holzWave.
     fn learn_default(&self, request: &Request, stdout: &[u8]) {
         let Some(read) = request.integration.read_default(request.verb, stdout) else { return };
-        if request.resolved.selection != CheckedSelection::default() {
+        let used = selection_text(&request.resolved.selection);
+        let tools_own = used == Selection::default()
+            || self.context.default_of(request.tool).is_some_and(|(default, _)| default == used);
+        if !tools_own {
             return;
         }
         if read.selection != Selection::default() {
@@ -1230,6 +1235,11 @@ impl IntegrationService {
         self.request(tool, verb, args, &selection, Lane::Card)?;
         self.found(tool)?;
         self.tickets.prepare(self, tool, verb, pane, args).map_err(ticket_fault)
+    }
+
+    /// Drops the ticket of a card that was closed; says whether there was one.
+    pub fn cancel(&self, ticket: &str) -> bool {
+        self.tickets.cancel(ticket)
     }
 
     /// The answer of the window to a card. The ticket is resolved again from the person's selection as it is now; any
@@ -1858,4 +1868,43 @@ fn launch_label(verb: &Verb, target: &[(String, String)], production: Option<&st
         label = format!("{label} ({})", clean_cell(name));
     }
     label.chars().take(128).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The probe environment of a test: the three variables the detector's probe gets.
+    fn probe_env() -> Vec<(OsString, OsString)> {
+        let home = std::env::temp_dir().into_os_string();
+        let pairs = [("HOME", home), ("USER", "tester".into()), ("SHELL", "/bin/sh".into())];
+        pairs.into_iter().map(|(name, value)| (OsString::from(name), value)).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_login_shell_is_asked_for_its_path_through_the_runner_and_only_where_it_may_be() {
+        let os = Os::current();
+        let dirs = login_shell_path(os, false, Some("/bin/sh"), &probe_env());
+        assert!(!dirs.is_empty(), "a login shell has a PATH");
+        for dir in &dirs {
+            assert!(platform::is_absolute_path(os, dir) && Path::new(dir).is_dir(), "{dir}");
+        }
+        let flatpak = login_shell_path(os, true, Some("/bin/sh"), &probe_env());
+        assert!(flatpak.is_empty(), "nothing starts in a Flatpak build");
+        let bare = login_shell_path(os, false, Some("zsh"), &probe_env());
+        assert!(bare.is_empty(), "a shell that is not a path is not asked");
+        assert!(login_shell_path(os, false, None, &probe_env()).is_empty());
+    }
+
+    #[test]
+    fn the_facts_of_the_real_machine_do_not_print_their_environment() {
+        let shell = ShellLaunch { program: "/bin/sh".into(), args: Vec::new() };
+        let facts = HostFacts::system(&std::env::temp_dir(), shell);
+        if let Ok(path) = std::env::var("PATH") {
+            assert_eq!(facts.env("PATH"), Some(path.clone()));
+            assert!(!format!("{facts:?}").contains(&path), "the debug text names no variable's value");
+        }
+        assert_eq!(facts.env("HW_SURELY_NOT_SET_ANYWHERE"), None);
+    }
 }
