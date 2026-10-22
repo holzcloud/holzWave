@@ -119,8 +119,10 @@ run_tests() {
     log=$(mktemp "${TMPDIR:-/tmp}/holzwave-linux-test.XXXXXX") || exit 2
     code=$(mktemp "${TMPDIR:-/tmp}/holzwave-linux-test-code.XXXXXX") || exit 2
     echo "+ docker run $IMAGE cargo test --locked --no-fail-fast $*"
+    # --init: the container's first process reaps orphans, as init does on a real machine. Without it a killed child that
+    # was orphaned stays a zombie and still answers `kill -0`, which the runner tests read as "not gone".
     tree_stream | {
-        docker run --rm -i ${PLATFORM:+--platform "$PLATFORM"} \
+        docker run --rm -i --init ${PLATFORM:+--platform "$PLATFORM"} \
             -v holzwave-linux-cargo-registry:/root/.cargo/registry \
             -v holzwave-linux-cargo-git:/root/.cargo/git \
             -v holzwave-linux-target$SUFFIX:/work/target \
