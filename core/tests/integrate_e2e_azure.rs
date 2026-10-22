@@ -640,11 +640,14 @@ mod pane {
 
     /// The card of the sign-in, its confirmation and the pane the launch makes: `Launch::apply_to` is the one place a
     /// launch becomes a pane, and the pane runs the fake in a real PTY with the real engine.
-    fn sign_in(rig: &Rig, service: &IntegrationService, probe: &Probe) -> (Launch, PaneHandle) {
+    fn sign_in(rig: &Rig, service: &IntegrationService, probe: &Probe, fake: &FakeCli) -> (Launch, PaneHandle) {
         let card = service.prepare("azure", "login", None, &args(&[])).expect("the card of the sign-in");
         let Done::Launch(launch) = service.confirm(&card.ticket, &card.hash).expect("a launch") else {
             panic!("an Exec verb confirms into a launch")
         };
+        // Checked here, before the pane exists: once the pane is started the fake may already have run, and on a fast
+        // machine it has.
+        assert!(!fake.started(), "the confirm started nothing: the pane does");
         assert!(launch.program.starts_with(&rig.bin), "the program is the one the detector found");
         let mut spec = PaneSpec::new("/bin/zsh", 100, 24);
         spec.env = vec![("HOLZWAVE_TOKEN".into(), "app-token".into())];
@@ -672,8 +675,7 @@ mod pane {
         service.cancel(&card.ticket);
 
         let probe = Probe::default();
-        let (launch, pane) = sign_in(&rig, &service, &probe);
-        assert!(!fake.started(), "the confirm started nothing: the pane does");
+        let (launch, pane) = sign_in(&rig, &service, &probe, &fake);
         assert_eq!(launch.args, ["login"]);
         assert_eq!(launch.program, fake.path());
         assert!(launch.env.iter().all(|(name, _)| !name.starts_with("HOLZWAVE_")), "no variable of the app");
@@ -706,7 +708,7 @@ mod pane {
             FakeCli::new(&rig.bin, "az").prints_stderr("ERROR: Unable to reach the sign-in page.\n").exits(1);
         let service = rig.service_over(facts_with_the_real_environment(&rig));
         let probe = Probe::default();
-        let (_launch, pane) = sign_in(&rig, &service, &probe);
+        let (_launch, pane) = sign_in(&rig, &service, &probe, &fake);
 
         assert!(wait_until(WAIT, || !probe.helds().is_empty()), "no Held event: {:?}", probe.events());
         assert!(probe.has_text("ERROR: Unable to reach the sign-in page."), "the tool's line stays on screen");
