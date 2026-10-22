@@ -1,0 +1,148 @@
+{
+  "fetched": 1760000000,
+  "rows": [
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "kube"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "talos"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "signed_out",
+      "subscription": null,
+      "tool": "azure"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "gam"
+    }
+  ],
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "tool": {
+    "binary": null,
+    "id": "azure",
+    "label": "Azure",
+    "path": "/opt/homebrew/bin/az",
+    "place": "path",
+    "reason": null,
+    "searched": [],
+    "selects": [
+      "subscription"
+    ],
+    "state": "found",
+    "verbs": [
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": true,
+        "id": "account",
+        "label": "Account",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": false,
+        "id": "subscriptions",
+        "label": "Subscriptions",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": false,
+        "id": "groups",
+        "label": "Resource groups",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [
+          {
+            "kind": "subscription",
+            "name": "subscription",
+            "required": true
+          }
+        ],
+        "effect": "local",
+        "exit_is_state": false,
+        "id": "set_subscription",
+        "label": "Make default",
+        "output": "done",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "exec",
+        "exit_is_state": false,
+        "id": "login",
+        "label": "Sign in",
+        "output": "terminal",
+        "refresh_secs": null
+      }
+    ],
+    "version": null
+  },
+  "view": {
+    "actions": [
+      {
+        "args": {},
+        "effect": "exec",
+        "label": "Sign in",
+        "verb": "login"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "kv",
+    "note": null,
+    "rows": [
+      {
+        "label": "State",
+        "tone": "warn",
+        "value": "Signed out"
+      }
+    ],
+    "title": "Azure account"
+  }
+}
