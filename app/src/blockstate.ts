@@ -3,16 +3,17 @@
 // is put on the screen with `textContent` only.
 
 import { isChatId } from "./chatstate.js";
+import { TOOLS, integrationContextText, isVerbId } from "./integratestate.js";
 
-export type BlockKind = "files" | "preview" | "monitor" | "chat";
+export type BlockKind = "files" | "preview" | "monitor" | "chat" | "integration";
 
 /** What a block pane shows, as the core lists it. */
 export interface BlockInfo {
   pane: number;
   kind: BlockKind;
-  /** `local` or the id of a saved SSH connection. */
+  /** `local` or the id of a saved SSH connection; for an integration block the tool (`kube`, `talos`, `azure`, `gam`). */
   source: string;
-  /** A directory for a browser, a file for a preview, the id of the conversation for a chat. */
+  /** A directory for a browser, a file for a preview, the id of the conversation for a chat, the id of the shown view for a tool. */
   path: string;
   /** The name of the source for the header. */
   source_label: string;
@@ -70,7 +71,7 @@ export function readSaved(raw: unknown): { modified: number | null; digest: stri
 /** The block of each pane that has one. Replaced as a whole by every answer of `pane_blocks`. */
 export const paneBlocks = new Map<number, BlockInfo>();
 
-const KINDS: ReadonlySet<string> = new Set(["files", "preview", "monitor", "chat"]);
+const KINDS: ReadonlySet<string> = new Set(["files", "preview", "monitor", "chat", "integration"]);
 
 /** Read the answer of `pane_blocks`; an entry that is not well formed is dropped. */
 export function readBlocks(raw: unknown): BlockInfo[] {
@@ -83,6 +84,8 @@ export function readBlocks(raw: unknown): BlockInfo[] {
     if (typeof o.source !== "string" || typeof o.path !== "string") continue;
     // A chat's path becomes the argument of chat commands: one that is not a plausible chat id never leaves this list.
     if (o.kind === "chat" && !isChatId(o.path)) continue;
+    // An integration block is a tool of the core's list and a plain verb id: the path becomes the argument of a command.
+    if (o.kind === "integration" && (!(TOOLS as readonly string[]).includes(o.source) || !isVerbId(o.path))) continue;
     const block: BlockInfo = {
       pane: o.pane,
       kind: o.kind as BlockKind,
@@ -190,6 +193,7 @@ export function shortDate(secs: number | null, now: Date = new Date()): string {
  */
 export function blockTitle(b: BlockInfo): string {
   if (b.kind === "chat") return "chat";
+  if (b.kind === "integration") return b.path.replace(/_/g, " ");
   return b.kind === "files" ? "files" : b.kind === "monitor" ? "system" : baseName(b.path);
 }
 
@@ -230,6 +234,7 @@ export function goneChats(previous: readonly BlockInfo[], next: readonly BlockIn
 export function blockContext(b: BlockInfo): string {
   if (b.kind === "monitor") return `${b.source === "local" ? "local" : b.source_label || b.source} · 1 s`;
   if (b.kind === "chat") return chatTitles.get(b.path) ?? "new chat";
+  if (b.kind === "integration") return integrationContextText(b.pane) ?? b.source_label;
   return b.kind === "files" ? `${b.source_label} · ${b.path}` : `${b.source_label} · preview`;
 }
 

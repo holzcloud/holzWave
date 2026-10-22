@@ -20,6 +20,8 @@
 //     view()           a copy of the layout the layout commands currently return
 //     reset()          clear calls and handlers and go back to the default layout (listeners are kept); the chat below
 //                      and the local network hook are reset too
+//     integration_*    the fifteen commands of the integrations answer a machine without the tools (empty lists, `null`) until a
+//                      test scripts them with `on`; the calls are recorded like every other
 //     localNetwork     the macOS Local Network permission of the shell (docs/design.md 6.24): the commands `local_network_status`,
 //                      `local_network_answer` and `local_network_open_settings`, answered from this hook. The default says the
 //                      system has no such setting, so no other test sees a notice or a group
@@ -1615,6 +1617,26 @@
     },
   };
 
+  // The integration commands of the core. Without a script (`on`) each answers what a machine without the tools would: empty
+  // lists and nothing, so a test that does not use an integration block sees no difference.
+  const integrationDefaults = {
+    integration_tools: () => [],
+    integration_binary_set: () => [],
+    integration_binary_clear: () => [],
+    integration_run: () => null,
+    integration_select: () => null,
+    integration_context: () => ({ rows: [], panes: [] }),
+    integration_prepare: () => null,
+    integration_confirm: () => null,
+    integration_cancel: () => null,
+    integration_launch: () => null,
+    integration_profiles: () => ({ profiles: [], notes: [] }),
+    integration_profile_save: () => ({ profiles: [], notes: [] }),
+    integration_profile_remove: () => ({ profiles: [], notes: [] }),
+    integration_secret_set: () => null,
+    integration_secret_clear: () => null,
+  };
+
   const mock = {
     calls,
     label,
@@ -1659,6 +1681,7 @@
         if (handler) return (await handler(args)) ?? null;
         if (Object.hasOwn(aiCommands, cmd)) return aiCommands[cmd](args ?? {}) ?? null;
         if (Object.hasOwn(netCommands, cmd)) return netCommands[cmd](args ?? {});
+        if (Object.hasOwn(integrationDefaults, cmd)) return integrationDefaults[cmd](args ?? {});
         if (LAYOUT_COMMANDS.has(cmd) && layoutError !== null) throw layoutError; // Tauri rejects with the error text
         if (cmd === "set_ratio") setRatio(args);
         if (cmd === "release_outside") return { outcome: "cancelled" };

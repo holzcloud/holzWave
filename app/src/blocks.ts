@@ -11,6 +11,7 @@ import { chatClosed, mountChat } from "./chat.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { bar, bytes, memory, noteWords, rate, readReading, uptime } from "./monitorstate.js";
 import type { MonNoteKind, MonReading, MonSample } from "./monitorstate.js";
+import { integrationBlock } from "./integrate.js";
 import { showEditor } from "./editorview.js";
 import type { EditorHandle } from "./editorview.js";
 import { showPdf } from "./pdfview.js";
@@ -34,7 +35,7 @@ let applyView: (v: View) => void = () => {};
 let onBlocks: () => void = () => {};
 
 /** One drawn block. */
-interface Instance {
+export interface Instance {
   pane: number;
   root: HTMLElement;
   info: BlockInfo;
@@ -782,7 +783,9 @@ function renderBlocks(): void {
             ? monitorBlock(info, root)
             : info.kind === "chat"
               ? chatBlock(info, root)
-              : previewBlock(info, root);
+              : info.kind === "integration"
+                ? integrationBlock(info, root, { applyView, refreshBlocks, changed: onBlocks })
+                : previewBlock(info, root);
       instances.set(id, inst);
     } else {
       inst.update(info);

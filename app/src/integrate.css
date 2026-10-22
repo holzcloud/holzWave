@@ -1,0 +1,140 @@
+/* The integration block (integrate.ts, docs/design.md section 6.25): a bar with the selection chips, a table, a list of
+   values or a text, and a status line that says what the block is doing. Every colour is a `--hw-*` token and every size
+   is in rem, so the UI scale moves it with the rest of the chrome (a pixel value only for 1 px hairlines, the 2 px focus
+   ring and the 28 px and 44 px touch minimums). Flat and hairline: no gradient, no blur, no shadow. Mono for everything:
+   all of it is something a machine wrote. Rose marks the selected row and the focus, never a status; a status is a word, a
+   mark and an underline besides its colour. The rules of the buttons carry the block's class so they win over the
+   `.block button` reset of blocks.css. */
+
+.block-integration { min-height: 0; }
+.block-integration [hidden] { display: none; }
+
+/* ---- the bar ------------------------------------------------------------------------------------------------------ */
+
+.ig-bar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; box-sizing: border-box;
+          min-height: calc(36rem / 12); padding: .333rem .833rem; border-bottom: 1px solid var(--hw-line); color: var(--hw-ink-2); }
+.block-integration button.ig-chip { display: inline-flex; align-items: center; box-sizing: border-box; max-width: 100%;
+                                    min-height: max(28px, calc(28rem / 12)); padding: 0 .667rem; border: 1px solid var(--hw-line);
+                                    border-radius: 62.5rem; background: none; color: var(--hw-ink); font-size: 1rem;
+                                    letter-spacing: normal; text-transform: none; overflow: hidden; text-overflow: ellipsis;
+                                    white-space: nowrap; cursor: pointer; }
+.block-integration button.ig-chip:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+.block-integration button.ig-chip[aria-expanded="true"] { background: var(--hw-rose-wash); border-color: var(--hw-rose); }
+.block-integration button.ig-chip:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+/* Production is a word with the mark and an underline: the colour is the third cue. */
+.ig-prod { color: var(--hw-warn); text-decoration: underline; white-space: nowrap; }
+.ig-prod::before { content: "! "; font-weight: 700; }
+.block-integration button.ig-refresh { display: inline-flex; align-items: center; box-sizing: border-box; margin-left: auto;
+                                       min-height: max(28px, calc(28rem / 12)); padding: 0 .667rem; border-radius: .5rem; }
+.block-integration button.ig-refresh:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+
+/* ---- the list under a chip ----------------------------------------------------------------------------------------- */
+
+.ig-list { flex: none; max-height: 60%; overflow-y: auto; border-bottom: 1px solid var(--hw-line); background: var(--hw-ground-2); }
+.block-integration button.ig-opt { display: flex; align-items: center; gap: .667rem; box-sizing: border-box; width: 100%;
+                                   min-height: max(28px, calc(28rem / 12)); padding: 0 .833rem; border: 0;
+                                   border-left: 2px solid transparent; border-radius: 0; background: none; color: var(--hw-ink);
+                                   font-size: 1rem; letter-spacing: normal; text-align: left; text-transform: none; white-space: nowrap;
+                                   cursor: pointer; }
+.block-integration button.ig-opt:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+.block-integration button.ig-opt[aria-selected="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
+.block-integration button.ig-opt:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+.ig-mark { flex: none; width: 1rem; }
+.ig-opt-label { flex: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ig-opt-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--hw-dim); }
+.ig-list-msg { margin: 0; padding: .333rem .833rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.ig-list-msg[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
+.ig-list-msg[data-tone="warn"]::before { content: "! "; font-weight: 700; }
+
+/* ---- the body ------------------------------------------------------------------------------------------------------- */
+
+.ig-body { flex: 1 1 0; min-height: 0; overflow: auto; }
+.ig-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.ig-th { position: sticky; top: 0; padding: .25rem .667rem; border-bottom: 1px solid var(--hw-line); background: var(--hw-pane);
+         color: var(--hw-dim); font-weight: 500; text-align: left; white-space: nowrap; }
+.ig-cell { box-sizing: border-box; height: max(28px, calc(20rem / 12)); max-width: 32rem; padding: .167rem .667rem;
+           border-bottom: 1px solid var(--hw-line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ig-row { cursor: default; }
+.ig-row:hover { background: var(--hw-rose-wash); }
+.ig-row[aria-selected="true"] { background: var(--hw-rose-wash); }
+.ig-row[aria-selected="true"] > .ig-cell:first-child { box-shadow: inset 2px 0 var(--hw-rose); }
+.ig-row[data-tone="dim"] { color: var(--hw-dim); }
+.ig-row[data-tone="warn"] { color: var(--hw-warn); }
+.ig-row[data-tone="danger"] { color: var(--hw-danger); }
+.ig-row[data-tone="danger"] > .ig-cell:first-child { text-decoration: underline; }
+.ig-cell[data-mark]::before { content: attr(data-mark) " "; font-weight: 700; text-decoration: none; display: inline-block; }
+.ig-acts { width: 1%; text-align: right; overflow: visible; }
+.block-integration button.ig-act { display: inline-flex; align-items: center; box-sizing: border-box; min-height: max(28px, calc(20rem / 12));
+                                   margin-left: .333rem; padding: 0 .5rem; border: 1px solid var(--hw-line); border-radius: .5rem;
+                                   background: none; color: var(--hw-ink-2); cursor: pointer; }
+.block-integration button.ig-act:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+.block-integration button.ig-act:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.ig-kvacts { padding: .333rem .833rem; }
+/* The rows kept from the last good answer while a later read failed: dim, and the status line says why. */
+.ig-body[data-stale="true"] .ig-row, .ig-body[data-stale="true"] .ig-kvrow, .ig-body[data-stale="true"] .ig-text { color: var(--hw-dim); }
+.ig-body[data-stale="true"] .ig-row > .ig-cell { color: var(--hw-dim); }
+
+.ig-kv { padding: .333rem 0; }
+.ig-kvrow { display: grid; grid-template-columns: minmax(6rem, 14rem) minmax(0, 1fr); column-gap: .833rem; padding: .167rem .833rem;
+            min-height: max(28px, calc(20rem / 12)); align-items: baseline; border-bottom: 1px solid var(--hw-line); }
+.ig-k { color: var(--hw-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ig-v { min-width: 0; overflow-wrap: anywhere; }
+.ig-kvrow[data-tone="dim"] .ig-v { color: var(--hw-dim); }
+.ig-kvrow[data-tone="warn"] .ig-v { color: var(--hw-warn); }
+.ig-kvrow[data-tone="danger"] .ig-v { color: var(--hw-danger); text-decoration: underline; }
+.ig-kvrow[data-mark] .ig-v::before { content: "! "; font-weight: 700; text-decoration: none; display: inline-block; }
+.ig-text { margin: 0; padding: .667rem .833rem; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.ig-text:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+
+/* A line under the rows: the core's note, the note that the list was cut, the sentence of an empty list. */
+.ig-note { margin: 0; padding: .333rem .833rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.ig-note[data-kind="cut"] { color: var(--hw-warn); text-decoration: underline; }
+.ig-note[data-kind="cut"]::before { content: "! "; font-weight: 700; }
+
+/* ---- a tool that cannot be used ------------------------------------------------------------------------------------- */
+
+.ig-missing { padding: .667rem .833rem; }
+.ig-places-title { margin: 0 0 .167rem; color: var(--hw-dim); }
+.ig-places { margin: 0 0 .667rem; padding-left: 1.25rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.ig-pathrow { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.ig-pathlabel { color: var(--hw-dim); }
+.ig-path { flex: 1 1 14rem; min-width: 0; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); padding: .25rem .5rem;
+           background: var(--hw-ground); color: var(--hw-ink); border: 1px solid var(--hw-line); border-radius: .333rem; font: inherit; }
+.ig-path:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
+.block-integration button.ig-pathbtn { display: inline-flex; align-items: center; box-sizing: border-box;
+                                       min-height: max(28px, calc(28rem / 12)); padding: 0 .667rem; }
+.block-integration button.ig-pathbtn:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+
+/* ---- the status line ------------------------------------------------------------------------------------------------ */
+
+.ig-status { flex: none; min-height: 1.5rem; box-sizing: border-box; padding: .167rem .833rem; border-top: 1px solid var(--hw-line);
+             color: var(--hw-dim); font-size: calc(11rem / 12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A warn line has the words, an underline and the mark `!` besides its colour, and it wraps. */
+.ig-status[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; white-space: normal; overflow-wrap: anywhere; }
+.ig-status[data-tone="warn"]::before { content: "! "; font-weight: 700; }
+
+/* The header of the pane: a production selection is warn, underlined and marked (the word is in the bar). */
+.ph-ctx[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
+.ph-ctx[data-tone="warn"] > span::before { content: "! "; font-weight: 700; }
+
+/* Motion: 160 ms for hover and focus, unless the setting or the system asks for none. */
+:root:not(.motion-reduce) .block-integration button.ig-chip, :root:not(.motion-reduce) .block-integration button.ig-opt,
+:root:not(.motion-reduce) .block-integration button.ig-act {
+  transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), border-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1);
+}
+
+@media (forced-colors: active) {
+  :root .ig-row[aria-selected="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  :root .ig-status[data-tone="warn"], :root .ig-prod, :root .ig-list-msg[data-tone="warn"] { outline: 2px solid Highlight; outline-offset: 2px; }
+}
+
+/* ---- narrow screens: 640 px and narrower ------------------------------------------------------------------------------ */
+
+@media (max-width: 640px) {
+  .block-integration button.ig-chip, .block-integration button.ig-refresh, .block-integration button.ig-opt,
+  .block-integration button.ig-act, .block-integration button.ig-pathbtn, .ig-path {
+    min-height: max(44px, calc(44rem / 12));
+  }
+  .ig-cell { height: max(44px, calc(28rem / 12)); }
+  .ig-path { font-size: max(16px, 1rem); }
+}

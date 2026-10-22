@@ -9,6 +9,7 @@
 import { el, fitNodes, setAttr, setRect, setText } from "./dom.js";
 import { paneRect } from "./geometry.js";
 import { blockContext, blockTitle, paneBlocks } from "./blockstate.js";
+import { integrationProduction } from "./integratestate.js";
 import { connDot, connText, paneConns } from "./connstate.js";
 import { shortenHome } from "./labels.js";
 import { startRename } from "./rename.js";
@@ -141,7 +142,10 @@ export function renderPaneHeads(): void {
             ? connText(conn)
             : shortenHome(state.cwds.get(id) ?? "", state.os);
       setText(head.ctx.firstElementChild as HTMLElement, ctx);
-      setAttr(head.ctx, "title", ctx === "" ? null : ctx);
+      // A production selection is said in the header too: the warn colour, an underline and the mark come from the tone.
+      const production = block?.kind === "integration" && integrationProduction(id);
+      setAttr(head.ctx, "data-tone", production ? "warn" : null);
+      setAttr(head.ctx, "title", ctx === "" ? null : production ? `${ctx} · production` : ctx);
     }
   }
   for (const [id, head] of heads) {
