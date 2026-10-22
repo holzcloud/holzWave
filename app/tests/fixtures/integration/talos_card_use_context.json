@@ -1,0 +1,74 @@
+{
+  "argv": [
+    "config",
+    "context",
+    "--",
+    "demo-lab"
+  ],
+  "effect": "local",
+  "expires_in_secs": 120,
+  "fields": [
+    [
+      "tool",
+      "talos"
+    ],
+    [
+      "verb",
+      "use_context"
+    ],
+    [
+      "effect",
+      "local"
+    ],
+    [
+      "program",
+      "talosctl"
+    ],
+    [
+      "arg 1",
+      "config"
+    ],
+    [
+      "arg 2",
+      "context"
+    ],
+    [
+      "arg 3",
+      "--"
+    ],
+    [
+      "arg 4",
+      "demo-lab"
+    ],
+    [
+      "context",
+      "demo-lab"
+    ],
+    [
+      "changes",
+      "the talosconfig of this computer"
+    ],
+    [
+      "guard",
+      "none"
+    ]
+  ],
+  "guard": {
+    "production": null
+  },
+  "hash": "a60bc16de937d949e641938e8f4451981b55a3603f50a62fadbe0745176c0a91",
+  "program": "talosctl",
+  "target": [
+    [
+      "context",
+      "demo-lab"
+    ],
+    [
+      "changes",
+      "the talosconfig of this computer"
+    ]
+  ],
+  "ticket": "0123456789abcdef0123456789abcdef",
+  "tool": "talos",
+  "verb": "use_context"
+}

@@ -1,0 +1,107 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": "talos-prod",
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "node",
+        "label": "NODE"
+      },
+      {
+        "id": "service",
+        "label": "SERVICE"
+      },
+      {
+        "id": "state",
+        "label": "STATE"
+      },
+      {
+        "id": "health",
+        "label": "HEALTH"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.11",
+          "apid",
+          "running",
+          "healthy"
+        ],
+        "key": "192.0.2.11/apid",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.11",
+          "etcd",
+          "running",
+          "healthy"
+        ],
+        "key": "192.0.2.11/etcd",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.11",
+          "kubelet",
+          "running",
+          "healthy"
+        ],
+        "key": "192.0.2.11/kubelet",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.12",
+          "apid",
+          "running",
+          "healthy"
+        ],
+        "key": "192.0.2.12/apid",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.12",
+          "etcd",
+          "running",
+          "unhealthy"
+        ],
+        "key": "192.0.2.12/etcd",
+        "tone": "warn"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.12",
+          "kubelet",
+          "running",
+          "healthy"
+        ],
+        "key": "192.0.2.12/kubelet",
+        "tone": "normal"
+      }
+    ],
+    "title": "Talos services",
+    "truncated": null
+  }
+}

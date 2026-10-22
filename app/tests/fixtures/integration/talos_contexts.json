@@ -1,0 +1,81 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": "talos-prod",
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "current",
+        "label": "CURRENT"
+      },
+      {
+        "id": "name",
+        "label": "NAME"
+      },
+      {
+        "id": "endpoints",
+        "label": "ENDPOINTS"
+      },
+      {
+        "id": "nodes",
+        "label": "NODES"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [
+          {
+            "args": {
+              "context": "demo-prod"
+            },
+            "effect": "local",
+            "label": "Use context",
+            "verb": "use_context"
+          }
+        ],
+        "cells": [
+          "*",
+          "demo-prod",
+          "192.0.2.11",
+          "192.0.2.11,192.0.2.12"
+        ],
+        "key": "demo-prod",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "context": "demo-lab"
+            },
+            "effect": "local",
+            "label": "Use context",
+            "verb": "use_context"
+          }
+        ],
+        "cells": [
+          "",
+          "demo-lab",
+          "192.0.2.31",
+          "192.0.2.31"
+        ],
+        "key": "demo-lab",
+        "tone": "normal"
+      }
+    ],
+    "title": "Talos contexts",
+    "truncated": null
+  }
+}

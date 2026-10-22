@@ -1,0 +1,48 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": "talos-prod",
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "actions": [],
+    "fetched": 1760000000,
+    "kind": "kv",
+    "note": null,
+    "rows": [
+      {
+        "label": "Context",
+        "tone": "normal",
+        "value": "demo-prod"
+      },
+      {
+        "label": "Nodes",
+        "tone": "normal",
+        "value": "192.0.2.11, 192.0.2.12"
+      },
+      {
+        "label": "Endpoints",
+        "tone": "normal",
+        "value": "192.0.2.11"
+      },
+      {
+        "label": "Roles",
+        "tone": "normal",
+        "value": "os:admin"
+      },
+      {
+        "label": "Access",
+        "tone": "warn",
+        "value": "full access (os:admin)"
+      }
+    ],
+    "title": "Talos context"
+  }
+}

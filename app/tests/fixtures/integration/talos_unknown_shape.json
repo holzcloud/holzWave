@@ -1,0 +1,23 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": "talos-prod",
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "fetched": 1760000000,
+    "format": "plain",
+    "kind": "text",
+    "note": "The output was not in the expected shape and is shown as text.",
+    "text": "WARNING: this is not what talosctl printed before\n",
+    "title": "Talos nodes",
+    "truncated": false
+  }
+}

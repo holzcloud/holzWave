@@ -1,0 +1,67 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": "talos-prod",
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "node",
+        "label": "NODE"
+      },
+      {
+        "id": "stage",
+        "label": "STAGE"
+      },
+      {
+        "id": "ready",
+        "label": "READY"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.11",
+          "running",
+          "yes"
+        ],
+        "key": "192.0.2.11",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.12",
+          "booting",
+          "no"
+        ],
+        "key": "192.0.2.12",
+        "tone": "warn"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "192.0.2.13",
+          "running",
+          "yes"
+        ],
+        "key": "192.0.2.13",
+        "tone": "normal"
+      }
+    ],
+    "title": "Talos machine status",
+    "truncated": null
+  }
+}
