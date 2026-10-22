@@ -1,0 +1,102 @@
+{
+  "argv": [
+    "delete",
+    "pod",
+    "--context=kind-test",
+    "--namespace=default",
+    "--wait=false",
+    "--request-timeout=10s",
+    "--",
+    "web-7d9f"
+  ],
+  "effect": "write",
+  "expires_in_secs": 120,
+  "fields": [
+    [
+      "tool",
+      "kube"
+    ],
+    [
+      "verb",
+      "delete_pod"
+    ],
+    [
+      "effect",
+      "write"
+    ],
+    [
+      "program",
+      "kubectl"
+    ],
+    [
+      "arg 1",
+      "delete"
+    ],
+    [
+      "arg 2",
+      "pod"
+    ],
+    [
+      "arg 3",
+      "--context=kind-test"
+    ],
+    [
+      "arg 4",
+      "--namespace=default"
+    ],
+    [
+      "arg 5",
+      "--wait=false"
+    ],
+    [
+      "arg 6",
+      "--request-timeout=10s"
+    ],
+    [
+      "arg 7",
+      "--"
+    ],
+    [
+      "arg 8",
+      "web-7d9f"
+    ],
+    [
+      "context",
+      "kind-test"
+    ],
+    [
+      "namespace",
+      "default"
+    ],
+    [
+      "pod",
+      "web-7d9f"
+    ],
+    [
+      "guard",
+      "none"
+    ]
+  ],
+  "guard": {
+    "production": null
+  },
+  "hash": "fddd2e2db2f53c29f96f2058e79cb9051c51aed99467d74610d5a8e63e868629",
+  "program": "kubectl",
+  "target": [
+    [
+      "context",
+      "kind-test"
+    ],
+    [
+      "namespace",
+      "default"
+    ],
+    [
+      "pod",
+      "web-7d9f"
+    ]
+  ],
+  "ticket": "0123456789abcdef0123456789abcdef",
+  "tool": "kube",
+  "verb": "delete_pod"
+}

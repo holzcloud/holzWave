@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { KUBE, openBlock, rowsShown } from "./integrate-lib.mjs";
-import { cardNode, openConfirm, textOf } from "./integrate-confirm-lib.mjs";
+import { cardNode, modeOf, openConfirm, textOf, wait } from "./integrate-confirm-lib.mjs";
 import { ALL_TOOLS, layout, openContext, sectionShown } from "./integrate-context-lib.mjs";
 
 /** A golden of the core, as the page receives it. */
@@ -18,6 +18,10 @@ export default async function ({ page, url, errors }) {
   await the_chips_switch_the_selection_for_this_pane(page, url);
   await make_default_asks_first_with_the_files_name(page, url);
   await the_context_section_sets_the_pick(page, url);
+  await a_production_delete_needs_two_real_presses(page, url);
+  await faults_keep_the_last_rows_dimmed(page, url);
+  await hostile_names_are_inert_and_have_no_actions(page, url);
+  await the_refresh_runs_only_when_visible(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -150,4 +154,165 @@ async function the_context_section_sets_the_pick(page, url) {
   await page.waitForFunction(() => window.__MOCK__.callsOf("integration_select").length === 1);
   assert.deepEqual(await calls(page, "integration_select"), [{ tool: "kube", pane: null, selection: { context: "kind-test" } }]);
   assert.equal(await page.locator(".cx-line").textContent(), "New blocks start with kind-test.");
+}
+
+const deleteAction = (page) => page.locator('tr[data-i="0"] .ig-act', { hasText: "Delete pod" });
+const confirms = (page) => calls(page, "integration_confirm");
+
+async function a_production_delete_needs_two_real_presses(page, url) {
+  const all = runs();
+  const prod = golden("kube_card_delete_pod_production.json");
+  const plain = golden("kube_card_delete_pod.json");
+  const pod = all.pods.view.rows[0].actions.find((a) => a.verb === "delete_pod").args;
+
+  // A card of a context the core calls production: the guard line names the profile, and one press only arms the card.
+  await openConfirm(page, url, { cards: { "kube/delete_pod": prod } }, { tools: [KUBE], runs: all });
+  await rowsShown(page);
+  await deleteAction(page).click();
+  await cardNode(page).waitFor();
+  assert.deepEqual(await calls(page, "integration_prepare"), [{ tool: "kube", verb: "delete_pod", pane: 2, args: pod }]);
+  assert.equal(await textOf(page, ".ic-title"), "Kubernetes · Delete pod");
+  assert.equal(await textOf(page, ".ic-guard"), `Production context: ${prod.guard.production}.`);
+  const args = await cardNode(page).locator(".ic-args .ic-row").evaluateAll((rows) => rows.map((r) => r.children[1].textContent));
+  assert.deepEqual(args, [prod.program, ...prod.argv], "the card shows the exact argument list of the core's golden");
+  assert.equal(await textOf(page, ".ic-yes"), "Allow once");
+
+  // A press inside the half second and a scripted click after it do nothing.
+  await cardNode(page).locator(".ic-yes").click({ force: true });
+  assert.equal(await modeOf(page), "ask");
+  await wait(page, 600);
+  await page.evaluate(() => document.querySelector(".ic-yes").click());
+  assert.equal(await modeOf(page), "ask", "a script cannot arm the card");
+  assert.equal((await confirms(page)).length, 0);
+
+  // The first real press arms it and sends nothing; a scripted click on the armed card sends nothing either.
+  await cardNode(page).locator(".ic-yes").click();
+  assert.equal(await modeOf(page), "armed");
+  assert.equal(await textOf(page, ".ic-yes"), "Press again to allow on production");
+  assert.equal((await confirms(page)).length, 0, "one press on production sends nothing");
+  await wait(page, 600);
+  await page.evaluate(() => document.querySelector(".ic-yes").click());
+  await wait(page, 100);
+  assert.equal((await confirms(page)).length, 0, "a script cannot allow on production");
+
+  // The second real press sends the ticket and the hash of the golden, and nothing else.
+  await cardNode(page).locator(".ic-yes").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("integration_confirm").length === 1);
+  assert.deepEqual(await confirms(page), [{ ticket: prod.ticket, hash: prod.hash }]);
+  await page.waitForFunction(() => document.querySelector(".ic-line")?.textContent?.startsWith("Done:"));
+
+  // A card with no guard needs one real press.
+  await openConfirm(page, url, { cards: { "kube/delete_pod": plain } }, { tools: [KUBE], runs: all });
+  await rowsShown(page);
+  await deleteAction(page).click();
+  await cardNode(page).waitFor();
+  assert.equal(await cardNode(page).locator(".ic-guard").count(), 0);
+  await wait(page, 600);
+  await cardNode(page).locator(".ic-yes").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("integration_confirm").length === 1);
+  assert.deepEqual(await confirms(page), [{ ticket: plain.ticket, hash: plain.hash }]);
+  assert.notEqual(plain.hash, prod.hash, "the two goldens are different requests");
+}
+
+async function faults_keep_the_last_rows_dimmed(page, url) {
+  const all = runs();
+  const failed = golden("kube_fault_failed.json");
+  const missing = golden("kube_fault_missing.json");
+  await openBlock(page, url, { tools: [KUBE], runs: all });
+  await rowsShown(page);
+  const status = page.locator(".block-integration .ig-status");
+
+  const said = async (fault) => {
+    await page.evaluate((f) => {
+      window.__IG__.faults = { pods: f };
+    }, fault);
+    await page.locator(".block-integration .ig-refresh").click();
+    await page.waitForFunction((text) => document.querySelector(".block-integration .ig-status")?.textContent === text, fault.text);
+    assert.equal(await status.getAttribute("data-tone"), "warn");
+    assert.equal(await status.evaluate((n) => getComputedStyle(n, "::before").content), '"! "', "the mark in front of the core's sentence");
+    assert.equal(await status.evaluate((n) => getComputedStyle(n).textDecorationLine), "underline", "and the underline");
+  };
+  const good = async () => {
+    await page.evaluate(() => {
+      window.__IG__.faults = {};
+    });
+    await page.locator(".block-integration .ig-refresh").click();
+    await page.waitForFunction(() => document.querySelector(".block-integration .ig-body")?.getAttribute("data-stale") === null && document.querySelector(".block-integration .ig-row") !== null);
+  };
+
+  // The tool ran and failed: the core's cleaned, cut sentence, and the last rows stay, dimmed.
+  assert.ok(failed.text.length <= "Kubernetes reported an error: ".length + 240, "the core cut the tool's line");
+  await said(failed);
+  assert.equal(await page.locator(".block-integration .ig-row").count(), all.pods.view.rows.length, "the last rows stay");
+  assert.equal(await page.locator(".block-integration .ig-body").getAttribute("data-stale"), "true", "and are dimmed");
+  await good();
+  assert.equal(await page.locator(".block-integration .ig-row").count(), all.pods.view.rows.length);
+
+  // No kubectl on this computer: the core's sentence, and the field for the path; rows of an earlier read would be
+  // about a tool that cannot be started, so there are none (design.md 6.25).
+  await said(missing);
+  assert.equal(await page.locator(".block-integration input.ig-path").count(), 1, "a field for the path of the program");
+  assert.equal(await page.locator(".block-integration .ig-row").count(), 0);
+  await good();
+}
+
+async function hostile_names_are_inert_and_have_no_actions(page, url) {
+  const hostile = golden("kube_pods_hostile.json");
+  await openBlock(page, url, { tools: [KUBE], runs: { pods: hostile } });
+  await rowsShown(page);
+  const cells = await page.locator(".block-integration .ig-table tbody tr").evaluateAll((trs) => trs.map((tr) => Array.from(tr.querySelectorAll("td.ig-cell")).map((td) => td.textContent)));
+  assert.equal(cells.length, hostile.view.rows.length);
+  const longName = hostile.view.rows[0].cells[0];
+  assert.ok(longName.length > 240, `the core's name is longer than the page shows (${longName.length})`);
+  for (const [i, row] of cells.entries()) {
+    for (const [j, text] of row.entries()) {
+      assert.ok([...text].length <= 240, `row ${i} cell ${j}: at most 240 characters, got ${[...text].length}`);
+      // No control character, no direction override or isolate, no zero-width character, no byte order mark in the drawn text.
+      assert.doesNotMatch(text.replace(/^! /, ""), /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/u, `row ${i} cell ${j}`);
+    }
+  }
+  assert.equal(cells[0][0], `${[...longName].slice(0, 239).join("")}…`, "the long name is cut to 240 characters with the ellipsis, not changed");
+
+  // A name made from tags or an attribute would be text; nothing in the table is an element made from a name.
+  assert.equal(await page.locator(".block-integration .ig-table img, .block-integration .ig-table [onerror], .block-integration .ig-table a").count(), 0);
+
+  // The rows whose names the core did not accept have no actions; the others have the core's three.
+  const withActions = await page.locator(".block-integration .ig-table tbody tr").evaluateAll((trs) => trs.map((tr) => tr.querySelectorAll(".ig-act").length));
+  assert.deepEqual(withActions, hostile.view.rows.map((r) => r.actions.length));
+  assert.equal(withActions[0], 0, "the name that fails validation has no action");
+  assert.ok(withActions.slice(1).every((n) => n === 3));
+}
+
+async function the_refresh_runs_only_when_visible(page, url) {
+  await page.clock.install();
+  await openBlock(page, url, { tools: [KUBE], runs: runs() });
+  await rowsShown(page);
+  const started = () => page.evaluate(() => window.__IG__.started);
+  assert.equal(await started(), 1, "one read when the block opens");
+  assert.equal(await page.locator('.panehead[data-pane="2"] .ph-ctx').textContent(), "Kubernetes · prod-eu · payments · 10 s", "the interval is the core's");
+
+  // The core's interval for the pods is 10 s.
+  await page.clock.runFor(9000);
+  assert.equal(await started(), 1, "not before the interval");
+  await page.clock.runFor(2000);
+  assert.equal(await started(), 2, "after it");
+
+  // A window that is not visible asks nothing, and asks once it is.
+  await page.evaluate(() => Object.defineProperty(document, "hidden", { configurable: true, get: () => true }));
+  await page.clock.runFor(60000);
+  assert.equal(await started(), 2, "no read while the window is hidden");
+  await page.evaluate(() => {
+    delete document.hidden;
+  });
+  await page.clock.runFor(2000);
+  assert.equal(await started(), 3, "and one read when it is visible again");
+
+  // A slow answer is never asked twice.
+  await page.evaluate(() => {
+    window.__IG__.delay = 25000;
+    window.__IG__.maxInflight = 0;
+  });
+  await page.clock.runFor(12000);
+  await page.clock.runFor(40000);
+  assert.equal(await page.evaluate(() => window.__IG__.maxInflight), 1, "never two requests of one block at once");
 }

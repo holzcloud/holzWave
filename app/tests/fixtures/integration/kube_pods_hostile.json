@@ -1,0 +1,142 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": "Production EU",
+    "selection": {
+      "context": "prod-eu",
+      "namespace": "payments",
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "name",
+        "label": "NAME"
+      },
+      {
+        "id": "ready",
+        "label": "READY"
+      },
+      {
+        "id": "status",
+        "label": "STATUS"
+      },
+      {
+        "id": "restarts",
+        "label": "RESTARTS"
+      },
+      {
+        "id": "age",
+        "label": "AGE"
+      },
+      {
+        "id": "node",
+        "label": "NODE"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [],
+        "cells": [
+          "long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-lon",
+          "1/1",
+          "Running",
+          "0",
+          "3d",
+          "node-1"
+        ],
+        "key": "long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-long-name-lon",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "container": "app",
+              "pod": "hostile-text"
+            },
+            "effect": "exec",
+            "label": "Exec",
+            "verb": "exec"
+          },
+          {
+            "args": {
+              "container": "app",
+              "pod": "hostile-text"
+            },
+            "effect": "read",
+            "label": "Logs",
+            "verb": "logs"
+          },
+          {
+            "args": {
+              "pod": "hostile-text"
+            },
+            "effect": "write",
+            "label": "Delete pod",
+            "verb": "delete_pod"
+          }
+        ],
+        "cells": [
+          "hostile-text",
+          "1/1",
+          "Running",
+          "0",
+          "3d",
+          "node-1"
+        ],
+        "key": "hostile-text",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "container": "app",
+              "pod": "unknown-members"
+            },
+            "effect": "exec",
+            "label": "Exec",
+            "verb": "exec"
+          },
+          {
+            "args": {
+              "container": "app",
+              "pod": "unknown-members"
+            },
+            "effect": "read",
+            "label": "Logs",
+            "verb": "logs"
+          },
+          {
+            "args": {
+              "pod": "unknown-members"
+            },
+            "effect": "write",
+            "label": "Delete pod",
+            "verb": "delete_pod"
+          }
+        ],
+        "cells": [
+          "unknown-members",
+          "1/1",
+          "Running",
+          "?",
+          "3d",
+          "node-1"
+        ],
+        "key": "unknown-members",
+        "tone": "normal"
+      }
+    ],
+    "title": "Pods",
+    "truncated": null
+  }
+}

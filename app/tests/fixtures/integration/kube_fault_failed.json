@@ -1,0 +1,5 @@
+{
+  "code": "failed",
+  "reason": "exit_status",
+  "text": "Kubernetes reported an error: Error from server (Forbidden): pods is forbidden: User \"dev\" cannot list resource \"pods\" in the namespace \"payments\"; User \"dev\" cannot list resource \"pods\" in the namespace \"payments\"; User \"dev\" cannot list resource \"pods\" in the namespa…"
+}

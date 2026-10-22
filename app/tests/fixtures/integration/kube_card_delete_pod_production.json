@@ -1,0 +1,106 @@
+{
+  "argv": [
+    "delete",
+    "pod",
+    "--context=prod-eu",
+    "--namespace=payments",
+    "--wait=false",
+    "--request-timeout=10s",
+    "--",
+    "web-7d9f"
+  ],
+  "effect": "write",
+  "expires_in_secs": 120,
+  "fields": [
+    [
+      "tool",
+      "kube"
+    ],
+    [
+      "verb",
+      "delete_pod"
+    ],
+    [
+      "effect",
+      "write"
+    ],
+    [
+      "program",
+      "kubectl"
+    ],
+    [
+      "arg 1",
+      "delete"
+    ],
+    [
+      "arg 2",
+      "pod"
+    ],
+    [
+      "arg 3",
+      "--context=prod-eu"
+    ],
+    [
+      "arg 4",
+      "--namespace=payments"
+    ],
+    [
+      "arg 5",
+      "--wait=false"
+    ],
+    [
+      "arg 6",
+      "--request-timeout=10s"
+    ],
+    [
+      "arg 7",
+      "--"
+    ],
+    [
+      "arg 8",
+      "web-7d9f"
+    ],
+    [
+      "context",
+      "prod-eu"
+    ],
+    [
+      "namespace",
+      "payments"
+    ],
+    [
+      "pod",
+      "web-7d9f"
+    ],
+    [
+      "guard",
+      "production"
+    ],
+    [
+      "production_name",
+      "Production EU"
+    ]
+  ],
+  "guard": {
+    "production": "Production EU"
+  },
+  "hash": "d265a403994a8a3bb87d7c637ffa0bd9f3c9096d328cfdea2200e6686311bc4e",
+  "program": "kubectl",
+  "target": [
+    [
+      "context",
+      "prod-eu"
+    ],
+    [
+      "namespace",
+      "payments"
+    ],
+    [
+      "pod",
+      "web-7d9f"
+    ]
+  ],
+  "ticket": "0123456789abcdef0123456789abcdef",
+  "tool": "kube",
+  "verb": "delete_pod"
+}

@@ -1,0 +1,5 @@
+{
+  "code": "missing",
+  "reason": "not_found",
+  "text": "kubectl was not found on this computer. Install it or set where it is."
+}
