@@ -1,0 +1,169 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": "Production EU",
+    "selection": {
+      "context": "prod-eu",
+      "namespace": "payments",
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "name",
+        "label": "NAME"
+      },
+      {
+        "id": "ready",
+        "label": "READY"
+      },
+      {
+        "id": "status",
+        "label": "STATUS"
+      },
+      {
+        "id": "restarts",
+        "label": "RESTARTS"
+      },
+      {
+        "id": "age",
+        "label": "AGE"
+      },
+      {
+        "id": "node",
+        "label": "NODE"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [
+          {
+            "args": {
+              "container": "app",
+              "pod": "web-7d9f"
+            },
+            "effect": "exec",
+            "label": "Exec",
+            "verb": "exec"
+          },
+          {
+            "args": {
+              "container": "app",
+              "pod": "web-7d9f"
+            },
+            "effect": "read",
+            "label": "Logs",
+            "verb": "logs"
+          },
+          {
+            "args": {
+              "pod": "web-7d9f"
+            },
+            "effect": "write",
+            "label": "Delete pod",
+            "verb": "delete_pod"
+          }
+        ],
+        "cells": [
+          "web-7d9f",
+          "2/2",
+          "Running",
+          "0",
+          "3d",
+          "node-1"
+        ],
+        "key": "web-7d9f",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "container": "job",
+              "pod": "batch-1"
+            },
+            "effect": "exec",
+            "label": "Exec",
+            "verb": "exec"
+          },
+          {
+            "args": {
+              "container": "job",
+              "pod": "batch-1"
+            },
+            "effect": "read",
+            "label": "Logs",
+            "verb": "logs"
+          },
+          {
+            "args": {
+              "pod": "batch-1"
+            },
+            "effect": "write",
+            "label": "Delete pod",
+            "verb": "delete_pod"
+          }
+        ],
+        "cells": [
+          "batch-1",
+          "0/1",
+          "ContainerCreating",
+          "0",
+          "3d",
+          ""
+        ],
+        "key": "batch-1",
+        "tone": "warn"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "container": "api",
+              "pod": "api-5c6d"
+            },
+            "effect": "exec",
+            "label": "Exec",
+            "verb": "exec"
+          },
+          {
+            "args": {
+              "container": "api",
+              "pod": "api-5c6d"
+            },
+            "effect": "read",
+            "label": "Logs",
+            "verb": "logs"
+          },
+          {
+            "args": {
+              "pod": "api-5c6d"
+            },
+            "effect": "write",
+            "label": "Delete pod",
+            "verb": "delete_pod"
+          }
+        ],
+        "cells": [
+          "api-5c6d",
+          "0/1",
+          "CrashLoopBackOff",
+          "7",
+          "3d",
+          "node-2"
+        ],
+        "key": "api-5c6d",
+        "tone": "danger"
+      }
+    ],
+    "title": "Pods",
+    "truncated": null
+  }
+}
