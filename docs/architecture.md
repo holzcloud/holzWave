@@ -5,7 +5,9 @@ contents of the later phases are a plan and will move. Sections 3, 5, 6, 7, 8 an
 built in Phase 2 (macOS, Windows and Linux; the author has run all three). The AI chat, the Apple on-device model and the
 extras of Phase 7 are built and tested against in-process servers, scripted providers and a page stub; they have not been
 run with a real provider account, and the rows of Part 7 of [test-plan.md](test-plan.md) are the
-owner's run.
+owner's run. The native integrations of Phase 8 (Kubernetes, Talos, Azure CLI and GAM7, section 9) are built and tested
+against fake tools and recorded fixtures; they have not been run against a real cluster, a real Talos, Azure or GAM account,
+or on Windows and Linux hardware, and the rows of Part 9 are the owner's run.
 
 ## 1. Goals and non-goals
 
@@ -47,7 +49,7 @@ owner's run.
  │  preview     file browser, markdown, media, editor backends                             built          │
  │  control     socket server for wsh                                                      built          │
  │  ai          Provider trait: HttpProvider on five wires · Apple bridge · scripted       built          │
- │  integrate   CLI-integration schema: kubectl · talosctl · az · gam                      phase 8        │
+ │  integrate   closed verb catalogue: kubectl · talosctl · az · gam                       built (fakes)  │
  └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
                            ▲
                     wsh (Rust binary) ── Unix socket / named pipe ── also over SSH tunnels
@@ -60,7 +62,7 @@ authoritative layout, session or setting, and can be reloaded at any time.
 
 | Path | Crate / package | Role | State |
 |---|---|---|---|
-| `core/` | `holzwave-core` | everything above except the shell | ✅ engine, pty, pane, layout, settings, session, connections, files, sync, the AI chat |
+| `core/` | `holzwave-core` | everything above except the shell | ✅ engine, pty, pane, layout, settings, session, connections, files, sync, the AI chat, the native integrations |
 | `app/src-tauri/` | `holzwave-app` | Tauri command layer, window, plugins | ✅ |
 | `app/src/` | TypeScript | chrome, renderers, input | ✅ |
 | `spike/` | `holzwave-spike` | measurement tool, not shipped | ✅ |
@@ -99,6 +101,7 @@ The modules of `holzwave-core` as built (`core/src/`):
 | `monitor` | the system monitor of this computer (`sysinfo`) and, in `monitor/remote.rs`, of a Linux host through the exec primitive | ✅ |
 | `widgets` | the sidebar widgets: data files checked field by field, described by `docs/widget.schema.json` | ✅ |
 | `history` | the command history in SQLite, a fuzzy matcher, each use stored with the host it ran on | ✅ |
+| `integrate` | the native integrations (`core/src/integrate/`, section 9): `args` (validated names), `detect`, `run` (the one place a tool is started), `view` (the view model), `profiles`, `context`, `ticket` (the card and the approval), `service`, and one module per tool: `kube`, `talos`, `azure`, `gam`. Tested against fake tools and recorded fixtures | ✅ |
 
 The AI chat in the shell and the page (`holzwave-core` itself stays free of Tauri and of any PTY code):
 
@@ -110,6 +113,13 @@ The AI chat in the shell and the page (`holzwave-core` itself stays free of Taur
 | `wsh/src/ai.rs`, `ipc/src/stream.rs` | `wsh ai` and the streamed reply of the local socket |
 | `plugins/apple-ai/` | `src/{backend,native,prompt,provider,pump,scripted}.rs` over `swift/Sources/AppleAI/` |
 | `app/src/` | the chat (`chat`, `chatview`, `chatstate`, `chatlist`), the sidebar form (`aisidebar`), the providers dialog (`aisettings`, `aistate`, `ondevice`), the macOS local network notice and Settings group (`localnet`, `localnetstate`, `localnet.css`), consent (`consent*`), approval and undo (`approval*`, `undo`), `wsh ai` requests (`ask*`), the palette actions (`inline*`), and the monitor and history views (`monitorstate`, `historystate`, `historyview`) |
+
+The integrations in the shell and the page:
+
+| Where | What |
+|---|---|
+| `app/src-tauri/src/integrate_host.rs` | builds the integration service from the real machine (environment, file system, login shell, keychain), answers the `integration_*` commands, turns a refusal into the fault object and sends the event `integration`; it holds no policy of its own and starts no process |
+| `app/src/` | the block (`integrate`, `integrateview`, `integratestate`, `integratetools`), the Context section and the status segments (`integratecontext`, `integratepick`), the confirmation card (`integrateconfirm`), the profiles dialog (`integrateprofiles`) and `integrate.css` |
 
 The app shell keeps one more type of its own, `AppCore` (`app/src-tauri/src/state.rs`): it holds the layout, the
 running panes, the settings and the session, has no Tauri type in it, and is tested headless with a recording sink
@@ -126,7 +136,7 @@ Each boundary is a trait in `holzwave-core` with at least one real implementatio
 | `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service, iOS/Android keystores | secrets never reach a file |
 | `SyncBackend` | `list`, `get`, `put`, `delete` with ETag | WebDAV (`opendal` or `reqwest_dav`) | Nextcloud today, others later |
 | `Provider` ✅ | `id`, `capabilities(model)`, `stream(request, callback, cancel) → completion` (blocking, with a cancel token) | `HttpProvider` ✅ over five wire adapters (local servers, cloud APIs, gateways), `AppleProvider` ✅ (Foundation Models), `ScriptedProvider` (the test double) | consent and context rules live above it: a provider accepts only context the gate approved |
-| `Integration` (planned) | `spec`, `argv`, `view` (section 9) | kubernetes, talos, azure, gam | one engine and a closed verb catalogue for four tools |
+| `Integration` ✅ | `spec`, `argv`, `view` (section 9) | `Kube`, `Talos`, `Azure`, `Gam`, each built and tested against fake tools and recorded fixtures | one engine and a closed verb catalogue for four tools |
 
 The engine trait is **not `Send`**: `libghostty-vt` objects are `!Send + !Sync`. An engine therefore lives on one
 thread and is driven over a channel (section 5). This shapes the whole concurrency model.
@@ -167,6 +177,11 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 - A chat turn runs on a turn thread of its own, never on a Tauri command thread: at most four run at once (one per running
   chat), so no command blocks a shell thread, and the streamed text is merged into about sixty events a second. A turn
   ends within a quarter second of the user's Stop, the HTTP call included.
+- An integration tool runs as a child process of the one runner (`integrate/run.rs`) with a reader thread for each of its
+  two pipes; at most four children run at once and a fifth waits at most a second. A background thread named
+  `holzwave-integration-status` reads the default verb of one due tool at a time, started by the first ask of the page, and
+  has no timer: an idle or hidden app starts nothing. A terminal launch is an ordinary pane actor whose program is the tool;
+  a failed start is held on screen until Enter.
 - The exec primitive (`SshExec`) runs on one worker runtime of its own, a single worker thread named `hw-exec`, with a cached
   connection and no terminal; its callers only wait. The local command runner (`exec.rs`) uses plain threads for its two
   pipes and is polled, not blocked, for the end, the time limit and the stop.
@@ -335,7 +350,11 @@ applied step by step by the TypeScript patcher, so both languages are proven aga
 | Widgets | `widgets/<id>.json`, `widget_notes.json` ✅ | yes | data only, checked by the loader and described by `docs/widget.schema.json` |
 | AI provider profiles | `ai.json` ✅, private atomic write | no | no keys, only a marker that a key exists; the keychain accounts `ai:<id>` are not synced either |
 | AI conversations | `chats/<id>.json` ✅, one file per chat, owner-only, atomic, written at message boundaries | no | terminal context is stored as a marker unless `ai_persist_context` says text; deleting a chat is an unlink, not a secure overwrite; a damaged file is moved aside as `.bad` and kept until the chat is deleted |
-| Secrets | OS keychain | only inside the encrypted payload | provider keys are the exception: they stay on the computer they were typed on |
+| Integration profiles | `integrations.json` ✅, atomic | yes | names and flags only; a file that breaks any rule is kept whole as `integrations.json.bad` and the app starts without profiles; described by `docs/integrations.schema.json` |
+| Integration paths | `integration_local.json` ✅ | no | the program and the configuration files of each tool on this computer; never a path in a synced file |
+| Integration selections and launches | `pane_integrations.json` ✅, `pane_launches.json` ✅ | no | which context, namespace, subscription, section or node a pane uses, and the label of a pane that was a tool session (it is not started again after a restart) |
+| Integration private files | `run/kube/<pane>.json` ✅ (mode 0600 in a folder of mode 0700), `integrations/<azure or gam>/<profile>/` ✅ | no | the overlay kubeconfig of a shell pane (names only, removed with the pane) and the configuration folder of an isolated Azure or GAM7 profile (the tool's own tokens, signed in again inside it) |
+| Secrets | OS keychain | only inside the encrypted payload | provider keys are the exception: they stay on the computer they were typed on; the secret variables of an integration profile are `int:<profile>:<NAME>`, at most 1 KiB, and travel inside the encrypted payload |
 | Scrollback | memory only | no | the engine owns it |
 
 The sync payload and its encryption are specified before any sync code exists: see [sync.md](sync.md).
@@ -395,10 +414,15 @@ the clipboard itself; otherwise nothing is written (`empty`). The bytes are fixe
 
 ## 9. Integrations and extensions
 
-### Integrations (planned)
+### Integrations (built)
 
-Status: planned. Nothing in this subsection is built yet; it is the design the code will follow, and the policy test
-(`core/tests/project_policy.rs`) holds the code to the rules that can be checked by reading its sources.
+Status: built, and tested against fake tools and recorded fixtures. The four tools, the Context section, the status
+segments, the confirmation card with the second press on production, the profiles dialog and the palette entries are
+built. They have not been run against a real cluster, a real Talos, an Azure or a Google Workspace account, or on Windows
+and Linux hardware: the rows of Part 9 of [test-plan.md](test-plan.md) are the owner's run, and nothing here is called
+verified until they pass. The shapes of Talos output and the write of `talosctl config context` are assumptions until rows
+INT-T1 and INT-T2. The policy test (`core/tests/project_policy.rs`) holds the code to the rules that can be checked by
+reading its sources, and holds this section, the rows and the configuration guide to the code.
 
 **What an integration is.** Kubernetes, Talos, Azure and GAM7 are compiled in. Each is one static `IntegrationSpec`:
 its binary names per system, a version probe, the environment it sets, what it lets you select (a context, a
@@ -410,57 +434,93 @@ Four small modules, one per tool, hold only the argument builders and the parser
 and `view`. An unknown verb is refused. This is not a plugin host (non-goal 3). A loadable argument template that
 travelled through sync would be remote command execution on every device that holds the passphrase, so the two
 published JSON documents, the profile file and the block view model, are data with a schema and a parity test (like
-`widget.schema.json`), never code.
+`widget.schema.json`), never code: `docs/integrations.schema.json` and `docs/integration-view.schema.json`, each held
+equal to its loader by a test.
 
 **The clients.** `kubectl` and `talosctl`, and `az` and GAM7 as wrappers. In-process clients were measured and left
 out: `kube-rs` adds 34 crates, 5.9 MB and 35 s to a cold release build and would need a hand-built attach,
 exec-credential plugins and the GUI `PATH` handled again; a Talos gRPC client adds 12 crates and a protobuf toolchain,
-and there is no official Rust client. The tools themselves handle plugins, proxies and every auth method.
+and there is no official Rust client. The tools themselves handle plugins, proxies and every auth method. The one
+dependency the integrations added is the `csv` crate, which reads the output of GAM7 (a person's directory text, so not a
+hand-written splitter).
 
 **Where they run.** On this computer only. A remote host is not planned. A tool is found by, in order, the path you
-set, the process `PATH`, the `PATH` of your login shell (asked once, lazily, absolute existing directories only) and a
-short fixed list per system; the `PATH` of a child is rebuilt from the same places, so a credential plugin is found
-too.
+set, the process `PATH`, the `PATH` of your login shell (asked once, lazily, only when the first two found nothing,
+absolute existing directories only, never on Windows, and only for zsh, bash, fish, sh, dash and ksh) and a short fixed
+list per system; the `PATH` of a child is rebuilt from the same places, so a credential plugin is found too. A program
+that the person sets is accepted only when its file name is one of the tool's own.
 
 **The runner.** Every child is started with an argument list: no shell, standard input closed, no program named in the
 source. Its environment is the inherited one minus the loader and interpreter variables (`LD_*`, `DYLD_*`, `PYTHON*`,
 `NODE_*`, `GIT_*`, `BASH_ENV`, `ENV`, `IFS`) and minus the app's own `HOLZWAVE_*`, plus the profile's plain variables
-and its secret ones. Credential variables are kept on purpose: the tools need them, and the AI command runner's rule
-of dropping every name that looks like a key would break them. Output is capped and a run that exceeds the cap fails
-and keeps the head, so a table never shows a cut-off document. Each run has a timeout and a process-group kill, and at
-most four children run at once. The one string a shell ever sees is a constant that picks bash or sh inside a pod.
+and its secret ones, and the tool's fixed ones (the Azure run sets `AZURE_CORE_COLLECT_TELEMETRY=false`; the person's own
+use of the tool in a terminal is not touched). Credential variables are kept on purpose: the tools need them, and the AI
+command runner's rule of dropping every name that looks like a key would break them. Output is capped (16 MiB by default)
+and a run that exceeds the cap fails and keeps the head, so a table never shows a cut-off document. Each run has a
+timeout (15 s by default) and a process-group kill, and at most four children run at once (a fifth waits at most a
+second, then answers `busy`). The one string a shell ever sees is a constant that picks bash or sh inside a pod.
 
 **Connection data.** The tools' own credential stores (kubeconfig, talosconfig, `~/.azure`, `~/.gam`) are referenced
 and never imported: the keychain cannot hold them and a materialised file would break "secrets only in the keychain".
 `integrations.json` is synced and holds names and flags (profiles, a pinned context or subscription or section, a
 production flag, plain environment). Machine-local paths live in `integration_local.json` and never sync. `secret_env`
-values are small, live in the keychain as `int:<profile>:<NAME>`, are read at the moment of a spawn and wiped after
-it, and travel only inside the encrypted `secrets.json`. A synced profile may not set a variable of the deny list,
-`PATH` or a tool's own configuration variable; a file that fails validation is set aside and the app starts without
-profiles.
+values are small (at most 1 KiB), live in the keychain as `int:<profile>:<NAME>`, are read at the moment of a spawn and
+wiped after it, and travel only inside the encrypted `secrets.json`. A synced profile may not set a variable of the deny
+list, `PATH`, a variable the app sets itself or one that makes a tool start another program; a file that fails
+validation is set aside whole as `integrations.json.bad` and the app starts without profiles. The format is in
+[config.md](config.md).
 
 **Context.** A block passes its selection on every command (`--context=<name>`, `--namespace=<name>`, a subscription
-id, a GAM section), so nothing on disk changes. A shell pane that is isolated gets a small overlay kubeconfig that
-holds names only and no credential, first in `KUBECONFIG`. The tools' own files change only through a confirmed
+id, a GAM section as `select <section>` for that one process), so nothing on disk changes. A shell pane gets a small
+overlay kubeconfig that holds names only and no credential, first in `KUBECONFIG`, in a file of mode 0600 below
+`run/kube/` (removed when the pane is gone; a sweep removes the ones whose pane no longer exists). A profile can give Azure and GAM7 a
+configuration folder of their own below `integrations/`. The tools' own files change only through a confirmed
 `Local` verb that names the file. The tools may still write their own state (a token refresh, a `set-context` you type
-yourself).
+yourself), and a start file of your shell can export `KUBECONFIG` again and replace the overlay.
 
 **Approval.** A verb that changes something or opens a session returns a card with the exact argument list, the target
 and a hash; `confirm` repeats the hash, the core resolves the request again, hashes again, refuses any difference and
-runs it once. The window is the only decider: nothing of it exists on the `wsh` socket, nothing is remembered, and the
-AI chat reaches no integration. A context that a profile marks as production shows its name and the word production on
-the card and needs a second press, for every verb that has a card.
+runs it once. A card waits 120 s, three wrong hashes drop it and at most eight wait. The window is the only decider:
+nothing of it exists on the `wsh` socket, nothing is remembered, and the AI chat reaches no integration. A context
+that a profile marks as production shows its name and the word production on the card and needs a second press, for
+every verb that has a card; a press within half a second of the card appearing or of the first press is ignored.
 
 **Terminal blocks.** Exec in a pod, logs, node messages, the Talos dashboard and `az login` are a pane whose program
 is the tool. A failing start is held on screen until you press Enter, so the error can be read. The pane gets no
-`HOLZWAVE_*` variable and is not restored on restart.
+`HOLZWAVE_*` variable and is not restored on restart: it is shown as a plain shell with one line that says what it ran.
 
 **View model.** A table (at most 64 columns and 2000 rows), a key-value list or a text. Every string from a cluster or
-an account is cleaned of control, direction and zero-width characters, cut, and shown as text only. Stderr is shown
-cleaned and cut and never logged.
+an account is cleaned of control, direction, zero-width and format characters, cut, and shown as text only; the page
+removes the same characters again and cuts a cell at 240 characters. Stderr is shown as one cleaned and cut line and
+never logged.
 
 **What the integrations never do:** print a raw kubeconfig, pass a verbose flag, ask for an access token, export a
 credential, emit a `save` that rewrites a GAM configuration, or offer anything to the AI chat.
+
+**As built.**
+
+| Part | Where | What |
+|---|---|---|
+| Names and arguments | `core/src/integrate/args.rs` | every name that can reach an argument is a type with one validating constructor; a flag that carries a name is built in the equals form |
+| Detection | `detect.rs` | the order above, the `PATH` of a child, a look again right before a run |
+| Runner | `run.rs` | argument list, scrubbed environment, capped output, timeout, process-group kill, four slots; compiled out on iOS and Android and disabled in a Flatpak build |
+| Views | `view.rs` | the view model, its caps and the one place text from a cluster is cleaned |
+| Profiles | `profiles.rs` | `integrations.json`, `integration_local.json`, the secret variables in the keychain |
+| Context | `context.rs` | the selection of a pane, its application to a run, the overlay and the isolated folders |
+| Approval | `ticket.rs` | the card, the ticket, the hash, the production guard; the one place an `Approved` value is made |
+| Service | `service.rs` | the registry, reads with single flight, faults, prepare and confirm, terminal launches, the cached status |
+| Tools | `kube.rs`, `talos.rs`, `azure.rs`, `gam.rs` | the argument lists and parsers of one tool each, and nothing else |
+| App shell | `app/src-tauri/src/integrate_host.rs` | builds the service from the real machine, answers the `integration_*` commands, sends the event `integration` |
+| Page | `app/src/integrate*.ts`, `integrate.css` | the block, the Context section and status segments, the card, the profiles dialog, the palette entries |
+
+The flows are three. A **read** is `integration_run`: the request is checked against the closed catalogue, the selection of
+the pane is resolved with its profile, the tool is found, the argument list is built, the environment is made, the runner
+runs it and the answer becomes a model or a fault. A **change** is `integration_prepare` (a card, nothing started) and then
+`integration_confirm(ticket, hash)`. A **terminal** is `integration_launch` (a verb that only reads) or the pane that a
+confirmed card opens. The **status** of a tool (the Context section, the status segments, the chip of a pane) is a cached
+value read by one background thread, `holzwave-integration-status`, started by the first ask; the core has no timer, so an
+idle or hidden app starts no process. A tool is due after 30 s (Kubernetes) or 60 s (the others), a failed read doubles the
+wait up to 300 s, and a signed-out or missing tool is a state and does not back off.
 
 User widgets are data, not code: a JSON document validated against a schema, rendered by the webview from a fixed
 set of widget kinds. There is no arbitrary script execution. The loader (`core/src/widgets.rs`) validates every file field
@@ -510,6 +570,9 @@ hosts are covered; another system is shown as not supported.
 | Model output | a reply runs code or loads something in the page | untrusted text; it is rendered by the core's sanitiser and copied through the page's own allow-list; no image or media element ever; a link with a query string or user information is inert |
 | Agent actions | a tool call does something the person did not see or approve | typed tools; each call shows its exact fields and a hash; only the window decides (`ai_decide`, and `ai_undo` for a file change), by repeating the card's hash, and the core checks again when the call runs; nothing is remembered; after untrusted text entered a turn every side-effect tool needs a fresh card; a deny list protects the app's own data, configuration and socket folders, shell start files, `~/.ssh`, `.git/hooks` and `.env` files; a command runs in a separate process with a scrubbed environment and is never typed into a pane; `wsh` and the local socket can neither approve nor consent |
 | AI traffic | a request leaves that nobody asked for, or goes to another place than the person chose | one HTTP chokepoint (`core/src/ai/http.rs`): https only (a loopback address, and the local network by an opt-in), no redirects, the resolved address pinned for a destination on this computer or the local network, bounded sizes and times, error text without URLs; nothing is requested before Send, and a name lookup happens only on an act that needs the destination; `Local only` refuses every destination that leaves the computer; the page never talks to a provider and the content security policy is unchanged |
+| Integration tools | a tool is started with more than the person decided: a name from a cluster, an account or a synced file becomes an option, a shell string or an environment variable of a loader | every child is an argument list started by the one runner, never a shell; every name is a validated type and a flag that carries one uses the equals form; a synced profile cannot set a loader, interpreter, program or app variable, and a file that breaks a rule is set aside whole; a verb that changes something is a card with a hash that only the window answers, once; the AI chat, `wsh` and the socket reach no integration. Tested by generated corpora against fakes (section 12), not against real tools |
+| Integration output | text from a cluster or an account spoofs the window, the card or a terminal (escape sequences, right-to-left marks, markup, huge cells) | cleaned once in the core, capped, cleaned again by the page and drawn as text only; the card spells control characters as escapes; a row whose name fails validation has no action |
+| Integration secrets | a secret variable of a profile reaches a file, a log, a card, a `Debug` text or another run | in the keychain as `int:<profile>:<NAME>` (at most 1 KiB), write-only, read for one spawn and wiped, never in `integrations.json`; a canary sweep over every output of the service finds the secret only in the environment of the runs that were given it |
 
 ### AI chat
 
@@ -553,6 +616,32 @@ core passes relative links, the page only absolute `http`, `https` and `mailto` 
 keychain; a command of the agent has the rights of the account and no sandbox (a daemon that leaves its process group
 outlives the kill); a name lookup of a host-name provider happens between the last check and the chokepoint's own resolve; a
 test that proves that nothing happened proves it for a time window, never for ever.
+
+### Integrations
+
+**What runs.** Your own `kubectl`, `talosctl`, `az` and GAM7, by an argument list built from a closed catalogue, with the
+environment of section 9, and never through a shell (one constant string picks bash or sh inside a pod). Nothing starts when
+the app opens; a read starts when a block that is shown or a status that the page asks for needs it, and a hidden window
+starts none. The integrations make no connection of their own: the tools do, and what they send is theirs, except that the
+Azure runs holzWave starts carry `AZURE_CORE_COLLECT_TELEMETRY=false`.
+
+**What is cleaned.** A name is validated before it can be an argument (a leading dash, control, direction and format
+characters are refused, and a refusal never quotes the input). Cell text, fault text and card text are cleaned and capped in
+the core and cleaned again in the page. A kubeconfig is never shown as text and no type of the integrations has a member for
+a token or a credential. A secret never reaches a card, a fault, a `Debug` text or a log.
+
+**Who can decide.** Only the window, by a press that a person made on a card with the exact argument list and a hash; the
+core resolves the request again at the press and runs it once. On a production context the button needs a second press.
+Nothing of this exists on the `wsh` socket and the AI chat has no integration tool.
+
+**Accepted residuals.** The value of a secret variable is in the environment of the tool it was given to, and a process of
+the same account can read it (for example `ps eww`) while that tool runs. A credential plugin of a tool may refresh a token
+in your kubeconfig on its own. A start file of your shell can export `KUBECONFIG` again and replace the overlay of a pane, so
+the chip says what holzWave set and not what the shell then did. The network and telemetry behaviour of the tools is theirs.
+A compromised page could press a button on a card; that is bounded by the page controls and the hash, as for the AI chat. A
+name that is made of blank-looking letters outside the format category of Unicode (such as U+3164) is accepted; nothing
+executes it, and the card spells the characters it shows. The Flatpak build and mobile run no integration, so they have no
+such exposure.
 
 ### wsh over an SSH tunnel
 
@@ -607,6 +696,17 @@ Windows and Linux are written and cross-checked from a Mac, and the author has r
   On their own they prove that it compiles and that the Unix half passes on Linux; a screen, an input method, a GPU or
   ConPTY are what the author's run on real machines covers.
 
+- **The integrations on the platforms.** macOS: built, and run against fake tools and recorded output; the research Mac had
+  `kubectl`, `az` and GAM7 and no `talosctl`. Linux: the whole core suite ran once in an Ubuntu container (arm64) with one
+  failure outside the integrations (an SSH test); the Linux directory list, Snap, Linuxbrew and a desktop started from a
+  launcher were not covered. Windows: the rules (the `PATHEXT` search, the batch-file argument charset of `az.cmd`, the `;`
+  separator of `KUBECONFIG`, the refusal of UNC and device paths) are tested with injected facts on the Mac; the five tests that
+  use the real system are in `core/tests/integrate_windows.rs`, have never been compiled for Windows and never run, and the
+  Windows and Linux cross-check did not run for this part. Mobile: the code that starts a process is compiled out and the
+  answer is `Unsupported`; the compile for an iOS or Android target did not run. Flatpak: the runner is built disabled, so
+  every tool reads `unsupported` and no process starts; no real sandbox ran. Rows INT-W1 to INT-W4 and INT-L1 of
+  [test-plan.md](test-plan.md) are the owner's.
+
 ## 12. Quality strategy
 
 All of it runs locally; GitHub builds only on request.
@@ -660,6 +760,18 @@ All of it runs locally; GitHub builds only on request.
   The ceilings are asserted in release builds only. The numbers are from the machines named in the rows, not from the
   owner's machines; the commands that measure them are in Part 1 of [test-plan.md](test-plan.md) and row AI8 records the
   owner's.
+- **Native integrations:** the quick set of Part 1 of [test-plan.md](test-plan.md) runs the tool modules, the two JSON
+  contracts, the service, the status worker and the end-to-end files against fake programs (POSIX scripts) and recorded
+  fixtures, and a release gate of generated corpora runs on top of it. Measured on an Apple silicon Mac on 2026-10-22: the
+  name-injection corpus has 38 classes over 22 verbs and 44 argument slots (7296 requests, 5814 refused, 1482 accepted, each
+  accepted list equal to the baseline with the name in its place, no refused request started a process); the hostile-output
+  corpus has 4134 documents in 113 classes and 3144 distinct models, all accepted by the schema check; the canary sweep checks
+  52 outputs for 5 canary values; the approval-bypass test makes 49 lane attempts and 24 ticket attempts, all refused with no
+  process started; the page gate puts 26 hostile shapes through the block on WebKit and Chromium. The counts are printed by the
+  tests and each has a minimum asserted, so a corpus cannot shrink unnoticed. These are tests against fakes and fixtures: no
+  real tool was in the loop, the fixtures for Talos, the GAM7 users and the Azure resource groups are written from the tools'
+  documents and not recorded, and the gated real-tool tests (`integrate_real`) skip unless `HW_INTEGRATION_REAL=1`. The human
+  rows are Part 9 of [test-plan.md](test-plan.md); how many of them have passed is not measured yet, the Result column says.
 - **Robustness:** corrupt `layout.json`, closing panes mid-output, and resizing during a flood are explicit tests,
   as are hostile `settings.json`, `session.json` and theme files (size, type, range and name limits).
 - **What no suite here can see** (real window chrome, an input method, a physical layout, the native menu, fonts, the
@@ -705,6 +817,8 @@ All of it runs locally; GitHub builds only on request.
 | A21 | Approval of an integration verb is a ticket resolved again at run time, decided by the window only, with a production guard | what the person saw is what runs, nothing of it exists on `wsh`, and a mistake in a production context costs a second press |
 | A22 | The environment of a child is the inherited one minus loader and interpreter variables and the app's own | the AI command runner's rule would drop the variables credential plugins need; a synced profile must not be able to hijack the next run |
 | A23 | The integrations run on this computer only | the tools hold your credentials on this computer; a remote run would need a second trust decision and is not planned |
+| A24 | GAM7 output is read by the `csv` crate, pinned to one version, with caps around it | the text is written by other people into a domain's directory; a hand-written splitter would be a parser of hostile input, and the crate is the established reader |
+| A25 | Text from a tool is cleaned in the core and again in the page | the view model is a published contract that a model need not have passed through the core's cleaning; the second pass is defence in depth, and both use the same list of hidden characters |
 
 ## 15. Open questions
 
@@ -719,15 +833,25 @@ All of it runs locally; GitHub builds only on request.
    goes; the AI chat client stays.
 6. The wire fixtures of the five providers are written from the vendors' documents, and real streams may differ. Rows AI1
    and AI2 of [test-plan.md](test-plan.md) close this; a difference becomes a new fixture and a rule.
-7. The JSON shapes of real Talos output (nodes, services, machine status) and whether `talosctl config context` writes
-   the configuration file. The Talos parsers are written from the tool's documents until a real talosconfig is used.
+7. The JSON shapes of real Talos output (nodes, services, machine status), the role member of `talosctl config info`, and
+   whether `talosctl config context` writes the configuration file. **Open, see rows INT-T1 and INT-T2.** The Talos
+   parsers are written from the tool's documents and the six Talos fixtures are written, not recorded, until a real
+   talosconfig is used; an unknown shape reads as plain text, never an error.
 8. How `az.cmd` on Windows treats the argument character set the integrations allow, and whether any name passes
-   through a batch file unharmed.
+   through a batch file unharmed. **Open, see rows INT-W2 and INT-W1.** What is built: an argument outside a strict
+   character set is refused before a process exists (tested with injected Windows facts on the Mac); a real `az.cmd` has
+   never been run.
 9. The `PATH` of an app started from the Finder, and the cost of asking a login shell for its `PATH` on fish and nushell.
-10. Whether a fake API server for the real `kubectl` can run in the owner's test run; until then the Kubernetes
-    parsers are tested against recorded output and a fake program.
+   **Answered in part.** A Finder-launched app on the research Mac (macOS 26) saw only `/usr/bin:/bin:/usr/sbin:/sbin`, so
+   none of the four tools was on it; the login-shell probe found the directories of `kubectl` and `az` and took about 7 to
+   12 ms with a synthetic home. fish is covered by a written capture and not a recording, and nushell is not asked (the
+   fixed directories and the path field apply). **Open, see row INT-P1** for the built app.
+10. Whether a fake API server for the real `kubectl` can run in the owner's test run. **Answered.** A local fake API server
+    (Python, `socketserver`) lets the real `kubectl` 1.36.1 produce the recorded pods and namespaces; the Kubernetes parsers
+    are tested against that recorded output and against a fake program. A real cluster is **open, see rows INT-K1 to
+    INT-K4**.
 
-The rows of the integrations part of [test-plan.md](test-plan.md) close questions 7 to 10; an answer becomes a fixture and
+The rows of Part 9 of [test-plan.md](test-plan.md) close the open parts of questions 7 to 10; an answer becomes a fixture and
 a rule.
 
 See also: [design.md](design.md) for colour, type, components and the window direction.

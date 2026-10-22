@@ -37,6 +37,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use holzwave_core::ai::profiles::AiConfig;
+use holzwave_core::integrate::profiles::IntegrationProfiles;
 use holzwave_core::keybindings::{Keybindings, actions_for};
 use holzwave_core::layout::{Layout, LoadStatus};
 use holzwave_core::local_network::{Choice, LocalNetwork};
@@ -3118,6 +3119,161 @@ fn the_integration_wording_guard_sees_the_old_sentence_and_its_key_phrases() {
     let new = "The tools run on this computer only; the active pane picks the context, and a connection is never used.";
     assert!(integration_wording_problems(new).is_empty(), "the decided design reads clean");
     assert!(integration_wording_problems("on the active pane, on the active tab").is_empty(), "another noun");
+}
+
+// ---- the integrations in the architecture, the design and the configuration guide -------------------------------------
+
+/// What is wrong with section 9 of the architecture as a statement of what is built: it has no subsection titled
+/// `Integrations (built)`, it still says planned, or it leaves out the sentence that says what the integrations were
+/// tested against. Whitespace is folded, so a line break inside a phrase does not hide it.
+fn integration_status_problems(section: &str) -> Vec<String> {
+    let text = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut problems = Vec::new();
+    if !text.contains("Integrations (built)") {
+        problems.push(String::from("it has no subsection titled `Integrations (built)`"));
+    }
+    if text.contains("Integrations (planned)") {
+        problems.push(String::from("it still says `Integrations (planned)`"));
+    }
+    if text.contains("Status: planned") || text.contains("is built yet") {
+        problems.push(String::from("it still says that nothing is built"));
+    }
+    if !text.contains("tested against fake tools and recorded fixtures") {
+        problems.push(String::from("it leaves out `tested against fake tools and recorded fixtures`"));
+    }
+    problems
+}
+
+#[test]
+fn architecture_section_9_is_marked_built_with_the_qualifier() {
+    let section = markdown_section(&read("docs/architecture.md"), "## 9.");
+    assert!(!section.is_empty(), "docs/architecture.md has no section 9");
+    let problems = integration_status_problems(&section);
+    assert!(problems.is_empty(), "section 9 of docs/architecture.md: {problems:?}");
+}
+
+#[test]
+fn the_status_guard_sees_a_planned_section_and_a_missing_qualifier() {
+    let planned = "## 9. Integrations\n\n### Integrations (planned)\n\nStatus: planned. Nothing in this subsection is built yet.\n";
+    assert_eq!(integration_status_problems(planned).len(), 4, "{:?}", integration_status_problems(planned));
+    let bare = "## 9. Integrations\n\n### Integrations (built)\n\nThey are built.\n";
+    assert_eq!(integration_status_problems(bare), ["it leaves out `tested against fake tools and recorded fixtures`"]);
+    let built = "### Integrations (built)\n\nThey are built and tested against fake tools\nand recorded fixtures.\n";
+    assert!(integration_status_problems(built).is_empty(), "a line break inside the phrase");
+}
+
+/// The design images of the integrations: `docs/design.md` names each, and each file is below `docs/design/`.
+const INTEGRATION_DESIGN_IMAGES: [&str; 6] = [
+    "integration-block.png",
+    "integration-states.png",
+    "integration-context.png",
+    "integration-confirm.png",
+    "integration-confirm-states.png",
+    "integration-profiles.png",
+];
+
+/// What is wrong with the images of the integrations: one the document does not name and one that does not exist.
+fn integration_image_problems(doc: &str, exists: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut problems = Vec::new();
+    for name in INTEGRATION_DESIGN_IMAGES {
+        if !doc.contains(&format!("design/{name}")) {
+            problems.push(format!("docs/design.md does not name {name}"));
+        }
+        if !exists(name) {
+            problems.push(format!("docs/design/{name} does not exist"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn design_md_names_every_integration_image_and_the_files_exist() {
+    let exists = |name: &str| root().join("docs/design").join(name).is_file();
+    let problems = integration_image_problems(&read("docs/design.md"), &exists);
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn the_image_guard_reports_an_unnamed_image_and_a_missing_file() {
+    let doc = "| ![](design/integration-block.png) |\n| ![](design/integration-states.png) |\n";
+    let only_block = |name: &str| name == "integration-block.png";
+    let problems = integration_image_problems(doc, &only_block);
+    assert!(problems.contains(&"docs/design.md does not name integration-profiles.png".to_owned()), "{problems:?}");
+    assert!(problems.contains(&"docs/design/integration-states.png does not exist".to_owned()), "{problems:?}");
+    assert!(!problems.iter().any(|p| p.contains("integration-block.png")), "the block image is fine: {problems:?}");
+    let all = INTEGRATION_DESIGN_IMAGES.map(|name| format!("![](design/{name})")).join("\n");
+    assert!(integration_image_problems(&all, &|_| true).is_empty(), "everything named and present");
+}
+
+/// The words `docs/config.md` must hold about the integrations: the files, the two schemas, the two action ids in
+/// backticks and the link to the schema of the profile file.
+const INTEGRATION_CONFIG_WORDS: [&str; 10] = [
+    "integrations.json",
+    "integration_local.json",
+    "pane_integrations.json",
+    "pane_launches.json",
+    "integrations.schema.json",
+    "integration-view.schema.json",
+    "`integration.context`",
+    "`integration.profiles`",
+    "(integrations.schema.json)",
+    "(integration-view.schema.json)",
+];
+
+/// What the configuration guide leaves out about the integrations, one entry for each missing word.
+fn integration_config_problems(doc: &str) -> Vec<String> {
+    INTEGRATION_CONFIG_WORDS
+        .iter()
+        .filter(|word| !doc.contains(**word))
+        .map(|word| format!("docs/config.md does not contain {word}"))
+        .collect()
+}
+
+/// Loads `integrations.json` from the marked example `name` of `docs/config.md` in a scratch folder: the profiles, the
+/// notes of the loader and whether the folder then holds `integrations.json.bad`.
+fn load_documented_profiles(name: &str) -> (IntegrationProfiles, Vec<String>, bool) {
+    let dir = common::scratch_dir("policy-integrations");
+    fs::write(dir.join("integrations.json"), documented_example(name)).expect("the example file");
+    let (profiles, notes) = IntegrationProfiles::load(&dir);
+    let bad = dir.join("integrations.json.bad").is_file();
+    fs::remove_dir_all(&dir).expect("remove scratch directory");
+    (profiles, notes, bad)
+}
+
+#[test]
+fn config_md_documents_the_integration_files_and_schemas() {
+    let doc = read("docs/config.md");
+    let problems = integration_config_problems(&doc);
+    assert!(problems.is_empty(), "{problems:?}");
+    for schema in ["docs/integrations.schema.json", "docs/integration-view.schema.json"] {
+        assert!(root().join(schema).is_file(), "{schema} does not exist");
+    }
+
+    // The profile examples are judged by the real loader, so a rule that changes fails here.
+    let (profiles, notes, bad) = load_documented_profiles("integrations/profile.json");
+    assert!(notes.is_empty() && !bad, "the profile example is refused: {notes:?}");
+    assert_eq!(profiles.items.len(), 1, "the profile example holds one profile");
+    let (profiles, notes, bad) = load_documented_profiles("integrations/production.json");
+    assert!(notes.is_empty() && !bad, "the production example is refused: {notes:?}");
+    assert_eq!(profiles.items.len(), 2, "the production example holds a Kubernetes and an Azure profile");
+    assert!(
+        profiles.items.iter().any(|profile| profile.production) && profiles.items.iter().any(|profile| profile.isolated),
+        "one profile is marked production and one is isolated"
+    );
+    let (profiles, notes, bad) = load_documented_profiles("integrations/refused.json");
+    assert_eq!(notes.len(), 1, "the refused example gives one note: {notes:?}");
+    assert!(profiles.items.is_empty(), "a refused file is not half applied");
+    assert!(bad, "a refused file is kept as integrations.json.bad");
+}
+
+#[test]
+fn the_config_guard_lists_what_a_document_leaves_out() {
+    let problems = integration_config_problems("`integration.context` and integrations.json only");
+    assert!(problems.contains(&"docs/config.md does not contain integration_local.json".to_owned()), "{problems:?}");
+    assert!(problems.contains(&"docs/config.md does not contain `integration.profiles`".to_owned()), "{problems:?}");
+    assert!(!problems.iter().any(|p| p.ends_with("contain `integration.context`")), "{problems:?}");
+    let full = INTEGRATION_CONFIG_WORDS.join(" ");
+    assert!(integration_config_problems(&full).is_empty(), "every word present");
 }
 
 // ---- the test targets the documents name ----------------------------------------------------------------------

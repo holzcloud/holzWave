@@ -15,6 +15,7 @@ change that forgets the document fails a test.
 - [Accessibility](#accessibility)
 - [Privacy](#privacy)
 - [`ai.json`](#aijson)
+- [`integrations.json` and `integration_local.json`](#integrationsjson-and-integration_localjson)
 
 ## Where the files live
 
@@ -45,6 +46,12 @@ against scratch directories and never touch the real one.
 | `ai.json` | the AI provider profiles, without keys | when a profile is saved or deleted | yes |
 | `chats/<id>.json` | one AI chat per file, readable by you only; terminal context is a marker unless `ai_persist_context` is on | when a message is stored | yes |
 | `history.db` | the command history, with the host each command ran on | when a command is reported | yes |
+| `integrations.json` | the integration profiles: names and flags for Kubernetes, Talos, Azure and GAM7, never a credential or a path | when a profile is saved or deleted in the dialog, and by you | no (synced, see [sync.md](sync.md)) |
+| `integration_local.json` | where each tool's program is on this computer, and the configuration files you list for it | when you set a path in a block, and by you | yes |
+| `pane_integrations.json` | which context, namespace, subscription, section or node each pane of an integration uses | 250 ms after the first change of a burst, and on quit | yes |
+| `pane_launches.json` | the label of each pane that was a tool session, so that it is not started again after a restart | when it changes | yes |
+| `run/kube/<pane>.json` | the overlay kubeconfig of a Kubernetes shell pane: names only, readable by you only | when the pane starts or its context changes; removed when the pane is gone | yes |
+| `integrations/<azure or gam>/<profile>/` | the configuration folder of an isolated Azure or GAM7 profile: the tool's own tokens, readable by you only | by the tool, after you sign in inside it | yes |
 | `widgets/<id>.json`, `widget_notes.json` | your widgets, and the texts of the note widgets | by you, and when a note changes | no |
 | `<name>.bad` | the bytes of a file that could not be used | when such a file is loaded | |
 
@@ -53,7 +60,7 @@ Rules that hold for every file:
 - **Atomic writes.** The bytes go to `<name>.tmp`, are flushed, and replace the file with one rename. A crash leaves the
   old content or the new one, never half of it.
 - **Bounded reads.** A file larger than its limit is not read: `settings.json`, `session.json` and `layout.json`
-  1 MiB, `ai.json` 256 KiB, a theme file 64 KiB. An oversized file is moved to `<name>.bad`.
+  1 MiB, `ai.json` 256 KiB, `integrations.json` and `integration_local.json` 256 KiB, a theme file 64 KiB. An oversized file is moved to `<name>.bad`.
 - **The app always starts.** A file that cannot be used is replaced by the defaults, and the original bytes are kept
   as `<name>.bad` before the next save can overwrite them. Keep a `.bad` copy if you want it: the next one replaces it.
 - **Hand edits are welcome.** An unknown key is ignored, so a file written by a newer version still loads. Edit while
@@ -624,6 +631,18 @@ is synced. The answer of a model is untrusted text and never runs, and every too
 own card. holzWave asks OpenAI not to store a request (`store: false`) and OpenRouter not to collect it
 (`data_collection: deny`) and cannot promise more: what a provider keeps is that provider's own policy.
 
+**The integrations.** The integrations start your own `kubectl`, `talosctl`, `az` and GAM7 on this computer, with an argument
+list, never through a shell, and only when you open a block, run a palette entry or have the Context section or a status
+segment shown; a hidden window starts none. They make no connection of their own: the tools do, and what a tool sends is that
+tool's own business, except that the runs holzWave starts set `AZURE_CORE_COLLECT_TELEMETRY=false` for Azure CLI (your own use of
+`az` in a terminal is not touched). Secret variables of a profile are kept in the operating system keychain and are given only to
+the tool that is started for it; the environment of a running tool can be read by another process of your account (for example
+with `ps eww`) while it runs. holzWave never imports a kubeconfig, a talosconfig or a tool's token file, and a credential plugin
+of a tool may refresh a token in your kubeconfig by itself. A shell start file that exports `KUBECONFIG` replaces the overlay of
+a Kubernetes shell pane. Nothing that a tool prints is sent anywhere, and the AI chat has no integration tool. The Flatpak build
+does not run the integrations, and the mobile apps do not have them. They are built and tested against fake tools and recorded
+fixtures and have not been run against a real cluster, a real Talos, Azure or GAM account, or on Windows and Linux hardware.
+
 ## `sync.json` and `sync_state.json`
 
 `sync.json` is `{"endpoint": "...", "user": "..."}`: the folder address and the account of the encrypted sync. The app
@@ -862,6 +881,134 @@ enter them again there.
   "acknowledged": ["https://openrouter.ai:443"]
 }
 ```
+
+## `integrations.json` and `integration_local.json`
+
+The integrations start your own `kubectl`, `talosctl`, `az` and GAM7 on this computer. A **profile** is what holzWave
+remembers about one connection of one tool: which context, namespace, subscription, section or node a block uses, whether
+that context is production, and a few environment variables. A profile never holds a credential and never holds a path.
+The tools keep their own credentials (a kubeconfig, a talosconfig, `~/.azure`, `~/.gam`); holzWave refers to them and never
+imports or copies them. You edit profiles in the dialog `Integration profiles…` (the action `integration.profiles`) or by
+hand in `integrations.json`; the dialog and the file are the same data.
+
+`integrations.json` is synced ([sync.md](sync.md)). `integration_local.json` is not: it holds paths of this computer.
+[integrations.schema.json](integrations.schema.json) describes `integrations.json` for an editor, and
+[integration-view.schema.json](integration-view.schema.json) describes the other published document, the view model that the
+core hands to a block (tables, key-value lists and text, with their caps). A test gives each schema and its loader the same
+documents and fails when they differ.
+
+```
+{ "version": 1, "profiles": [ { ... }, ... ] }
+```
+
+| Field | Meaning |
+|---|---|
+| `version` | must be `1`; a file of another version is set aside |
+| `id` | `a-z`, `0-9`, `_` and `-`, at most 32 characters, not starting with a dash; unique in the file |
+| `tool` | `kube`, `talos`, `azure` or `gam` |
+| `name` | what you call it, 1 to 64 characters, no control or invisible character |
+| `context`, `namespace` | the context a `kube` or `talos` profile pins and the namespace a `kube` profile pins (a DNS label); a context does not start with a dash |
+| `node` | the node a `talos` profile pins: an address or a DNS name |
+| `subscription` | the subscription an `azure` profile pins, by its GUID |
+| `section` | the section a `gam` profile pins; a word that GAM7 reads as a command (`save`, `select`, `config` and the like) is refused |
+| `production` | whether the pinned context is production: the card names it and the button needs a second press |
+| `isolated` | an `azure` or `gam` profile runs with a configuration folder of its own below `integrations/`; you sign in again inside it and it stays on this computer |
+| `env` | plain environment variables for the tool: a name and a value |
+| `secret_env` | the names, never the values, of variables whose values are in the keychain |
+
+A tool takes only its own selection fields, so a `kube` profile with a `subscription` is refused. The rules, which the loader
+applies to the whole file before anything is used:
+
+- at most 64 profiles, at most 32 plain variables and 8 secret names for each, a value at most 1024 bytes, the file at most
+  256 KiB; an object with a member that is not in the table is refused, and so is the same key twice;
+- a variable name is not one the runner strips (`HOLZWAVE_*`, `LD_*`, `DYLD_*`, `PYTHON*`, `NODE_*`, `GIT_*`, `BASH_ENV`,
+  `ENV`, `IFS`, `PATH`), not one the app sets itself (`KUBECONFIG`, `TALOSCONFIG`, `AZURE_CONFIG_DIR`, `GAMCFGDIR`,
+  `GAMCFGSECTION`) and not one that makes a tool start another program or read another start file (`BROWSER`, `EDITOR`,
+  `VISUAL`, `PAGER`, `SHELL`, `SHELLOPTS`, `BASHOPTS`, `PROMPT_COMMAND`, `ZDOTDIR`, `HOME`, `XDG_CONFIG_HOME`,
+  `KUBE_EDITOR`, `KUBECTL_EXTERNAL_DIFF`, `AZURE_EXTENSION_DIR`, `SSLKEYLOGFILE`); names are compared without regard to case,
+  because Windows does, so the file is valid on every platform or on none;
+- a plain value is not a path: it does not start with `/`, `~/`, two backslashes or a drive letter and a separator. Paths of
+  one computer belong in `integration_local.json`;
+- a value holds no control, direction, zero-width or other invisible character;
+- a secret name is listed once and is not also a plain variable. The value of a secret variable is typed in the dialog, kept in
+  the operating system keychain under `int:<profile id>:<NAME>`, at most 1 KiB, read for one run and wiped, and never written
+  to a file. It travels between your computers only inside the encrypted sync payload. Removing a profile removes its keychain
+  entries on this computer; a removal on one computer does not remove the entries of another.
+
+A file that breaks any rule is not half applied. It is kept whole as `integrations.json.bad` (the next one replaces it), holzWave
+starts without profiles, and the dialog shows one note that names the profile and the field and never a value. The same holds
+for a file that arrives by sync (it is read at the next start, like the other files the running app owns).
+
+<!-- example: integrations/profile.json -->
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "staging",
+      "tool": "kube",
+      "name": "Staging cluster",
+      "context": "staging-eu",
+      "namespace": "payments",
+      "env": { "AWS_PROFILE": "staging" },
+      "secret_env": ["AWS_SECRET_ACCESS_KEY"]
+    }
+  ]
+}
+```
+
+A production context and an isolated Azure profile in one file. The Kubernetes profile marks the context it pins as
+production; the Azure profile pins a subscription by its GUID (a made-up one here) and signs in inside its own folder.
+
+<!-- example: integrations/production.json -->
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "prod-eu",
+      "tool": "kube",
+      "name": "Production, EU",
+      "context": "prod-eu",
+      "namespace": "payments",
+      "production": true
+    },
+    {
+      "id": "azure-lab",
+      "tool": "azure",
+      "name": "Azure lab",
+      "subscription": "00000000-0000-4000-8000-000000000000",
+      "isolated": true
+    }
+  ]
+}
+```
+
+A file that is refused. The second profile sets `LD_PRELOAD`, which would load code into every tool that profile starts, so
+the whole file is set aside, including the first profile, which is fine on its own.
+
+<!-- example: integrations/refused.json -->
+```json
+{
+  "version": 1,
+  "profiles": [
+    { "id": "fine", "tool": "kube", "name": "A fine profile", "context": "staging-eu" },
+    { "id": "loads-code", "tool": "kube", "name": "Loads code", "env": { "LD_PRELOAD": "libhook.so" } }
+  ]
+}
+```
+
+`integration_local.json` holds `{ "version": 1, "binaries": { "<tool>": "<absolute path>" }, "config_paths": { "<tool>":
+["<absolute path>", ...] } }`. `binaries` is set with `Set path` in a block when holzWave cannot find a tool; the file name must
+be one of the tool's own. `config_paths` is written by you: the configuration files of a tool on this computer (for Kubernetes
+the list that follows the overlay in `KUBECONFIG`), at most 8 for each tool. Every path is absolute on this computer and none is
+a network or device path. A file that breaks a rule is set aside as `integration_local.json.bad` with one note, without the
+path.
+
+The overlay of a Kubernetes shell pane (`run/kube/<pane>.json`) names the selected context, its cluster, its user and the
+namespace, and nothing that is secret; it is listed first in `KUBECONFIG` for that pane only. A start file of your shell that
+exports `KUBECONFIG` again replaces it. The two actions `integration.context` and `integration.profiles` are in the key binding
+table above; they have no default chord.
 
 ## `widgets/*.json` and `widget_notes.json`
 
