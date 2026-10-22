@@ -1872,7 +1872,8 @@ as they came; nothing is dropped, and a long value wraps.
 **Production.** When the core's guard names a production context the guard line is drawn and the card needs **two presses**. The
 first press on `Allow once` (after the half second) arms the card and sends nothing: the bar turns danger, the button reads
 `Press again to allow on production`, and the line says `Armed. The next press allows this on production. Nothing has run
-yet.` so that assistive technology announces it. The second press sends the confirm. `Deny`, `Escape` or the card ending
+yet.` so that assistive technology announces it. The second press sends the confirm, and only when half a second has passed since the first (a double click arms the card and
+cannot allow it). `Deny`, `Escape` or the card ending
 disarms it, and nothing is remembered: the next card, also for the same action, starts unarmed. A card that stays armed is not
 timed out by the page; it ends with its ticket after 120 seconds.
 
@@ -1901,7 +1902,7 @@ covers) is `cannot`.
 | `Tab` | reaches the argument box, `Allow once` and `Deny` in this order |
 | `Space`, `Enter` on a button | decides |
 | `Escape` with the focus inside the card | denies (the ticket is cancelled) and returns the focus to the terminal pane that had it; `Escape` elsewhere does nothing to the card |
-| a press on `Allow once` within half a second of the card appearing, also of a card drawn again after a changed request | ignored (a click aimed at what moved cannot allow an action) |
+| a press on `Allow once` within half a second of the card appearing, also of a card drawn again after a changed request, and a second press on an armed card within half a second of the first | ignored (a click aimed at what moved cannot allow an action) |
 | a click or key press made by a script | ignored; `Deny` works at any time for a real press |
 | the palette entry `Answer the integration request` | moves the keyboard to `Deny`; the entry is there only while a card waits |
 

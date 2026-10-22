@@ -35,8 +35,8 @@ export function cardOf(over = {}) {
 /** The confirm answer of a verb that ran. */
 export const RAN = { kind: "ran", pane: null, note: 'pod "api-0" deleted', view: null };
 
-/** The confirm answer of a verb that opened a pane: the layout has a third pane (5), a terminal beside the others. */
-export const OPENED = (view) => ({ kind: "launched", pane: 5, note: "Exec in pod api-0", view });
+/** The confirm answer of a verb that opened a pane: the layout has a third pane (3), a terminal beside the others. */
+export const OPENED = (view, pane = 3) => ({ kind: "launched", pane, note: "Exec in pod api-0", view });
 
 export const ticketFault = (reason, text = "The action is not waiting.") => ({ code: "ticket", reason, text });
 
@@ -101,3 +101,32 @@ export const cardNode = (page) => page.locator("section.ic");
 export const textOf = (page, selector) => page.locator(`section.ic ${selector}`).textContent();
 export const gone = (page) => page.waitForFunction(() => document.querySelector("section.ic") === null);
 export const wait = (page, ms) => page.waitForTimeout(ms);
+
+/** A production card: the guard names the context. */
+export const PROD = "Production EU";
+export const prodCard = (over = {}) => cardOf({ production: PROD, ...over });
+
+/** The colour a token has in the page, as the browser computes it, so a test never writes a colour. */
+export const tokenColor = (page, name) =>
+  page.evaluate((n) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${n})`;
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, name);
+
+/** Show a card and wait until it is drawn. */
+export async function show(page, ...args) {
+  await request(page, ...args);
+  await cardNode(page).waitFor();
+}
+
+/** Real presses, after the half second. */
+export async function allow(page) {
+  await wait(page, 600);
+  await cardNode(page).locator(".ic-yes").click();
+}
+
+export const modeOf = (page) => cardNode(page).getAttribute("data-mode");

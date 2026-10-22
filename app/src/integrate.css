@@ -186,7 +186,7 @@
 .ic-foot { color: var(--hw-dim); font-size: calc(11rem / 12); }
 
 /* The buttons: `Deny` at the left, `Allow once` solid at the right, armed in the danger colour with its words. */
-.ic-actions { display: flex; justify-content: space-between; gap: .5rem; margin: 0 0 .5rem; }
+.ic-actions { display: flex; flex-direction: row-reverse; justify-content: space-between; gap: .5rem; margin: 0 0 .5rem; }
 .dlg.ic button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12));
                  padding: 0 .833rem; border: 1px solid var(--hw-line); border-radius: .333rem; background: none; color: var(--hw-ink); cursor: pointer;
                  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase;

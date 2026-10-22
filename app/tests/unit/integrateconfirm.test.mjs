@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { CARD_WORDS, hashShown, modeWords, readCard } from "../../dist/integratestate.js";
+import { CARD_WORDS, HALF_SECOND, hashShown, modeWords, nextMode, readCard, refusalOf } from "../../dist/integratestate.js";
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
 const HASH = "9f3a41c2d7be0123456789abcdef0123456789abcdef0123456789abcdef0123";
@@ -116,4 +116,92 @@ test("every mode has words, and the words of an outcome come from the core", () 
   assert.equal(modeWords("ended"), "That action is no longer waiting.");
   assert.equal(modeWords("changed"), "The request changed. Nothing ran. Read the card again.");
   assert.equal(modeWords("cannot"), "This request could not be read in full. It can only be denied.");
+});
+
+// ---- the machine of the modes -------------------------------------------------------------------------------------------------
+
+const MODES = ["ask", "armed", "sending", "done", "ended", "changed", "cannot"];
+const allow = (over = {}) => ({ type: "allow", now: 10_000, shownAt: 0, armedAt: null, trusted: true, production: false, ...over });
+
+test("an ordinary card is allowed by one real press after the half second", () => {
+  assert.equal(HALF_SECOND, 500);
+  assert.deepEqual(nextMode("ask", allow()), { mode: "sending", act: "confirm" });
+  assert.deepEqual(nextMode("ask", allow({ now: 500 })), { mode: "sending", act: "confirm" }, "exactly half a second counts");
+  assert.deepEqual(nextMode("ask", allow({ now: 499 })), { mode: "ask", act: "none" }, "one millisecond too early");
+  assert.deepEqual(nextMode("ask", allow({ trusted: false })), { mode: "ask", act: "none" }, "a press a script made");
+});
+
+test("a production card arms on the first press and is allowed by the second", () => {
+  assert.deepEqual(nextMode("ask", allow({ production: true })), { mode: "armed", act: "arm" });
+  assert.deepEqual(nextMode("ask", allow({ production: true, now: 499 })), { mode: "ask", act: "none" });
+  assert.deepEqual(nextMode("ask", allow({ production: true, trusted: false })), { mode: "ask", act: "none" });
+  assert.deepEqual(nextMode("armed", allow({ production: true, armedAt: 5000 })), { mode: "sending", act: "confirm" });
+  assert.deepEqual(nextMode("armed", allow({ production: true, armedAt: 9501 })), { mode: "armed", act: "none" }, "a double click arms and cannot allow");
+  assert.deepEqual(nextMode("armed", allow({ production: true, armedAt: 9500 })), { mode: "sending", act: "confirm" });
+  assert.deepEqual(nextMode("armed", allow({ production: true, armedAt: 5000, trusted: false })), { mode: "armed", act: "none" });
+});
+
+test("only an unarmed ordinary card or an armed card can reach a confirm, in every combination", () => {
+  let confirms = 0;
+  for (const mode of MODES) {
+    for (const trusted of [true, false]) {
+      for (const production of [true, false]) {
+        for (const now of [0, 499, 500, 10_000]) {
+          for (const armedAt of [null, now, now - 499, now - 500]) {
+            const next = nextMode(mode, allow({ mode, trusted, production, now, shownAt: 0, armedAt }));
+            if (next.act !== "confirm") {
+              if (mode !== "sending") assert.notEqual(next.mode, "sending", "sending only through a confirm");
+              continue;
+            }
+            confirms += 1;
+            assert.equal(trusted, true, "a script never confirms");
+            assert.ok(now >= 500, "never within the half second");
+            assert.ok(mode === "armed" || (mode === "ask" && !production), `${mode} production=${production}`);
+            if (mode === "armed") assert.ok(armedAt === null || now - armedAt >= 500, "never within half a second of arming");
+          }
+        }
+      }
+    }
+  }
+  assert.ok(confirms > 0, "the loop reached a confirm");
+});
+
+test("deny counts for a real press in the modes that have the button, whenever it is made", () => {
+  for (const mode of ["ask", "armed", "cannot", "changed"]) {
+    assert.deepEqual(nextMode(mode, { type: "deny", trusted: true }), { mode: "ended", act: "cancel" }, mode);
+    assert.deepEqual(nextMode(mode, { type: "deny", trusted: false }), { mode, act: "none" }, `${mode} by a script`);
+  }
+  for (const mode of ["sending", "done", "ended"]) {
+    assert.deepEqual(nextMode(mode, { type: "deny", trusted: true }), { mode, act: "none" }, mode);
+  }
+});
+
+test("the answers of the core move a card that is sending, and no other", () => {
+  assert.deepEqual(nextMode("sending", { type: "ran" }), { mode: "done", act: "none" });
+  assert.deepEqual(nextMode("sending", { type: "refused", refusal: "ended" }), { mode: "ended", act: "none" });
+  assert.deepEqual(nextMode("sending", { type: "refused", refusal: "changed" }), { mode: "changed", act: "none" });
+  assert.deepEqual(nextMode("sending", { type: "refused", refusal: "other" }), { mode: "ask", act: "none" }, "disarmed: a new decision is needed");
+  for (const mode of MODES.filter((m) => m !== "sending")) {
+    assert.deepEqual(nextMode(mode, { type: "ran" }), { mode, act: "none" }, mode);
+    assert.deepEqual(nextMode(mode, { type: "refused", refusal: "ended" }), { mode, act: "none" }, mode);
+  }
+  assert.deepEqual(nextMode("changed", { type: "fresh" }), { mode: "ask", act: "none" });
+  for (const mode of MODES.filter((m) => m !== "changed")) assert.deepEqual(nextMode(mode, { type: "fresh" }), { mode, act: "none" }, mode);
+});
+
+test("a ticket that runs out ends a card that waits, never one that is sending or finished", () => {
+  for (const mode of ["ask", "armed", "changed", "cannot"]) assert.deepEqual(nextMode(mode, { type: "expired" }), { mode: "ended", act: "none" }, mode);
+  for (const mode of ["sending", "done", "ended"]) assert.deepEqual(nextMode(mode, { type: "expired" }), { mode, act: "none" }, mode);
+});
+
+test("the refusals of the core are told apart by code and reason", () => {
+  const ticket = (reason) => ({ code: "ticket", reason, text: "x" });
+  assert.equal(refusalOf(ticket("unknown")), "ended");
+  assert.equal(refusalOf(ticket("expired")), "ended");
+  assert.equal(refusalOf(ticket("changed")), "changed");
+  assert.equal(refusalOf(ticket("mismatch")), "changed");
+  assert.equal(refusalOf(ticket("refused")), "other");
+  assert.equal(refusalOf(ticket("")), "other");
+  assert.equal(refusalOf({ code: "failed", reason: "unknown", text: "x" }), "other", "the reason alone says nothing");
+  assert.equal(refusalOf({ code: "refused", reason: "expired", text: "x" }), "other");
 });

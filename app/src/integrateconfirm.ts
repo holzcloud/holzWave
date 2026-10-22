@@ -153,17 +153,17 @@ function build(item: Item, count: number, index: number): HTMLElement {
   const waiting = item.mode === "ask" || item.mode === "armed" || item.mode === "sending" || item.mode === "changed" || item.mode === "cannot";
   if (waiting) {
     const actions = el("div", "ic-actions", section);
+    // `Allow once` comes first in the document and `Deny` second (6.26); the style sheet draws `Deny` at the left.
+    const yes = card === null ? null : button(actions, "ic-yes", "yes", item.mode === "armed" ? CARD_WORDS.yesArmed : CARD_WORDS.yes);
     const no = button(actions, "ic-no", "no", CARD_WORDS.no);
     // Only a real press counts; `nextMode` applies the half second and the other rules.
     no.addEventListener("click", (e) => step(item, { type: "deny", trusted: e.isTrusted }));
-    if (card !== null) {
-      const yes = button(actions, "ic-yes", "yes", item.mode === "armed" ? CARD_WORDS.yesArmed : CARD_WORDS.yes);
+    no.disabled = item.mode === "sending";
+    if (card !== null && yes !== null) {
       yes.addEventListener("click", (e) =>
         step(item, { type: "allow", now: Date.now(), shownAt: item.shownAt, armedAt: item.armedAt, trusted: e.isTrusted, production: card.production !== null }),
       );
-      const locked = item.mode === "sending" || item.mode === "changed";
-      yes.disabled = locked;
-      no.disabled = item.mode === "sending";
+      yes.disabled = item.mode === "sending" || item.mode === "changed";
       if (item.mode === "armed") yes.dataset.armed = "true";
       el("p", "ic-foot", section).textContent = CARD_WORDS.foot;
     }
