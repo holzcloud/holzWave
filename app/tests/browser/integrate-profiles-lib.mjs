@@ -31,10 +31,11 @@ export const AZURE_PROFILE = profile({
  *   saveFaults  faults thrown by `integration_profile_save`, one for each call, in order (then it works)
  *   setFault / clearFault / removeFault   a fault thrown by that command
  *   listFault   a fault thrown by `integration_profiles`
+ *   setDelay    milliseconds `integration_secret_set` waits before it answers
  * The mock keeps `window.__PF__.values`, a map `profile:name` to true for a name that has a value, and never a value.
  */
 export async function installProfiles(page, config = {}) {
-  const base = { profiles: [PROD, STAGING], notes: [], saveFaults: [], setFault: null, clearFault: null, removeFault: null, listFault: null, values: {} };
+  const base = { profiles: [PROD, STAGING], notes: [], saveFaults: [], setFault: null, clearFault: null, removeFault: null, listFault: null, setDelay: 0, values: {} };
   await page.addInitScript((cfg) => {
     const M = window.__MOCK__;
     window.__PF__ = cfg;
@@ -76,8 +77,9 @@ export async function installProfiles(page, config = {}) {
       for (const k of Object.keys(pf.values)) if (k.startsWith(`${a.id}:`)) delete pf.values[k];
       return view();
     });
-    M.on("integration_secret_set", (a) => {
+    M.on("integration_secret_set", async (a) => {
       const pf = window.__PF__;
+      if (pf.setDelay > 0) await new Promise((r) => setTimeout(r, pf.setDelay));
       if (pf.setFault) throw pf.setFault;
       const p = pf.profiles.find((q) => q.id === a.profile);
       if (!p || !p.secret_env.some((s) => s.name === a.name)) throw fault(`profile ${a.profile}: ${a.name} is not a secret variable of the profile`, "secret");

@@ -1276,3 +1276,26 @@ export function duplicateName(rows: readonly { name: string }[]): string | null 
   }
   return null;
 }
+
+/** The words of the sentences of the dialog that are the page's own. */
+export const PROFILE_WORDS = {
+  sync:
+    "The profile file is synced between your computers. Secret values are kept in the keychain and synced inside the encrypted secrets. Paths of this computer are never part of a profile.",
+  secretsHint: "Saved values are never shown. Type a new one to replace it.",
+  saveFirst: "Save the profile first.",
+  saved: "saved",
+  notSet: "not set",
+} as const;
+
+/** The bounds the page keeps for the rows; the core's own limits are the ones that decide. */
+export const ROW_CAPS = { env: 32, secrets: 8 } as const;
+
+/**
+ * The index of the first name of `names` that the core's sentence carries as a word of its own (`profile prod: env LD_PRELOAD is not
+ * allowed`), or -1. The page does not interpret the sentence: it only finds the row to put it on. A longer name is another name, and
+ * the case counts.
+ */
+export function namedRow(text: string, names: readonly string[]): number {
+  const words = new Set(text.split(/[^A-Za-z0-9_]+/).filter((w) => w !== ""));
+  return names.findIndex((n) => n !== "" && words.has(n));
+}

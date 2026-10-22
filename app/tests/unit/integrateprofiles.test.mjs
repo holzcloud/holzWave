@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  duplicateName, fieldsFor, profileSelectionText, profileToSave, readProfiles, slug, takesOwnFolder, uniqueId,
+  duplicateName, fieldsFor, namedRow, profileSelectionText, profileToSave, readProfiles, slug, takesOwnFolder, uniqueId,
 } from "../../dist/integratestate.js";
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
@@ -173,4 +173,19 @@ test("a name used by two rows is found before anything is sent", () => {
   assert.equal(duplicateName([{ name: "A", value: "1" }, { name: "B", value: "2" }]), null);
   assert.equal(duplicateName([{ name: "", value: "" }, { name: "", value: "" }]), null, "blank rows are not names");
   assert.equal(duplicateName([{ name: " A", value: "1" }, { name: "A ", value: "2" }]), "A");
+});
+
+// ---- Task 3: which row a sentence of the core is about --------------------------------------------------------------------
+
+test("a sentence of the core is shown on the row whose variable name it carries", () => {
+  const names = ["AWS_PROFILE", "LD_PRELOAD", "TOKEN_1"];
+  assert.equal(namedRow("profile prod: env LD_PRELOAD is not allowed", names), 1);
+  assert.equal(namedRow("profile prod: env AWS_PROFILE is not valid", names), 0);
+  assert.equal(namedRow("profile prod: TOKEN_1 is not a secret variable of the profile", names), 2);
+  assert.equal(namedRow("profile prod: context is not valid", names), -1, "a sentence about another field belongs to no row");
+  assert.equal(namedRow("profile prod: env LD_PRELOAD_X is not allowed", names), -1, "a longer name is another name");
+  assert.equal(namedRow("profile prod: env XLD_PRELOAD is not allowed", names), -1);
+  assert.equal(namedRow("anything", []), -1);
+  assert.equal(namedRow("profile prod: env  is not allowed", ["", " "]), -1, "a blank name is no name");
+  assert.equal(namedRow("profile prod: env ld_preload is not allowed", names), -1, "the case of a name counts");
 });

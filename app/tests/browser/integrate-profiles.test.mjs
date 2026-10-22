@@ -2,7 +2,7 @@
 // reads the core's list once, shows every profile as text with the word `production` where the core says so, shows the core's
 // notes as dim lines, takes the keyboard while it is open and gives it back to the terminal on Escape.
 import assert from "node:assert/strict";
-import { AZURE_PROFILE, HOSTILE, PROD, STAGING, countOf, openDialog, openPage, profile } from "./integrate-profiles-lib.mjs";
+import { AZURE_PROFILE, HOSTILE, PROD, STAGING, callsOf, countOf, openDialog, openPage, profile } from "./integrate-profiles-lib.mjs";
 
 const NOTE = "integrations.json was not used: it has a member or a value that is not allowed (line 3, column 9)";
 
@@ -10,6 +10,7 @@ export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
   await listCase(page, url);
   await hostileCase(page, url);
+  await keysCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -98,4 +99,43 @@ async function hostileCase(page, url) {
   assert.equal(await page.locator(".dlg.ip-box b").count(), 0);
   assert.equal(await page.locator("[onerror]").count(), 0);
   await page.keyboard.press("Escape");
+}
+
+async function keysCase(page, url) {
+  await page.reload();
+  await page.evaluate(([a, b]) => {
+    window.__PF__.profiles = [a, b];
+  }, [PROD, STAGING]);
+  await page.waitForSelector(".cx-row");
+  await openDialog(page);
+  await page.waitForSelector("label.ip-row");
+
+  // Tab stays inside the box, forwards and backwards, and the terminal behind it gets nothing.
+  const inside = () => page.evaluate(() => document.querySelector(".dlg.ip-box").contains(document.activeElement));
+  const seen = new Set();
+  for (let i = 0; i < 40; i += 1) {
+    await page.keyboard.press("Tab");
+    assert.equal(await inside(), true, `Tab ${i} left the dialog`);
+    seen.add(await page.evaluate(() => document.activeElement.id || document.activeElement.className));
+  }
+  for (let i = 0; i < 40; i += 1) {
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await inside(), true, `Shift+Tab ${i} left the dialog`);
+  }
+  assert.ok(seen.size > 8, "the whole dialog can be reached with Tab");
+  assert.equal(await countOf(page, "key"), 0, "no key reached the terminal");
+
+  // The arrows move inside the list of profiles and choose the profile (a radio group).
+  await page.locator("label.ip-row").first().locator("input").focus();
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await page.locator("label.ip-row[data-chosen=true] .ip-name").textContent(), "Staging");
+  assert.equal(await page.locator("#ip-name").inputValue(), "Staging");
+
+  // Enter in a text field saves the profile in the form.
+  await page.locator("#ip-name").fill("Staging two");
+  await page.locator("#ip-name").press("Enter");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("integration_profile_save").length === 1);
+  assert.equal((await callsOf(page, "integration_profile_save"))[0].profile.name, "Staging two");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".dlg.ip-box", { state: "detached" });
 }

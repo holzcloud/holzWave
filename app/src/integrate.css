@@ -226,3 +226,25 @@
 .ai-settings .ip-prod { flex: none; color: var(--hw-warn); text-decoration: underline; }
 .ai-settings .ip-prod::before { content: "!"; margin-right: .6ch; font-weight: 700; display: inline-block; }
 .ai-settings .ip-status[data-kind="warn"] { color: var(--hw-warn); }
+
+/* The rows of the secret and the plain variables. A secret row is the name and its word on one line, the field and the buttons on
+   the next; the word (`saved`, `not set`) is the cue and the colour the second. */
+.ai-settings .ip-secret, .ai-settings .ip-env-row { margin: 0 0 .667rem; }
+.ai-settings .ip-secret-head { display: flex; align-items: baseline; justify-content: space-between; gap: .667rem; min-width: 0; }
+.ai-settings .ip-vname { min-width: 0; color: var(--hw-ink); font-family: "JetBrains Mono", ui-monospace, monospace; overflow-wrap: anywhere; }
+.ai-settings .ip-state { flex: none; color: var(--hw-dim); }
+.ai-settings .ip-state[data-state="saved"] { color: var(--hw-ok); }
+.ai-settings .ip-secret-edit, .ai-settings .ip-env-line { display: flex; align-items: center; gap: .5rem; min-width: 0; margin-top: .25rem; }
+.ai-settings .ip-secret-edit input, .ai-settings .ip-env-value { flex: 1 1 auto; }
+.ai-settings .ip-env-name { flex: 0 1 12rem; }
+.ai-settings .ip-secret-edit button, .ai-settings .ip-env-line button { flex: none; }
+.ai-settings .ip-secret-hint { margin: .167rem 0 0; }
+.ai-settings .ip-row-error { grid-column: auto; margin: .167rem 0 0; }
+.ai-settings .ip-row-error::before { content: "!"; margin-right: .6ch; font-weight: 700; display: inline-block; }
+.ai-settings .ip-add-row .aiset-keyrow { grid-column: 2; }
+.ai-settings .ip-sync { margin: 0 0 .667rem; }
+.ai-settings .ip-add-row { margin-top: .333rem; }
+.ai-settings button:disabled { opacity: .5; cursor: default; }
+.ai-settings button.ip-delete[data-armed="true"] { border-color: var(--hw-danger); color: var(--hw-ink); text-decoration: underline; }
+.ai-settings button.aiset-close[data-armed="true"] { border-color: var(--hw-danger); color: var(--hw-ink); text-decoration: underline; }
+.ai-settings .ip-form .ip-fields:empty { display: none; }
