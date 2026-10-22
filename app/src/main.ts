@@ -87,6 +87,7 @@ async function main() {
       renderStatus();
       renderOverlay();
     },
+    applyView,
   });
   initCopyMode(renderStatus);
   await initEvents();

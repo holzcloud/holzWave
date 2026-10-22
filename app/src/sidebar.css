@@ -52,17 +52,56 @@
 
 /* ---- the Context section (integratecontext.ts, docs/design.md 6.11) --------------------------------------------------- */
 
-.cx-section[hidden] { display: none; }
 .cx-refresh { padding: 0 .333rem; min-width: max(28px, calc(28rem / 12)); min-height: max(28px, calc(20rem / 12)); background: none;
               border: 1px solid transparent; border-radius: .333rem; color: var(--hw-dim); cursor: pointer; }
 .cx-refresh:hover { border-color: var(--hw-line); color: var(--hw-ink); }
 .cx-row { padding: .25rem 0 .5rem; }
-.cx-head { display: flex; align-items: baseline; gap: .5rem; min-width: 0; }
+.cx-head { display: flex; align-items: center; gap: .5rem; min-width: 0; min-height: max(28px, calc(20rem / 12)); }
 .cx-mark { flex: none; min-width: 1.5rem; color: var(--hw-ink-2); }
 .cx-label { flex: none; color: var(--hw-ink-2); font-size: calc(11rem / 12); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; }
 .cx-words { display: flex; flex: 1 1 auto; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; min-width: 0; }
 .cx-word { color: var(--hw-dim); }
 .cx-word[data-kind="production"], .cx-word[data-kind="missing"], .cx-word[data-kind="signed_out"] { color: var(--hw-warn); text-decoration: underline; }
 .cx-word[data-kind="production"]::before, .cx-word[data-kind="missing"]::before, .cx-word[data-kind="signed_out"]::before { content: "! "; font-weight: 700; }
-.cx-sel { margin-left: 2rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--hw-ink); }
-.cx-row[data-stale="true"] .cx-sel { color: var(--hw-dim); }
+.cx-acts { display: flex; flex: none; gap: .333rem; }
+#sidebar button.cx-act, #sidebar button.cx-value, #sidebar button.ig-pathbtn { box-sizing: border-box; background: none; color: var(--hw-ink-2);
+                                                                         border: 1px solid var(--hw-line); border-radius: .5rem; cursor: pointer; }
+#sidebar button.cx-act { display: inline-flex; align-items: center; min-height: max(28px, calc(20rem / 12)); padding: 0 .5rem; }
+#sidebar button.cx-act:hover, #sidebar button.cx-value:hover, #sidebar button.ig-pathbtn:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+.cx-sel { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem; margin-left: 2rem; min-width: 0; color: var(--hw-ink); }
+.cx-sep { color: var(--hw-dim); }
+#sidebar button.cx-value { max-width: 100%; min-height: max(28px, calc(20rem / 12)); padding: 0 .5rem; overflow: hidden; text-overflow: ellipsis;
+                           white-space: nowrap; color: var(--hw-ink); }
+#sidebar button.cx-value[aria-expanded="true"] { background: var(--hw-rose-wash); border-color: var(--hw-rose); }
+#sidebar button.cx-small { font-size: calc(11rem / 12); color: var(--hw-ink-2); }
+.cx-row[data-stale="true"] .cx-sel, .cx-row[data-stale="true"] button.cx-value { color: var(--hw-dim); }
+.cx-reason, .cx-note { margin: .25rem 0 0 2rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.cx-reason { color: var(--hw-warn); text-decoration: underline; }
+.cx-reason::before { content: "! "; font-weight: 700; }
+.cx-line { margin: 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+.cx-line:empty { display: none; }
+.cx-line[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
+.cx-line[data-tone="warn"]::before { content: "! "; font-weight: 700; }
+.cx-path { margin: .25rem 0 0 2rem; }
+
+/* The list and the path field of an integration block (integratepick.ts) drawn in the narrow column. */
+#sidebar .ig-list { margin: .25rem 0 0 2rem; max-height: 14rem; overflow-y: auto; border: 1px solid var(--hw-line); background: var(--hw-ground-2); }
+#sidebar button.ig-opt { display: flex; align-items: center; gap: .5rem; box-sizing: border-box; width: 100%; min-height: max(28px, calc(20rem / 12));
+                         padding: 0 .5rem; border: 0; border-left: 2px solid transparent; border-radius: 0; background: none; color: var(--hw-ink);
+                         text-align: left; white-space: nowrap; cursor: pointer; }
+#sidebar button.ig-opt:hover { background: var(--hw-rose-wash); }
+#sidebar button.ig-opt[aria-selected="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
+#sidebar .ig-mark { flex: none; width: 1rem; }
+#sidebar .ig-opt-label { flex: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#sidebar .ig-opt-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--hw-dim); }
+#sidebar .ig-list-msg { margin: 0; padding: .333rem .5rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+#sidebar .ig-list-msg[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
+#sidebar .ig-list-msg[data-tone="warn"]::before { content: "! "; font-weight: 700; }
+#sidebar .ig-pathrow { display: flex; flex-wrap: wrap; align-items: center; gap: .333rem; }
+#sidebar .ig-path { flex: 1 1 100%; min-width: 0; box-sizing: border-box; min-height: max(28px, calc(20rem / 12)); padding: .167rem .5rem; font: inherit;
+                    color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
+#sidebar .ig-path:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
+#sidebar button.ig-pathbtn { min-height: max(28px, calc(20rem / 12)); padding: 0 .5rem; }
+@media (max-width: 640px) {
+  #sidebar button.cx-act, #sidebar button.cx-value, #sidebar button.ig-opt, #sidebar button.ig-pathbtn, #sidebar .ig-path, .cx-refresh { min-height: max(44px, calc(28rem / 12)); }
+}

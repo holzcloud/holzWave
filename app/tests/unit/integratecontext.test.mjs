@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { glyphOf, readContext, rowWords, selectionText } from "../../dist/integratestate.js";
+import { glyphOf, reachPane, reachWords, readContext, rowWords, selectionOf, selectionText, valueOf } from "../../dist/integratestate.js";
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
 
@@ -102,4 +102,36 @@ test("the production word is the core's flag and never comes from a name", () =>
 
 test("each tool has its mark", () => {
   assert.deepEqual(["kube", "talos", "azure", "gam"].map(glyphOf), ["⎈", "◇", "az", "gam"]);
+});
+
+// ---- the reach of a choice ------------------------------------------------------------------------------------------------
+
+const pane = (id, over = {}) => ({ pane: id, tool: "kube", view: "pods", context: "prod-eu", namespace: null, production: null, held: false, status: null, ...over });
+
+test("the reach words say which pane a choice changed or what new blocks start with", () => {
+  assert.equal(reachWords(3, "prod-eu"), "Pane 3 now uses prod-eu.");
+  assert.equal(reachWords(null, "prod-eu"), "New blocks start with prod-eu.");
+  assert.equal(reachWords(12, "<b>x</b>"), "Pane 12 now uses <b>x</b>.", "a value is text and stays those characters");
+  const long = reachWords(null, "v".repeat(300));
+  assert.ok(Array.from(long).length < 140, "a long value is cut in the sentence");
+});
+
+test("a choice follows the focused pane only when that pane belongs to the tool", () => {
+  const panes = [pane(3), pane(4, { view: "shell" }), pane(5, { tool: "talos", view: "nodes" })];
+  assert.equal(reachPane("kube", 3, panes, null), 3, "an integration block of the tool in the core's list");
+  assert.equal(reachPane("kube", 4, panes, null), 4, "a terminal a launch opened for the tool");
+  assert.equal(reachPane("kube", 5, panes, null), null, "a pane of another tool");
+  assert.equal(reachPane("kube", 1, panes, null), null, "a pane the core did not list");
+  assert.equal(reachPane("kube", null, panes, null), null, "no focus");
+  assert.equal(reachPane("kube", 2, [], { kind: "integration", source: "kube" }), 2, "a block of the tool that has no selection yet");
+  assert.equal(reachPane("kube", 2, [], { kind: "integration", source: "talos" }), null, "a block of another tool");
+  assert.equal(reachPane("kube", 2, [], { kind: "files", source: "kube" }), null, "a block of another kind");
+});
+
+test("the selection of a row is what the tool selects and nothing else", () => {
+  assert.deepEqual(selectionOf(row("kube", { context: "prod-eu", namespace: "payments", subscription: "x" })), { context: "prod-eu", namespace: "payments" });
+  assert.deepEqual(selectionOf(row("azure", { subscription: "holz-prod" })), { subscription: "holz-prod" });
+  assert.deepEqual(selectionOf(row("talos")), {});
+  assert.equal(valueOf(row("kube", { context: "prod-eu" }), "context"), "prod-eu");
+  assert.equal(valueOf(row("kube", { context: "prod-eu" }), "namespace"), undefined);
 });

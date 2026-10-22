@@ -602,6 +602,49 @@ export function rowWords(row: ContextRow): RowWord[] {
   return out;
 }
 
+/** The whole selection a row shows, as the core takes it: only the members its tool selects. */
+export function selectionOf(row: ContextRow): Sel {
+  const out: Sel = {};
+  for (const name of ROW_MEMBERS[row.tool]) {
+    const v = row[name];
+    if (v !== null) out[name] = v;
+  }
+  return out;
+}
+
+/** One value of a row, or undefined when it has none. */
+export function valueOf(row: ContextRow, kind: SelectKind): string | undefined {
+  return row[kind] ?? undefined;
+}
+
+/** The selections of a tool's row, in the order shown: the members a person can choose. */
+export function rowKinds(tool: ToolId): readonly SelectKind[] {
+  return ROW_MEMBERS[tool];
+}
+
+/**
+ * The pane a choice in the Context section is for: the focused pane when it belongs to `tool` (the core lists it as a block of
+ * the tool or as a terminal a launch opened for it, or it is an integration block of the tool that has no selection yet), else
+ * null, which is the pick that new blocks start from. Read from the lists the core and the block layer keep, never guessed.
+ */
+export function reachPane(
+  tool: ToolId,
+  focus: number | null,
+  panes: readonly PaneInfo[],
+  block: { kind: string; source: string } | null,
+): number | null {
+  if (focus === null) return null;
+  if (panes.some((p) => p.pane === focus && p.tool === tool)) return focus;
+  if (block !== null && block.kind === "integration" && block.source === tool) return focus;
+  return null;
+}
+
+/** The line under the section after a choice: which pane changed, or what new blocks start with. */
+export function reachWords(pane: number | null, value: string): string {
+  const v = cutCell(value, 60);
+  return pane === null ? `New blocks start with ${v}.` : `Pane ${pane} now uses ${v}.`;
+}
+
 // ---- words ------------------------------------------------------------------------------------------------------------
 
 export type StateName = "reading" | "empty" | "failed" | "missing" | "unusable" | "ok";
