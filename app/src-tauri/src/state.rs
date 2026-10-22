@@ -3983,7 +3983,6 @@ mod tests {
     use holzwave_core::integrate::run::EnvPolicy;
     use holzwave_core::layout::Axis;
 
-    #[cfg(unix)]
     const WAIT: Duration = Duration::from_secs(5);
 
     // Every test that starts a pane starts a real POSIX shell (`/bin/cat`, `/bin/sh -c ...`), so those are
@@ -6257,6 +6256,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_selected_theme_that_a_download_replaced_is_the_new_one_in_force() {
         let (core, _rec, dir) = core("/bin/cat", &[]);
         let first = Theme { name: "Mine".into(), ..Theme::papier() };
@@ -9380,11 +9380,13 @@ mod tests {
         t.core.focus_pane_in(MAIN_WINDOW, pane).expect("focus");
     }
 
+    #[cfg(unix)]
     fn says(t: &Ticked, pane: PaneId, words: &str) -> bool {
         wait_until(WAIT, || t.rec.has_text(pane, words))
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_install_on_a_pane_that_is_not_ssh_says_so_on_the_pane() {
         let t = ticked(&[]);
         // A local pane.
@@ -9418,6 +9420,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_install_only_acts_for_the_pane_in_focus() {
         let t = ticked(&[]);
         started_and_focused(&t, t.remote);
@@ -9428,6 +9431,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn an_install_for_a_connection_edited_to_another_host_is_refused() {
         let t = ticked(&[]);
         started_and_focused(&t, t.remote);

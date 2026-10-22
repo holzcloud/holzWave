@@ -70,18 +70,49 @@ run() {
     "$@" || failed=1
 }
 
-check_core() {
-    for target in $TARGETS; do
-        run cargo check --locked --all-targets -p holzwave-core --target "$target"
-    done
-}
-
 # A directory with x86_64-w64-mingw32-windres -> llvm-windres, for the one command that needs it.
 shim=
+
+# A directory with a C compiler and an archiver for x86_64-unknown-linux-gnu, built on Zig (a build requirement
+# anyway), for the C code of ring and friends: the Mac has no Linux cross compiler. cc-rs adds its own --target, which
+# Zig must not see twice.
+zshim=
 cleanup() {
     [ -n "$shim" ] && rm -rf "$shim"
+    [ -n "$zshim" ] && rm -rf "$zshim"
 }
 trap cleanup EXIT
+
+check_core() {
+    command -v zig >/dev/null 2>&1 || {
+        echo "cross-check: zig is missing: the Linux half compiles C with zig cc (brew install zig@0.16)" >&2
+        exit 2
+    }
+    zshim=$(mktemp -d "${TMPDIR:-/tmp}/holzwave-zcc.XXXXXX") || exit 2
+    cat >"$zshim/x86_64-linux-gnu-gcc" <<'CC'
+#!/bin/sh
+args=
+for a in "$@"; do
+    case "$a" in
+        --target=*) ;;
+        *) args="$args '$a'" ;;
+    esac
+done
+eval exec zig cc -target x86_64-linux-gnu $args
+CC
+    printf '#!/bin/sh\nexec zig ar "$@"\n' >"$zshim/x86_64-linux-gnu-ar"
+    chmod +x "$zshim/x86_64-linux-gnu-gcc" "$zshim/x86_64-linux-gnu-ar"
+    for target in $TARGETS; do
+        case "$target" in
+            x86_64-unknown-linux-gnu)
+                run env PATH="$zshim:$PATH" CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \
+                    AR_x86_64_unknown_linux_gnu=x86_64-linux-gnu-ar \
+                    cargo check --locked --all-targets -p holzwave-core --target "$target"
+                ;;
+            *) run cargo check --locked --all-targets -p holzwave-core --target "$target" ;;
+        esac
+    done
+}
 
 check_app() {
     windres=$(command -v llvm-windres)

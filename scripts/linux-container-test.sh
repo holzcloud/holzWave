@@ -127,6 +127,7 @@ run_tests() {
             -v holzwave-linux-cargo-git:/root/.cargo/git \
             -v holzwave-linux-target$SUFFIX:/work/target \
             -e CARGO_TERM_COLOR=never \
+            ${CARGO_BUILD_JOBS:+-e CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS"} \
             "$IMAGE" \
             sh -c 'tar -x --no-same-owner -C /work && exec "$@"' sh cargo test --locked --no-fail-fast "$@"
         echo $? >"$code"

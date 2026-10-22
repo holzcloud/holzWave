@@ -1525,7 +1525,8 @@ mod tests {
         assert_eq!(list(&gone, json!({})).expect_err("missing"), ToolError::Host(Detail::new(UNREADABLE)));
 
         // Names with control characters stay one line each; a link is shown as a link and not followed.
-        if cfg!(unix) {
+        #[cfg(unix)]
+        {
             let names = ["line\nbreak", "esc\u{1b}[31m", "bidi\u{202e}txt"];
             for name in names {
                 tmp.write(&format!("odd/{name}"), b"x");
@@ -1600,8 +1601,10 @@ mod tests {
         for secret in [".git/config", ".env", ".ssh/id_x", "data/x.txt"] {
             tmp.write(secret, b"needle");
         }
+        #[allow(unused_mut)]
         let mut skipped = 6;
-        if cfg!(unix) {
+        #[cfg(unix)]
+        {
             std::os::unix::fs::symlink(tmp.0.join("sub"), tmp.0.join("link")).expect("a link to a folder");
             std::os::unix::fs::symlink(tmp.0.join("a.txt"), tmp.0.join("linkfile")).expect("a link to a file");
             skipped += 2;

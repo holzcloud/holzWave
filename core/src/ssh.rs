@@ -2341,6 +2341,11 @@ mod tests {
             assert!(Instant::now() < deadline, "Enter did not try again");
             thread::sleep(Duration::from_millis(20));
         }
+        // Closing while the second login is still under way ends the pane with 0; the pane has to be waiting again.
+        while link.state() != ConnState::Failed {
+            assert!(Instant::now() < deadline, "the second refusal never left the pane waiting");
+            thread::sleep(Duration::from_millis(20));
+        }
         let boxed: Box<dyn Link> = Box::new(link);
         assert_eq!(boxed.close().unwrap(), 255);
     }
