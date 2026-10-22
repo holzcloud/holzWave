@@ -169,7 +169,8 @@ AI chat, AI chat states, AI sidebar, attention marks, drag) and a platform switc
    held), hint labels, the key binding capture row, and the accent colour of settings checkboxes and radios.
    Everything else is warm grey.
 5. **tmux-style status line.** A bottom strip of segments (panes, renderer, encoding, version), with the mode word and
-   the notice taking a segment while they last. It does not repeat the workspaces: they are the pills of the title bar.
+   the notice taking a segment while they last, and the Kubernetes context and the Azure subscription when the core has
+   one (6.11). It does not repeat the workspaces: they are the pills of the title bar.
 6. **Numbered tabs.** Tabs carry their number (`1 shell`) so `⌘1…9` is discoverable.
 7. **Command palette first.** Actions are reachable by name with a fuzzy palette (`⌘K`); the chrome stays small.
 8. **Responsive by layout, not by style.** On a phone the same `View` shows one pane per screen, the tab strip
@@ -204,7 +205,7 @@ the pill and the tab and change neither shape: the pill stays round with its dia
 | Tab row (28 px) | numbered tabs, a `⌁` mark on tabs with a remote connection, the attention marks of 6.23 (`? ▲ ! ✓`) after the name of a tab that holds a pane out of view that needs you, `＋`; a hint line right-aligned |
 | Area | the split tree of the shown tab, 1 px hairlines between panes, no gaps; the focused pane has the rose line on its header |
 | Sidebar (216 px, collapsible) | **Hosts** (state dot, protocol, reconnect counter), **Context** (Kubernetes context and namespace, Azure subscription, GAM profile), **History** (fuzzy search), **Widgets**. The column has a second form, the AI chat (280 px, 6.18), that takes its place |
-| Status line (24 px) | tmux-style segments (the workspaces are not repeated here, the pills of the title bar are their place): tabs and panes, Kubernetes context, Azure subscription, git branch, SSH count, sync state, renderer, encoding, version |
+| Status line (24 px) | tmux-style segments (the workspaces are not repeated here, the pills of the title bar are their place): tabs and panes, Kubernetes context and Azure subscription (buttons, 6.11), git branch, SSH count, sync state, renderer, encoding, version |
 
 The AI chat is a pane (6.12). Its second form, in the sidebar's column, replaces the sidebar while it is shown (6.18): the
 palette entry `AI chat in the sidebar` and `✦ AI` (when the tab has no chat pane) turn the shown column into the chat, and
@@ -251,6 +252,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Local network states | ![](design/local-network-states.png) | the group `Local network` of the Settings dialog in four states (6.24): `allowed`, `denied` (underlined, `!`), `not asked yet` and `not known` (`?`), each with its advice and the buttons it offers; `Open System Settings` is always there |
 | Integration block | ![](design/integration-block.png) | a Kubernetes pods block beside its shell (6.25): header `pods`, context `Kubernetes · prod · payments · 10 s` marked as production, the bar with the context and namespace chips and `↻ Refresh`, a table with the status in words, a selected row with its `Logs` button, and the line `Updated 4 s ago` |
 | Integration states | ![](design/integration-states.png) | the block in four states (6.25): `Reading …`, the tool not found with the places searched, a path field, `Set path` and `Check again`, an error line with the last rows kept dimmed, and a table cut with its note |
+| Context section | ![](design/integration-context.png) | the sidebar's Context section (6.11): one row for each of Kubernetes, Talos, Azure and GAM with the mark, the selection as text, `production` (warn, underlined, `!`) on the Kubernetes row and its `Shell` button, the listbox open under it with the current value marked, the line `New blocks start with prod-eu.`, the status line segments `⎈ prod-eu/payments` `! PRODUCTION` and `az holz-prod`, and a shell pane whose header has the chip `⎈ prod-eu` `! production`; beside it the section in two states, a tool not found with `Set path` and Azure `signed out` |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -449,7 +451,56 @@ hidden at first and remembers whether it was shown. Sections, each under a `.lab
   links, which the system opens). Two exist from the start (Notes, Pomodoro); more are `widgets/<id>.json` files
   ([config.md](config.md)), and a file that is not valid is left out with its reason shown in the sidebar.
 
-The **Context** section (Kubernetes, Azure, GAM) is drawn with the integrations, not before.
+- **Context:** the tools the person already uses on the command line, between Hosts and History (the phone has no sidebar and
+  no section). The head has the label `Context` and, at the right, the button `↻` (`Read the context again`). There is one
+  row for each of `Kubernetes`, `Talos`, `Azure` and `GAM`, in that order, and a row is always drawn, so there is never an empty
+  heading. A row has two lines. The first is the **mark** (`⎈` Kubernetes, `◇` Talos, and the text marks `az` and `gam`), the
+  tool's name in the label style and, at the right, its **words**. The second is the **selection** as mono text: Kubernetes
+  the context and the namespace (`prod-eu · payments`), Talos the context and the node, Azure the subscription, GAM the
+  section, and `—` when nothing is selected. Every value is a button of the row; the namespace of a Kubernetes row and the
+  node of a Talos row are second, smaller buttons of the same line. The values come from the core, which resolves them for the focused pane: the
+  pane's own selection when it has one, else the pick of the tool, else what the tool itself is set to. The page formats them
+  and decides nothing.
+  - **The words.** The page adds only these, and each has a second cue besides its colour: `production` (warn, underlined, with
+    the mark `!`; the flag is the core's, never a guess from a name), `not found` (warn, underlined, `!`) with the button
+    `Set path`, `signed out` (warn, underlined, `!`) for Azure, and `stale` with the value dimmed, which says the value is the
+    one the tool had when it was last read; `↻` in the head reads again. A tool that cannot be used shows the core's reason in
+    one line under its row (warn, underlined, `!`) beside `Set path`.
+  - **The list.** A press on a value opens a listbox under the row with the entries of the matching list (contexts,
+    namespaces, nodes, subscriptions, sections), the one of an integration block (6.25): the first cells of a row are its
+    text, the current value has the wash, a 2 px bar and `●` against `○`, `Up`, `Down`, `Home` and `End` move, `Enter` or
+    `Space` chooses, `Escape` closes it and gives the keyboard back to the terminal. A list that cannot be read shows the
+    core's sentence in its place. The page shows no value the core did not send.
+  - **The reach of a choice.** A choice says what it changed in the line under the section (`role="status"`). When the
+    focused pane is an integration block of that tool, or a terminal that was opened for that tool from a row (a shell), the
+    choice sets the selection of **that pane** and the line says `Pane 3 now uses prod-eu.` With any other pane focused it
+    sets the **pick** of the tool, which new blocks start from, and the line says `New blocks start with prod-eu.` A choice
+    writes nothing to the tool's own files and changes no pane but the one named; making a choice the tool's own setting is a
+    separate, confirmed action of a later section and has no entry here. A choice the core refuses is its sentence in that line
+    (warn, underlined, `!`) and changes nothing.
+  - **Shell.** A Kubernetes row has the hairline button `Shell` at the end of its first line. It opens a terminal in a new tab
+    with the person's shell and the context of the row (the context and the namespace the row shows, which the core sets for
+    that terminal only). While a shell opened from a row is the focused pane, a line under the row says `A shell's own startup
+    file can replace this.`, because a startup file of the shell runs after holzWave set the context.
+  - **Not found.** `Set path` opens the path field of the block (6.25) under the row: the field `Absolute path of the program`,
+    `Set path` and `Check again`; the core checks the path and its sentence, when it refuses one, is the line under the section.
+  - **Asking.** The page asks the core for the rows when it starts, when the core says that a selection, the tools or a held
+    pane changed, when the focus or the layout changes, on `↻` and every 30 seconds while the window is visible; a window that
+    is hidden asks nothing, and nothing asks from a draw. If the core cannot be reached the last rows stay, dimmed.
+
+The **status line** shows the same fact in two segments, drawn only when the core has a value: `⎈ prod-eu/payments` for
+Kubernetes and `az holz-prod` for Azure. The value is the one the section shows for the focused pane, so the two cannot
+disagree; right after the focus moves, and before the core has answered for the new pane, the segments are dimmed with the
+word `stale`. A production selection adds the word `PRODUCTION` to the segment (warn, underlined, with the mark `!`). A segment
+is a button (`aria-label` `Kubernetes context prod-eu, namespace payments, production`) that shows the sidebar and brings the
+Context section into view; it is as high as the status line and keeps the look of the other segments (a hairline at its right, the label style).
+
+The **pane header** of a terminal that holzWave gave a context (a shell opened from a row) has a chip between the title and the
+context: `⎈ prod-eu`, mono, hairline, round like the other chips, with `production` after it (warn, underlined, `!`) when the
+core says so. Its `title` says `Set by holzWave for this pane`. A pane the core did not list has no chip, and a pane whose
+header already names its context (an integration block, 6.25) shows it there and has no second one.
+
+![Context section](design/integration-context.png)
 
 The column has a second form, the AI chat (6.18). Only one form shows at a time; `Cmd+B` and `▥ Sidebar` show and hide the column in whichever form it is in.
 
