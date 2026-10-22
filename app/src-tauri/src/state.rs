@@ -1376,7 +1376,8 @@ impl AppCore {
         Ok((pane, view))
     }
 
-    /// What the tools are set to and which panes have a selection. With `refresh` it starts the tools, so it blocks.
+    /// What the tools are set to and which panes have a selection, from what is known and at once. The ask lets the
+    /// service refresh an old value in the background, and a change comes back as an `integration` event.
     pub fn integration_context(&self, pane: Option<PaneId>, refresh: bool) -> ContextAnswer {
         self.integrations.context(pane, refresh, &|pane| self.pane_held(pane))
     }

@@ -17,7 +17,8 @@ use holzwave_core::integrate::context::ContextRow;
 use holzwave_core::integrate::kube;
 use holzwave_core::integrate::profiles::IntegrationProfile;
 use holzwave_core::integrate::service::{
-    Done, Fault, FaultCode, HostFacts, IntegrationService, PaneRow, ProfilesView, RunAnswer, SelectionView, ToolView,
+    ChangeEvent, ChangeKind, Done, Fault, FaultCode, HostFacts, IntegrationService, PaneRow, ProfilesView, RunAnswer,
+    SelectionView, ToolView,
 };
 use holzwave_core::integrate::ticket::Card;
 use holzwave_core::integrate::{Selection, ToolId};
@@ -201,11 +202,25 @@ pub struct LaunchNote<'a> {
     pub from: Option<PaneId>,
 }
 
+/// Numbers an event and sends it to every window.
+fn send_event(
+    sink: &dyn Sink,
+    seq: &AtomicU64,
+    kind: IntegrationChange,
+    tool: Option<ToolId>,
+    pane: Option<PaneId>,
+    code: Option<u32>,
+) {
+    let seq = seq.fetch_add(1, Ordering::SeqCst) + 1;
+    sink.send(Target::All, Out::Integration(IntegrationEvent { seq, kind, tool, pane, code }));
+}
+
 /// The service and what the shell keeps beside it.
 pub struct IntegrationHost {
     service: Arc<IntegrationService>,
     sink: Arc<dyn Sink>,
-    seq: AtomicU64,
+    /// The number of the last event; the service's own callback counts with it too.
+    seq: Arc<AtomicU64>,
     /// Writes `pane_integrations.json` 250 ms after the first change of a burst, and when flushed.
     saver: Debounced,
     /// How many times the saver wrote the file, for the tests.
@@ -226,7 +241,21 @@ impl IntegrationHost {
         for note in service.notes() {
             eprintln!("holzwave: {note}");
         }
-        let service = Arc::new(service);
+        // Shared, so that the service can refresh the status in the background when the page asks. A Flatpak build is
+        // switched off by the facts (`HostFacts::system` reads the flag once): the service answers `unsupported` and
+        // never starts its thread.
+        let service = service.shared();
+        let seq = Arc::new(AtomicU64::new(0));
+        {
+            // A change that a background read finds reaches every window as one `context` event of the tool.
+            let (sink, seq) = (sink.clone(), seq.clone());
+            service.set_on_change(Arc::new(move |change: ChangeEvent| {
+                let kind = match change.kind {
+                    ChangeKind::Context => IntegrationChange::Context,
+                };
+                send_event(&*sink, &seq, kind, change.tool, change.pane, change.code);
+            }));
+        }
         let writes = Arc::new(AtomicUsize::new(0));
         let saver = {
             let (service, writes) = (service.clone(), writes.clone());
@@ -238,7 +267,7 @@ impl IntegrationHost {
                 Err(error) => eprintln!("holzwave: cannot save the selections of the integration panes: {:?}", error.kind()),
             })
         };
-        IntegrationHost { service, sink, seq: AtomicU64::new(0), saver, writes }
+        IntegrationHost { service, sink, seq, saver, writes }
     }
 
     /// The service, for the calls that need nothing of the shell.
@@ -259,8 +288,7 @@ impl IntegrationHost {
 
     /// Tells every window that something changed. The event holds no data.
     pub fn event(&self, kind: IntegrationChange, tool: Option<ToolId>, pane: Option<PaneId>, code: Option<u32>) {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        self.sink.send(Target::All, Out::Integration(IntegrationEvent { seq, kind, tool, pane, code }));
+        send_event(&*self.sink, &self.seq, kind, tool, pane, code);
     }
 
     /// The tool a call named, when it names one (an unknown word gives `None`, and the call is refused on its own).
@@ -405,9 +433,10 @@ impl IntegrationHost {
         Ok(())
     }
 
-    /// The rows of the tools and the entries of the panes. With `refresh` the tools are looked for again and their
-    /// default verbs are read, which starts processes: blocking. `held` says whether a pane holds its tool's last words,
-    /// and with which status.
+    /// The rows of the tools and the entries of the panes, from what is known: nothing is started and nothing is waited
+    /// for. The ask itself lets the service read a tool whose value is old, or with `refresh` one that is older than two
+    /// seconds, once in the background; a change comes back as an event of the service (a `context` event with the
+    /// tool), and the next ask sees it. `held` says whether a pane holds its tool's last words, and with which status.
     pub fn context(
         &self,
         pane: Option<PaneId>,
@@ -415,10 +444,6 @@ impl IntegrationHost {
         held: &dyn Fn(PaneId) -> Option<Option<u32>>,
     ) -> ContextAnswer {
         let rows = self.service.context_rows(pane, refresh);
-        if refresh {
-            // What the tools are set to may have moved: every window asks again.
-            self.event(IntegrationChange::Context, None, None, None);
-        }
         let panes = self
             .service
             .pane_rows()
@@ -490,6 +515,7 @@ mod tests {
     use std::sync::Mutex;
 
     use holzwave_core::blocks::BlockKind;
+    use holzwave_core::integrate::context::RowState;
     use holzwave_core::integrate::service::ToolState;
     use holzwave_core::integrate::view::ViewModel;
     use holzwave_core::integrate::{Selection, ToolId};
@@ -1005,7 +1031,9 @@ mod tests {
         assert!(!fake.started(), "the command itself starts nothing");
 
         // The pane has a selection to show while it lives: that of the pane the person acted in.
-        let rows = core.integration_context(None, false).panes;
+        // (The service's own rows are read, not the answer of an ask: an ask lets the service read the tool in the
+        // background, and this test watches the one run of its fake.)
+        let rows = core.integrations().service().pane_rows();
         let row = rows.iter().find(|row| row.pane == pane).expect("the launched pane has a row");
         assert_eq!((row.tool, row.view.as_str(), row.context.as_deref()), (ToolId::Kube, "exec", Some("dev")));
 
@@ -1053,7 +1081,8 @@ mod tests {
         assert_eq!(core.view_in("main").expect("the main window").panes.len(), panes_now);
 
         // The launched panes have a row each, and the launch of the first runs its tool when the page starts it.
-        let rows = core.integration_context(None, false).panes;
+        // (Read from the service: an ask would let it read the tool in the background, and this test watches one run.)
+        let rows = core.integrations().service().pane_rows();
         assert!(rows.iter().any(|row| row.pane == beside.pane && row.view == "logs"));
         core.start_pane(beside.pane, 80, 24, 0, 0).expect("the pane starts");
         assert!(wait_until(std::time::Duration::from_secs(20), || ran(&kubectl)));
@@ -1380,5 +1409,117 @@ mod tests {
         assert!(seqs.len() >= 3);
         assert_eq!(seqs[0], 1, "the first event is number one");
         assert!(seqs.windows(2).all(|pair| pair[1] == pair[0] + 1), "{seqs:?}");
+    }
+
+    // ---- the status in the background, the start-time sweep and the Flatpak switch ----------------------------------
+
+    #[test]
+    fn stale_overlays_are_swept_at_start() {
+        let machine = Machine::new("sweep-start");
+        let open = {
+            let (core, _rec) = machine.core();
+            let view = core.split_in("main", false).expect("a split");
+            core.flush();
+            view.focus
+        };
+        let (stale, live) = (kube::overlay_path(&machine.data, 9_000_009), kube::overlay_path(&machine.data, open));
+        let foreign = live.parent().expect("the overlay directory").join("notes.txt");
+        std::fs::create_dir_all(live.parent().expect("the overlay directory")).expect("the overlay directory");
+        for path in [&stale, &live, &foreign] {
+            std::fs::write(path, "{}").expect("a file below run/kube");
+        }
+
+        // Building the core is all that happens: no command is called.
+        let (_core, rec) = machine.core();
+        assert!(!stale.exists(), "the overlay of a pane that is not in the layout is gone");
+        assert!(live.exists(), "the overlay of a live pane stays");
+        assert!(foreign.exists(), "a file that is not an overlay is not touched");
+        assert!(rec.integration_events().is_empty(), "and the sweep says nothing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_change_reaches_the_sink_as_one_event() {
+        let machine = Machine::new("background");
+        let _fake = fake_cli::FakeCli::new(&machine.bin, "kubectl").prints(&fixture("kubectl/config_view.json"));
+        let (core, rec) = machine.core();
+        let kube_events = |rec: &Rec| {
+            rec.integration_events().into_iter().filter(|(_, event)| event.tool == Some(ToolId::Kube)).collect::<Vec<_>>()
+        };
+
+        let answer = core.integration_context(None, true);
+        assert_eq!(answer.rows.len(), 4, "the ask is answered at once, from what is known");
+        assert!(core.integrations().service().wait_idle(std::time::Duration::from_secs(30)), "the read ends");
+
+        let events = kube_events(&rec);
+        assert_eq!(events.len(), 1, "one event for the change of one tool: {events:?}");
+        let (target, event) = &events[0];
+        assert_eq!(*target, Target::All, "every window hears it");
+        assert_eq!((event.kind, event.pane, event.code), (IntegrationChange::Context, None, None));
+        assert!(rec.integration_events().iter().all(|(_, event)| event.tool.is_some()), "no event that names no tool");
+        let rows = core.integration_context(None, false).rows;
+        let kube = rows.iter().find(|row| row.tool == ToolId::Kube).expect("a row");
+        assert_eq!(kube.context.as_deref(), Some("dev"), "the next ask sees the new value");
+        let seqs: Vec<u64> = rec.integration_events().iter().map(|(_, e)| e.seq).collect();
+        assert!(seqs.windows(2).all(|pair| pair[1] == pair[0] + 1), "the events are numbered like the others: {seqs:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_flatpak_core_runs_nothing_and_says_so() {
+        let machine = Machine::new("flatpak");
+        let fakes: Vec<_> = ["kubectl", "talosctl", "az", "gam"]
+            .iter()
+            .map(|name| fake_cli::FakeCli::new(&machine.bin, name).prints("never"))
+            .collect();
+        let (core, rec) = machine.core_over(machine.facts().with_flatpak(true));
+        let sentence = "The integrations are not available in the Flatpak build.";
+
+        let tools = core.integration_tools();
+        assert_eq!(tools.len(), 4);
+        assert!(tools.iter().all(|tool| tool.state == ToolState::Unsupported && tool.reason.as_deref() == Some(sentence)));
+        let faults = [
+            core.integration_run("kube", "pods", None, &args(&[])).expect_err("nothing runs"),
+            core.integration_prepare("kube", "delete_pod", None, &args(&[("pod", "api-0")])).map(|_| ()).expect_err("no card"),
+        ];
+        for fault in faults {
+            assert_eq!((fault.code, fault.text.as_str()), (FaultCode::Unsupported, sentence), "{fault:?}");
+        }
+        let service = core.integrations().service();
+        let rows = core.integration_context(None, true).rows;
+        assert_eq!(rows.len(), 4, "the rows are still answered");
+        assert!(service.wait_idle(std::time::Duration::from_secs(5)));
+        assert!(!service.worker_watch().started(), "not even the status thread starts");
+        assert!(fakes.iter().all(|fake| !fake.started()), "no process was started");
+        assert!(!machine.data.join("run").exists(), "nothing is written below run/");
+        assert!(rec.integration_events().is_empty(), "and nothing changed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_first_ask_prepares_the_selection_of_new_blocks() {
+        let machine = Machine::new("first-ask");
+        let _fake = fake_cli::FakeCli::new(&machine.bin, "kubectl").prints(&fixture("kubectl/config_view.json"));
+        let (core, rec) = machine.core();
+
+        // The page asks once at start and hears of the result.
+        core.integration_context(None, true);
+        assert!(
+            wait_until(std::time::Duration::from_secs(30), || {
+                rec.integration_events().iter().any(|(_, event)| event.tool == Some(ToolId::Kube))
+            }),
+            "the first ask is answered by an event"
+        );
+        // The rows are ready before the first block: they are what the page's pick starts from.
+        let rows = core.integration_context(None, false).rows;
+        let kube = rows.iter().find(|row| row.tool == ToolId::Kube).expect("a row");
+        assert_eq!((kube.state, kube.context.as_deref()), (RowState::Found, Some("dev")), "read by the first ask");
+        let pick = Selection { context: kube.context.clone(), ..Selection::default() };
+        core.integration_select("kube", None, &pick).expect("the pick");
+
+        let pane = pane_of(&core.block_open_in("main", "tab", BlockKind::Integration, "kube", "pods").expect("a tab"));
+        let answer = core.integration_context(Some(pane), false);
+        let own = answer.panes.iter().find(|entry| entry.pane == pane).expect("the new block has an entry");
+        assert_eq!(own.context.as_deref(), Some("dev"), "the new block starts from the pick the rows gave");
     }
 }
