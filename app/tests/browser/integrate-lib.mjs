@@ -72,9 +72,11 @@ export const BLOCK = { pane: 2, kind: "integration", source: "kube", path: "pods
  *   runs      the answer of integration_run by verb id
  *   faults    a fault by verb id, thrown instead of an answer
  *   delay     milliseconds every run waits
+ *   selectProduction  what the core says about the production flag after a selection (default: unchanged)
+ *   launch    the answer of integration_launch; launchFault is thrown instead
  * The mock also counts the runs on the way (`inflight`, `maxInflight`) and the runs started (`started`).
  */
-export async function openBlock(page, url, config = {}) {
+export async function openBlock(page, url, config = {}, layout = LAYOUT) {
   const base = {
     tools: [KUBE],
     blocks: [BLOCK],
@@ -85,6 +87,7 @@ export async function openBlock(page, url, config = {}) {
     maxInflight: 0,
     started: 0,
     selectFault: null,
+    launchFault: null,
     launch: null,
   };
   await page.addInitScript(([layout, cfg]) => {
@@ -107,13 +110,24 @@ export async function openBlock(page, url, config = {}) {
       }
     });
     M.on("integration_select", (a) => {
-      if (window.__IG__.selectFault) throw window.__IG__.selectFault;
-      return { selection: { profile: null, context: null, namespace: null, subscription: null, section: null, node: null, ...a.selection }, production: null };
+      const ig = window.__IG__;
+      if (ig.selectFault) throw ig.selectFault;
+      const selection = { profile: null, context: null, namespace: null, subscription: null, section: null, node: null, ...a.selection };
+      // The core now answers with this pane's new selection, and whether it is a production one.
+      for (const r of Object.values(ig.runs)) {
+        if (!r) continue;
+        r.selection.selection = selection;
+        if (ig.selectProduction !== undefined) r.selection.production = ig.selectProduction;
+      }
+      return { selection, production: ig.selectProduction ?? null };
     });
-    M.on("integration_launch", () => window.__IG__.launch);
+    M.on("integration_launch", () => {
+      if (window.__IG__.launchFault) throw window.__IG__.launchFault;
+      return window.__IG__.launch;
+    });
     M.on("block_open", () => M.view());
     M.on("block_update", () => M.view());
-  }, [LAYOUT, { ...base, ...config }]);
+  }, [layout, { ...base, ...config }]);
   await page.goto(`${url}index.html?renderer=canvas`);
 }
 
@@ -121,3 +135,19 @@ export async function openBlock(page, url, config = {}) {
 export async function rowsShown(page) {
   await page.waitForSelector(".block-integration .ig-table tbody tr");
 }
+
+/** The layout with the integration pane focused (the keys of a block go to the focused pane). */
+export const FOCUSED = { ...LAYOUT, focus: 2, tabs: [{ ...LAYOUT.tabs[0], focus: 2 }] };
+
+/** The layout after a launch: a third pane, the terminal that shows the logs. */
+export const LAUNCHED = {
+  ...LAYOUT,
+  panes: [[1, { x: 0, y: 0, w: 0.5, h: 1 }], [2, { x: 0.5, y: 0, w: 0.5, h: 0.5 }], [3, { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }]],
+  focus: 3,
+  tabs: [{ title: "pods", active: true, focus: 3, panes: 3 }],
+  workspaces: [{ name: "main", active: true, panes: 3 }],
+  dividers: [
+    { split: 10, axis: "Row", area: { x: 0, y: 0, w: 1, h: 1 }, ratio: 0.5 },
+    { split: 11, axis: "Column", area: { x: 0.5, y: 0, w: 0.5, h: 1 }, ratio: 0.5 },
+  ],
+};

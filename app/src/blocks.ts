@@ -784,7 +784,7 @@ function renderBlocks(): void {
             : info.kind === "chat"
               ? chatBlock(info, root)
               : info.kind === "integration"
-                ? integrationBlock(info, root, { applyView, refreshBlocks, changed: onBlocks })
+                ? integrationBlock(info, root, { applyView, changed: onBlocks })
                 : previewBlock(info, root);
       instances.set(id, inst);
     } else {

@@ -2,15 +2,16 @@
 // Talos, Azure, GAM) as a table, a list of values or a text. The core runs the tool and cleans what it printed; this
 // module asks for a view, draws the model it gets with `textContent` (integrateview.ts) and says what it is doing in
 // words. It builds no name, no argument list and no program: it sends the facts the core listed.
-import { call } from "./bridge.js";
+import { call, listen } from "./bridge.js";
 import { el, loadStyles, setAttr, setText } from "./dom.js";
 import type { BlockInfo } from "./blockstate.js";
 import type { Instance } from "./blocks.js";
 import { focusInput } from "./keyboard.js";
 import {
-  ageWords, clearIntegrationContext, contextText, readFault, readRunAnswer, readTools, setIntegrationContext, stateWords,
+  PICK_VERBS, ageWords, clearIntegrationContext, contextText, nextSelection, pickerEntries, readFault, readLaunchAnswer,
+  readRunAnswer, readTools, refreshDue, setIntegrationContext, stateWords,
 } from "./integratestate.js";
-import type { Fault, Sel, ToolEntry, ToolId, ViewModel } from "./integratestate.js";
+import type { Fault, RowAction, Sel, SelectKind, ToolEntry, ToolId, ViewModel } from "./integratestate.js";
 import { renderKv, renderTable, renderText } from "./integrateview.js";
 import type { DrawOptions } from "./integrateview.js";
 import type { View } from "./types.js";
@@ -19,8 +20,6 @@ import type { View } from "./types.js";
 export interface Deps {
   /** Show a layout (the answer of a launch). */
   applyView(v: View): void;
-  /** Ask the core which panes are blocks, and draw them. */
-  refreshBlocks(): Promise<void>;
   /** The header of a pane has new words: draw the strips again. */
   changed(): void;
 }
@@ -61,6 +60,42 @@ function toolOf(id: string): ToolEntry | null {
   return tools?.find((t) => t.id === id) ?? null;
 }
 
+// ---- the event of the core ---------------------------------------------------------------------------------------
+
+/** What an event says to a block: it carries no data, the block asks. `gap` is true when an event was missed. */
+interface Hint {
+  kind: string;
+  tool: string | null;
+  pane: number | null;
+  gap: boolean;
+}
+const hints = new Set<(h: Hint) => void>();
+let listening = false;
+let lastSeq = 0;
+
+/** Listen for the event `integration` once for the window. It holds {seq, kind, tool, pane, code} and nothing else. */
+function listenOnce(): void {
+  if (listening) return;
+  listening = true;
+  listen<unknown>("integration", (payload) => {
+    if (typeof payload !== "object" || payload === null) return;
+    const o = payload as Record<string, unknown>;
+    if (typeof o.kind !== "string" || typeof o.seq !== "number") return;
+    const gap = lastSeq > 0 && o.seq !== lastSeq + 1;
+    lastSeq = o.seq;
+    if (o.kind === "tools" || gap) void loadTools(true);
+    const hint: Hint = {
+      kind: o.kind,
+      tool: typeof o.tool === "string" ? o.tool : null,
+      pane: typeof o.pane === "number" ? o.pane : null,
+      gap,
+    };
+    for (const h of [...hints]) h(hint);
+  }).catch(() => {
+    listening = false;
+  });
+}
+
 // ---- the block ---------------------------------------------------------------------------------------------------
 
 export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps): Instance {
@@ -84,6 +119,12 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
   /** The core refused what the person asked for in the path field: said on the status line, the state stays. */
   let refusal: Fault | null = null;
   let selected = 0;
+  /** The key of the selected row, so that a read that moves the rows keeps the same one selected. */
+  let selectedKey: string | null = null;
+  /** Counts the selections of this pane: a read that began before one is not drawn. */
+  let gen = 0;
+  /** When the last read started, in the page's clock. */
+  let lastStart = 0;
   /** When the last good answer came, in the page's clock. */
   let received = 0;
   /** What was typed in the path field: it survives a redraw. */
@@ -104,15 +145,25 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
     if (alive) draw();
   };
 
+  /** A button on a row is drawn for an action that only reads and opens a terminal, and that the core listed as such. */
+  const drawn = (action: RowAction): boolean =>
+    action.effect === "read" &&
+    (toolOf(current.source)?.verbs.some((v) => v.id === action.verb && v.effect === "read" && v.output === "terminal") ?? false);
+
   const options = (): DrawOptions => ({
     selected,
-    drawn: () => false,
-    press: () => {},
+    drawn,
+    press: (action) => void launch(action),
     pick: (i) => {
-      selected = i;
-      mark();
+      select(i);
     },
   });
+
+  const select = (i: number): void => {
+    selected = i;
+    selectedKey = model?.kind === "table" ? (model.rows[i]?.key ?? null) : null;
+    mark();
+  };
 
   /** Move the highlight without drawing the table again. */
   const mark = (): void => {
@@ -176,12 +227,15 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
 
   const draw = (): void => {
     const keep = focusedAction();
+    drawBar();
     if (unusable()) {
       drawMissing();
     } else if (model === null) {
       body.replaceChildren();
     } else if (model.kind === "table") {
-      selected = Math.max(0, Math.min(selected, model.rows.length - 1));
+      const at = selectedKey === null ? -1 : model.rows.findIndex((r) => r.key === selectedKey);
+      selected = at >= 0 ? at : Math.max(0, Math.min(selected, model.rows.length - 1));
+      selectedKey = model.rows[selected]?.key ?? null;
       renderTable(body, model, options());
       if (model.rows.length === 0) note(stateWords("empty").text, "empty");
       if (model.truncated) note(model.truncated.note, "cut");
@@ -227,9 +281,16 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
       return;
     }
     busy = true;
+    lastStart = Date.now();
+    const mine = gen;
     try {
       const raw = await call<unknown>("integration_run", { tool: tool(), verb: current.path, pane: current.pane, args: {} });
       if (!alive) return;
+      if (mine !== gen) {
+        // The selection changed while this was on its way: its rows are the old selection's, so ask again.
+        again = true;
+        return;
+      }
       const answer = readRunAnswer(raw);
       refusal = null;
       if (answer === null) {
@@ -246,17 +307,21 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
       }
     } catch (e) {
       if (!alive) return;
+      if (mine !== gen) {
+        again = true;
+        return;
+      }
       refusal = null;
       fault = readFault(e);
       phase = "failed";
     } finally {
       busy = false;
+      if (again && alive) {
+        again = false;
+        void run();
+      }
     }
     draw();
-    if (again && alive) {
-      again = false;
-      void run();
-    }
   };
 
   /** The person typed a path: the core checks it, the page only sends it. */
@@ -288,17 +353,212 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
     }
   };
 
+  // ---- the bar: the chips of the selection, the production word and the button that reads again ---------------------
+
+  const prod = el("span", "ig-prod", bar);
+  prod.textContent = "production";
+  prod.hidden = true;
   const refresh = el("button", "ig-refresh", bar);
   refresh.type = "button";
   refresh.dataset.field = "";
   refresh.textContent = "↻ Refresh";
   refresh.setAttribute("aria-label", "Refresh");
   refresh.addEventListener("click", () => void run());
+  const chips = new Map<SelectKind, HTMLButtonElement>();
 
-  // The age advances once a second.
+  const drawBar = (): void => {
+    const entry = toolOf(current.source);
+    const kinds = entry?.selects ?? [];
+    for (const [kind, chip] of chips) {
+      if (!kinds.includes(kind)) {
+        chip.remove();
+        chips.delete(kind);
+      }
+    }
+    for (const kind of kinds) {
+      let chip = chips.get(kind);
+      if (!chip) {
+        chip = el("button", "ig-chip");
+        chip.type = "button";
+        chip.dataset.field = "";
+        chip.dataset.select = kind;
+        chip.setAttribute("aria-haspopup", "listbox");
+        chip.setAttribute("aria-expanded", "false");
+        chip.addEventListener("click", () => void openPicker(kind));
+        bar.insertBefore(chip, prod);
+        chips.set(kind, chip);
+      }
+      const value = selection[kind];
+      setText(chip, `${kind} ${value ?? "—"}`);
+      chip.setAttribute("aria-label", `${kind}: ${value ?? "none"}`);
+    }
+    prod.hidden = !production;
+  };
+
+  // ---- the list under a chip ---------------------------------------------------------------------------------------
+
+  let picker: { kind: SelectKind; node: HTMLElement } | null = null;
+  let pickToken = 0;
+
+  const closePicker = (focus: "chip" | "terminal" | "none"): void => {
+    if (picker === null) return;
+    const { kind, node } = picker;
+    picker = null;
+    pickToken += 1;
+    node.remove();
+    const chip = chips.get(kind);
+    chip?.setAttribute("aria-expanded", "false");
+    if (focus === "chip") chip?.focus({ preventScroll: true });
+    else if (focus === "terminal") focusInput();
+  };
+
+  const listMessage = (node: HTMLElement, text: string, warn: boolean): void => {
+    node.replaceChildren();
+    const p = el("p", "ig-list-msg", node);
+    p.setAttribute("role", "status");
+    if (warn) p.dataset.tone = "warn";
+    p.textContent = text;
+  };
+
+  const openPicker = async (kind: SelectKind): Promise<void> => {
+    if (picker?.kind === kind) {
+      closePicker("chip");
+      return;
+    }
+    closePicker("none");
+    const node = el("div", "ig-list");
+    node.setAttribute("role", "listbox");
+    node.setAttribute("aria-label", `${kind} list`);
+    node.addEventListener("keydown", (e) => pickerKey(e, node));
+    root.insertBefore(node, body);
+    picker = { kind, node };
+    const mine = ++pickToken;
+    chips.get(kind)?.setAttribute("aria-expanded", "true");
+    listMessage(node, stateWords("reading").text, false);
+    try {
+      // The entries are a list the core reads for this pane; the page shows no value that the core did not send.
+      const answer = readRunAnswer(
+        await call<unknown>("integration_run", { tool: tool(), verb: PICK_VERBS[kind], pane: current.pane, args: {} }),
+      );
+      if (mine !== pickToken || !alive) return;
+      const entries = pickerEntries(answer?.view ?? null);
+      if (answer === null) {
+        listMessage(node, readFault(null).text, true);
+      } else if (entries.length === 0) {
+        listMessage(node, stateWords("empty").text, false);
+      } else {
+        node.replaceChildren();
+        const now = selection[kind];
+        for (const entry of entries) {
+          const opt = el("button", "ig-opt", node);
+          opt.type = "button";
+          opt.dataset.field = "";
+          opt.setAttribute("role", "option");
+          opt.setAttribute("aria-selected", String(entry.key === now));
+          el("span", "ig-mark", opt).textContent = entry.key === now ? "●" : "○";
+          el("span", "ig-opt-label", opt).textContent = entry.label;
+          if (entry.detail !== "") el("span", "ig-opt-detail", opt).textContent = entry.detail;
+          opt.addEventListener("click", () => void choose(kind, entry.key));
+        }
+        const options = Array.from(node.querySelectorAll<HTMLElement>(".ig-opt"));
+        (options.find((o) => o.getAttribute("aria-selected") === "true") ?? options[0])?.focus({ preventScroll: true });
+      }
+    } catch (e) {
+      if (mine !== pickToken || !alive) return;
+      listMessage(node, readFault(e).text, true);
+    }
+  };
+
+  const pickerKey = (e: KeyboardEvent, node: HTMLElement): void => {
+    const opts = Array.from(node.querySelectorAll<HTMLElement>(".ig-opt"));
+    const at = opts.findIndex((o) => o === document.activeElement);
+    const go = (i: number): void => {
+      e.preventDefault();
+      opts[(i + opts.length) % opts.length]?.focus({ preventScroll: true });
+    };
+    switch (e.key) {
+      case "ArrowDown":
+        go(at + 1);
+        break;
+      case "ArrowUp":
+        go(at < 0 ? 0 : at - 1);
+        break;
+      case "Home":
+        go(0);
+        break;
+      case "End":
+        go(opts.length - 1);
+        break;
+      case "Escape":
+        e.preventDefault();
+        e.stopPropagation();
+        closePicker("terminal");
+        break;
+      default:
+    }
+  };
+
+  /** The person chose an entry: the core takes it for this pane only, then the view is read again. */
+  const choose = async (kind: SelectKind, key: string): Promise<void> => {
+    closePicker("chip");
+    try {
+      await call("integration_select", { tool: tool(), pane: current.pane, selection: nextSelection(tool(), selection, kind, key) });
+    } catch (e) {
+      refusal = readFault(e);
+      draw();
+      return;
+    }
+    refusal = null;
+    gen += 1;
+    void run();
+  };
+
+  // ---- the actions of a row ----------------------------------------------------------------------------------------
+
+  /** A read verb that opens a terminal (the logs): the core launches it beside this pane with the row's own arguments. */
+  const launch = async (action: RowAction): Promise<void> => {
+    try {
+      const answer = readLaunchAnswer(
+        await call<unknown>("integration_launch", {
+          tool: tool(), verb: action.verb, pane: current.pane, args: action.args, placement: "right",
+        }),
+      );
+      if (!alive) return;
+      if (answer === null) {
+        refusal = readFault(null);
+        draw();
+        return;
+      }
+      refusal = null;
+      deps.applyView(answer.view);
+    } catch (e) {
+      if (!alive) return;
+      refusal = readFault(e);
+      draw();
+    }
+  };
+
+  // ---- time: the age of the data, and the verbs that read again by themselves ---------------------------------------
+
+  const interval = (): number | null => toolOf(current.source)?.verbs.find((v) => v.id === current.path)?.refresh_secs ?? null;
+
   const timer = setInterval(() => {
-    if (alive && phase === "ready" && fault === null) setText(status, ageWords((Date.now() - received) / 1000));
+    if (!alive) return;
+    if (phase === "ready" && fault === null && refusal === null) setText(status, ageWords((Date.now() - received) / 1000));
+    // Only a block that is on screen, in a visible window, with no request of its own on the way, reads by itself.
+    const due = refreshDue({
+      secs: interval(), last: lastStart, now: Date.now(), hidden: document.hidden, shown: root.offsetParent !== null, busy, alive,
+    });
+    if (due && !unusable()) void run();
   }, 1000);
+
+  const hint = (h: Hint): void => {
+    if (!alive) return;
+    if (h.kind !== "context" && h.kind !== "held" && !h.gap) return;
+    if (h.gap || h.pane === current.pane || (h.pane === null && (h.tool === null || h.tool === current.source))) void run();
+  };
+  hints.add(hint);
+  listenOnce();
 
   toolListeners.add(describe);
   void loadTools();
@@ -312,14 +572,53 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
       return current;
     },
     update(next) {
+      const moved = next.path !== current.path || next.source !== current.source;
       current = next;
+      if (!moved) return;
+      // Another view of the tool (the core moved the pane): start again, with the words of reading.
+      closePicker("none");
+      model = null;
+      fault = null;
+      refusal = null;
+      phase = "reading";
+      selected = 0;
+      selectedKey = null;
+      gen += 1;
+      describe();
+      void run();
     },
-    key() {
-      return false;
+    key(e) {
+      if (picker !== null) return false;
+      const rows = model?.kind === "table" ? model.rows.length : 0;
+      switch (e.key) {
+        case "ArrowDown":
+          if (rows > 0) select(Math.min(rows - 1, selected + 1));
+          else body.scrollBy({ top: 48 });
+          return true;
+        case "ArrowUp":
+          if (rows > 0) select(Math.max(0, selected - 1));
+          else body.scrollBy({ top: -48 });
+          return true;
+        case "Home":
+          if (rows > 0) select(0);
+          else body.scrollTo({ top: 0 });
+          return true;
+        case "End":
+          if (rows > 0) select(rows - 1);
+          else body.scrollTo({ top: body.scrollHeight });
+          return true;
+        case "r":
+          void run();
+          return true;
+        default:
+          return false;
+      }
     },
     dispose() {
       alive = false;
       clearInterval(timer);
+      hints.delete(hint);
+      closePicker("none");
       toolListeners.delete(describe);
       clearIntegrationContext(info.pane);
       root.replaceChildren();

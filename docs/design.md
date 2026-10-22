@@ -1732,10 +1732,11 @@ else.
 **Refresh.** A view that the core says refreshes by itself (the Kubernetes pods, every 10 s) is read again on that interval
 **only while the window is visible and the block is shown**, never with two reads on the way at once, and not after the pane
 is closed. Every other view reads when it opens, when the selection changes, on `↻ Refresh` and on the key `r`. A refresh
-asks the core; the block builds nothing.
+asks the core; the block builds nothing. A message from the core that a selection or the tools changed (another window
+chose, a program was set) carries no data and only makes the block ask again.
 
 **Keys.** While the pane has the focus: `Up`, `Down`, `Home` and `End` move the selected row, `r` refreshes. In the listbox:
-`Up` and `Down` move, `Enter` or `Space` chooses, `Escape` closes it. `Escape` in the path field returns the focus to the
+`Up`, `Down`, `Home` and `End` move, `Enter` or `Space` chooses, `Escape` closes it and gives the keyboard back to the terminal. `Escape` in the path field returns the focus to the
 terminal. All other keys stay with the terminal and the shortcuts.
 
 **Accessibility.** The status line is a `role="status"` region; the chips and buttons have their words as their names. A

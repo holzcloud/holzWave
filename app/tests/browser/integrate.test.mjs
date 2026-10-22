@@ -7,7 +7,7 @@ export default async function ({ page, url, errors }) {
   await openBlock(page, url);
   await rowsShown(page);
 
-  const head = await page.locator(".block-integration .ig-table thead th").allTextContents();
+  const head = await page.locator(".block-integration .ig-table thead th:not(.ig-th-act)").allTextContents();
   assert.deepEqual(head, ["NAME", "READY", "STATUS", "RESTARTS", "AGE"], "a header row with the core's labels");
   assert.equal(await page.locator(".block-integration .ig-table tbody tr").count(), 2);
   assert.equal(await page.locator(".block-integration .ig-table").getAttribute("role"), "table");
