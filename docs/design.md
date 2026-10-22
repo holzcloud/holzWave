@@ -249,6 +249,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Attention marks | ![](design/attention.png) | the marks of 6.23 on the tab row and the title-bar pills: `?` waits for you, `▲` rang the bell, `!` command failed, `✓` command finished, each in its status colour and never rose; the tab `2 holzkube` holds all four side by side in that order, the pill `infra` shows `! ✓` (the kinds of its tabs, once each), the shown tab and the shown workspace carry none; a floating card lists the four kinds with their words and sources |
 | Local network notice | ![](design/local-network.png) | the notice of 6.24 over the daily window, on a Mac with macOS 15 or later: `Allow local network access?`, the lead, the three reasons, the note that macOS asks next and that panes count as holzWave, `Not now` (hairline) and `Allow` (solid, focused) |
 | Local network states | ![](design/local-network-states.png) | the group `Local network` of the Settings dialog in four states (6.24): `allowed`, `denied` (underlined, `!`), `not asked yet` and `not known` (`?`), each with its advice and the buttons it offers; `Open System Settings` is always there |
+| Integration block | ![](design/integration-block.png) | a Kubernetes pods block beside its shell (6.25): header `pods`, context `Kubernetes · prod · payments · 10 s` marked as production, the bar with the context and namespace chips and `↻ Refresh`, a table with the status in words, a selected row with its `Logs` button, and the line `Updated 4 s ago` |
+| Integration states | ![](design/integration-states.png) | the block in four states (6.25): `Reading …`, the tool not found with the places searched, a path field, `Set path` and `Check again`, an error line with the last rows kept dimmed, and a table cut with its note |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -1670,3 +1672,86 @@ has nothing to remove. Every size is in `rem`; the buttons are at least 28 px hi
 
 **Not drawn.** A switch that grants or revokes the permission (holzWave cannot change it; it says where the person can), a list
 of hosts, a badge, a notification, and a notice again at a later start.
+
+### 6.25 Integration blocks
+
+A tool the person already uses on the command line (`kubectl`, `talosctl`, `az`, `gam`) can be read in a pane of its own
+kind. holzWave does not reimplement the tool: the core runs it with an argument list that it builds itself, cleans what it
+printed and sends a **view model**, a table, a key-value list or a text. The pane draws that model and nothing else. It is a
+pane like the monitor (6.5): the same header strip, flat and hairline, mono, no shadow. This section covers the block; the
+confirmation card of a verb that changes something, the Context section of the sidebar and the profiles dialog are drawn in
+the sections that build them.
+
+**The pane.** Header `pods` (the id of the shown view, with underscores as spaces, in the label style: `contexts`, `nodes`,
+`machine status`), context in mono `Kubernetes · prod · payments · 10 s`: the tool, the selection of this pane and, for a
+view that refreshes by itself, the interval. Before the core has answered, the context is the tool's name alone. The view is
+changed from the core (a palette entry or a row action of a later section), never by the block itself.
+
+**Production.** When the core says that the selection is a production one, the context text of the header is in the warn
+colour, underlined and has the mark `!` before it, and the bar shows the word `production` (warn, underlined, `!`) beside the
+context chip. The flag is the core's; the page never decides it from a name.
+
+**The bar.** One row under the header, hairline below it. From the left: one chip for each selection the tool has, showing
+the current value (`context prod-eu`, `namespace payments`; Kubernetes has a context and a namespace, Talos a context and a
+node, Azure a subscription, GAM a section), then the production word when it applies, then at the right `↻ Refresh`. A chip
+is a button with `aria-haspopup="listbox"`. A press opens a listbox under the chip with the entries of the matching list
+(`contexts`, `namespaces`, `nodes`, `subscriptions`, `sections`): the first cells of a row are its text, the current value has
+the wash and a 2 px bar, and the mark `●` against `○`. Choosing an entry sets the selection **of this pane only** and reads
+the view again; the list closes and the focus returns to the chip. A list that cannot be read shows the core's sentence in
+place of the entries. The page never shows a value that the core did not send.
+
+**The body** is one of three shapes, every string in it set as text:
+
+- A **table**: a header row in the label style, one row for each entry separated by hairlines, the cells in mono, a cell
+  cut at 240 characters with an ellipsis (the whole text is its `title`). A row with the tone `dim` is quiet. A row with the
+  tone `warn` or `danger` gets the mark `!` before its first cell, and its cells are in the status colour; the status word
+  in the cell is the second cue, and `danger` is also underlined. The selected row has the rose wash and a 2 px rose bar.
+  Row actions that only read are buttons at the end of the row (`Logs`), hairline, the word is the core's label. A table is
+  `role="table"` and the rows `role="row"`.
+- A **key-value list**: the label in the dim colour, the value in mono, one pair for each line, the same tones.
+- A **text**: preformatted, wrapping, mono, scrolling inside the pane.
+
+**States, by words.** Each has a word and a second cue besides colour, and lives on the `role="status"` line under the body,
+or in the body where it replaces the rows.
+
+| State | Words | Second cue |
+|---|---|---|
+| waiting for the first answer | `Reading …` | the word; no rows |
+| tool not found | the core's sentence (`kubectl was not found on this computer. Install it or set where it is.`), the places that were searched, a field for the path, `Set path` and `Check again` | warn, underline, the mark `!` |
+| tool unusable | the core's reason (`kubectl cannot be used: writable by everyone.`) | warn, underline, `!` |
+| signed out, or any other state of the account | drawn as the model the core sends, with its own rows; the page does not interpret the word | the rows |
+| a read failed | `! ` and the core's one sentence; the last rows stay, dimmed, until a good answer | warn, underline, `!`, dimming |
+| the list was cut | the core's note under the table (`Showing the first 2000 of 2500 rows.`) | the words |
+| nothing to show | `Nothing to show.` | the words |
+| a good answer | `Updated just now`, `Updated 12 s ago`, `Updated 3 min ago`; the age advances once a second | the words |
+
+The path field is a text field of the page: it keeps its own keys and `Escape` gives the keyboard back to the terminal. A
+path the core refuses is shown as the core's sentence on the status line. The field sends the path to the core and to nothing
+else.
+
+**Refresh.** A view that the core says refreshes by itself (the Kubernetes pods, every 10 s) is read again on that interval
+**only while the window is visible and the block is shown**, never with two reads on the way at once, and not after the pane
+is closed. Every other view reads when it opens, when the selection changes, on `↻ Refresh` and on the key `r`. A refresh
+asks the core; the block builds nothing.
+
+**Keys.** While the pane has the focus: `Up`, `Down`, `Home` and `End` move the selected row, `r` refreshes. In the listbox:
+`Up` and `Down` move, `Enter` or `Space` chooses, `Escape` closes it. `Escape` in the path field returns the focus to the
+terminal. All other keys stay with the terminal and the shortcuts.
+
+**Accessibility.** The status line is a `role="status"` region; the chips and buttons have their words as their names. A
+state and a tone are `data-state` and `data-tone`, a dimmed table is `data-stale`. Hairlines use `--hw-line` and dim text
+`--hw-dim`, so `contrast-high` holds; the 2 px focus ring holds for every chip, button and the field; under `forced-colors`
+the warn marks and the selected row get a system-colour outline; nothing moves, so `motion-reduce` has nothing to remove.
+Every size is in `rem`; chips and buttons are at least 28 px high on a desktop and 44 px at 640 px and narrower.
+
+**Text from tools is untrusted.** A pod, a context or a domain is named by other people. Every string in the block is the
+core's cleaned text and is set as text, never as markup: a name that looks like an element is shown as those characters.
+The page sends the core facts only: the tool, the view, the pane, the argument values of a row's own action and a value that
+was chosen from a list the core sent.
+
+![Integration block](design/integration-block.png)
+
+![Integration states](design/integration-states.png)
+
+**Not drawn.** A confirmation card, a button for a verb that changes something, the Context section of the sidebar, a
+profiles dialog, a choice of interval, a column sort, a filter field and a log viewer (a log opens in a terminal pane).
