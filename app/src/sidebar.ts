@@ -9,6 +9,7 @@ import { call } from "./bridge.js";
 import { connect, connections } from "./connections.js";
 import { paneConns } from "./connstate.js";
 import { el, setText } from "./dom.js";
+import { mountContextSection } from "./integratecontext.js";
 import { readHits, meta } from "./historystate.js";
 import type { Hit } from "./historystate.js";
 import { fit } from "./scene.js";
@@ -258,6 +259,8 @@ function build(container: HTMLElement): HTMLElement {
   const main = el("div", "sb-main", container);
   const hosts = section(main, "Hosts");
   hostsBox = el("div", "sb-hosts", hosts);
+  // The tools the person already uses on the command line: drawn once the core has listed them (integratecontext.ts).
+  mountContextSection(el("div", "cx-slot", main));
   buildHistory(main);
   const widgets = section(main, "Widgets");
   widgetsBox = el("div", "", widgets);

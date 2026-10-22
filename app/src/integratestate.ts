@@ -424,6 +424,21 @@ export function setIntegrationContext(pane: number, text: string, production: bo
 
 export function clearIntegrationContext(pane: number): void {
   contexts.delete(pane);
+  selections.delete(pane);
+}
+
+/** The whole selection of each integration block, profile included, as its last read answered it. */
+const selections = new Map<number, Sel>();
+
+/** Remember the selection a block's last read used, so that a choice made elsewhere can send the whole selection and keep its profile. */
+export function setPaneSelection(pane: number, selection: Sel): void {
+  selections.set(pane, { ...selection });
+}
+
+/** The selection of an integration block, or null when the pane is none or has not read yet. */
+export function paneSelection(pane: number): Sel | null {
+  const known = selections.get(pane);
+  return known ? { ...known } : null;
 }
 
 export function integrationContextText(pane: number): string | null {
@@ -433,6 +448,158 @@ export function integrationContextText(pane: number): string | null {
 /** Whether the core said that the pane's selection is a production one. */
 export function integrationProduction(pane: number): boolean {
   return contexts.get(pane)?.production ?? false;
+}
+
+// ---- the context of the tools -----------------------------------------------------------------------------------------
+
+/** The state word of a row of the context answer. */
+export type RowState = "found" | "not_found" | "signed_out" | "unknown";
+const ROW_STATES: readonly RowState[] = ["found", "not_found", "signed_out", "unknown"];
+
+/** One tool as the sidebar, the status line and the pane chip show it. `production` is the core's flag: the name of the profile (maybe empty) or null. */
+export interface ContextRow {
+  tool: ToolId;
+  state: RowState;
+  context: string | null;
+  namespace: string | null;
+  node: string | null;
+  subscription: string | null;
+  section: string | null;
+  production: string | null;
+  stale: boolean;
+}
+
+/** A pane that has an integration selection: a block, or a terminal that a launch opened. */
+export interface PaneInfo {
+  pane: number;
+  tool: ToolId;
+  /** The view the pane shows, or the verb a launch opened. */
+  view: string;
+  context: string | null;
+  namespace: string | null;
+  production: string | null;
+  held: boolean;
+  status: number | null;
+}
+
+export interface ContextSummary {
+  rows: ContextRow[];
+  panes: PaneInfo[];
+}
+
+/** The most rows and panes the page reads; the core sends four rows and at most a few hundred panes. */
+const MAX_PANES = 512;
+
+function member(o: Record<string, unknown>, name: string): string | null {
+  const v = o[name];
+  return typeof v === "string" && v !== "" ? cut(v, CAPS.argValue) : null;
+}
+
+/** The core's production flag: a name (maybe empty, when the flag is only `true`) or null. */
+function productionOf(raw: unknown): string | null {
+  if (raw === true) return "";
+  return typeof raw === "string" && raw !== "" ? cut(raw, CAPS.label) : null;
+}
+
+/**
+ * Read the answer of `integration_context`. A row or a pane that is not the contract is dropped, a member that is no text is
+ * empty, and an unknown state is `unknown`: the page draws what it understands and trusts nothing else.
+ */
+export function readContext(raw: unknown): ContextSummary {
+  const o = obj(raw);
+  const rows: ContextRow[] = [];
+  const panes: PaneInfo[] = [];
+  if (!o) return { rows, panes };
+  for (const item of Array.isArray(o.rows) ? o.rows : []) {
+    const r = obj(item);
+    if (!r || typeof r.tool !== "string" || !(TOOLS as readonly string[]).includes(r.tool)) continue;
+    rows.push({
+      tool: r.tool as ToolId,
+      state: (ROW_STATES as readonly unknown[]).includes(r.state) ? (r.state as RowState) : "unknown",
+      context: member(r, "context"),
+      namespace: member(r, "namespace"),
+      node: member(r, "node"),
+      subscription: member(r, "subscription"),
+      section: member(r, "section"),
+      production: productionOf(r.production),
+      stale: r.stale === true,
+    });
+    if (rows.length >= TOOLS.length * 2) break;
+  }
+  for (const item of Array.isArray(o.panes) ? o.panes : []) {
+    const p = obj(item);
+    if (!p || typeof p.pane !== "number" || !Number.isSafeInteger(p.pane) || p.pane < 0) continue;
+    if (typeof p.tool !== "string" || !(TOOLS as readonly string[]).includes(p.tool) || typeof p.view !== "string") continue;
+    panes.push({
+      pane: p.pane,
+      tool: p.tool as ToolId,
+      view: cut(p.view, CAPS.label),
+      context: member(p, "context"),
+      namespace: member(p, "namespace"),
+      production: productionOf(p.production),
+      held: p.held === true,
+      status: typeof p.status === "number" && Number.isSafeInteger(p.status) && p.status >= 0 ? p.status : null,
+    });
+    if (panes.length >= MAX_PANES) break;
+  }
+  return { rows, panes };
+}
+
+/** The selections each tool shows in its row, in the order they are shown. */
+const ROW_MEMBERS: Readonly<Record<ToolId, readonly ("context" | "namespace" | "node" | "subscription" | "section")[]>> = {
+  kube: ["context", "namespace"],
+  talos: ["context", "node"],
+  azure: ["subscription"],
+  gam: ["section"],
+};
+
+/** The mark of a tool: a glyph for Kubernetes and Talos, a text chip for the other two. */
+export function glyphOf(tool: ToolId): string {
+  switch (tool) {
+    case "kube":
+      return "⎈";
+    case "talos":
+      return "◇";
+    case "azure":
+      return "az";
+    default:
+      return "gam";
+  }
+}
+
+/** The values of a row that its tool selects, in the order shown; the empty list when nothing is selected. */
+export function selectionValues(row: ContextRow): string[] {
+  const out: string[] = [];
+  for (const name of ROW_MEMBERS[row.tool]) {
+    const v = row[name];
+    if (v !== null) out.push(v);
+  }
+  return out;
+}
+
+/** The text of the selection of a row: `prod-eu · payments`, or a dash when nothing is selected. Each value is cut for the narrow column. */
+export function selectionText(row: ContextRow): string {
+  const values = selectionValues(row);
+  return values.length === 0 ? "—" : values.map((v) => cutCell(v, 60)).join(" · ");
+}
+
+export type WordKind = "production" | "missing" | "signed_out" | "stale";
+export interface RowWord {
+  kind: WordKind;
+  text: string;
+}
+
+/**
+ * The words a row adds to its selection. Production first (the flag is the core's, never a guess from a name), then the state of the
+ * tool, then `stale` when there is a value that can be old. These are the only words the page adds.
+ */
+export function rowWords(row: ContextRow): RowWord[] {
+  const out: RowWord[] = [];
+  if (row.production !== null) out.push({ kind: "production", text: "production" });
+  if (row.state === "not_found") out.push({ kind: "missing", text: "not found" });
+  else if (row.state === "signed_out") out.push({ kind: "signed_out", text: "signed out" });
+  if (row.stale && selectionValues(row).length > 0) out.push({ kind: "stale", text: "stale" });
+  return out;
 }
 
 // ---- words ------------------------------------------------------------------------------------------------------------

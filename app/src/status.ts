@@ -6,6 +6,7 @@
 import { getCopyMode } from "./copymode.js";
 import { connSummary, paneConns } from "./connstate.js";
 import { el, setText } from "./dom.js";
+import { followLayout } from "./integratecontext.js";
 import { NOTICE_MS, paneCountText, rendererText } from "./labels.js";
 import { state } from "./state.js";
 
@@ -49,4 +50,5 @@ export function renderStatus(): void {
   setText(renderer, rendererText(state.renderer, state.stats.avgMs));
   setText(encoding, "UTF-8");
   setText(version, state.version);
+  followLayout(); // asks the core only when the focus or the panes changed
 }

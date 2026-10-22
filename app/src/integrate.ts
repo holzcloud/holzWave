@@ -2,16 +2,20 @@
 // Talos, Azure, GAM) as a table, a list of values or a text. The core runs the tool and cleans what it printed; this
 // module asks for a view, draws the model it gets with `textContent` (integrateview.ts) and says what it is doing in
 // words. It builds no name, no argument list and no program: it sends the facts the core listed.
-import { call, listen } from "./bridge.js";
+import { call } from "./bridge.js";
 import { el, loadStyles, setAttr, setText } from "./dom.js";
 import type { BlockInfo } from "./blockstate.js";
 import type { Instance } from "./blocks.js";
 import { focusInput } from "./keyboard.js";
 import {
-  PICK_VERBS, ageWords, clearIntegrationContext, contextText, nextSelection, pickerEntries, readFault, readLaunchAnswer,
-  readRunAnswer, readTools, refreshDue, setIntegrationContext, stateWords,
+  ageWords, clearIntegrationContext, contextText, nextSelection, readFault, readLaunchAnswer, readRunAnswer, refreshDue,
+  setIntegrationContext, setPaneSelection, stateWords,
 } from "./integratestate.js";
-import type { Fault, RowAction, Sel, SelectKind, ToolEntry, ToolId, ViewModel } from "./integratestate.js";
+import type { Fault, RowAction, Sel, SelectKind, ToolId, ViewModel } from "./integratestate.js";
+import { openPicker, pathRow } from "./integratepick.js";
+import type { Picker } from "./integratepick.js";
+import { loadTools, onHint, onTools, setTools, toolOf } from "./integratetools.js";
+import type { Hint } from "./integratetools.js";
 import { renderKv, renderTable, renderText } from "./integrateview.js";
 import type { DrawOptions } from "./integrateview.js";
 import type { View } from "./types.js";
@@ -22,78 +26,6 @@ export interface Deps {
   applyView(v: View): void;
   /** The header of a pane has new words: draw the strips again. */
   changed(): void;
-}
-
-// ---- the tools, shared by the blocks of the window ---------------------------------------------------------------
-
-let tools: ToolEntry[] | null = null;
-let toolsAsk: Promise<ToolEntry[]> | null = null;
-const toolListeners = new Set<() => void>();
-
-/** The tool entries the core listed, asked once; `force` asks again (the person set a path, or the core said they changed). */
-function loadTools(force = false): Promise<ToolEntry[]> {
-  if (toolsAsk && !force) return toolsAsk;
-  const ask = (async () => {
-    try {
-      tools = readTools(await call<unknown>("integration_tools"));
-    } catch {
-      // no answer is no list: the block still reads its view
-      tools ??= [];
-    }
-    for (const notify of [...toolListeners]) notify();
-    return tools ?? [];
-  })();
-  toolsAsk = ask;
-  return ask;
-}
-
-/** The core answered with the tool entries again (a path was set or cleared). */
-function setTools(raw: unknown): void {
-  const list = readTools(raw);
-  if (list.length === 0) return;
-  tools = list;
-  toolsAsk = Promise.resolve(list);
-  for (const notify of [...toolListeners]) notify();
-}
-
-function toolOf(id: string): ToolEntry | null {
-  return tools?.find((t) => t.id === id) ?? null;
-}
-
-// ---- the event of the core ---------------------------------------------------------------------------------------
-
-/** What an event says to a block: it carries no data, the block asks. `gap` is true when an event was missed. */
-interface Hint {
-  kind: string;
-  tool: string | null;
-  pane: number | null;
-  gap: boolean;
-}
-const hints = new Set<(h: Hint) => void>();
-let listening = false;
-let lastSeq = 0;
-
-/** Listen for the event `integration` once for the window. It holds {seq, kind, tool, pane, code} and nothing else. */
-function listenOnce(): void {
-  if (listening) return;
-  listening = true;
-  listen<unknown>("integration", (payload) => {
-    if (typeof payload !== "object" || payload === null) return;
-    const o = payload as Record<string, unknown>;
-    if (typeof o.kind !== "string" || typeof o.seq !== "number") return;
-    const gap = lastSeq > 0 && o.seq !== lastSeq + 1;
-    lastSeq = o.seq;
-    if (o.kind === "tools" || gap) void loadTools(true);
-    const hint: Hint = {
-      kind: o.kind,
-      tool: typeof o.tool === "string" ? o.tool : null,
-      pane: typeof o.pane === "number" ? o.pane : null,
-      gap,
-    };
-    for (const h of [...hints]) h(hint);
-  }).catch(() => {
-    listening = false;
-  });
 }
 
 // ---- the block ---------------------------------------------------------------------------------------------------
@@ -141,6 +73,7 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
       selection,
       verb?.refresh_secs ?? null,
     );
+    setPaneSelection(current.pane, selection);
     if (setIntegrationContext(current.pane, text, production)) deps.changed();
     if (alive) draw();
   };
@@ -191,38 +124,15 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
       const list = el("ul", "ig-places", box);
       for (const place of entry.searched) el("li", "", list).textContent = place;
     }
-    const row = el("div", "ig-pathrow", box);
-    const input = el("input", "ig-path", row);
-    input.type = "text";
-    input.dataset.field = "";
-    input.spellcheck = false;
-    input.autocomplete = "off";
-    input.placeholder = "Absolute path of the program";
-    input.setAttribute("aria-label", "Path of the program");
-    input.value = pathText;
-    input.addEventListener("input", () => {
-      pathText = input.value;
+    pathRow(box, {
+      value: pathText,
+      input: (v) => {
+        pathText = v;
+      },
+      set: () => void setPath(),
+      again: () => void checkAgain(),
+      escape: () => focusInput(),
     });
-    input.addEventListener("keydown", (e) => {
-      if (e.isComposing) return;
-      if (e.key === "Escape") {
-        e.preventDefault();
-        focusInput();
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        void setPath();
-      }
-    });
-    const set = el("button", "ig-pathbtn", row);
-    set.type = "button";
-    set.dataset.field = "";
-    set.textContent = "Set path";
-    set.addEventListener("click", () => void setPath());
-    const again = el("button", "ig-pathbtn", row);
-    again.type = "button";
-    again.dataset.field = "";
-    again.textContent = "Check again";
-    again.addEventListener("click", () => void checkAgain());
   };
 
   const draw = (): void => {
@@ -384,7 +294,7 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
         chip.dataset.select = kind;
         chip.setAttribute("aria-haspopup", "listbox");
         chip.setAttribute("aria-expanded", "false");
-        chip.addEventListener("click", () => void openPicker(kind));
+        chip.addEventListener("click", () => togglePicker(kind));
         bar.insertBefore(chip, prod);
         chips.set(kind, chip);
       }
@@ -397,105 +307,33 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
 
   // ---- the list under a chip ---------------------------------------------------------------------------------------
 
-  let picker: { kind: SelectKind; node: HTMLElement } | null = null;
-  let pickToken = 0;
+  let picker: { kind: SelectKind; list: Picker } | null = null;
 
   const closePicker = (focus: "chip" | "terminal" | "none"): void => {
     if (picker === null) return;
-    const { kind, node } = picker;
+    const { kind, list } = picker;
     picker = null;
-    pickToken += 1;
-    node.remove();
+    list.close();
     const chip = chips.get(kind);
     chip?.setAttribute("aria-expanded", "false");
     if (focus === "chip") chip?.focus({ preventScroll: true });
     else if (focus === "terminal") focusInput();
   };
 
-  const listMessage = (node: HTMLElement, text: string, warn: boolean): void => {
-    node.replaceChildren();
-    const p = el("p", "ig-list-msg", node);
-    p.setAttribute("role", "status");
-    if (warn) p.dataset.tone = "warn";
-    p.textContent = text;
-  };
-
-  const openPicker = async (kind: SelectKind): Promise<void> => {
+  /** A press on a chip: the list of the shared picker opens under the bar, or closes when it was this chip's. */
+  const togglePicker = (kind: SelectKind): void => {
     if (picker?.kind === kind) {
       closePicker("chip");
       return;
     }
     closePicker("none");
-    const node = el("div", "ig-list");
-    node.setAttribute("role", "listbox");
-    node.setAttribute("aria-label", `${kind} list`);
-    node.addEventListener("keydown", (e) => pickerKey(e, node));
-    root.insertBefore(node, body);
-    picker = { kind, node };
-    const mine = ++pickToken;
     chips.get(kind)?.setAttribute("aria-expanded", "true");
-    listMessage(node, stateWords("reading").text, false);
-    try {
-      // The entries are a list the core reads for this pane; the page shows no value that the core did not send.
-      const answer = readRunAnswer(
-        await call<unknown>("integration_run", { tool: tool(), verb: PICK_VERBS[kind], pane: current.pane, args: {} }),
-      );
-      if (mine !== pickToken || !alive) return;
-      const entries = pickerEntries(answer?.view ?? null);
-      if (answer === null) {
-        listMessage(node, readFault(null).text, true);
-      } else if (entries.length === 0) {
-        listMessage(node, stateWords("empty").text, false);
-      } else {
-        node.replaceChildren();
-        const now = selection[kind];
-        for (const entry of entries) {
-          const opt = el("button", "ig-opt", node);
-          opt.type = "button";
-          opt.dataset.field = "";
-          opt.setAttribute("role", "option");
-          opt.setAttribute("aria-selected", String(entry.key === now));
-          el("span", "ig-mark", opt).textContent = entry.key === now ? "●" : "○";
-          el("span", "ig-opt-label", opt).textContent = entry.label;
-          if (entry.detail !== "") el("span", "ig-opt-detail", opt).textContent = entry.detail;
-          opt.addEventListener("click", () => void choose(kind, entry.key));
-        }
-        const options = Array.from(node.querySelectorAll<HTMLElement>(".ig-opt"));
-        (options.find((o) => o.getAttribute("aria-selected") === "true") ?? options[0])?.focus({ preventScroll: true });
-      }
-    } catch (e) {
-      if (mine !== pickToken || !alive) return;
-      listMessage(node, readFault(e).text, true);
-    }
-  };
-
-  const pickerKey = (e: KeyboardEvent, node: HTMLElement): void => {
-    const opts = Array.from(node.querySelectorAll<HTMLElement>(".ig-opt"));
-    const at = opts.findIndex((o) => o === document.activeElement);
-    const go = (i: number): void => {
-      e.preventDefault();
-      opts[(i + opts.length) % opts.length]?.focus({ preventScroll: true });
-    };
-    switch (e.key) {
-      case "ArrowDown":
-        go(at + 1);
-        break;
-      case "ArrowUp":
-        go(at < 0 ? 0 : at - 1);
-        break;
-      case "Home":
-        go(0);
-        break;
-      case "End":
-        go(opts.length - 1);
-        break;
-      case "Escape":
-        e.preventDefault();
-        e.stopPropagation();
-        closePicker("terminal");
-        break;
-      default:
-    }
+    const list = openPicker({
+      tool: tool(), kind, pane: current.pane, current: selection[kind], host: root, before: body,
+      choose: (key) => void choose(kind, key),
+      escape: () => closePicker("terminal"),
+    });
+    picker = { kind, list };
   };
 
   /** The person chose an entry: the core takes it for this pane only, then the view is read again. */
@@ -557,10 +395,8 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
     if (h.kind !== "context" && h.kind !== "held" && !h.gap) return;
     if (h.gap || h.pane === current.pane || (h.pane === null && (h.tool === null || h.tool === current.source))) void run();
   };
-  hints.add(hint);
-  listenOnce();
-
-  toolListeners.add(describe);
+  const unhint = onHint(hint);
+  const untools = onTools(describe);
   void loadTools();
   draw();
   void run();
@@ -617,9 +453,9 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
     dispose() {
       alive = false;
       clearInterval(timer);
-      hints.delete(hint);
+      unhint();
       closePicker("none");
-      toolListeners.delete(describe);
+      untools();
       clearIntegrationContext(info.pane);
       root.replaceChildren();
     },

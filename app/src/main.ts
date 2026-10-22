@@ -18,6 +18,7 @@ import { initHistory } from "./historyview.js";
 import { initLoginPrompt } from "./loginprompt.js";
 import { initLocalNetwork } from "./localnet.js";
 import { initInline } from "./inline.js";
+import { initIntegrationContext } from "./integratecontext.js";
 import { decorateReply } from "./inlinecode.js";
 import { sidebarChat } from "./aisidebar.js";
 import { initSidebar } from "./sidebar.js";
@@ -80,6 +81,13 @@ async function main() {
   initHistory();
   initLoginPrompt();
   await initSidebar();
+  // The Context section, the status segments and the pane chips read one answer of the core (docs/design.md 6.11).
+  initIntegrationContext({
+    changed: () => {
+      renderStatus();
+      renderOverlay();
+    },
+  });
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);
