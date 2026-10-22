@@ -1157,3 +1157,122 @@ export function profileSelectionText(profile: ProfileEntry): string {
   const values = PINNED.map((kind) => profile[kind]).filter((v): v is string => v !== null && v !== "");
   return values.length === 0 ? "—" : values.map((v) => cutCell(v, PROFILE_CAPS.shown)).join(" · ");
 }
+
+/** The label and the example of each field a profile can pin. The example is a placeholder: the page never puts a value in a field. */
+export const FIELD_WORDS: Readonly<Record<SelectKind, { label: string; example: string }>> = {
+  context: { label: "Context", example: "prod-eu" },
+  namespace: { label: "Namespace", example: "payments" },
+  subscription: { label: "Subscription", example: "00000000-0000-0000-0000-000000000000" },
+  section: { label: "Section", example: "work" },
+  node: { label: "Node", example: "node-1" },
+};
+
+/**
+ * The fields the form shows for a tool: what the core says the tool selects, in the core's order. The page names no tool, so a
+ * tool the core adds has its form the day it lists it. A tool the core did not list has none.
+ */
+export function fieldsFor(tool: { selects: readonly SelectKind[] } | null): SelectKind[] {
+  return tool === null ? [] : [...tool.selects];
+}
+
+/**
+ * Whether the tool keeps a configuration folder of its own that a profile can ask for. The core's list has no member for it; the
+ * convention of the core's descriptions is that a tool whose selection is a subscription or a section (the accounts of a cloud
+ * or a workspace) signs in inside such a folder, and the core refuses the flag for any other tool in its own words.
+ */
+export function takesOwnFolder(tool: { selects: readonly SelectKind[] } | null): boolean {
+  return tool !== null && (tool.selects.includes("subscription") || tool.selects.includes("section"));
+}
+
+const ID_MAX = 32;
+const ID_FALLBACK = "profile";
+
+/** A lower-case form of a name for an id: letters, digits, `-` and `_`, at most 32 characters, never starting or ending with a dash. */
+export function slug(name: string): string {
+  const made = name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+/, "");
+  return made.slice(0, ID_MAX).replace(/-+$/, "");
+}
+
+/** `base` if no listed id is that, else `base-2`, `base-3`, and so on; a new profile can never replace another one. */
+export function uniqueId(base: string, taken: readonly string[]): string {
+  const root = base === "" ? ID_FALLBACK : base;
+  if (!taken.includes(root)) return root;
+  for (let n = 2; ; n += 1) {
+    const tail = `-${n}`;
+    const candidate = `${root.slice(0, ID_MAX - tail.length).replace(/-+$/, "")}${tail}`;
+    if (!taken.includes(candidate)) return candidate;
+  }
+}
+
+/** What the form holds, as text and flags. */
+export interface FormValues {
+  id: string;
+  tool: string;
+  name: string;
+  fields: Partial<Record<SelectKind, string>>;
+  production: boolean;
+  isolated: boolean;
+  env: { name: string; value: string }[];
+  secrets: string[];
+}
+
+/** The profile a save sends: the shape of the profile file, one object. Rules are the core's; this only shapes what was typed. */
+export interface ProfileToSave {
+  id: string;
+  tool: string;
+  name: string;
+  context: string | null;
+  namespace: string | null;
+  subscription: string | null;
+  section: string | null;
+  node: string | null;
+  production: boolean;
+  isolated: boolean;
+  env: Record<string, string>;
+  secret_env: string[];
+}
+
+/**
+ * The object `integration_profile_save` takes. A selection field the tool does not select is null, and so is an empty one (the ends
+ * are trimmed); `isolated` is false for a tool without a folder of its own; a variable row with neither a name nor a value is a row
+ * that was never filled in and is left out; a secret variable is its name alone.
+ */
+export function profileToSave(form: FormValues, selects: readonly SelectKind[], ownFolder: boolean): ProfileToSave {
+  const pinned = (kind: SelectKind): string | null => {
+    if (!selects.includes(kind)) return null;
+    const text = (form.fields[kind] ?? "").trim();
+    return text === "" ? null : text;
+  };
+  const env: Record<string, string> = {};
+  for (const row of form.env) {
+    const name = row.name.trim();
+    if (name === "" && row.value === "") continue;
+    env[name] = row.value;
+  }
+  return {
+    id: form.id,
+    tool: form.tool,
+    name: form.name,
+    context: pinned("context"),
+    namespace: pinned("namespace"),
+    subscription: pinned("subscription"),
+    section: pinned("section"),
+    node: pinned("node"),
+    production: form.production,
+    isolated: ownFolder && form.isolated,
+    env,
+    secret_env: form.secrets.map((n) => n.trim()).filter((n) => n !== ""),
+  };
+}
+
+/** The first variable name that two rows share (an object cannot hold both), or null. Blank names are not names. */
+export function duplicateName(rows: readonly { name: string }[]): string | null {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const name = row.name.trim();
+    if (name === "") continue;
+    if (seen.has(name)) return name;
+    seen.add(name);
+  }
+  return null;
+}

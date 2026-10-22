@@ -35,6 +35,11 @@ export function setTools(raw: unknown): void {
   for (const notify of [...toolListeners]) notify();
 }
 
+/** The tool entries the core listed, in its order; empty before the list arrived. */
+export function listedTools(): readonly ToolEntry[] {
+  return tools ?? [];
+}
+
 /** The entry of a tool, or null before the list arrived or for a tool the core did not list. */
 export function toolOf(id: string): ToolEntry | null {
   return tools?.find((t) => t.id === id) ?? null;
