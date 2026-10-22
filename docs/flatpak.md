@@ -47,6 +47,8 @@ The first build takes a while (a release build of the whole app plus the Ghostty
 - **`--talk-name=org.freedesktop.Flatpak` removes the sandbox for this app.** It lets the app run any command on the host
   with your rights. A terminal cannot be useful without it: inside the sandbox a shell sees only the runtime's `/bin/sh` and
   none of your tools. The only host command holzWave starts is your login shell (or the program of the `shell` setting).
+  The integrations (the Kubernetes, Talos, Azure and GAM7 blocks) are not available in the Flatpak build, so no tool of
+  theirs is started on the host.
   The manifest, the AppStream description and this page say so; Flathub submission is not planned, and Flathub would
   not accept this permission without a long justification.
 - **`--filesystem=home`** gives the app your home folder, so `~`, the directories of panes and "reveal in the file manager"

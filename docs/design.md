@@ -220,7 +220,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 |---|---|---|
 | Daily | ![](design/6-desktop.png) | local shell with the chip of a Kubernetes context (6.11), SSH pane that is reconnecting (`⟳ 2/5`), SFTP editor, Markdown preview, system monitor, sidebar |
 | Palette (`Cmd+K`) | ![](design/palette.png) | fuzzy list in groups (actions, connect, switch) with the chords on the right |
-| New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history; the picker is drawn but not built: Kubernetes, Talos, Azure and GAM7 open from the command palette and from the sidebar's Context section (6.25) |
+| New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history; Kubernetes, Talos, Azure and GAM7 are not opened from it yet: they open from the command palette and from the sidebar's Context section (6.25 says why) |
 | Search | ![](design/search.png) | scrollback search bar in the pane, hits marked, the current hit solid |
 | Copy mode | ![](design/copy-mode.png) | keyboard selection, hint letters on hashes and paths, a solid status line with the keys |
 | Connections | ![](design/connections.png) | list and form: host, user, login (`Key file`, `Password`, `Agent` or `Code or password prompt`), secret from the OS keychain, jump host, reconnect policy, startup command, use wsh on this host |

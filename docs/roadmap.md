@@ -20,6 +20,10 @@ ever taken over, its Apache-2.0 licence is checked first and the notices are kep
 | Sync, secret store | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Apple on-device AI | ✅ macOS 26+, Apple Silicon | – | – | ❓ | – |
 
+The `wsh`, K8s, Talos, Azure and GAM7 row means built and tested against fake tools and recorded fixtures. The integrations
+did not run on Windows or Linux hardware, the Flatpak build does not run them, and a real cluster or account is open on
+macOS too (Part 9 of [test-plan.md](test-plan.md)).
+
 Not included on any platform: a web browser block.
 
 ## Phase 1 — Spike (one week)
@@ -122,7 +126,7 @@ Status: built in the core and the page and covered by tests against in-process s
 stub. Not yet run with real accounts, or a real local model server; the
 manual rows are in Part 7 of [test-plan.md](test-plan.md).
 
-- ✅ Sidebar with hosts, history search and widgets (note, Pomodoro timer, command/link list; custom ones from `widgets/*.json`, validated, no code). The files are described by [widget.schema.json](widget.schema.json) and a test keeps the schema and the loader in step. Open: the Context section (with the integrations), widgets on mobile.
+- ✅ Sidebar with hosts, history search and widgets (note, Pomodoro timer, command/link list; custom ones from `widgets/*.json`, validated, no code). The files are described by [widget.schema.json](widget.schema.json) and a test keeps the schema and the loader in step. The Context section is built with the integrations (Phase 6b). Open: widgets on mobile.
 - ✅ History with fuzzy search: SQLite (`history.db`, mode 0600, `secure_delete`), fzf-style matching (`nucleo-matcher`), fed by shell hooks through `wsh` (`wsh init bash|zsh|fish`; PowerShell panes report on their own), a best-effort filter keeps secrets and leading-space commands out, a dialog with `Cmd/Ctrl+Shift+H` and a sidebar section. `^R` is an opt-in binding (`wsh init <shell> --ctrl-r`). Open: remote hosts (a command from a pane on a saved connection is found from that pane, but nothing typed on the far side is recorded: the tunnel refuses the history commands on purpose, so a remote host cannot write into the history), optional sync (deletions of themes and widgets travel, but the history is a database that cannot be carried entry by entry, so a forgotten command would come back; it stays local until deletions of single entries can be synced).
 - ✅ System monitor block (CPU, memory, network, busiest processes; `sysinfo`). Other computers over SSH: built for Linux hosts (a fixed read-only command through the exec session of a saved connection, names and numbers only; another system is shown as not supported).
 - ✅ AI chat behind a provider abstraction: Anthropic, OpenAI, Gemini, local servers (Ollama, LM Studio, llama.cpp), AI gateways and the Apple model. Four surfaces: a chat pane, the sidebar column, the palette actions and `wsh ai`. Terminal context is sent only with consent, per pane; every tool action needs your approval; keys live in the OS keychain; none of it is synced.
@@ -130,18 +134,25 @@ manual rows are in Part 7 of [test-plan.md](test-plan.md).
 
 ## Phase 6b — Native integrations (desktop)
 
-One plugin schema, "CLI integration": binary detection, context switcher, output parser, block widget.
+One compiled-in description for each tool ("CLI integration"): binary detection, context switcher, output parser, block. No
+plugin host: the two published JSON documents, the profile file and the view model, are data with a schema.
 
 | Integration | Approach |
 |---|---|
-| Kubernetes | `kubectl` wrapper (`kube-rs` is not used: 34 more crates and exec plugins to rebuild): context and namespace switcher, pod list, logs, "exec in pod" as a terminal block |
-| Talos | `talosctl` wrapper: node status, services, dmesg and dashboard as terminal blocks (no gRPC client) |
-| Azure CLI | `az` wrapper: subscription switcher, login state in the status bar, `az login` as a terminal block |
-| GAM7 | wrapper with profile choice (several domains and configs), output as a table or JSON block |
+| Kubernetes | `kubectl` wrapper (`kube-rs` is not used: 34 more crates and exec plugins to rebuild): context and namespace switcher, pod list, logs, "exec in pod" as a terminal block, and a shell pane with its own context. Built |
+| Talos | `talosctl` wrapper: nodes, services, machine status, info and contexts as views; dmesg and the dashboard as terminal blocks; making a context the default behind a card (no gRPC client). Built; the output shapes are written from the documents, not recorded |
+| Azure CLI | `az` wrapper: account, subscriptions and resource groups, the subscription switcher, login state in the status line, `az login` as a terminal block. Built |
+| GAM7 | wrapper with the choice of a configuration section (several domains and configs), sections, domain and users as a table or JSON block. Built; the text of `gam showsections` is an assumption |
 
-Connection data goes through the secret store and sync.
+Connection data goes through the profile file and the keychain, and sync carries the profiles and their small secret
+variables inside the encrypted payload; nothing is imported from a kubeconfig, a talosconfig or a tool's token files.
 
-Status: planned; the design is in architecture.md section 9.
+Status: built, rows open (test-plan Part 9). Built and tested against fake tools and recorded fixtures; not yet run against
+a real cluster, a real Talos, Azure or GAM account, or on Windows and Linux hardware. The design is in architecture.md section 9.
+
+Open: the New block picker (drawn in the design, not built), a saved Pod connection kind, integration tools for the AI chat
+(none, on purpose), importing a kubeconfig, user-loadable integrations, and `kube-rs` or a Talos gRPC client only if polling
+proves too slow.
 
 ## Phase 7 — Mobile
 

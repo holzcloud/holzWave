@@ -82,6 +82,21 @@ Both are built on a Mac (Windows as a cross build, Linux in an amd64 container) 
 </tr>
 </table>
 
+<table>
+<tr><th>A Kubernetes pods block</th><th>Block states</th><th>The Context section</th></tr>
+<tr>
+<td><img src="docs/design/integration-block.png" alt="A Kubernetes pods block beside its shell, marked as production"></td>
+<td><img src="docs/design/integration-states.png" alt="The block in four states: reading, the tool not found with a path field, an error with the last rows dimmed, and a table that was cut"></td>
+<td><img src="docs/design/integration-context.png" alt="The Context section of the sidebar with one row for each of the four tools"></td>
+</tr>
+<tr><th>Confirming an action</th><th>Card states</th><th>Integration profiles</th></tr>
+<tr>
+<td><img src="docs/design/integration-confirm.png" alt="The card for deleting a pod in a production context, armed for the second press"></td>
+<td><img src="docs/design/integration-confirm-states.png" alt="Four cards: a change of the tool's own configuration, an exec session, an allowed card running, and one that is no longer waiting"></td>
+<td><img src="docs/design/integration-profiles.png" alt="The dialog of integration profiles with a production profile chosen"></td>
+</tr>
+</table>
+
 The same window is drawn on every platform; only the OS window buttons and the keyboard shortcuts differ. All views and
 the design rules are in [docs/design.md](docs/design.md).
 
@@ -105,6 +120,7 @@ Built and tested by the author on macOS, Windows and Linux:
 | System monitor of this computer and of Linux hosts over SSH | built, tested against a test server, not yet against real hosts |
 | AI chat in a pane, the sidebar, the palette and `wsh ai`: Anthropic, OpenAI, Gemini, local servers and gateways; you share a pane before its text leaves, and every tool action asks first | built, tested against test servers, not yet against real providers |
 | **Fully offline AI on a Mac:** the Apple on-device model (macOS 26 or later with Apple Intelligence) answers on the Mac itself, with no account, no key and nothing leaving the computer | built |
+| Kubernetes, Talos, Azure CLI and GAM7 as blocks (your own `kubectl`, `talosctl`, `az` and GAM7 on this computer), a Context section with a status for each, a card with the exact command and a second press on a production context, a profiles dialog, palette entries | built, tested against fake tools and recorded fixtures, not yet against real clusters or accounts or on Windows and Linux hardware; the Flatpak build does not run them and the mobile apps do not have them |
 | iOS, Android | planned |
 
 Per-phase detail: [docs/status.md](docs/status.md).
@@ -133,8 +149,9 @@ Phase 1 (spike) is done, phase 2 (desktop MVP, including the Windows and Linux v
 built, and phase 3 (SSH, WSL, Docker, connection manager), phase 4 (file browser, previews, editor), the encrypted sync
 and the `wsh` CLI are built and tested against test servers. The system monitor (local and over SSH), the history search
 and the sidebar with widgets are built too, and so are the AI chat and the on-device model, whose manual checks wait for
-real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). Next come the native integrations (Kubernetes,
-Talos, Azure CLI, GAM7; planned in detail, work has started), then mobile.
+real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). The native integrations (Kubernetes, Talos, Azure
+CLI, GAM7) are built and tested against fake tools and recorded fixtures; their rows for real clusters and accounts and for
+Windows and Linux hardware are open (Part 9 of the test plan). Mobile comes next.
 Versions go `0.0.1-alpha3`, `0.0.1-beta1` (now), `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
@@ -142,7 +159,8 @@ Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 [Architecture](docs/architecture.md) · [Design](docs/design.md) · [Roadmap](docs/roadmap.md) ·
 [Status and stack](docs/status.md) · [Building](docs/building.md) · [Sync format](docs/sync.md) ·
-[Configuration files](docs/config.md) · [Test plan](docs/test-plan.md)
+[Configuration files](docs/config.md) · [Test plan](docs/test-plan.md) ·
+[Profile schema](docs/integrations.schema.json) · [View schema](docs/integration-view.schema.json)
 
 ## License and credits
 

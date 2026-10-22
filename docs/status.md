@@ -22,6 +22,10 @@
   shell hook) and a file. Terminal context leaves the device only after you share that pane, every send shows what
   goes out, and every tool action asks first. Tested against test servers and scripted providers, not yet against real
   providers or a real Apple model.
+- **Your own tools as blocks.** `kubectl`, `talosctl`, `az` and GAM7 on this computer: tables that follow the tool, a Context
+  section with a status for each, a card with the exact command before anything changes, and a second press on a context you
+  mark as production. Nothing is imported from a kubeconfig or a token file, and nothing is sent anywhere by holzWave. Tested
+  against fake tools and recorded fixtures, not yet against real clusters or accounts.
 - **Few dependencies.** No frontend framework and no bundler. Security-critical code (VT parsing, SSH) comes from
   established libraries, never hand-rolled.
 
@@ -57,11 +61,15 @@ selection, copy, paste; saved layout; WebGL2 with Canvas 2D fallback. SSH, WSL a
 video, audio; local and over SFTP) are built (core and page; see the notes above). So are the AI chat with its providers and
 surfaces, the on-device model, the widgets (described by a JSON Schema), the `^R` binding, a history that follows the host of the focused pane, and the system monitor of this computer and of Linux hosts over SSH. These were tested against test
 servers and scripted providers, not yet against real providers or a real Apple model; the manual
-rows are in Part 7 of [test-plan.md](test-plan.md). Not built:
+rows are in Part 7 of [test-plan.md](test-plan.md). The native integrations are built too: Kubernetes, Talos, Azure CLI and
+GAM7 as blocks, the Context section of the sidebar and the status segments, the confirmation card with the second press on
+a production context, the profiles dialog and the palette entries. They are tested against fake tools and recorded fixtures
+and have not been run against a real cluster, a real Talos, Azure or Google Workspace account, or on Windows and Linux
+hardware; those rows are open (Part 9 of [test-plan.md](test-plan.md)). The Flatpak build does not run them, mobile drops
+them, and the New block picker is drawn in the design and not built. Not built:
 
 | Phase | Planned |
 |---|---|
-| 8 | Kubernetes, Talos, Azure CLI, GAM7 blocks, and the Context section of the sidebar with them |
 | 9 | iOS (SSH) and Android (local shell and SSH), widgets on mobile, AI provider keys on mobile (they need a mobile secret store) |
 | 10 | Kitty graphics, hyperlinks, signed packages |
 
