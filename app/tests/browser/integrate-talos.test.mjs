@@ -6,7 +6,7 @@
 // tool; nothing here says what the real tool prints.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { openBlock, rowsShown } from "./integrate-lib.mjs";
+import { LAUNCHED, openBlock, rowsShown } from "./integrate-lib.mjs";
 import { allow, cardNode, installCore, textOf, wait } from "./integrate-confirm-lib.mjs";
 import { callsOf } from "./lib.mjs";
 
@@ -49,6 +49,8 @@ export default async function ({ page, url, errors }) {
     the_role_is_said_in_words,
     a_truncated_stream_shows_the_rows_and_the_note,
     use_context_asks_first_with_the_files_name,
+    node_actions_launch_or_ask,
+    a_hostile_node_has_no_button_and_inert_text,
   ];
   for (const run of cases) {
     try {
@@ -224,4 +226,68 @@ async function use_context_asks_first_with_the_files_name(page, url) {
   await allow(page);
   await page.waitForFunction(() => window.__MOCK__.callsOf("integration_confirm").length === 1);
   assert.deepEqual(await callsOf(page, "integration_confirm"), [{ ticket: card.ticket, hash: card.hash }]);
+}
+
+async function node_actions_launch_or_ask(page, url) {
+  const card = golden("talos_card_dashboard.json");
+  const nodes = golden("talos_nodes.json");
+  await installCore(page, { cards: { "talos/dashboard": card } });
+  await open(page, url, "nodes", { nodes }, { launch: { pane: 3, view: LAUNCHED } });
+  await rowsShown(page);
+
+  // The core offers four actions on a valid node; the page draws a read action only for a verb that opens a terminal, so the two
+  // views (Services, Machine status) have no button here and the other two do, the one that asks first ending in an ellipsis.
+  assert.deepEqual(nodes.view.rows[0].actions.map((a) => a.verb), ["services", "machine_status", "dmesg", "dashboard"]);
+  for (const i of [0, 1, 2]) {
+    assert.deepEqual(await page.locator(`tr[data-i="${i}"] .ig-act`).allTextContents(), ["Kernel log", "Dashboard\u2026"], `row ${i}`);
+  }
+
+  // A read terminal launches beside the pane with the row's own argument and nothing else.
+  await page.locator('tr[data-i="1"] .ig-act', { hasText: "Kernel log" }).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("integration_launch").length === 1);
+  assert.deepEqual((await callsOf(page, "integration_launch"))[0], {
+    tool: "talos", verb: "dmesg", pane: 2, args: { node: "192.0.2.12" }, placement: "right",
+  });
+  await page.waitForSelector('.panehead[data-pane="3"]');
+  assert.equal((await callsOf(page, "integration_prepare")).length, 0, "a read asks for no card");
+
+  // An Exec verb asks first: the core's card is shown with the exact fields, and nothing is launched or confirmed by the press.
+  await page.locator('tr[data-i="0"] .ig-act', { hasText: "Dashboard" }).click();
+  await cardNode(page).waitFor();
+  assert.deepEqual(await callsOf(page, "integration_prepare"), [{ tool: "talos", verb: "dashboard", pane: 2, args: { node: "192.0.2.11" } }]);
+  assert.equal(await textOf(page, ".ic-title"), "Talos \u00b7 Dashboard");
+  assert.match(await textOf(page, ".ic-effect"), /^Opens a session with your credentials\./);
+  const rows = (selector) => cardNode(page).locator(`${selector} .ic-row`).evaluateAll((r) => r.map((x) => [x.children[0].textContent, x.children[1].textContent]));
+  assert.deepEqual(await rows(".ic-target"), card.target);
+  assert.deepEqual(await rows(".ic-args"), [["program", "talosctl"], ...card.argv.map((a, i) => [`arg ${i + 1}`, a])], "the exact argument list of the core");
+  assert.equal(await cardNode(page).locator(".ic-guard").count(), 0);
+  assert.equal((await callsOf(page, "integration_launch")).length, 1, "the press launched nothing");
+  assert.equal((await callsOf(page, "integration_confirm")).length, 0, "and confirmed nothing");
+  await wait(page, 600);
+  await cardNode(page).locator(".ic-no").click();
+  await page.waitForFunction(() => document.querySelector("section.ic") === null);
+  assert.equal((await callsOf(page, "integration_confirm")).length, 0, "Deny starts nothing");
+  assert.deepEqual(await callsOf(page, "integration_cancel"), [{ ticket: card.ticket }]);
+}
+
+async function a_hostile_node_has_no_button_and_inert_text(page, url) {
+  // ASSUMPTION: the members stream is a written variant with hostile names; the core made the rows.
+  const hostile = golden("talos_nodes_hostile.json");
+  await open(page, url, "nodes", { nodes: hostile });
+  await rowsShown(page);
+  assert.deepEqual(await drawnRows(page), hostile.view.rows.map((r) => r.cells), "every cell as the core wrote it, hostile text included");
+  assert.equal(await page.locator(".block-integration img").count(), 0, "markup in a host name is text");
+  assert.equal(await page.locator(".block-integration [onerror]").count(), 0);
+  assert.equal(await page.locator('tr[data-i="1"] .ig-act').count(), 0, "a hostile node: no button");
+  assert.equal(await page.locator('tr[data-i="3"] .ig-act').count(), 0, "a mask and an option: no button");
+  // A valid address with a hostile host name: the buttons carry the address, never the name.
+  assert.deepEqual(await page.locator('tr[data-i="2"] .ig-act').allTextContents(), ["Kernel log", "Dashboard\u2026"]);
+  await page.evaluate(() => {
+    window.__IG__.launch = { pane: 3, view: window.__MOCK__.view() };
+  });
+  await page.locator('tr[data-i="2"] .ig-act', { hasText: "Kernel log" }).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("integration_launch").length === 1);
+  const sent = (await callsOf(page, "integration_launch"))[0];
+  assert.deepEqual(sent.args, { node: "192.0.2.13" });
+  assert.ok(!JSON.stringify(sent).includes("touch"), "the host name is not sent");
 }

@@ -1,0 +1,151 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": "talos-prod",
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "node",
+        "label": "NODE"
+      },
+      {
+        "id": "hostname",
+        "label": "HOSTNAME"
+      },
+      {
+        "id": "type",
+        "label": "TYPE"
+      },
+      {
+        "id": "addresses",
+        "label": "ADDRESSES"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [
+          {
+            "args": {
+              "node": "192.0.2.11"
+            },
+            "effect": "read",
+            "label": "Services",
+            "verb": "services"
+          },
+          {
+            "args": {
+              "node": "192.0.2.11"
+            },
+            "effect": "read",
+            "label": "Machine status",
+            "verb": "machine_status"
+          },
+          {
+            "args": {
+              "node": "192.0.2.11"
+            },
+            "effect": "read",
+            "label": "Kernel log",
+            "verb": "dmesg"
+          },
+          {
+            "args": {
+              "node": "192.0.2.11"
+            },
+            "effect": "exec",
+            "label": "Dashboard",
+            "verb": "dashboard"
+          }
+        ],
+        "cells": [
+          "192.0.2.11",
+          "node-1.example.com",
+          "controlplane",
+          "192.0.2.11"
+        ],
+        "key": "node-1.example.com",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "--talosconfig=/etc/passwd",
+          "<img src=x onerror=alert(1)>",
+          "controlplane",
+          "--talosconfig=/etc/passwd"
+        ],
+        "key": "<img src=x onerror=alert(1)>",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "node": "192.0.2.13"
+            },
+            "effect": "read",
+            "label": "Services",
+            "verb": "services"
+          },
+          {
+            "args": {
+              "node": "192.0.2.13"
+            },
+            "effect": "read",
+            "label": "Machine status",
+            "verb": "machine_status"
+          },
+          {
+            "args": {
+              "node": "192.0.2.13"
+            },
+            "effect": "read",
+            "label": "Kernel log",
+            "verb": "dmesg"
+          },
+          {
+            "args": {
+              "node": "192.0.2.13"
+            },
+            "effect": "exec",
+            "label": "Dashboard",
+            "verb": "dashboard"
+          }
+        ],
+        "cells": [
+          "192.0.2.13",
+          "$(touch /tmp/never)",
+          "controlplane",
+          "192.0.2.13"
+        ],
+        "key": "$(touch /tmp/never)",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "10.0.4.12/24",
+          "-e",
+          "controlplane",
+          "10.0.4.12/24"
+        ],
+        "key": "-e",
+        "tone": "normal"
+      }
+    ],
+    "title": "Talos nodes",
+    "truncated": null
+  }
+}

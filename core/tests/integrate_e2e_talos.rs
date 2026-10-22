@@ -16,6 +16,7 @@ mod common;
 mod fake_cli;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -406,4 +407,314 @@ fn use_context_asks_first_with_the_files_name() {
     assert!(guarded.fields.contains(&("guard".to_owned(), "production".to_owned())));
     let calm = service.prepare("talos", "use_context", Some(5), &args(&[("context", "demo-lab")])).expect("a card");
     assert_eq!(calm.guard.production, None);
+}
+
+// ---- the terminals, the config path variable and the node actions ------------------------------------------------
+
+/// The node every card and launch below talks to: the address of the first member of the written members fixture.
+const NODE: &str = "192.0.2.11";
+
+fn os(words: &[&str]) -> Vec<OsString> {
+    words.iter().map(OsString::from).collect()
+}
+
+/// A machine whose environment holds a variable of the app and a loader variable, and every such name the test process
+/// has itself (a test run from a holzWave pane has the app's socket variables, which is the case the removal is for).
+fn dirty_facts(rig: &Rig) -> HostFacts {
+    let mut facts = rig.facts().with_env("HOLZWAVE_TOKEN", "app-secret").with_env("LD_PRELOAD", "/tmp/x.so");
+    for (name, value) in std::env::vars_os() {
+        let (Some(name), Some(value)) = (name.to_str(), value.to_str()) else { continue };
+        if name.starts_with("HOLZWAVE_") || name.starts_with("DYLD_") || name.starts_with("LD_") {
+            facts = facts.with_env(name, value);
+        }
+    }
+    facts
+}
+
+/// `integration_local.json` of this computer with a talosconfig path; returns the path. It must be written before the
+/// service is made, which reads the file once.
+fn write_local(rig: &Rig) -> String {
+    let path = rig.home.join(".talos").join("config").to_string_lossy().into_owned();
+    let document = serde_json::json!({ "version": 1, "binaries": {}, "config_paths": { "talos": [path] } });
+    std::fs::write(rig.data.join("integration_local.json"), document.to_string()).expect("the local file");
+    path
+}
+
+#[test]
+fn dmesg_launches_without_a_ticket_and_dashboard_asks() {
+    let rig = Rig::new();
+    let fake = rig.talosctl("");
+    let service = rig.service_over(dirty_facts(&rig));
+    service.select("talos", Some(3), &in_context("talos-prod")).expect("a selection");
+    let node = args(&[("node", NODE)]);
+
+    // A read terminal launches at once: no card, no ticket, and nothing is started by the service.
+    let dmesg = service.launch("talos", "dmesg", Some(3), &node).expect("dmesg launches");
+    assert_eq!(dmesg.program, fake.path());
+    assert_eq!(dmesg.args, os(&["dmesg", "--follow", "--context=talos-prod", "--nodes=192.0.2.11"]), "context before node");
+    assert!(!fake.started(), "a launch only describes the program");
+    // A node that is not a node never becomes an argument: the launch is refused before it exists.
+    for hostile in ["--talosconfig=/etc/passwd", "-e", "$(touch /tmp/never)", "192.0.2.11/24", ""] {
+        let fault = service.launch("talos", "dmesg", Some(3), &args(&[("node", hostile)])).expect_err(hostile);
+        assert_eq!(fault.code, FaultCode::Refused, "{hostile:?}");
+        assert!(!fault.text.contains("touch"), "the refusal never repeats the input: {}", fault.text);
+    }
+
+    // The dashboard changes nothing but opens a session, so it asks: no launch without the card.
+    let fault = service.launch("talos", "dashboard", Some(3), &node).expect_err("not a launch without a card");
+    assert_eq!(fault.code, FaultCode::Refused);
+    let card = service.prepare("talos", "dashboard", Some(3), &node).expect("a card");
+    assert_eq!((card.tool, card.effect, card.program.as_str()), (ToolId::Talos, VerbEffect::Exec, "talosctl"));
+    assert_eq!(card.argv, ["dashboard", "--context=talos-prod", "--nodes=192.0.2.11"]);
+    assert_eq!(card.guard.production, None, "no profile pins the context, so no production guard");
+    assert!(card.target.contains(&("context".to_owned(), "talos-prod".to_owned())), "{:?}", card.target);
+    assert!(card.target.contains(&("node".to_owned(), NODE.to_owned())), "{:?}", card.target);
+    assert!(!fake.started(), "a card starts nothing");
+    check_golden("talos_card_dashboard.json", &card);
+
+    let done = service.confirm(&card.ticket, &card.hash).expect("the confirm gives a launch");
+    let Done::Launch(launch) = done else { panic!("an exec verb launches, got {done:?}") };
+    assert!(!fake.started(), "the confirm started nothing: the pane does");
+    assert_eq!(launch.args, os(&["dashboard", "--context=talos-prod", "--nodes=192.0.2.11"]));
+    assert_eq!(launch.args, card.argv.iter().map(OsString::from).collect::<Vec<_>>(), "what launches is what the card showed");
+    let names: Vec<&String> = launch.env.iter().map(|(name, _)| name).collect();
+    assert!(names.iter().all(|name| !name.starts_with("HOLZWAVE_")), "no variable of the app: {names:?}");
+    assert!(launch.env_remove.iter().any(|name| name == "HOLZWAVE_TOKEN"), "the pane removes what it inherits: {:?}", launch.env_remove);
+    assert!(launch.env_remove.iter().any(|name| name == "LD_PRELOAD"), "{:?}", launch.env_remove);
+    let again = service.confirm(&card.ticket, &card.hash).expect_err("a ticket approves once");
+    assert_eq!(again.code, FaultCode::Ticket);
+}
+
+#[test]
+fn the_local_config_path_becomes_talosconfig() {
+    let rig = Rig::new();
+    let talosconfig = write_local(&rig);
+    let fake = rig.talosctl(&fixture("talosctl/get_members.json"));
+    let service = rig.service_over(dirty_facts(&rig));
+    assert!(service.notes().is_empty(), "the local file is read without a note: {:?}", service.notes());
+    service.select("talos", Some(3), &in_context("talos-prod")).expect("a selection");
+
+    // A read: the path reaches the tool as its own variable, and the app's variables do not.
+    service.run_view("talos", "nodes", Some(3), &args(&[])).expect("the nodes are read");
+    let env = fake.env();
+    assert_eq!(env.get("TALOSCONFIG"), Some(&talosconfig), "the machine-local path is the tool's variable");
+    assert!(env.keys().all(|name| !name.starts_with("HOLZWAVE_")), "{:?}", env.keys().collect::<Vec<_>>());
+    assert!(!env.contains_key("LD_PRELOAD"), "nor does a loader variable");
+    assert!(argv_of(&fake).iter().all(|arg| !arg.contains(&talosconfig) && !arg.starts_with("--talosconfig")), "the path is never an argument");
+
+    // The two terminals carry it in the pane's environment, once.
+    let node = args(&[("node", NODE)]);
+    let dmesg = service.launch("talos", "dmesg", Some(3), &node).expect("dmesg launches");
+    let dashboard = {
+        let card = service.prepare("talos", "dashboard", Some(3), &node).expect("a card");
+        let Done::Launch(launch) = service.confirm(&card.ticket, &card.hash).expect("a launch") else { panic!("a launch") };
+        launch
+    };
+    for (what, launch) in [("dmesg", &dmesg), ("dashboard", &dashboard)] {
+        let found: Vec<&(String, String)> = launch.env.iter().filter(|(name, _)| name == "TALOSCONFIG").collect();
+        assert_eq!(found.len(), 1, "{what}: exactly one TALOSCONFIG");
+        assert_eq!(found[0].1, talosconfig, "{what}");
+        assert!(launch.args.iter().all(|arg| !arg.to_string_lossy().contains("talosconfig")), "{what}: {:?}", launch.args);
+    }
+
+    // Without the file nothing sets the variable: the tool reads its own default.
+    let plain = Rig::new();
+    let fake = plain.talosctl(&fixture("talosctl/get_members.json"));
+    plain.service().run_view("talos", "nodes", None, &args(&[])).expect("the nodes are read");
+    assert!(!fake.env().contains_key("TALOSCONFIG"), "no path, no variable");
+}
+
+#[test]
+fn node_rows_carry_actions_only_for_valid_names() {
+    // A stream of members written for this test from the first object of get_members.json (a written variant): the
+    // second member has a hostile node and a markup host name, the third a valid address and a shell-syntax host name,
+    // the fourth a mask and an option as names.
+    let template = serde_json::Deserializer::from_str(&fixture("talosctl/get_members.json"))
+        .into_iter::<Value>()
+        .next()
+        .expect("a first object")
+        .expect("JSON");
+    let members = |entries: &[(&str, &str)]| -> String {
+        entries
+            .iter()
+            .map(|(node, host)| {
+                let mut item = template.clone();
+                item["node"] = serde_json::json!(node);
+                item["spec"]["hostname"] = serde_json::json!(host);
+                item["spec"]["addresses"] = serde_json::json!([node]);
+                serde_json::to_string_pretty(&item).expect("JSON")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let hostile_markup = "<img src=x onerror=alert(1)>";
+    let rig = Rig::new();
+    let _ = rig.talosctl(&members(&[
+        (NODE, "node-1.example.com"),
+        ("--talosconfig=/etc/passwd", hostile_markup),
+        ("192.0.2.13", "$(touch /tmp/never)"),
+        ("10.0.4.12/24", "-e"),
+    ]));
+    let answer = fresh(&rig).run_view("talos", "nodes", Some(3), &args(&[])).expect("the nodes are read");
+    let rows = table_of(&answer).rows();
+    assert_eq!(rows.len(), 4);
+
+    let shape = |row: &holzwave_core::integrate::view::Row| -> Vec<(String, String, VerbEffect, Vec<(String, String)>)> {
+        row.actions()
+            .iter()
+            .map(|a| {
+                let args = a.args().map(|(k, v)| (k.to_owned(), v.to_owned())).collect();
+                (a.verb().to_owned(), a.label().to_owned(), a.effect(), args)
+            })
+            .collect()
+    };
+    let offered = |node: &str| -> Vec<(String, String, VerbEffect, Vec<(String, String)>)> {
+        [
+            ("services", "Services", VerbEffect::Read),
+            ("machine_status", "Machine status", VerbEffect::Read),
+            // The real label of the verb; the page shows it as written and adds the ellipsis to the Exec one.
+            ("dmesg", "Kernel log", VerbEffect::Read),
+            ("dashboard", "Dashboard", VerbEffect::Exec),
+        ]
+        .into_iter()
+        .map(|(verb, label, effect)| (verb.to_owned(), label.to_owned(), effect, vec![("node".to_owned(), node.to_owned())]))
+        .collect()
+    };
+    assert_eq!(shape(&rows[0]), offered(NODE), "a valid row offers exactly these four, in this order");
+    assert!(rows[1].actions().is_empty(), "a hostile node and a markup host name: no action");
+    assert_eq!(shape(&rows[2]), offered("192.0.2.13"), "a valid address with a hostile host name: the address only");
+    assert!(rows[3].actions().is_empty(), "a mask and an option: no action");
+    // The hostile text is still shown, as text; it only has no button and never an argument.
+    assert_eq!(rows[1].cells().nth(1), Some(hostile_markup));
+    for row in rows {
+        for action in row.actions() {
+            assert!(action.args().all(|(_, value)| !value.contains("touch") && !value.starts_with('-') && !value.contains('<')));
+        }
+    }
+    check_golden("talos_nodes_hostile.json", &answer);
+}
+
+// ---- the dashboard in a real pane (needs the engine) --------------------------------------------------------------
+
+#[cfg(feature = "ghostty")]
+mod pane {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use super::*;
+    use common::wait_until;
+    use holzwave_core::engine::{DomKey, Mods};
+    use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec};
+    use holzwave_core::wire::{FrameMsg, RowMsg};
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    /// Collects everything a pane sends to its sink.
+    #[derive(Clone, Default)]
+    pub struct Probe {
+        log: Arc<Mutex<Vec<PaneEvent>>>,
+    }
+
+    impl Probe {
+        pub fn sink(&self) -> impl FnMut(PaneEvent) + Send + 'static {
+            let log = self.log.clone();
+            move |event| log.lock().unwrap().push(event)
+        }
+
+        pub fn events(&self) -> Vec<PaneEvent> {
+            self.log.lock().unwrap().clone()
+        }
+
+        pub fn has_text(&self, needle: &str) -> bool {
+            let rows = |f: &FrameMsg| f.changed.iter().any(|r| row_text(r).contains(needle));
+            self.events().into_iter().any(|e| matches!(e, PaneEvent::Frame(f) if rows(&f)))
+        }
+
+        pub fn helds(&self) -> Vec<Option<u32>> {
+            self.events().into_iter().filter_map(|e| if let PaneEvent::Held { code } = e { Some(code) } else { None }).collect()
+        }
+
+        pub fn exits(&self) -> Vec<Option<u32>> {
+            self.events().into_iter().filter_map(|e| if let PaneEvent::Exited { code } = e { Some(code) } else { None }).collect()
+        }
+    }
+
+    fn row_text(row: &RowMsg) -> String {
+        row.runs.iter().flat_map(|run| run.0.chars()).filter(|c| *c != '\0').collect()
+    }
+
+    /// The launch that a confirmed dashboard card gives, on a rig whose `talosctl` is `fake`.
+    pub fn dashboard_launch(rig: &Rig) -> holzwave_core::integrate::run::Launch {
+        let service = rig.service_over(dirty_facts(rig));
+        service.select("talos", Some(3), &in_context("talos-prod")).expect("a selection");
+        let card = service.prepare("talos", "dashboard", Some(3), &args(&[("node", NODE)])).expect("a card");
+        let Done::Launch(launch) = service.confirm(&card.ticket, &card.hash).expect("a launch") else { panic!("a launch") };
+        launch
+    }
+
+    fn spawn(launch: &holzwave_core::integrate::run::Launch, probe: &Probe) -> PaneHandle {
+        // The size, the cell and the scrollback are the pane's; the program, the arguments and the environment are the launch's.
+        let mut spec = PaneSpec::new("/bin/zsh", 100, 24);
+        spec.env = vec![("HOLZWAVE_TOKEN".into(), "app-token".into())];
+        launch.apply_to(&mut spec);
+        PaneHandle::spawn_ghostty(1, spec, probe.sink()).expect("the pane starts")
+    }
+
+    #[test]
+    fn dashboard_runs_the_exact_argument_list_in_a_real_pane() {
+        let rig = Rig::new();
+        let talosconfig = write_local(&rig);
+        let fake = rig.talosctl("dashboard drawn\n");
+        let launch = dashboard_launch(&rig);
+        assert!(!fake.started(), "nothing ran before the pane");
+
+        let probe = Probe::default();
+        let pane = spawn(&launch, &probe);
+        // A quick success is held for the linger time, so the notice and the record are both there to read.
+        assert!(wait_until(WAIT, || !probe.helds().is_empty()), "the pane was not held: {:?}", probe.events());
+        assert!(probe.has_text("dashboard drawn"), "the tool's own words are on screen");
+
+        let argv: Vec<String> = fake.argv().iter().map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+        assert_eq!(argv, ["dashboard", "--context=talos-prod", "--nodes=192.0.2.11"], "the exact list, nothing added by the pane");
+        let seen = fake.env();
+        let names: Vec<&String> = seen.keys().collect();
+        assert!(!names.iter().any(|name| name.starts_with("HOLZWAVE_")), "no variable of the app, not even the one the spec had: {names:?}");
+        assert!(!seen.contains_key("LD_PRELOAD"), "{names:?}");
+        assert_eq!(seen.get("TALOSCONFIG"), Some(&talosconfig), "the machine-local path is the tool's variable");
+        let path = seen.get("PATH").expect("the rebuilt PATH");
+        assert!(path.starts_with(&format!("{}:", rig.bin.display())), "the tool's directory first: {path}");
+        pane.close();
+        assert!(pane.join(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_failing_dashboard_is_held_until_enter() {
+        let rig = Rig::new();
+        let fake = FakeCli::new(&rig.bin, "talosctl").prints_stderr("rpc error: code = Unavailable desc = connection refused\n").exits(1);
+        let launch = dashboard_launch(&rig);
+        let probe = Probe::default();
+        let pane = spawn(&launch, &probe);
+
+        assert!(wait_until(WAIT, || !probe.helds().is_empty()), "no Held event: {:?}", probe.events());
+        assert!(probe.has_text("rpc error: code = Unavailable"), "the tool's line is on screen");
+        assert!(wait_until(WAIT, || probe.has_text("[holzWave] exited with status 1. Press Enter to close.")), "the notice line is on screen");
+        assert_eq!(probe.helds(), [Some(1)], "one Held with the tool's status");
+        assert!(probe.exits().is_empty(), "no Exited yet");
+        assert_eq!(fake.argv().len(), 3, "it did run, with the card's list");
+
+        // Waiting, a letter and a modified Enter close nothing.
+        std::thread::sleep(Duration::from_millis(1200));
+        let key = |code: &str, name: &str, mods: Mods| DomKey { code: code.into(), key: name.into(), mods, release: false, ..DomKey::default() };
+        for press in [key("KeyA", "a", Mods::NONE), key("Enter", "Enter", Mods::SHIFT), key("Escape", "Escape", Mods::NONE)] {
+            let _ = pane.key(press);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(probe.exits().is_empty(), "the pane ended without Enter: {:?}", probe.events());
+
+        pane.key(key("Enter", "Enter", Mods::NONE)).expect("the held pane takes a key");
+        assert!(wait_until(WAIT, || !probe.exits().is_empty()), "Enter did not end the pane: {:?}", probe.events());
+        assert!(pane.join(Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(probe.exits(), [Some(1)], "exactly one Exited, with the tool's status");
+    }
 }

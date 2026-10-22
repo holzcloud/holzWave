@@ -1,0 +1,69 @@
+{
+  "argv": [
+    "dashboard",
+    "--context=talos-prod",
+    "--nodes=192.0.2.11"
+  ],
+  "effect": "exec",
+  "expires_in_secs": 120,
+  "fields": [
+    [
+      "tool",
+      "talos"
+    ],
+    [
+      "verb",
+      "dashboard"
+    ],
+    [
+      "effect",
+      "exec"
+    ],
+    [
+      "program",
+      "talosctl"
+    ],
+    [
+      "arg 1",
+      "dashboard"
+    ],
+    [
+      "arg 2",
+      "--context=talos-prod"
+    ],
+    [
+      "arg 3",
+      "--nodes=192.0.2.11"
+    ],
+    [
+      "context",
+      "talos-prod"
+    ],
+    [
+      "node",
+      "192.0.2.11"
+    ],
+    [
+      "guard",
+      "none"
+    ]
+  ],
+  "guard": {
+    "production": null
+  },
+  "hash": "dfd2b379f6c121d0fef4cb2fed070b593b6c87e2bb06b86fc5f60d9f005faa51",
+  "program": "talosctl",
+  "target": [
+    [
+      "context",
+      "talos-prod"
+    ],
+    [
+      "node",
+      "192.0.2.11"
+    ]
+  ],
+  "ticket": "0123456789abcdef0123456789abcdef",
+  "tool": "talos",
+  "verb": "dashboard"
+}
