@@ -909,19 +909,32 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Whether the card has to spell out the character: controls, direction marks, zero-width and tag characters.
+/// Whether the card has to spell out the character: controls, direction marks, zero-width and tag characters, and every
+/// other format character (Unicode category Cf: the deprecated shaping controls, the interlinear annotation marks, the
+/// Mongolian vowel separator, the musical and hieroglyph format controls, the Arabic number signs).
 /// The integration names refuse the same characters, so this one rule decides both.
 pub(crate) fn is_hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
             '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
                 | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
                 | '\u{200B}'..='\u{200F}'
                 | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{2069}'
+                | '\u{2060}'..='\u{206F}'
                 | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
                 | '\u{E0000}'..='\u{E007F}'
         )
 }
