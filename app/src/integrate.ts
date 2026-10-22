@@ -10,7 +10,7 @@ import type { Instance } from "./blocks.js";
 import { focusInput } from "./keyboard.js";
 import {
   ageWords, clearIntegrationContext, contextText, entryId, entryTitle, localVerbFor, nextSelection, readFault, readLaunchAnswer,
-  readRunAnswer, refreshDue, setIntegrationContext, setPaneSelection, stateWords, viewVerbs,
+  readRunAnswer, refreshDue, setIntegrationContext, setPaneSelection, stateWords, terminalVerbs, viewVerbs,
 } from "./integratestate.js";
 import type { Fault, RowAction, Sel, SelectKind, ToolEntry, ToolId, ViewModel } from "./integratestate.js";
 import { requestAction } from "./integrateconfirm.js";
@@ -37,11 +37,13 @@ export interface Deps {
 export interface ActionDeps {
   /** Open an integration block in a new tab; resolves to null, or to the core's reason. */
   open(source: string, path: string): Promise<string | null>;
+  /** Show a layout (the answer of a launch). */
+  applyView(v: View): void;
   /** Say a sentence in the status line. */
   say(text: string): void;
 }
 
-let actionDeps: ActionDeps = { open: async () => null, say: () => {} };
+let actionDeps: ActionDeps = { open: async () => null, applyView: () => {}, say: () => {} };
 const entryIds = new Set<string>();
 
 /** Whether the page runs where the entries exist: a phone has no palette. */
@@ -50,9 +52,35 @@ function entriesWanted(): boolean {
 }
 
 /**
- * Make one palette entry for each view of each tool in the core's list. The titles and the verbs are the core's; the ids are
- * `integration.open.<tool>.<verb>`. The entries made before are taken away first, so a tool that left the list loses its entries
- * and a tool that arrived gets them. A tool that is not installed keeps its entries: the block it opens offers the path.
+ * A terminal verb that needs no argument, from the palette. A read verb opens its terminal in a new tab at once, as the Context
+ * section's `Shell` does; a verb that is not read (Exec) asks first through the card, like a button of a row. The focused pane is
+ * named so that the terminal starts with its context; the core decides what the pane means.
+ */
+async function runTerminal(tool: string, verb: string, effect: string): Promise<void> {
+  const pane = state.view?.focus ?? null;
+  if (effect !== "read") {
+    const result = await requestAction(tool, verb, pane, {});
+    if (result.kind === "refused") actionDeps.say(result.fault.text);
+    return;
+  }
+  try {
+    const answer = readLaunchAnswer(await call<unknown>("integration_launch", { tool, verb, pane, args: {}, placement: "tab" }));
+    if (answer === null) {
+      actionDeps.say(readFault(null).text);
+      return;
+    }
+    actionDeps.applyView(answer.view);
+    focusInput();
+  } catch (e) {
+    actionDeps.say(readFault(e).text);
+  }
+}
+
+/**
+ * Make the palette entries from the core's list of tools: one for each view (`integration.open.<tool>.<verb>`) and one for each
+ * terminal verb that needs no argument (`integration.run.<tool>.<verb>`). The titles and the verbs are the core's and the page names
+ * no tool. The entries made before are taken away first, so a tool that left the list loses its entries and a tool that arrived gets
+ * them. A tool that is not installed keeps its entries: the block it opens offers the path.
  */
 export function registerIntegrationActions(tools: readonly ToolEntry[]): void {
   for (const id of entryIds) unregisterAction(id);
@@ -67,6 +95,12 @@ export function registerIntegrationActions(tools: readonly ToolEntry[]): void {
         title: entryTitle(tool.label, verb.label),
         run: () => void actionDeps.open(tool.id, verb.id).then((reason) => reason !== null && actionDeps.say(reason)),
       });
+      entryIds.add(id);
+    }
+    for (const verb of terminalVerbs(tool)) {
+      const id = entryId("run", tool.id, verb.id);
+      if (entryIds.has(id)) continue;
+      registerAction({ id, title: entryTitle(tool.label, verb.label), run: () => void runTerminal(tool.id, verb.id, verb.effect) });
       entryIds.add(id);
     }
   }

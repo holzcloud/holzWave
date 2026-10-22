@@ -4,9 +4,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  CAPS, MEMBERS, PICK_VERBS, ageWords, clearIntegrationContext, contextText, cutCell, entryTitle, integrationContextText, integrationProduction,
+  CAPS, MEMBERS, PICK_VERBS, ageWords, clearIntegrationContext, contextText, cutCell, entryId, entryTitle, integrationContextText, integrationProduction,
   nextSelection, pickerEntries, readFault, readLaunchAnswer, readRunAnswer, readTools, readView, refreshDue, setIntegrationContext,
-  stateWords, viewVerbs,
+  stateWords, terminalVerbs, viewVerbs,
 } from "../../dist/integratestate.js";
 import { blockContext, blockTitle, readBlocks } from "../../dist/blockstate.js";
 
@@ -331,4 +331,36 @@ test("the view verbs are the read verbs with a view output, in the core's order"
   };
   assert.deepEqual(viewVerbs(tool).map((v) => v.id), ["contexts", "pods"]);
   assert.deepEqual(viewVerbs({ ...tool, verbs: [] }), []);
+});
+
+test("a view that needs an argument has no entry, and the ids follow the tool and the verb", () => {
+  const tool = {
+    id: "talos", label: "Talos", state: "found", path: null, binary: null, reason: null, version: null, searched: [], selects: [],
+    verbs: [verbOf("services", "Services", "read", "view"), verbOf("service", "Service", "read", "view", [{ name: "service", kind: "service", required: true }])],
+  };
+  assert.deepEqual(viewVerbs(tool).map((v) => v.id), ["services"]);
+  assert.equal(entryId("open", "talos", "services"), "integration.open.talos.services");
+  assert.equal(entryId("run", "azure", "login"), "integration.run.azure.login");
+});
+
+test("the terminal verbs are the read and exec verbs that open a terminal and need no argument", () => {
+  const needs = [{ name: "pod", kind: "pod", required: true }];
+  const optional = [{ name: "container", kind: "container", required: false }];
+  const tool = {
+    id: "kube", label: "Kubernetes", state: "found", path: null, binary: null, reason: null, version: null, searched: [], selects: [],
+    verbs: [
+      verbOf("shell", "Shell", "read", "terminal"),
+      verbOf("logs", "Logs", "read", "terminal", needs),
+      verbOf("exec", "Exec", "exec", "terminal", needs),
+      verbOf("dashboard", "Dashboard", "exec", "terminal", optional),
+      verbOf("login", "Sign in", "exec", "terminal"),
+      verbOf("use_context", "Use context", "local", "done"),
+      verbOf("wipe", "Wipe", "write", "done"),
+      verbOf("local_term", "Local terminal", "local", "terminal"),
+      verbOf("write_term", "Write terminal", "write", "terminal"),
+      verbOf("pods", "Pods", "read", "view"),
+    ],
+  };
+  assert.deepEqual(terminalVerbs(tool).map((v) => v.id), ["shell", "dashboard", "login"]);
+  assert.deepEqual(viewVerbs(tool).map((v) => v.id), ["pods"]);
 });

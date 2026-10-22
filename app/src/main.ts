@@ -94,7 +94,7 @@ async function main() {
   // The card that asks before an integration action changes something shows a returned layout the way the rest of the page does.
   initIntegrationConfirm({ applyView });
   // The palette is the way to the blocks of the tools: one entry for each view the core lists (docs/design.md 6.25).
-  initIntegrationActions({ open: (source, path) => openBlock("integration", source, path, "tab"), say: showNotice });
+  initIntegrationActions({ open: (source, path) => openBlock("integration", source, path, "tab"), applyView, say: showNotice });
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);
