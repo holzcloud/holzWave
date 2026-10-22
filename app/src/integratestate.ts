@@ -103,11 +103,21 @@ export type ViewModel = TableModel | KvModel | TextModel;
 
 // ---- reading ----------------------------------------------------------------------------------------------------------
 
-/** `s` cut to `max` characters (not UTF-16 units), so that a character is never split. */
-function cut(s: string, max: number): string {
-  if (s.length <= max) return s;
-  const chars = Array.from(s);
-  return chars.length <= max ? s : chars.slice(0, max).join("");
+// The characters that have no shape or change what a text says: controls, line and paragraph separators, direction marks, zero-width
+// and other format characters, and the tag characters (the Unicode category Cf and the controls). The core removes them before a
+// text is in a model; the reader removes them again, so a model that did not come through the core's cleaning is drawn without them
+// as well. A text keeps its line feeds and tabs. The expressions are written with escapes: this file holds none of the characters.
+const HIDDEN =
+  /[\u0000-\u001F\u007F-\u009F\u00AD\u0600-\u0605\u061C\u06DD\u070F\u0890\u0891\u08E2\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\u{110BD}\u{110CD}\u{13430}-\u{1343F}\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0001}\u{E0020}-\u{E007F}]/gu;
+const HIDDEN_IN_TEXT =
+  /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u00AD\u0600-\u0605\u061C\u06DD\u070F\u0890\u0891\u08E2\u180E\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB\u{110BD}\u{110CD}\u{13430}-\u{1343F}\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0001}\u{E0020}-\u{E007F}]/gu;
+
+/** `s` without the hidden characters, cut to `max` characters (not UTF-16 units), so that a character is never split. */
+function cut(s: string, max: number, lines = false): string {
+  const clean = s.replace(lines ? HIDDEN_IN_TEXT : HIDDEN, "");
+  if (clean.length <= max) return clean;
+  const chars = Array.from(clean);
+  return chars.length <= max ? clean : chars.slice(0, max).join("");
 }
 
 /** A cell as the block draws it: at most `max` characters, the last one an ellipsis when something was left out. */
@@ -220,7 +230,7 @@ function readText(o: Record<string, unknown>): TextModel | null {
   return {
     kind: "text",
     title: str(o.title, CAPS.title),
-    text: cut(o.text, CAPS.text),
+    text: cut(o.text, CAPS.text, true),
     format: o.format === "json" ? "json" : "plain",
     truncated: o.truncated === true,
     note: strOrNull(o.note, CAPS.note),
