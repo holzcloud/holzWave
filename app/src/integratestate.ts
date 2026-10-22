@@ -1053,3 +1053,107 @@ export function localVerbFor(tool: ToolEntry | null, kind: SelectKind): { verb: 
 export function heldText(status: number | null): string {
   return status === null ? "exited" : `exited ${status}`;
 }
+
+// ---- the profiles dialog (docs/design.md 6.27) ------------------------------------------------------------------------
+
+/** The bounds of the dialog's answer and fields. The page cuts what it reads and limits what it types; every rule is the core's. */
+export const PROFILE_CAPS = {
+  profiles: 64,
+  notes: 16,
+  note: 400,
+  id: 64,
+  name: 128,
+  nameField: 64,
+  selection: 253,
+  envs: 64,
+  envName: 64,
+  envValue: 1024,
+  secrets: 16,
+  tool: 32,
+  shown: 60,
+} as const;
+
+/** A secret variable of a profile: its name and whether the keychain holds a value. The value itself is never in the page. */
+export interface ProfileSecret {
+  name: string;
+  has_value: boolean;
+}
+
+/** A profile as the core lists it. `tool` is the core's word, kept as text even when the page does not know it. */
+export interface ProfileEntry {
+  id: string;
+  tool: string;
+  name: string;
+  context: string | null;
+  namespace: string | null;
+  subscription: string | null;
+  section: string | null;
+  node: string | null;
+  production: boolean;
+  isolated: boolean;
+  env: { name: string; value: string }[];
+  secrets: ProfileSecret[];
+}
+
+export interface ProfilesView {
+  profiles: ProfileEntry[];
+  notes: string[];
+}
+
+/** The answer of `integration_profiles` and `integration_profile_save`: `{profiles, notes}`. What is not the contract is dropped. */
+export function readProfiles(raw: unknown): ProfilesView {
+  const o = obj(raw);
+  if (!o) return { profiles: [], notes: [] };
+  const profiles: ProfileEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of Array.isArray(o.profiles) ? o.profiles : []) {
+    if (profiles.length >= PROFILE_CAPS.profiles) break;
+    const p = obj(item);
+    if (!p || typeof p.id !== "string" || p.id === "" || seen.has(p.id)) continue;
+    const id = cut(p.id, PROFILE_CAPS.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const env: { name: string; value: string }[] = [];
+    const given = obj(p.env);
+    for (const name of Object.keys(given ?? {})) {
+      const value = given?.[name];
+      if (name === "" || typeof value !== "string" || env.length >= PROFILE_CAPS.envs) continue;
+      env.push({ name: cut(name, PROFILE_CAPS.envName), value: cut(value, PROFILE_CAPS.envValue) });
+    }
+    const secrets: ProfileSecret[] = [];
+    for (const s of Array.isArray(p.secret_env) ? p.secret_env : []) {
+      const e = obj(s);
+      if (!e || typeof e.name !== "string" || e.name === "" || secrets.length >= PROFILE_CAPS.secrets) continue;
+      secrets.push({ name: cut(e.name, PROFILE_CAPS.envName), has_value: e.has_value === true });
+    }
+    const name = str(p.name, PROFILE_CAPS.name);
+    profiles.push({
+      id,
+      tool: str(p.tool, PROFILE_CAPS.tool),
+      name: name === "" ? id : name,
+      context: strOrNull(p.context, PROFILE_CAPS.selection),
+      namespace: strOrNull(p.namespace, PROFILE_CAPS.selection),
+      subscription: strOrNull(p.subscription, PROFILE_CAPS.selection),
+      section: strOrNull(p.section, PROFILE_CAPS.selection),
+      node: strOrNull(p.node, PROFILE_CAPS.selection),
+      production: p.production === true,
+      isolated: p.isolated === true,
+      env,
+      secrets,
+    });
+  }
+  const notes = (Array.isArray(o.notes) ? o.notes : [])
+    .filter((n): n is string => typeof n === "string" && n !== "")
+    .slice(0, PROFILE_CAPS.notes)
+    .map((n) => cut(n, PROFILE_CAPS.note));
+  return { profiles, notes };
+}
+
+/** The members a profile pins, in the order the list shows them. */
+const PINNED: readonly SelectKind[] = ["context", "namespace", "node", "subscription", "section"];
+
+/** The pinned selection of a profile as the list shows it: `prod-eu · payments`, or a dash when it pins nothing. */
+export function profileSelectionText(profile: ProfileEntry): string {
+  const values = PINNED.map((kind) => profile[kind]).filter((v): v is string => v !== null && v !== "");
+  return values.length === 0 ? "—" : values.map((v) => cutCell(v, PROFILE_CAPS.shown)).join(" · ");
+}

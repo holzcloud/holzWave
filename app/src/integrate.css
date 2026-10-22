@@ -214,3 +214,14 @@
   .dlg.ic button { min-height: max(44px, calc(44rem / 12)); min-width: max(44px, calc(44rem / 12)); }
   .ic-actions { gap: .667rem; }
 }
+
+/* ---- the profiles dialog (integrateprofiles.ts, docs/design.md 6.27) ---------------------------------------------------- */
+
+/* It is the box and the groups of the providers dialog (aisettings.css); these rules are what that dialog does not have. Colours are
+   tokens, sizes are rem, a pixel value is a hairline, the focus ring or a minimum target. Flat: the one shadow is the box's own. */
+.ai-settings .ip-notes { color: var(--hw-dim); }
+.ai-settings .ip-notes:empty { display: none; }
+.ai-settings .ip-tool { flex: none; }
+.ai-settings .ip-sel { flex: 1 1 auto; text-align: right; }
+.ai-settings .ip-prod { flex: none; color: var(--hw-warn); text-decoration: underline; }
+.ai-settings .ip-prod::before { content: "!"; margin-right: .6ch; font-weight: 700; display: inline-block; }

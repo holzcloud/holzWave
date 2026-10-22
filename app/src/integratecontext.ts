@@ -12,6 +12,7 @@ import {
   chipText, localVerbFor, segmentText, selectionOf, selectionText, selectionValues, valueOf,
 } from "./integratestate.js";
 import type { ChipText, ContextRow, ContextSummary, SegmentText, SelectKind, ToolEntry, ToolId } from "./integratestate.js";
+import { openIntegrationProfiles } from "./integrateprofiles.js";
 import { openPicker, pathRow } from "./integratepick.js";
 import type { Picker } from "./integratepick.js";
 import { requestAction } from "./integrateconfirm.js";
@@ -208,7 +209,13 @@ function makeSection(place: HTMLElement): void {
   const sec = el("section", "sb-section cx-section", place);
   const head = el("div", "sb-head label", sec);
   el("span", "", head).textContent = "Context";
-  const refresh = el("button", "cx-refresh", head);
+  const acts = el("div", "cx-head-acts", head);
+  const profiles = el("button", "cx-profiles", acts);
+  profiles.type = "button";
+  profiles.textContent = "Profiles…";
+  profiles.title = "Manage the profiles of the integrations";
+  profiles.addEventListener("click", () => void openIntegrationProfiles().then(focusInput));
+  const refresh = el("button", "cx-refresh", acts);
   refresh.type = "button";
   refresh.textContent = "↻";
   refresh.title = "Read the context again";

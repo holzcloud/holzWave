@@ -55,6 +55,10 @@
 .cx-refresh { padding: 0 .333rem; min-width: max(28px, calc(28rem / 12)); min-height: max(28px, calc(20rem / 12)); background: none;
               border: 1px solid transparent; border-radius: .333rem; color: var(--hw-dim); cursor: pointer; }
 .cx-refresh:hover { border-color: var(--hw-line); color: var(--hw-ink); }
+.cx-head-acts { display: flex; align-items: center; gap: .333rem; }
+.cx-profiles { padding: 0 .333rem; min-height: max(28px, calc(20rem / 12)); background: none; border: 1px solid transparent; border-radius: .333rem;
+               color: var(--hw-dim); cursor: pointer; }
+.cx-profiles:hover { border-color: var(--hw-line); color: var(--hw-ink); }
 .cx-row { padding: .25rem 0 .5rem; }
 .cx-head { display: flex; align-items: baseline; gap: .5rem; min-width: 0; }
 .cx-mark { flex: none; min-width: 1.5rem; color: var(--hw-ink-2); }
@@ -105,5 +109,6 @@
 #sidebar .ig-path:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
 #sidebar button.ig-pathbtn { min-height: max(28px, calc(20rem / 12)); padding: 0 .5rem; }
 @media (max-width: 640px) {
+  .cx-profiles { display: none; }
   #sidebar button.cx-act, #sidebar button.cx-value, #sidebar button.ig-opt, #sidebar button.ig-pathbtn, #sidebar .ig-path, .cx-refresh { min-height: max(44px, calc(28rem / 12)); }
 }
