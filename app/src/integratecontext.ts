@@ -4,6 +4,7 @@
 // `textContent`. It decides nothing about a context and builds no name, argument or program: a choice is a key of a list the
 // core sent, and the reach of a choice (a pane, or the pick that new blocks start from) is read from the core's lists. The
 // status line and the pane headers read the same answer, so the three places cannot disagree.
+import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { paneBlocks } from "./blockstate.js";
 import { el, setAttr, setText } from "./dom.js";
@@ -588,6 +589,10 @@ export function initIntegrationContext(handed: ContextDeps): void {
   enabled = onDesktop();
   started = true;
   if (!enabled) return;
+  // The two core actions that make the integrations rebindable. Neither has a default chord; a chord the person gives one in the key
+  // binding editor reaches it here by its id. The titles are the core's.
+  registerAction({ id: "integration.context", title: "Show the Context section", run: showContext });
+  registerAction({ id: "integration.profiles", title: "Integration profiles\u2026", run: () => void openIntegrationProfiles().then(focusInput) });
   onHint((h) => {
     if (h.kind === "context" || h.kind === "tools" || h.kind === "held" || h.gap) schedule();
   });

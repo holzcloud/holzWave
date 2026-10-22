@@ -76,8 +76,9 @@ fn parse_exposes_modifiers_and_key_as_fields() {
 /// The action table of `os`, after checking that it is the full set: a loop over an empty table would pass vacuously.
 fn all_actions(os: &str) -> &'static [ActionInfo] {
     // 15 named defaults, nine tab and nine workspace selections, the history and sidebar actions, the three chat actions
-    // that have a chord, the eleven that are unbound until the user binds them, and the six line-editing actions.
-    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 2 + 3 + 11 + 6, "the {os} table holds 55 actions");
+    // that have a chord, the thirteen that are unbound until the user binds them (two of them open the integrations), and the six
+    // line-editing actions.
+    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 2 + 3 + 13 + 6, "the {os} table holds 57 actions");
     actions_for(os)
 }
 
@@ -205,6 +206,29 @@ fn the_unbound_actions_stay_unbound_on_every_platform() {
         ] {
             assert_eq!(default_of(os, id), None, "{id} on {os}");
         }
+    }
+}
+
+#[test]
+fn the_integration_actions_exist_on_every_platform_and_are_unbound() {
+    for os in OSES {
+        let table = all_actions(os);
+        let ids: Vec<&str> = table.iter().map(|a| a.id).collect();
+        // Appended after the last action of the base table, so every action before keeps its place.
+        let at = ids.iter().position(|id| *id == "ai.new_chat").expect("ai.new_chat is in the table");
+        assert_eq!(&ids[at + 1..at + 3], ["integration.context", "integration.profiles"], "the order on {os}");
+        let title_of = |id: &str| table.iter().find(|a| a.id == id).map(|a| a.title);
+        assert_eq!(title_of("integration.context"), Some("Show the Context section"), "title on {os}");
+        assert_eq!(title_of("integration.profiles"), Some("Integration profiles\u{2026}"), "title on {os}");
+        // No default chord: a chord would have to be free on three platforms and the design drew none.
+        assert_eq!(default_of(os, "integration.context"), None, "integration.context on {os}");
+        assert_eq!(default_of(os, "integration.profiles"), None, "integration.profiles on {os}");
+        // A person can still give them one; the table accepts it like any other action.
+        let o = overrides(&[("integration.context", "Ctrl+Alt+Shift+I"), ("integration.profiles", "Ctrl+Alt+Shift+J")]);
+        let (kb, warnings) = Keybindings::resolve_for(os, &o);
+        assert!(warnings.is_empty(), "{os}: {warnings:?}");
+        assert_eq!(kb.chord_of("integration.context"), Some(&chord("Ctrl+Alt+Shift+I")), "{os}");
+        assert_eq!(kb.chord_of("integration.profiles"), Some(&chord("Ctrl+Alt+Shift+J")), "{os}");
     }
 }
 

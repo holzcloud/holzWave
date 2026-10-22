@@ -3,9 +3,11 @@
 // core's own tool list; the page names no tool. A mock core answers `integration_tools` and records `block_open`,
 // `integration_launch` and `integration_prepare`.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { BLOCK, LAUNCHED } from "./integrate-lib.mjs";
-import { KUBE, layout, openContext } from "./integrate-context-lib.mjs";
+import { KUBE, ROWS, layout, openContext } from "./integrate-context-lib.mjs";
 import { cardOf, installCore } from "./integrate-confirm-lib.mjs";
+import { installProfiles } from "./integrate-profiles-lib.mjs";
 import { callsOf, emit } from "./lib.mjs";
 
 const verb = (id, label, effect, output, args = []) => ({ id, label, effect, output, refresh_secs: null, exit_is_state: false, args });
@@ -88,6 +90,7 @@ export default async function ({ page, url, errors }) {
     a_tools_event_re_registers,
     mobile_has_no_integration_entries,
     a_terminal_entry_launches_or_asks_by_effect,
+    the_two_integration_actions_run_by_id,
   ];
   for (const run of cases) {
     try {
@@ -112,8 +115,9 @@ async function open(page, url, config = {}, view) {
   await page.waitForFunction(() => document.activeElement?.id === "ime");
 }
 
-/** The ids of the registered integration actions, in registration order. */
-const ids = (page) => page.evaluate(() => window.__registry.listActions().map((a) => a.id).filter((id) => id.startsWith("integration.")));
+/** The ids of the registered palette entries of the tools, in registration order (not the two core actions). */
+const ids = (page) =>
+  page.evaluate(() => window.__registry.listActions().map((a) => a.id).filter((id) => id.startsWith("integration.open.") || id.startsWith("integration.run.")));
 
 /** The title of a registered action by id, or null. */
 const titleOf = (page, id) => page.evaluate((i) => window.__registry.listActions().find((a) => a.id === i)?.title ?? null, id);
@@ -234,6 +238,7 @@ async function mobile_has_no_integration_entries(page, url) {
   assert.equal((await callsOf(page, "integration_tools")).length >= 1, true, "the list arrived");
   await page.evaluate(() => new Promise((r) => setTimeout(r, 300)));
   assert.deepEqual(await entries(page), [], "a phone has no integration entries");
+  assert.equal(await titleOf(page, "integration.context"), null, "and no handler of the two actions: there is no sidebar to show");
   await emit(page, "integration", { seq: 1, kind: "tools", tool: null, pane: null, code: null });
   await page.evaluate(() => new Promise((r) => setTimeout(r, 300)));
   assert.deepEqual(await entries(page), []);
@@ -272,4 +277,48 @@ async function a_terminal_entry_launches_or_asks_by_effect(page, url) {
   assert.deepEqual((await callsOf(page, "integration_prepare")).at(-1), { tool: "azure", verb: "login", pane: 3, args: {} });
   assert.equal((await callsOf(page, "integration_launch")).length, 2);
   await page.locator("section.ic .ic-no").click();
+}
+
+/** The key binding rows the core sends, from the golden file the page and the core are both held to. */
+const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
+const coreRow = (id) => GOLDEN.settings_view.keybindings.find((r) => r.action === id);
+
+async function the_two_integration_actions_run_by_id(page, url) {
+  // The core's two rows have no chord, and the page registers actions with the core's titles under the core's ids.
+  for (const id of ["integration.context", "integration.profiles"]) {
+    const row = coreRow(id);
+    assert.ok(row, `the core lists ${id}`);
+    assert.equal(row.chord, null, `${id} has no default chord`);
+  }
+  await installProfiles(page, { profiles: [], notes: [] });
+  // The sidebar starts hidden: the first action shows it with the Context section in view.
+  await open(page, url, { sidebar: false, rows: ROWS });
+  await page.waitForSelector(".cx-row", { state: "attached" });
+  for (const id of ["integration.context", "integration.profiles"]) {
+    assert.equal(await titleOf(page, id), coreRow(id).title, `${id}: the page and the core name it the same`);
+  }
+  assert.equal(await page.locator(".cx-section").isVisible(), false, "the sidebar is hidden to begin with");
+  await page.evaluate(() => window.__registry.runAction("integration.context"));
+  await page.locator(".cx-section").waitFor({ state: "visible" });
+  assert.equal(
+    await page.evaluate(() => document.activeElement?.classList.contains("cx-value")),
+    true,
+    "and the keyboard is on the first value of the section",
+  );
+
+  // The second action opens the profiles dialog without the section's button.
+  await page.evaluate(() => document.getElementById("term").focus());
+  await page.evaluate(() => window.__registry.runAction("integration.profiles"));
+  await page.waitForSelector(".dlg.ip-box");
+  assert.equal((await callsOf(page, "integration_profiles")).length, 1, "the dialog read the profiles");
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.querySelector(".dlg.ip-box") === null);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "ime", "the keyboard goes back to the terminal");
+
+  // Both are in the palette.
+  await page.keyboard.press("Meta+k");
+  await page.waitForFunction(() => document.activeElement?.classList.contains("palette-input") === true);
+  await page.keyboard.type("Integration profiles");
+  assert.equal(await page.locator(".palette-row .palette-title").first().textContent(), "Integration profiles\u2026");
+  await page.keyboard.press("Escape");
 }

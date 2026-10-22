@@ -332,6 +332,12 @@ GNOME's input method takes for emoji.
 | `pane.move_to_new_window`, `tab.move_to_new_window` | none | none | none |
 | `tab.close`, `workspace.close` | none | none | none |
 | `ai.new_chat` | none | none | none |
+| `integration.context`, `integration.profiles` | none | none | none |
+
+`integration.context` shows the sidebar and brings its Context section into view; `integration.profiles` opens the dialog of the
+integration profiles. Neither has a default chord, so no chord of another action is taken; give one in the key binding editor if
+you want it. The views of Kubernetes, Talos, Azure and GAM and their terminals that need no argument are in the command palette
+(for example `Kubernetes: Pods`), one entry for each, and they open in a new tab.
 
 `ai.open` shows the AI chat: it focuses the chat pane of the shown tab when there is one, and otherwise opens a new chat as
 a pane to the right of the focused pane. `ai.new_chat` always starts a new conversation in a new pane. Both are also in the

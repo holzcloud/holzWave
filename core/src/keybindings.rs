@@ -197,7 +197,7 @@ const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
 }
 
 /// The base part of the macOS default table. Order is the order of the editor, and the other tables keep it.
-static BASE_MACOS: [ActionInfo; 49] = [
+static BASE_MACOS: [ActionInfo; 51] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -247,10 +247,12 @@ static BASE_MACOS: [ActionInfo; 49] = [
     unbound("tab.close", "Close tab"),
     unbound("workspace.close", "Close workspace"),
     unbound("ai.new_chat", "New AI chat"),
+    unbound("integration.context", "Show the Context section"),
+    unbound("integration.profiles", "Integration profiles…"),
 ];
 
 /// The base part for Windows and Linux: the same actions in the same order, on `Ctrl+Shift` (see the module docs).
-static BASE_OTHER: [ActionInfo; 49] = [
+static BASE_OTHER: [ActionInfo; 51] = [
     action("pane.split_right", "Split pane right", "Ctrl+Shift+D"),
     action("pane.split_down", "Split pane down", "Ctrl+Shift+O"),
     action("pane.close", "Close pane", "Ctrl+Shift+W"),
@@ -300,6 +302,8 @@ static BASE_OTHER: [ActionInfo; 49] = [
     unbound("tab.close", "Close tab"),
     unbound("workspace.close", "Close workspace"),
     unbound("ai.new_chat", "New AI chat"),
+    unbound("integration.context", "Show the Context section"),
+    unbound("integration.profiles", "Integration profiles…"),
 ];
 
 /// The line-editing actions with the macOS standard as default: Option moves and deletes by word, Cmd by line.

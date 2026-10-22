@@ -5614,8 +5614,8 @@ mod tests {
         assert_eq!(view.theme, Theme::aubergine());
         assert_eq!(view.keybindings.len(), actions().len());
         assert!(view.keybindings.iter().all(|row| row.is_default));
-        // Every action has a default chord but the rename, swap, move and close-tab-or-workspace actions and, off macOS, the line start and end ones.
-        assert!(view.keybindings.iter().all(|row| row.chord.is_some() || row.action.contains("rename") || row.action.starts_with("pane.swap") || row.action.starts_with("pane.move") || row.action.starts_with("tab.move") || row.action == "tab.close" || row.action == "workspace.close" || row.action == "ai.new_chat" || row.action.starts_with("edit.line") || row.action == "edit.delete_to_line_start"));
+        // Every action has a default chord but the rename, swap, move, close-tab-or-workspace and integration actions and, off macOS, the line start and end ones.
+        assert!(view.keybindings.iter().all(|row| row.chord.is_some() || row.action.contains("rename") || row.action.starts_with("pane.swap") || row.action.starts_with("pane.move") || row.action.starts_with("tab.move") || row.action == "tab.close" || row.action == "workspace.close" || row.action == "ai.new_chat" || row.action.starts_with("integration.") || row.action.starts_with("edit.line") || row.action == "edit.delete_to_line_start"));
         assert_eq!(view.warnings, Vec::<String>::new());
     }
 

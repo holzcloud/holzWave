@@ -220,7 +220,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 |---|---|---|
 | Daily | ![](design/6-desktop.png) | local shell with the chip of a Kubernetes context (6.11), SSH pane that is reconnecting (`⟳ 2/5`), SFTP editor, Markdown preview, system monitor, sidebar |
 | Palette (`Cmd+K`) | ![](design/palette.png) | fuzzy list in groups (actions, connect, switch) with the chords on the right |
-| New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history |
+| New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history; the picker is drawn but not built: Kubernetes, Talos, Azure and GAM7 open from the command palette and from the sidebar's Context section (6.25) |
 | Search | ![](design/search.png) | scrollback search bar in the pane, hits marked, the current hit solid |
 | Copy mode | ![](design/copy-mode.png) | keyboard selection, hint letters on hashes and paths, a solid status line with the keys |
 | Connections | ![](design/connections.png) | list and form: host, user, login (`Key file`, `Password`, `Agent` or `Code or password prompt`), secret from the OS keychain, jump host, reconnect policy, startup command, use wsh on this host |
@@ -1738,6 +1738,19 @@ printed and sends a **view model**, a table, a key-value list or a text. The pan
 pane like the monitor (6.5): the same header strip, flat and hairline, mono, no shadow. This section covers the block; the
 confirmation card of a verb that changes something, the Context section of the sidebar and the profiles dialog are drawn in
 the sections that build them.
+
+**How a block is reached.** The New block picker of 6.3 is drawn but not built, so the command palette and the sidebar's
+Context section (6.11) are the ways in. The palette has one entry for each view that each tool lists, titled `<tool>: <view>`
+with the labels the core sends (`Kubernetes: Pods`, `Talos: Machine status`, `Azure: Subscriptions`, `GAM7: Users`), and one for
+each terminal that needs no argument (`Kubernetes: Shell with the current context`, `Talos: Dashboard`, `Talos: Kernel
+messages`, `Azure: Sign in`). A view opens as a block in a new tab. A terminal that only reads opens at once in a new tab; one
+that is not read-only asks first through the card of 6.26. A verb that needs a value (`Logs`, `Exec in pod`, `Delete pod`) or
+that changes something has no palette entry: it is a button of a row or of the Context section, so that its value and its
+card come with it. A tool that is not installed keeps its entries, and the block they open says so and offers the path field.
+The entries come from the core's list of tools, so a tool added later brings its own and nothing is drawn for it here. Two
+actions, `integration.context` (`Show the Context section`) and `integration.profiles` (`Integration profiles…`), are in the
+palette and in the key binding editor with no default chord, so a person can give them one. A phone has neither the palette
+nor these entries.
 
 **The pane.** Header `pods` (the id of the shown view, with underscores as spaces, in the label style: `contexts`, `nodes`,
 `machine status`), context in mono `Kubernetes · prod · payments · 10 s`: the tool, the selection of this pane and, for a

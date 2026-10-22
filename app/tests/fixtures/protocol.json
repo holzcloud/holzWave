@@ -1885,6 +1885,18 @@
           "title": "New AI chat"
         },
         {
+          "action": "integration.context",
+          "chord": null,
+          "is_default": true,
+          "title": "Show the Context section"
+        },
+        {
+          "action": "integration.profiles",
+          "chord": null,
+          "is_default": true,
+          "title": "Integration profiles…"
+        },
+        {
           "action": "edit.word_back",
           "chord": "Alt+Left",
           "is_default": true,
@@ -2483,6 +2495,18 @@
         "chord": null,
         "is_default": true,
         "title": "New AI chat"
+      },
+      {
+        "action": "integration.context",
+        "chord": null,
+        "is_default": true,
+        "title": "Show the Context section"
+      },
+      {
+        "action": "integration.profiles",
+        "chord": null,
+        "is_default": true,
+        "title": "Integration profiles…"
       },
       {
         "action": "edit.word_back",

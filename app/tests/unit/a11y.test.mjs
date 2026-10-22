@@ -192,7 +192,7 @@ test("rows that are not rows are left out of the index", () => {
 
 test("the static table agrees with the core's default table for every action the core knows", () => {
   const rows = golden.settings_view.keybindings;
-  assert.equal(rows.length, 55);
+  assert.equal(rows.length, 57);
   const { index, conflicts } = bindingIndex(rows);
   assert.deepEqual(conflicts, []);
   for (const [chord, action] of CHORDS) {
@@ -282,7 +282,7 @@ test("the settings view carries the binding rows and the overrides the user type
   const raw = structuredClone(golden.settings_view);
   raw.settings.keybindings = { "pane.close": "Cmd+Shift+W", "tab.new": "", broken: 5 };
   const view = readSettingsView(raw);
-  assert.equal(view.keybindings.length, 55);
+  assert.equal(view.keybindings.length, 57);
   assert.deepEqual(view.keybindings[0], { action: "pane.split_right", title: "Split pane right", chord: "Cmd+D", is_default: true });
   assert.deepEqual(view.settings.keybindings, { "pane.close": "Cmd+Shift+W", "tab.new": "" }, "a non-text value is left out");
 });
