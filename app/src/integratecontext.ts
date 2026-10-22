@@ -9,9 +9,9 @@ import { paneBlocks } from "./blockstate.js";
 import { el, setAttr, setText } from "./dom.js";
 import {
   cutCell, glyphOf, nextSelection, paneSelection, reachPane, reachWords, readContext, readFault, readLaunchAnswer, rowKinds, rowWords,
-  selectionOf, selectionText, selectionValues, valueOf,
+  chipText, segmentText, selectionOf, selectionText, selectionValues, valueOf,
 } from "./integratestate.js";
-import type { ContextRow, ContextSummary, SelectKind, ToolEntry, ToolId } from "./integratestate.js";
+import type { ChipText, ContextRow, ContextSummary, SegmentText, SelectKind, ToolEntry, ToolId } from "./integratestate.js";
 import { openPicker, pathRow } from "./integratepick.js";
 import type { Picker } from "./integratepick.js";
 import { loadTools, onHint, onTools, setTools, toolOf } from "./integratetools.js";
@@ -53,13 +53,44 @@ export function contextRows(): readonly ContextRow[] {
   return summary.rows;
 }
 
-export function contextPanes(): ContextSummary["panes"] {
-  return summary.panes;
+/** A status segment as the status line draws it. */
+export type SegmentView = SegmentText;
+
+/**
+ * The segments of the status line, from the answer the section reads. A segment is dimmed with the word `stale` when the answer is
+ * old: the last ask failed, or the focus moved to a pane the core has not answered for yet (the answer may be the old pane's).
+ */
+export function contextSegments(): SegmentView[] {
+  if (!enabled) return [];
+  const old = failing || askedFor !== (state.view?.focus ?? null);
+  const out: SegmentView[] = [];
+  for (const tool of ["kube", "azure"] as const) {
+    const row = summary.rows.find((r) => r.tool === tool);
+    const seg = row ? segmentText(row) : null;
+    if (!seg) continue;
+    const stale = seg.stale || old;
+    out.push({ ...seg, stale, label: seg.stale || !old ? seg.label : `${seg.label}, stale` });
+  }
+  return out;
 }
 
-/** The pane the rows in hand were asked for, and whether the page has moved on since. */
-export function contextAskedFor(): number | null {
-  return askedFor;
+/**
+ * The chip for the header of `pane`: only for a pane the core listed with a context, and not for an integration block, whose header
+ * already names its context. Null otherwise, and on a phone.
+ */
+export function paneChip(pane: number): ChipText | null {
+  if (!enabled) return null;
+  if (paneBlocks.get(pane)?.kind === "integration") return null;
+  const info = summary.panes.find((p) => p.pane === pane);
+  return info ? chipText(info) : null;
+}
+
+/** A status segment was pressed: show the sidebar, bring the section into view and give the keyboard to its first value. */
+export function showContext(): void {
+  show();
+  if (!section) return;
+  section.scrollIntoView({ block: "nearest" });
+  section.querySelector<HTMLElement>(".cx-value")?.focus({ preventScroll: true });
 }
 
 // ---- asking -------------------------------------------------------------------------------------------------------------
@@ -95,6 +126,28 @@ async function ask(refresh: boolean): Promise<void> {
   }
 }
 
+/** A burst of changes (an event, a focus change) makes one ask. */
+const DEBOUNCE_MS = 250;
+/** While the window is visible the page asks now and then, so a change made outside holzWave shows up. */
+const TICK_MS = 30_000;
+
+let timer: ReturnType<typeof setTimeout> | undefined;
+/** Something changed while the window was hidden: it asks once when it can be seen again. */
+let owed = false;
+
+const visible = (): boolean => document.visibilityState === "visible";
+
+/** Ask soon, once for a burst of changes. A hidden window asks nothing now; it asks once when it is visible again. */
+function schedule(wait = DEBOUNCE_MS): void {
+  if (!enabled) return;
+  if (!visible()) {
+    owed = true;
+    return;
+  }
+  clearTimeout(timer);
+  timer = setTimeout(() => void ask(false), wait);
+}
+
 /** The key of the layout the page last asked about. */
 let layoutKey = "";
 
@@ -105,12 +158,13 @@ export function followLayout(): void {
   if (!view) return;
   const key = `${view.focus}:${view.panes.map(([id]) => id).join(",")}`;
   if (key === layoutKey) return;
+  const first = layoutKey === "";
   layoutKey = key;
   // What a choice said was about the pane that had the focus; an open list was read for it.
   closePicker();
   say("", false);
   draw();
-  void ask(false);
+  schedule(first ? 0 : DEBOUNCE_MS);
 }
 
 // ---- the line under the section -----------------------------------------------------------------------------------------
@@ -130,9 +184,12 @@ function say(text: string, warn: boolean): void {
 
 // ---- the section --------------------------------------------------------------------------------------------------------
 
-/** Hand over the empty place the sidebar made for the section. Nothing is made and nothing is asked here. */
-export function mountContextSection(place: HTMLElement): void {
+let show: () => void = () => {};
+
+/** Hand over the empty place the sidebar made for the section, and how to show the sidebar. Nothing is made and nothing is asked here. */
+export function mountContextSection(place: HTMLElement, showSidebar: () => void): void {
   slot = place;
+  show = showSidebar;
 }
 
 /** Make the section: the head with `Context` and the button that reads again, the rows and the line under them. */
@@ -497,7 +554,16 @@ export function initIntegrationContext(handed: ContextDeps): void {
   started = true;
   if (!enabled) return;
   onHint((h) => {
-    if (h.kind === "context" || h.kind === "tools" || h.kind === "held" || h.gap) void ask(false);
+    if (h.kind === "context" || h.kind === "tools" || h.kind === "held" || h.gap) schedule();
+  });
+  setInterval(() => {
+    if (visible()) schedule(0);
+  }, TICK_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (visible() && owed) {
+      owed = false;
+      schedule();
+    }
   });
   onTools(() => draw());
   void loadTools();

@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { glyphOf, reachPane, reachWords, readContext, rowWords, selectionOf, selectionText, valueOf } from "../../dist/integratestate.js";
+import { chipText, glyphOf, reachPane, reachWords, readContext, rowWords, segmentText, selectionOf, selectionText, valueOf } from "../../dist/integratestate.js";
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
 
@@ -134,4 +134,47 @@ test("the selection of a row is what the tool selects and nothing else", () => {
   assert.deepEqual(selectionOf(row("talos")), {});
   assert.equal(valueOf(row("kube", { context: "prod-eu" }), "context"), "prod-eu");
   assert.equal(valueOf(row("kube", { context: "prod-eu" }), "namespace"), undefined);
+});
+
+// ---- the status segments and the pane chip -----------------------------------------------------------------------------------
+
+test("the status segments: Kubernetes as context/namespace and Azure as the subscription, only when there is a value", () => {
+  const seg = (r) => segmentText(r);
+  assert.deepEqual(seg(row("kube", { context: "prod-eu", namespace: "payments" })), {
+    tool: "kube", text: "⎈ prod-eu/payments", production: false, stale: false, label: "Kubernetes context prod-eu, namespace payments",
+  });
+  assert.equal(seg(row("kube", { context: "prod-eu" })).text, "⎈ prod-eu");
+  assert.equal(seg(row("azure", { subscription: "holz-prod" })).text, "az holz-prod");
+  assert.equal(seg(row("azure", { subscription: "holz-prod" })).label, "Azure subscription holz-prod");
+  assert.equal(seg(row("kube")), null, "no value, no segment");
+  assert.equal(seg(row("azure", { state: "signed_out" })), null);
+  assert.equal(seg(row("kube", { state: "not_found" })), null);
+  assert.equal(seg(row("talos", { context: "t", node: "n" })), null, "the status line has Kubernetes and Azure only");
+  assert.equal(seg(row("gam", { section: "work" })), null);
+});
+
+test("a segment says production and stale in words, and the production flag is the core's", () => {
+  const prod = segmentText(row("kube", { context: "prod-eu", namespace: "payments", production: "Production" }));
+  assert.equal(prod.production, true);
+  assert.equal(prod.label, "Kubernetes context prod-eu, namespace payments, production");
+  assert.equal(segmentText(row("kube", { context: "production", namespace: "prod" })).production, false, "a name is not the flag");
+  assert.equal(segmentText(row("kube", { context: "dev", stale: true })).stale, true);
+  assert.match(segmentText(row("kube", { context: "dev", stale: true })).label, /, stale$/);
+  assert.equal(segmentText(row("azure", { subscription: "s", production: "" })).production, true, "a flag without a name");
+});
+
+test("a segment cuts long names and keeps markup as text", () => {
+  const hostile = "<img src=x onerror=alert(1)>";
+  assert.equal(segmentText(row("kube", { context: hostile, namespace: "a" })).text, `⎈ ${hostile}/a`);
+  const long = segmentText(row("kube", { context: "c".repeat(200), namespace: "n".repeat(200) })).text;
+  assert.ok(Array.from(long).length <= 2 + 40 + 1 + 40, "each value is cut");
+});
+
+test("the chip is the mark and the context holzWave set for a pane, and says production when the core does", () => {
+  assert.deepEqual(chipText(pane(3, { view: "shell", context: "prod-eu" })), { text: "⎈ prod-eu", production: false, title: "Set by holzWave for this pane" });
+  assert.equal(chipText(pane(3, { view: "shell", context: "prod-eu", production: "Production" })).production, true);
+  assert.equal(chipText(pane(3, { tool: "talos", view: "shell", context: "talos-prod" })).text, "◇ talos-prod");
+  assert.equal(chipText(pane(3, { context: null })), null, "no context, no chip");
+  assert.equal(chipText(pane(3, { tool: "azure", context: "x" })), null, "the chip is for a context");
+  assert.equal(chipText(pane(3, { context: "c".repeat(300) })).text.length <= 2 + 60, true, "cut");
 });

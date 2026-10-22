@@ -4,7 +4,7 @@
 // `Escape` gives the keyboard back to the terminal. A command from the history or a widget is put on the prompt of the
 // focused pane and never run; a link is opened by the system.
 import { registerAction } from "./actions.js";
-import { aiFormShown, columnChanged, initAiSidebar } from "./aisidebar.js";
+import { aiFormShown, columnChanged, initAiSidebar, showSidebarForm } from "./aisidebar.js";
 import { call } from "./bridge.js";
 import { connect, connections } from "./connections.js";
 import { paneConns } from "./connstate.js";
@@ -260,7 +260,10 @@ function build(container: HTMLElement): HTMLElement {
   const hosts = section(main, "Hosts");
   hostsBox = el("div", "sb-hosts", hosts);
   // The tools the person already uses on the command line: drawn once the core has listed them (integratecontext.ts).
-  mountContextSection(el("div", "cx-slot", main));
+  mountContextSection(el("div", "cx-slot", main), () => {
+    setSidebar(true);
+    showSidebarForm();
+  });
   buildHistory(main);
   const widgets = section(main, "Widgets");
   widgetsBox = el("div", "", widgets);

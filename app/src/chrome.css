@@ -229,3 +229,37 @@
   border: 2px solid var(--hw-ink); outline: 1px solid var(--hw-ground-2); outline-offset: -3px;
 }
 :root.dragging, :root.dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+
+/* ---- the context: status segments and the pane chip (integratecontext.ts, docs/design.md 6.11) -------------------- */
+
+/* A segment of the Kubernetes context or the Azure subscription is a button that looks like the other segments. A name is not a
+   label: it keeps its case and its spacing. The word PRODUCTION has an underline and the mark `!` besides the warn colour. */
+#status button.ctx-seg {
+  flex: none; font: inherit; letter-spacing: inherit; text-transform: uppercase; color: inherit; background: none; border: 0;
+  border-right: 1px solid var(--hw-line); border-radius: 0; cursor: pointer; padding: 0 .833rem; line-height: calc(23rem / 12);
+  white-space: nowrap;
+}
+#status button.ctx-seg:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+#status button.ctx-seg:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+#status .ctx-text { text-transform: none; letter-spacing: normal; color: var(--hw-ink-2); }
+#status .ctx-prod, #status .ctx-stale { margin-left: .5rem; }
+#status .ctx-prod { color: var(--hw-warn); text-decoration: underline; font-weight: 700; }
+#status .ctx-prod::before { content: "! "; }
+#status .ctx-stale { color: var(--hw-dim); text-transform: lowercase; }
+#status button.ctx-seg[data-stale="true"] .ctx-text { color: var(--hw-dim); }
+
+/* The chip of a pane: the mark and the context holzWave set. It takes the pointer so that its title can be read. */
+.ph-chip {
+  flex: none; display: inline-flex; align-items: center; gap: .5rem; max-width: 40%; box-sizing: border-box; padding: 0 .5rem;
+  border: 1px solid var(--hw-line); border-radius: 62.5rem; color: var(--hw-ink-2); pointer-events: auto; overflow: hidden;
+  white-space: nowrap;
+}
+.ph-chip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ph-chip-prod { flex: none; color: var(--hw-warn); text-decoration: underline; }
+.ph-chip-prod::before { content: "! "; font-weight: 700; }
+
+@media (forced-colors: active) {
+  :root #status button.ctx-seg:focus-visible { outline-color: Highlight; }
+  :root .ctx-prod, :root .ph-chip-prod { outline: 2px solid Highlight; outline-offset: 2px; }
+  :root .ph-chip { border-color: CanvasText; }
+}

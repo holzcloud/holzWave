@@ -166,6 +166,11 @@ function setForm(next: Form): void {
   renderOverlay();
 }
 
+/** Show the sidebar's own sections in the column, whichever form it was in (a status segment leads there). */
+export function showSidebarForm(): void {
+  setForm("sidebar");
+}
+
 /** Show `id` in the chat host: mount the chat module the first time, else switch its view. */
 function showChat(id: string): void {
   if (root === null) return;

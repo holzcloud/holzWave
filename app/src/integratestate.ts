@@ -645,6 +645,60 @@ export function reachWords(pane: number | null, value: string): string {
   return pane === null ? `New blocks start with ${v}.` : `Pane ${pane} now uses ${v}.`;
 }
 
+/** What a status segment says. `production` and `stale` are words of the segment; `label` is its accessible name. */
+export interface SegmentText {
+  tool: ToolId;
+  text: string;
+  production: boolean;
+  stale: boolean;
+  label: string;
+}
+
+/**
+ * The status segment of a row: `⎈ prod-eu/payments` for Kubernetes and `az holz-prod` for Azure, and nothing for a tool without a
+ * value, for a tool that is not there, and for the other two tools (the status line has these two). The core resolved the row for
+ * the focused pane, so the segment is the pane's selection, else the pick, else what the tool is set to.
+ */
+export function segmentText(row: ContextRow): SegmentText | null {
+  if (row.state === "not_found") return null;
+  const stale = row.stale;
+  const production = row.production !== null;
+  const tail = `${production ? ", production" : ""}${stale ? ", stale" : ""}`;
+  if (row.tool === "kube" && row.context !== null) {
+    const ns = row.namespace;
+    return {
+      tool: "kube",
+      text: `${glyphOf("kube")} ${cutCell(row.context, 40)}${ns === null ? "" : `/${cutCell(ns, 40)}`}`,
+      production,
+      stale,
+      label: `Kubernetes context ${cutCell(row.context, 60)}${ns === null ? "" : `, namespace ${cutCell(ns, 60)}`}${tail}`,
+    };
+  }
+  if (row.tool === "azure" && row.subscription !== null) {
+    return {
+      tool: "azure",
+      text: `${glyphOf("azure")} ${cutCell(row.subscription, 40)}`,
+      production,
+      stale,
+      label: `Azure subscription ${cutCell(row.subscription, 60)}${tail}`,
+    };
+  }
+  return null;
+}
+
+/** What the chip in the header of a pane says. */
+export interface ChipText {
+  text: string;
+  production: boolean;
+  title: string;
+}
+
+/** The chip of a pane the core listed: the mark and the context holzWave set for it, for Kubernetes and Talos; null without a context. */
+export function chipText(info: PaneInfo): ChipText | null {
+  if ((info.tool !== "kube" && info.tool !== "talos") || info.context === null) return null;
+  return { text: `${glyphOf(info.tool)} ${cutCell(info.context, 60)}`, production: info.production !== null, title: "Set by holzWave for this pane" };
+}
+
 // ---- words ------------------------------------------------------------------------------------------------------------
 
 export type StateName = "reading" | "empty" | "failed" | "missing" | "unusable" | "ok";

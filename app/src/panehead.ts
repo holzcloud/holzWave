@@ -9,7 +9,9 @@
 import { el, fitNodes, setAttr, setRect, setText } from "./dom.js";
 import { paneRect } from "./geometry.js";
 import { blockContext, blockTitle, paneBlocks } from "./blockstate.js";
+import { paneChip } from "./integratecontext.js";
 import { integrationProduction } from "./integratestate.js";
+import type { ChipText } from "./integratestate.js";
 import { connDot, connText, paneConns } from "./connstate.js";
 import { shortenHome } from "./labels.js";
 import { startRename } from "./rename.js";
@@ -23,6 +25,8 @@ interface Head {
   sub: HTMLElement;
   /** The text of the context lives in a child, so the cut can be made from the left (see chrome.css). */
   ctx: HTMLElement;
+  /** The chip with the context holzWave set for the pane; made when the core lists one, removed when it does not. */
+  chip: HTMLElement | null;
 }
 
 const heads = new Map<number, Head>();
@@ -53,7 +57,7 @@ function create(pane: number, parent: HTMLElement): Head {
     e.stopPropagation();
     closeHandler(pane);
   });
-  return { root, dot, title, sub, ctx };
+  return { root, dot, title, sub, ctx, chip: null };
 }
 
 /** What a confirmed name is sent to; the chrome sets it, so this module does not import it. */
@@ -98,6 +102,29 @@ function automaticTitle(pane: number): string {
 /** The title of a pane's strip: what its program set, else the title of the tab the pane is in. */
 function titleOf(pane: number, tabTitle: string): string {
   return state.titles.get(pane) || tabTitle;
+}
+
+/** The chip between the title and the context: the mark and the context the core gave the pane, and `production` when it says so. */
+function drawChip(head: Head, chip: ChipText | null): void {
+  if (chip === null) {
+    head.chip?.remove();
+    head.chip = null;
+    return;
+  }
+  if (head.chip === null) {
+    head.chip = el("span", "ph-chip");
+    el("span", "ph-chip-text", head.chip);
+    head.root.insertBefore(head.chip, head.ctx);
+  }
+  setAttr(head.chip, "title", chip.title);
+  setText(head.chip.firstElementChild as HTMLElement, chip.text);
+  let prod = head.chip.querySelector<HTMLElement>(".ph-chip-prod");
+  if (!chip.production) {
+    prod?.remove();
+  } else {
+    if (!prod) prod = el("span", "ph-chip-prod", head.chip);
+    setText(prod, "production");
+  }
 }
 
 /**
@@ -146,6 +173,7 @@ export function renderPaneHeads(): void {
       const production = block?.kind === "integration" && integrationProduction(id);
       setAttr(head.ctx, "data-tone", production ? "warn" : null);
       setAttr(head.ctx, "title", ctx === "" ? null : production ? `${ctx} · production` : ctx);
+      drawChip(head, paneChip(id));
     }
   }
   for (const [id, head] of heads) {
