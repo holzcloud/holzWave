@@ -1,0 +1,108 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": "Production EU",
+    "selection": {
+      "context": "prod-eu",
+      "namespace": "payments",
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "current",
+        "label": "CURRENT"
+      },
+      {
+        "id": "name",
+        "label": "NAME"
+      },
+      {
+        "id": "cluster",
+        "label": "CLUSTER"
+      },
+      {
+        "id": "user",
+        "label": "USER"
+      },
+      {
+        "id": "namespace",
+        "label": "NAMESPACE"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [
+          {
+            "args": {
+              "context": "arn:aws:eks:eu-central-1:000000000000:cluster/demo"
+            },
+            "effect": "local",
+            "label": "Use context",
+            "verb": "use_context"
+          }
+        ],
+        "cells": [
+          "",
+          "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+          "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+          "exec-user",
+          ""
+        ],
+        "key": "arn:aws:eks:eu-central-1:000000000000:cluster/demo",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "context": "dev"
+            },
+            "effect": "local",
+            "label": "Use context",
+            "verb": "use_context"
+          }
+        ],
+        "cells": [
+          "*",
+          "dev",
+          "dev-cluster",
+          "token-user",
+          ""
+        ],
+        "key": "dev",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "context": "kind-test"
+            },
+            "effect": "local",
+            "label": "Use context",
+            "verb": "use_context"
+          }
+        ],
+        "cells": [
+          "",
+          "kind-test",
+          "kind-test",
+          "token-user",
+          "test"
+        ],
+        "key": "kind-test",
+        "tone": "normal"
+      }
+    ],
+    "title": "Contexts",
+    "truncated": null
+  }
+}

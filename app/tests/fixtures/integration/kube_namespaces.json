@@ -1,0 +1,94 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": "Production EU",
+    "selection": {
+      "context": "prod-eu",
+      "namespace": "payments",
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "name",
+        "label": "NAME"
+      },
+      {
+        "id": "status",
+        "label": "STATUS"
+      },
+      {
+        "id": "age",
+        "label": "AGE"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [
+          {
+            "args": {
+              "namespace": "default"
+            },
+            "effect": "local",
+            "label": "Set namespace",
+            "verb": "set_namespace"
+          }
+        ],
+        "cells": [
+          "default",
+          "Active",
+          "3d"
+        ],
+        "key": "default",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "namespace": "kube-system"
+            },
+            "effect": "local",
+            "label": "Set namespace",
+            "verb": "set_namespace"
+          }
+        ],
+        "cells": [
+          "kube-system",
+          "Active",
+          "3d"
+        ],
+        "key": "kube-system",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "namespace": "team-a"
+            },
+            "effect": "local",
+            "label": "Set namespace",
+            "verb": "set_namespace"
+          }
+        ],
+        "cells": [
+          "team-a",
+          "Active",
+          "3d"
+        ],
+        "key": "team-a",
+        "tone": "normal"
+      }
+    ],
+    "title": "Namespaces",
+    "truncated": null
+  }
+}

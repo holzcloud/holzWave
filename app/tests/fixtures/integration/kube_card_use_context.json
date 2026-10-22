@@ -1,0 +1,74 @@
+{
+  "argv": [
+    "config",
+    "use-context",
+    "--",
+    "kind-test"
+  ],
+  "effect": "local",
+  "expires_in_secs": 120,
+  "fields": [
+    [
+      "tool",
+      "kube"
+    ],
+    [
+      "verb",
+      "use_context"
+    ],
+    [
+      "effect",
+      "local"
+    ],
+    [
+      "program",
+      "kubectl"
+    ],
+    [
+      "arg 1",
+      "config"
+    ],
+    [
+      "arg 2",
+      "use-context"
+    ],
+    [
+      "arg 3",
+      "--"
+    ],
+    [
+      "arg 4",
+      "kind-test"
+    ],
+    [
+      "context",
+      "kind-test"
+    ],
+    [
+      "changes",
+      "the kubeconfig files named by KUBECONFIG, by default ~/.kube/config"
+    ],
+    [
+      "guard",
+      "none"
+    ]
+  ],
+  "guard": {
+    "production": null
+  },
+  "hash": "d9469456de357f18f023bdf5e4398a417ea830a29e93485ffe4fe376934854b1",
+  "program": "kubectl",
+  "target": [
+    [
+      "context",
+      "kind-test"
+    ],
+    [
+      "changes",
+      "the kubeconfig files named by KUBECONFIG, by default ~/.kube/config"
+    ]
+  ],
+  "ticket": "0123456789abcdef0123456789abcdef",
+  "tool": "kube",
+  "verb": "use_context"
+}
