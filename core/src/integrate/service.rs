@@ -24,8 +24,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -72,9 +72,98 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most bytes of the answer to a version probe that are read.
 const VERSION_STDOUT: usize = 64 * 1024;
 
+/// How long a tool's status is served before the next ask starts a new read.
+const STATUS_TTL: Duration = Duration::from_secs(30);
+/// The least time between two reads of one tool, also for a forced refresh.
+pub const MIN_FORCED: Duration = Duration::from_secs(2);
+
+type ChangeFn = dyn Fn(ChangeEvent) + Send + Sync;
+type ClockFn = dyn Fn() -> Instant + Send + Sync;
 type CheckFn = dyn Fn(&str) -> ProgramCheck + Send + Sync;
 type ModeFn = dyn Fn(&str) -> Option<u32> + Send + Sync;
 type LoginFn = dyn Fn() -> Vec<String> + Send + Sync;
+
+/// What a change event announces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    /// What a tool is set to, or whether it is there, moved.
+    Context,
+}
+
+/// A change the service found on its own, in the background. It says what moved and holds no value: whoever listens
+/// asks for the rows again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeEvent {
+    pub kind: ChangeKind,
+    pub tool: Option<ToolId>,
+    pub pane: Option<PaneId>,
+    pub code: Option<u32>,
+}
+
+/// A look at the status thread from outside: whether it was ever started and whether it has ended. The tests of the
+/// core and of the shell use it to show that nothing runs without an ask and that dropping the service ends the thread.
+#[derive(Debug, Clone, Default)]
+pub struct WorkerWatch {
+    started: Arc<AtomicBool>,
+    ended: Arc<AtomicBool>,
+}
+
+impl WorkerWatch {
+    /// The thread was started (by the first ask that needed a read).
+    pub fn started(&self) -> bool {
+        self.started.load(Ordering::SeqCst)
+    }
+
+    /// The thread has ended.
+    pub fn ended(&self) -> bool {
+        self.ended.load(Ordering::SeqCst)
+    }
+}
+
+/// What the rows of a tool show, compared before and after a read: a change in any of it is announced, once.
+#[derive(Clone, PartialEq)]
+struct Seen {
+    state: ContextDetection,
+    signed_out: bool,
+    default: Option<(Selection, bool)>,
+}
+
+/// The cache entry of one tool's status.
+struct Watched {
+    /// When the last read ended.
+    read_at: Option<Instant>,
+    /// The earliest time an ask that is not forced may start the next read.
+    next_at: Option<Instant>,
+    /// A read is queued or running.
+    in_flight: bool,
+    /// What was last announced.
+    announced: Seen,
+}
+
+impl Watched {
+    fn new() -> Self {
+        Watched {
+            read_at: None,
+            next_at: None,
+            in_flight: false,
+            announced: Seen { state: ContextDetection::Unknown, signed_out: false, default: None },
+        }
+    }
+
+    /// Whether an ask at `now` starts a read: never while one is in flight; a forced ask when the value is older than
+    /// [`MIN_FORCED`], any other ask when the wait of the tool is over.
+    fn due(&self, forced: bool, now: Instant) -> bool {
+        if self.in_flight {
+            return false;
+        }
+        match self.read_at {
+            None => true,
+            Some(read) if forced => now.saturating_duration_since(read) >= MIN_FORCED,
+            Some(_) => self.next_at.is_none_or(|next| now >= next),
+        }
+    }
+}
 
 /// What the service knows of the machine it runs on. The shell builds it from the real one ([`HostFacts::system`]); the
 /// tests build it over a scratch directory ([`HostFacts::for_tests`]). Nothing of it is read from the process after it
@@ -480,6 +569,19 @@ pub struct IntegrationService {
     /// The host writes the file of the pane selections itself ([`IntegrationService::save_panes`]): a change is not
     /// written when it is made.
     deferred_saves: bool,
+    /// The time of the status cache and of the answer cache; the tests move it.
+    clock: Arc<ClockFn>,
+    /// Told when a background read found a change.
+    on_change: Mutex<Option<Arc<ChangeFn>>>,
+    /// The status of each tool, in the order of [`ToolId::ALL`].
+    status: Mutex<Vec<Watched>>,
+    /// Woken when a background read is over.
+    idle: Condvar,
+    /// The service as its shell shares it, so that the status thread can reach it ([`IntegrationService::shared`]).
+    me: OnceLock<Weak<IntegrationService>>,
+    /// The jobs of the status thread; the thread is started by the first ask that needs one.
+    queue: OnceLock<Option<mpsc::Sender<ToolId>>>,
+    watch: WorkerWatch,
 }
 
 impl fmt::Debug for IntegrationService {
@@ -607,6 +709,13 @@ impl IntegrationService {
             busy_panes: (Mutex::new(HashSet::new()), Condvar::new()),
             generation: AtomicU64::new(0),
             deferred_saves: false,
+            clock: Arc::new(Instant::now),
+            on_change: Mutex::new(None),
+            status: Mutex::new(ToolId::ALL.iter().map(|_| Watched::new()).collect()),
+            idle: Condvar::new(),
+            me: OnceLock::new(),
+            queue: OnceLock::new(),
+            watch: WorkerWatch::default(),
         }
     }
 
@@ -649,6 +758,34 @@ impl IntegrationService {
     pub fn with_limits(mut self, limits: RunLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// The same service with another clock, for the time-to-live of the status and of the answers. The tests move it.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<ClockFn>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The service behind an `Arc`, which is what the shell holds. Only a shared service can refresh the status in the
+    /// background (the thread reaches it through a weak handle); an unshared one answers from what it knows and starts
+    /// nothing on its own.
+    #[must_use]
+    pub fn shared(self) -> Arc<Self> {
+        let shared = Arc::new(self);
+        let _ = shared.me.set(Arc::downgrade(&shared));
+        shared
+    }
+
+    /// Sets what is called when a background read, or a read of a tool's default verb, found that a status moved. The
+    /// callback gets a kind and a tool and no value; it runs on the thread that found the change, with no lock held.
+    pub fn set_on_change(&self, on_change: Arc<ChangeFn>) {
+        *self.on_change.lock().unwrap_or_else(PoisonError::into_inner) = Some(on_change);
+    }
+
+    /// A look at the status thread, see [`WorkerWatch`].
+    pub fn worker_watch(&self) -> WorkerWatch {
+        self.watch.clone()
     }
 
     fn integration(&self, tool: ToolId) -> &'static dyn Integration {
@@ -937,9 +1074,10 @@ impl IntegrationService {
     }
 
     fn cached(&self, key: &Key) -> Option<RunAnswer> {
+        let now = (self.clock)();
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         match cache.get(key) {
-            Some((at, answer)) if at.elapsed() < CACHE_TTL => Some(answer.clone()),
+            Some((at, answer)) if now.saturating_duration_since(*at) < CACHE_TTL => Some(answer.clone()),
             Some(_) => {
                 cache.remove(key);
                 None
@@ -949,13 +1087,14 @@ impl IntegrationService {
     }
 
     fn cache_put(&self, key: Key, answer: RunAnswer) {
+        let now = (self.clock)();
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
-        cache.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
+        cache.retain(|_, (at, _)| now.saturating_duration_since(*at) < CACHE_TTL);
         while cache.len() >= CACHE_MAX {
             let Some(oldest) = cache.iter().min_by_key(|(_, (at, _))| *at).map(|(key, _)| key.clone()) else { break };
             cache.remove(&oldest);
         }
-        cache.insert(key, (Instant::now(), answer));
+        cache.insert(key, (now, answer));
     }
 
     /// Drops the cached answers of a tool and of a pane, and makes the runs that are in flight not fill the cache.
@@ -1126,10 +1265,13 @@ impl IntegrationService {
         if read.selection != Selection::default() {
             let _ = self.context.set_default(request.tool, &read.selection);
         }
-        let mut state = self.lock();
-        let slot = slot_of(request.tool);
-        state.slots[slot].signed_out = read.signed_out;
-        state.contexts[slot] = read.contexts;
+        {
+            let mut state = self.lock();
+            let slot = slot_of(request.tool);
+            state.slots[slot].signed_out = read.signed_out;
+            state.contexts[slot] = read.contexts;
+        }
+        self.announce(request.tool);
     }
 
     // ---- selections and the rows of the sidebar ---------------------------------------------------------------------
@@ -1181,30 +1323,142 @@ impl IntegrationService {
     }
 
     /// One row per tool for the sidebar, the status line and the pane chip: the state of the tool and what is selected
-    /// for `pane` (the pick and the tool's own selection when the pane has none). With `refresh` the tools are looked
-    /// for again and their default verbs are read, four at a time: that starts processes, so call it off the UI thread.
+    /// for `pane` (the pick and the tool's own selection when the pane has none).
+    ///
+    /// The answer is the cached state and comes at once; this call starts no process and waits for none. It also asks
+    /// for a refresh: a tool whose value is older than its time-to-live is read once in the background, and with
+    /// `refresh` also a value older than [`MIN_FORCED`]. A change is announced through the callback of
+    /// [`IntegrationService::set_on_change`], and the next ask sees it. Nothing is read without an ask.
     pub fn context_rows(&self, pane: Option<PaneId>, refresh: bool) -> Vec<ContextRow> {
-        if refresh && self.enabled {
-            std::thread::scope(|scope| {
-                for tool in ToolId::ALL {
-                    scope.spawn(move || {
-                        let _ = self.refresh_default(tool);
-                    });
-                }
-            });
+        let rows = {
+            let state = self.lock();
+            ToolId::ALL
+                .iter()
+                .map(|tool| {
+                    let slot = &state.slots[slot_of(*tool)];
+                    let detection = match slot.state {
+                        ContextDetection::Found if slot.signed_out => ContextDetection::SignedOut,
+                        other => other,
+                    };
+                    self.context.summary(&state.profiles, *tool, pane, detection)
+                })
+                .collect()
+        };
+        self.ask_for_refresh(refresh);
+        rows
+    }
+
+    /// Queues one read for every tool that is due. The status thread is started by the first ask that needs it.
+    fn ask_for_refresh(&self, forced: bool) {
+        let Some(me) = self.me.get() else { return };
+        if !self.enabled {
+            return;
         }
-        let state = self.lock();
-        ToolId::ALL
-            .iter()
-            .map(|tool| {
-                let slot = &state.slots[slot_of(*tool)];
-                let detection = match slot.state {
-                    ContextDetection::Found if slot.signed_out => ContextDetection::SignedOut,
-                    other => other,
-                };
-                self.context.summary(&state.profiles, *tool, pane, detection)
-            })
-            .collect()
+        let now = (self.clock)();
+        let due: Vec<ToolId> = {
+            let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+            ToolId::ALL
+                .iter()
+                .copied()
+                .filter(|tool| {
+                    let watched = &mut status[slot_of(*tool)];
+                    let due = watched.due(forced, now);
+                    watched.in_flight |= due;
+                    due
+                })
+                .collect()
+        };
+        if due.is_empty() {
+            return;
+        }
+        let queue = self.queue.get_or_init(|| self.start_worker(me.clone()));
+        for tool in due {
+            if queue.as_ref().is_none_or(|queue| queue.send(tool).is_err()) {
+                self.finish_read(tool, None);
+            }
+        }
+    }
+
+    /// Starts the one thread that reads the tools' default verbs, one after the other. It holds the service only while
+    /// it reads and ends when the service is gone.
+    fn start_worker(&self, service: Weak<IntegrationService>) -> Option<mpsc::Sender<ToolId>> {
+        let (queue, jobs) = mpsc::channel::<ToolId>();
+        let ended = self.watch.ended.clone();
+        let spawned = std::thread::Builder::new().name("holzwave-integration-status".to_owned()).spawn(move || {
+            while let Ok(tool) = jobs.recv() {
+                let Some(service) = service.upgrade() else { break };
+                service.background_read(tool);
+            }
+            ended.store(true, Ordering::SeqCst);
+        });
+        spawned.ok().map(|_| {
+            self.watch.started.store(true, Ordering::SeqCst);
+            queue
+        })
+    }
+
+    /// One background read of a tool's default verb, and the bookkeeping that follows it.
+    fn background_read(&self, tool: ToolId) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.refresh_default(tool)));
+        self.announce(tool);
+        self.finish_read(tool, Some(outcome.is_ok_and(|read| read.is_ok())));
+    }
+
+    /// Ends the read of a tool: the time it ended and the earliest time of the next automatic one. `None` means it
+    /// never ran.
+    fn finish_read(&self, tool: ToolId, _read: Option<bool>) {
+        let now = (self.clock)();
+        {
+            let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+            let watched = &mut status[slot_of(tool)];
+            watched.read_at = Some(now);
+            watched.next_at = Some(now + STATUS_TTL);
+            watched.in_flight = false;
+        }
+        self.idle.notify_all();
+    }
+
+    /// Waits until no background read is queued or running, for at most `timeout`. Says whether it is quiet.
+    pub fn wait_idle(&self, timeout: Duration) -> bool {
+        let until = Instant::now() + timeout;
+        let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+        while status.iter().any(|watched| watched.in_flight) {
+            let Some(left) = until.checked_duration_since(Instant::now()) else { return false };
+            status = self.idle.wait_timeout(status, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+        true
+    }
+
+    /// What the rows of a tool show now.
+    fn seen(&self, tool: ToolId) -> Seen {
+        let (state, signed_out) = {
+            let state = self.lock();
+            let slot = &state.slots[slot_of(tool)];
+            (slot.state, slot.signed_out)
+        };
+        Seen { state, signed_out, default: self.context.default_of(tool) }
+    }
+
+    /// Tells the callback that the status of `tool` moved, if it did since it was last told. Each change is told once,
+    /// whichever read found it.
+    fn announce(&self, tool: ToolId) {
+        let seen = self.seen(tool);
+        let changed = {
+            let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+            let watched = &mut status[slot_of(tool)];
+            if watched.announced == seen {
+                false
+            } else {
+                watched.announced = seen;
+                true
+            }
+        };
+        if changed {
+            let callback = self.on_change.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            if let Some(callback) = callback {
+                callback(ChangeEvent { kind: ChangeKind::Context, tool: Some(tool), pane: None, code: None });
+            }
+        }
     }
 
     /// Reads the default verb of a tool with an empty selection, which is how the service learns the tool's own state.
