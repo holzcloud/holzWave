@@ -378,6 +378,36 @@ export function readTools(raw: unknown): ToolEntry[] {
   return out;
 }
 
+// ---- the palette entries ----------------------------------------------------------------------------------------------
+
+/** The title of a palette entry: the tool's label and the verb's label, both the core's. */
+export function entryTitle(toolLabel: string, verbLabel: string): string {
+  return `${toolLabel}: ${verbLabel}`;
+}
+
+/** The id of a palette action: `integration.open.<tool>.<verb>` for a view, `integration.run.<tool>.<verb>` for a terminal. */
+export function entryId(kind: "open" | "run", tool: string, verb: string): string {
+  return `integration.${kind}.${tool}.${verb}`;
+}
+
+/** Whether a verb needs a value that the palette cannot supply. */
+function needsArgument(verb: VerbEntry): boolean {
+  return verb.args.some((a) => a.required);
+}
+
+/** The verbs of a tool that read and show a view and need no argument, in the core's order: each can open a block. */
+export function viewVerbs(tool: ToolEntry): VerbEntry[] {
+  return tool.verbs.filter((v) => v.effect === "read" && v.output === "view" && !needsArgument(v));
+}
+
+/**
+ * The verbs of a tool that open a terminal and need no argument, in the core's order: a read verb launches at once, an Exec verb asks
+ * first. A verb that changes something on this computer or in a cluster (Local, Write) has no entry: it needs a selection and a card.
+ */
+export function terminalVerbs(tool: ToolEntry): VerbEntry[] {
+  return tool.verbs.filter((v) => v.output === "terminal" && (v.effect === "read" || v.effect === "exec") && !needsArgument(v));
+}
+
 // ---- the selection ----------------------------------------------------------------------------------------------------
 
 export interface PickerEntry {

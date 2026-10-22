@@ -78,9 +78,9 @@ export async function refreshBlocks(): Promise<void> {
   }
 }
 
-/** Open a file browser (`files`), a preview (`preview`), the monitor or a chat in a new tab or beside the focused pane. */
+/** Open a file browser (`files`), a preview (`preview`), the monitor, a chat or a view of an integration tool in a new tab or beside the focused pane. */
 export async function openBlock(
-  kind: "files" | "preview" | "monitor" | "chat",
+  kind: "files" | "preview" | "monitor" | "chat" | "integration",
   source: string,
   path: string,
   placement: "tab" | "right" | "down",

@@ -19,6 +19,7 @@ import { initLoginPrompt } from "./loginprompt.js";
 import { initLocalNetwork } from "./localnet.js";
 import { initInline } from "./inline.js";
 import { initIntegrationConfirm } from "./integrateconfirm.js";
+import { initIntegrationActions } from "./integrate.js";
 import { initIntegrationContext } from "./integratecontext.js";
 import { decorateReply } from "./inlinecode.js";
 import { sidebarChat } from "./aisidebar.js";
@@ -36,7 +37,7 @@ import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
 import { initSearch } from "./search-ui.js";
 import { change, watch as watchSettings } from "./settings.js";
 import { initSelection } from "./selection.js";
-import { renderStatus } from "./status.js";
+import { renderStatus, showNotice } from "./status.js";
 import type { View } from "./types.js";
 
 // A layout command of a window that is just going (its last pane was closed or moved away, and the shell destroys it)
@@ -92,6 +93,8 @@ async function main() {
   });
   // The card that asks before an integration action changes something shows a returned layout the way the rest of the page does.
   initIntegrationConfirm({ applyView });
+  // The palette is the way to the blocks of the tools: one entry for each view the core lists (docs/design.md 6.25).
+  initIntegrationActions({ open: (source, path) => openBlock("integration", source, path, "tab"), say: showNotice });
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);

@@ -2,23 +2,25 @@
 // Talos, Azure, GAM) as a table, a list of values or a text. The core runs the tool and cleans what it printed; this
 // module asks for a view, draws the model it gets with `textContent` (integrateview.ts) and says what it is doing in
 // words. It builds no name, no argument list and no program: it sends the facts the core listed.
+import { registerAction, unregisterAction } from "./actions.js";
 import { call } from "./bridge.js";
 import { el, loadStyles, setAttr, setText } from "./dom.js";
 import type { BlockInfo } from "./blockstate.js";
 import type { Instance } from "./blocks.js";
 import { focusInput } from "./keyboard.js";
 import {
-  ageWords, clearIntegrationContext, contextText, localVerbFor, nextSelection, readFault, readLaunchAnswer, readRunAnswer, refreshDue,
-  setIntegrationContext, setPaneSelection, stateWords,
+  ageWords, clearIntegrationContext, contextText, entryId, entryTitle, localVerbFor, nextSelection, readFault, readLaunchAnswer,
+  readRunAnswer, refreshDue, setIntegrationContext, setPaneSelection, stateWords, viewVerbs,
 } from "./integratestate.js";
-import type { Fault, RowAction, Sel, SelectKind, ToolId, ViewModel } from "./integratestate.js";
+import type { Fault, RowAction, Sel, SelectKind, ToolEntry, ToolId, ViewModel } from "./integratestate.js";
 import { requestAction } from "./integrateconfirm.js";
 import { openPicker, pathRow } from "./integratepick.js";
 import type { Picker } from "./integratepick.js";
-import { loadTools, onHint, onTools, setTools, toolOf } from "./integratetools.js";
+import { listedTools, loadTools, onHint, onTools, setTools, toolOf } from "./integratetools.js";
 import type { Hint } from "./integratetools.js";
 import { renderKv, renderTable, renderText } from "./integrateview.js";
 import type { DrawOptions } from "./integrateview.js";
+import { state } from "./state.js";
 import type { View } from "./types.js";
 
 /** What the block needs from the block layer, handed over so that this module does not import it. */
@@ -27,6 +29,55 @@ export interface Deps {
   applyView(v: View): void;
   /** The header of a pane has new words: draw the strips again. */
   changed(): void;
+}
+
+// ---- the palette entries -----------------------------------------------------------------------------------------
+
+/** What the entries need from the page, handed over so that this module does not import the block layer or the status line. */
+export interface ActionDeps {
+  /** Open an integration block in a new tab; resolves to null, or to the core's reason. */
+  open(source: string, path: string): Promise<string | null>;
+  /** Say a sentence in the status line. */
+  say(text: string): void;
+}
+
+let actionDeps: ActionDeps = { open: async () => null, say: () => {} };
+const entryIds = new Set<string>();
+
+/** Whether the page runs where the entries exist: a phone has no palette. */
+function entriesWanted(): boolean {
+  return state.os !== "ios" && state.os !== "android";
+}
+
+/**
+ * Make one palette entry for each view of each tool in the core's list. The titles and the verbs are the core's; the ids are
+ * `integration.open.<tool>.<verb>`. The entries made before are taken away first, so a tool that left the list loses its entries
+ * and a tool that arrived gets them. A tool that is not installed keeps its entries: the block it opens offers the path.
+ */
+export function registerIntegrationActions(tools: readonly ToolEntry[]): void {
+  for (const id of entryIds) unregisterAction(id);
+  entryIds.clear();
+  if (!entriesWanted()) return;
+  for (const tool of tools) {
+    for (const verb of viewVerbs(tool)) {
+      const id = entryId("open", tool.id, verb.id);
+      if (entryIds.has(id)) continue;
+      registerAction({
+        id,
+        title: entryTitle(tool.label, verb.label),
+        run: () => void actionDeps.open(tool.id, verb.id).then((reason) => reason !== null && actionDeps.say(reason)),
+      });
+      entryIds.add(id);
+    }
+  }
+}
+
+/** Register the entries from the core's list now and whenever the list changes (the first answer, a `tools` event, a path that was set). */
+export function initIntegrationActions(handed: ActionDeps): void {
+  actionDeps = handed;
+  if (!entriesWanted()) return;
+  onTools(() => registerIntegrationActions(listedTools()));
+  void loadTools();
 }
 
 // ---- the block ---------------------------------------------------------------------------------------------------

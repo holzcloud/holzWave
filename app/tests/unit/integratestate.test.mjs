@@ -4,9 +4,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  CAPS, MEMBERS, PICK_VERBS, ageWords, clearIntegrationContext, contextText, cutCell, integrationContextText, integrationProduction,
+  CAPS, MEMBERS, PICK_VERBS, ageWords, clearIntegrationContext, contextText, cutCell, entryTitle, integrationContextText, integrationProduction,
   nextSelection, pickerEntries, readFault, readLaunchAnswer, readRunAnswer, readTools, readView, refreshDue, setIntegrationContext,
-  stateWords,
+  stateWords, viewVerbs,
 } from "../../dist/integratestate.js";
 import { blockContext, blockTitle, readBlocks } from "../../dist/blockstate.js";
 
@@ -309,4 +309,26 @@ test("a refresh is due only for a verb that asks for it, in view, shown, alive a
   assert.equal(refreshDue({ ...base, busy: true }), false);
   assert.equal(refreshDue({ ...base, alive: false }), false);
   assert.equal(refreshDue({ ...base, secs: 0 }), false);
+});
+
+const verbOf = (id, label, effect, output, args = []) => ({ id, label, effect, output, refresh_secs: null, args });
+
+test("a palette title is the tool's label, a colon and the verb's label", () => {
+  assert.equal(entryTitle("Kubernetes", "Pods"), "Kubernetes: Pods");
+  assert.equal(entryTitle("Talos", "Machine status"), "Talos: Machine status");
+});
+
+test("the view verbs are the read verbs with a view output, in the core's order", () => {
+  const tool = {
+    id: "kube", label: "Kubernetes", state: "found", path: null, binary: null, reason: null, version: null, searched: [], selects: [],
+    verbs: [
+      verbOf("contexts", "Contexts", "read", "view"),
+      verbOf("use_context", "Use context", "local", "done", [{ name: "context", kind: "context", required: true }]),
+      verbOf("shell", "Shell", "read", "terminal"),
+      verbOf("pods", "Pods", "read", "view"),
+      verbOf("delete_pod", "Delete pod", "write", "done", [{ name: "pod", kind: "pod", required: true }]),
+    ],
+  };
+  assert.deepEqual(viewVerbs(tool).map((v) => v.id), ["contexts", "pods"]);
+  assert.deepEqual(viewVerbs({ ...tool, verbs: [] }), []);
 });
