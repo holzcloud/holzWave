@@ -39,7 +39,7 @@ export default async function ({ page, url, errors }) {
   // A plain shell has the focus: the choice is the pick, and the line says what new blocks start with.
   await page.locator(`${kube} .cx-value[data-select="context"]`).click();
   await page.locator(`${kube} .ig-list .ig-opt`).first().waitFor();
-  assert.deepEqual(await page.locator(`${kube} .ig-list .ig-opt`).allTextContents(), ["●prod-eu", "○dev"]);
+  assert.deepEqual(await page.locator(`${kube} .ig-list .ig-opt`).allTextContents(), ["●prod-eu", "○dev", "Make default…"]);
   assert.equal(await page.locator(`${kube} .ig-list`).getAttribute("role"), "listbox");
   assert.deepEqual((await callsOf(page, "integration_run")).at(-1), { tool: "kube", verb: "contexts", pane: null, args: {} });
   await page.locator(`${kube} .ig-list .ig-opt`, { hasText: "dev" }).click();

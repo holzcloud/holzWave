@@ -9,8 +9,8 @@
 import { el, fitNodes, setAttr, setRect, setText } from "./dom.js";
 import { paneRect } from "./geometry.js";
 import { blockContext, blockTitle, paneBlocks } from "./blockstate.js";
-import { paneChip } from "./integratecontext.js";
-import { integrationProduction } from "./integratestate.js";
+import { paneChip, paneHeld } from "./integratecontext.js";
+import { heldText, integrationProduction } from "./integratestate.js";
 import type { ChipText } from "./integratestate.js";
 import { connDot, connText, paneConns } from "./connstate.js";
 import { shortenHome } from "./labels.js";
@@ -145,6 +145,7 @@ export function renderPaneHeads(): void {
         head = create(id, layer);
         heads.set(id, head);
       }
+      const held = paneHeld(id);
       const exited = state.exited.has(id);
       const focused = id === view.focus;
       const r = paneRect(state.metrics, unit);
@@ -153,7 +154,8 @@ export function renderPaneHeads(): void {
       head.root.classList.toggle("focus-line", focused && multiple && !exited);
       head.root.classList.toggle("exited", exited);
       const conn = paneConns.get(id);
-      setAttr(head.dot, "data-state", exited ? "exited" : (connDot(conn) ?? (focused ? "focused" : "idle")));
+      // A terminal the core holds open after its program ended is an exited pane too: the dot is hollow with a dash.
+      setAttr(head.dot, "data-state", exited || held ? "exited" : (connDot(conn) ?? (focused ? "focused" : "idle")));
       const name = nameOf(id);
       const program = titleOf(id, tabTitle);
       // A name the user gave comes first; the program's title stays visible after it, lighter.
@@ -161,7 +163,9 @@ export function renderPaneHeads(): void {
       const block = paneBlocks.get(id);
       setText(head.title, name !== "" ? name : block ? blockTitle(block) : program);
       setText(head.sub, name !== "" && program !== name ? program : "");
-      const ctx = exited
+      const ctx = held
+        ? heldText(held.status)
+        : exited
         ? "exited"
         : block
           ? blockContext(block)
@@ -171,7 +175,8 @@ export function renderPaneHeads(): void {
       setText(head.ctx.firstElementChild as HTMLElement, ctx);
       // A production selection is said in the header too: the warn colour, an underline and the mark come from the tone.
       const production = block?.kind === "integration" && integrationProduction(id);
-      setAttr(head.ctx, "data-tone", production ? "warn" : null);
+      // A held terminal says `exited N` in the same tone: the warn colour, an underline and the mark come from it (6.26).
+      setAttr(head.ctx, "data-tone", production || held ? "warn" : null);
       setAttr(head.ctx, "title", ctx === "" ? null : production ? `${ctx} · production` : ctx);
       drawChip(head, paneChip(id));
     }

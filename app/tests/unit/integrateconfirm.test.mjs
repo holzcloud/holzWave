@@ -4,7 +4,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { CARD_WORDS, HALF_SECOND, hashShown, modeWords, nextMode, readCard, refusalOf } from "../../dist/integratestate.js";
+import {
+  CARD_WORDS, HALF_SECOND, actionLabel, asksFirst, hashShown, heldText, localVerbFor, modeWords, nextMode, readCard, readTools, refusalOf,
+} from "../../dist/integratestate.js";
 
 const golden = JSON.parse(readFileSync(new URL("../fixtures/protocol.json", import.meta.url), "utf8"));
 const HASH = "9f3a41c2d7be0123456789abcdef0123456789abcdef0123456789abcdef0123";
@@ -204,4 +206,52 @@ test("the refusals of the core are told apart by code and reason", () => {
   assert.equal(refusalOf(ticket("")), "other");
   assert.equal(refusalOf({ code: "failed", reason: "unknown", text: "x" }), "other", "the reason alone says nothing");
   assert.equal(refusalOf({ code: "refused", reason: "expired", text: "x" }), "other");
+});
+
+// ---- the row actions, the Make default entries and the held header ----------------------------------------------------------
+
+const verb = (id, label, effect, args = []) => ({ id, label, effect, output: effect === "read" ? "view" : "done", refresh_secs: null, exit_is_state: false, args });
+const arg = (name, kind, required = true) => ({ name, kind, required });
+const entry = (id, verbs) => readTools([{ id, label: id, state: "found", path: "/x", binary: null, reason: null, version: null, searched: [], selects: [], verbs }])[0];
+
+test("the tool list keeps the arguments of a verb with their kinds", () => {
+  const tool = entry("kube", [verb("use_context", "Use context", "local", [arg("context", "context"), arg("junk", 5), "x"]), verb("pods", "Pods", "read")]);
+  assert.deepEqual(tool.verbs[0].args, [{ name: "context", kind: "context", required: true }]);
+  assert.deepEqual(tool.verbs[1].args, []);
+});
+
+test("the Local verb of a kind is found from the core's list by the kind of its first argument, by no name", () => {
+  const kube = entry("kube", [
+    verb("contexts", "Contexts", "read"),
+    verb("switch_ctx", "Switch context", "local", [arg("context", "context")]),
+    verb("set_namespace", "Set namespace", "local", [arg("namespace", "namespace")]),
+    verb("delete_pod", "Delete pod", "write", [arg("pod", "pod")]),
+  ]);
+  assert.deepEqual(localVerbFor(kube, "context"), { verb: "switch_ctx", arg: "context", label: "Switch context" });
+  assert.deepEqual(localVerbFor(kube, "namespace"), { verb: "set_namespace", arg: "namespace", label: "Set namespace" });
+  assert.equal(localVerbFor(kube, "node"), null, "no verb for the kind");
+  assert.equal(localVerbFor(kube, "section"), null);
+  // A verb that writes or reads is never a way to make something the default, whatever its first argument is.
+  const writer = entry("talos", [verb("zap", "Zap", "write", [arg("context", "context")]), verb("peek", "Peek", "read", [arg("context", "context")])]);
+  assert.equal(localVerbFor(writer, "context"), null);
+  // Only a required first argument counts, and only the first.
+  const optional = entry("azure", [verb("use", "Use", "local", [arg("context", "context", false)]), verb("two", "Two", "local", [arg("a", "pod"), arg("context", "context")])]);
+  assert.equal(localVerbFor(optional, "context"), null);
+  assert.equal(localVerbFor(null, "context"), null);
+});
+
+test("an action that asks first ends in an ellipsis and says so", () => {
+  assert.equal(actionLabel({ label: "Logs", effect: "read" }), "Logs");
+  assert.equal(actionLabel({ label: "Exec", effect: "exec" }), "Exec…");
+  assert.equal(actionLabel({ label: "Delete", effect: "write" }), "Delete…");
+  assert.equal(actionLabel({ label: "Use context", effect: "local" }), "Use context…");
+  assert.equal(actionLabel({ label: "Exec…", effect: "exec" }), "Exec…", "not twice");
+  assert.deepEqual(["read", "local", "write", "exec"].map(asksFirst), [false, true, true, true]);
+});
+
+test("a held terminal says exited with its status", () => {
+  assert.equal(heldText(1), "exited 1");
+  assert.equal(heldText(0), "exited 0");
+  assert.equal(heldText(137), "exited 137");
+  assert.equal(heldText(null), "exited");
 });

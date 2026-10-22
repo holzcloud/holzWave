@@ -43,9 +43,9 @@ export default async function ({ page, url, errors }) {
   await page.waitForSelector(".ig-list .ig-opt");
   assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("integration_run").at(-1)), { tool: "kube", verb: "contexts", pane: 2, args: {} });
   assert.equal(await page.locator(".ig-list").getAttribute("role"), "listbox");
-  assert.deepEqual(await page.locator(".ig-opt .ig-opt-label").allTextContents(), ["prod", "dev", HOSTILE]);
+  assert.deepEqual(await page.locator(".ig-opt .ig-opt-label").allTextContents(), ["prod", "dev", HOSTILE, "Make default…"]);
   assert.equal(await page.locator(".ig-list img").count(), 0);
-  assert.deepEqual(await page.locator(".ig-opt").evaluateAll((n) => n.map((o) => o.getAttribute("aria-selected"))), ["true", "false", "false"]);
+  assert.deepEqual(await page.locator(".ig-opt").evaluateAll((n) => n.map((o) => o.getAttribute("aria-selected"))), ["true", "false", "false", "false"]);
   assert.equal(await page.locator(".ig-chip").first().getAttribute("aria-expanded"), "true");
 
   // Escape closes it and gives the keyboard back to the terminal.
@@ -100,10 +100,11 @@ export default async function ({ page, url, errors }) {
   await page.locator(".ig-refresh").click();
   await page.waitForFunction(() => /^Updated/.test(document.querySelector(".ig-status")?.textContent ?? ""));
 
-  // A row shows the buttons of its actions that only read, and a press launches beside the pane with the row's own arguments.
-  assert.deepEqual(await page.locator(".ig-act").allTextContents(), ["Logs"], "an action that changes something is not drawn here");
+  // A row shows the buttons of its actions; one that asks first ends in an ellipsis, and a press on the one that only reads launches
+  // beside the pane with the row's own arguments.
+  assert.deepEqual(await page.locator(".ig-act").allTextContents(), ["Logs", "Delete pod…", "Use…"]);
   assert.equal(await page.locator("tr[data-i='1'] .ig-act").count(), 0);
-  await page.locator(".ig-act").click();
+  await page.locator(".ig-act", { hasText: "Logs" }).click();
   await page.waitForFunction(() => window.__MOCK__.callsOf("integration_launch").length === 1);
   assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("integration_launch")[0]), {
     tool: "kube", verb: "logs", pane: 2, args: { pod: "api-0" }, placement: "right",
@@ -114,7 +115,7 @@ export default async function ({ page, url, errors }) {
   await page.evaluate(() => {
     window.__IG__.launchFault = { code: "refused", reason: "needs_card", text: "This action changes something or opens a session, so it needs an approval first." };
   });
-  await page.locator(".ig-act").click();
+  await page.locator(".ig-act", { hasText: "Logs" }).click();
   await page.waitForFunction(() => document.querySelector(".ig-status")?.textContent?.startsWith("This action changes something"));
 
   // The keyboard is on the integration pane again (the launch moved the focus to the new terminal).

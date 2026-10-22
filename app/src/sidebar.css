@@ -93,6 +93,7 @@
 #sidebar button.ig-opt:hover { background: var(--hw-rose-wash); }
 #sidebar button.ig-opt[aria-selected="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
 #sidebar .ig-mark { flex: none; width: 1rem; }
+#sidebar button.ig-opt.ig-opt-default { border-top: 1px solid var(--hw-line); }
 #sidebar .ig-opt-label { flex: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #sidebar .ig-opt-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--hw-dim); }
 #sidebar .ig-list-msg { margin: 0; padding: .333rem .5rem; color: var(--hw-dim); overflow-wrap: anywhere; }

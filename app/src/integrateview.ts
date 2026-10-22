@@ -2,14 +2,14 @@
 // Every string in them is the core's cleaned text, and it is set with `textContent` and nothing else: a name that looks
 // like an element is shown as those characters. This file has no markup in it, makes no URL and builds no argument.
 import { el } from "./dom.js";
-import { cutCell } from "./integratestate.js";
+import { actionLabel, asksFirst, cutCell } from "./integratestate.js";
 import type { KvModel, RowAction, TableModel, TextModel, Tone } from "./integratestate.js";
 
 /** What the block gives the renderers: which row is selected, the actions it may draw and what a press does. */
 export interface DrawOptions {
   /** The index of the selected row of a table, or -1. */
   selected: number;
-  /** Whether an action is drawn: the block lets only the ones it knows how to run through. */
+  /** Whether an action is drawn: the block lets only the ones the core's own list of verbs backs up. */
   drawn(action: RowAction): boolean;
   /** An action was pressed. */
   press(action: RowAction): void;
@@ -28,7 +28,9 @@ function actionButton(action: RowAction, o: DrawOptions, parent: HTMLElement, in
   b.type = "button";
   b.dataset.field = "";
   b.dataset.act = String(index);
-  b.textContent = cutCell(action.label, MAX_BUTTON);
+  // An action that asks first ends in an ellipsis and says so; the card of the core follows before anything runs.
+  b.textContent = cutCell(actionLabel(action), MAX_BUTTON);
+  if (asksFirst(action.effect)) b.title = "Asks for confirmation";
   b.addEventListener("click", (ev) => {
     ev.stopPropagation();
     o.press(action);

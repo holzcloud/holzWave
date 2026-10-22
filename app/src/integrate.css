@@ -40,6 +40,8 @@
 .block-integration button.ig-opt[aria-selected="true"] { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); }
 .block-integration button.ig-opt:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
 .ig-mark { flex: none; width: 1rem; }
+/* The last entry of a list, `Make default…`: set apart by a hairline, without a mark; it asks for the card of 6.26 first. */
+.block-integration button.ig-opt.ig-opt-default { border-top: 1px solid var(--hw-line); }
 .ig-opt-label { flex: none; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ig-opt-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--hw-dim); }
 .ig-list-msg { margin: 0; padding: .333rem .833rem; color: var(--hw-dim); overflow-wrap: anywhere; }
@@ -113,9 +115,6 @@
 .ig-status[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; white-space: normal; overflow-wrap: anywhere; }
 .ig-status[data-tone="warn"]::before { content: "! "; font-weight: 700; }
 
-/* The header of the pane: a production selection is warn, underlined and marked (the word is in the bar). */
-.ph-ctx[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
-.ph-ctx[data-tone="warn"] > span::before { content: "! "; font-weight: 700; }
 
 /* Motion: 160 ms for hover and focus, unless the setting or the system asks for none. */
 :root:not(.motion-reduce) .block-integration button.ig-chip, :root:not(.motion-reduce) .block-integration button.ig-opt,

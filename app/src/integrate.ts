@@ -8,10 +8,11 @@ import type { BlockInfo } from "./blockstate.js";
 import type { Instance } from "./blocks.js";
 import { focusInput } from "./keyboard.js";
 import {
-  ageWords, clearIntegrationContext, contextText, nextSelection, readFault, readLaunchAnswer, readRunAnswer, refreshDue,
+  ageWords, clearIntegrationContext, contextText, localVerbFor, nextSelection, readFault, readLaunchAnswer, readRunAnswer, refreshDue,
   setIntegrationContext, setPaneSelection, stateWords,
 } from "./integratestate.js";
 import type { Fault, RowAction, Sel, SelectKind, ToolId, ViewModel } from "./integratestate.js";
+import { requestAction } from "./integrateconfirm.js";
 import { openPicker, pathRow } from "./integratepick.js";
 import type { Picker } from "./integratepick.js";
 import { loadTools, onHint, onTools, setTools, toolOf } from "./integratetools.js";
@@ -78,15 +79,20 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
     if (alive) draw();
   };
 
-  /** A button on a row is drawn for an action that only reads and opens a terminal, and that the core listed as such. */
-  const drawn = (action: RowAction): boolean =>
-    action.effect === "read" &&
-    (toolOf(current.source)?.verbs.some((v) => v.id === action.verb && v.effect === "read" && v.output === "terminal") ?? false);
+  /**
+   * A button on a row is drawn for an action that the core's own list of verbs backs up: the verb is listed with the same effect, and an
+   * action that only reads must open a terminal. The effect the row claims is never trusted over the list.
+   */
+  const drawn = (action: RowAction): boolean => {
+    const verb = toolOf(current.source)?.verbs.find((v) => v.id === action.verb);
+    if (verb === undefined || verb.effect !== action.effect) return false;
+    return action.effect === "read" ? verb.output === "terminal" : true;
+  };
 
   const options = (): DrawOptions => ({
     selected,
     drawn,
-    press: (action) => void launch(action),
+    press: (action) => void (action.effect === "read" ? launch(action) : ask(action.verb, action.args)),
     pick: (i) => {
       select(i);
     },
@@ -328,10 +334,17 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
     }
     closePicker("none");
     chips.get(kind)?.setAttribute("aria-expanded", "true");
+    // The last entry: the Local verb that makes this value the tool's own setting, found from the core's list, asks first.
+    const local = localVerbFor(toolOf(current.source), kind);
+    const value = selection[kind];
     const list = openPicker({
-      tool: tool(), kind, pane: current.pane, current: selection[kind], host: root, before: body,
+      tool: tool(), kind, pane: current.pane, current: value, host: root, before: body,
       choose: (key) => void choose(kind, key),
       escape: () => closePicker("terminal"),
+      makeDefault: local !== null && value !== undefined && value !== "" ? () => {
+        closePicker("chip");
+        void ask(local.verb, { [local.arg]: value });
+      } : undefined,
     });
     picker = { kind, list };
   };
@@ -373,6 +386,22 @@ export function integrationBlock(info: BlockInfo, root: HTMLElement, deps: Deps)
       if (!alive) return;
       refusal = readFault(e);
       draw();
+    }
+  };
+
+  /** An action that asks first: the core prepares the card, the person decides, and a verb that ran makes the block read again. */
+  const ask = async (verb: string, args: Record<string, string>): Promise<void> => {
+    const result = await requestAction(tool(), verb, current.pane, args);
+    if (!alive) return;
+    if (result.kind === "refused") {
+      refusal = result.fault;
+      draw();
+      return;
+    }
+    refusal = null;
+    if (result.kind === "done") {
+      gen += 1;
+      void run();
     }
   };
 

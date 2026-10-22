@@ -180,6 +180,11 @@
 }
 .ph-ctx > span { direction: ltr; unicode-bidi: isolate; }
 .panehead.exited .ph-ctx { color: var(--hw-ink-2); }
+/* A production selection of an integration block and a held terminal (`exited 1`) are warn, underlined and marked: the words are the
+   cue, the underline and the mark `!` the second, the colour the third. Here and not in integrate.css, which loads with the first
+   block or card, because a held terminal needs no block. */
+.panehead .ph-ctx[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; }
+.panehead .ph-ctx[data-tone="warn"] > span::before { content: "! "; font-weight: 700; }
 
 /* ---- forced colours ----------------------------------------------------------------------------------------- */
 

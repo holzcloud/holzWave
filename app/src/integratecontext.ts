@@ -9,11 +9,12 @@ import { paneBlocks } from "./blockstate.js";
 import { el, setAttr, setText } from "./dom.js";
 import {
   cutCell, glyphOf, nextSelection, paneSelection, reachPane, reachWords, readContext, readFault, readLaunchAnswer, rowKinds, rowWords,
-  chipText, segmentText, selectionOf, selectionText, selectionValues, valueOf,
+  chipText, localVerbFor, segmentText, selectionOf, selectionText, selectionValues, valueOf,
 } from "./integratestate.js";
 import type { ChipText, ContextRow, ContextSummary, SegmentText, SelectKind, ToolEntry, ToolId } from "./integratestate.js";
 import { openPicker, pathRow } from "./integratepick.js";
 import type { Picker } from "./integratepick.js";
+import { requestAction } from "./integrateconfirm.js";
 import { loadTools, onHint, onTools, setTools, toolOf } from "./integratetools.js";
 import { focusInput } from "./keyboard.js";
 import { state } from "./state.js";
@@ -51,6 +52,16 @@ function onDesktop(): boolean {
 
 export function contextRows(): readonly ContextRow[] {
   return summary.rows;
+}
+
+/**
+ * Whether the core lists `pane` as a held terminal (a program that ended and whose terminal stays open), and with which status. The
+ * header of the pane says so. A pane the core did not list, or lists as not held, is null.
+ */
+export function paneHeld(pane: number): { status: number | null } | null {
+  if (!enabled) return null;
+  const info = summary.panes.find((p) => p.pane === pane);
+  return info !== undefined && info.held ? { status: info.status } : null;
 }
 
 /** A status segment as the status line draws it. */
@@ -456,13 +467,18 @@ function togglePicker(tool: ToolId, kind: SelectKind, opener: HTMLElement): void
   opener.setAttribute("aria-expanded", "true");
   // The list goes under the values and their buttons.
   const acts = node.querySelector(".cx-acts");
+  const reach = reachOf(tool);
+  // The last entry: the Local verb that makes the value the tool's own setting, found from the core's list, asks first.
+  const local = localVerbFor(toolOf(tool), kind);
+  const value = valueOf(row, kind);
   const list = openPicker({
-    tool, kind, pane: reachOf(tool), current: valueOf(row, kind), host: node, before: acts?.nextSibling ?? null,
+    tool, kind, pane: reach, current: value, host: node, before: acts?.nextSibling ?? null,
     choose: (key) => void choose(tool, kind, key),
     escape: () => {
       closePicker();
       focusInput();
     },
+    makeDefault: local !== null && value !== undefined && value !== "" ? () => void makeDefault(tool, local, value, reach) : undefined,
   });
   picking = { tool, kind, list, opener };
 }
@@ -483,6 +499,17 @@ async function choose(tool: ToolId, kind: SelectKind, key: string): Promise<void
   }
   say(reachWords(reach, key), false);
   void ask(false);
+}
+
+/** The person chose `Make default…`: the core prepares the card for the Local verb with the value the row shows, and nothing changes until it is allowed. */
+async function makeDefault(tool: ToolId, local: { verb: string; arg: string }, value: string, pane: number | null): Promise<void> {
+  closePicker("value");
+  const result = await requestAction(tool, local.verb, pane, { [local.arg]: value });
+  if (result.kind === "refused") say(result.fault.text, true);
+  else if (result.kind === "done") {
+    say("", false);
+    void ask(true);
+  }
 }
 
 // ---- the buttons of a row -----------------------------------------------------------------------------------------------

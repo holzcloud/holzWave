@@ -21,6 +21,8 @@ export interface PickerOptions {
   choose(key: string): void;
   /** `Escape` was pressed inside the list. The caller closes it and gives the keyboard back. */
   escape(): void;
+  /** The last entry, `Make default…`: given when the tool has a Local verb for this kind of value and a value is selected. */
+  makeDefault?(): void;
 }
 
 export interface Picker {
@@ -100,6 +102,18 @@ export function openPicker(o: PickerOptions): Picker {
           el("span", "ig-opt-label", opt).textContent = entry.label;
           if (entry.detail !== "") el("span", "ig-opt-detail", opt).textContent = entry.detail;
           opt.addEventListener("click", () => o.choose(entry.key));
+        }
+        if (o.makeDefault !== undefined) {
+          const make = o.makeDefault.bind(o);
+          const opt = el("button", "ig-opt ig-opt-default", node);
+          opt.type = "button";
+          opt.dataset.field = "";
+          opt.title = "Asks for confirmation";
+          opt.setAttribute("role", "option");
+          opt.setAttribute("aria-selected", "false");
+          el("span", "ig-mark", opt);
+          el("span", "ig-opt-label", opt).textContent = "Make default…";
+          opt.addEventListener("click", () => make());
         }
         const options = Array.from(node.querySelectorAll<HTMLElement>(".ig-opt"));
         (options.find((x) => x.getAttribute("aria-selected") === "true") ?? options[0])?.focus({ preventScroll: true });
