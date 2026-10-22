@@ -1,0 +1,42 @@
+{
+  "argv": [
+    "login"
+  ],
+  "effect": "exec",
+  "expires_in_secs": 120,
+  "fields": [
+    [
+      "tool",
+      "azure"
+    ],
+    [
+      "verb",
+      "login"
+    ],
+    [
+      "effect",
+      "exec"
+    ],
+    [
+      "program",
+      "az"
+    ],
+    [
+      "arg 1",
+      "login"
+    ],
+    [
+      "guard",
+      "none"
+    ]
+  ],
+  "guard": {
+    "production": null
+  },
+  "hash": "e93efe13e77928bd938ec164bc7af72f1101cb19a5adac70f7c6c8c4c9b34e64",
+  "program": "az",
+  "target": [],
+  "ticket": "0123456789abcdef0123456789abcdef",
+  "tool": "azure",
+  "verb": "login"
+}

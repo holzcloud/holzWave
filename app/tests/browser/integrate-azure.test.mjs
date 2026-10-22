@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { layout, openContext, sectionShown } from "./integrate-context-lib.mjs";
+import { LAUNCHED } from "./integrate-lib.mjs";
 import { allow, cardNode, installCore, textOf } from "./integrate-confirm-lib.mjs";
 import { callsOf } from "./lib.mjs";
 
@@ -32,6 +33,7 @@ export default async function ({ page, url, errors }) {
     the_signed_in_account_has_its_rows_and_no_sign_in,
     the_subscription_chip_switches_for_this_pane,
     the_status_segment_names_the_subscription,
+    sign_in_asks_first,
   ];
   for (const run of cases) {
     try {
@@ -110,8 +112,8 @@ async function the_signed_out_account_is_a_state_in_the_block_and_the_section(pa
   // The block: the core's rows, the warn tone with the mark `!`, the sign-in action, and no fault.
   await enterBlock(page, "Azure: Account", "account");
   assert.deepEqual(await rowsOf(page), [["State", "Signed out", "warn", "!"]]);
-  const value = page.locator(".block-integration .ig-kvrow .ig-v");
-  assert.equal(await value.evaluate((n) => getComputedStyle(n, "::before").content), '"! "', "the mark is the second cue");
+  // The stylesheet of the block is loaded when the block is first drawn, so the mark may appear a moment after the rows.
+  await page.waitForFunction(() => getComputedStyle(document.querySelector(".block-integration .ig-kvrow .ig-v"), "::before").content === '"! "');
   const buttons = page.locator(".block-integration .ig-kvacts .ig-act");
   assert.deepEqual(await buttons.allTextContents(), ["Sign in…"], "the one action is the core's, and it asks first");
   assert.equal(await buttons.getAttribute("title"), "Asks for confirmation");
@@ -254,4 +256,51 @@ async function the_status_segment_names_the_subscription(page, url) {
   const last = page.locator(".block-integration .ig-table tbody tr").nth(2);
   assert.equal(await last.getAttribute("data-tone"), "warn");
   assert.equal(await last.locator(".ig-cell").first().getAttribute("data-mark"), "!");
+}
+
+async function sign_in_asks_first(page, url) {
+  const out = golden("azure_account_signed_out.json");
+  const card = golden("azure_card_login.json");
+  const opened = { kind: "launched", pane: 3, note: "Azure · Sign in", view: LAUNCHED };
+  await installCore(page, { cards: { "azure/login": card }, steps: [{ answer: opened }] });
+  await open(page, url, out, { account: runOf(out) });
+  await sectionShown(page);
+  await enterBlock(page, "Azure: Account", "account");
+  const pairs = (selector) => cardNode(page).locator(`${selector} .ic-row`).evaluateAll((r) => r.map((x) => [x.children[0].textContent, x.children[1].textContent]));
+  const shows = async () => {
+    await cardNode(page).waitFor();
+    assert.equal(await textOf(page, ".ic-title"), "Azure · Sign in");
+    assert.deepEqual(await pairs(".ic-args"), [["program", "az"], ["arg 1", "login"]], "the exact fields of the core's card");
+    assert.equal(await cardNode(page).locator(".ic-target .ic-row").count(), 0, "a sign-in names no target");
+    assert.equal(await cardNode(page).locator(".ic-guard").count(), 0);
+    assert.equal(await textOf(page, ".ic-hash"), `hash ${card.hash.slice(0, 12)}`);
+    assert.deepEqual(await cardNode(page).locator("button").allTextContents(), ["Allow once", "Deny"]);
+  };
+
+  // The action of the block asks for the card; nothing is sent until the press.
+  assert.equal((await callsOf(page, "integration_prepare")).length, 0);
+  await page.locator(".block-integration .ig-kvacts .ig-act").click();
+  await shows();
+  assert.deepEqual(await callsOf(page, "integration_prepare"), [{ tool: "azure", verb: "login", pane: 2, args: {} }]);
+  assert.equal((await callsOf(page, "integration_confirm")).length, 0, "nothing runs before the press");
+  assert.equal((await callsOf(page, "integration_launch")).length, 0, "and the terminal is not started by the page");
+
+  // Deny: the ticket is dropped, no pane is made.
+  await page.waitForTimeout(600);
+  await cardNode(page).locator(".ic-no").click();
+  await page.waitForFunction(() => document.querySelector("section.ic") === null);
+  assert.deepEqual(await callsOf(page, "integration_cancel"), [{ ticket: card.ticket }]);
+  assert.equal((await callsOf(page, "integration_confirm")).length, 0);
+
+  // The palette entry gives the same card for the focused pane.
+  await page.evaluate(() => document.getElementById("term").focus());
+  await runFromPalette(page, "Azure: Sign in");
+  await shows();
+  assert.deepEqual((await callsOf(page, "integration_prepare")).at(-1), { tool: "azure", verb: "login", pane: 2, args: {} });
+  assert.equal((await callsOf(page, "integration_confirm")).length, 0, "the palette starts nothing by itself");
+
+  // Allow: one confirm with the core's ticket and hash, and the terminal the core made appears beside the block.
+  await allow(page);
+  assert.deepEqual(await callsOf(page, "integration_confirm"), [{ ticket: card.ticket, hash: card.hash }]);
+  await page.waitForFunction(async () => (await import(new URL("state.js", location.href).href)).state.view?.panes.length === 3);
 }
