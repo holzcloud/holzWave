@@ -2547,7 +2547,10 @@ fn test_plan_has_every_ai_and_extras_row_exactly_once() {
 /// order of the table: the human checks that need a real cluster, account, Windows or Linux machine, which no suite
 /// here can run. Every id is in the document exactly once, with an area, an instruction and an expected result; the
 /// Result cell is the owner's and stays empty until the owner has run the row.
-const INTEGRATION_TEST_PLAN_ROWS: [&str; 1] = ["INT-K1"];
+const INTEGRATION_TEST_PLAN_ROWS: [&str; 18] = [
+    "INT-K1", "INT-K2", "INT-K3", "INT-K4", "INT-T1", "INT-T2", "INT-A1", "INT-A2", "INT-G1", "INT-G2", "INT-P1", "INT-W1",
+    "INT-W2", "INT-W3", "INT-W4", "INT-L1", "INT-S1", "INT-X1",
+];
 
 fn integration_test_plan_row_ids() -> Vec<String> {
     INTEGRATION_TEST_PLAN_ROWS.iter().map(|id| (*id).to_owned()).collect()

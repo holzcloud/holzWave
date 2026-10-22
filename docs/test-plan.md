@@ -1,9 +1,10 @@
 # Test plan
 
-Seven parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
+Nine parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
 macOS acceptance of Phase 2, the Windows and Linux list of Phase 2.2 (Part 4), connections (Part 5), files and previews
-with the extras (Part 6), and the AI chat with the Apple on-device model and the rest of the extras (Part 7). All of it
-runs locally; nothing here needs GitHub (D-04).
+with the extras (Part 6), the AI chat with the Apple on-device model and the rest of the extras (Part 7), the local
+network notice of macOS (Part 8), and the native integrations with Kubernetes, Talos, Azure CLI and GAM7 (Part 9). All of
+it runs locally; nothing here needs GitHub (D-04).
 
 ## Part 1: run everything locally
 
@@ -68,6 +69,46 @@ sh scripts/cross-check.sh all                 # Windows (GNU ABI) and Linux comp
 Optional variables: `HOLZWAVE_LIVE_ANTHROPIC_MODEL` and `HOLZWAVE_TEST_GEMINI_MODEL` name another model,
 `HOLZWAVE_TEST_BAD_CERT_URL` is an https address with a bad certificate that must be refused, and
 `HOLZWAVE_TEST_SSH_PORT` is the port of the real SSH server. Part 7 says what to record from each run.
+
+The native integrations (Kubernetes, Talos, Azure CLI and GAM7) have commands of their own. The first block needs no Zig,
+no network and none of the four tools: the tool modules, the two JSON contracts, the service and the status worker run
+against fake programs and recorded fixtures. The rest needs more, as each comment says. Part 9 is the list for the real
+tools.
+
+```sh
+# the quick set: no Zig, no network, no tool installed
+cargo test --locked --offline -p holzwave-core --no-default-features --test integrate_argv --test integrate_detect --test integrate_run --test integrate_view --test integrate_profiles --test integrate_kube --test integrate_talos --test integrate_azure --test integrate_gam --test integrate_context --test integrate_ticket --test integrate_service --test integrate_status
+
+# the shell and pane tests: the pane needs the engine (Zig), the library tests of the app shell need the app's build
+cargo test --locked --offline -p holzwave-core --test integrate_pane
+cargo test --locked --offline -p holzwave-app --lib integration
+
+# the end-to-end files: the service driven the way the app shell builds it, against fake programs (Unix only; their
+# pane tests need the engine, so without Zig those tests are left out)
+cargo test --locked --offline -p holzwave-core --no-default-features --test integrate_e2e_kube --test integrate_e2e_talos --test integrate_e2e_azure --test integrate_e2e_gam
+
+# the release gate: generated name injection, hostile output, canary secrets, the environment policy, approval bypass
+cargo test --locked --offline -p holzwave-core --no-default-features --test integrate_injection --test integrate_hostile --test integrate_canary --test integrate_bypass
+
+# the page: the blocks, the Context section, the card, the profiles dialog, the palette entries, hostile text
+npm run test:browser --prefix app -- --only integrate
+
+# what the real tools print: read-only verbs, sanitised before they are written to core/tests/fixtures/integrations/
+sh scripts/record-integration-fixtures.sh <kubectl|az|gam|talosctl|all>
+HW_TALOSCONFIG=<absolute path of a talosconfig> HW_TALOS_NODE=<address> sh scripts/record-integration-fixtures.sh talosctl
+sh scripts/probe-login-path.sh <zsh|bash|fish|sh|dash|ksh> --check     # the login-shell PATH probe against its recorded captures
+
+# the real-tool conformance tests: they skip with a printed reason unless the variable is set and the tool is found
+HW_INTEGRATION_REAL=1 cargo test --locked --offline -p holzwave-core --no-default-features --test integrate_real -- --nocapture
+
+# on a Windows machine only: the detector, az.cmd, ConPTY and the overlay value (rows INT-W1 to INT-W4)
+cargo test -p holzwave-core --test integrate_windows -- --nocapture
+```
+
+The cross-check and the Linux container of the commands above (`sh scripts/cross-check.sh all` and `sh
+scripts/linux-container-test.sh core`) cover the integrations too. Three notes: the real-tool tests are gated and skip
+with a printed reason, the fake tools are Unix scripts (the Windows file writes its own `.cmd` stand-ins), and the
+recorder writes sanitised output only and never runs a verb that changes a cluster, an account or a configuration.
 
 Notes:
 
@@ -360,11 +401,46 @@ Machines the rows need:
 ## Part 9: native integrations (Kubernetes, Talos, Azure CLI, GAM7)
 
 Nothing in this part is verified until you run the row and write `pass`, or `fail` with a line of what was seen, in its
-Result column. The rows need real tools, clusters and accounts that no suite here can reach.
+Result column. The rows need real tools, clusters and accounts that no suite here can reach: the integrations are tested
+against fake tools and recorded fixtures, and the shapes of Talos output and the Windows rows are assumptions until the
+owner has run them. A row that you do not run stays empty. A failing row becomes a task of its own.
+
+Use throwaway objects. Every row that deletes, signs out or changes a default names a test namespace, a spare account or a
+copy of the file; read the card and the context it names before you press `Allow once`. A key or token never goes into a
+file or a command line: the rows describe a made-up value by its prefix and length.
 
 | # | Area | What to do | Expected | Result |
 |---|---|---|---|---|
 | INT-K1 | Kubernetes on a real cluster | With a real cluster in your kubeconfig (kind, Docker Desktop's Kubernetes or a throwaway cloud cluster): (1) open `Kubernetes: Contexts`, `Kubernetes: Namespaces` and `Kubernetes: Pods` from the palette and compare with `kubectl config get-contexts`, `kubectl get namespaces` and `kubectl get pods -o wide`. (2) In the pods block pick another context and another namespace in the chips. (3) Watch the pods block while a pod is created and deleted in a terminal; then hide the window for a minute. (4) Open the block for a context whose server is down. (5) Compare READY, STATUS, RESTARTS and AGE with `kubectl get pods`. | (1) The lists match and the current context row is marked. (2) Only this pane's context and namespace change: `kubectl config current-context` in a terminal still prints the old one and `shasum ~/.kube/config` is the same before and after. (3) The table follows within 10 s; while the window is hidden no `kubectl` process starts (`ps`). (4) `! kubectl reported an error: …` in words, the last rows kept and dimmed. (5) The words match kubectl's; a pod in a back-off state is marked `!`. Record kubectl ____, cluster ____. | |
+| INT-K2 | Exec in Pod, Logs and the credential plugin | On the cluster: (1) `Exec…` on a pod with bash and on one with only sh, read the card (the pod shell string is one argument on its own row) and press `Allow once`; (2) resize the window, run `ls`, then `exit`; (3) `Exec…` on a pod in the `Completed` state and on a pod you have no right to; (4) `Logs` on a busy pod, then close the pane; (5) in an exec shell run `env \| grep HOLZWAVE`; (6) start holzWave from the Finder and exec into a pod of a cluster that uses an exec credential plugin (aws, gke-gcloud-auth-plugin or kubelogin). | (1) A shell opens in a new tab: bash where present, else sh. (2) It resizes, and `exit` closes the pane at once. (3) The pane stays with the tool's error line, the header `exited 1` and the notice `[holzWave] exited with status 1. Press Enter to close.`; Enter closes it. (4) The log streams and closing the pane ends the process (`ps` shows no kubectl). (5) Nothing is printed. (6) The plugin runs and the shell opens, or the difference is recorded: ____. | |
+| INT-K3 | Production guard and delete pod | In a test namespace create two throwaway pods. In `Integration profiles…` add a profile that pins the context with `Production context` checked. (1) In the pods block press `Delete…` on a pod: read the card, press `Allow once`, wait a second and press it again. (2) Open another card and press `Escape`. (3) Press `Allow once` within half a second of a card appearing, and press it twice in a quick double click. (4) Between the card and the second press switch the namespace chip. (5) Switch to a context without the flag and delete the second pod. (6) Choose `Make default…` on the context chip and confirm; then run `kubectl config current-context`. | (1) The card names the context in the warn colour with `production`; the first press changes the button to `Press again to allow on production` and nothing is deleted (`kubectl get pod` still lists it); the second press deletes exactly the pod the card names and the row says `Done: …`. (2) Nothing is deleted. (3) The press is ignored; a double click does not delete. (4) The press answers that the request changed and a new card is drawn, or the card still names the first namespace, and nothing runs. (5) One press deletes. (6) The card names `the kubeconfig files named by KUBECONFIG`; after the confirm `kubectl config current-context` prints the new context, and only because you confirmed. | |
+| INT-K4 | Overlay shell and credential plugins | (1) Run `Kubernetes: Shell with the current context` for a context other than the current one. In the pane run `kubectl config current-context`, `echo $KUBECONFIG` and `kubectl config use-context <a third one>`; in a normal terminal run `kubectl config current-context` and compare `shasum ~/.kube/config` before and after. (2) Add `export KUBECONFIG=$HOME/.kube/config` at the end of your shell's rc file and open the shell pane again. (3) Close the pane and look in the `run/kube` folder of the data directory. (4) Restart holzWave with a shell pane open. | (1) The pane prints the selected context; `KUBECONFIG` starts with the overlay file and then your own list; `use-context` in the pane changes only the overlay, so the normal terminal and the file are unchanged. (2) The chip still says what holzWave set but the shell uses your own file: the documented limit. (3) The overlay file is gone. (4) The pane starts as a normal shell with `holzWave: this pane ran …; it is not started again`. | |
+| INT-T1 | Talos output shapes | With a real talosconfig (a reader role if you can) and `talosctl` installed: run `HW_TALOSCONFIG=<file> HW_TALOS_NODE=<address> sh scripts/record-integration-fixtures.sh talosctl`; then open `Talos: Nodes`, `Talos: Services`, `Talos: Machine status`, `Talos: Info` and `Talos: Contexts` and compare with `talosctl get members`, `talosctl services`, `talosctl get machinestatus`, `talosctl config info` and `talosctl config contexts`. | The six recorded files replace the written ones in `core/tests/fixtures/integrations/talosctl/` and the core tests pass with them, or a difference becomes a new fixture and a parser rule; the five views show the same members, services, status and contexts; an unknown shape is plain text, never an error. Talos ____; member names that differed ____. | |
+| INT-T2 | Talos Local verb, dashboard, dmesg and the role | (1) With two contexts in the talosconfig use `Make default…` on the Talos context chip, confirm, then read `talosctl config contexts` and the modification time of the talosconfig. (2) `Talos: Dashboard` on a node, press `Allow once`, use it and press `q`. (3) `Kernel messages` on a node row. (4) Open `Talos: Info` with an `os:reader` config and with an `os:admin` config. | (1) The card says which file changes; after the confirm the current context changed in the file (the assumption that `config context` writes it: record yes or no ____). (2) The dashboard runs in a terminal pane and ends cleanly; `--context=` and `--nodes=` in the equals form were accepted (record yes or no ____). (3) The kernel messages stream; closing the pane stops them. (4) `read-only (os:reader)` and `full access (os:admin)` with the mark (whether `config info` has a role member: ____). | |
+| INT-A1 | Azure signed in and signed out | (1) Sign out with `az logout`, open `Azure: Account`, press `Sign in…`, read the card, press `Allow once` and finish the sign-in in the browser. (2) Open `Azure: Subscriptions` and `Azure: Resource groups` and compare with `az account list -o table` and `az group list -o table`. (3) Pick another subscription in the chip. (4) Compare the status line segment with the Context section. (5) With an update available for `az` open the account view. | (1) Signed out shows `signed out`, the mark and the action; the sign-in runs in a terminal pane; afterwards the block shows `Signed in`. (2) The lists match. (3) Only this pane's subscription changes: `az account show` in a terminal still shows the old default and `~/.azure/azureProfile.json` is unchanged. (4) `az <name>` in the status line equals the Context section. (5) The update notice on standard error does not appear in the table. | |
+| INT-A2 | Azure isolated folder and telemetry | Add an Azure profile with `Own configuration folder` checked, run `Azure: Sign in` for it and look in `integrations/azure/<profile>/` of the data directory; read the sentence under the box; run `az config get core.collect_telemetry` in a normal terminal; watch the network while the account and subscription blocks refresh. | The sign-in writes its tokens into the profile's own folder only; your normal `~/.azure` is unchanged and your own telemetry setting is untouched; the sentence `Sign in again inside it. holzWave keeps it on this computer.` matches what happens and nothing of the folder is synced; the runs holzWave starts carry `AZURE_CORE_COLLECT_TELEMETRY=false` (check with `ps eww` while one runs) and the monitor shows only the traffic `az` itself makes. | |
+| INT-G1 | GAM sections, domain and users | With GAM7 set up for a small test domain with two sections in `gam.cfg`: (1) open `GAM7: Sections` and pick the other section in the chip; (2) `GAM7: Domain`; (3) `GAM7: Users` and the JSON view; (4) compare `gam.cfg` before and after and `gam select <section> print users`. | (1) The list matches `gam showsections` (record the real text of the output: ____). (2) The facts match `gam info domain`. (3) The users match `gam print users`; a user with a multi-line field is on one line. (4) `gam.cfg` is byte-identical: nothing was saved. `gam` was found although it is only an alias (record where: ____). | |
+| INT-G2 | GAM on a large domain and the per-process section | On a domain with thousands of users open `GAM7: Users` and time it; in a terminal run `GAMCFGSECTION=<other section> gam info domain` while the default section differs. | The block shows at most 2000 rows with the note that more rows exist and the app stays responsive; the run ends within 15 s or the fault says why; `GAMCFGSECTION` selects the section for that process only (the assumption: record yes or no ____); `config csv_output_row_limit` is honoured (the output stops at 2001 rows). | |
+| INT-P1 | Finder start and the PATH | Build the app (`npm --prefix app run tauri -- build --bundles app`), start it from the Finder, not from a terminal, and open the block of each of the four tools. Repeat with fish as your login shell and with nushell. | Each installed tool is found even though the Finder's `PATH` lacks it, and the block says where (the process path, the login shell or a fixed directory); `gam` in `~/bin/gam7` is found; with fish it works; with nushell the probe is skipped and the fixed directories or the path field are used; a tool in none of them shows `<tool> was not found.` with the places searched and the path field; `Set path` with the right file works and a wrong file name is refused. | |
+| INT-W1 | Windows detection | On Windows 10 or 11 with kubectl, az (MSI), gam (`C:\GAM7`) and talosctl installed (winget or by hand): start the app from the Start menu, open each block, and run `cargo test -p holzwave-core --test integrate_windows -- --nocapture`; note the tests marked `Row INT-W1`. | Each tool is found; `az.cmd` is found through the extensions of `PATHEXT` and marked as a batch file; `%LOCALAPPDATA%\Microsoft\WinGet\Links`, `%LOCALAPPDATA%\GAM7` and `C:\GAM7` are searched; a relative and a UNC `PATH` entry are ignored; the tests pass. The file has never been compiled for Windows: a compile error is the first finding (record: ____). | |
+| INT-W2 | az.cmd and the argument charset | Run the `Row INT-W2` test of the Windows test file; in the app open `Azure: Subscriptions` and choose a subscription; end a run that started a child to see that the whole tree ends (taskkill). | Arguments with `&`, `%`, `^`, `\|`, `<`, `>`, a double quote or a space never reach a process (the marker file is not written); normal use works; the child of the child ends too. | |
+| INT-W3 | Exec in Pod in ConPTY | Run the `Row INT-W3` test; in the app repeat INT-K2 steps 1 to 4 on a real cluster and look at the header `exited N` under high contrast. | The exec pane runs in a ConPTY, resizes and exits; a failing exec is held until Enter and its dash and mark show under high contrast. | |
+| INT-W4 | Overlay separator and UNC paths | Run the `Row INT-W4` test; start a Kubernetes shell with a context chosen and print `$env:KUBECONFIG`; set `KUBECONFIG` to a UNC path in your environment and start holzWave. | The value is the overlay, a semicolon, then your list; a UNC or device entry is dropped (a network monitor shows no connection to that server). | |
+| INT-L1 | Linux and the Flatpak build | On Linux run `sh scripts/linux-container-test.sh core` or `cargo test -p holzwave-core`; start the app from a launcher and open each block with the tools in `~/.local/bin`, `/snap/bin` or Homebrew's Linux prefix; exec into a pod. In the Flatpak build open any integration block. | The tests pass (the container run had one failure outside the integrations, the test `a_wrong_password_keeps_the_pane_open_with_the_reason_and_enter_tries_again` in `core/src/ssh.rs`; record whether it fails on your machine ____); the tools are found (record where ____); the Flatpak build says `The integrations are not available in the Flatpak build.` for every tool and starts no process. | |
+| INT-S1 | Profiles and secret variables between two devices | On two devices with the same sync account: create a profile with a secret variable on device A and sync; on B restart the app (staged files apply at start), open `Integration profiles…` and run a block for that profile; remove the profile on A and look in the keychain; then add `LD_PRELOAD` to the profile's plain variables in the file on A and sync. | B has the profile; the secret variable shows `saved` (the value travelled inside the encrypted secrets) and a run on B uses it (a credential plugin works); the keychain entry `int:<profile>:<NAME>` is gone on A after the removal; the file with `LD_PRELOAD` is quarantined on B (`.bad`, a note in the dialog, no profiles) and the app starts. | |
+| INT-X1 | Hostile names on a cluster | In a throwaway cluster create objects whose labels, annotations, event messages and (where the API allows) names are confusing: a very long name, a label with an escape sequence sent through the API, an event message with right-to-left characters; open the pods block and the contexts and namespaces blocks and try the row actions. | Everything is inert text of at most 240 characters per cell; rows whose pod names are valid keep their actions and rows whose names are not have none; nothing is executed; a card spells control characters as escapes. | |
+
+Machines the rows need:
+
+- INT-K1 to INT-K4: a Mac with `kubectl` and a throwaway cluster (kind or Docker Desktop is enough); INT-K2 step 6 needs a cluster with an exec credential plugin.
+- INT-T1 and INT-T2: a Mac with `talosctl` and a Talos cluster or a Talos in a container, ideally with an `os:reader` and an `os:admin` configuration.
+- INT-A1 and INT-A2: a Mac with `az` and an Azure account you may sign in to. INT-G1 and INT-G2: a Mac with GAM7 and a Google Workspace test domain (INT-G2 a large one).
+- INT-P1: the built app, started from the Finder, and fish and nushell as login shells. INT-X1: a throwaway cluster you may fill with odd names.
+- INT-S1: two devices with one sync account and a real keychain on each.
+- INT-W1 to INT-W4: a Windows 10 or 11 machine. INT-L1: a Linux desktop and a Flatpak build.
+
+A failing row becomes a task of its own: the owner writes `fail` and what was seen, and a gap plan fixes it before the
+phase is called done.
 
 ## What to expect
 
@@ -408,3 +484,19 @@ Known limits of this build, so they are not reported as defects:
   older SDK builds the app without it. Where it is missing it cannot be chosen, and nothing falls back to another provider.
 - The upload arrow of the system monitor is drawn in the secondary ink in the app and on the design page; the pictures of
   [design.md](design.md) that show a monitor still draw it in rose until they are rendered again.
+- The native integrations (Kubernetes, Talos, Azure CLI, GAM7) were run only against fake tools and recorded fixtures. The
+  shapes of Talos output and the roles in `talosctl config info` are written from the tool's documents, and that
+  `talosctl config context` writes the talosconfig is an assumption, until rows INT-T1 and INT-T2 are run. The text of
+  `gam showsections` and the per-process `GAMCFGSECTION` and row limit are assumptions until INT-G1 and INT-G2.
+- A tool is found through the process `PATH`, then your login shell's `PATH` (zsh, bash, fish, sh, dash and ksh; nushell is
+  not asked), then a short list of directories per system. A tool in none of them needs its path set in the block.
+- A Kubernetes shell pane gets an overlay `KUBECONFIG` that lists the selected context first. A start file of your shell
+  that exports `KUBECONFIG` again replaces it, and a credential plugin may refresh a token in your kubeconfig by itself.
+- The value of a secret variable of a profile is in the environment of the tool it is started for, so another process of
+  your account can read it with `ps eww` while that tool runs.
+- A Flatpak build does not run the integrations and says so. Mobile has none. Nothing of the integrations ran on Windows
+  hardware, and the Windows and mobile compile checks did not run (the Windows tests exist and have never been compiled
+  for that target). Linux ran only in an Ubuntu container, where one test outside the integrations failed (row INT-L1).
+- The `New block` picker shows the integrations drawn and not built: the blocks are opened from the palette, the Context
+  section of the sidebar and the profiles dialog.
+- The table of GAM7 output is limited to 2000 rows, and `kubectl` exec uses bash where the pod has it and sh otherwise.
