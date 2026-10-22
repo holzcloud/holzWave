@@ -465,6 +465,42 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .status .cseg .stl{margin-left:6px;color:var(--ink3);text-transform:lowercase}
 .phchip{flex:none;display:inline-flex;align-items:center;gap:6px;max-width:60%;box-sizing:border-box;padding:0 6px;border:1px solid var(--edge);border-radius:999px;color:var(--ink2);white-space:nowrap;overflow:hidden}
 .phchip>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}.phchip .pw{flex:none;color:var(--warn);text-decoration:underline}.phchip .pw::before{content:"! ";font-weight:700}
+/* The card of an integration action (docs/design.md 6.26). The classes and the words are those of app/src/integrate.css. A 2 px bar runs along the left edge (warn while a decision
+   is needed, danger when armed or when the card can only be denied, a hairline after); the guard line, the armed line and the fault line are a word, an underline and the mark !
+   besides their colour; rose is the solid Allow once only. The floating layer is the only shadow. */
+.ic-card{width:288px;box-sizing:border-box;padding:10px;border-radius:8px;border-left:2px solid var(--warn);color:var(--ink);font:400 12px/1.4 var(--mono);text-align:left}
+.ic-card[data-mode=armed],.ic-card[data-mode=cannot]{border-left-color:var(--danger)}
+.ic-card[data-mode=sending],.ic-card[data-mode=done],.ic-card[data-mode=ended]{border-left-color:var(--edge)}
+.ic-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:2px 8px;margin-bottom:4px}
+.ic-who,.ic-count{color:var(--ink3)}
+.ic-who::before{content:"! ";color:var(--warn);font-weight:700}
+.ic-card[data-mode=armed] .ic-who::before,.ic-card[data-mode=cannot] .ic-who::before{color:var(--danger)}
+.ic-card[data-mode=sending] .ic-who::before,.ic-card[data-mode=done] .ic-who::before,.ic-card[data-mode=ended] .ic-who::before{content:""}
+.ic-title{margin:0 0 4px;font:700 13px/1.3 var(--mono);overflow-wrap:anywhere}
+.ic-effect{margin:0 0 6px;color:var(--ink2);font:400 13px/1.4 var(--sans);overflow-wrap:anywhere}
+.ic-target{margin:0 0 6px}
+.ic-row{display:grid;grid-template-columns:minmax(36px,72px) minmax(0,1fr);column-gap:8px;padding:1px 0}
+.ic-name{color:var(--ink3);overflow-wrap:anywhere}.ic-value{min-width:0;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+.ic-args{box-sizing:border-box;max-height:240px;margin:0 0 6px;padding:2px 6px;overflow:hidden;border:1px solid var(--edge);border-radius:4px}
+.ic-guard{margin:0 0 6px;color:var(--warn);text-decoration:underline;overflow-wrap:anywhere}.ic-guard::before{content:"!";margin-right:.6ch;font-weight:700;text-decoration:none;display:inline-block}
+.ic-hash{margin:0 0 6px;color:var(--ink3);font-size:11px}
+.ic-line,.ic-fault,.ic-foot{margin:0 0 6px;font:400 12px/1.4 var(--sans);overflow-wrap:anywhere}
+.ic-line{color:var(--ink)}
+.ic-card[data-mode=armed] .ic-line,.ic-card[data-mode=changed] .ic-line,.ic-card[data-mode=cannot] .ic-line{color:var(--warn);text-decoration:underline}
+.ic-card[data-mode=armed] .ic-line::before,.ic-card[data-mode=changed] .ic-line::before,.ic-card[data-mode=cannot] .ic-line::before{content:"!";margin-right:.6ch;font-weight:700;display:inline-block}
+.ic-fault{color:var(--danger);text-decoration:underline}.ic-fault::before{content:"!";margin-right:.6ch;font-weight:700;display:inline-block}
+.ic-foot{color:var(--ink3);font-size:11px}
+.ic-acts{display:flex;flex-direction:row-reverse;justify-content:space-between;gap:8px;margin:0 0 6px}
+.ic-acts .btn{display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;min-height:28px;padding:0 10px;border-radius:5px;font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;text-align:center}
+.ic-acts .btn.p.arm{background:var(--danger);border-color:var(--danger);color:var(--ground)}
+.ic-acts .btn.off,.ic-acts .btn.p.off{background:none;border-color:var(--edge);color:var(--ink3);font-weight:500}
+.ic-grid{display:grid;grid-template-columns:repeat(4,264px);gap:16px;justify-content:center;align-content:start;padding:10px 12px;flex:1;background:var(--ground);overflow:hidden}
+.ic-cell .cap{margin:0 0 4px}.ic-cell .ic-card{width:264px;box-shadow:none}.ic-cell .ig-frame{width:264px}
+.ic-held{display:flex;justify-content:center;padding:0 12px 10px;background:var(--ground)}
+.ic-held .cap{margin:0 0 4px}
+.dot.ex{box-sizing:border-box;background:none;border:1px solid var(--ink3);position:relative}
+.dot.ex::after{content:"";position:absolute;left:-4px;right:-4px;top:calc(50% - .5px);height:1px;background:var(--ink3)}
+.ig-frame .ph .ctx.ic-exited{color:var(--warn);text-decoration:underline}.ic-exited>span::before{content:"! ";font-weight:700}
 /* Handys */
 .phones{display:flex;gap:16px;flex-wrap:wrap;width:fit-content;max-width:100%}
 .ph1{width:200px;height:400px;border:1px solid var(--edge);border-radius:22px;overflow:hidden;background:var(--ground);display:flex;flex-direction:column;font:400 10px/1.5 var(--mono);position:relative}
@@ -658,8 +694,8 @@ function base(v){
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span>${v==='attn'?mks(['fail','done']):''}</div><div class="ws">◇ docs <span class="n">1</span>${v==='attn'?mks(['done']):''}</div><div class="ws plus">＋</div>
     <span class="fill"></span>
     <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
-  <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
+  <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
+  <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2',chip:phChip('⎈ talos-prod')})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1))}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -667,7 +703,7 @@ function base(v){
       ${P('in','◧','notes.md','preview',md)}
       ${P('','◔','system','local · 1 s',sysmon)}
     </div>${searchBar}
-  </div>`}${v==='kiwsh'?side:v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='kimonstates'||v==='kint'||v==='kintstates'?'':v==='kintctx'?cxSideCtx:v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||(v==='kintctx'?status('',cseg('⎈ prod-eu/payments',{prod:1})):status())}${awOver(v)}`;
+  </div>`}${v==='kiwsh'?side:v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='kimonstates'||v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?'':v==='kintctx'?cxSideCtx:v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||(v==='kintctx'?status('',cseg('⎈ prod-eu/payments',{prod:1})):status())}${awOver(v)}${icOver(v)}`;
 }
 /* The chat pane (docs/design.md 6.12). Two states of one conversation: `kipane` streams a reply, `kistates` shows the picker, a stopped
    reply, a failed turn and a long draft. The words are the ones of the page: the status words, the end row, the count. */
@@ -1038,6 +1074,49 @@ const cxArea=()=>`<div class="area" style="flex:0 0 400px;grid-template-columns:
    cxRow('az','Azure',['—'],{words:[['signed_out','signed out']]}),
    cxRow('gam','GAM',['work'],{stale:1,words:[['stale','stale']]})].join('')}))}</div></div></div>`;
 
+/* The card of an integration action (docs/design.md 6.26). `kintconfirm` is the pods block of the Daily window with the card at the top right for Delete pod in a production
+   context, armed: the first press is made and nothing has run. `kintconfirmstates` is the card in four more states, narrower so that they fit side by side, and under them
+   the header of a held terminal. One function draws the card (`icCard`) from the words of the page; the buttons that ask first end in an ellipsis. */
+const icRows=(rows)=>rows.map(([n,v])=>`<div class="ic-row"><span class="ic-name">${n}</span><span class="ic-value">${v}</span></div>`).join('');
+const icArgs=(prog,args)=>icRows([['program',prog],...args.map((a,i)=>['arg '+(i+1),a])]);
+const icEffect={write:'Changes a cluster or an account. Check the target below.',local:'Changes the tool\'s own configuration. It writes: ',exec:'Opens a session with your credentials. Check the command below.'};
+const icLines={armed:'Armed. The next press allows this on production. Nothing has run yet.',sending:'Allowed · running…',ended:'That action is no longer waiting.'};
+const icCard=(o)=>`<div class="ic-card float" role="alertdialog" aria-label="${o.title}" data-mode="${o.mode||'ask'}" data-production="${o.prod?'true':'false'}">
+ <div class="ic-head"><span class="ic-who lbl">Confirm needed</span>${o.count?`<span class="ic-count lbl">${o.count}</span>`:''}</div>
+ <h2 class="ic-title">${o.title}</h2>
+ <p class="ic-effect">${o.effect}</p>
+ <div class="ic-target">${icRows(o.target)}</div>
+ <div class="ic-args">${icArgs(o.prog,o.args)}</div>
+ ${o.prod?`<p class="ic-guard">Production context: ${o.prod}.</p>`:''}
+ <p class="ic-hash">hash ${o.hash||'9f3a41c2d7be'}</p>
+ ${icLines[o.mode]?`<p class="ic-line">${icLines[o.mode]}</p>`:''}${o.fault?`<p class="ic-fault">${o.fault}</p>`:''}
+ ${o.mode==='ended'?'':`<div class="ic-acts"><span class="btn p ${o.mode==='armed'?'arm':''} ${o.mode==='sending'?'off':''}">${o.mode==='armed'?'Press again to allow on production':'Allow once'}</span><span class="btn ${o.mode==='sending'?'off':''}">Deny</span></div><p class="ic-foot">Allows this one action only. Nothing is kept for later. Esc denies.</p>`}</div>`;
+const icDelete={title:'Kubernetes · Delete pod',effect:icEffect.write,target:[['context','prod-eu'],['namespace','payments'],['pod','api-0']],prog:'kubectl',
+ args:['delete','pod','--context=prod-eu','--namespace=payments','--wait=false','--request-timeout=10s','--','api-0']};
+const icKubeConfig='the kubeconfig files named by KUBECONFIG, by default ~/.kube/config';
+const icLocal={title:'Kubernetes · Use context',effect:icEffect.local+icKubeConfig,target:[['context','dev']],prog:'kubectl',args:['config','use-context','--','dev'],hash:'4c0e7a19b2d5'};
+const icExec={title:'Kubernetes · Exec',effect:icEffect.exec,target:[['context','dev'],['pod','api-0']],prog:'kubectl',hash:'b17d02e6a9f3',
+ args:['exec','-i','-t','--context=dev','api-0','--','sh','-c','command -v bash >/dev/null 2>&1 && exec bash || exec sh']};
+const icShortDelete={...icDelete,args:['delete','pod','--wait=false','--request-timeout=10s','--','api-0'],target:[['context','dev'],['namespace','default'],['pod','api-0']]};
+const igActBtn=(t,ask)=>`<span class="ig-act"${ask?' title="Asks for confirmation"':''}>${t}</span>`;
+const igRowAsk=(cells,o={})=>`<tr class="${o.t||''} ${o.sel?'sel2':''}">${cells.map(c=>`<td>${c}</td>`).join('')}${o.act===undefined?'':`<td class="ig-a">${o.act?`${igActBtn('Logs')} ${igActBtn('Exec…',1)} ${igActBtn('Delete…',1)}`:''}</td>`}</tr>`;
+const igPodsAsk=`<div class="ig-body"><table class="ig-table">${igHead(['NAME','READY','STATUS','RESTARTS','AGE'],1)}<tbody>${[
+ igRowAsk(['api-0','1/1','Running','0','3d'],{sel:1,act:1}),
+ igRowAsk(['api-1','1/1','Running','0','3d'],{act:0}),
+ igRowAsk(['worker-0','0/1','Pending','0','4s'],{t:'w',act:0}),
+ igRowAsk(['cron-27184','0/1','CrashLoopBackOff','12','8m'],{t:'d',act:0}),
+ igRowAsk(['web-5f9d','1/1','Running','1','2d'],{act:0}),
+ igRowAsk(['db-0','0/1','Completed','0','9d'],{t:'q',act:0})
+].join('')}</tbody></table></div>`;
+const icArea=()=>`<div class="area" style="grid-template-columns:2fr 1fr;grid-template-rows:1fr">${P('','⎈','pods','<span class="ig-wctx">Kubernetes · prod-eu · payments · 10 s</span>',`${igChips()}${igPodsAsk}<div class="ig-status" role="status">Updated 4 s ago</div>`,{f:1})}${P('','⌁','talos-1','ssh · talos-1',ssh(0))}</div>`;
+const icHeld=(ctx,body)=>`<div class="ig-frame"><div class="ph"><i class="dot ex"></i><span class="dim">⎈</span><b class="lbl">exec api-0</b>${phChip('⎈ dev')}<span class="ctx ic-exited"><span>${ctx}</span></span></div><div class="term pre">${body}</div></div>`;
+const icStates=()=>`<div class="ic-grid">${[
+ ['A Local verb: Make default',icCard(icLocal)+`<div class="cap" style="margin-top:14px">A held terminal: the program ended, the terminal stays open</div>${icHeld('exited 1',`error: container not found\n<span class="dim">exited 1</span>`)}`],
+ ['An Exec verb, not production',icCard(icExec)],
+ ['After Allow once',icCard({...icShortDelete,mode:'sending'})],
+ ['The ticket is gone',icCard({...icShortDelete,mode:'ended'})]
+].map(([cap,card])=>`<div class="ic-cell"><div class="cap">${cap}</div>${card}</div>`).join('')}</div>`;
+const icOver=v=>v==='kintconfirm'?`<div class="ov" style="right:12px;top:68px">${icCard({...icDelete,mode:'armed',prod:'Production EU'})}</div>`:'';
 const views=[
  ['alltag','Daily','Every level at a glance: workspaces as pills, tabs below, panes inside. Panes: local shell, SSH with Kubernetes context (reconnecting here), SFTP editor, Markdown preview, system monitor. Hosts, context, history and widgets on the right.'],
  ['palette','Palette ⌘K','Every action by name: layout, connect, switch, themes. The way to reach anything without its own button.'],
@@ -1077,6 +1156,8 @@ const views=[
  ['kiactions','AI actions in the palette','The palette lists the AI actions beside the others, with the chord of the running platform (use the platform switch): Explain error and Command from description prepare a message and never send it. Both can be changed or unbound in the key binding editor.'],
  ['kiexplain','AI chat: explain an error','One chord opens the chat where you are with the message written and the item chosen: here the last command and its output, ticked and read, because the core lists it (else the selection, else the screen). The card is the one of 6.14, so a pane that is not shared yet still asks first. Nothing is sent until you press Send.'],
  ['kidescribe','AI chat: command from a description','A command in a reply reaches the prompt only when you press Insert at prompt, and is never run: the line sits at the prompt of pane 1 with the cursor after it. A block that holds characters that are not shown has no button and says so, with the mark ! and in words.'],
+ ['kintconfirm','Integration card','The card before an action that changes something or opens a session with your credentials, here Delete pod in a production context after the first press. The core prepared it: the tool and the verb, one sentence for the effect, the target rows, the argument list spelled element by element in its order (program kubectl, arg 1 delete, and so on) and the guard line in the warn colour, underlined and marked ! with the context named in words. The hash is the first 12 characters. Armed means the bar is the danger colour and the solid button reads Press again to allow on production; nothing has run. The row of the pod has Logs, which reads, and Exec… and Delete…, which ask first. The card is a floating layer that never takes the keyboard.'],
+ ['kintconfirmstates','Integration card states','The card in four more states, drawn a little narrower than the 24 rem of the app so that they fit side by side: a Local verb that makes a context the default (the sentence of what it writes is in the effect line), an Exec verb in a context that is not production, after Allow once (both buttons disabled, Allowed · running…) and a ticket that is gone (That action is no longer waiting., no buttons). Under them the header of a held terminal: a hollow dot with a dash and exited 1 in the warn colour, underlined and marked !.'],
  ['kiwsh','wsh ai asks','A program in a terminal asked the model a question: the pane that asked says it waits, and the card at the top right asks the person. Nothing leaves the computer until you press Send once in the window; the card never takes the keyboard, so typing in the terminal goes on. It shows the prompt in full, the piped text by counts and findings (never as text), and where it goes with the place chip: cloud in the warn colour with the words leaves this computer.'],
  ['kiwshstates','wsh ai request states','The card in four states: asking for a model in the cloud, asking for a model on this computer (no warn colour, nothing piped in), after Send once (the foot says Sending and both buttons are disabled), and after a refusal from holzWave with a second request waiting (the fault line has the mark ! and is underlined, and the head counts 1 of 2). Every state has words besides its colour. The four cards are drawn a little narrower than the 24 rem of the app so that they fit side by side.'],
  ['attn','Attention marks','A pane that is out of view and needs you marks its tab and the pill of its workspace: ? waits for you, ▲ rang the bell, ! command failed, ✓ command finished, each in its status colour and never rose. Every kind that is present shows, side by side, in that order, with no count: holzkube holds all four. A pill shows the kinds of all its tabs together, once each, so infra shows ! ✓ (a failed command and a finished one) and docs shows ✓. The shown tab and the shown workspace carry no mark. The tab and the pill keep their shapes (square and numbered, round with a diamond); the title and the accessible name list the kinds in words. Nothing sounds and nothing notifies.'],

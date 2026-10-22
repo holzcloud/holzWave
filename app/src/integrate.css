@@ -165,23 +165,23 @@
           font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; line-height: 1.4; }
 .ic-name { color: var(--hw-dim); overflow-wrap: anywhere; }
 .ic-value { min-width: 0; color: var(--hw-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
-.ic-args { box-sizing: border-box; max-height: 12rem; margin: 0 0 .5rem; padding: .167rem .5rem; overflow: auto;
+.ic-args { box-sizing: border-box; max-height: 20rem; margin: 0 0 .5rem; padding: .167rem .5rem; overflow: auto;
            border: 1px solid var(--hw-line); border-radius: .333rem; }
 .ic-args:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
 
 /* The guard: the context named in words, in the warn colour, underlined and marked; the colour is the third cue. */
 .ic-guard { margin: 0 0 .5rem; color: var(--hw-warn); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; line-height: 1.4;
             text-decoration: underline; overflow-wrap: anywhere; }
-.ic-guard::before { content: "! "; font-weight: 700; text-decoration: none; display: inline-block; }
+.ic-guard::before { content: "!"; margin-right: .6ch; font-weight: 700; text-decoration: none; display: inline-block; }
 .ic-hash { margin: 0 0 .5rem; color: var(--hw-dim); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); }
 
 /* The sentence of the mode and the core's refusal. */
 .ic-line, .ic-fault, .ic-foot { margin: 0 0 .5rem; font-family: "Manrope", system-ui, sans-serif; font-size: 1rem; line-height: 1.4; overflow-wrap: anywhere; }
 .ic-line { color: var(--hw-ink); }
 .ic[data-mode="armed"] .ic-line, .ic[data-mode="changed"] .ic-line, .ic[data-mode="cannot"] .ic-line { color: var(--hw-warn); text-decoration: underline; }
-.ic[data-mode="armed"] .ic-line::before, .ic[data-mode="changed"] .ic-line::before, .ic[data-mode="cannot"] .ic-line::before { content: "! "; font-weight: 700; display: inline-block; }
+.ic[data-mode="armed"] .ic-line::before, .ic[data-mode="changed"] .ic-line::before, .ic[data-mode="cannot"] .ic-line::before { content: "!"; margin-right: .6ch; font-weight: 700; display: inline-block; }
 .ic-fault { color: var(--hw-danger); text-decoration: underline; }
-.ic-fault::before { content: "! "; font-weight: 700; display: inline-block; }
+.ic-fault::before { content: "!"; margin-right: .6ch; font-weight: 700; display: inline-block; }
 .ic-foot { color: var(--hw-dim); font-size: calc(11rem / 12); }
 
 /* The buttons: `Deny` at the left, `Allow once` solid at the right, armed in the danger colour with its words. */

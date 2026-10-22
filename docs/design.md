@@ -253,8 +253,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Integration block | ![](design/integration-block.png) | a Kubernetes pods block beside its shell (6.25): header `pods`, context `Kubernetes · prod · payments · 10 s` marked as production, the bar with the context and namespace chips and `↻ Refresh`, a table with the status in words, a selected row with its `Logs` button, and the line `Updated 4 s ago` |
 | Integration states | ![](design/integration-states.png) | the block in four states (6.25): `Reading …`, the tool not found with the places searched, a path field, `Set path` and `Check again`, an error line with the last rows kept dimmed, and a table cut with its note |
 | Context section | ![](design/integration-context.png) | the sidebar's Context section (6.11): one row for each of Kubernetes, Talos, Azure and GAM with the mark, the selection as text, `production` (warn, underlined, `!`) on the Kubernetes row and its `Shell` button, the listbox open under it with the current value marked, the line `New blocks start with prod-eu.`, the status line segments `⎈ prod-eu/payments` `! PRODUCTION` and `az holz-prod`, and a shell pane whose header has the chip `⎈ prod-eu` `! production`; beside it the section in two states, a tool not found with `Set path` and Azure `signed out` |
-| Integration card | integration-confirm.png (6.26) | the card for `Kubernetes · Delete pod` in a production context, armed: head `! Confirm needed`, the effect line, the target rows, the argument list spelled element by element, the guard line `Production context: Production EU.` (warn, underlined, `!`), the hash, the danger bar and the button `Press again to allow on production` |
-| Integration card states | integration-confirm-states.png (6.26) | four cards: a Local verb with the `changes` sentence, an Exec verb on a context that is not production, `Allowed · running…`, and `That action is no longer waiting.`; below them the header of a held pane with the hollow dot with a dash and `exited 1` (warn, `!`) |
+| Integration card | ![](design/integration-confirm.png) | the card for `Kubernetes · Delete pod` in a production context, armed (6.26): head `! Confirm needed`, the effect line, the target rows, the argument list spelled element by element, the guard line `Production context: Production EU.` (warn, underlined, `!`), the hash, the danger bar and the button `Press again to allow on production`; the pods block beside it has `Logs`, `Exec…` and `Delete…` on the selected row |
+| Integration card states | ![](design/integration-confirm-states.png) | four cards (6.26): a Local verb with the `changes` sentence, an Exec verb on a context that is not production, `Allowed · running…`, and `That action is no longer waiting.`; under the first one the header of a held terminal with the hollow dot with a dash and `exited 1` (warn, underlined, `!`) |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -1850,7 +1850,7 @@ while one is shown waits behind it and is counted in the head (`1 of 2`); the co
 | Title | the tool and the verb as the core's tool list names them: `Kubernetes · Delete pod` (the core's ids when the list does not know them) |
 | Effect line | one sentence for the effect of the verb (see below) |
 | Target | one row for each pair of the core's target in the core's order: the name (dim, mono) and the value (ink, mono, wrapped, never cut): `context prod-eu`, `namespace payments`, `pod api-0` |
-| Arguments | a hairline box in mono with one row for the program (`program kubectl`) and one for each argument (`arg 1 delete` to `arg 9 api-0`), in the order the core spelled them, each element on its own row; at most 12 rem high, it scrolls inside and takes the focus with `Tab` |
+| Arguments | a hairline box in mono with one row for the program (`program kubectl`) and one for each argument (`arg 1 delete` to `arg 9 api-0`), in the order the core spelled them, each element on its own row; at most 20 rem high, it scrolls inside and takes the focus with `Tab` |
 | Guard | only for a production context: `Production context: Production EU.` in the warn colour, underlined, with the mark `!` and the word `production`; the name is the core's |
 | Hash | `hash 9f3a41c2d7be`: the first 12 characters, dim, mono |
 | Line | a live region (`role="status"`) for the sentence of the mode (armed, sending, done, ended, changed) |
@@ -1933,6 +1933,10 @@ when it gives none) in the warn colour, underlined, with the mark `!`. The termi
 | Cannot show this request / This request could not be read in full. It can only be denied. | a card the page cannot read |
 | Denied. Nothing ran. | the status line after `Deny` |
 | exited 1 | the context slot of a held terminal |
+
+![Integration card](design/integration-confirm.png)
+
+![Integration card states](design/integration-confirm-states.png) The picture draws the four cards a little narrower than the 24 rem of the app so that they fit side by side.
 
 **Not built.** An `Always allow`, an allow for the session or for a pane, a setting that carries an approval, a remembered
 choice, a timer that arms or disarms a card, a sound or a notification, and a card for a verb that only reads.
