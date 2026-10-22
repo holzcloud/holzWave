@@ -638,7 +638,10 @@ Nothing of this exists on the `wsh` socket and the AI chat has no integration to
 the same account can read it (for example `ps eww`) while that tool runs. A credential plugin of a tool may refresh a token
 in your kubeconfig on its own. A start file of your shell can export `KUBECONFIG` again and replace the overlay of a pane, so
 the chip says what holzWave set and not what the shell then did. The network and telemetry behaviour of the tools is theirs.
-A compromised page could press a button on a card; that is bounded by the page controls and the hash, as for the AI chat. A
+The production guard follows the selection of the pane the request comes from, so a switch of the tool's own default toward a
+production context from a pane that is not on one shows that target on its card and needs one press. The overlay of a shell pane
+is named for the pane it was opened from, so two shells opened from one pane share a file (a known defect, recorded by an
+ignored test). A compromised page could press a button on a card; that is bounded by the page controls and the hash, as for the AI chat. A
 name that is made of blank-looking letters outside the format category of Unicode (such as U+3164) is accepted; nothing
 executes it, and the card spells the characters it shows. The Flatpak build and mobile run no integration, so they have no
 such exposure.
