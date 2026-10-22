@@ -138,3 +138,80 @@
   .ig-cell { height: max(44px, calc(28rem / 12)); }
   .ig-path { font-size: max(16px, 1rem); }
 }
+
+/* ---- the card of an action that asks first (integrateconfirm.ts, docs/design.md section 6.26) ------------------------- */
+
+/* A floating layer at the top right of the window with no backdrop and no keyboard of its own. It is a dialog of dialogs.css
+   (`.dlg`), which gives it the look and the one shadow of the floating layers; this sheet sets no shadow. A 2 px bar runs along
+   its left edge: warn while a decision is needed, danger when it is armed or can only be denied, a hairline after. The rules of
+   the buttons carry the card's class so they win over the `.dlg button` reset. */
+.dlg.ic { position: fixed; z-index: 15; top: calc(62rem / 12 + .667rem); right: 1rem; box-sizing: border-box;
+          width: min(24rem, calc(100vw - 2rem)); max-height: calc(100vh - 7rem); padding: .833rem; overflow-y: auto;
+          border-left: 2px solid var(--hw-warn); }
+.dlg.ic[data-mode="armed"], .dlg.ic[data-mode="cannot"] { border-left-color: var(--hw-danger); }
+.dlg.ic[data-mode="sending"], .dlg.ic[data-mode="done"], .dlg.ic[data-mode="ended"] { border-left-color: var(--hw-line); }
+.ic [hidden] { display: none; }
+
+.ic-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .167rem .667rem; margin-bottom: .333rem; }
+.ic-who, .ic-count { color: var(--hw-dim); }
+.ic-who::before { content: "! "; color: var(--hw-warn); font-weight: 700; }
+.ic[data-mode="armed"] .ic-who::before, .ic[data-mode="cannot"] .ic-who::before { color: var(--hw-danger); }
+.ic[data-mode="sending"] .ic-who::before, .ic[data-mode="done"] .ic-who::before, .ic[data-mode="ended"] .ic-who::before { content: ""; }
+.ic-title { margin: 0 0 .333rem; font-size: 1.083rem; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
+.ic-effect { margin: 0 0 .5rem; color: var(--hw-ink-2); font-family: "Manrope", system-ui, sans-serif; font-size: 1.083rem; line-height: 1.4; overflow-wrap: anywhere; }
+
+/* The target rows and the argument list: the name dim, the value in ink, wrapped and never cut. The box scrolls inside. */
+.ic-target { margin: 0 0 .5rem; }
+.ic-row { display: grid; grid-template-columns: minmax(3rem, 6rem) minmax(0, 1fr); column-gap: .667rem; padding: .083rem 0;
+          font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; line-height: 1.4; }
+.ic-name { color: var(--hw-dim); overflow-wrap: anywhere; }
+.ic-value { min-width: 0; color: var(--hw-ink); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ic-args { box-sizing: border-box; max-height: 12rem; margin: 0 0 .5rem; padding: .167rem .5rem; overflow: auto;
+           border: 1px solid var(--hw-line); border-radius: .333rem; }
+.ic-args:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 0; }
+
+/* The guard: the context named in words, in the warn colour, underlined and marked; the colour is the third cue. */
+.ic-guard { margin: 0 0 .5rem; color: var(--hw-warn); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1rem; line-height: 1.4;
+            text-decoration: underline; overflow-wrap: anywhere; }
+.ic-guard::before { content: "! "; font-weight: 700; text-decoration: none; display: inline-block; }
+.ic-hash { margin: 0 0 .5rem; color: var(--hw-dim); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); }
+
+/* The sentence of the mode and the core's refusal. */
+.ic-line, .ic-fault, .ic-foot { margin: 0 0 .5rem; font-family: "Manrope", system-ui, sans-serif; font-size: 1rem; line-height: 1.4; overflow-wrap: anywhere; }
+.ic-line { color: var(--hw-ink); }
+.ic[data-mode="armed"] .ic-line, .ic[data-mode="changed"] .ic-line, .ic[data-mode="cannot"] .ic-line { color: var(--hw-warn); text-decoration: underline; }
+.ic[data-mode="armed"] .ic-line::before, .ic[data-mode="changed"] .ic-line::before, .ic[data-mode="cannot"] .ic-line::before { content: "! "; font-weight: 700; display: inline-block; }
+.ic-fault { color: var(--hw-danger); text-decoration: underline; }
+.ic-fault::before { content: "! "; font-weight: 700; display: inline-block; }
+.ic-foot { color: var(--hw-dim); font-size: calc(11rem / 12); }
+
+/* The buttons: `Deny` at the left, `Allow once` solid at the right, armed in the danger colour with its words. */
+.ic-actions { display: flex; justify-content: space-between; gap: .5rem; margin: 0 0 .5rem; }
+.dlg.ic button { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; min-height: max(28px, calc(28rem / 12));
+                 padding: 0 .833rem; border: 1px solid var(--hw-line); border-radius: .333rem; background: none; color: var(--hw-ink); cursor: pointer;
+                 font-family: "JetBrains Mono", ui-monospace, monospace; font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase;
+                 text-align: center; }
+.dlg.ic button:hover { border-color: var(--hw-rose); background: none; color: var(--hw-ink); }
+.dlg.ic button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.dlg.ic .ic-yes { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep); color: var(--hw-on-accent); }
+.dlg.ic .ic-yes:hover { border-color: var(--hw-rose-deep); background: var(--hw-rose-deep); color: var(--hw-on-accent); }
+.dlg.ic .ic-yes[data-armed="true"] { border-color: var(--hw-danger); background: var(--hw-danger); color: var(--hw-ground); }
+.dlg.ic button:disabled { border-color: var(--hw-line); background: none; color: var(--hw-dim); cursor: default; opacity: 1; }
+
+:root.contrast-high .dlg.ic, :root.contrast-high .ic-args { border-color: var(--hw-ink-3); }
+:root.contrast-high .dlg.ic { border-left-color: var(--hw-warn); }
+:root.contrast-high .dlg.ic[data-mode="armed"], :root.contrast-high .dlg.ic[data-mode="cannot"] { border-left-color: var(--hw-danger); }
+
+@media (forced-colors: active) {
+  :root .dlg.ic { outline: 2px solid CanvasText; outline-offset: -2px; }
+  :root .ic-guard { outline: 2px solid Highlight; outline-offset: 2px; }
+  :root .dlg.ic button:focus-visible, :root .ic-args:focus-visible { outline: 2px solid Highlight; }
+}
+
+/* A phone: the card is a bottom sheet over the full width; every target is at least 44 px and the text is at least 16 px. */
+@media (max-width: 640px) {
+  .dlg.ic { top: auto; right: 0; bottom: 0; left: 0; width: auto; max-height: 70vh; border-radius: .5rem .5rem 0 0; }
+  .ic-effect, .ic-title, .ic-row, .ic-guard, .ic-line, .ic-fault { font-size: 1.334rem; }
+  .dlg.ic button { min-height: max(44px, calc(44rem / 12)); min-width: max(44px, calc(44rem / 12)); }
+  .ic-actions { gap: .667rem; }
+}

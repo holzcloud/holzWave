@@ -303,12 +303,19 @@ export function readLaunchAnswer(raw: unknown): { pane: number; view: View } | n
 }
 
 export type ToolState = "found" | "not_found" | "unusable" | "unsupported";
+/** An argument of a verb as the core lists it: its name, the kind of value it takes and whether it is required. */
+export interface VerbArg {
+  name: string;
+  kind: string;
+  required: boolean;
+}
 export interface VerbEntry {
   id: string;
   label: string;
   effect: Effect;
   output: "view" | "terminal" | "done";
   refresh_secs: number | null;
+  args: VerbArg[];
 }
 export interface ToolEntry {
   id: ToolId;
@@ -346,7 +353,14 @@ export function readTools(raw: unknown): ToolEntry[] {
       const effect: Effect = (MEMBERS.effects as readonly string[]).includes(String(e.effect)) ? (e.effect as Effect) : "exec";
       const output = e.output === "view" || e.output === "terminal" ? e.output : "done";
       const secs = typeof e.refresh_secs === "number" && Number.isFinite(e.refresh_secs) && e.refresh_secs > 0 ? e.refresh_secs : null;
-      verbs.push({ id: e.id, label: cut(e.label, CAPS.label), effect, output, refresh_secs: secs });
+      const args: VerbArg[] = [];
+      for (const a of Array.isArray(e.args) ? e.args : []) {
+        const given = obj(a);
+        if (!given || typeof given.name !== "string" || typeof given.kind !== "string") continue;
+        args.push({ name: cut(given.name, CAPS.argName), kind: cut(given.kind, CAPS.label), required: given.required === true });
+        if (args.length >= CAPS.args) break;
+      }
+      verbs.push({ id: e.id, label: cut(e.label, CAPS.label), effect, output, refresh_secs: secs, args });
     }
     out.push({
       id: o.id as ToolId,
@@ -744,4 +758,298 @@ export function refreshDue(o: {
 }): boolean {
   if (o.secs === null || !(o.secs > 0) || !o.alive || o.hidden || !o.shown || o.busy) return false;
   return o.now - o.last >= o.secs * 1000;
+}
+
+// ---- the card of an action that asks first (docs/design.md section 6.26) -------------------------------------------------
+
+/** The effects that ask first. `read` has no card. */
+export type AskingEffect = "local" | "write" | "exec";
+
+/** The most fields, and the most characters in one value, that the page reads from a card. The core's own limit is 8 KiB in all. */
+export const CARD_CAPS = { fields: 64, value: 8192, name: 128, expiresMax: 3600 } as const;
+
+/**
+ * The card as the core prepared it. Every text is the core's: control, direction, zero-width and tag characters were written as
+ * escapes there. The page draws these members and sends back the `ticket` and the `hash` and nothing else.
+ */
+export interface Card {
+  ticket: string;
+  tool: string;
+  verb: string;
+  effect: AskingEffect;
+  program: string;
+  argv: string[];
+  target: [string, string][];
+  /** The name of the production context the action touches, or null. */
+  production: string | null;
+  /** Every field the hash covers, in the core's order. */
+  fields: [string, string][];
+  hash: string;
+  /** Seconds the ticket is good for, as the core said. */
+  expires: number;
+}
+
+const TICKET_SHAPE = /^[0-9a-f]{32}$/;
+const HASH_SHAPE = /^[0-9a-f]{64}$/;
+
+function pairs(raw: unknown, max: number): [string, string][] | null {
+  if (!Array.isArray(raw) || raw.length > max) return null;
+  const out: [string, string][] = [];
+  for (const item of raw) {
+    if (!Array.isArray(item) || item.length !== 2) return null;
+    const [name, value] = item as [unknown, unknown];
+    if (typeof name !== "string" || typeof value !== "string") return null;
+    if (name.length > CARD_CAPS.name || value.length > CARD_CAPS.value) return null;
+    out.push([name, value]);
+  }
+  return out;
+}
+
+/** The fields the hash covers, rebuilt from the members the card is drawn from, in the order the core makes them. */
+function expectedFields(c: Omit<Card, "fields" | "hash" | "expires" | "ticket">): [string, string][] {
+  return [
+    ["tool", c.tool],
+    ["verb", c.verb],
+    ["effect", c.effect],
+    ["program", c.program],
+    ...c.argv.map((a, i): [string, string] => [`arg ${i + 1}`, a]),
+    ...c.target,
+    ["guard", c.production === null ? "none" : "production"],
+    ...(c.production === null ? [] : [["production_name", c.production] as [string, string]]),
+  ];
+}
+
+/**
+ * Read the card the core prepared. Anything that is not the contract is `null`: a missing ticket or hash, a hash that is not
+ * 64 lower case hex digits, a field list of the wrong shape, more than 64 fields, a value over 8192 characters, an effect that
+ * asks nothing, or members that do not say what the fields the hash covers say. The page draws the members, so they must be the
+ * very fields the hash is over.
+ */
+export function readCard(raw: unknown): Card | null {
+  const o = obj(raw);
+  if (!o) return null;
+  if (typeof o.ticket !== "string" || !TICKET_SHAPE.test(o.ticket)) return null;
+  if (typeof o.hash !== "string" || !HASH_SHAPE.test(o.hash)) return null;
+  if (typeof o.tool !== "string" || typeof o.verb !== "string" || typeof o.program !== "string") return null;
+  if (o.tool.length > CARD_CAPS.name || o.verb.length > CARD_CAPS.name || o.program.length > CARD_CAPS.value) return null;
+  if (o.effect !== "local" && o.effect !== "write" && o.effect !== "exec") return null;
+  const expires = o.expires_in_secs;
+  if (typeof expires !== "number" || !Number.isInteger(expires) || expires < 1 || expires > CARD_CAPS.expiresMax) return null;
+  const g = obj(o.guard);
+  if (!g) return null;
+  let production: string | null = null;
+  if (g.production !== null && g.production !== undefined) {
+    if (typeof g.production !== "string" || g.production === "" || g.production.length > CARD_CAPS.value) return null;
+    production = g.production;
+  }
+  const fields = pairs(o.fields, CARD_CAPS.fields);
+  const target = pairs(o.target, CARD_CAPS.fields);
+  if (!fields || !target || !Array.isArray(o.argv) || o.argv.length > CARD_CAPS.fields) return null;
+  const argv: string[] = [];
+  for (const a of o.argv) {
+    if (typeof a !== "string" || a.length > CARD_CAPS.value) return null;
+    argv.push(a);
+  }
+  const card: Card = { ticket: o.ticket, tool: o.tool, verb: o.verb, effect: o.effect, program: o.program, argv, target, production, fields, hash: o.hash, expires };
+  const expected = expectedFields(card);
+  if (expected.length !== fields.length || expected.some(([n, v], i) => n !== fields[i]?.[0] || v !== fields[i]?.[1])) return null;
+  return card;
+}
+
+/** The first twelve characters of the hash, as the card shows it. */
+export function hashShown(hash: string): string {
+  return hash.slice(0, 12);
+}
+
+/** The sentence of the core's `changes` pair of a Local card, or null. */
+export function changesOf(card: Card): string | null {
+  return card.target.find(([name]) => name === "changes")?.[1] ?? null;
+}
+
+/** The target rows of a card: the core's pairs in the core's order. The `changes` pair of a Local card is in the effect line, not twice. */
+export function targetRows(card: Card): [string, string][] {
+  return card.effect === "local" ? card.target.filter(([name]) => name !== "changes") : card.target;
+}
+
+/** The rows of the argument box: the program, then each argument as the core spelled it, one element each. */
+export function argumentRows(card: Card): [string, string][] {
+  return [["program", card.program], ...card.argv.map((a, i): [string, string] => [`arg ${i + 1}`, a])];
+}
+
+/** Every word of the card that is not the core's. */
+export const CARD_WORDS = {
+  head: "Confirm needed",
+  cannotTitle: "Cannot show this request",
+  count: (n: number, of: number): string => `${n} of ${of}`,
+  yes: "Allow once",
+  yesArmed: "Press again to allow on production",
+  no: "Deny",
+  foot: "Allows this one action only. Nothing is kept for later. Esc denies.",
+  waiting: "waiting for your decision",
+  denied: "Denied. Nothing ran.",
+  write: "Changes a cluster or an account. Check the target below.",
+  local: "Changes the tool's own configuration.",
+  exec: "Opens a session with your credentials. Check the command below.",
+  armed: "Armed. The next press allows this on production. Nothing has run yet.",
+  sending: "Allowed · running…",
+  ended: "That action is no longer waiting.",
+  changed: "The request changed. Nothing ran. Read the card again.",
+  cannot: "This request could not be read in full. It can only be denied.",
+  palette: "Answer the integration request",
+  failed: "The request failed.",
+} as const;
+
+/** The title: the tool and the verb as the core's tool list names them, else the core's ids. */
+export function titleWords(card: Card, toolLabel: string | null, verbLabel: string | null): string {
+  return `${toolLabel ?? card.tool} · ${verbLabel ?? card.verb}`;
+}
+
+/** The effect line: one sentence for the effect, and for a Local verb the sentence of the core that names what it writes. */
+export function effectWords(card: Card): string {
+  if (card.effect === "write") return CARD_WORDS.write;
+  if (card.effect === "exec") return CARD_WORDS.exec;
+  const changes = changesOf(card);
+  return changes === null ? CARD_WORDS.local : `${CARD_WORDS.local} It writes: ${changes}`;
+}
+
+/** The guard line of a production context, in the core's words for the name. */
+export function guardWords(name: string): string {
+  return `Production context: ${name}.`;
+}
+
+/** The modes of a card. */
+export type Mode = "ask" | "armed" | "sending" | "done" | "ended" | "changed" | "cannot";
+
+/** What a confirm that worked said. */
+export interface Outcome {
+  kind: "ran" | "launched";
+  note: string;
+  pane: number | null;
+}
+
+/** The line a mode shows. `ask` has none. */
+export function modeWords(mode: Mode, outcome: Outcome | null = null): string {
+  switch (mode) {
+    case "armed":
+      return CARD_WORDS.armed;
+    case "sending":
+      return CARD_WORDS.sending;
+    case "done":
+      if (outcome === null) return "";
+      if (outcome.kind === "launched") return outcome.pane === null ? "Opened a pane" : `Opened pane ${outcome.pane}`;
+      return outcome.note === "" ? "Done." : `Done: ${cutCell(outcome.note, FAULT_MAX)}`;
+    case "ended":
+      return CARD_WORDS.ended;
+    case "changed":
+      return CARD_WORDS.changed;
+    case "cannot":
+      return CARD_WORDS.cannot;
+    default:
+      return "";
+  }
+}
+
+/** The answer of `integration_confirm`: what happened, the new pane and layout of a launch. */
+export interface ConfirmAnswer {
+  kind: "ran" | "launched";
+  note: string;
+  pane: number | null;
+  view: View | null;
+}
+
+export function readConfirm(raw: unknown): ConfirmAnswer | null {
+  const o = obj(raw);
+  if (!o || (o.kind !== "ran" && o.kind !== "launched")) return null;
+  const note = typeof o.note === "string" ? cut(o.note, FAULT_MAX) : "";
+  const pane = typeof o.pane === "number" && Number.isSafeInteger(o.pane) && o.pane >= 0 ? o.pane : null;
+  if (o.kind === "ran") return { kind: "ran", note, pane: null, view: null };
+  const view = obj(o.view);
+  if (pane === null || !view || !Array.isArray(view.panes)) return null;
+  return { kind: "launched", note, pane, view: o.view as View };
+}
+
+/** What a refused confirm means: the ticket is gone, the request is another one, or any other sentence of the core. */
+export type Refusal = "ended" | "changed" | "other";
+
+export function refusalOf(fault: Fault): Refusal {
+  if (fault.code !== "ticket") return "other";
+  if (fault.reason === "unknown" || fault.reason === "expired") return "ended";
+  if (fault.reason === "changed" || fault.reason === "mismatch") return "changed";
+  return "other";
+}
+
+/** A press or key made less than this long (milliseconds) after a card appeared, or after it was armed, does not count. */
+export const HALF_SECOND = 500;
+
+/** What happened to a card. `trusted` is the browser's `isTrusted`: a click or key a script made is not. */
+export type CardEvent =
+  | { type: "allow"; now: number; shownAt: number; armedAt: number | null; trusted: boolean; production: boolean }
+  | { type: "deny"; trusted: boolean }
+  | { type: "ran" }
+  | { type: "refused"; refusal: Refusal }
+  | { type: "expired" }
+  | { type: "fresh" };
+
+/** What the page does besides drawing the next mode. */
+export type CardAct = "none" | "arm" | "confirm" | "cancel";
+
+/**
+ * The whole state machine of a card as one pure function. `Allow once` counts only for a press that a person made, at least
+ * half a second after the card was drawn, and for an armed card also half a second after it was armed (a double click arms
+ * and cannot allow). A production card needs a second press. `Deny` counts for any real press at any time but while a confirm is on
+ * its way. Nothing else makes the page call `integration_confirm`.
+ */
+export function nextMode(mode: Mode, event: CardEvent): { mode: Mode; act: CardAct } {
+  const stay = { mode, act: "none" as CardAct };
+  switch (event.type) {
+    case "allow": {
+      if (mode !== "ask" && mode !== "armed") return stay;
+      if (!event.trusted || event.now - event.shownAt < HALF_SECOND) return stay;
+      if (mode === "armed") {
+        if (event.armedAt !== null && event.now - event.armedAt < HALF_SECOND) return stay;
+        return { mode: "sending", act: "confirm" };
+      }
+      return event.production ? { mode: "armed", act: "arm" } : { mode: "sending", act: "confirm" };
+    }
+    case "deny":
+      if (!event.trusted) return stay;
+      return mode === "ask" || mode === "armed" || mode === "cannot" || mode === "changed" ? { mode: "ended", act: "cancel" } : stay;
+    case "ran":
+      return mode === "sending" ? { mode: "done", act: "none" } : stay;
+    case "refused":
+      if (mode !== "sending") return stay;
+      return { mode: event.refusal === "ended" ? "ended" : event.refusal === "changed" ? "changed" : "ask", act: "none" };
+    case "expired":
+      return mode === "ask" || mode === "armed" || mode === "changed" || mode === "cannot" ? { mode: "ended", act: "none" } : stay;
+    case "fresh":
+      return mode === "changed" ? { mode: "ask", act: "none" } : stay;
+    default:
+      return stay;
+  }
+}
+
+/** The label of a row action: `…` after it when the action asks first, so a person knows a card follows. */
+export function actionLabel(action: { label: string; effect: Effect }): string {
+  return action.effect === "read" || action.label.endsWith("…") ? action.label : `${action.label}…`;
+}
+
+/** Whether an action of this effect asks first. */
+export function asksFirst(effect: Effect): boolean {
+  return effect !== "read";
+}
+
+/** The Local verb that makes a value of `kind` the tool's own setting: the verb whose first argument has that kind. Found from the core's list, by no name. */
+export function localVerbFor(tool: ToolEntry | null, kind: SelectKind): { verb: string; arg: string; label: string } | null {
+  if (tool === null) return null;
+  for (const verb of tool.verbs) {
+    if (verb.effect !== "local") continue;
+    const first = verb.args[0];
+    if (first !== undefined && first.kind === kind && first.required) return { verb: verb.id, arg: first.name, label: verb.label };
+  }
+  return null;
+}
+
+/** The context slot of a held terminal: `exited 1`, or `exited` when the core gave no status. */
+export function heldText(status: number | null): string {
+  return status === null ? "exited" : `exited ${status}`;
 }

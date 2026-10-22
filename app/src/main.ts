@@ -18,6 +18,7 @@ import { initHistory } from "./historyview.js";
 import { initLoginPrompt } from "./loginprompt.js";
 import { initLocalNetwork } from "./localnet.js";
 import { initInline } from "./inline.js";
+import { initIntegrationConfirm } from "./integrateconfirm.js";
 import { initIntegrationContext } from "./integratecontext.js";
 import { decorateReply } from "./inlinecode.js";
 import { sidebarChat } from "./aisidebar.js";
@@ -89,6 +90,8 @@ async function main() {
     },
     applyView,
   });
+  // The card that asks before an integration action changes something shows a returned layout the way the rest of the page does.
+  initIntegrationConfirm({ applyView });
   initCopyMode(renderStatus);
   await initEvents();
   await listen<View>("layout", applyView);
