@@ -635,7 +635,9 @@ fn no_argument_list_holds_a_write_or_save_word() {
 // The real tool, offline and in a scratch configuration directory (gated).
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// GAM is a shell alias on many machines: `HW_GAM`, then the `PATH`, then `~/bin/gam7/gam`.
+/// GAM is a shell alias on many machines: `HW_GAM`, then the `PATH`, then `~/bin/gam7/gam`. Unix only: the mode bits
+/// of a file do not exist on Windows, where the real tool is `gam.exe` (the Windows test file has its own rows).
+#[cfg(unix)]
 fn find_gam() -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let executable = |path: &Path| {
@@ -656,6 +658,7 @@ fn find_gam() -> Option<PathBuf> {
     })
 }
 
+#[cfg(unix)]
 #[test]
 fn the_chained_meta_commands_parse_in_a_real_gam() {
     if std::env::var("HW_INTEGRATION_REAL").ok().as_deref() != Some("1") {
