@@ -1,0 +1,187 @@
+{
+  "fetched": 1760000000,
+  "rows": [
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "kube"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "talos"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": "Production",
+      "section": null,
+      "stale": false,
+      "state": "found",
+      "subscription": "00000000-0000-4000-8000-000000000002",
+      "tool": "azure"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "gam"
+    }
+  ],
+  "selection": {
+    "production": "Production",
+    "selection": {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "profile": "prod-azure",
+      "section": null,
+      "subscription": "00000000-0000-4000-8000-000000000002"
+    }
+  },
+  "tool": {
+    "binary": null,
+    "id": "azure",
+    "label": "Azure",
+    "path": "/opt/homebrew/bin/az",
+    "place": "path",
+    "reason": null,
+    "searched": [],
+    "selects": [
+      "subscription"
+    ],
+    "state": "found",
+    "verbs": [
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": true,
+        "id": "account",
+        "label": "Account",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": false,
+        "id": "subscriptions",
+        "label": "Subscriptions",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": false,
+        "id": "groups",
+        "label": "Resource groups",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [
+          {
+            "kind": "subscription",
+            "name": "subscription",
+            "required": true
+          }
+        ],
+        "effect": "local",
+        "exit_is_state": false,
+        "id": "set_subscription",
+        "label": "Make default",
+        "output": "done",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "exec",
+        "exit_is_state": false,
+        "id": "login",
+        "label": "Sign in",
+        "output": "terminal",
+        "refresh_secs": null
+      }
+    ],
+    "version": null
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "name",
+        "label": "Name"
+      },
+      {
+        "id": "location",
+        "label": "Location"
+      },
+      {
+        "id": "state",
+        "label": "State"
+      },
+      {
+        "id": "tags",
+        "label": "Tags"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [],
+        "cells": [
+          "rg-demo-one",
+          "westeurope",
+          "Succeeded",
+          "1"
+        ],
+        "key": "rg-demo-one",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "rg-demo-two",
+          "northeurope",
+          "Succeeded",
+          "0"
+        ],
+        "key": "rg-demo-two",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "rg-demo-three",
+          "westeurope",
+          "Deleting",
+          "0"
+        ],
+        "key": "rg-demo-three",
+        "tone": "warn"
+      }
+    ],
+    "title": "Azure resource groups",
+    "truncated": null
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "argv": [
+    "account",
+    "set",
+    "--subscription=00000000-0000-4000-8000-000000000003",
+    "--only-show-errors"
+  ],
+  "effect": "local",
+  "expires_in_secs": 120,
+  "fields": [
+    [
+      "tool",
+      "azure"
+    ],
+    [
+      "verb",
+      "set_subscription"
+    ],
+    [
+      "effect",
+      "local"
+    ],
+    [
+      "program",
+      "az"
+    ],
+    [
+      "arg 1",
+      "account"
+    ],
+    [
+      "arg 2",
+      "set"
+    ],
+    [
+      "arg 3",
+      "--subscription=00000000-0000-4000-8000-000000000003"
+    ],
+    [
+      "arg 4",
+      "--only-show-errors"
+    ],
+    [
+      "subscription",
+      "00000000-0000-4000-8000-000000000003"
+    ],
+    [
+      "changes",
+      "the Azure CLI configuration of this computer (azureProfile.json)"
+    ],
+    [
+      "guard",
+      "none"
+    ]
+  ],
+  "guard": {
+    "production": null
+  },
+  "hash": "b373ea0c0b5c5643c85bf7be45c4035d1ff701297b07888e95b069a6e48f5cee",
+  "program": "az",
+  "target": [
+    [
+      "subscription",
+      "00000000-0000-4000-8000-000000000003"
+    ],
+    [
+      "changes",
+      "the Azure CLI configuration of this computer (azureProfile.json)"
+    ]
+  ],
+  "ticket": "0123456789abcdef0123456789abcdef",
+  "tool": "azure",
+  "verb": "set_subscription"
+}

@@ -17,10 +17,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use holzwave_core::integrate::args::{ProfileId, SubscriptionId};
 use holzwave_core::integrate::context::RowState;
-use holzwave_core::integrate::service::{HostFacts, IntegrationService, RunAnswer};
+use holzwave_core::integrate::profiles::IntegrationProfile;
+use holzwave_core::integrate::service::{Done, FaultCode, HostFacts, IntegrationService, RunAnswer};
 use holzwave_core::integrate::view::{Tone, ViewModel};
-use holzwave_core::integrate::{ToolId, VerbEffect};
+use holzwave_core::integrate::{Selection, ToolId, VerbEffect};
 use holzwave_core::secrets::MemoryStore;
 use serde_json::{json, Value};
 
@@ -60,7 +62,16 @@ impl Rig {
     }
 
     fn service(&self) -> IntegrationService {
-        IntegrationService::new(&self.data, self.store.clone(), self.facts(), &[])
+        self.service_over(self.facts())
+    }
+
+    fn service_over(&self, facts: HostFacts) -> IntegrationService {
+        IntegrationService::new(&self.data, self.store.clone(), facts, &[])
+    }
+
+    /// The machine of a person who has an Azure CLI configuration of their own, named by the environment.
+    fn facts_with_a_configuration(&self) -> HostFacts {
+        self.facts().with_env("AZURE_CONFIG_DIR", self.azure_config.to_str().expect("text"))
     }
 }
 
@@ -127,14 +138,25 @@ fn golden(name: &str, document: &Value) {
 /// `integration_tools` and the rows of `integration_context`, in one document. The document is also returned as the
 /// typed answer, and with the argument list the fake recorded for the read.
 fn read(rig: &Rig, service: &IntegrationService, fake: &FakeCli, verb: &str) -> (RunAnswer, Value, Vec<String>) {
+    read_for(rig, service, fake, verb, None)
+}
+
+/// [`read`] for a pane: the selection of the pane decides the argument list, and the rows are the pane's.
+fn read_for(
+    rig: &Rig,
+    service: &IntegrationService,
+    fake: &FakeCli,
+    verb: &str,
+    pane: Option<u64>,
+) -> (RunAnswer, Value, Vec<String>) {
     let tools = service.tools();
     let azure = tools.iter().find(|tool| tool.id == ToolId::Azure).expect("an Azure entry");
     let tool = serde_json::to_value(azure).expect("the tool is JSON");
-    let answer = service.run_view("azure", verb, None, &args(&[])).unwrap_or_else(|e| panic!("azure {verb}: {e}"));
+    let answer = service.run_view("azure", verb, pane, &args(&[])).unwrap_or_else(|e| panic!("azure {verb}: {e}"));
     let recorded = argv_of(fake);
     let mut document = serde_json::to_value(&answer).expect("the answer is JSON");
     document["tool"] = tool;
-    document["rows"] = serde_json::to_value(service.context_rows(None, false)).expect("the rows are JSON");
+    document["rows"] = serde_json::to_value(service.context_rows(pane, false)).expect("the rows are JSON");
     normalise(&mut document, rig);
     (answer, document, recorded)
 }
@@ -233,4 +255,198 @@ fn a_signed_out_read_leaves_no_file_behind() {
     let _ = read(&rig, &service, &fake, "account");
     assert_eq!(snapshot(&rig.azure_config), config_before, "the person's Azure CLI configuration is untouched");
     assert_eq!(snapshot(&rig.data), data_before, "and so is the data directory");
+}
+
+// ---- the subscriptions and the groups -------------------------------------------------------------------------------
+
+const FIRST: &str = "00000000-0000-4000-8000-000000000002";
+const SECOND: &str = "00000000-0000-4000-8000-000000000003";
+const THIRD: &str = "00000000-0000-4000-8000-000000000004";
+
+/// The recorded list of subscriptions with one change: the third entry is disabled, which the recorded account does not
+/// have. Everything else is the recorded text.
+fn subscriptions_with_a_disabled_one() -> String {
+    let text = fixture("account_list.json");
+    let enabled = "\"state\": \"Enabled\"";
+    let at = text.rfind(enabled).expect("the recorded list has a state in its last entry");
+    let mut out = text.clone();
+    out.replace_range(at..at + enabled.len(), "\"state\": \"Disabled\"");
+    assert_ne!(out, text);
+    out
+}
+
+/// The cells of a table, as text, one array each.
+fn cells(view: &ViewModel) -> Vec<Vec<String>> {
+    let ViewModel::Table(table) = view else { panic!("a table was expected, got {view:?}") };
+    table.rows().iter().map(|row| row.cells().map(str::to_owned).collect()).collect()
+}
+
+#[test]
+fn subscriptions_and_groups_goldens_match() {
+    let rig = Rig::new();
+    let fake = FakeCli::new(&rig.bin, "az").prints(&subscriptions_with_a_disabled_one());
+    let service = rig.service();
+
+    // The subscriptions: the default is starred, the disabled one is told in words and in the warn tone, and every
+    // entry with a valid GUID has the action that makes it the tool's default.
+    let (answer, document, recorded) = read(&rig, &service, &fake, "subscriptions");
+    assert_eq!(recorded, ["account", "list", "-o", "json", "--only-show-errors"]);
+    let ViewModel::Table(table) = &answer.view else { panic!("a table, got {:?}", answer.view) };
+    let columns: Vec<&str> = table.columns().iter().map(|column| column.label()).collect();
+    assert_eq!(columns, ["Default", "Name", "ID", "State", "Tenant"]);
+    let tenant = "00000000-0000-4000-8000-000000000001";
+    assert_eq!(
+        cells(&answer.view),
+        [
+            vec!["*", "Item 1", FIRST, "Enabled", tenant],
+            vec!["", "Item 2", SECOND, "Enabled", tenant],
+            vec!["", "Item 3", THIRD, "Disabled", tenant],
+        ]
+    );
+    let tones: Vec<Tone> = table.rows().iter().map(|row| row.tone()).collect();
+    assert_eq!(tones, [Tone::Normal, Tone::Normal, Tone::Warn], "only the state decides the tone");
+    for (row, guid) in table.rows().iter().zip([FIRST, SECOND, THIRD]) {
+        let actions: Vec<(&str, VerbEffect, Vec<(&str, &str)>)> =
+            row.actions().iter().map(|a| (a.verb(), a.effect(), a.args().collect())).collect();
+        assert_eq!(actions, [("set_subscription", VerbEffect::Local, vec![("subscription", guid)])]);
+    }
+    golden("azure_subscriptions.json", &document);
+
+    // The groups of a pane that uses a profile which pins the first subscription and says it is production: the list
+    // names that subscription on its command line, and the rows of the pane say production.
+    let id = ProfileId::parse("prod-azure").expect("an id");
+    let mut profile = IntegrationProfile::new(id, ToolId::Azure, "Production");
+    profile.subscription = Some(SubscriptionId::parse(FIRST).expect("a guid"));
+    profile.production = true;
+    service.save_profile(profile).expect("a profile");
+    service
+        .select("azure", Some(3), &Selection { profile: Some("prod-azure".into()), ..Selection::default() })
+        .expect("a selection");
+    let fake = fake.prints(&fixture("group_list.json"));
+    let (answer, document, recorded) = read_for(&rig, &service, &fake, "groups", Some(3));
+    assert_eq!(recorded, ["group", "list", "-o", "json", "--only-show-errors", &format!("--subscription={FIRST}")]);
+    let ViewModel::Table(table) = &answer.view else { panic!("a table, got {:?}", answer.view) };
+    let columns: Vec<&str> = table.columns().iter().map(|column| column.label()).collect();
+    assert_eq!(columns, ["Name", "Location", "State", "Tags"]);
+    assert!(table.rows().iter().all(|row| row.actions().is_empty()), "a group has no action");
+    let shown = cells(&answer.view);
+    assert_eq!(shown[0], ["rg-demo-one", "westeurope", "Succeeded", "1"], "the tags are counted, never read");
+    assert!(shown.iter().any(|row| row[2] == "Deleting"), "a state other than Succeeded is told in words: {shown:?}");
+    assert!(
+        table.rows().iter().zip(&shown).any(|(row, cells)| cells[2] == "Deleting" && row.tone() != Tone::Normal),
+        "and in the tone"
+    );
+    assert_eq!(answer.selection.production.as_deref(), Some("Production"));
+    assert_eq!(document["rows"][2]["production"], "Production");
+    assert_eq!(document["rows"][2]["subscription"], FIRST);
+    golden("azure_groups.json", &document);
+}
+
+/// Makes a fake count its starts: the rig's script sources `<name>.conf` before it records anything, so one more line
+/// there appends to `<name>.runs` at every start. Call it after the last builder method (a builder rewrites the file).
+fn counted(fake: FakeCli) -> FakeCli {
+    use std::io::Write;
+    let path = format!("{}.conf", fake.path().display());
+    let mut conf = std::fs::OpenOptions::new().append(true).open(path).expect("the settings of the fake");
+    writeln!(conf, "echo run >> \"$d/$n.runs\"").expect("one more line");
+    fake
+}
+
+/// How many times a counted fake was started.
+fn runs(fake: &FakeCli) -> usize {
+    std::fs::read_to_string(format!("{}.runs", fake.path().display())).map_or(0, |text| text.lines().count())
+}
+
+fn choosing(guid: &str) -> Selection {
+    Selection { subscription: Some(guid.into()), ..Selection::default() }
+}
+
+#[test]
+fn a_subscription_is_selected_per_pane_and_nothing_is_written() {
+    let rig = Rig::new();
+    let fake = FakeCli::new(&rig.bin, "az").prints(&fixture("group_list.json"));
+    let service = rig.service_over(rig.facts_with_a_configuration());
+    let (config_before, data_before) = (snapshot(&rig.azure_config), snapshot(&rig.data));
+    assert!(data_before.is_empty(), "the data directory starts empty: {data_before:?}");
+
+    service.select("azure", Some(3), &choosing(FIRST)).expect("a selection for pane 3");
+    service.select("azure", Some(4), &choosing(SECOND)).expect("a selection for pane 4");
+    let list = |pane: u64| {
+        service.run_view("azure", "groups", Some(pane), &args(&[])).unwrap_or_else(|e| panic!("pane {pane}: {e}"));
+        (argv_of(&fake), fake.env())
+    };
+    let (first, first_env) = list(3);
+    let (second, second_env) = list(4);
+    let (bare, _) = list(5);
+
+    // The two lists differ in the subscription flag and in nothing else.
+    let base = ["group", "list", "-o", "json", "--only-show-errors"];
+    assert_eq!(first, [base.as_slice(), &[format!("--subscription={FIRST}").as_str()]].concat());
+    assert_eq!(second, [base.as_slice(), &[format!("--subscription={SECOND}").as_str()]].concat());
+    assert_eq!(bare, base, "a pane without a selection names no subscription: the tool's own default decides");
+    assert_eq!(first_env, second_env, "and the environment of the two runs is the same");
+    assert_eq!(
+        first_env.get("AZURE_CONFIG_DIR").map(String::as_str),
+        rig.azure_config.to_str(),
+        "the person's own configuration is what the tool reads"
+    );
+
+    // The core's summary is what the section and the status line draw, for the focused pane.
+    let subscription = |pane: Option<u64>| {
+        let rows = service.context_rows(pane, false);
+        rows.iter().find(|row| row.tool == ToolId::Azure).and_then(|row| row.subscription.clone())
+    };
+    assert_eq!(subscription(Some(3)).as_deref(), Some(FIRST));
+    assert_eq!(subscription(Some(4)).as_deref(), Some(SECOND));
+    assert_eq!(subscription(None), None, "the tool's own default was not read, and no pane's choice became it");
+
+    // Nothing was written but the file of the pane selections, and the tool's own configuration is byte for byte
+    // what it was.
+    assert_eq!(snapshot(&rig.azure_config), config_before, "the Azure CLI configuration is untouched");
+    let after: Vec<String> = snapshot(&rig.data).into_keys().collect();
+    assert_eq!(after, ["pane_integrations.json"], "only the file of the pane selections was created");
+}
+
+#[test]
+fn set_subscription_asks_first_and_runs_once() {
+    let rig = Rig::new();
+    let _account = FakeCli::new(&rig.bin, "az").prints(&fixture("account_show.json"));
+    let service = rig.service_over(rig.facts_with_a_configuration());
+    service.run_view("azure", "account", None, &args(&[])).expect("the default read");
+    let stale = |service: &IntegrationService| {
+        service.context_rows(None, false).iter().find(|row| row.tool == ToolId::Azure).map(|row| row.stale)
+    };
+    assert_eq!(stale(&service), Some(false), "a value that was just read is not stale");
+    let config_before = snapshot(&rig.azure_config);
+
+    // `az account set` prints nothing when it works.
+    let fake = counted(FakeCli::new(&rig.bin, "az"));
+    let card = service.prepare("azure", "set_subscription", None, &args(&[("subscription", SECOND)])).expect("a card");
+    assert_eq!(card.argv, ["account", "set", &format!("--subscription={SECOND}"), "--only-show-errors"]);
+    assert_eq!(card.effect, VerbEffect::Local);
+    assert_eq!(card.program, "az");
+    let changes = "the Azure CLI configuration of this computer (azureProfile.json)";
+    assert!(card.target.contains(&("changes".to_owned(), changes.to_owned())), "{:?}", card.target);
+    assert!(card.target.contains(&("subscription".to_owned(), SECOND.to_owned())), "{:?}", card.target);
+    assert_eq!(card.guard.production, None, "no guard without a production profile");
+    assert_eq!(runs(&fake), 0, "a card starts nothing");
+    let mut document = serde_json::to_value(&card).expect("the card is JSON");
+    normalise(&mut document, &rig);
+    golden("azure_card_set_subscription.json", &document);
+
+    let done = service.confirm(&card.ticket, &card.hash).expect("the confirm runs it");
+    let Done::Ran { note } = done else { panic!("a local verb runs, got {done:?}") };
+    assert_eq!(note, "Make default done.", "the tool said nothing, so the core says what ran");
+    assert_eq!(runs(&fake), 1, "the fake ran once");
+    assert_eq!(argv_of(&fake), card.argv, "and with exactly the list of the card");
+    assert_eq!(fake.env().get("AZURE_CORE_COLLECT_TELEMETRY").map(String::as_str), Some("false"));
+    assert_eq!(stale(&service), Some(true), "the tool's own default may have changed, so it is marked");
+    let rows = service.context_rows(None, false);
+    let azure = rows.iter().find(|row| row.tool == ToolId::Azure).expect("an Azure row");
+    assert_eq!(azure.subscription.as_deref(), Some(FIRST), "and the value is kept");
+
+    let again = service.confirm(&card.ticket, &card.hash).expect_err("a ticket approves once");
+    assert_eq!(again.code, FaultCode::Ticket);
+    assert_eq!(runs(&fake), 1, "the second confirm ran nothing");
+    assert_eq!(snapshot(&rig.azure_config), config_before, "holzWave itself never edits the tool's configuration");
 }

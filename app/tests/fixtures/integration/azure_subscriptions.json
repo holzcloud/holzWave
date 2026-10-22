@@ -1,0 +1,221 @@
+{
+  "fetched": 1760000000,
+  "rows": [
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "kube"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "talos"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "found",
+      "subscription": null,
+      "tool": "azure"
+    },
+    {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "production": null,
+      "section": null,
+      "stale": false,
+      "state": "not_found",
+      "subscription": null,
+      "tool": "gam"
+    }
+  ],
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": null,
+      "subscription": null
+    }
+  },
+  "tool": {
+    "binary": null,
+    "id": "azure",
+    "label": "Azure",
+    "path": "/opt/homebrew/bin/az",
+    "place": "path",
+    "reason": null,
+    "searched": [],
+    "selects": [
+      "subscription"
+    ],
+    "state": "found",
+    "verbs": [
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": true,
+        "id": "account",
+        "label": "Account",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": false,
+        "id": "subscriptions",
+        "label": "Subscriptions",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "read",
+        "exit_is_state": false,
+        "id": "groups",
+        "label": "Resource groups",
+        "output": "view",
+        "refresh_secs": null
+      },
+      {
+        "args": [
+          {
+            "kind": "subscription",
+            "name": "subscription",
+            "required": true
+          }
+        ],
+        "effect": "local",
+        "exit_is_state": false,
+        "id": "set_subscription",
+        "label": "Make default",
+        "output": "done",
+        "refresh_secs": null
+      },
+      {
+        "args": [],
+        "effect": "exec",
+        "exit_is_state": false,
+        "id": "login",
+        "label": "Sign in",
+        "output": "terminal",
+        "refresh_secs": null
+      }
+    ],
+    "version": null
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "default",
+        "label": "Default"
+      },
+      {
+        "id": "name",
+        "label": "Name"
+      },
+      {
+        "id": "id",
+        "label": "ID"
+      },
+      {
+        "id": "state",
+        "label": "State"
+      },
+      {
+        "id": "tenant",
+        "label": "Tenant"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [
+          {
+            "args": {
+              "subscription": "00000000-0000-4000-8000-000000000002"
+            },
+            "effect": "local",
+            "label": "Make default",
+            "verb": "set_subscription"
+          }
+        ],
+        "cells": [
+          "*",
+          "Item 1",
+          "00000000-0000-4000-8000-000000000002",
+          "Enabled",
+          "00000000-0000-4000-8000-000000000001"
+        ],
+        "key": "00000000-0000-4000-8000-000000000002",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "subscription": "00000000-0000-4000-8000-000000000003"
+            },
+            "effect": "local",
+            "label": "Make default",
+            "verb": "set_subscription"
+          }
+        ],
+        "cells": [
+          "",
+          "Item 2",
+          "00000000-0000-4000-8000-000000000003",
+          "Enabled",
+          "00000000-0000-4000-8000-000000000001"
+        ],
+        "key": "00000000-0000-4000-8000-000000000003",
+        "tone": "normal"
+      },
+      {
+        "actions": [
+          {
+            "args": {
+              "subscription": "00000000-0000-4000-8000-000000000004"
+            },
+            "effect": "local",
+            "label": "Make default",
+            "verb": "set_subscription"
+          }
+        ],
+        "cells": [
+          "",
+          "Item 3",
+          "00000000-0000-4000-8000-000000000004",
+          "Disabled",
+          "00000000-0000-4000-8000-000000000001"
+        ],
+        "key": "00000000-0000-4000-8000-000000000004",
+        "tone": "warn"
+      }
+    ],
+    "title": "Azure subscriptions",
+    "truncated": null
+  }
+}
