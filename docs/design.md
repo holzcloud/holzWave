@@ -253,6 +253,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Integration block | ![](design/integration-block.png) | a Kubernetes pods block beside its shell (6.25): header `pods`, context `Kubernetes · prod · payments · 10 s` marked as production, the bar with the context and namespace chips and `↻ Refresh`, a table with the status in words, a selected row with its `Logs` button, and the line `Updated 4 s ago` |
 | Integration states | ![](design/integration-states.png) | the block in four states (6.25): `Reading …`, the tool not found with the places searched, a path field, `Set path` and `Check again`, an error line with the last rows kept dimmed, and a table cut with its note |
 | Context section | ![](design/integration-context.png) | the sidebar's Context section (6.11): one row for each of Kubernetes, Talos, Azure and GAM with the mark, the selection as text, `production` (warn, underlined, `!`) on the Kubernetes row and its `Shell` button, the listbox open under it with the current value marked, the line `New blocks start with prod-eu.`, the status line segments `⎈ prod-eu/payments` `! PRODUCTION` and `az holz-prod`, and a shell pane whose header has the chip `⎈ prod-eu` `! production`; beside it the section in two states, a tool not found with `Set path` and Azure `signed out` |
+| Integration card | integration-confirm.png (6.26) | the card for `Kubernetes · Delete pod` in a production context, armed: head `! Confirm needed`, the effect line, the target rows, the argument list spelled element by element, the guard line `Production context: Production EU.` (warn, underlined, `!`), the hash, the danger bar and the button `Press again to allow on production` |
+| Integration card states | integration-confirm-states.png (6.26) | four cards: a Local verb with the `changes` sentence, an Exec verb on a context that is not production, `Allowed · running…`, and `That action is no longer waiting.`; below them the header of a held pane with the hollow dot with a dash and `exited 1` (warn, `!`) |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -475,8 +477,8 @@ hidden at first and remembers whether it was shown. Sections, each under a `.lab
     focused pane is an integration block of that tool, or a terminal that was opened for that tool from a row (a shell), the
     choice sets the selection of **that pane** and the line says `Pane 3 now uses prod-eu.` With any other pane focused it
     sets the **pick** of the tool, which new blocks start from, and the line says `New blocks start with prod-eu.` A choice
-    writes nothing to the tool's own files and changes no pane but the one named; making a choice the tool's own setting is a
-    separate, confirmed action of a later section and has no entry here. A choice the core refuses is its sentence in that line
+    writes nothing to the tool's own files and changes no pane but the one named; making a choice the tool's own setting is the
+    last entry of the list, `Make default…`, which asks for the card of 6.26 and changes nothing until it is allowed (6.25). A choice the core refuses is its sentence in that line
     (warn, underlined, `!`) and changes nothing.
   - **Shell.** A Kubernetes row has the hairline button `Shell` on a line of its own under the selection. It opens a terminal in a new tab
     with the person's shell and the context of the row (the context and the namespace the row shows, which the core sets for
@@ -1759,8 +1761,10 @@ place of the entries. The page never shows a value that the core did not send.
   cut at 240 characters with an ellipsis (the whole text is its `title`). A row with the tone `dim` is quiet. A row with the
   tone `warn` or `danger` gets the mark `!` before its first cell, and its cells are in the status colour; the status word
   in the cell is the second cue, and `danger` is also underlined. The selected row has the rose wash and a 2 px rose bar.
-  Row actions that only read are buttons at the end of the row (`Logs`), hairline, the word is the core's label. A table is
-  `role="table"` and the rows `role="row"`.
+  Row actions are buttons at the end of the row, hairline, the word is the core's label (`Logs`). An action that changes
+  something or opens a session (`Exec…`, `Delete…`, `Use context…`) has `…` after its label and the `title` `Asks for
+  confirmation`: it opens the card of 6.26 and nothing runs before that card is allowed. A table is `role="table"` and the
+  rows `role="row"`.
 - A **key-value list**: the label in the dim colour, the value in mono, one pair for each line, the same tones.
 - A **text**: preformatted, wrapping, mono, scrolling inside the pane.
 
@@ -1807,5 +1811,135 @@ was chosen from a list the core sent.
 
 ![Integration states](design/integration-states.png)
 
-**Not drawn.** A confirmation card, a button for a verb that changes something, the Context section of the sidebar, a
-profiles dialog, a choice of interval, a column sort, a filter field and a log viewer (a log opens in a terminal pane).
+**Make default.** The list under a chip of a tool that has a Local verb for that kind of value (the verb whose first
+argument is of that kind: Kubernetes context and namespace, Talos context, Azure subscription; the GAM section has none) ends
+with the entry `Make default…`, after a hairline and without a `●`. It asks for the confirmation card of 6.26 for that verb with the value
+the pane has now, so the tool's own setting becomes what this pane reads. It is not drawn when nothing is selected, and
+choosing it changes nothing until the card is allowed. The Context section of the sidebar (6.11) has the same entry.
+
+**Not drawn.** A profiles dialog, a choice of interval, a column sort, a filter field and a log viewer (a log opens in a
+terminal pane).
+
+### 6.26 Approving an integration action
+
+The card in which the person sees what an integration will run before it changes something or opens a session with their
+credentials, and allows it once or denies it. It is of the family of the approval card (6.15) and the shell request card
+(6.20): flat, hairline, a 2 px bar, one solid action, and it never takes the keyboard. The core enforces the rule: it
+prepares the card from the request, spells every argument, names the target and the guard, and binds all of it to a hash; only
+a confirm that repeats the card's ticket and hash runs anything, the core resolves the request again at that moment, and a
+ticket is good once. The page only shows what the core sent and relays a person's press. It does not summarise, shorten,
+reorder, merge, translate or classify a field, it keeps nothing for later, and the only things it sends are the ticket and the
+hash it was given. It builds no argument, name, program or hash.
+
+**When a card appears.** For every action that is not a plain read: a **Local** verb (changes the tool's own configuration:
+`Use context…`, `Make default…`), a **Write** verb (changes a cluster or an account: `Delete pod…`) and an **Exec** verb (opens
+a session with your credentials: `Exec…`). A verb that only reads has no card. Nothing runs, and no pane opens, until the card
+is allowed.
+
+**Place and form.** A floating layer without a backdrop, 24 rem wide, at the top right of the window under the title bar, in
+whichever pane the action started and whichever tab is shown, so a tab switch cannot hide it; at 640 px and narrower a bottom sheet
+over the full width. It has the look of the dialogs (`--hw-ground-2`, a hairline `--hw-line`, the radius and the shadow of the
+floating layers, which is the page's only shadow). A bar of 2 px runs along its left edge. Typing in the terminal goes on while a card waits. A second card that arrives
+while one is shown waits behind it and is counted in the head (`1 of 2`); the core holds at most eight.
+
+**Parts, top to bottom.**
+
+| Part | Words |
+|---|---|
+| Head | a `.label` `Confirm needed` with the mark `!`, and `1 of 2` at the right when more than one card waits |
+| Title | the tool and the verb as the core's tool list names them: `Kubernetes · Delete pod` (the core's ids when the list does not know them) |
+| Effect line | one sentence for the effect of the verb (see below) |
+| Target | one row for each pair of the core's target in the core's order: the name (dim, mono) and the value (ink, mono, wrapped, never cut): `context prod-eu`, `namespace payments`, `pod api-0` |
+| Arguments | a hairline box in mono with one row for the program (`program kubectl`) and one for each argument (`arg 1 delete` to `arg 9 api-0`), in the order the core spelled them, each element on its own row; at most 12 rem high, it scrolls inside and takes the focus with `Tab` |
+| Guard | only for a production context: `Production context: Production EU.` in the warn colour, underlined, with the mark `!` and the word `production`; the name is the core's |
+| Hash | `hash 9f3a41c2d7be`: the first 12 characters, dim, mono |
+| Line | a live region (`role="status"`) for the sentence of the mode (armed, sending, done, ended, changed) |
+| Fault line | empty, unless the core refused the press; then the core's sentence, danger, underlined, marked `!`, above the buttons |
+| Buttons | `Deny` (left, hairline) and `Allow once` (right, solid `--hw-rose-deep`, `--hw-on-accent` text) |
+| Foot | `Allows this one action only. Nothing is kept for later. Esc denies.` |
+
+Control, bidirectional, zero-width and tag characters in a name were written as escapes (`\u{202e}`) by the core and are shown
+as they came; nothing is dropped, and a long value wraps.
+
+**Effect lines.**
+
+| Effect | Words |
+|---|---|
+| `write` | Changes a cluster or an account. Check the target below. |
+| `local` | Changes the tool's own configuration. It writes: the core's `changes` sentence (`the kubeconfig files named by KUBECONFIG, by default ~/.kube/config`). The `changes` pair is shown here and not a second time among the target rows. |
+| `exec` | Opens a session with your credentials. Check the command below. |
+
+**Production.** When the core's guard names a production context the guard line is drawn and the card needs **two presses**. The
+first press on `Allow once` (after the half second) arms the card and sends nothing: the bar turns danger, the button reads
+`Press again to allow on production`, and the line says `Armed. The next press allows this on production. Nothing has run
+yet.` so that assistive technology announces it. The second press sends the confirm. `Deny`, `Escape` or the card ending
+disarms it, and nothing is remembered: the next card, also for the same action, starts unarmed. A card that stays armed is not
+timed out by the page; it ends with its ticket after 120 seconds.
+
+**Modes.** Each mode has words, so colour is never the only cue. `data-mode` holds the mode.
+
+| Mode | Bar | Second cue and content |
+|---|---|---|
+| `ask` | warn | the mark `!` in the head, both buttons |
+| `armed` | danger | the guard line, the button `Press again to allow on production`, the line `Armed. The next press allows this on production. Nothing has run yet.` |
+| `sending` | hairline | the line `Allowed · running…`, both buttons disabled, `aria-busy` |
+| `done` | hairline | the line `Done: <the core's one-line note>` for a verb that ran, `Opened pane 5` for an Exec verb (the layout of the core is applied and the new pane appears), no buttons; the card leaves after a few seconds and the status line keeps the sentence |
+| `ended` | hairline | the line `That action is no longer waiting.` for a ticket the core does not know, that expired or that was answered, no buttons |
+| `changed` | warn | the line `The request changed. Nothing ran. Read the card again.`; the page asks the core for a new card for the same action and draws it; the half second and the two presses start again |
+| `cannot` | danger | the mark `!`, the title `Cannot show this request`, the sentence `This request could not be read in full. It can only be denied.`, only `Deny` |
+
+A refusal of any other kind (a tool that cannot be started, a failed run) keeps the card with the core's sentence in the fault
+line; the card is unarmed again and a new decision is needed. A card the page cannot read (no ticket, no 64-character hash, a field list
+of the wrong shape, more than 64 fields, a value over 8192 characters, or members that do not agree with the fields the hash
+covers) is `cannot`.
+
+**Keys and focus.**
+
+| Key or press | Effect |
+|---|---|
+| a card appears | nothing: it never takes the focus; the status line says `waiting for your decision` |
+| `Tab` | reaches the argument box, `Allow once` and `Deny` in this order |
+| `Space`, `Enter` on a button | decides |
+| `Escape` with the focus inside the card | denies (the ticket is cancelled) and returns the focus to the terminal pane that had it; `Escape` elsewhere does nothing to the card |
+| a press on `Allow once` within half a second of the card appearing, also of a card drawn again after a changed request | ignored (a click aimed at what moved cannot allow an action) |
+| a click or key press made by a script | ignored; `Deny` works at any time for a real press |
+| the palette entry `Answer the integration request` | moves the keyboard to `Deny`; the entry is there only while a card waits |
+
+No key allows an action without the focus on its button.
+
+**A held terminal.** A terminal that an Exec verb opened and whose program ended stays open with the program's last output.
+Its header says so: the dot is hollow with a dash, and the context slot reads `exited 1` (the status the core gives; `exited`
+when it gives none) in the warn colour, underlined, with the mark `!`. The terminal line itself comes from the core. A pane the core does not list as held has the header it always had.
+
+**Sentences.**
+
+| Sentence | Where |
+|---|---|
+| Confirm needed | the head |
+| Kubernetes · Delete pod | the title |
+| Changes a cluster or an account. Check the target below. | the effect line of a Write verb |
+| Changes the tool's own configuration. It writes: … | the effect line of a Local verb |
+| Opens a session with your credentials. Check the command below. | the effect line of an Exec verb |
+| Production context: Production EU. | the guard line |
+| Allow once, Press again to allow on production, Deny | the buttons |
+| Allows this one action only. Nothing is kept for later. Esc denies. | the foot |
+| Armed. The next press allows this on production. Nothing has run yet. | the line of an armed card |
+| Allowed · running… | after the press, until the core answers |
+| Done: pod "api-0" deleted | a verb that ran, with the core's note |
+| Opened pane 5 | an Exec verb |
+| That action is no longer waiting. | an ended card |
+| The request changed. Nothing ran. Read the card again. | a request that changed since the card was drawn |
+| Cannot show this request / This request could not be read in full. It can only be denied. | a card the page cannot read |
+| Denied. Nothing ran. | the status line after `Deny` |
+| exited 1 | the context slot of a held terminal |
+
+**Not built.** An `Always allow`, an allow for the session or for a pane, a setting that carries an approval, a remembered
+choice, a timer that arms or disarms a card, a sound or a notification, and a card for a verb that only reads.
+
+**Narrow screens (640 px and narrower).** The card is a bottom sheet over the full width; both buttons are at least 44 px high and
+the text is at least 16 px.
+
+**Accessibility.** The card is an `alertdialog` named by its title and described by the effect line, the line is the live
+region, `aria-busy` while sending, hairlines are `--hw-line` so `contrast-high` holds (`--hw-ink-3` on the card), nothing
+moves so `motion-reduce` has nothing to remove, the focus ring is 2 px, and under forced colours the card, the guard line
+and the focus ring use system colours.
