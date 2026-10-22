@@ -255,6 +255,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Context section | ![](design/integration-context.png) | the sidebar's Context section (6.11): one row for each of Kubernetes, Talos, Azure and GAM with the mark, the selection as text, `production` (warn, underlined, `!`) on the Kubernetes row and its `Shell` button, the listbox open under it with the current value marked, the line `New blocks start with prod-eu.`, the status line segments `⎈ prod-eu/payments` `! PRODUCTION` and `az holz-prod`, and a shell pane whose header has the chip `⎈ prod-eu` `! production`; beside it the section in two states, a tool not found with `Set path` and Azure `signed out` |
 | Integration card | ![](design/integration-confirm.png) | the card for `Kubernetes · Delete pod` in a production context, armed (6.26): head `! Confirm needed`, the effect line, the target rows, the argument list spelled element by element, the guard line `Production context: Production EU.` (warn, underlined, `!`), the hash, the danger bar and the button `Press again to allow on production`; the pods block beside it has `Logs`, `Exec…` and `Delete…` on the selected row |
 | Integration card states | ![](design/integration-confirm-states.png) | four cards (6.26): a Local verb with the `changes` sentence, an Exec verb on a context that is not production, `Allowed · running…`, and `That action is no longer waiting.`; under the first one the header of a held terminal with the hollow dot with a dash and `exited 1` (warn, underlined, `!`) |
+| Integration profiles | ![](design/integration-profiles.png) | the dialog of 6.27 over the daily window: the group `Profiles` with a production profile chosen (`production`, warn, underlined, `!`), the form of that profile (name, tool radios, context and namespace, `Production context` checked with its sentence), `Secret variables` with one write-only row (`saved`, `Set`, `Clear`), `Environment` with a refusal of the core on a row (danger, underlined, `!`), the sync note, `Delete` and `Save` |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -454,7 +455,8 @@ hidden at first and remembers whether it was shown. Sections, each under a `.lab
   ([config.md](config.md)), and a file that is not valid is left out with its reason shown in the sidebar.
 
 - **Context:** the tools the person already uses on the command line, between Hosts and History (the phone has no sidebar and
-  no section). The head has the label `Context` and, at the right, the button `↻` (`Read the context again`). There is one
+  no section). The head has the label `Context` and, at the right, the hairline button `Profiles…` (it opens the dialog of 6.27; it is not
+  drawn at 640 px and narrower) and the button `↻` (`Read the context again`). There is one
   row for each of `Kubernetes`, `Talos`, `Azure` and `GAM`, in that order, and a row is always drawn, so there is never an empty
   heading. A row has two lines. The first is the **mark** (`⎈` Kubernetes, `◇` Talos, and the text marks `az` and `gam`), the
   tool's name in the label style and, at the right, its **words**. The second is the **selection** as mono text: Kubernetes
@@ -1948,3 +1950,135 @@ the text is at least 16 px.
 region, `aria-busy` while sending, hairlines are `--hw-line` so `contrast-high` holds (`--hw-ink-3` on the card), nothing
 moves so `motion-reduce` has nothing to remove, the focus ring is 2 px, and under forced colours the card, the guard line
 and the focus ring use system colours.
+
+### 6.27 Integration profiles
+
+The dialog in which a person keeps what holzWave remembers about one connection of an integration tool (6.25): which tool, which
+context, namespace, node, subscription or section it pins, whether it is a **production** context, whether it keeps a
+configuration folder of its own, the plain environment variables the tool is started with and the *names* of the secret
+variables whose values live in the keychain. It looks and keys like the AI providers dialog (6.13) and does nothing else: it
+runs no tool, reads no cluster and tests no connection. The core owns every rule: it validates the profile, refuses what it
+does not allow and says why in a sentence, and the dialog shows that sentence. The page checks only how long a field is, and it
+builds no name, argument list, path or id that the person did not type, except the id of a new profile (below).
+
+**What a profile is, and where it goes.** The profile file holds names and flags and is synced between the person's computers.
+Secret values are kept in the keychain and travel only inside the encrypted secrets of the sync. A path of this computer (the
+program of a tool, a configuration folder) is never part of a profile. The dialog says so in one note under the groups.
+
+**Way in.** The hairline button `Profiles…` in the head of the sidebar's Context section (6.11), left of `↻`. It is not drawn
+at 640 px and narrower, and a phone has no Context section, so the dialog has no way in on a phone yet; the palette
+entry comes with the palette (it has no chord). One dialog at a time; a second ask while it is open changes nothing. `Escape`,
+`Close` and a press on the backdrop close it, and the keyboard goes back to the terminal.
+
+**Box.** The box of the Settings dialog and the providers dialog (a floating layer: hairline, 8 px radius, the one shadow), 40 rem
+wide, scrolling inside. From the top: the title `Integration profiles`; the status line (`role="status"`, one line); the notes of
+the core about its profile file, only when it sent any, as dim lines (a file that did not load is named there, with the reason);
+four groups, each a fieldset under a `.label` legend: `Profiles`, `Profile`, `Secret variables`, `Environment`; the note about
+syncing; the buttons `Delete` and `Save`; then `Close`. While it is open it takes the keys: nothing reaches the terminal, `Tab`
+stays inside, the arrows move inside a radio group, `Enter` in a text field saves, and `Escape` closes.
+
+**Profiles.** A radio group with one row for each profile the core listed (at most 64): a native radio, the name, the tool's name
+dim, the pinned selection in mono (`prod-eu · payments`, `—` when it pins nothing) and, for a production profile, the word
+`production` (warn, underlined, with the mark `!` before it). The row of the profile in the form has the rose wash and a 2 px
+rose bar on its left. A name is text: markup in a name is those characters. `＋ New` sits below the list; with no profile the
+list says "No profile yet."
+
+**Profile.** The legend is `Profile`, or `New profile` while adding. In this order:
+
+- `Name`, a text field of at most 64 characters.
+- `Tool`, a radio group of the tools the core lists, with the core's names. Changing the tool keeps the name and the switches
+  and empties the fields the new tool does not select.
+- The fields the chosen tool selects, taken from the core's list of its selections (`Context` and `Namespace` for
+  Kubernetes, `Context` and `Node` for Talos, `Subscription` for Azure, `Section` for GAM). Each is a text field of at most 253
+  characters whose placeholder is an example (`prod-eu`, `payments`, `node-1`, `00000000-0000-0000-0000-000000000000`, `work`);
+  the page puts no value in a field the person did not type, and an empty field pins nothing. A field the tool does not select
+  is not in the form and is sent as null.
+- A checkbox `Production context` with the sentence "Actions on this context ask twice." The flag is the person's, loaded from
+  the core and sent back with every save.
+- A checkbox `Own configuration folder` with the sentence "Sign in again inside it. holzWave keeps it on this computer.", only
+  for a tool that selects a subscription or a section (Azure and GAM).
+- The line of the core's refusal of the profile, empty until there is one: the core's sentence, naming the profile and the field,
+  in the danger colour, underlined, with the mark `!`, and `role="alert"`.
+
+**Secret variables.** One row for each name in the profile's secret variables: the name in mono, a password field, one state
+word, and the buttons `Set`, `Clear` and `Remove`. The field is empty on every open and after every call, has `autocomplete="off"`,
+takes at most 1024 characters, and has no show toggle. The state word comes from the core's `has_value`: `saved` or `not set`.
+`Set` is dimmed until the profile has been saved once with that name (the core refuses a value for a name the profile does not
+declare; the row says "Save the profile first.") and until the field holds text; a press sends the value in one call, empties
+the field at once and shows `saved`. `Clear` deletes the value and shows `not set`. `Remove` takes the name out of the profile at
+the next `Save`; a saved value of that name is deleted first. Below the rows a text field `Variable name` and `Add` add a name
+(at most 8); the name is sent with the next save, and the core checks it. The group says "Saved values are never shown. Type a
+new one to replace it."
+
+**Environment.** One row for each plain variable: a name field, a value field and `Remove`; `Add` adds an empty row (at most
+32). The page applies no rule of its own to a name or a value. When the core refuses a row at a save, its sentence is shown on the
+row that carries the name the sentence mentions, and otherwise on the line under the profile.
+
+**Saving and deleting.** `Save` sends the whole profile in one call, in the shape of the profile file: the id, the tool, the
+name, the four selection fields (empty text is null), the two flags, the plain variables as an object and the secret variables
+as a list of names. The id of a profile that exists is its own; the id of a new profile is a lower-case form of its name (letters,
+digits, `-` and `_`, at most 32), made unique among the listed ids so that a new profile can never replace another one. On
+success the list is read again and the saved profile stays chosen; on a refusal nothing changes and the sentence is shown.
+`Delete` (only for a saved profile) turns into `Delete?` on the first press and removes the profile, its secrets included, on the
+second; any other press, a key typed in a field and `Escape` take the question back. After a removal the list is read again and the
+form is empty.
+
+**Leaving with changes.** The status line says `unsaved` (warn, and the word) while the form differs from the saved profile. A
+press on another row or on `＋ New` says `Changes were not saved.` and shows the other profile. `Close`, `Escape` and the backdrop
+ask first: the button reads `Discard changes?` and the line says "Unsaved changes. Close again to discard them."; any other
+action takes the question back. A value typed into a secret field is never an unsaved change; it is sent by `Set` or lost when
+the dialog closes.
+
+**Keys and focus.**
+
+| Key | Effect |
+|---|---|
+| open | the box takes the focus, then the chosen row, or `Name` for a new profile |
+| `Tab`, `Shift+Tab` | stays inside the dialog; one stop for each radio group |
+| arrows in a radio group | choose the profile or the tool |
+| `Enter` in a text field | `Save`; in a secret field it is `Set` for that row |
+| `Escape` | takes back an armed `Delete?`, else closes (asks first with unsaved changes) and returns the keyboard to the terminal |
+
+![Integration profiles](design/integration-profiles.png)
+
+**States and their second cue.**
+
+| State | Colour | Second cue |
+|---|---|---|
+| profile in the form | rose wash | `●` radio, 2 px bar on the left |
+| production profile | warn | the word `production` underlined with a `!` before it |
+| unsaved changes | warn | the word `unsaved` in the status line |
+| secret saved | ok | the word `saved` |
+| secret not set | dim | the word `not set` |
+| refusal of the core | danger | its sentence, underlined, `!` mark, `aria-invalid` on the row it names |
+| armed delete | danger border | the text `Delete?` |
+| armed close | danger border | the text `Discard changes?` |
+
+**Sentences.**
+
+| Sentence | Where |
+|---|---|
+| Integration profiles | the title |
+| Profiles, Profile, New profile, Secret variables, Environment | the legends |
+| ＋ New, Save, Delete, Delete?, Set, Clear, Remove, Add, Close, Discard changes? | the buttons |
+| saved, not set | the state word of a secret |
+| Production context / Actions on this context ask twice. | the checkbox and its sentence |
+| Own configuration folder / Sign in again inside it. holzWave keeps it on this computer. | the checkbox and its sentence |
+| Saved values are never shown. Type a new one to replace it. | under the secret rows |
+| Save the profile first. | the hint of a secret row whose name is not saved yet |
+| The profile file is synced between your computers. Secret values are kept in the keychain and synced inside the encrypted secrets. Paths of this computer are never part of a profile. | the note under the groups |
+| No profile yet. | the empty list |
+| Saved. / Deleted. / Saving… / unsaved / Changes were not saved. / Unsaved changes. Close again to discard them. | the status line |
+
+**Not built.** A show toggle for a secret, a copy of a secret, an import from a kubeconfig or a cloud account, a test of the
+connection, an edit of the id of a profile, a path of this computer in a profile, and a rule of the core written into the page.
+
+**Narrow screens (640 px and narrower).** The dialog is the screen, as in 6.13: full width and height, no radius, no shadow, the
+fields stacked, rows, options, inputs and buttons at least 44 px high, input text at least 16 px. The secret rows and the
+environment rows wrap: the name above, the field and the buttons below. On a desktop the same targets keep their 28 px minimum.
+
+**Accessibility.** Every control has a visible label; the secret field is named `Value of {NAME}`, the environment fields
+`Name` and `Value of {NAME}`; a row that the core refused is `aria-invalid` and `aria-describedby` its sentence; the status line
+is `role="status"`; the list and the tools are radio groups. Nothing moves, so `motion-reduce` has nothing to remove. Every
+hairline is `--hw-line`, so `contrast-high` holds. Under forced colours the chosen row and the armed buttons get a system-colour
+outline.
