@@ -1,0 +1,105 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": "work",
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "primaryEmail",
+        "label": "primaryEmail"
+      },
+      {
+        "id": "name.fullName",
+        "label": "name.fullName"
+      },
+      {
+        "id": "suspended",
+        "label": "suspended"
+      },
+      {
+        "id": "orgUnitPath",
+        "label": "orgUnitPath"
+      },
+      {
+        "id": "notes",
+        "label": "notes"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [],
+        "cells": [
+          "alice@example.com",
+          "Alice Example",
+          "False",
+          "/",
+          ""
+        ],
+        "key": "alice@example.com",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "bob@example.com",
+          "Bob Example",
+          "False",
+          "/Staff",
+          "Line one, with a comma line two with \"quotes\""
+        ],
+        "key": "bob@example.com",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "carol@example.com",
+          "Carol Example",
+          "True",
+          "/Former",
+          "on leave"
+        ],
+        "key": "carol@example.com",
+        "tone": "dim"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "dave@example.com",
+          "Dave Example",
+          "False",
+          "/Staff/Sales",
+          ""
+        ],
+        "key": "dave@example.com",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "erin@example.com",
+          "Erin Example",
+          "False",
+          "/",
+          "plain, quoted"
+        ],
+        "key": "erin@example.com",
+        "tone": "normal"
+      }
+    ],
+    "title": "Users",
+    "truncated": null
+  }
+}
