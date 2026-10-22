@@ -2541,6 +2541,55 @@ fn test_plan_has_every_ai_and_extras_row_exactly_once() {
     assert!(problems.is_empty(), "docs/test-plan.md Part 7: {problems:?}");
 }
 
+// ---- Part 9 of the test plan ------------------------------------------------------------------------------
+
+/// The rows of Part 9 of `docs/test-plan.md` (the native integrations: Kubernetes, Talos, Azure CLI and GAM7), in the
+/// order of the table: the human checks that need a real cluster, account, Windows or Linux machine, which no suite
+/// here can run. Every id is in the document exactly once, with an area, an instruction and an expected result; the
+/// Result cell is the owner's and stays empty until the owner has run the row.
+const INTEGRATION_TEST_PLAN_ROWS: [&str; 1] = ["INT-K1"];
+
+fn integration_test_plan_row_ids() -> Vec<String> {
+    INTEGRATION_TEST_PLAN_ROWS.iter().map(|id| (*id).to_owned()).collect()
+}
+
+#[test]
+fn test_plan_has_every_integration_row_exactly_once() {
+    let problems = test_plan_row_problems(&read("docs/test-plan.md"), &integration_test_plan_row_ids());
+    assert!(problems.is_empty(), "docs/test-plan.md Part 9: {problems:?}");
+}
+
+/// The rows of the integrations whose Result cell (the fifth, and anything after it) holds text, one sentence each:
+/// nothing may be written there before the owner has run the row, so a document can never claim a row verified.
+fn integration_result_problems(doc: &str) -> Vec<String> {
+    doc.lines()
+        .filter_map(table_cells)
+        .filter(|cells| cells.first().is_some_and(|id| id.starts_with("INT-")))
+        .filter(|cells| cells.iter().skip(4).any(|cell| !cell.is_empty()))
+        .map(|cells| format!("row {} has a Result that is not empty", cells[0]))
+        .collect()
+}
+
+#[test]
+fn integration_rows_have_empty_results() {
+    let problems = integration_result_problems(&read("docs/test-plan.md"));
+    assert!(problems.is_empty(), "docs/test-plan.md Part 9: {problems:?}");
+}
+
+#[test]
+fn the_result_check_flags_a_filled_cell_and_accepts_an_empty_one() {
+    let empty = "| INT-K1 | Area | do it | it works | |\n| INT-K2 | Area | do it | it works |  |\n";
+    assert!(integration_result_problems(empty).is_empty(), "empty cells");
+    let filled = "| INT-K1 | Area | do it | it works | pass |\n| INT-K2 | Area | do it | it works | |\n";
+    assert_eq!(integration_result_problems(filled), ["row INT-K1 has a Result that is not empty"]);
+    let escaped = "| INT-K1 | Area | do it \\| twice | it works | |\n";
+    assert!(integration_result_problems(escaped).is_empty(), "an escaped bar is part of its cell");
+    let extra = "| INT-K1 | Area | do it | it works | | fail |\n";
+    assert_eq!(integration_result_problems(extra).len(), 1, "text after the Result cell counts");
+    let other = "| AI1 | Area | do it | it works | pass |\n| INT-K1 | Area | do it | it works | |\n";
+    assert!(integration_result_problems(other).is_empty(), "only the rows of the integrations are looked at");
+}
+
 // ---- no plan label in the public tree -----------------------------------------------------------------------
 
 /// The first-party directories whose text files are public: the labels of the private planning tree stay out of them.

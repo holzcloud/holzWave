@@ -357,6 +357,15 @@ Machines the rows need:
 - The browser file `app/tests/browser/localnet.test.mjs` runs with the rest of `npm run test:browser` (or alone with
   `--only localnet`) and needs no Mac.
 
+## Part 9: native integrations (Kubernetes, Talos, Azure CLI, GAM7)
+
+Nothing in this part is verified until you run the row and write `pass`, or `fail` with a line of what was seen, in its
+Result column. The rows need real tools, clusters and accounts that no suite here can reach.
+
+| # | Area | What to do | Expected | Result |
+|---|---|---|---|---|
+| INT-K1 | Kubernetes on a real cluster | With a real cluster in your kubeconfig (kind, Docker Desktop's Kubernetes or a throwaway cloud cluster): (1) open `Kubernetes: Contexts`, `Kubernetes: Namespaces` and `Kubernetes: Pods` from the palette and compare with `kubectl config get-contexts`, `kubectl get namespaces` and `kubectl get pods -o wide`. (2) In the pods block pick another context and another namespace in the chips. (3) Watch the pods block while a pod is created and deleted in a terminal; then hide the window for a minute. (4) Open the block for a context whose server is down. (5) Compare READY, STATUS, RESTARTS and AGE with `kubectl get pods`. | (1) The lists match and the current context row is marked. (2) Only this pane's context and namespace change: `kubectl config current-context` in a terminal still prints the old one and `shasum ~/.kube/config` is the same before and after. (3) The table follows within 10 s; while the window is hidden no `kubectl` process starts (`ps`). (4) `! kubectl reported an error: …` in words, the last rows kept and dimmed. (5) The words match kubectl's; a pod in a back-off state is marked `!`. Record kubectl ____, cluster ____. | |
+
 ## What to expect
 
 Known limits of this build, so they are not reported as defects:
