@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use holzwave_core::integrate::profiles::LocalFile;
 use holzwave_core::integrate::service::{HostFacts, IntegrationService, RunAnswer};
-use holzwave_core::integrate::Selection;
+use holzwave_core::integrate::{Selection, ToolId};
 use holzwave_core::secrets::MemoryStore;
 use serde_json::Value;
 
@@ -247,4 +248,256 @@ fn case_the_users_answer(rig: &Rig) {
 #[test]
 fn the_users_answer_is_written_as_a_golden_and_matches_it() {
     case_the_users_answer(&Rig::new());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Sections, the domain and the JSON view.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A listing of a configuration with three sections, the second one selected. Written, not recorded: the tool was only
+/// ever recorded with an empty configuration directory, which has the one section `DEFAULT`.
+const SECTIONS_TEXT: &str = "Config File: /path/to/gamcfg/gam.cfg\n  DEFAULT\n  lab\n  work *\n";
+
+/// The users as `formatjson` prints them: the e-mail and one JSON object per row in the `JSON` column, quotes doubled.
+/// Written: the shape is the tool's document, no real domain was ever read.
+fn users_as_json() -> String {
+    let objects = [
+        r#"{"primaryEmail":"alice@example.com","name":{"fullName":"Alice Example"},"suspended":false,"orgUnitPath":"/"}"#,
+        r#"{ "primaryEmail" : "carol@example.com" , "suspended" : true , "orgUnitPath" : "/Former" }"#,
+    ];
+    let mut out = String::from("primaryEmail,JSON\n");
+    for object in objects {
+        let email = object.split('"').nth(3).expect("an e-mail");
+        out.push_str(&format!("{email},\"{}\"\n", object.replace('"', "\"\"")));
+    }
+    out
+}
+
+/// The domain document of the written fixture with two members the module does not know, one of them a secret.
+fn domain_with_unknown_members() -> String {
+    let mut document: Value = serde_json::from_str(&fixture("info_domain.json")).expect("the domain fixture is JSON");
+    let members = document.as_object_mut().expect("an object");
+    members.insert("oauthClientSecret".to_owned(), Value::from("SECRET-VALUE-0042"));
+    members.insert("token".to_owned(), serde_json::json!({ "access": "TOKEN-VALUE-0042" }));
+    serde_json::to_string_pretty(&document).expect("JSON")
+}
+
+/// The first row of the table `name` is built from, as a list of cells.
+fn cells(value: &Value, row: usize) -> Vec<String> {
+    value["view"]["rows"][row]["cells"]
+        .as_array()
+        .expect("cells")
+        .iter()
+        .map(|c| c.as_str().expect("text").to_owned())
+        .collect()
+}
+
+fn case_sections_domain_and_json(rig: &Rig) {
+    let service = rig.service();
+    service.select("gam", Some(PANE), &section("work")).expect("a section for the pane");
+
+    // The sections: the selected one is starred, a row has no action, and the list never selects or saves anything.
+    // Written fixture: a configuration with several sections was never recorded (the reader is lenient on purpose).
+    let fake = gam_printing(&rig.bin, SECTIONS_TEXT);
+    let sections = service.run_view("gam", "sections", Some(PANE), &no_args()).expect("the sections are read");
+    assert_eq!(argv_of(&fake), ["showsections"], "the listing is read from the tool itself, with no section chosen");
+    let wire_sections = wire(&sections);
+    assert_eq!(wire_sections["view"]["kind"], "table");
+    let ids: Vec<&str> =
+        wire_sections["view"]["columns"].as_array().expect("columns").iter().map(|c| c["id"].as_str().expect("id")).collect();
+    assert_eq!(ids, ["section", "selected"]);
+    assert_eq!(cells(&wire_sections, 0), ["DEFAULT", ""]);
+    assert_eq!(cells(&wire_sections, 1), ["lab", ""]);
+    assert_eq!(cells(&wire_sections, 2), ["work", "*"], "the selected section carries the star");
+    for row in wire_sections["view"]["rows"].as_array().expect("rows") {
+        assert_eq!(row["actions"].as_array().map(Vec::len), Some(0), "a section has no action: nothing switches the tool's default");
+    }
+    golden("gam_sections.json", &sections);
+
+    // The domain: key-value rows of the members the module knows; the others are dropped, counted, and their values
+    // are nowhere. Written fixture: the member names are an assumption from the tool's documents.
+    let fake = gam_printing(&rig.bin, &domain_with_unknown_members());
+    let domain = service.run_view("gam", "domain", Some(PANE), &no_args()).expect("the domain is read");
+    assert_eq!(argv_of(&fake), ["select", "work", "info", "domain", "formatjson"]);
+    let wire_domain = wire(&domain);
+    assert_eq!(wire_domain["view"]["kind"], "kv");
+    assert_eq!(wire_domain["view"]["note"], "2 other members are not shown.");
+    let pairs: Vec<(&str, &str)> = wire_domain["view"]["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| (r["label"].as_str().expect("label"), r["value"].as_str().expect("value")))
+        .collect();
+    assert_eq!(pairs[0], ("Domain", "example.com"));
+    assert!(pairs.contains(&("Alias", "alias-two.example.com, not verified")));
+    let text = wire_domain.to_string();
+    assert!(!text.contains("SECRET-VALUE-0042") && !text.contains("TOKEN-VALUE-0042"), "an unknown member never reaches the page");
+    golden("gam_domain.json", &domain);
+
+    // Output that is not JSON is shown as the plain text it is, never as a table of guesses.
+    // (Another pane: an identical request within a second is served from the service's cache, by design.)
+    let _fake = gam_printing(&rig.bin, "Domain: example.com\n");
+    service.select("gam", Some(PANE + 1), &section("work")).expect("a section for the other pane");
+    let odd = service.run_view("gam", "domain", Some(PANE + 1), &no_args()).expect("drift is a text, not a fault");
+    assert_eq!(wire(&odd)["view"]["kind"], "text");
+
+    // The users as JSON: the flag asks for `formatjson`, and the page gets one pretty, re-serialised array.
+    let fake = gam_printing(&rig.bin, &users_as_json());
+    let mut flag = no_args();
+    flag.insert("as_json".to_owned(), "true".to_owned());
+    let users = service.run_view("gam", "users", Some(PANE), &flag).expect("the users are read as JSON");
+    let argv = argv_of(&fake);
+    assert_eq!(argv.last().map(String::as_str), Some("formatjson"), "{argv:?}");
+    assert_eq!(&argv[..5], ["select", "work", "config", "csv_output_row_limit", "2001"]);
+    let wire_users = wire(&users);
+    assert_eq!(wire_users["view"]["kind"], "text");
+    assert_eq!(wire_users["view"]["format"], "json");
+    assert_eq!(wire_users["view"]["truncated"], false);
+    let shown = wire_users["view"]["text"].as_str().expect("text");
+    let parsed: Value = serde_json::from_str(shown).expect("the text is one JSON document");
+    assert_eq!(parsed.as_array().map(Vec::len), Some(2), "one array of the objects of the JSON column");
+    assert!(shown.contains("\n  "), "pretty printed");
+    assert!(!shown.contains("\"primaryEmail\" :"), "re-serialised, never the tool's own spacing");
+    assert!(shown.len() <= 64 * 1024, "bounded: {} bytes", shown.len());
+    golden("gam_users_json.json", &users);
+}
+
+#[test]
+fn sections_domain_and_json_goldens_match() {
+    case_sections_domain_and_json(&Rig::new());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A section belongs to a pane, and the tool's configuration directory is never written.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Every path below `dir` and the bytes of every file in it, so that "unchanged" means: no file added, removed or changed.
+fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        for entry in fs::read_dir(dir).expect("list the directory").flatten() {
+            let path = entry.path();
+            let name = path.strip_prefix(base).expect("below the base").to_string_lossy().into_owned();
+            if path.is_dir() {
+                out.insert(format!("{name}/"), Vec::new());
+                walk(base, &path, out);
+            } else {
+                out.insert(name, fs::read(&path).expect("read a file"));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// A configuration directory of the tool as a person might have one: the file with the sections and the OAuth files.
+fn scratch_config(rig: &Rig) -> PathBuf {
+    let dir = rig.root.join("gamcfg");
+    fs::create_dir(&dir).expect("the configuration directory");
+    fs::write(dir.join("gam.cfg"), "[DEFAULT]\ncustomer_id = my_customer\n\n[work]\ndomain = example.com\n").expect("gam.cfg");
+    fs::write(dir.join("oauth2.txt"), "{\"scratch\": true}\n").expect("oauth2.txt");
+    fs::create_dir(dir.join("gamcache")).expect("the cache directory");
+    fs::write(dir.join("gamcache").join("entry"), b"cached").expect("a cache file");
+    dir
+}
+
+fn case_a_section_is_selected_per_pane(rig: &Rig) {
+    let config = scratch_config(rig);
+    let mut local = LocalFile::default();
+    local.set_config_paths(ToolId::Gam, std::slice::from_ref(&config)).expect("a configuration path of this computer");
+    local.save(&rig.data).expect("the machine-local file");
+    let before = snapshot(&config);
+
+    let fake = gam_printing(&rig.bin, &fixture("print_users.csv"));
+    let service = rig.service();
+    for (pane, choice) in [(3_u64, Some("work")), (4, Some("lab")), (5, None)] {
+        let selection = choice.map_or_else(Selection::default, section);
+        service.select("gam", Some(pane), &selection).expect("a selection for the pane");
+        service.run_view("gam", "users", Some(pane), &no_args()).expect("the users are read for the pane");
+    }
+
+    let mut lists = rig.lists();
+    lists.sort();
+    assert_eq!(lists.len(), 3, "one start for each pane: {lists:?}");
+    let runs = fs::read_to_string(format!("{}.runs", fake.path().display())).expect("the count of starts");
+    assert_eq!(runs.lines().count(), 3, "and the record holds each of them");
+    // The lists differ in the leading `select <section>` and in nothing else.
+    let mut chosen = Vec::new();
+    let mut rest = Vec::new();
+    for list in &lists {
+        if list[0] == "select" {
+            chosen.push(list[1].clone());
+            rest.push(list[2..].to_vec());
+        } else {
+            rest.push(list.clone());
+        }
+    }
+    chosen.sort();
+    assert_eq!(chosen, ["lab", "work"], "each pane that chose a section selects it, for that one process");
+    assert!(rest.windows(2).all(|pair| pair[0] == pair[1]), "everything after the selection is the same: {rest:?}");
+    assert_eq!(rest[0][..5], ["config", "csv_output_row_limit", "2001", "print", "users"]);
+
+    // The machine-local configuration directory is the tool's directory for every start, and nothing in it changed.
+    let env = fake.env();
+    assert_eq!(env.get("GAMCFGDIR").map(String::as_str), config.to_str());
+    assert_eq!(snapshot(&config), before, "no file of the configuration directory was added, removed or changed");
+}
+
+#[test]
+fn a_section_is_selected_per_pane_and_the_configuration_directory_is_untouched() {
+    case_a_section_is_selected_per_pane(&Rig::new());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The sweep: no argument list of any case holds a word that saves or writes.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Makes the table of the cases of this file from their names, so that the sweep runs every one of them.
+macro_rules! cases {
+    ($($name:ident),+ $(,)?) => {
+        const CASES: &[(&str, fn(&Rig))] = &[$((stringify!($name), $name)),+];
+    };
+}
+
+cases![case_the_users_answer, case_sections_domain_and_json, case_a_section_is_selected_per_pane];
+
+#[test]
+fn no_recorded_argument_list_holds_a_save_or_write_word() {
+    // Every case of the file is in the table: the sweep cannot miss one that was added later.
+    let source = include_str!("integrate_e2e_gam.rs");
+    let defined = source.lines().filter(|line| line.starts_with("fn case_")).count();
+    assert_eq!(defined, CASES.len(), "every `fn case_...` of this file is listed in `cases!`");
+
+    // Each case runs on a machine of its own; the lists its fake recorded are read back and checked together.
+    let mut all: Vec<Vec<String>> = Vec::new();
+    for (name, case) in CASES {
+        let rig = Rig::new();
+        case(&rig);
+        let lists = rig.lists();
+        assert!(!lists.is_empty(), "{name} recorded no argument list");
+        all.extend(lists);
+    }
+    check_lists(&all);
+    let words: usize = all.iter().map(Vec::len).sum();
+    println!("swept {} argument lists, {words} words, against {} write words", all.len(), WRITE_WORDS.len());
+    // The shapes that matter were among them, so a clean sweep over nothing cannot pass.
+    let has = |word: &str| all.iter().any(|list| list.iter().any(|w| w == word));
+    for word in ["select", "config", "print", "info", "showsections", "formatjson"] {
+        assert!(has(word), "no recorded list holds {word}");
+    }
+
+    // The check itself bites: lists that save, write or misuse a meta command are refused.
+    for bad in [
+        &["select", "work", "save"][..],
+        &["select", "work", "config", "csv_output_row_limit", "2001", "SAVE", "print", "users"],
+        &["oauth", "create"],
+        &["print", "users", "todrive"],
+        &["config", "csv_output_row_limit", "5", "print", "users"],
+        &["config", "customer_id", "x"],
+        &["print", "users", "select", "work"],
+        &["print", "users", "--config"],
+    ] {
+        let list: Vec<String> = bad.iter().map(|w| (*w).to_owned()).collect();
+        assert!(std::panic::catch_unwind(|| check_list(&list)).is_err(), "{list:?} must be refused");
+    }
 }

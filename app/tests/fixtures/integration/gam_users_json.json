@@ -1,0 +1,23 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": "work",
+      "subscription": null
+    }
+  },
+  "view": {
+    "fetched": 1760000000,
+    "format": "json",
+    "kind": "text",
+    "note": "2 objects shown.",
+    "text": "[\n  {\n    \"name\": {\n      \"fullName\": \"Alice Example\"\n    },\n    \"orgUnitPath\": \"/\",\n    \"primaryEmail\": \"alice@example.com\",\n    \"suspended\": false\n  },\n  {\n    \"orgUnitPath\": \"/Former\",\n    \"primaryEmail\": \"carol@example.com\",\n    \"suspended\": true\n  }\n]",
+    "title": "Users",
+    "truncated": false
+  }
+}

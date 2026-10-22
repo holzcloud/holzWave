@@ -1,0 +1,60 @@
+{
+  "fetched": 1760000000,
+  "selection": {
+    "production": null,
+    "selection": {
+      "context": null,
+      "namespace": null,
+      "node": null,
+      "profile": null,
+      "section": "work",
+      "subscription": null
+    }
+  },
+  "view": {
+    "columns": [
+      {
+        "id": "section",
+        "label": "Section"
+      },
+      {
+        "id": "selected",
+        "label": "Selected"
+      }
+    ],
+    "fetched": 1760000000,
+    "kind": "table",
+    "note": null,
+    "rows": [
+      {
+        "actions": [],
+        "cells": [
+          "DEFAULT",
+          ""
+        ],
+        "key": "DEFAULT",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "lab",
+          ""
+        ],
+        "key": "lab",
+        "tone": "normal"
+      },
+      {
+        "actions": [],
+        "cells": [
+          "work",
+          "*"
+        ],
+        "key": "work",
+        "tone": "normal"
+      }
+    ],
+    "title": "Sections",
+    "truncated": null
+  }
+}
