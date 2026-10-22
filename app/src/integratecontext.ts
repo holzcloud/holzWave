@@ -237,8 +237,8 @@ function rowFor(tool: ToolId): HTMLElement {
   el("span", "cx-mark", head).setAttribute("aria-hidden", "true");
   el("span", "cx-label", head);
   el("span", "cx-words", head);
-  el("span", "cx-acts", head);
   el("div", "cx-sel", node);
+  el("div", "cx-acts", node);
   rowEls.set(tool, node);
   return node;
 }
@@ -454,9 +454,10 @@ function togglePicker(tool: ToolId, kind: SelectKind, opener: HTMLElement): void
   const node = rowEls.get(tool);
   if (!row || !node) return;
   opener.setAttribute("aria-expanded", "true");
-  const sel = node.querySelector(".cx-sel");
+  // The list goes under the values and their buttons.
+  const acts = node.querySelector(".cx-acts");
   const list = openPicker({
-    tool, kind, pane: reachOf(tool), current: valueOf(row, kind), host: node, before: sel?.nextSibling ?? null,
+    tool, kind, pane: reachOf(tool), current: valueOf(row, kind), host: node, before: acts?.nextSibling ?? null,
     choose: (key) => void choose(tool, kind, key),
     escape: () => {
       closePicker();

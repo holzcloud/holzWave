@@ -56,14 +56,15 @@
               border: 1px solid transparent; border-radius: .333rem; color: var(--hw-dim); cursor: pointer; }
 .cx-refresh:hover { border-color: var(--hw-line); color: var(--hw-ink); }
 .cx-row { padding: .25rem 0 .5rem; }
-.cx-head { display: flex; align-items: center; gap: .5rem; min-width: 0; min-height: max(28px, calc(20rem / 12)); }
+.cx-head { display: flex; align-items: baseline; gap: .5rem; min-width: 0; }
 .cx-mark { flex: none; min-width: 1.5rem; color: var(--hw-ink-2); }
 .cx-label { flex: none; color: var(--hw-ink-2); font-size: calc(11rem / 12); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; }
 .cx-words { display: flex; flex: 1 1 auto; justify-content: flex-end; flex-wrap: wrap; gap: .5rem; min-width: 0; }
 .cx-word { color: var(--hw-dim); }
 .cx-word[data-kind="production"], .cx-word[data-kind="missing"], .cx-word[data-kind="signed_out"] { color: var(--hw-warn); text-decoration: underline; }
 .cx-word[data-kind="production"]::before, .cx-word[data-kind="missing"]::before, .cx-word[data-kind="signed_out"]::before { content: "! "; font-weight: 700; }
-.cx-acts { display: flex; flex: none; gap: .333rem; }
+.cx-acts { display: flex; flex-wrap: wrap; gap: .333rem; margin: .25rem 0 0 2rem; }
+.cx-acts:empty { display: none; }
 #sidebar button.cx-act, #sidebar button.cx-value, #sidebar button.ig-pathbtn { box-sizing: border-box; background: none; color: var(--hw-ink-2);
                                                                          border: 1px solid var(--hw-line); border-radius: .5rem; cursor: pointer; }
 #sidebar button.cx-act { display: inline-flex; align-items: center; min-height: max(28px, calc(20rem / 12)); padding: 0 .5rem; }

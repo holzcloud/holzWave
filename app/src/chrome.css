@@ -250,7 +250,7 @@
 
 /* The chip of a pane: the mark and the context holzWave set. It takes the pointer so that its title can be read. */
 .ph-chip {
-  flex: none; display: inline-flex; align-items: center; gap: .5rem; max-width: 40%; box-sizing: border-box; padding: 0 .5rem;
+  flex: none; display: inline-flex; align-items: center; gap: .5rem; max-width: 60%; box-sizing: border-box; padding: 0 .5rem;
   border: 1px solid var(--hw-line); border-radius: 62.5rem; color: var(--hw-ink-2); pointer-events: auto; overflow: hidden;
   white-space: nowrap;
 }

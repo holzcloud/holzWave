@@ -218,7 +218,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 
 | View | Image | What it shows |
 |---|---|---|
-| Daily | ![](design/6-desktop.png) | local shell, SSH pane that is reconnecting (`⟳ 2/5`) with a Kubernetes chip, SFTP editor, Markdown preview, system monitor, sidebar |
+| Daily | ![](design/6-desktop.png) | local shell with the chip of a Kubernetes context (6.11), SSH pane that is reconnecting (`⟳ 2/5`), SFTP editor, Markdown preview, system monitor, sidebar |
 | Palette (`Cmd+K`) | ![](design/palette.png) | fuzzy list in groups (actions, connect, switch) with the chords on the right |
 | New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history |
 | Search | ![](design/search.png) | scrollback search bar in the pane, hits marked, the current hit solid |
@@ -463,7 +463,7 @@ hidden at first and remembers whether it was shown. Sections, each under a `.lab
   and decides nothing.
   - **The words.** The page adds only these, and each has a second cue besides its colour: `production` (warn, underlined, with
     the mark `!`; the flag is the core's, never a guess from a name), `not found` (warn, underlined, `!`) with the button
-    `Set path`, `signed out` (warn, underlined, `!`) for Azure, and `stale` with the value dimmed, which says the value is the
+    `Set path` on a line of its own under the selection, `signed out` (warn, underlined, `!`) for Azure, and `stale` with the value dimmed, which says the value is the
     one the tool had when it was last read; `↻` in the head reads again. A tool that cannot be used shows the core's reason in
     one line under its row (warn, underlined, `!`) beside `Set path`.
   - **The list.** A press on a value opens a listbox under the row with the entries of the matching list (contexts,
@@ -478,7 +478,7 @@ hidden at first and remembers whether it was shown. Sections, each under a `.lab
     writes nothing to the tool's own files and changes no pane but the one named; making a choice the tool's own setting is a
     separate, confirmed action of a later section and has no entry here. A choice the core refuses is its sentence in that line
     (warn, underlined, `!`) and changes nothing.
-  - **Shell.** A Kubernetes row has the hairline button `Shell` at the end of its first line. It opens a terminal in a new tab
+  - **Shell.** A Kubernetes row has the hairline button `Shell` on a line of its own under the selection. It opens a terminal in a new tab
     with the person's shell and the context of the row (the context and the namespace the row shows, which the core sets for
     that terminal only). While a shell opened from a row is the focused pane, a line under the row says `A shell's own startup
     file can replace this.`, because a startup file of the shell runs after holzWave set the context.
@@ -492,8 +492,10 @@ The **status line** shows the same fact in two segments, drawn only when the cor
 Kubernetes and `az holz-prod` for Azure. The value is the one the section shows for the focused pane, so the two cannot
 disagree; right after the focus moves, and before the core has answered for the new pane, the segments are dimmed with the
 word `stale`. A production selection adds the word `PRODUCTION` to the segment (warn, underlined, with the mark `!`). A segment
-is a button (`aria-label` `Kubernetes context prod-eu, namespace payments, production`) that shows the sidebar and brings the
-Context section into view; it is as high as the status line and keeps the look of the other segments (a hairline at its right, the label style).
+is a button (`aria-label` `Kubernetes context prod-eu, namespace payments, production`) that shows the sidebar, brings the
+Context section into view and gives the keyboard to its first value; it is as high as the status line and keeps the look of the
+other segments (a hairline at its right). A name is machine text, not a label: the context, the namespace and the subscription
+are shown with the case the core sent, in mono, and only the word `PRODUCTION` is in capitals.
 
 The **pane header** of a terminal that holzWave gave a context (a shell opened from a row) has a chip between the title and the
 context: `⎈ prod-eu`, mono, hairline, round like the other chips, with `production` after it (warn, underlined, `!`) when the

@@ -430,6 +430,41 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ig-frame{box-sizing:border-box;width:336px;border:1px solid var(--edge);border-radius:8px;background:var(--pane);overflow:hidden;display:flex;flex-direction:column}
 .ig-frame .ph{height:24px}.ig-frame .ig-table td{max-width:96px}
 .ig-frame .ph .ctx{flex:1;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:right}.ig-frame .ph .ctx>span{direction:ltr;unicode-bidi:isolate}
+/* The Context section of the sidebar, the status line segments and the chip of a pane (docs/design.md 6.11). The classes and the words are those of
+   app/src/sidebar.css and chrome.css. Production, not found and signed out are a word, an underline and the mark ! besides their colour; rose is the
+   current value of the open list and the focus only. A name is shown as it is (a name is not a label), so the segments are not set in capitals. */
+.cx-row{padding:3px 12px 6px}
+.cx-head{display:flex;align-items:center;gap:6px;min-width:0}
+.cx-mark{flex:none;min-width:18px;color:var(--ink2)}
+.cx-label{flex:none;color:var(--ink2);font:500 11px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.cx-words{display:flex;flex:1 1 auto;justify-content:flex-end;flex-wrap:wrap;gap:6px;min-width:0}
+.cx-word{color:var(--ink3)}
+.cx-word.production,.cx-word.missing,.cx-word.signed_out{color:var(--warn);text-decoration:underline}
+.cx-word.production::before,.cx-word.missing::before,.cx-word.signed_out::before{content:"! ";font-weight:700}
+.cx-acts{display:flex;flex-wrap:wrap;gap:4px;margin:3px 0 0 24px}
+.cx-act,.cx-value{display:inline-flex;align-items:center;box-sizing:border-box;min-height:28px;padding:0 6px;border:1px solid var(--edge);border-radius:6px;color:var(--ink2);white-space:nowrap}
+.cx-act.on,.cx-value.on{background:var(--wash);border-color:var(--rose)}
+.cx-sel{display:flex;flex-wrap:wrap;align-items:center;gap:3px;margin-left:24px;min-width:0;color:var(--ink)}
+.cx-sep{color:var(--ink3)}
+.cx-value{color:var(--ink)}.cx-value.cx-small{font-size:11px;color:var(--ink2)}
+.cx-row.stale .cx-value{color:var(--ink3)}
+.cx-reason,.cx-note{margin:3px 0 0 24px;color:var(--ink3);overflow-wrap:anywhere}
+.cx-reason{color:var(--warn);text-decoration:underline}.cx-reason::before{content:"! ";font-weight:700}
+.cx-list{margin:3px 0 0 24px;border:1px solid var(--edge);background:var(--ground2)}
+.cx-opt{display:flex;align-items:center;gap:8px;min-height:28px;padding:0 6px;border-left:2px solid transparent;color:var(--ink);white-space:nowrap}
+.cx-opt.on{background:var(--wash);border-left-color:var(--rose)}.cx-opt .m{flex:none;width:12px}.cx-opt .d{color:var(--ink3)}
+.cx-path{margin:3px 0 0 24px}.cx-path .ig-pathrow{display:flex;flex-wrap:wrap;gap:4px}.cx-path .ig-path{flex:1 1 100%;margin:0}
+.cx-line{margin:4px 12px 0;color:var(--ink3);overflow-wrap:anywhere}
+.cx-line.warn{color:var(--warn);text-decoration:underline}.cx-line.warn::before{content:"! ";font-weight:700}
+.cx-ground{display:flex;flex-direction:column;gap:10px;align-items:center;flex:1;min-width:0;padding:10px 12px;background:var(--ground);overflow:hidden}
+.cx-frame{box-sizing:border-box;width:216px;border:1px solid var(--edge);border-radius:8px;background:var(--ground2);overflow:hidden}.cx-frame .sec{border:0}
+.cx-cells{display:flex;gap:16px;align-items:flex-start}.cx-cell{width:216px}
+.status .cseg>span{padding:0;border:0;height:auto;display:inline;text-transform:none;letter-spacing:normal}
+.status .cseg .ct{color:var(--ink2)}.status .cseg.stale .ct{color:var(--ink3)}
+.status .cseg .pw{margin-left:6px;color:var(--warn);text-decoration:underline;font-weight:700;text-transform:uppercase}.status .cseg .pw::before{content:"! "}
+.status .cseg .stl{margin-left:6px;color:var(--ink3);text-transform:lowercase}
+.phchip{flex:none;display:inline-flex;align-items:center;gap:6px;max-width:60%;box-sizing:border-box;padding:0 6px;border:1px solid var(--edge);border-radius:999px;color:var(--ink2);white-space:nowrap;overflow:hidden}
+.phchip>span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}.phchip .pw{flex:none;color:var(--warn);text-decoration:underline}.phchip .pw::before{content:"! ";font-weight:700}
 /* Handys */
 .phones{display:flex;gap:16px;flex-wrap:wrap;width:fit-content;max-width:100%}
 .ph1{width:200px;height:400px;border:1px solid var(--edge);border-radius:22px;overflow:hidden;background:var(--ground);display:flex;flex-direction:column;font:400 10px/1.5 var(--mono);position:relative}
@@ -561,12 +596,23 @@ NET  <span class="in">↓ 1.2 MB/s</span>  <span class="up">↑ 84 KB/s</span>
 const MK={ask:'?',bell:'▲',fail:'!',done:'✓'};
 const mks=(kinds)=>kinds&&kinds.length?`<span class="attn">${kinds.map(k=>`<span class="mk ${k}">${MK[k]}</span>`).join('')}</span>`:'';
 const tabs=(on,m={})=>['1 shell','2 holzkube','3 notes.md','4 layout.rs','5 sysmon',...(on===5?['6 pods']:[])].map((t,i)=>`<div class="tab ${i==on?'on':''}">${t}${i==1?' <span class="cy">⌁</span>':''}${mks(m[i])}<span class="x">×</span></div>`).join('')+'<div class="tab dim" style="border:0">＋</div>';
+/* The Context section as built (docs/design.md 6.11). `cxRow(mark, label, values, o)`: the first line has the mark, the name, the words and the buttons; the second the
+   selection as buttons separated by dots, and below them the open list, the path field, the reason of an unusable tool or the note of a shell. */
+const cxRow=(mark,label,vals,o={})=>`<div class="cx-row${o.stale?' stale':''}"><div class="cx-head"><span class="cx-mark">${mark}</span><span class="cx-label">${label}</span><span class="cx-words">${(o.words||[]).map(([k,t])=>`<span class="cx-word ${k}">${t}</span>`).join('')}</span></div>${o.plain?`<div class="cx-sel">${vals.join(' · ')}</div>`:`<div class="cx-sel">${vals.map((v,i)=>`${i?'<span class="cx-sep"> · </span>':''}<span class="cx-value${i?' cx-small':''}${o.open===i?' on':''}">${v}</span>`).join('')}</div>`}${(o.acts||[]).length?`<div class="cx-acts">${o.acts.map(([t,on])=>`<span class="cx-act${on?' on':''}">${t}</span>`).join('')}</div>`:''}${o.after||''}</div>`;
+const cxList=(items,now)=>`<div class="cx-list">${items.map(([k,d])=>`<div class="cx-opt${k===now?' on':''}"><span class="m">${k===now?'●':'○'}</span><span>${k}</span>${d?`<span class="d">${d}</span>`:''}</div>`).join('')}</div>`;
+const cxSection=(o={})=>`<div class="sec"><div class="h lbl"><span>Context</span><span>↻</span></div>${o.rows||[
+ cxRow('⎈','Kubernetes',['talos-prod','kube-system'],{acts:[['Shell']]}),
+ cxRow('◇','Talos',['talos-prod','talos-1']),
+ cxRow('az','Azure',['holz-prod']),
+ cxRow('gam','GAM',['holzcloud.ch'])].join('')}${o.line?`<p class="cx-line${o.warn?' warn':''}">${o.line}</p>`:''}</div>`;
 const side=`<div class="side">
  <div class="sec"><div class="h lbl"><span>Hosts</span><span>＋</span></div><div class="i"><span class="ok">●</span>talos-1<span class="dim" style="margin-left:auto">ssh</span></div><div class="i on"><span class="wa">⟳</span>talos-2<span style="margin-left:auto">2/5</span></div><div class="i"><span class="ok">●</span>nas<span class="dim" style="margin-left:auto">wsl</span></div><div class="i"><span class="dim">○</span>build-box<span class="dim" style="margin-left:auto">docker</span></div></div>
- <div class="sec"><div class="h lbl"><span>Context</span><span>⌘⇧C</span></div><div class="i"><span class="cy">⎈</span>talos-prod</div><div class="i"><span class="dim">ns</span>kube-system</div><div class="i"><span class="in">az</span>holz-prod</div><div class="i"><span class="dim">gam</span>holzcloud.ch</div></div>
+ ${cxSection()}
  <div class="sec"><div class="h lbl"><span>History</span><span>⌃R</span></div><div class="input">kube<span class="cur"></span></div><div class="i pre">kubectl get nodes</div><div class="i pre">kubectl logs -f etcd…</div><div class="i pre dim">talosctl dashboard</div></div>
  <div class="sec" style="border:0"><div class="h lbl"><span>Widgets</span><span>＋</span></div><div class="i"><span class="ro">◧</span>Notes</div><div class="i"><span class="ro">◧</span>Pomodoro</div></div></div>`;
-const status=(extra='')=>`<div class="status row"><span>5 tabs · 5 panes</span><span class="cy">⎈ talos-prod/kube-system</span><span class="in">az holz-prod</span><span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta1</span></div>`;
+/* A status segment of the context (docs/design.md 6.11): a button in the app, the text, then the words PRODUCTION and stale when they apply. */
+const cseg=(text,o={})=>`<span class="cseg${o.stale?' stale':''}"><span class="ct">${text}</span>${o.prod?'<span class="pw">production</span>':''}${o.stale?'<span class="stl">stale</span>':''}</span>`;
+const status=(extra='',k8s=cseg('⎈ talos-prod/kube-system'))=>`<div class="status row"><span>5 tabs · 5 panes</span>${k8s}${cseg('az holz-prod')}<span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta1</span></div>`;
 
 
 const OSK={mac:{n:'⌘',s:'⇧',a:'⌥'},win:{n:'Ctrl',s:'Shift',a:'Alt'},lin:{n:'Ctrl',s:'Shift',a:'Alt'}};
@@ -613,15 +659,15 @@ function base(v){
     <span class="fill"></span>
     <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
   <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
-    ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2'})}
-    ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1),{chip:'<span class="chip k">⎈ talos-prod</span>'})}
+  <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
+    ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2',chip:phChip('⎈ talos-prod')})}
+    ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1))}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
     <div style="display:grid;grid-template-rows:1fr 1fr;gap:1px;background:var(--edge);min-height:0">
       ${P('in','◧','notes.md','preview',md)}
       ${P('','◔','system','local · 1 s',sysmon)}
     </div>${searchBar}
-  </div>`}${v==='kiwsh'?side:v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='kimonstates'||v==='kint'||v==='kintstates'?'':v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||status()}${awOver(v)}`;
+  </div>`}${v==='kiwsh'?side:v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='kimonstates'||v==='kint'||v==='kintstates'?'':v==='kintctx'?cxSideCtx:v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||(v==='kintctx'?status('',cseg('⎈ prod-eu/payments',{prod:1})):status())}${awOver(v)}`;
 }
 /* The chat pane (docs/design.md 6.12). Two states of one conversation: `kipane` streams a reply, `kistates` shows the picker, a stopped
    reply, a failed turn and a long draft. The words are the ones of the page: the status words, the end row, the count. */
@@ -969,6 +1015,29 @@ const igStates=()=>`<div class="mo-grid">${[
  ['List cut',igFrame('Kubernetes · dev · default',`${igChips('context dev','namespace default',0)}${igSmall([igRow(['job-0001','0/1','Completed','9d']),igRow(['job-0002','0/1','Completed','9d']),igRow(['job-0003','0/1','Completed','9d']),igRow(['job-0004','0/1','Completed','9d'])],{after:'<p class="ig-note cut">Showing the first 2000 of 2500 rows.</p>'})}<div class="ig-status" role="status">Updated 12 s ago</div>`)]
 ].map(([cap,frame])=>`<div class="mo-cell">${frame}<div class="cap">${cap}</div></div>`).join('')}</div>`;
 
+/* The Context section of the sidebar, the status segments and the chip of a pane (docs/design.md 6.11). `kintctx` is the window with the sidebar: the focused pane 1 is a plain
+   shell, so a choice sets the pick of Kubernetes and the line says New blocks start with prod-eu. Pane 5, a shell opened from the Kubernetes row, has the chip and the word
+   production. The ground beside the panes holds the section in three more states: a tool that is not found (the path field open, the core refused a path), a tool that cannot be
+   used, Azure signed out and a value that is stale, and a choice made while a shell opened from a row has the focus. */
+const phChip=(t,prod)=>`<span class="phchip" title="Set by holzWave for this pane"><span>${t}</span>${prod?'<span class="pw">production</span>':''}</span>`;
+const cxPath=`<div class="cx-path"><div class="ig-pathrow"><span class="ig-path">Absolute path of the program</span><span class="ig-act">Set path</span><span class="ig-act">Check again</span></div></div>`;
+const cxFrame=(cap,sec)=>`<div class="cx-cell"><div class="cx-frame">${sec}</div><div class="cap">${cap}</div></div>`;
+const cxSideCtx=`<div class="side">
+ <div class="sec"><div class="h lbl"><span>Hosts</span><span>＋</span></div><div class="i on"><span class="wa">⟳</span>talos-2<span style="margin-left:auto">2/5</span></div></div>
+ ${cxSection({rows:[
+  cxRow('⎈','Kubernetes',['prod-eu','payments'],{words:[['production','production']],acts:[['Shell']],open:0,after:cxList([['prod-eu',''],['staging',''],['dev','']],'prod-eu')}),
+  cxRow('◇','Talos',['talos-prod','talos-1']),
+  cxRow('az','Azure',['holz-prod']),
+  cxRow('gam','GAM',['work'])].join(''),line:'New blocks start with prod-eu.'})}
+ <div class="sec" style="border:0"><div class="h lbl"><span>History</span><span>⌃R</span></div><div class="input">kube<span class="cur"></span></div></div></div>`;
+const cxArea=()=>`<div class="area" style="flex:0 0 400px;grid-template-columns:1fr;grid-template-rows:1fr 1fr">${P('','❯','shell','~/holzWave',`<div class="term pre"><span class="ro">❯</span> <span class="cur"></span></div>`,{f:1})}${P('','❯','shell','~/holzWave',`<div class="term pre"><span class="ro">❯</span> kubectl config current-context\nprod-eu\n<span class="ro">❯</span> <span class="cur"></span></div>`,{chip:phChip('⎈ prod-eu',1)})}</div>
+ <div class="cx-ground"><div class="cx-cells">
+  <div class="col" style="display:flex;flex-direction:column;gap:12px">${cxFrame('Not found, path field open, a path refused',cxSection({rows:cxRow('◇','Talos',['—'],{plain:1,words:[['missing','not found']],acts:[['Set path',1]],after:cxPath}),line:'That file is not talosctl.',warn:1}))}${cxFrame('A shell from a row has the focus',cxSection({rows:cxRow('⎈','Kubernetes',['staging','default'],{acts:[['Shell']],after:'<p class="cx-note">A shell\'s own startup file can replace this.</p>'}),line:'Pane 5 now uses staging.'}))}</div>
+  <div class="col">${cxFrame('Unusable, signed out, stale',cxSection({rows:[
+   cxRow('⎈','Kubernetes',['—'],{plain:1,acts:[['Set path']],after:'<p class="cx-reason">kubectl cannot be used: writable by everyone.</p>'}),
+   cxRow('az','Azure',['—'],{words:[['signed_out','signed out']]}),
+   cxRow('gam','GAM',['work'],{stale:1,words:[['stale','stale']]})].join('')}))}</div></div></div>`;
+
 const views=[
  ['alltag','Daily','Every level at a glance: workspaces as pills, tabs below, panes inside. Panes: local shell, SSH with Kubernetes context (reconnecting here), SFTP editor, Markdown preview, system monitor. Hosts, context, history and widgets on the right.'],
  ['palette','Palette ⌘K','Every action by name: layout, connect, switch, themes. The way to reach anything without its own button.'],
@@ -987,6 +1056,7 @@ const views=[
  ['kimonstates','Monitor states','What the pane says while it connects, when the host does not answer and when it is not Linux. The reason is in words, underlined and marked with ! besides its colour, and the last numbers stay, dimmed, until the host answers again. A host whose key is not known yet is refused, and the line says to connect to it once.'],
  ['kint','Integration block','A tool that is read, here Kubernetes: the pods of one cluster and namespace beside a shell. The header names the view and the selection with the interval of the refresh, and a production selection is warn, underlined and marked ! with the word production in the bar. The chips are the selection (a press opens the list the core sent, a choice is for this pane only), the table is text the core cleaned, the status is a word besides its colour, and a row that only reads can open a terminal (Logs).'],
  ['kintstates','Integration states','What the block says while it reads, when the tool is not found (the places looked in, a field for the path, Set path and Check again), when a read failed (the last rows stay, dimmed, with the core\u2019s sentence marked !) and when a list was cut. Every state has words besides its colour.'],
+ ['kintctx','Context section','The tools the person uses on the command line, in the sidebar between Hosts and History: one row each for Kubernetes, Talos, Azure and GAM with the mark, the name and the selection as text. The focused pane 1 is a plain shell, so the open list under Kubernetes sets the pick and the line says New blocks start with prod-eu; production is the word, an underline and the mark ! as well as its colour, and Shell opens a terminal with the row\u2019s context. The status line has the segments \u2013 prod-eu/payments with PRODUCTION and az holz-prod \u2013 and pane 5, a shell opened from the row, has the chip and the word production. Beside the panes the section in more states: a tool that is not found with its path field and a refused path, a tool that cannot be used, Azure signed out, a stale value and the note under a shell that has the focus.'],
  ['sync','Sync','Nextcloud/WebDAV, end-to-end encrypted, conflicts keep a backup, a list of what is synced.'],
  ['ki','AI sidebar','The AI chat takes the place of the sidebar in the same column, 280 px wide: the head with ◂ Sidebar leads back, the title button names the chat and ＋ New chat starts another. Below them is the chat of the pane form: the bar, the transcript, the consent card and the composer. Terminal content is sent only after you share that pane.'],
  ['kichats','AI chat: conversations','The title button opens the list of stored chats under the head: a row for the chat on screen (the rose wash, a 2 px bar and the mark ●), one for every other chat with its model and age, and a chat that is open in a pane says in pane 3 and has no ×. The first press on × turns it into Delete? (underlined, in the danger colour); the second deletes the chat for good. The core’s notes about its folder are dim lines above the rows, and one sentence about the list (here Chat deleted.) is said under the head.'],
@@ -1015,7 +1085,7 @@ const views=[
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kint'||cur==='kintstates'||cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='lanstates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kint'||cur==='kintstates'||cur==='kintctx'||cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='lanstates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }
