@@ -17,6 +17,17 @@
 //! 5. the runner runs it with a time limit and a cap on the output;
 //! 6. the answer becomes a model or a fault.
 //!
+//! The status of the tools (the rows of the sidebar, the status line and the pane chip) is a cached value:
+//!
+//! - who asks: the page, through `context_rows`, and only while it shows a status; the core has no timer, so an idle
+//!   or hidden app starts no process;
+//! - who reads: one background thread, started by the first ask, reads the default verb of a tool that is due, one tool
+//!   after the other and never two reads of one tool at once;
+//! - what is cached: the tool's own selection and its state, served at once; a tool is due after 30 s (Kubernetes) or
+//!   60 s (the others), or after 2 s when the ask is forced;
+//! - when it backs off: a failed read doubles the wait (60, 120, 240, at most 300 s) and marks the value old, a good
+//!   read resets it; a signed-out tool and a missing one are states and do not back off.
+//!
 //! The environment of a child is the inherited one without the app's own and the hijackable names, the rebuilt `PATH`,
 //! the profile's variables, the tool's fixed ones, the isolation variable of the selection and the secrets.
 
@@ -72,10 +83,16 @@ const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The most bytes of the answer to a version probe that are read.
 const VERSION_STDOUT: usize = 64 * 1024;
 
-/// How long a tool's status is served before the next ask starts a new read.
-const STATUS_TTL: Duration = Duration::from_secs(30);
+/// How long the status of Kubernetes is served before the next ask starts a new read.
+pub const TTL_KUBE: Duration = Duration::from_secs(30);
+/// The same for Talos, Azure and GAM, whose reads are slower or reach a network.
+pub const TTL_OTHER: Duration = Duration::from_secs(60);
 /// The least time between two reads of one tool, also for a forced refresh.
 pub const MIN_FORCED: Duration = Duration::from_secs(2);
+/// The wait after the first failed read of a tool; every further failure doubles it.
+pub const BACKOFF_START: Duration = Duration::from_secs(60);
+/// The longest wait after failures.
+pub const BACKOFF_MAX: Duration = Duration::from_secs(300);
 
 type ChangeFn = dyn Fn(ChangeEvent) + Send + Sync;
 type ClockFn = dyn Fn() -> Instant + Send + Sync;
@@ -129,12 +146,38 @@ struct Seen {
     default: Option<(Selection, bool)>,
 }
 
+/// How a background read ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadEnd {
+    /// The tool answered (a signed-out tool answers too: that is a state).
+    Answered,
+    /// There was nothing to read: the tool is missing or unusable, the build runs nothing, or no slot was free.
+    Nothing,
+    /// The tool failed, timed out, wrote too much, or its answer could not be read.
+    Failed,
+    /// The read never ran.
+    Dropped,
+}
+
+/// The time a tool's status is served: its time-to-live, or after `failures` failed reads in a row the longer of that
+/// and 60, 120, 240 and then 300 seconds.
+fn wait_after(tool: ToolId, failures: u32) -> Duration {
+    let ttl = if tool == ToolId::Kube { TTL_KUBE } else { TTL_OTHER };
+    if failures == 0 {
+        return ttl;
+    }
+    let doubled = BACKOFF_START.saturating_mul(1_u32 << (failures - 1).min(8));
+    ttl.max(doubled.min(BACKOFF_MAX))
+}
+
 /// The cache entry of one tool's status.
 struct Watched {
     /// When the last read ended.
     read_at: Option<Instant>,
     /// The earliest time an ask that is not forced may start the next read.
     next_at: Option<Instant>,
+    /// How many reads in a row failed.
+    failures: u32,
     /// A read is queued or running.
     in_flight: bool,
     /// What was last announced.
@@ -146,6 +189,7 @@ impl Watched {
         Watched {
             read_at: None,
             next_at: None,
+            failures: 0,
             in_flight: false,
             announced: Seen { state: ContextDetection::Unknown, signed_out: false, default: None },
         }
@@ -1374,7 +1418,7 @@ impl IntegrationService {
         let queue = self.queue.get_or_init(|| self.start_worker(me.clone()));
         for tool in due {
             if queue.as_ref().is_none_or(|queue| queue.send(tool).is_err()) {
-                self.finish_read(tool, None);
+                self.finish_read(tool, ReadEnd::Dropped);
             }
         }
     }
@@ -1400,19 +1444,33 @@ impl IntegrationService {
     /// One background read of a tool's default verb, and the bookkeeping that follows it.
     fn background_read(&self, tool: ToolId) {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.refresh_default(tool)));
+        let end = match outcome {
+            Ok(Ok(())) => ReadEnd::Answered,
+            Ok(Err(fault)) if matches!(fault.code, FaultCode::Missing | FaultCode::Unsupported | FaultCode::Busy) => {
+                ReadEnd::Nothing
+            }
+            Ok(Err(_)) | Err(_) => ReadEnd::Failed,
+        };
+        if end == ReadEnd::Failed {
+            // The value stays, marked as possibly out of date.
+            self.context.mark_stale(tool);
+        }
         self.announce(tool);
-        self.finish_read(tool, Some(outcome.is_ok_and(|read| read.is_ok())));
+        self.finish_read(tool, end);
     }
 
-    /// Ends the read of a tool: the time it ended and the earliest time of the next automatic one. `None` means it
-    /// never ran.
-    fn finish_read(&self, tool: ToolId, _read: Option<bool>) {
+    /// Ends the read of a tool: when it ended, and the earliest time of the next automatic one. A failure doubles the
+    /// wait, any other end (a signed-out tool answers, a missing one has nothing to read) resets it.
+    fn finish_read(&self, tool: ToolId, end: ReadEnd) {
         let now = (self.clock)();
         {
             let mut status = self.status.lock().unwrap_or_else(PoisonError::into_inner);
             let watched = &mut status[slot_of(tool)];
-            watched.read_at = Some(now);
-            watched.next_at = Some(now + STATUS_TTL);
+            watched.failures = if end == ReadEnd::Failed { watched.failures.saturating_add(1) } else { 0 };
+            if end != ReadEnd::Dropped {
+                watched.read_at = Some(now);
+                watched.next_at = Some(now + wait_after(tool, watched.failures));
+            }
             watched.in_flight = false;
         }
         self.idle.notify_all();
