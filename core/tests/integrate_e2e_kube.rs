@@ -451,6 +451,42 @@ fn the_shell_launch_gets_a_private_overlay() {
     assert!(service.pane_rows().is_empty());
 }
 
+/// The first path of the `KUBECONFIG` list of a launch: the overlay of the pane.
+fn overlay_of(launch: &holzwave_core::integrate::run::Launch) -> PathBuf {
+    let (_, list) = launch.env.iter().find(|(name, _)| name == "KUBECONFIG").expect("KUBECONFIG is set");
+    PathBuf::from(list.split(':').next().expect("a first entry"))
+}
+
+/// What a person expects of two shells: each has its own overlay, which goes with its own pane. It does not hold today:
+/// the overlay is named for the pane that the shell was opened *from* (the pane the person acted in), because the new pane
+/// does not exist yet when the launch is made. Two shells opened from one pane share one file, so the later one changes
+/// the context of the earlier one, and closing a shell leaves the file until the pane it came from closes. The fix needs
+/// the id of the new pane before the overlay is written (a decision about the order of the steps of a launch, which the
+/// shell plan owns), so it is not made here.
+#[test]
+#[ignore = "known defect: the overlay of a shell is named for the pane it was opened from, not for the new pane"]
+fn two_shell_panes_opened_from_one_pane_have_overlays_of_their_own() {
+    let rig = Rig::new();
+    let _fake = FakeCli::new(&rig.bin, "kubectl").prints(&fixture("kubectl/config_view.json"));
+    let shell = holzwave_core::platform::ShellLaunch { program: "/bin/zsh".to_owned(), args: vec!["-l".to_owned()] };
+    let service = rig.service_over(rig.facts().with_shell(shell));
+
+    service.select("kube", Some(7), &selecting("kind-test", "payments")).expect("a selection");
+    let first = service.launch("kube", "shell", Some(7), &args(&[])).expect("the first shell");
+    service.note_launch(8, "kube", "shell", Some(7)).expect("the first shell pane is noted");
+    service.select("kube", Some(7), &selecting("dev", "payments")).expect("the person picks another context");
+    let second = service.launch("kube", "shell", Some(7), &args(&[])).expect("the second shell");
+    service.note_launch(9, "kube", "shell", Some(7)).expect("the second shell pane is noted");
+
+    let (one, two) = (overlay_of(&first), overlay_of(&second));
+    assert_ne!(one, two, "the second shell must not overwrite the file the first one reads");
+    assert!(std::fs::read_to_string(&one).expect("the first overlay").contains("kind-test"));
+
+    service.forget_pane(8);
+    assert!(!one.exists(), "closing the first shell pane removes its overlay");
+    assert!(two.exists(), "and leaves the second one alone");
+}
+
 impl Rig {
     fn service_over(&self, facts: HostFacts) -> IntegrationService {
         IntegrationService::new(&self.data, self.store.clone(), facts, &[])
