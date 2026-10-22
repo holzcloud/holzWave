@@ -97,7 +97,7 @@ fn argv_of(fake: &FakeCli) -> Vec<String> {
 }
 
 /// A service over the rig whose pane 3 talks to `talos-prod`. A read is answered from the service's cache for a second
-/// (single flight, 08-17), so a test that changes what the fake prints and asks for the same view again needs a new service.
+/// (single flight), so a test that changes what the fake prints and asks for the same view again needs a new service.
 fn fresh(rig: &Rig) -> IntegrationService {
     let service = rig.service();
     service.select("talos", Some(3), &in_context("talos-prod")).expect("a selection");
