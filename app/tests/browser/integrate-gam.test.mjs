@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { openBlock } from "./integrate-lib.mjs";
+import { layout, openContext } from "./integrate-context-lib.mjs";
 
 /** An answer file of the core, as the page receives it. */
 const golden = (name) => JSON.parse(readFileSync(new URL(`../fixtures/integration/${name}`, import.meta.url), "utf8"));
@@ -25,7 +26,14 @@ const open = (page, url, path, runs, extra = {}) =>
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
-  const cases = [the_users_golden_is_drawn, the_section_chip_switches_for_this_pane_and_has_no_make_default, the_json_and_domain_views_are_drawn];
+  const cases = [
+    the_users_golden_is_drawn,
+    the_section_chip_switches_for_this_pane_and_has_no_make_default,
+    the_json_and_domain_views_are_drawn,
+    large_and_hostile_documents_are_drawn_inert,
+    an_overflow_is_drawn_as_a_fault,
+    the_palette_opens_a_users_block,
+  ];
   for (const run of cases) {
     try {
       await run(page, url);
@@ -119,4 +127,91 @@ async function the_json_and_domain_views_are_drawn(page, url) {
   assert.equal(await page.locator(".block-integration .ig-act").count(), 0, "a domain has no action");
   const shown = await page.locator(".block-integration").textContent();
   assert.ok(!shown.includes("SECRET-VALUE") && !shown.includes("TOKEN-VALUE"), "a member the core dropped is nowhere on the page");
+}
+
+async function large_and_hostile_documents_are_drawn_inert(page, url) {
+  // 3000 rows were read; the core kept 2000 and said so, and the page draws the cap it was given and its two sentences.
+  const truncated = golden("gam_users_truncated.json");
+  await open(page, url, "users", { users: truncated });
+  await page.waitForFunction(() => document.querySelectorAll(".block-integration .ig-table tbody tr").length === 2000);
+  assert.equal(await page.locator(".block-integration .ig-table tbody tr").count(), truncated.view.rows.length);
+  assert.equal(await page.locator(".block-integration .ig-table tbody tr:last-child td:first-child").textContent(), truncated.view.rows.at(-1).key);
+  assert.equal(await page.locator('.block-integration .ig-note[data-kind="cut"]').textContent(), truncated.view.truncated.note);
+  assert.equal(await page.locator(".block-integration .ig-note:not([data-kind])").textContent(), truncated.view.note);
+
+  // The hostile directory: every character of it is text. Nothing hidden, nothing that moves text around, no element.
+  const hostile = golden("gam_users_multiline.json");
+  await open(page, url, "users", { users: hostile });
+  await page.waitForSelector(".block-integration .ig-table tbody tr");
+  const cells = await page.locator(".block-integration .ig-table td").evaluateAll((tds) => tds.map((td) => [td.textContent, td.getAttribute("title")]));
+  assert.equal(cells.length, hostile.view.rows.length * hostile.view.columns.length);
+  const unclean = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+  const everything = await page.locator(".block-integration").textContent();
+  assert.ok(!unclean.test(everything), "no control, format, direction or zero-width character is in the block's text");
+  for (const [text] of cells) assert.ok([...text].length <= 240, `a cell is at most 240 characters, not ${[...text].length}`);
+  // The cell of 5000 characters was cut by the core at 4096 bytes and is shown cut again at 240, the whole of it in the title.
+  const big = hostile.view.rows.find((r) => r.key === "big@example.com").cells[1];
+  assert.ok(big.length > 4000 && big.length <= 4096, `the core's cell is ${big.length} characters`);
+  assert.deepEqual(cells.find(([, title]) => title === big)?.[0].length, 240, "shown at 240, the title holds the core's cell");
+  // A name that looks like an element is those characters, and nothing was made from it.
+  assert.ok(cells.some(([text]) => text === "<img src=x onerror=alert(1)>"));
+  assert.equal(await page.locator(".block-integration img, .block-integration [onerror], .block-integration script").count(), 0);
+  // The columns the core made unique are drawn as they came.
+  assert.deepEqual(await page.locator(".block-integration .ig-table thead th").allTextContents(), hostile.view.columns.map((c) => c.label));
+}
+
+/** The fault of a run that printed more than is read, as the core sends it (core/tests/integrate_e2e_gam.rs holds the same text). */
+const OVERFLOW = { code: "overflow", reason: "overflow", text: "The answer of GAM7 is larger than is read." };
+
+async function an_overflow_is_drawn_as_a_fault(page, url) {
+  await open(page, url, "users", {}, { faults: { users: OVERFLOW } });
+  await page.waitForFunction((text) => document.querySelector(".block-integration .ig-status")?.textContent === text, OVERFLOW.text);
+  const status = page.locator(".block-integration .ig-status");
+  assert.equal(await status.getAttribute("data-tone"), "warn");
+  // The mark `!` is drawn before the sentence besides the colour and the underline.
+  assert.equal(await status.evaluate((n) => getComputedStyle(n, "::before").content), '"! "');
+  assert.equal(await page.locator(".block-integration .ig-table, .block-integration .ig-row, .block-integration pre.ig-text").count(), 0, "no rows");
+}
+
+async function the_palette_opens_a_users_block(page, url) {
+  // GAM7 is reached from the command palette like the other tools: its views are entries, and the block reads from the core.
+  const users = golden("gam_users.json");
+  const BLOCK_USERS = { pane: 2, kind: "integration", source: "gam", path: "users", source_label: "GAM7" };
+  await openContext(page, url, { sidebar: false, rows: [], tools: [GAM], runs: { users } }, layout(1, [1]));
+  await page.waitForFunction(() => window.__MOCK__.callsOf("integration_tools").length >= 1);
+  await page.evaluate(async () => {
+    window.__registry = await import(new URL("actions.js", location.href).href);
+  });
+  await page.waitForFunction(() => window.__registry.listActions().some((a) => a.id === "integration.open.gam.users"));
+  assert.deepEqual(
+    await page.evaluate(() => window.__registry.listActions().filter((a) => a.id.startsWith("integration.")).map((a) => [a.id, a.title]).filter(([id]) => id.startsWith("integration.open."))),
+    [["integration.open.gam.sections", "GAM7: Sections"], ["integration.open.gam.domain", "GAM7: Domain"], ["integration.open.gam.users", "GAM7: Users"]],
+    "one entry for each view, with the core's labels",
+  );
+  assert.equal(await page.evaluate(() => window.__registry.listActions().some((a) => a.id.startsWith("integration.run.gam."))), false, "GAM7 has no terminal verb");
+  // The mock core opens the block the way the real one does: a second pane that the block list names.
+  await page.evaluate((block) => {
+    window.__MOCK__.on("block_open", () => {
+      window.__CX__.blocks = [block];
+      window.__MOCK__.setView({
+        workspaces: [{ name: "main", active: true, panes: 2 }],
+        tabs: [{ title: "users", active: true, focus: 2, panes: 2 }],
+        focus: 2,
+        panes: [[1, { x: 0, y: 0, w: 0.5, h: 1 }], [2, { x: 0.5, y: 0, w: 0.5, h: 1 }]],
+        dividers: [{ split: 10, axis: "Row", area: { x: 0, y: 0, w: 1, h: 1 }, ratio: 0.5 }],
+        pane_names: [],
+        windows: 1,
+      });
+      return window.__MOCK__.view();
+    });
+  }, BLOCK_USERS);
+  await page.evaluate(() => document.getElementById("term").focus());
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+  await page.keyboard.press("Meta+k");
+  await page.waitForFunction(() => document.activeElement?.classList.contains("palette-input") === true);
+  await page.keyboard.type("GAM7: Users");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".block-integration .ig-table tbody tr");
+  assert.deepEqual((await page.evaluate(() => window.__MOCK__.callsOf("block_open")))[0], { kind: "integration", source: "gam", path: "users", placement: "tab" });
+  assert.equal(await page.locator(".block-integration .ig-table tbody tr").count(), users.view.rows.length);
 }

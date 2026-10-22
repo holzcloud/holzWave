@@ -20,8 +20,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use holzwave_core::integrate::profiles::LocalFile;
-use holzwave_core::integrate::service::{HostFacts, IntegrationService, RunAnswer};
+use holzwave_core::integrate::args::{ProfileId, SectionName};
+use holzwave_core::integrate::profiles::{IntegrationProfile, LocalFile};
+use holzwave_core::integrate::run::RunLimits;
+use holzwave_core::integrate::service::{FaultCode, HostFacts, IntegrationService, RunAnswer, ToolState};
 use holzwave_core::integrate::{Selection, ToolId};
 use holzwave_core::secrets::MemoryStore;
 use serde_json::Value;
@@ -59,7 +61,11 @@ impl Rig {
     }
 
     fn service(&self) -> IntegrationService {
-        IntegrationService::new(&self.data, self.store.clone(), self.facts(), &[])
+        self.service_over(self.facts())
+    }
+
+    fn service_over(&self, facts: HostFacts) -> IntegrationService {
+        IntegrationService::new(&self.data, self.store.clone(), facts, &[])
     }
 
     /// Every argument list a recording fake of this rig was started with, in no particular order.
@@ -449,6 +455,272 @@ fn a_section_is_selected_per_pane_and_the_configuration_directory_is_untouched()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Large and hostile documents.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A character by its code point: the hostile documents are built from codes, never typed as escapes.
+fn ch(code: u32) -> char {
+    char::from_u32(code).expect("a Unicode scalar value")
+}
+
+/// Whether `text` holds a control character, or one that spoofs (a direction control, a zero-width character, a tag).
+fn unclean(text: &str) -> Option<char> {
+    text.chars().find(|c| c.is_control() || matches!(*c as u32, 0x202A..=0x202E | 0x2066..=0x2069 | 0x200B..=0x200F | 0xFEFF | 0xE0000..=0xE007F))
+}
+
+/// Every string of a document, keys included.
+fn strings_of(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => out.push(text.clone()),
+        Value::Array(items) => items.iter().for_each(|item| strings_of(item, out)),
+        Value::Object(map) => {
+            for (key, item) in map {
+                out.push(key.clone());
+                strings_of(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// No string of an answer holds a raw control, direction or zero-width character.
+fn assert_wire_clean(value: &Value, label: &str) {
+    let mut all = Vec::new();
+    strings_of(value, &mut all);
+    for text in &all {
+        assert!(unclean(text).is_none(), "{label}: {:?} in {text:?}", unclean(text));
+    }
+}
+
+/// A fresh pane that has chosen the section `work`: an identical read of one pane within a second is served from the
+/// service's cache, so every read of a case that wants the tool to run has a pane of its own.
+fn fresh_pane(service: &IntegrationService, counter: &mut u64) -> u64 {
+    *counter += 1;
+    let pane = 100 + *counter;
+    service.select("gam", Some(pane), &section("work")).expect("a section for the pane");
+    pane
+}
+
+/// `rows` users, two columns: the document `print users` prints when a domain is large.
+fn big_document(rows: usize) -> String {
+    let mut out = String::from("primaryEmail,orgUnitPath\n");
+    for n in 0..rows {
+        out.push_str(&format!("u{n}@example.com,/Staff\n"));
+    }
+    out
+}
+
+/// A directory of people as many people wrote it: a byte order mark, a duplicate header, a quoted cell with a line break,
+/// a comma and quotes, an escape sequence with a title payload, a right-to-left override and a zero-width character, a
+/// NUL, a short row, a long row, a name that looks like an element and a cell of 5000 characters.
+fn hostile_document() -> String {
+    let (bom, rlo, zwsp, esc, bel, nul) = (ch(0xFEFF), ch(0x202E), ch(0x200B), ch(0x1B), ch(0x07), ch(0));
+    let mut out = String::new();
+    out.push(bom);
+    out.push_str("primaryEmail,name,name,notes\r\n");
+    out.push_str("alice@example.com,Alice,Dup,\"Line one, with a comma\r\nline \"\"two\"\"\"\r\n");
+    out.push_str(&format!("esc@example.com,{esc}[31mred{esc}[0m {esc}]0;title{bel}ok,x,y\n"));
+    out.push_str(&format!("rtl@example.com,{rlo}evil{zwsp}name,x,y\n"));
+    out.push_str(&format!("nul@example.com,A{nul}B,x,y\n"));
+    out.push_str("short@example.com\n");
+    out.push_str("long@example.com,a,b,c,d,e,f\n");
+    out.push_str("html@example.com,<img src=x onerror=alert(1)>,x,y\n");
+    out.push_str(&format!("big@example.com,{},x,y\n", "z".repeat(5000)));
+    out
+}
+
+fn case_large_and_hostile_documents(rig: &Rig) {
+    let service = rig.service();
+    let mut counter = 0;
+
+    // 3000 rows: the argument list asks for one more than is shown, the reader keeps 2000 and the model says that more exist.
+    let fake = gam_printing(&rig.bin, &big_document(3000));
+    let pane = fresh_pane(&service, &mut counter);
+    let truncated = service.run_view("gam", "users", Some(pane), &no_args()).expect("the large directory is read");
+    assert!(argv_of(&fake).windows(3).any(|w| w == ["config", "csv_output_row_limit", "2001"]), "the limit is in the list");
+    let wire_truncated = wire(&truncated);
+    let rows = wire_truncated["view"]["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 2000, "the table keeps 2000 rows");
+    assert_eq!(rows[1999]["key"], "u1999@example.com");
+    assert_eq!(wire_truncated["view"]["truncated"]["shown"], 2000);
+    assert_eq!(wire_truncated["view"]["note"], "More rows exist than are shown.");
+    golden("gam_users_truncated.json", &truncated);
+
+    // A header of 70 columns keeps 64 and says so.
+    let header: Vec<String> = (0..70).map(|n| format!("c{n}")).collect();
+    let row: Vec<String> = (0..70).map(|n| format!("v{n}")).collect();
+    let _fake = gam_printing(&rig.bin, &format!("{}\n{}\n", header.join(","), row.join(",")));
+    let pane = fresh_pane(&service, &mut counter);
+    let wide = wire(&service.run_view("gam", "users", Some(pane), &no_args()).expect("the wide directory is read"));
+    assert_eq!(wide["view"]["columns"].as_array().map(Vec::len), Some(64));
+    assert_eq!(cells(&wide, 0).len(), 64);
+    assert_eq!(wide["view"]["note"], "First 64 of 70 columns.");
+
+    // The hostile directory: every cell is clean and bounded, a duplicate header is made unique, ragged rows are counted.
+    let _fake = gam_printing(&rig.bin, &hostile_document());
+    let pane = fresh_pane(&service, &mut counter);
+    let hostile = service.run_view("gam", "users", Some(pane), &no_args()).expect("the hostile directory is read");
+    let wire_hostile = wire(&hostile);
+    assert_wire_clean(&wire_hostile, "hostile directory");
+    let ids: Vec<&str> =
+        wire_hostile["view"]["columns"].as_array().expect("columns").iter().map(|c| c["id"].as_str().expect("id")).collect();
+    assert_eq!(ids, ["primaryEmail", "name", "name#2", "notes"], "a byte order mark is not part of the first name, a duplicate is unique");
+    assert_eq!(wire_hostile["view"]["note"], "2 rows had another number of fields.");
+    let by_key = |key: &str| {
+        let rows = wire_hostile["view"]["rows"].as_array().expect("rows");
+        let at = rows.iter().position(|r| r["key"] == key).unwrap_or_else(|| panic!("no row {key}"));
+        cells(&wire_hostile, at)
+    };
+    assert_eq!(by_key("alice@example.com")[3], "Line one, with a comma line \"two\"", "a quoted cell with a line break is one cell on one line");
+    assert_eq!(by_key("esc@example.com")[1], "red ok", "an escape sequence goes with its payload");
+    assert_eq!(by_key("rtl@example.com")[1], "evilname", "a direction override and a zero-width character are dropped");
+    assert_eq!(by_key("nul@example.com")[1], "AB", "a NUL is dropped");
+    assert_eq!(by_key("short@example.com"), ["short@example.com", "", "", ""], "a short row is padded");
+    assert_eq!(by_key("long@example.com").len(), 4, "a long row is cut to the header");
+    assert_eq!(by_key("html@example.com")[1], "<img src=x onerror=alert(1)>", "a name that looks like an element stays text");
+    let big = &by_key("big@example.com")[1];
+    assert!(big.len() <= 4096, "a cell of 5000 characters is cut at 4096 bytes: {} bytes", big.len());
+    assert!(big.ends_with(ch(0x2026)), "and the cut says so");
+    golden("gam_users_multiline.json", &hostile);
+}
+
+#[test]
+fn large_and_hostile_documents_give_clean_bounded_goldens() {
+    case_large_and_hostile_documents(&Rig::new());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// An output above the cap.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The fault of a run that printed more than is read, as the page receives it.
+const OVERFLOW_FAULT: &str = r#"{"code":"overflow","reason":"overflow","text":"The answer of GAM7 is larger than is read."}"#;
+
+fn case_an_oversized_output_is_an_overflow_fault(rig: &Rig) {
+    let _fake = recording(FakeCli::new(&rig.bin, "gam").prints_bytes(20 * 1024 * 1024));
+    let limits = RunLimits { max_stdout: 1024 * 1024, timeout: std::time::Duration::from_secs(20) };
+    let service = rig.service().with_limits(limits);
+    service.select("gam", Some(PANE), &section("work")).expect("a section for the pane");
+    let fault = service.run_view("gam", "users", Some(PANE), &no_args()).expect_err("20 MiB are not read");
+    assert_eq!(fault.code, FaultCode::Overflow);
+    assert_eq!(serde_json::to_value(&fault).expect("JSON"), serde_json::from_str::<Value>(OVERFLOW_FAULT).expect("JSON"));
+    // No rows: a fault has no model, and the debug text of a fault holds none of the output.
+    assert!(!format!("{fault:?}").contains("0123456789abcdef"));
+}
+
+#[test]
+fn an_oversized_output_is_an_overflow_fault() {
+    case_an_oversized_output_is_an_overflow_fault(&Rig::new());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Isolation.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn case_isolation(rig: &Rig) {
+    use std::os::unix::fs::PermissionsExt;
+    let config = scratch_config(rig);
+    let mut local = LocalFile::default();
+    local.set_config_paths(ToolId::Gam, std::slice::from_ref(&config)).expect("a configuration path of this computer");
+    local.save(&rig.data).expect("the machine-local file");
+    let before = snapshot(&config);
+
+    let fake = gam_printing(&rig.bin, &fixture("print_users.csv"));
+    // The machine carries a variable of the app and one of the person's.
+    let service = rig.service_over(rig.facts().with_env("HOLZWAVE_TOKEN", "app-secret").with_env("FOO", "bar"));
+    let mut profile = IntegrationProfile::new(ProfileId::parse("work-iso").expect("an id"), ToolId::Gam, "Work, own folder");
+    profile.section = Some(SectionName::parse("work").expect("a section"));
+    profile.isolated = true;
+    service.save_profile(profile).expect("a profile");
+
+    // A pane that uses the profile runs in the profile's own folder, below the data directory, private.
+    let with_profile = Selection { profile: Some("work-iso".to_owned()), ..Selection::default() };
+    service.select("gam", Some(3), &with_profile).expect("a selection with the profile");
+    service.run_view("gam", "users", Some(3), &no_args()).expect("the users are read in the profile's folder");
+    let folder = rig.data.join("integrations").join("gam").join("work-iso");
+    let env = fake.env();
+    assert_eq!(env.get("GAMCFGDIR").map(String::as_str), folder.to_str(), "the tool's configuration directory is the profile's own");
+    assert!(folder.is_dir(), "and it exists");
+    let mode = fs::metadata(&folder).expect("the folder").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "private to the person: {mode:o}");
+    assert!(argv_of(&fake).starts_with(&["select".to_owned(), "work".to_owned()]), "the profile pins the section: {:?}", argv_of(&fake));
+    assert!(!env.keys().any(|name| name.starts_with("HOLZWAVE_")), "no variable of the app reaches the tool");
+    assert_eq!(env.get("FOO").map(String::as_str), Some("bar"), "while the person's own variables do");
+
+    // A pane without isolation uses the machine-local configuration path as the tool's directory.
+    service.select("gam", Some(4), &section("work")).expect("a selection without the profile");
+    service.run_view("gam", "users", Some(4), &no_args()).expect("the users are read in the person's directory");
+    let env = fake.env();
+    assert_eq!(env.get("GAMCFGDIR").map(String::as_str), config.to_str(), "no isolation asked for: the machine-local path");
+    assert!(!env.keys().any(|name| name.starts_with("HOLZWAVE_")));
+    assert_eq!(snapshot(&config), before, "the person's directory was not written");
+}
+
+#[test]
+fn isolation_gives_the_tool_its_own_folder() {
+    case_isolation(&Rig::new());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A program that is on no PATH.
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn case_a_gam_in_a_fixed_directory(rig: &Rig) {
+    // GAM7's installer puts it in `~/bin/gam7`, which no PATH names.
+    let fixed = rig.home.join("bin").join("gam7");
+    fs::create_dir_all(&fixed).expect("the installer's directory");
+    let at_home = recording(FakeCli::new(&fixed, "gam").prints(&fixture("version.txt")));
+    let service = rig.service();
+    let found = |service: &IntegrationService| service.tools().into_iter().find(|tool| tool.id == ToolId::Gam).expect("a GAM entry");
+
+    let tool = found(&service);
+    assert_eq!(tool.state, ToolState::Found, "found through the fixed directories, though the PATH lacks it");
+    assert_eq!(tool.place, Some("fixed_dir"));
+    assert_eq!(tool.path.as_deref(), at_home.path().to_str());
+    assert_eq!(tool.version.as_deref(), Some("7.46.02"), "and asked for its version once");
+    assert_eq!(argv_of(&at_home), ["version"]);
+
+    // A path the person sets wins over everything else, and the program there is the one that runs.
+    let elsewhere = rig.root.join("elsewhere");
+    fs::create_dir(&elsewhere).expect("another directory");
+    let chosen = recording(FakeCli::new(&elsewhere, "gam").prints(&fixture("print_users.csv")));
+    let tool = service.set_binary("gam", chosen.path().to_str().expect("a path")).expect("a program named gam is accepted");
+    assert_eq!(tool.place, Some("override"));
+    assert_eq!(tool.path.as_deref(), chosen.path().to_str());
+    service.select("gam", Some(PANE), &section("work")).expect("a section for the pane");
+    service.run_view("gam", "users", Some(PANE), &no_args()).expect("the users are read");
+    let started = |dir: &Path| {
+        let mut found = Vec::new();
+        collect_lists(dir, &mut found);
+        found
+    };
+    let there = started(&elsewhere);
+    assert_eq!(there.iter().filter(|list| list.iter().any(|w| w == "print")).count(), 1, "the program the person chose read the users: {there:?}");
+    assert_eq!(started(&fixed), [["version"]], "and the one in the fixed directory was only asked for its version, once");
+
+    // A program with another name is refused, and the choice stays as it was.
+    let other = FakeCli::new(&elsewhere, "gamx");
+    let fault = service.set_binary("gam", other.path().to_str().expect("a path")).expect_err("not named gam");
+    assert_eq!(fault.code, FaultCode::Refused);
+    assert_eq!(fault.reason, "name");
+    assert_eq!(fault.text, "The file must be named gam.");
+    assert!(!other.started(), "a refused program is never started");
+    assert_eq!(found(&service).path.as_deref(), chosen.path().to_str());
+    let relative = service.set_binary("gam", "gam").expect_err("a relative path");
+    assert_eq!((relative.code, relative.reason), (FaultCode::Refused, "path"));
+
+    // Forgetting the choice brings the search back.
+    service.clear_binary("gam").expect("forgotten");
+    let tool = found(&service);
+    assert_eq!((tool.place, tool.path.as_deref()), (Some("fixed_dir"), at_home.path().to_str()));
+}
+
+#[test]
+fn a_gam_in_a_fixed_directory_is_found_and_a_set_path_must_be_named_gam() {
+    case_a_gam_in_a_fixed_directory(&Rig::new());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The sweep: no argument list of any case holds a word that saves or writes.
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -459,7 +731,15 @@ macro_rules! cases {
     };
 }
 
-cases![case_the_users_answer, case_sections_domain_and_json, case_a_section_is_selected_per_pane];
+cases![
+    case_the_users_answer,
+    case_sections_domain_and_json,
+    case_a_section_is_selected_per_pane,
+    case_large_and_hostile_documents,
+    case_an_oversized_output_is_an_overflow_fault,
+    case_isolation,
+    case_a_gam_in_a_fixed_directory,
+];
 
 #[test]
 fn no_recorded_argument_list_holds_a_save_or_write_word() {
