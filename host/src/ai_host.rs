@@ -30,6 +30,7 @@ use holzwave_core::Error as CoreError;
 use holzwave_core::files::{FileSource, Kind as FileKind};
 use holzwave_core::layout::PaneId;
 use holzwave_core::preview::{Content, SNIFF, classify};
+#[cfg(feature = "keyring")]
 use holzwave_core::secrets::KeychainStore;
 use holzwave_core::settings::Settings;
 use holzwave_core::textread::TextRegion;
@@ -62,8 +63,19 @@ pub struct AiParts {
 
 impl AiParts {
     /// The platform keychain and the system clock.
+    #[cfg(feature = "keyring")]
     pub fn system() -> AiParts {
         AiParts { vault: KeyVault::new(Arc::new(KeychainStore)), clock: None, protected: Vec::new() }
+    }
+
+    /// A keychain in memory and the system clock: the value of a host built without the platform keychain.
+    #[cfg(not(feature = "keyring"))]
+    pub fn system() -> AiParts {
+        AiParts {
+            vault: KeyVault::new(Arc::new(holzwave_core::secrets::MemoryStore::default())),
+            clock: None,
+            protected: Vec::new(),
+        }
     }
 
     /// The same parts with `dirs` added to the places no tool may touch. The deny list of the service, of the tools
@@ -169,7 +181,7 @@ impl AiFault {
 
     /// The refusal of an answer to a card of `wsh ai`: the code `ask`, the stable name of the reason and its fixed
     /// sentence. The page acts on `unknown_ask`, `seal_mismatch` and `bad_verdict`.
-    pub(crate) fn from_ask(fault: &AskFault) -> AiFault {
+    pub fn from_ask(fault: &AskFault) -> AiFault {
         AiFault { code: "ask", reason: Some(fault.reason()), text: fault.to_string() }
     }
 
@@ -406,7 +418,7 @@ impl AiHost {
     /// Gives the host the source of the on-device model. Set once, at start; answers whether it was taken. Nothing is
     /// asked of the source here: the model is looked at only when a person acts (the list of providers, a send or a
     /// context call that names it, a request of `wsh ai`).
-    pub(crate) fn use_device(&self, source: Arc<dyn DeviceSource>) -> bool {
+    pub fn use_device(&self, source: Arc<dyn DeviceSource>) -> bool {
         self.device.set(source).is_ok()
     }
 
@@ -984,7 +996,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::state::ShellSpec;
-    use holzwave_host::windows::{CursorSpot, Place};
+    use crate::windows::{CursorSpot, Place};
 
     /// The text a user types in these tests; it appears in test code only, so a hit anywhere else is a leak.
     const TEXT_CANARY: &str = "zq-host-text-8d3b27f1c4";
@@ -1738,7 +1750,7 @@ mod tests {
     }
 
     fn stream_golden_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/ai_stream.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../app/tests/fixtures/ai_stream.json")
     }
 
     fn update_fixtures() -> bool {
@@ -2431,13 +2443,12 @@ mod tests {
         assert!(!sent.contains(TOOL_TEXT), "the file text reached the model after a denial");
         assert!(!everything_serialised(&rec, &[]).contains(TOOL_TEXT), "the file text reached an event");
 
-        // The command runs on a blocking thread of the async runtime of the app, where a call that classifies a
-        // destination is refused. A decision only locks the table, so it answers as it does anywhere else.
+        // The command runs on a thread of its own, not on the one that built the core. A decision only locks the table,
+        // so it answers as it does anywhere else. (The desktop app runs it on a blocking thread of its async runtime,
+        // where a call that classifies a destination is refused; the app crate has a test for that.)
         let spent = {
             let (core, chat) = (core.clone(), chat.clone());
-            tauri::async_runtime::block_on(async move {
-                tauri::async_runtime::spawn_blocking(move || core.ai_decide(&chat, "call_1", "deny", &hash)).await
-            })
+            std::thread::spawn(move || core.ai_decide(&chat, "call_1", "deny", &hash)).join()
         };
         let fault = spent.expect("the blocking thread ends").expect_err("a card that was decided");
         assert_eq!((fault.code, fault.reason), ("tool", Some("unknown_call")));
@@ -2564,7 +2575,7 @@ mod tests {
 
     /// The text the core's golden gives a stopped call: the page and the model hear the same sentence.
     fn golden_stopped() -> String {
-        let golden: Value = serde_json::from_str(include_str!("../../tests/fixtures/ai_command_card.json")).expect("JSON");
+        let golden: Value = serde_json::from_str(include_str!("../../app/tests/fixtures/ai_command_card.json")).expect("JSON");
         golden["texts"]["stopped"].as_str().expect("a sentence").to_owned()
     }
 
@@ -3240,7 +3251,7 @@ mod tests {
     }
 
     fn tool_golden_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/ai_tool_stream.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../app/tests/fixtures/ai_tool_stream.json")
     }
 
     #[test]

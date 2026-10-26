@@ -17,7 +17,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crate::state::system_root;
+use holzwave_host::state::system_root;
 
 /// What a platform without a text-size signal, or any failure, gives: no change.
 pub const NEUTRAL: u32 = 100;

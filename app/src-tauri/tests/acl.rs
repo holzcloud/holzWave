@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 
 const LIB_RS: &str = include_str!("../src/lib.rs");
 const COMMANDS_RS: &str = include_str!("../src/commands.rs");
-const HOST_RS: &str = include_str!("../src/ai_host.rs");
-const INTEGRATE_HOST_RS: &str = include_str!("../src/integrate_host.rs");
+const HOST_RS: &str = include_str!("../../../host/src/ai_host.rs");
+const INTEGRATE_HOST_RS: &str = include_str!("../../../host/src/integrate_host.rs");
 const IPC_RS: &str = include_str!("../../../ipc/src/lib.rs");
 const BUILD_RS: &str = include_str!("../build.rs");
 const MENU_RS: &str = include_str!("../src/menu.rs");
@@ -843,6 +843,23 @@ fn shipped_code(source: &str) -> String {
     code_lines(shipped).join("\n")
 }
 
+/// Every `.rs` file of the source directories of the shell: the app's own and the host crate's, where the application
+/// logic moved to. A file does not leave a scan by moving from one to the other.
+fn shell_sources() -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    for dir in ["src", "../../host/src"] {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+        for entry in std::fs::read_dir(&dir).expect("the source directory") {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let name = path.file_name().expect("a name").to_string_lossy().into_owned();
+                files.push((name, std::fs::read_to_string(&path).expect("a source file")));
+            }
+        }
+    }
+    files
+}
+
 /// How many times each file of `files` calls the approval table's decide method in the part that ships.
 fn decide_calls(files: &[(String, String)]) -> Vec<(String, usize)> {
     files
@@ -854,15 +871,7 @@ fn decide_calls(files: &[(String, String)]) -> Vec<(String, usize)> {
 
 #[test]
 fn the_approval_table_is_decided_from_one_place_only() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("the source directory") {
-        let path = entry.expect("an entry").path();
-        if path.extension().is_some_and(|ext| ext == "rs") {
-            let name = path.file_name().expect("a name").to_string_lossy().into_owned();
-            files.push((name, std::fs::read_to_string(&path).expect("a source file")));
-        }
-    }
+    let files = shell_sources();
     assert!(files.len() >= 8, "the scan found {} files", files.len());
     let calls = decide_calls(&files);
     assert_eq!(calls, [("ai_tools.rs".to_owned(), 1)], "the table is decided from one place and one call only");
@@ -889,15 +898,7 @@ fn settle_calls(files: &[(String, String)]) -> Vec<(String, usize)> {
 
 #[test]
 fn the_ask_table_is_settled_from_one_place_only() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    for entry in std::fs::read_dir(&dir).expect("the source directory") {
-        let path = entry.expect("an entry").path();
-        if path.extension().is_some_and(|ext| ext == "rs") {
-            let name = path.file_name().expect("a name").to_string_lossy().into_owned();
-            files.push((name, std::fs::read_to_string(&path).expect("a source file")));
-        }
-    }
+    let files = shell_sources();
     assert!(files.len() >= 8, "the scan found {} files", files.len());
     assert_eq!(settle_calls(&files), [("ai_ask.rs".to_owned(), 1)], "a request is settled from one place and one call only");
 

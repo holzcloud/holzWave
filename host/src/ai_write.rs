@@ -337,7 +337,7 @@ impl fmt::Debug for UndoLog {
 
 /// Why a change could not be taken back. Each has a stable name for the page and one fixed sentence; none holds a path or text.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UndoFault {
+pub enum UndoFault {
     /// No such change, or it was used already, or the chat is gone.
     UnknownChange,
     /// The assistant made the file; nothing here can remove a file.
@@ -352,7 +352,7 @@ pub(crate) enum UndoFault {
 
 impl UndoFault {
     /// The stable name of the fault.
-    pub(crate) fn reason(self) -> &'static str {
+    pub fn reason(self) -> &'static str {
         match self {
             Self::UnknownChange => "unknown_change",
             Self::Created => "created",

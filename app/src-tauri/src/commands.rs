@@ -42,10 +42,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
-use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
+use holzwave_host::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
 use crate::clipboard;
-use crate::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
-use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
+use holzwave_host::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
+use holzwave_host::state::{AppCore, AppInfo, Released, SettingsView, View};
 use holzwave_host::windows::DropKind;
 
 // ---- wire types ------------------------------------------------------------------------------------------------
@@ -957,7 +957,7 @@ pub fn login_prompt_cancel(core: State<Arc<AppCore>>, id: String) -> bool {
 
 /// The widgets of the sidebar, their saved notes and what was wrong with a widget file.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn widgets_list(core: State<Arc<AppCore>>) -> crate::state::WidgetsView {
+pub fn widgets_list(core: State<Arc<AppCore>>) -> holzwave_host::state::WidgetsView {
     core.widgets_list()
 }
 

@@ -43,10 +43,20 @@ pub struct IntegrationParts {
 impl IntegrationParts {
     /// The real machine and the platform keychain. `shell` is the person's shell as the app resolved it for the
     /// settings, for a pane that is the shell itself.
+    #[cfg(feature = "keyring")]
     pub fn system(dir: &Path, shell: ShellLaunch) -> IntegrationParts {
         IntegrationParts {
             facts: HostFacts::system(dir, shell),
             secrets: Arc::new(holzwave_core::secrets::KeychainStore),
+        }
+    }
+
+    /// The real machine and a keychain in memory: the value of a host built without the platform keychain.
+    #[cfg(not(feature = "keyring"))]
+    pub fn system(dir: &Path, shell: ShellLaunch) -> IntegrationParts {
+        IntegrationParts {
+            facts: HostFacts::system(dir, shell),
+            secrets: Arc::new(holzwave_core::secrets::MemoryStore::default()),
         }
     }
 
@@ -505,7 +515,7 @@ impl IntegrationHost {
 
 /// The fake program rig of the core's integration tests: a script that stands in for a command-line tool.
 #[cfg(all(test, unix))]
-#[path = "../../../core/tests/common/fake_cli.rs"]
+#[path = "../../core/tests/common/fake_cli.rs"]
 mod fake_cli;
 
 #[cfg(test)]
@@ -523,7 +533,7 @@ mod tests {
 
     use crate::ai_host::AiParts;
     use crate::state::{AppCore, Out, ShellSpec, Sink, Target};
-    use holzwave_host::windows::{CursorSpot, Place};
+    use crate::windows::{CursorSpot, Place};
 
     #[cfg(unix)]
     use super::fake_cli;
@@ -602,7 +612,7 @@ mod tests {
     /// A recorded fixture of the tools, as text.
     pub(crate) fn fixture(relative: &str) -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../core/tests/fixtures/integrations")
+            .join("../core/tests/fixtures/integrations")
             .join(relative);
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture {relative}: {e}"))
     }

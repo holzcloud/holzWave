@@ -11,7 +11,7 @@ use tauri::http::{self, Method, Request, Response, StatusCode, header};
 
 use holzwave_host::ranges::{Range, parse_range};
 
-use crate::state::AppCore;
+use holzwave_host::state::AppCore;
 
 /// The scheme name, as registered and as in the policy.
 pub const SCHEME: &str = "holzfile";
@@ -92,6 +92,50 @@ pub fn serve(core: &AppCore, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
 mod tests {
     use super::*;
 
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use holzwave_host::state::{AppCore, Out, ShellSpec, Sink, Target};
+    use holzwave_host::windows::{CursorSpot, Place};
+
+    /// A scratch directory that goes away with the value.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("holzwave-app-{tag}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir(&path).expect("scratch dir");
+            Scratch(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A sink that tells no webview anything and opens no window.
+    struct Quiet;
+
+    impl Sink for Quiet {
+        fn send(&self, _target: Target, _out: Out) {}
+
+        fn close_window(&self, _label: &str) {}
+
+        fn open_window(&self, _label: &str, _place: &Place) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn cursor_spot(&self, _source: &str) -> CursorSpot {
+            CursorSpot::Unknown
+        }
+    }
+
     #[test]
     fn only_a_token_is_a_path() {
         let req = |uri: &str| Request::builder().uri(uri).body(Vec::new()).unwrap();
@@ -111,5 +155,58 @@ mod tests {
         } else {
             assert_eq!(url, "holzfile://localhost/abc");
         }
+    }
+
+    #[test]
+    fn a_granted_file_is_served_in_ranges_and_nothing_else_is() {
+        use tauri::http::{Method, Request, StatusCode, header};
+        let dir = Scratch::new("serve");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+        png.extend((0..100u8).collect::<Vec<_>>());
+        let file = dir.0.join("a.png");
+        std::fs::write(&file, &png).unwrap();
+        std::fs::write(dir.0.join("secret.txt"), "not shown").unwrap();
+        let core = AppCore::new(dir.0.clone(), Arc::new(Quiet), ShellSpec::default());
+
+        let grant = core.file_grant("local", file.to_str().unwrap()).unwrap();
+        assert_eq!((grant.mime.as_str(), grant.size), ("image/png", png.len() as u64));
+        assert!(core.file_grant("local", dir.0.join("secret.txt").to_str().unwrap()).is_err(), "text is not granted");
+        let request = |method: Method, token: &str, range: Option<&str>| {
+            let mut b = Request::builder().method(method).uri(format!("holzfile://localhost/{token}"));
+            if let Some(r) = range {
+                b = b.header(header::RANGE, r);
+            }
+            b.body(Vec::new()).unwrap()
+        };
+
+        let whole = serve(&core, &request(Method::GET, &grant.token, None));
+        assert_eq!(whole.status(), StatusCode::OK);
+        assert_eq!(whole.body(), &png);
+        assert_eq!(whole.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(whole.headers()["X-Content-Type-Options"], "nosniff");
+        assert_eq!(whole.headers()["Content-Security-Policy"], "default-src 'none'; sandbox");
+
+        let part = serve(&core, &request(Method::GET, &grant.token, Some("bytes=16-19")));
+        assert_eq!(part.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(part.body(), &png[16..20]);
+        assert_eq!(part.headers()[header::CONTENT_RANGE], format!("bytes 16-19/{}", png.len()));
+        let tail = serve(&core, &request(Method::GET, &grant.token, Some("bytes=-4")));
+        assert_eq!(tail.body(), &png[png.len() - 4..]);
+        let past = serve(&core, &request(Method::GET, &grant.token, Some("bytes=9999-")));
+        assert_eq!(past.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+
+        let head = serve(&core, &request(Method::HEAD, &grant.token, None));
+        assert_eq!((head.status(), head.body().len()), (StatusCode::OK, 0));
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], png.len().to_string());
+        assert_eq!(serve(&core, &request(Method::POST, &grant.token, None)).status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // A token nobody was given, and a path that is not a token, read nothing.
+        assert_eq!(serve(&core, &request(Method::GET, &"0".repeat(32), None)).status(), StatusCode::NOT_FOUND);
+        let by_path = Request::builder().uri("holzfile://localhost/secret.txt").body(Vec::new()).unwrap();
+        assert_eq!(serve(&core, &by_path).status(), StatusCode::NOT_FOUND);
+
+        // After the preview is gone the URL stops working.
+        core.file_revoke(&grant.token);
+        assert_eq!(serve(&core, &request(Method::GET, &grant.token, None)).status(), StatusCode::NOT_FOUND);
     }
 }

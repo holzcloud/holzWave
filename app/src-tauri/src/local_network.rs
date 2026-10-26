@@ -6,7 +6,7 @@
 use std::time::Duration;
 use std::sync::Arc;
 
-use holzwave_host::local_network::Source;
+use holzwave_host::local_network::{PlatformParts, Source};
 #[cfg(target_os = "macos")]
 use holzwave_core::local_network::Reading;
 
@@ -19,6 +19,15 @@ pub fn system() -> Option<Arc<dyn Source>> {
     #[cfg(not(target_os = "macos"))]
     {
         None
+    }
+}
+
+/// The pieces the platform supplies to the core: the source of this platform when it has one, the host's default (which
+/// reports the setting as unsupported) when it has none.
+pub fn platform_parts() -> PlatformParts {
+    match system() {
+        Some(local_network) => PlatformParts { local_network },
+        None => PlatformParts::default(),
     }
 }
 

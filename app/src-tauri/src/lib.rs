@@ -25,22 +25,15 @@
 //! user typed. A tool call that waits for the person is decided by `ai_decide`, which takes the chat, the call, `allow`
 //! or `deny` and the hash of the card, and answers nothing.
 
-mod ai_ask;
 mod ai_device;
-mod ai_host;
-mod ai_tools;
-mod ai_write;
-mod ai_exec;
 mod clipboard;
 mod commands;
 mod files_protocol;
-mod integrate_host;
 mod local_network;
-mod login_prompt;
 mod menu;
+#[cfg(test)]
 mod state;
 mod textscale;
-mod wsh_tunnel;
 
 use std::sync::Arc;
 
@@ -50,8 +43,8 @@ use tauri::{
 };
 
 use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
-use ai_host::AiParts;
-use state::{AppCore, Out, ShellSpec, Sink, Target};
+use holzwave_host::ai_host::AiParts;
+use holzwave_host::state::{AppCore, Out, ShellSpec, Sink, Target};
 use holzwave_host::windows::{
     CursorSpot, Frame, Normal, Place, WindowTracker, physical_pixels, pointer_is_global, position_beside,
     position_under_cursor, shared_divisor, units_per_point, window_under,
@@ -370,7 +363,8 @@ pub fn run() {
             protected.extend(app.path().app_config_dir().ok());
             protected.extend(ipc_dir(app.handle()));
             let parts = AiParts::system().protecting(protected);
-            let core = AppCore::new_with_ai(dir, sink, ShellSpec::default(), parts);
+            let core =
+                AppCore::new_with_platform(dir, sink, ShellSpec::default(), parts, None, local_network::platform_parts());
             // The on-device model (macOS only): the host learns where it comes from and asks nothing of it until a person acts.
             if let Some(source) = ai_device::system() {
                 core.ai().use_device(source);
@@ -576,37 +570,6 @@ pub fn run() {
         });
 }
 
-/// The app's side of `wsh`.
-pub(crate) struct IpcHandler(std::sync::Arc<AppCore>);
-
-impl holzwave_ipc::Handler for IpcHandler {
-    fn handle(&self, pane: Option<u64>, cmd: holzwave_ipc::Cmd) -> Result<String, String> {
-        self.0.ipc_command(pane, cmd)
-    }
-
-    /// `wsh ai` is a request that waits for the person in the window and answers as a stream; every other command is
-    /// answered as one text, as the trait's default does.
-    fn handle_stream(
-        &self,
-        pane: Option<u64>,
-        cmd: holzwave_ipc::Cmd,
-        input: String,
-        gone: &holzwave_ipc::Gone,
-        out: &mut dyn holzwave_ipc::Sink,
-    ) -> Result<(), String> {
-        match cmd {
-            holzwave_ipc::Cmd::Ai { prompt, .. } => self.0.ai_ask(pane, prompt, input, gone, out),
-            other => {
-                let answer = self.handle(pane, other)?;
-                if !answer.is_empty() {
-                    out.text(&answer).map_err(|e| e.to_string())?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
 /// The folder of the local socket: `holzwave` in the runtime directory when there is one, `ipc` in the data directory
 /// otherwise, and none when neither is known. The one definition of the place: the code that creates the socket and the
 /// deny list of the agent both get it from here.
@@ -622,7 +585,7 @@ fn ipc_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
 fn start_ipc(app: &tauri::AppHandle, core: &std::sync::Arc<AppCore>) {
     let dir = ipc_dir(app);
     let (Some(dir), Ok(token)) = (dir, holzwave_ipc::new_token()) else { return };
-    match holzwave_ipc::serve(&dir, token.clone(), std::sync::Arc::new(IpcHandler(core.clone()))) {
+    match holzwave_ipc::serve(&dir, token.clone(), std::sync::Arc::new(holzwave_host::IpcHandler(core.clone()))) {
         Ok(server) => {
             core.set_ipc(dir, token);
             // Lives as long as the app.
