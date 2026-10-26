@@ -707,4 +707,44 @@ mod tests {
         assert!(code.contains("protecting("), "the core is built with the places the agent may not touch");
         assert!(body_of("pub fn run(").contains("app_config_dir"), "and with the configuration directory");
     }
+
+    /// A decision on a call that waits for nothing, made on a blocking thread of the async runtime of the app, which is
+    /// where the command runs. A call there that classifies a destination is refused; a decision only locks the table, so
+    /// it answers as it does anywhere else.
+    #[test]
+    fn a_decision_on_a_blocking_thread_of_the_async_runtime_answers_unknown_call() {
+        use holzwave_core::ai::profiles::KeyVault;
+        use holzwave_host::windows::{CursorSpot, Place};
+
+        struct Quiet;
+
+        impl Sink for Quiet {
+            fn send(&self, _target: Target, _out: Out) {}
+
+            fn close_window(&self, _label: &str) {}
+
+            fn open_window(&self, _label: &str, _place: &Place) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn cursor_spot(&self, _source: &str) -> CursorSpot {
+                CursorSpot::Unknown
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("holzwave-app-decide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("scratch dir");
+        let parts = AiParts { vault: KeyVault::unavailable(), clock: None, protected: Vec::new() };
+        let core = AppCore::new_with_ai(dir.clone(), Arc::new(Quiet), ShellSpec::new("/bin/cat", &[]), parts);
+        let chat = core.ai().conversation_new().expect("a chat id");
+
+        let spent = tauri::async_runtime::block_on(async move {
+            let core = core.clone();
+            tauri::async_runtime::spawn_blocking(move || core.ai_decide(&chat, "call_1", "deny", "no-such-hash")).await
+        });
+        let fault = spent.expect("the blocking thread ends").expect_err("no card waits for this call");
+        assert_eq!((fault.code, fault.reason), ("tool", Some("unknown_call")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
