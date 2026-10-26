@@ -7,7 +7,19 @@ const APP = new URL("../../", import.meta.url);
 export const APP_DIR = fileURLToPath(APP);
 export const DIST_DIR = fileURLToPath(new URL("dist/", APP));
 export const MOCK_PATH = fileURLToPath(new URL("tests/browser/tauri-mock.js", APP));
+export const WS_MOCK_PATH = fileURLToPath(new URL("tests/browser/ws-mock.js", APP));
 export const ENGINES = ["webkit", "chromium"];
+/** The two ways the page reaches the core: the Tauri global of the desktop app, or the socket of a server. */
+export const BACKENDS = ["tauri", "ws"];
+
+let backend = "tauri";
+/** Choose the backend `newPage` sets up from now on (the runner calls this before each test). */
+export function setBackend(name) {
+  if (!BACKENDS.includes(name)) throw new Error(`unknown backend "${name}" (expected ${BACKENDS.join(" or ")})`);
+  backend = name;
+}
+/** The backend the current test runs on. */
+export const currentBackend = () => backend;
 
 /** playwright-core as installed for app/package.json. */
 export function loadPlaywright() {
@@ -36,7 +48,8 @@ export async function launch(engine) {
 }
 
 /**
- * A fresh page with the Tauri stub installed before any page script, plus `errors`: one string for every
+ * A fresh page with the core stub installed before any page script (the Tauri global, or on the ws backend the fake
+ * socket of ws-mock.js after the same mock core), plus `errors`: one string for every
  * uncaught page error and every Content-Security-Policy violation. A test fails if `errors` is not empty.
  * `deviceScaleFactor` sets window.devicePixelRatio (1 by default).
  */
@@ -52,7 +65,11 @@ export async function newPage(browser, { viewport = { width: 1000, height: 640 }
       true,
     );
   });
+  await page.addInitScript((name) => {
+    window.__HW_BACKEND__ = name;
+  }, backend);
   await page.addInitScript({ path: MOCK_PATH });
+  if (backend === "ws") await page.addInitScript({ path: WS_MOCK_PATH });
   return { page, errors };
 }
 

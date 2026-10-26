@@ -1,5 +1,14 @@
-// In-page stand-in for the Tauri global, injected before the page's own scripts (Playwright addInitScript).
+// In-page stand-in for the core, injected before the page's own scripts (Playwright addInitScript). It runs in two modes:
 //
+//   Tauri mode (the default)  the page finds `window.__TAURI__` below and talks to it, as in the desktop app.
+//   ws mode (`window.__HW_BACKEND__ === "ws"`, set by lib.mjs)  there is no `__TAURI__` and no `__TAURI_INTERNALS__`, the
+//     window is always `main`, and the page talks to a fake socket (ws-mock.js, loaded after this file) that calls
+//     `__MOCK__.invoke` and `__MOCK__.listen` and turns every event of this mock into an event frame. Both modes run the
+//     same `invoke` and `listen` below, so a test is written once.
+//
+//   window.__MOCK__.invoke(cmd, args)  -> Promise, the function behind `core.invoke` in both modes
+//   window.__MOCK__.listen(name, cb, {target})  -> Promise<unlisten>, the function behind `event.listen`; in ws mode the
+//                      page does not use it, a test that wants a listener of its own may
 //   window.__TAURI__.core.invoke(cmd, args)  -> Promise, answered by a scripted handler or the defaults below
 //   window.__TAURI__.event.listen(name, cb, {target})  -> Promise<unlisten>; cb receives { event, id, payload }
 //   window.__TAURI_INTERNALS__.metadata.currentWindow.label  the window's label: `main`, or the `?window=` of the URL
@@ -197,7 +206,8 @@
   ]);
   const clamp = (r) => Math.min(0.9, Math.max(0.1, r));
 
-  const label = new URLSearchParams(location.search).get("window") || "main";
+  const wsMode = window.__HW_BACKEND__ === "ws";
+  const label = wsMode ? "main" : new URLSearchParams(location.search).get("window") || "main";
   const calls = [];
   const handlers = new Map();
   const listeners = new Map(); // event name -> Set of { cb, target }
@@ -207,10 +217,13 @@
   let mockAi = null;
 
   // What the shell puts into every webview: the label of the window the page is in.
-  window.__TAURI_INTERNALS__ = { metadata: { currentWindow: { label }, currentWebview: { label, windowLabel: label } } };
+  if (!wsMode) {
+    window.__TAURI_INTERNALS__ = { metadata: { currentWindow: { label }, currentWebview: { label, windowLabel: label } } };
+  }
 
-  /** Deliver to the listeners `wanted` accepts; returns how many got it. */
+  /** Deliver to the listeners `wanted` accepts; returns how many got it. In ws mode the fake socket is the listener. */
   const deliver = (name, payload, wanted) => {
+    if (wsMode) return window.__WS_MOCK__.push(name, payload, wanted);
     const set = listeners.get(name);
     if (!set) return 0;
     const targets = [...set].filter(wanted);
@@ -1637,9 +1650,32 @@
     integration_secret_clear: () => null,
   };
 
+  const invoke = async (cmd, args) => {
+    calls.push([cmd, args]);
+    const handler = handlers.get(cmd);
+    if (handler) return (await handler(args)) ?? null;
+    if (Object.hasOwn(aiCommands, cmd)) return aiCommands[cmd](args ?? {}) ?? null;
+    if (Object.hasOwn(netCommands, cmd)) return netCommands[cmd](args ?? {});
+    if (Object.hasOwn(integrationDefaults, cmd)) return integrationDefaults[cmd](args ?? {});
+    if (LAYOUT_COMMANDS.has(cmd) && layoutError !== null) throw layoutError; // Tauri rejects with the error text
+    if (cmd === "set_ratio") setRatio(args);
+    if (cmd === "release_outside") return { outcome: "cancelled" };
+    return LAYOUT_COMMANDS.has(cmd) ? view() : null;
+  };
+
+  // `options.target` is the label of the window whose events are wanted; without it the listener hears all.
+  const listen = async (name, cb, options) => {
+    if (!listeners.has(name)) listeners.set(name, new Set());
+    const entry = { cb, target: typeof options?.target === "string" ? options.target : undefined };
+    listeners.get(name).add(entry);
+    return () => listeners.get(name)?.delete(entry);
+  };
+
   const mock = {
     calls,
     label,
+    invoke,
+    listen,
     callsOf: (cmd) => calls.filter((c) => c[0] === cmd).map((c) => c[1]),
     emit: (name, payload) => deliver(name, payload, () => true),
     emitTo: (to, name, payload) => deliver(name, payload, (l) => l.target === undefined || l.target === to),
@@ -1673,29 +1709,7 @@
   };
 
   window.__MOCK__ = mock;
-  window.__TAURI__ = {
-    core: {
-      invoke: async (cmd, args) => {
-        calls.push([cmd, args]);
-        const handler = handlers.get(cmd);
-        if (handler) return (await handler(args)) ?? null;
-        if (Object.hasOwn(aiCommands, cmd)) return aiCommands[cmd](args ?? {}) ?? null;
-        if (Object.hasOwn(netCommands, cmd)) return netCommands[cmd](args ?? {});
-        if (Object.hasOwn(integrationDefaults, cmd)) return integrationDefaults[cmd](args ?? {});
-        if (LAYOUT_COMMANDS.has(cmd) && layoutError !== null) throw layoutError; // Tauri rejects with the error text
-        if (cmd === "set_ratio") setRatio(args);
-        if (cmd === "release_outside") return { outcome: "cancelled" };
-        return LAYOUT_COMMANDS.has(cmd) ? view() : null;
-      },
-    },
-    event: {
-      // `options.target` is the label of the window whose events are wanted; without it the listener hears all.
-      listen: async (name, cb, options) => {
-        if (!listeners.has(name)) listeners.set(name, new Set());
-        const entry = { cb, target: typeof options?.target === "string" ? options.target : undefined };
-        listeners.get(name).add(entry);
-        return () => listeners.get(name)?.delete(entry);
-      },
-    },
-  };
+  if (!wsMode) {
+    window.__TAURI__ = { core: { invoke }, event: { listen } };
+  }
 })();
