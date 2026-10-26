@@ -73,6 +73,39 @@ pub fn user_name(uid: u32) -> String {
     format!("u{uid}")
 }
 
+/// Checks the worker program at helper start and returns its fully resolved path. The file must be a regular file, and
+/// neither it nor any directory above it may be writable by the helper's user (an owner can always change the mode) or
+/// by a group the helper belongs to, nor by everybody. Otherwise a compromised supervisor could substitute the program
+/// the helper starts under another user's id.
+#[cfg(unix)]
+pub fn worker_file_is_protected(path: &Path, own_uid: u32, own_gids: &[u32]) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !path.is_absolute() {
+        return Err("the worker path is not absolute".to_owned());
+    }
+    let real = std::fs::canonicalize(path).map_err(|_| "the worker file cannot be found".to_owned())?;
+    let meta = std::fs::metadata(&real).map_err(|_| "the worker file cannot be read".to_owned())?;
+    if !meta.is_file() {
+        return Err("the worker path is not a regular file".to_owned());
+    }
+    for entry in real.ancestors() {
+        let meta = std::fs::metadata(entry).map_err(|_| "a directory above the worker file cannot be read".to_owned())?;
+        let mode = meta.mode();
+        let what = if entry == real { "the worker file" } else { "a directory above the worker file" };
+        if meta.uid() == own_uid {
+            return Err(format!("{what} ({}) belongs to the helper's user, who could change its mode", entry.display()));
+        }
+        if mode & 0o002 != 0 {
+            return Err(format!("{what} ({}) can be written by everybody", entry.display()));
+        }
+        if mode & 0o020 != 0 && own_gids.contains(&meta.gid()) {
+            return Err(format!("{what} ({}) can be written by a group of the helper", entry.display()));
+        }
+    }
+    Ok(real)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +176,90 @@ mod tests {
     #[test]
     fn the_user_name_is_u_and_the_number() {
         assert_eq!(user_name(20_001), "u20001");
+    }
+
+    #[cfg(unix)]
+    mod worker_file {
+        use super::super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn scratch(tag: &str) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("hw-spawn-helper-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            dir
+        }
+
+        fn file_in(dir: &Path) -> PathBuf {
+            let f = dir.join("worker");
+            std::fs::write(&f, b"#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+            f
+        }
+
+        // The test user owns these files, so a helper that is somebody else is what makes the chain acceptable.
+        const OTHER_UID: u32 = 0x7ffffff0;
+        const OTHER_GID: u32 = 0x7ffffff1;
+
+        #[test]
+        fn accepts_a_chain_the_helper_cannot_write() {
+            let dir = scratch("ok");
+            let f = file_in(&dir);
+            let got = worker_file_is_protected(&f, OTHER_UID, &[OTHER_GID]).expect("accepted");
+            assert!(got.ends_with("worker"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn refuses_a_file_that_belongs_to_the_helper() {
+            let dir = scratch("own");
+            let f = file_in(&dir);
+            use std::os::unix::fs::MetadataExt;
+            let me = std::fs::metadata(&f).unwrap().uid();
+            assert!(worker_file_is_protected(&f, me, &[]).is_err());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn refuses_a_world_writable_directory_above() {
+            let dir = scratch("world");
+            let f = file_in(&dir);
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(worker_file_is_protected(&f, OTHER_UID, &[OTHER_GID]).is_err());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn refuses_a_group_writable_directory_of_a_group_of_the_helper() {
+            let dir = scratch("group");
+            let f = file_in(&dir);
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+            use std::os::unix::fs::MetadataExt;
+            let gid = std::fs::metadata(&dir).unwrap().gid();
+            assert!(worker_file_is_protected(&f, OTHER_UID, &[gid]).is_err(), "the helper is in the group");
+            assert!(worker_file_is_protected(&f, OTHER_UID, &[OTHER_GID]).is_ok(), "the helper is not in the group");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn refuses_a_directory_and_a_missing_file_and_a_relative_path() {
+            let dir = scratch("kinds");
+            assert!(worker_file_is_protected(&dir, OTHER_UID, &[]).is_err(), "a directory");
+            assert!(worker_file_is_protected(&dir.join("nope"), OTHER_UID, &[]).is_err(), "missing");
+            assert!(worker_file_is_protected(Path::new("worker"), OTHER_UID, &[]).is_err(), "relative");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn resolves_a_link_and_checks_the_real_file() {
+            let dir = scratch("link");
+            let f = file_in(&dir);
+            let link = dir.join("link");
+            std::os::unix::fs::symlink(&f, &link).unwrap();
+            let got = worker_file_is_protected(&link, OTHER_UID, &[OTHER_GID]).expect("accepted");
+            assert!(got.ends_with("worker"), "the answer is the real path, not the link");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

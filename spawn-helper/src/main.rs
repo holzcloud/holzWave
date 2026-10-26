@@ -22,7 +22,7 @@ mod service {
     use holzwave_spawn_helper::home::{Existing, HomeBase, HomeError};
     use holzwave_spawn_helper::protocol::{self, Answer, MAX_MESSAGE, Mode, Refusal, Request};
     use holzwave_spawn_helper::spawn::{self, Started, WorkerConfig};
-    use holzwave_spawn_helper::validate::uid_in_range;
+    use holzwave_spawn_helper::validate::{uid_in_range, worker_file_is_protected};
     use rustix::fd::{AsFd, BorrowedFd};
     use rustix::io::Errno;
     use rustix::net::{
@@ -31,6 +31,7 @@ mod service {
     };
     use std::io::{IoSlice, IoSliceMut};
     use std::mem::MaybeUninit;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::process::{Child, ExitCode};
 
@@ -50,7 +51,14 @@ mod service {
         own_uid: u32,
         control: std::io::Stdin,
         base: HomeBase,
-        children: Vec<Child>,
+        workers: BTreeMap<u32, Worker>,
+    }
+
+    /// A worker that is alive, by the user it runs as.
+    struct Worker {
+        child: Child,
+        // Held so that the process can be signalled without ever naming a process id again.
+        _pidfd: rustix::fd::OwnedFd,
     }
 
     pub fn run() -> ExitCode {
@@ -63,7 +71,22 @@ mod service {
                 return ExitCode::from(2);
             }
         };
+        match spawn::stray_descriptors() {
+            Ok(strays) if strays.is_empty() => {}
+            Ok(strays) => return fail(&format!("descriptors {strays:?} are open: the supervisor must pass nothing but the control socket")),
+            Err(_) => return fail("/proc/self/fd cannot be read: /proc must be mounted"),
+        }
         caps::ensure_or_exit();
+        // The worker file is the one thing a compromised supervisor could substitute to run code as another user.
+        let mut gids: Vec<u32> = rustix::process::getgroups().unwrap_or_default().iter().map(|g| g.as_raw()).collect();
+        gids.push(rustix::process::getgid().as_raw());
+        let worker_path = match worker_file_is_protected(&args.worker_path, own_uid, &gids) {
+            Ok(real) => real,
+            Err(message) => return fail(&format!("the worker file is not protected: {message}")),
+        };
+        if std::env::set_current_dir("/").is_err() {
+            return fail("the helper cannot change to the root directory");
+        }
         let control = std::io::stdin();
         match sockopt::socket_type(control.as_fd()) {
             Ok(SocketType::SEQPACKET) => {}
@@ -73,8 +96,7 @@ mod service {
             Ok(base) => base,
             Err(message) => return fail(&message),
         };
-        let worker_path = args.worker_path.clone();
-        let mut helper = Helper { args, worker_path, own_uid, control, base, children: Vec::new() };
+        let mut helper = Helper { args, worker_path, own_uid, control, base, workers: BTreeMap::new() };
         helper.serve();
         ExitCode::SUCCESS
     }
@@ -119,13 +141,19 @@ mod service {
             self.send(&Answer::refused(id, refusal).to_bytes(), None);
         }
 
+        /// Forgets the workers that have ended, so that their users can be served again.
+        fn collect_exited(&mut self) {
+            self.workers.retain(|_, worker| matches!(worker.child.try_wait(), Ok(None)));
+        }
+
         fn handle(&mut self, bytes: &[u8]) {
+            self.collect_exited();
             let (id, request) = match protocol::parse(bytes) {
                 Ok(parsed) => parsed,
                 Err((id, refusal)) => return self.refuse(id, 0, refusal),
             };
             match request {
-                Request::Ping => self.send(&Answer::pong(id, self.children.len() as u32).to_bytes(), None),
+                Request::Ping => self.send(&Answer::pong(id, self.workers.len() as u32).to_bytes(), None),
                 Request::Spawn { uid, mode } => self.spawn(id, uid, mode),
                 Request::KillUid { .. } | Request::RemoveHome { .. } => self.refuse(id, 0, Refusal::BadRequest),
             }
@@ -137,6 +165,12 @@ mod service {
 
         fn spawn(&mut self, id: u64, uid: u64, mode: Mode) {
             let Some(uid) = self.person(uid) else { return self.refuse(id, 0, Refusal::UidRefused) };
+            if self.workers.contains_key(&uid) {
+                return self.refuse(id, uid, Refusal::BusyUid);
+            }
+            if self.workers.len() >= self.args.max_workers {
+                return self.refuse(id, uid, Refusal::WorkerLimit);
+            }
             let home = match mode {
                 Mode::Serve => self.base.ensure(uid, uid),
                 Mode::WipeSecrets | Mode::WipeHome => match self.base.inspect(uid) {
@@ -159,11 +193,11 @@ mod service {
                 nofile: self.args.nofile,
             };
             match spawn::start_worker(&cfg, uid, mode) {
-                Ok(Started { child, pidfd: _pidfd, supervisor_end }) => {
+                Ok(Started { child, pidfd, supervisor_end }) => {
                     let pid = child.id() as i32;
                     log("spawned", uid);
                     self.send(&Answer::spawned(id, pid).to_bytes(), Some(supervisor_end.as_fd()));
-                    self.children.push(child);
+                    self.workers.insert(uid, Worker { child, _pidfd: pidfd });
                 }
                 Err(_) => self.refuse(id, uid, Refusal::SpawnFailed),
             }

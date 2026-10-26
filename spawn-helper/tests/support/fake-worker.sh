@@ -14,18 +14,14 @@
 #
 # The probe is a list of `key: value` lines ending with `probe-end`: the ids, the groups and the capability sets from
 # /proc/<pid>/status, the descriptors that survived the exec of this shell (those without close-on-exec), the environment
-# exactly as the helper passed it, the process group and the shell's own arguments.
+# exactly as the helper passed it, where descriptors 0 to 3 point, and the process group.
 
 mode=$3
 
-probe() {
-    echo "probe-begin"
-    while IFS= read -r line; do
-        case "$line" in
-            Uid:* | Gid:* | Groups:* | CapInh:* | CapPrm:* | CapEff:* | CapBnd:* | CapAmb:* | NoNewPrivs:*) echo "$line" ;;
-        esac
-    done </proc/$$/status
-    open=
+# What the helper left this process, read once before any redirection: the probe is written through descriptor 3, which
+# makes descriptor 1 a copy of the socket for as long as it runs.
+startup_facts() {
+    fds_open=
     for entry in /proc/$$/fd/*; do
         n=${entry##*/}
         [ -e "/proc/$$/fdinfo/$n" ] || continue
@@ -39,10 +35,28 @@ probe() {
         flags=${1:-0}
         # O_CLOEXEC is 02000000: a descriptor with it is closed by the next exec and is not part of what a program inherits.
         if [ $((0$flags & 02000000)) -eq 0 ]; then
-            open="$open $n"
+            fds_open="$fds_open $n"
         fi
     done
-    echo "fds-open:$open"
+    fds_open=${fds_open# }
+    fd0=$(readlink /proc/$$/fd/0)
+    fd1=$(readlink /proc/$$/fd/1)
+    fd2=$(readlink /proc/$$/fd/2)
+    fd3=$(readlink /proc/$$/fd/3)
+}
+
+probe() {
+    echo "probe-begin"
+    while IFS= read -r line; do
+        case "$line" in
+            Uid:* | Gid:* | Groups:* | CapInh:* | CapPrm:* | CapEff:* | CapBnd:* | CapAmb:* | NoNewPrivs:*) echo "$line" ;;
+        esac
+    done </proc/$$/status
+    echo "fds-open:$fds_open"
+    echo "fd-0: $fd0"
+    echo "fd-1: $fd1"
+    echo "fd-2: $fd2"
+    echo "fd-3: $fd3"
     tr '\0' '\n' </proc/$$/environ | while IFS= read -r line; do echo "env: $line"; done
     echo "pid: $$"
     read -r _ _ _ _ pgrp _ </proc/$$/stat
@@ -64,6 +78,7 @@ case "$mode" in
     *) exit 64 ;;
 esac
 
+startup_facts
 probe >&3
 while IFS= read -r cmd <&3; do
     case "$cmd" in

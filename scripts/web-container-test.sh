@@ -96,7 +96,10 @@ DOCKERFILE
 CAPS_VOLUME=holzwave-web-caps$SUFFIX
 
 # The tests the caps run must report as passed, by name. A run that reports fewer is a failure, whatever its status says.
-CAPS_TESTS="spawns_a_worker_as_the_person_with_nothing_left fails_closed_without_file_caps"
+CAPS_TESTS="spawns_a_worker_as_the_person_with_nothing_left fails_closed_without_file_caps
+    refuses_what_the_range_forbids refuses_a_symlink_as_home home_directory_is_private
+    a_second_spawn_for_a_live_uid_is_refused the_worker_limit_is_enforced
+    the_worker_gets_exactly_four_descriptors_and_a_fixed_environment a_person_cannot_run_the_helper"
 
 # Builds the helper and the test binary as root, and lays out /opt/hw on the volume: the helper twice (0750, root and the
 # group of the test user, so that a person's worker cannot execute it), the file capabilities on one copy only, the test

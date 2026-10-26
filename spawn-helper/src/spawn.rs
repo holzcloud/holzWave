@@ -152,3 +152,28 @@ pub fn start_worker(cfg: &WorkerConfig<'_>, uid: u32, mode: Mode) -> io::Result<
         }
     }
 }
+
+/// The descriptors above 2 that this process has open right now. At start the helper expects none: a descriptor that
+/// the supervisor leaked into it would be inherited by every worker unless it is close-on-exec, and the helper cannot
+/// tell, so it refuses to run instead. The listing's own directory handle is not counted.
+pub fn stray_descriptors() -> io::Result<Vec<u32>> {
+    let numbers: Vec<u32> = std::fs::read_dir("/proc/self/fd")?
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .collect();
+    // The directory handle of the listing is closed by now, so its number no longer resolves.
+    Ok(numbers.into_iter().filter(|n| *n > 2 && std::fs::read_link(format!("/proc/self/fd/{n}")).is_ok()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_open_descriptor_above_two_is_reported() {
+        let file = std::fs::File::open("/proc/self/status").expect("open");
+        let number = file.as_raw_fd() as u32;
+        assert!(number > 2);
+        assert!(stray_descriptors().expect("listing").contains(&number));
+        drop(file);
+    }
+}
