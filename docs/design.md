@@ -104,6 +104,7 @@ default.
 | Diff box | a hairline box in mono inside an approval card (6.16): a head line with the kind, the counts and the sizes, then the changed lines with their line numbers and a `+` or `-` sign as the cue; no fill, wraps and scrolls inside, at most 16 rem high |
 | Shell request card | a floating layer without a backdrop (6.20): the prompt of a `wsh ai` request in full, the piped text by counts and findings, the destination and whether it leaves this computer, `Don't send` and `Send once`; it never takes the keyboard, and only a real press after half a second can send |
 | On-device row | a read-only group row in the providers dialog (6.21): the name `Apple on-device`, a state word, one sentence of advice and, when the model cannot answer, a hairline `Check again`; in the chat picker it is an ordinary row with no host; shown only on a Mac, flat and hairline, no shadow |
+| Sign-in box and web dialogs | the box of the Settings dialog centred on the ground before sign-in (6.28), and the account and people dialogs and the layer `Confirm it is you` (6.29): hairline, 8 px radius, the one shadow, labels above fields, one solid button, errors with `!` and an underline; the browser build only |
 | Local network notice and row | a text-only floating layer on the first start of a Mac (6.24): the reason, `Not now` and `Allow`; and a read-only group row `Local network` in the Settings dialog with the state in words, one sentence of advice and the buttons `Open System Settings`, `Allow` and `Check again`; macOS 15 or later only, flat and hairline, the one shadow is the layer's |
 
 **Motion:** 160 ms for hover and focus, 240 ms for layout changes, easing `cubic-bezier(.2,.7,.3,1)` (holzcloud).
@@ -256,6 +257,13 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Integration card | ![](design/integration-confirm.png) | the card for `Kubernetes · Delete pod` in a production context, armed (6.26): head `! Confirm needed`, the effect line, the target rows, the argument list spelled element by element, the guard line `Production context: Production EU.` (warn, underlined, `!`), the hash, the danger bar and the button `Press again to allow on production`; the pods block beside it has `Logs`, `Exec…` and `Delete…` on the selected row |
 | Integration card states | ![](design/integration-confirm-states.png) | four cards (6.26): a Local verb with the `changes` sentence, an Exec verb on a context that is not production, `Allowed · running…`, and `That action is no longer waiting.`; under the first one the header of a held terminal with the hollow dot with a dash and `exited 1` (warn, underlined, `!`) |
 | Integration profiles | ![](design/integration-profiles.png) | the dialog of 6.27 over the daily window: the group `Profiles` with a production profile chosen (`production`, warn, underlined, `!`), the form of that profile (name, tool radios, context and namespace, `Production context` checked with its sentence), `Secret variables` with one write-only row (`saved`, `Set`, `Clear`), `Environment` with a refusal of the core on a row (danger, underlined, `!`), the sync note, `Delete` and `Save` |
+| Web: sign in | ![](design/web-signin.png) | the page of the browser build before a person is signed in (6.28): the wordmark, the name of the server, the passkey button, one button for each single sign-on provider, `or`, the password form; the code step after a wrong code with the one sentence for every failure |
+| Web: first administrator | ![](design/web-first-admin.png) | `Set up this server` (6.28): the masked setup token, the username, the display name, the two sign-in methods and the refusal of a weak password |
+| Web: invitation | ![](design/web-invite.png) | `You were invited` (6.28): the authenticator step with the key in groups of four, the link and `Code`, and the recovery step whose `Continue` waits for `I have saved this code` |
+| Web: unlock | ![](design/web-unlock.png) | `Your saved passwords are locked` (6.28) over the window: the passphrase with its failure sentence, and the recovery code, each with `Not now` and `Unlock` |
+| Web: account | ![](design/web-account.png) | the account dialog (6.29) with its six groups and the layer `Confirm it is you` above it |
+| Web: people | ![](design/web-people.png) | the people dialog (6.29): the table of accounts with state marks, the menu of one row and the invitation link shown once |
+| Web: window | ![](design/web-window.png) | the window as the browser shows it (6.30): no window buttons, the marks of the status line, the upload target, the `Download` row menu and the Notifications setting |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -324,11 +332,11 @@ A chat pane on a phone is the screen, with a sheet from the bottom edge for the 
 ### 6.7 Platforms
 
 The same window is drawn everywhere; only the OS window buttons move (traffic lights on the left on macOS, flat glyphs
-on the right on Windows, round buttons on the right on GNOME). Shortcut labels follow the platform table in section 7.
+on the right on Windows, round buttons on the right on GNOME), and in a browser there are none (6.30). Shortcut labels follow the platform table in section 7.
 
-| macOS | Windows | Linux |
-|---|---|---|
-| ![](design/platforms/macos.png) | ![](design/platforms/windows.png) | ![](design/platforms/linux.png) |
+| macOS | Windows | Linux | Browser |
+|---|---|---|---|
+| ![](design/platforms/macos.png) | ![](design/platforms/windows.png) | ![](design/platforms/linux.png) | ![](design/platforms/web.png) |
 
 ### 6.8 Connection states
 
@@ -379,12 +387,13 @@ The five earlier candidates stay as the record of the alternatives: [Glas](desig
 [Papier](design/5-papier.png). The cream *Papier* look remains a candidate for a **light theme** later, because the
 terminal palette and the tokens are shared by every chrome style.
 
-## 7. Where Windows and Linux differ from macOS (Phase 2.2)
+## 7. Where Windows, Linux and the browser differ from macOS
 
 Every behaviour that differs from macOS on purpose is in this one table (ROADMAP success criterion 3). The look is the
 same on every platform except where a row says otherwise. Windows and Linux were written and cross-checked from a Mac
 and have since been run by the author on Windows and Linux machines: a row here says what was built, and
-[test-plan.md](test-plan.md) Part 4 is the record of the run.
+[test-plan.md](test-plan.md) Part 4 is the record of the run. The last rows are about the browser build, where the desktop
+window runs in a web page (6.30); they say what the page is specified to do.
 
 | Deviation | Reason | Changed by |
 |---|---|---|
@@ -406,6 +415,14 @@ and have since been run by the author on Windows and Linux machines: a row here 
 | **WebKitGTK may need a graphics workaround** (a blank or flickering window, mostly on NVIDIA). holzWave sets none by default | an unconditional override disables the fast path for everybody; owner decision of 2026-10-12: none until a failure is reproduced on hardware ([build-linux.md](build-linux.md)) | a follow-up plan if row L2 finds one |
 | **The on-device model row and the group `On device` exist only on macOS 26 or later with Apple Intelligence**; nothing of them is drawn on Windows and Linux | Apple's model exists only there and the bridge to it is not compiled elsewhere; the chat picker and the providers dialog look the same on every platform otherwise (6.21) | none planned |
 | **The notice and the group `Local network` exist only on macOS 15 or later**; nothing of them is drawn on Windows and Linux, and `local_network.json` is never written there | the privacy setting `Local Network` is a macOS feature and the probe behind it is not compiled elsewhere (6.24) | none planned |
+| **Browser: no window buttons and no title-bar drag region.** The browser draws its own bar above the page, and the page's bar starts at the left edge with the first workspace pill | a page cannot draw or move the window it is shown in (6.30) | none planned |
+| **Browser: its own chord table, and the keyboard lock in full screen.** The defaults leave out the chords a browser keeps for itself (`Ctrl+W`, `Ctrl+T`, `Ctrl+N`, `Ctrl+Tab`, the same with `Shift`, `Ctrl+PageUp`, `Ctrl+PageDown`); labels use `Ctrl` and `Alt`. In full screen a Chromium browser is asked to pass every key to the page (`navigator.keyboard.lock()`); other browsers keep their chords. Every chord can be changed in the settings | the browser takes those chords before the page sees them; a keyboard lock exists only in Chromium and only in full screen | a browser that offers a lock outside full screen |
+| **Browser: the clipboard is the browser's.** Copy and paste use the asynchronous clipboard API on a user gesture and the `paste` event where the API refuses; a terminal program can write the clipboard (OSC 52) only after a gesture and the existing setting, and can never read it | a browser lets a page read or write the clipboard only on a gesture, and a program in a pane must not be able to read it | none planned |
+| **Browser: no tear-off.** One window `main` is mirrored by every browser tab of the person; `Move pane to new window` and `Move tab to new window` are absent | the person's windows live on the server and every tab shows the same set | none planned |
+| **Browser: no text-scale signal from the system.** The UI scale is the `ui_scale` setting alone, as on macOS | a web page has no OS text size to read; the browser's zoom is a separate setting | none planned |
+| **Browser: no local-network group and no notice.** Nothing of 6.24 is drawn | the privacy setting belongs to the app, and the browser build runs on a server, not on the person's computer | none planned |
+| **Browser: `Reveal in folder` and open-in-folder answer `Not available in the browser.`** and are absent from menus and the palette | the files are on the server, not in the person's file manager | the `Download` action replaces them |
+| **Browser: files are moved by upload and download.** A file dropped on a shell pane is uploaded to the upload folder and its server path is typed into the pane; `Download` in the row menu and the palette fetches a file through a short-lived link | the browser has no path to a file on the server and the server has none to the person's disk | none planned |
 
 ### 6.9 Sync
 
@@ -2293,3 +2310,161 @@ character by character in their groups.
 
 **Not drawn.** A QR code, a download of the recovery code as a file, a print button, a choice of several recovery codes,
 and a way to skip the recovery step.
+
+### 6.29 Account and people
+
+Two dialogs of the browser build, both the box of the Settings dialog (a floating layer: hairline, 8 px radius, the one
+shadow). They come from the palette and nowhere else: the entries `Account…`, `People…` (administrators only; for a member
+the entry is absent, not disabled) and `Sign out` (ends this session), and the text button `Unlock` of the locked mark in
+the status line (6.30). The Settings dialog gets no row for them and the title bar no new control. One dialog at a time;
+`Escape` and `Close` close it and the keyboard goes back to the terminal.
+
+**Account.** The box is 40 rem wide and scrolls inside. From the top: the title `Account`; one status line
+(`role="status"`, one line, for `Saved.` and for an error; never a secret); then six groups, each a `fieldset` with
+`role="group"` under a `.label` legend in the manner of 6.21; then `Close`. Each group has one row: the name, the state as a
+word at the right, and the button of the change. A group is drawn only when it applies: `Password` and `Authenticator` only
+for an account that has a password, the others always.
+
+| Group | State word | Buttons |
+|---|---|---|
+| Password | `set` | `Change` |
+| Authenticator | `set` | `Replace` |
+| Passkeys | `N saved` | `Add passkey`; under it one row for each passkey with its name, `used` and when, and `Remove` |
+| Unlock passphrase | `set` or `not set` | `Change` or `Set` |
+| Recovery code | `saved` or `none` | `Make a new code` |
+| Sessions | none | `Sign out` on every row but this one, and `Sign out everywhere` |
+
+A state word is its own cue: `set` and `saved` are in the ok colour, `not set` and `none` are dim; the colour is never alone.
+A change opens its form in the place of the group's row, with `Save` and `Cancel`: the password asks `Current password` and `New password`
+(`current-password`, `new-password`, the refusal sentence of 6.28 rule 7); the authenticator shows the key, the link and `Code` of
+the invitation step; a passkey asks for a `Name` and then shows the prompt of the browser; the passphrase asks for `New
+passphrase`; a new recovery code is shown in the same once-only step as in 6.28 and says `The new code replaces the old one.`
+before it is made. Removing the last way to sign in is refused with `This is your last way to sign in. Add another first.`
+
+A session row shows the device (the browser and system, as a short summary), the address in mono, and when it was last seen. The
+session that shows the dialog is marked with the words `this session` and a filled dot `●` and has no `Sign out`; every other row
+has one. `Sign out everywhere` ends every session including this one, and the window then shows the sign-in page.
+
+**Confirm it is you.** Every change asks for a sign-in no older than five minutes. The page sends the change; when the answer
+says that a recent sign-in is needed, it shows this layer once and repeats the change after it. A layer above the dialog,
+with its own backdrop over the dialog, the same box as the other dialogs, centred, 24 rem wide. It shows the account name in
+mono in the sentence `Signed in as NAME. Enter your password to make this change.`, so that no other dialog can pass for it
+(an administrator sees the same box for an admin action). Then the field `Password` (`current-password`, focused), the buttons `Cancel` and `Confirm`
+(solid) and a text button `Use a passkey` when the account has a passkey. An account with neither a password nor a passkey has
+`Sign in again with NAME` (the provider's name) in place of the field and `Confirm`; it leaves the page like a sign-in. A
+wrong password says the sentence of 6.28 rule 1. `Escape` is `Cancel`; the focus stays inside the layer and returns to the
+button that opened it. A confirmation does not extend the session.
+
+**People.** The box is 41 rem wide and scrolls inside. The title `People` with the hairline button `Invite` at the right, the
+status line, then a table with the columns `Name`, `Role`, `State`, `Last sign-in` and an actions column, the sentence `This list
+shows names, roles and states only. It never shows anyone's secrets, terminals, commands or layout.` and `Close`. A row is the display name with the
+username in dim mono, the role (`admin` or `member`), the state, when the person last signed in (`today 09:12`, `yesterday`, `3
+weeks ago`, `never`) and a button `⋯` named `Actions for NAME` (`aria-haspopup="menu"`). The row of the open menu has the rose
+wash and the button the rose ring.
+
+| State | Shown as | Second cue |
+|---|---|---|
+| `active` | `● active`, ok | the filled dot and the word |
+| `disabled` | `○ disabled`, dim | the hollow ring and the word |
+| `locked out` | `! locked out`, warn | the mark `!`, an underline and the word |
+
+The menu, in this order: `Make admin` or `Make member`, `Disable` or `Enable`, `Unlock sign-in` (only while the person is locked
+out), then after a hairline `Reset secrets` and `Delete` (danger colour, last). The two below the hairline ask first, in a
+confirmation of the same box (24 rem) that names the person: `Delete NAME?` says `They can no longer sign in and their terminals stop. Their files stay on the
+server, and nobody can open their saved passwords and keys again.`; `Reset secrets of NAME?` says `Their saved passwords and keys are
+deleted. Their account, layout and history stay.` The buttons are `Cancel` and the action's name in a hairline button with the
+danger border and text (armed, as in 6.27); rose is not used for a destructive action. An administrator cannot disable, delete or
+demote the last active administrator: those three entries are dim and `aria-disabled`, and the menu says why under them in the
+dim style, `Last active administrator. Make someone else an administrator first.` Every action also asks for a recent sign-in, with
+the layer above.
+
+`Invite` opens a small form in a layer of the same box: `Role` (a radio group, `Member` first, then `Administrator`), `Days` (1 to
+30, 7 at first) and `Username` (optional: when it is filled the account is made at once and the link enrols it; a taken name says
+`That username is taken. Choose another.`), `Cancel` and the solid `Create link`. The layer then shows the link once: the title `Invitation link`, the
+sentence `Shown once. Copy it now and send it to the person. It works for 7 days, as a member.` (with the real days and role), the link in
+a bordered block in mono cut with an ellipsis, `Copy link` and the solid `Done`. The link is never listed again, is not put into
+the status line or the title, and is removed from the page when `Done` is pressed or the layer closes.
+
+No dialog of this section shows any person's secrets, terminal output, commands, scrollback or layout, and there is no audit viewer. An
+administrator reads and changes the account rows and nothing else.
+
+**Keys.** `Tab` goes through the groups and buttons of the account dialog in reading order, and through the actions button of each
+row in the people dialog (one stop for each row). `Enter` or `Space` on `⋯` opens the menu with the first entry focused; the arrows
+move, `Enter` chooses, `Escape` closes the menu and returns to its button. Dialogs are modal (`aria-modal`), the focus stays inside
+and returns to where it was. The focus ring is 2 px.
+
+**Accessibility.** Hairlines use `--hw-line` and dim text `--hw-ink-2` under `contrast-high`; under `forced-colors` the dialogs, the row
+of the open menu and the armed buttons keep their borders or get a system-colour outline; nothing moves, so `motion-reduce` has nothing
+to remove. Every size is in `rem`, every target at least 28 px high. The table has real header cells; the menu is `role="menu"`.
+
+![Account](design/web-account.png)
+![People](design/web-people.png)
+
+**Not drawn.** A password that an administrator sets for someone, impersonating a person, a view of anyone's data, groups, bulk actions,
+a search of the people, an audit viewer, API tokens, management of SSH keys and a list of shared panes.
+
+### 6.30 The web window
+
+The window of the browser build is the desktop window of 6.1 to 6.3 with the changes below; nothing else differs. The three levels,
+the numbered tabs, the sidebar, the status line and every dialog keep their shapes and tokens. The window has **no window buttons and
+no drag region**: the browser draws its own bar above the page, and the page's bar starts at the left edge with the first workspace
+pill. One window, labelled `main`, is mirrored by every browser tab of the person: a second tab shows the same workspaces, tabs and
+panes, and nothing can be torn off.
+
+**Status line marks.** Each mark is a segment of the status line (6.2) with a word and a shape, never colour alone; they are
+`role="status"` regions and carry no secret.
+
+| Mark | Words | Shape | When | Second cue |
+|---|---|---|---|---|
+| reconnecting | `reconnecting` | dotted ring `◌` (as in 6.8) | one second after the connection to the server was lost; a shorter break draws nothing | warn colour, the ring and the word |
+| offline | `offline` | `!` | the browser reports that it has no network | danger colour, the mark and an underline |
+| session ends | `session ends in 4 min` | quarter circle `◔` | for the last five minutes of the idle time; the minutes count down once a minute, the last is `session ends in 1 min` | warn colour, the glyph and the words |
+| session ended | `session ended` | `!` | the session is over: the sign-in box of 6.28 opens over the window with `Your session ended. Sign in again.`; the panes keep running and are there again after the sign-in | danger colour, the mark and an underline |
+| secrets locked | `secrets locked` and a text button `Unlock` | a lock glyph, drawn as a small box with a shackle | the saved passwords are locked (6.28); `Unlock` opens the dialog | plain ink; the glyph, the words and the button |
+
+The idle mark is announced when it first appears and again at one minute, not every minute. Any activity of the person ends it. While the
+connection is down the panes show their last screen.
+
+**Upload by drop.** While a file is dragged over a pane that runs a shell, the pane shows a hairline dashed edge (1 px, `--hw-rose`, with
+`--hw-rose-wash` inside) and, centred, a small box with the label `Drop to upload` (uppercase, tracked) over `to` and the upload folder in mono. Rose
+marks the target of the action. A drag that carries no file (text, a link) shows nothing, and a pane that runs no shell shows no edge and
+accepts nothing. A finished upload types the server's path into the pane like a paste, never followed by `Enter`, several paths separated by
+spaces, and the status line says `Uploaded.` (`Uploaded 3 files.`). A refusal says why in words and puts nothing in the pane:
+`Not uploaded: too large.` or `Not uploaded: name not allowed.`
+
+**Download.** A file of the file browser (6.5) has the menu entry `Download` in its row menu, with `Open preview`, and the palette has
+the entry `Download`, which acts on the selected row of the focused file browser and is absent when there is none. A refusal is said in
+the status line in words, as an upload's is.
+
+**Notifications.** The Settings dialog gets a group `Notifications` after Accessibility, in the browser build only, in the manner of 6.24: one
+row with the name `Notify me`, the dim meta `bell and attention`, the state as a word at the right, one sentence of advice and one button.
+They are off until the person turns them on, and the browser is asked only when `Turn on` is pressed, never at load.
+
+| State | Shown as | Tone and second cue | Advice | Button |
+|---|---|---|---|---|
+| `off` | off | plain; the word | Bell and attention marks also show in the tab title. Turn this on to get a browser notification as well. | `Turn on` |
+| `on` | on | ok; the word | A browser notification appears when a pane out of view rings the bell or needs you. It never contains terminal text. | `Turn off` |
+| `blocked` | blocked by the browser | warn; the word, an underline and `!` | The browser blocks notifications for this site. Allow them in the site settings of the browser, then choose Check again. | `Check again` |
+
+Besides the notification, the title of the browser tab shows the kinds of 6.23 that are present, as their glyphs in the fixed order
+followed by `holzWave` (`? ▲ holzWave`); with none, the title is `holzWave`. The title never holds anything a pane wrote. The icon of
+the tab gets a small dot in `--hw-warn` while any kind is present.
+
+**Controls the browser does not have.** Tear-off entries (`Move pane to new window`, `Move tab to new window`), the text size from the system,
+the group `Local network` and `Reveal in folder` are absent from menus, the palette and the Settings, not disabled. When a stored shortcut
+or a script calls one of them anyway, the answer is `Not available in the browser.`, said as the notice of the status line for as long as a
+notice lasts (rule 5 of section 6). Copying and pasting use the clipboard of the browser (section 7). A link in a pane opens in a new browser tab, only
+for `http`, `https` and `mailto` and after the confirmation of the desktop.
+
+**Keys.** The browser keeps some chords for itself; the web build has its own table of defaults without them and labels them with `Ctrl` and
+`Alt` (section 7). The shortcuts view and the palette show the chords of that table; a chord that has none yet shows `–`.
+
+![The web window](design/web-window.png)
+![The browser as a platform](design/platforms/web.png)
+
+**Accessibility.** The marks are words and shapes, so colour is never the only cue; the dashed edge and its label are the target's cues;
+hairlines use `--hw-line` and dim text `--hw-ink-2` under `contrast-high`; under `forced-colors` the marks and the label box use system
+colours and the dashed edge keeps its dashes; nothing moves, so `motion-reduce` has nothing to remove. Every size is in `rem`.
+
+**Not drawn.** SSH key management, API tokens, shared panes, an audit viewer, a mobile layout of the page, a button that installs the page
+as an app, and a control that sets the upload folder (the server's configuration does).

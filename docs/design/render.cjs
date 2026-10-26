@@ -157,8 +157,35 @@ async function check(file) {
   for (const words of ['waits for you', 'rang the bell', 'command failed', 'command finished']) if (!attnText.includes(words)) failures.push(`the view attn does not show ${words}`);
   const attnAll = await page.$$eval('#stage .tab', (tabs) => tabs.map((t) => [...t.querySelectorAll('.attn .mk')].map((m) => m.textContent).join('')));
   if (attnAll[1] !== '?▲!✓') failures.push(`the second tab of the view attn shows ${attnAll[1]}, not ?▲!✓`);
+  // The browser build: seven views, each with the words its section of docs/design.md fixes, and a platform without window buttons.
+  for (const view of ['web-signin', 'web-first-admin', 'web-invite', 'web-unlock', 'web-account', 'web-people', 'web-window']) if (!views.includes(view)) failures.push(`the view ${view} is missing`);
+  const webWords = {
+    'web-signin': ['Sign in with a passkey', 'Sign-in failed. Check your details or ask an admin.', 'Continue with Keycloak'],
+    'web-first-admin': ['Set up this server', 'Setup token', 'Password and authenticator app', 'Use at least 12 characters. Not your username, not one repeated character.'],
+    'web-invite': ['You were invited', 'Copy link', 'I have saved this code', 'Tick the box to continue.'],
+    'web-unlock': ['Your saved passwords are locked', 'That did not unlock your secrets.', 'Use recovery code', 'an admin can reset your secrets'],
+    'web-account': ['Confirm it is you', 'Sign out everywhere', 'this session', 'Recovery code'],
+    'web-people': ['locked out', 'Unlock sign-in', 'Reset secrets', 'Invitation link'],
+    'web-window': ['Drop to upload', 'Download', 'secrets locked', 'Unlock', 'session ends in 4 min', 'Not available in the browser.', 'blocked by the browser'],
+  };
+  for (const [view, wanted] of Object.entries(webWords)) {
+    if (!views.includes(view)) continue;
+    await show(page, view);
+    const text = await page.$eval('#stage', (n) => n.textContent);
+    for (const words of wanted) if (!text.includes(words)) failures.push(`the view ${view} does not show ${words}`);
+    const buttons = await page.$$eval('#stage .wc', (ns) => ns.filter((n) => getComputedStyle(n).display !== 'none').length);
+    if (buttons !== 0) failures.push(`the view ${view} shows ${buttons} window button groups`);
+  }
+  await show(page, 'web-invite');
+  if ((await page.$$eval('#stage [aria-disabled="true"]', (n) => n.length)) !== 1) failures.push('the view web-invite does not show the disabled Continue of the recovery step');
+  for (const [os, groups] of [['mac', 1], ['web', 0]]) {
+    await show(page, 'alltag', os);
+    const shown = await page.$$eval('#stage .wc', (ns) => ns.filter((n) => getComputedStyle(n).display !== 'none').length);
+    if (shown !== groups) failures.push(`the platform ${os} shows ${shown} window button groups, not ${groups}`);
+  }
+  await page.click('#os button[data-os="mac"]');
   // The chords of the AI actions follow the platform switch: the symbols on macOS, the words on Windows and Linux.
-  const keysOf = { mac: ['⇧⌘Y', '⇧⌘G'], win: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'], lin: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'] };
+  const keysOf = { mac: ['⇧⌘Y', '⇧⌘G'], win: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'], lin: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'], web: ['Ctrl+Shift+Y', 'Ctrl+Shift+G'] };
   for (const [os, wanted] of Object.entries(keysOf)) {
     await show(page, 'kiactions', os);
     const text = await page.$eval('#stage', (n) => n.textContent);

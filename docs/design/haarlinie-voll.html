@@ -398,7 +398,7 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .wb-page{flex:1;display:flex;align-items:flex-start;justify-content:center;gap:2rem;padding:3.5rem 1rem 1rem;background:var(--ground)}
 .wb-cell{display:flex;flex-direction:column;gap:.4rem}
 .wb-cell .cap{margin:0}
-.wb-box{position:static;width:26rem;padding:1.25rem 1.5rem 1.1rem;border-radius:8px;display:flex;flex-direction:column;font:400 12px/1.45 var(--mono)}
+.wb-box{position:static;width:26rem;padding:1.25rem 1.5rem 1.1rem;border-radius:8px;display:flex;flex-direction:column;line-height:1.45}
 .wb-box.narrow{width:24rem}
 .wb-box.ov{position:absolute}
 .wb-brand{display:flex;align-items:baseline;gap:.75rem;margin:0 0 1rem}
@@ -439,7 +439,7 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .wb-r{display:flex;align-items:center;gap:.6rem;min-height:1.5rem}
 .wb-r .nm{color:var(--ink)}.wb-r .mt{color:var(--ink3)}.wb-r .st{margin-left:auto;color:var(--ink3)}
 .wb-r .st.ok{color:var(--ok)}
-.wb-r .btn{min-height:1.5rem;padding:0 .6rem;font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.wb-r .btn{min-height:1.5rem;padding:0 .6rem;font-size:.85em;font-weight:500;letter-spacing:.1em;text-transform:uppercase}
 .wb-r .cur-s{color:var(--ink)}
 .wb-r .cur-s::before{content:"\25CF  "}
 .wb-acts{display:flex;justify-content:flex-end;gap:.5rem;margin:.6rem 0 0}
@@ -457,7 +457,8 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .wb-menu .it.dg{color:var(--danger)}
 .wb-kebab{display:inline-flex;align-items:center;justify-content:center;min-width:1.75rem;min-height:1.75rem;border:1px solid var(--edge);border-radius:6px;color:var(--ink2)}
 .wb-kebab.on{background:var(--wash);border-color:var(--rose)}
-.wb-drop{position:absolute;inset:6px;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.25rem;border:1px dashed var(--rose);background:var(--wash);color:var(--ink)}
+.wb-drop{position:absolute;inset:2px;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.25rem;border:1px dashed var(--rose);background:var(--wash);color:var(--ink)}
+.wb-drop .lb{display:flex;flex-direction:column;align-items:center;gap:.25rem;padding:.5rem 1.1rem;border:1px solid var(--edge);border-radius:6px;background:var(--ground2)}
 .wb-drop b{letter-spacing:.1em;text-transform:uppercase;font-size:.9em}
 .wb-lock{display:inline-block;position:relative;width:.7em;height:.5em;margin:0 .2em 0 0;border:1.5px solid currentColor;border-radius:2px;vertical-align:-.05em}
 .wb-lock::before{content:"";position:absolute;left:.1em;bottom:100%;width:.3em;height:.28em;border:1.5px solid currentColor;border-bottom:0;border-radius:.2em .2em 0 0}
@@ -614,7 +615,7 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
     <div class="seg" id="views" role="group" aria-label="View"></div>
     <small>Platform</small>
     <div class="seg" id="os" role="group" aria-label="Platform">
-      <button aria-pressed="true" data-os="mac">macOS</button><button aria-pressed="false" data-os="win">Windows</button><button aria-pressed="false" data-os="lin">Linux</button>
+      <button aria-pressed="true" data-os="mac">macOS</button><button aria-pressed="false" data-os="win">Windows</button><button aria-pressed="false" data-os="lin">Linux</button><button aria-pressed="false" data-os="web">Browser</button>
     </div>
     <div class="note" id="note"></div>
   </div>
@@ -736,8 +737,11 @@ const status=(extra='',k8s=cseg('⎈ talos-prod/kube-system'))=>`<div class="sta
 
 
 const OSK={mac:{n:'⌘',s:'⇧',a:'⌥'},win:{n:'Ctrl',s:'Shift',a:'Alt'},lin:{n:'Ctrl',s:'Shift',a:'Alt'}};
+/* The web build has the Windows and Linux labels, without the chords a browser keeps for itself (docs/design.md section 7): those show a dash until the web table gives them another chord. */
+const WEBRESERVED=['Ctrl+W','Ctrl+T','Ctrl+N','Ctrl+Tab','Ctrl+Shift+W','Ctrl+Shift+T','Ctrl+Shift+N','Ctrl+PageUp','Ctrl+PageDown'];
 function chord(os,c){ // c: mac string, w: win/lin string
-  return c[os==='mac'?0:1]||'<span class="dim">–</span>';}
+  const k=c[os==='mac'?0:1];
+  return k&&!(os==='web'&&WEBRESERVED.includes(k))?k:'<span class="dim">–</span>';}
 const KEYS=[
  ['Pane',[['Split pane right','pane.split_right',['⌘D','Ctrl+Shift+D']],['Split pane down','pane.split_down',['⇧⌘D','Ctrl+Shift+O']],['Close pane','pane.close',['⌘W','Ctrl+Shift+W']],['Next pane','pane.focus_next',['⌘]','Ctrl+Shift+]']],['Previous pane','pane.focus_prev',['⌘[','Ctrl+Shift+[']],['Move pane to new window','pane.move_to_new_window',['','']]]],
  ['Tab',[['New tab','tab.new',['⌘T','Ctrl+Shift+T']],['Tab 1 to 9','tab.select_1…9',['⌘1 … ⌘9','Alt+Shift+1 … 9']],['Rename tab','tab.rename',['','']]]],
@@ -780,7 +784,7 @@ function base(v){
     <span class="fill"></span>
     <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">${v.startsWith('web-')?'Ctrl+Shift+P':'⌘K'}</div>${wcR}</div>
   <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">${v.startsWith('web-')?'Alt+Shift+1–9':'⌘1–9'} tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
+  <div class="body">${v==='web-window'?wbArea():v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2',chip:phChip('⎈ talos-prod')})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1))}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -788,7 +792,7 @@ function base(v){
       ${P('in','◧','notes.md','preview',md)}
       ${P('','◔','system','local · 1 s',sysmon)}
     </div>${searchBar}
-  </div>`}${v==='kiwsh'?side:v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='kimonstates'||v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?'':v==='kintctx'?cxSideCtx:v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||(v==='kintctx'?status('',cseg('⎈ prod-eu/payments',{prod:1})):status())}${awOver(v)}${icOver(v)}`;
+  </div>`}${v==='kiwsh'?side:v==='web-window'||v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='kimonstates'||v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?'':v==='kintctx'?cxSideCtx:v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||(v==='kintctx'?status('',cseg('⎈ prod-eu/payments',{prod:1})):v==='web-window'?wbStatus():status())}${awOver(v)}${icOver(v)}${v==='web-window'?wbNotif():''}`;
 }
 /* The chat pane (docs/design.md 6.12). Two states of one conversation: `kipane` streams a reply, `kistates` shows the picker, a stopped
    reply, a failed turn and a long draft. The words are the ones of the page: the status words, the end row, the count. */
@@ -1089,9 +1093,47 @@ const wbUnlock=(field,err,alt,over)=>`<div class="ov float wb-box narrow" role="
  <div class="wb-h" style="margin:.5rem 0 0">If you lost both, an admin can reset your secrets. That deletes your saved passwords and keys, and keeps your account, layout and history.</div></div>`;
 wbViews['web-first-admin']=()=>wbPage([['Password chosen, new password refused',wbSetup('password',wbPolicy)],['Passkey chosen',wbSetup('passkey','')]]);
 wbViews['web-invite']=()=>wbPage([['Authenticator step',wbInviteKey()],['Recovery step',wbInviteRecovery()]]);
+/* The account and people dialogs (docs/design.md 6.29) and the window of the browser build (6.30). */
+const wbRow=(name,meta,state,btn,o={})=>`<div class="wb-r"><span class="nm${o.cur?' cur-s':''}">${name}</span><span class="mt">${meta}</span><span class="st ${o.tone||''}">${state}</span>${btn?`<span class="btn">${btn}</span>`:''}</div>`;
+const wbAccount=()=>`<div class="ov float wb-box sheet" role="dialog" aria-modal="true" aria-label="Account" style="left:24px;top:22px">
+ <div class="wb-title" style="margin:0">Account</div><div class="ap-s" role="status" style="min-height:1.1rem;margin:0"></div>
+ ${apG('Password',wbRow('Password','','set','Change',{tone:'ok'}))}
+ ${apG('Authenticator',wbRow('Authenticator app','','set','Replace',{tone:'ok'}))}
+ ${apG('Passkeys',wbRow('2 passkeys','','saved','Add passkey',{tone:'ok'})+wbRow('MacBook','used today','','Remove')+wbRow('Phone','used 3 days ago','','Remove'))}
+ ${apG('Unlock passphrase',wbRow('Passphrase','','not set','Set'))}
+ ${apG('Recovery code',wbRow('Recovery code','','saved','Make a new code',{tone:'ok'}))}
+ ${apG('Sessions',wbRow('Firefox on macOS','203.0.113.7 · now','this session','',{cur:1})+wbRow('Chrome on Linux','198.51.100.24 · 3 h ago','','Sign out')+`<div class="wb-r" style="justify-content:flex-end"><span class="btn">Sign out everywhere</span></div>`)}
+ <div class="wb-acts"><span class="btn">Close</span></div></div>`;
+const wbStepUp=`<div class="scrim" style="z-index:7"></div><div class="ov float wb-box narrow" role="dialog" aria-modal="true" aria-label="Confirm it is you" style="left:700px;top:150px;z-index:8">
+ <div class="wb-title">Confirm it is you</div>
+ <div class="wb-lead" style="margin:0 0 .6rem">Signed in as <b style="color:var(--ink)">holz</b>. Enter your password to make this change.</div>
+ ${wbIn('Password',wbDots(9),{fo:1})}
+ <div class="wb-acts" style="margin:0 0 .5rem"><span class="btn">Cancel</span><span class="btn p">Confirm</span></div>
+ <div><span class="wb-tb">Use a passkey</span></div></div>`;
+const wbPerson=(name,user,role,state,last,o={})=>`<tr class="${o.on?'on':''}"><td>${name}<span class="un">${user}</span></td><td class="wb-st">${role}</td><td><span class="wb-st ${state==='active'?'ok':state==='locked out'?'wa':'dm'}">${state==='active'?'● ':state==='disabled'?'○ ':''}${state}</span></td><td class="wb-st">${last}</td><td style="text-align:right"><span class="wb-kebab${o.on?' on':''}" aria-label="Actions for ${name}">⋯</span></td></tr>`;
+const wbPeople=()=>`<div class="ov float wb-box sheet" role="dialog" aria-modal="true" aria-label="People" style="left:60px;top:40px;width:41rem">
+ <div class="row" style="gap:.6rem"><div class="wb-title" style="margin:0">People</div><span class="btn" style="margin-left:auto;display:flex;align-items:center;min-height:1.75rem">Invite</span></div><div class="ap-s" role="status" style="min-height:1.1rem;margin:0"></div>
+ <table class="wb-tbl"><thead><tr><th>Name</th><th>Role</th><th>State</th><th>Last sign-in</th><th></th></tr></thead><tbody>
+ ${wbPerson('Anna Keller','anna','admin','active','today 09:12')}${wbPerson('Ben Ito','ben','member','active','yesterday')}${wbPerson('Chris Roy','chris','member','locked out','today 08:40',{on:1})}${wbPerson('Dana Wu','dana','member','disabled','3 weeks ago')}${wbPerson('Eli Sato','eli','member','active','never')}</tbody></table>
+ <div class="wb-h" style="margin:.6rem 0 0">This list shows names, roles and states only. It never shows anyone's secrets, terminals, commands or layout.</div>
+ <div class="wb-acts"><span class="btn">Close</span></div>
+ <div class="float wb-menu" role="menu" aria-label="Actions for Chris Roy" style="left:26.8rem;top:13.4rem"><div class="it on" role="menuitem"><span>Make admin</span></div><div class="it" role="menuitem"><span>Disable</span></div><div class="it" role="menuitem"><span>Unlock sign-in</span></div><div class="it rule" role="menuitem"><span>Reset secrets</span></div><div class="it dg" role="menuitem"><span>Delete</span></div></div></div>
+ <div class="ov float wb-box narrow" role="dialog" aria-label="Invitation link" style="left:730px;top:150px">
+ <div class="wb-title">Invitation link</div>
+ <div class="wb-lead" style="margin:0 0 .6rem">Shown once. Copy it now and send it to the person. It works for 7 days, as a member.</div>
+ <div class="wb-f"><span class="lbl">Link</span><div class="wb-row2" style="margin:0"><div class="wb-in"><span class="tx">https://holz.example.net/#invite=hwi_7Qk2mXe9</span></div><span class="btn">Copy link</span></div></div>
+ <div class="wb-acts"><span class="btn p">Done</span></div></div>`;
+const wbDrop='<div class="wb-drop" role="status"><div class="lb"><b>Drop to upload</b><span class="dim">to <span style="color:var(--ink)">~/uploads</span></span></div></div>';
+const wbRowMenu='<div class="ov float wb-menu" role="menu" aria-label="sync.pdf" style="left:11rem;top:5.6rem;width:10rem"><div class="it" role="menuitem"><span>Open preview</span></div><div class="it on" role="menuitem"><span>Download</span></div></div>';
+const wbArea=()=>`<div class="area">${P('','❯','shell','pane 1 · ~/holzWave',shell('')+wbDrop,{f:1,chip:phChip('⎈ talos-prod')})}${P('in','▦','files','sftp · talos-1',tree+wbRowMenu)}${P('','⌁','holzkube','ssh · talos-2',ssh(0))}${P('in','◧','notes.md','preview',md)}</div>`;
+const wbStatus=()=>`<div class="status row"><span>5 tabs · 5 panes</span><span class="wa">◌ reconnecting</span><span class="wa">◔ session ends in 4 min</span><span><i class="wb-lock"></i>secrets locked <span class="wb-un">Unlock</span></span><span>Not available in the browser.</span><span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta1</span></div>`;
+const wbNRow=(state,tone,word,line,btns)=>`<div class="ln-row" data-state="${state}" data-tone="${tone}"><span class="ln-name">Notify me</span><span class="ln-meta">bell and attention</span><span class="ln-state">${word}</span><p class="ln-adv">${line}</p><div class="ln-btns">${btns.map(b=>`<span class="ln-btn">${b}</span>`).join('')}</div></div>`;
+const wbNotif=()=>`<div class="float wb-notif" role="group" aria-label="Settings: Notifications"><div class="cap" style="margin:0">Settings</div><div class="cap" style="margin:0">Off, the default</div>${apG('Notifications',wbNRow('off','plain','off','Bell and attention marks also show in the tab title. Turn this on to get a browser notification as well.',['Turn on']))}<div class="cap" style="margin:0">Blocked in the browser</div>${apG('Notifications',wbNRow('blocked','warn','blocked by the browser','The browser blocks notifications for this site. Allow them in the site settings of the browser, then choose Check again.',['Check again']))}</div>`;
 wbViews['web-signin']=()=>wbPage([['Password, step 1',wbSignIn({cur:1})],['Authenticator code, after a wrong code',wbCode(wbGeneric)]]);
 
 const ovl={
+ 'web-account':`<div class="scrim"></div>${wbAccount()}${wbStepUp}`,
+ 'web-people':`<div class="scrim"></div>${wbPeople()}`,
  'web-unlock':`<div class="scrim"></div>${wbUnlock('Passphrase','That did not unlock your secrets.','Use recovery code','left:100px;top:130px')}${wbUnlock('Recovery code','','Use passphrase','left:596px;top:130px')}`,
  history:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:560px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">⌕</span>kgp<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
   <div class="it on"><span><span class="ro">k</span>ubectl <span class="ro">g</span>et <span class="ro">p</span>ods -n kube-system</span><span class="dim">~/infra · 2 h ago · ×14</span></div>
@@ -1323,6 +1365,9 @@ const views=[
 ['web-first-admin','Web: first administrator','Shown instead of the sign-in only while the server has no administrator: Set up this server, the setup token (masked, read from the address fragment and cleared at once), the username and the display name, then the first sign-in method in the words and the order of the invitation. Left, the password choice with the server\u2019s refusal of a weak password (the mark !, an underline and the sentence); right, the passkey choice.'],
  ['web-invite','Web: invitation','An invitation link opens this page: You were invited and the role as a label. Left, the authenticator step: the secret in groups of four characters with Copy, the otpauth link with Copy link and the field Code, no QR code. Right, the recovery code, shown once in groups with Copy; Continue stays disabled, and says why in words, until I have saved this code is ticked, and the step cannot be left by Escape or a click outside.'],
  ['web-unlock','Web: unlock','The dialog over the window when the saved passwords are locked: the passphrase field with the sentence for a wrong one (the mark ! and an underline), Not now and Unlock, a text button for the recovery code, and the dim sentence that an admin can reset the secrets, which deletes the saved passwords and keys and keeps the account, the layout and the history. Right, the same dialog with the recovery code field.'],
+ ['web-account','Web: account','The account dialog, opened from the palette entry Account\u2026: one group for each thing a person can change (password, authenticator, passkeys, unlock passphrase, recovery code) with its state as a word, and the sessions with this one marked by the word this session and a dot, Sign out and Sign out everywhere. A change asks again in the layer Confirm it is you above the dialog, which shows the account name in mono and offers the password or a passkey.'],
+ ['web-people','Web: people','The people dialog, for administrators only: the table of accounts with role, state (active with a dot, disabled with a ring, locked out with ! and an underline) and last sign-in, the menu of one row (Make admin, Disable, Unlock sign-in while locked out, Reset secrets, Delete) and the layer that shows a new invitation link once with Copy link. The dialog shows no secret, terminal, command or layout of anyone.'],
+ ['web-window','Web: window','The window as a browser shows it: the bar starts at the left edge, with no window buttons and no drag region. In the status line the marks reconnecting (a dotted ring), session ends in 4 min (a quarter circle) and secrets locked (a lock and the text button Unlock), and the notice Not available in the browser. A file dragged over a pane shows a dashed edge and Drop to upload with the folder; the row menu of the file browser has Download; Settings has the row Notifications, here off and blocked by the browser.'],
   ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
