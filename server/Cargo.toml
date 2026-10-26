@@ -50,7 +50,8 @@ rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "p
 
 # Sign-in. The default features of openidconnect select reqwest 0.12 with aws-lc-rs, so they are off and the HTTP exchange
 # goes through an adapter over the reqwest of the core's spelling (ring provider, platform verifier).
-webauthn-rs = "=0.6.1-dev"
+# `conditional-ui` is the library's name for the discoverable (username-less) authentication calls.
+webauthn-rs = { version = "=0.6.1-dev", features = ["conditional-ui"] }
 openidconnect = { version = "=4.0.1", default-features = false }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "system-proxy"] }
 totp-rs = { version = "=6.0.0", features = ["otpauth", "zeroize", "gen_secret"] }
