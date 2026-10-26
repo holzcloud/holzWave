@@ -1,0 +1,24 @@
+# Standalone measurement project: is permessage-deflate worth turning on, and is the library that offers it safe enough?
+# It has its own workspace table and its own lock on purpose. Nothing here is linked into the server, and the main
+# lock never holds a dependency of this project.
+
+[workspace]
+
+[package]
+name = "web-deflate"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Measures the wire cost, the decompression-bomb behaviour and the interoperability of permessage-deflate"
+
+[dependencies]
+# The server side of the measurement: the same WebSocket stack the web server is built on, with the same message cap.
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
+# Results file and the check that a recorded line is exactly what serde_json writes (key order kept).
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
+
+[dev-dependencies]
+# The client of the baseline measurement. `handshake` only: the test connects over a plain TCP stream.
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
