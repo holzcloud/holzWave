@@ -151,6 +151,16 @@ impl Helper {
 }
 
 impl Helper {
+    /// The next event, waiting at most `wait`. An answer arriving here would be a bug of the test.
+    fn wait_event(&mut self, wait: Duration) -> Option<Value> {
+        if let Some(event) = self.events.pop_front() {
+            return Some(event);
+        }
+        let (value, _) = self.receive(wait)?;
+        assert!(value.get("event").is_some(), "an event was expected, not {value}");
+        Some(value)
+    }
+
     /// The number of workers the helper says it holds.
     fn workers(&mut self) -> u64 {
         self.request(r#""op":"ping""#).0["workers"].as_u64().expect("a count")
@@ -205,6 +215,37 @@ impl Worker {
             probe.raw.push(line);
         }
     }
+}
+
+/// The `key: value` lines of /proc/<pid>/status, or `None` when the process is gone.
+fn proc_status(pid: i32) -> Option<BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    Some(
+        text.lines()
+            .filter_map(|line| line.split_once(':'))
+            .map(|(key, value)| (key.to_owned(), value.trim().to_owned()))
+            .collect(),
+    )
+}
+
+/// Every process in the container that is not a zombie, with its status.
+fn processes() -> Vec<(i32, BTreeMap<String, String>)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").expect("/proc") {
+        let Some(pid) = entry.ok().and_then(|e| e.file_name().to_str()?.parse::<i32>().ok()) else { continue };
+        if let Some(status) = proc_status(pid) {
+            if !status.get("State").is_some_and(|s| s.starts_with('Z')) {
+                found.push((pid, status));
+            }
+        }
+    }
+    found
+}
+
+/// The processes whose real user is `uid`.
+fn processes_of(uid: u32) -> Vec<i32> {
+    let wanted = uid.to_string();
+    processes().into_iter().filter(|(_, s)| s.get("Uid").and_then(|u| u.split_whitespace().next()) == Some(wanted.as_str())).map(|(pid, _)| pid).collect()
 }
 
 #[derive(Default)]
@@ -481,4 +522,205 @@ fn a_person_cannot_run_the_helper() {
         assert!(reply.starts_with("exec-try: status=126"), "the shell could not execute it: {reply}");
         assert!(reply.contains("Permission denied"), "{reply}");
     }
+}
+
+#[test]
+#[ignore = "needs the container of scripts/web-container-test.sh"]
+fn the_helper_reports_a_worker_that_exits() {
+    let mut helper = Helper::start("exits", &[]);
+    let mut worker = helper.spawn(20020, "serve").expect("spawn");
+    worker.probe();
+    let pid = worker.pid;
+    let closed = Instant::now();
+    drop(worker);
+    let event = helper.wait_event(Duration::from_secs(5)).expect("the helper reports the end of the worker");
+    let took = closed.elapsed();
+    println!("lifecycle: exit report {took:?} after the socket closed: {event}");
+    assert_eq!(event["event"], "exited");
+    assert_eq!(event["pid"], pid);
+    assert_eq!(event["uid"], 20020);
+    assert_eq!(event["status"], 0);
+    assert!(event["signal"].is_null());
+    assert!(took < Duration::from_secs(1), "within a second: {took:?}");
+    assert_eq!(helper.workers(), 0, "the ended worker is forgotten");
+
+    // The person can be served again at once, and the exit code of the worker is carried.
+    let mut again = helper.spawn(20020, "serve").expect("the person is served again");
+    again.probe();
+    again.send("exit 3");
+    let event = helper.wait_event(Duration::from_secs(5)).expect("the second end is reported");
+    println!("lifecycle: {event}");
+    assert_eq!((event["status"].as_i64(), event["signal"].is_null()), (Some(3), true));
+}
+
+#[test]
+#[ignore = "needs the container of scripts/web-container-test.sh"]
+fn kill_uid_ends_every_process_of_the_person() {
+    let mut helper = Helper::start("sweep", &[]);
+    let mut victim = helper.spawn(20021, "serve").expect("spawn");
+    let mut bystander = helper.spawn(20022, "serve").expect("spawn");
+    victim.probe();
+    bystander.probe();
+
+    // A child in a session and a process group of its own: it is not found through the worker's process group.
+    victim.send("child");
+    let child: i32 = victim.line().strip_prefix("child: ").expect("a pid").parse().expect("a number");
+    // The shell prints the pid when it has forked; the child becomes a session leader a moment later.
+    let waited = Instant::now();
+    loop {
+        let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).expect("the child runs");
+        let fields: Vec<&str> = stat.rsplit_once(')').expect("stat").1.split_whitespace().collect();
+        if fields[3] == child.to_string() {
+            break;
+        }
+        assert!(waited.elapsed() < Duration::from_secs(5), "the child leads its own session, not {}", fields[3]);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(processes_of(20021).len(), 2, "the worker and its child: {:?}", processes_of(20021));
+
+    // Requests the helper must refuse.
+    for members in [
+        r#""op":"kill_uid","uid":0,"signal":"kill""#,
+        r#""op":"kill_uid","uid":10001,"signal":"kill""#,
+        r#""op":"kill_uid","uid":999,"signal":"kill""#,
+        r#""op":"kill_uid","uid":30000,"signal":"term""#,
+        r#""op":"kill_uid","uid":4294967295,"signal":"kill""#,
+    ] {
+        let (answer, _) = helper.request(members);
+        println!("matrix: {members} -> {}", answer["error"]);
+        assert_eq!((answer["ok"].clone(), answer["error"].clone()), (false.into(), "uid_refused".into()), "{members}");
+    }
+    assert_eq!(helper.request(r#""op":"kill_uid","uid":20021,"signal":"hup""#).0["error"], "bad_request");
+    assert_eq!(processes_of(20021).len(), 2, "nothing was signalled by the refusals");
+
+    let started = Instant::now();
+    let (answer, _) = helper.request(r#""op":"kill_uid","uid":20021,"signal":"kill""#);
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert!(answer["signalled"].as_u64() >= Some(2), "the worker and its child were signalled: {answer}");
+    while !processes_of(20021).is_empty() {
+        assert!(started.elapsed() < Duration::from_secs(5), "processes of 20021 remain: {:?}", processes_of(20021));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    println!("lifecycle: kill_uid ended {} processes in {:?}", answer["signalled"], started.elapsed());
+
+    // The worker's end is reported as a signal, and a person who was not named is untouched.
+    let event = helper.wait_event(Duration::from_secs(5)).expect("exited");
+    println!("lifecycle: {event}");
+    assert_eq!((event["uid"].as_u64(), event["signal"].as_i64(), event["status"].as_i64()), (Some(20021), Some(9), Some(137)));
+    assert_eq!(proc_status(bystander.pid).expect("the bystander lives")["Uid"].split_whitespace().next(), Some("20022"));
+    bystander.send("probe");
+    assert_eq!(bystander.probe().lines["Uid"].split_whitespace().next(), Some("20022"), "and still answers");
+    assert_eq!(helper.workers(), 1);
+}
+
+#[test]
+#[ignore = "needs the container of scripts/web-container-test.sh"]
+fn remove_home_removes_the_tree_and_the_directory() {
+    let mut helper = Helper::start("remove", &[]);
+    let top = helper.base.parent().expect("the test directory").to_path_buf();
+    // Somebody else's directory that a link inside the home points to; anybody may write to it, so that a removal that
+    // followed the link would succeed and be noticed.
+    let target = top.join("target");
+    std::fs::create_dir(&target).expect("target");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o777)).expect("mode");
+    std::fs::write(target.join("precious"), b"keep").expect("file");
+    std::fs::set_permissions(target.join("precious"), std::fs::Permissions::from_mode(0o666)).expect("mode");
+
+    let mut worker = helper.spawn(20023, "serve").expect("spawn");
+    worker.probe();
+    worker.send(&format!("fill {}", target.display()));
+    assert_eq!(worker.line(), "filled");
+    let home = helper.base.join("20023");
+    assert!(std::fs::symlink_metadata(&home).is_ok(), "the home exists");
+
+    // A home with a live worker is not removed.
+    let refused = helper.request(r#""op":"remove_home","uid":20023"#).0;
+    assert_eq!(refused["error"], "busy_uid", "{refused}");
+
+    drop(worker);
+    assert_eq!(helper.wait_event(Duration::from_secs(5)).expect("exited")["event"], "exited");
+    let started = Instant::now();
+    let (answer, _) = helper.request(r#""op":"remove_home","uid":20023"#);
+    println!("lifecycle: remove_home {answer} in {:?}", started.elapsed());
+    assert_eq!(answer["ok"], true, "{answer}");
+    assert_eq!(std::fs::symlink_metadata(&home).err().map(|e| e.kind()), Some(std::io::ErrorKind::NotFound), "the home is gone");
+    assert_eq!(std::fs::read(target.join("precious")).expect("the link target is intact"), b"keep");
+
+    // Nothing to remove is a success; what is not a person's home, or not in the range, is refused.
+    assert_eq!(helper.request(r#""op":"remove_home","uid":20023"#).0["ok"], true);
+    assert_eq!(helper.request(r#""op":"remove_home","uid":0"#).0["error"], "uid_refused");
+    assert_eq!(helper.request(r#""op":"remove_home","uid":10001"#).0["error"], "uid_refused");
+    std::os::unix::fs::symlink(&target, helper.base.join("20024")).expect("link");
+    assert_eq!(helper.request(r#""op":"remove_home","uid":20024"#).0["error"], "home_refused");
+    assert!(std::fs::symlink_metadata(helper.base.join("20024")).expect("the link stays").file_type().is_symlink());
+    assert_eq!(std::fs::read(target.join("precious")).expect("the link target is intact"), b"keep");
+    assert_eq!(helper.workers(), 0);
+}
+
+#[test]
+#[ignore = "needs the container of scripts/web-container-test.sh"]
+fn the_helper_ends_its_workers_when_the_control_socket_closes() {
+    let mut helper = Helper::start("shutdown", &[]);
+    let mut first = helper.spawn(20024, "serve").expect("spawn");
+    let mut second = helper.spawn(20025, "serve").expect("spawn");
+    first.probe();
+    second.probe();
+    first.send("child");
+    first.line();
+    assert_eq!(processes_of(20024).len(), 2);
+
+    let closed = Instant::now();
+    helper.control = None;
+    let status = loop {
+        match helper.child.try_wait().expect("wait") {
+            Some(status) => break status,
+            None => {
+                assert!(closed.elapsed() < Duration::from_secs(12), "the helper outlives its control socket");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    println!("lifecycle: the helper ended {:?} after the control socket closed, status {status}", closed.elapsed());
+    assert!(status.success(), "{status}");
+    assert!(processes_of(20024).is_empty() && processes_of(20025).is_empty(), "no process of the people is left");
+    // The workers' own sockets were still open on this side: it was the helper that ended them.
+    drop((first, second));
+}
+
+#[test]
+#[ignore = "needs the container of scripts/web-container-test.sh"]
+fn no_process_in_the_container_has_uid_zero() {
+    let mut helper = Helper::start("noroot", &[]);
+    let mut worker = helper.spawn(20026, "serve").expect("spawn");
+    worker.probe();
+
+    let mut seen = std::collections::BTreeSet::new();
+    let all = processes();
+    for (pid, status) in &all {
+        for id in status["Uid"].split_whitespace().chain(status["Gid"].split_whitespace()) {
+            assert_ne!(id, "0", "process {pid} ({}) runs with id 0: {status:?}", status["Name"]);
+        }
+        seen.insert(status["Uid"].split_whitespace().next().unwrap_or("?").to_owned());
+    }
+    println!("no-root: {} processes, real users {:?}", all.len(), seen);
+
+    // The helper rests with its four capabilities permitted and none effective, inherited or ambient.
+    let status = proc_status(helper.child.id() as i32).expect("the helper runs");
+    println!("no-root: helper CapPrm={} CapEff={} CapInh={} CapAmb={}", status["CapPrm"], status["CapEff"], status["CapInh"], status["CapAmb"]);
+    assert_eq!(status["CapPrm"], "00000000000000e1", "CHOWN, KILL, SETGID and SETUID are permitted");
+    for set in ["CapEff", "CapInh", "CapAmb"] {
+        assert_eq!(status[set], "0000000000000000", "{set} of the helper at rest");
+    }
+}
+
+#[test]
+#[ignore = "needs the container of scripts/web-container-test.sh"]
+fn the_stand_in_supervisor_has_no_capabilities() {
+    let status = proc_status(std::process::id() as i32).expect("this process");
+    for set in ["CapInh", "CapPrm", "CapEff", "CapAmb"] {
+        println!("supervisor: {set}={}", status[set]);
+        assert_eq!(status[set], "0000000000000000", "{set} of the stand-in supervisor is empty");
+    }
+    assert_eq!(status["Uid"].split_whitespace().collect::<Vec<_>>(), ["10001"; 4]);
+    assert_eq!(status["NoNewPrivs"], "0", "no_new_privs would switch the file capabilities of the helper off");
 }

@@ -102,6 +102,8 @@ pub enum Refusal {
     WipeTimeout,
     /// The emptied home directory could not be removed.
     RemoveFailed,
+    /// The processes of the person could not be listed or signalled.
+    KillFailed,
 }
 
 impl Refusal {
@@ -121,6 +123,7 @@ impl Refusal {
             Refusal::WipeFailed => "wipe_failed",
             Refusal::WipeTimeout => "wipe_timeout",
             Refusal::RemoveFailed => "remove_failed",
+            Refusal::KillFailed => "kill_failed",
         }
     }
 }

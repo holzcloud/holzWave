@@ -1,11 +1,13 @@
 #!/bin/sh
 # The test suite on Linux, from the Mac, in a Docker container.
 #
-#   sh scripts/linux-container-test.sh [core|app|all] [-- <arguments for the test binaries>]    (default: core)
+#   sh scripts/linux-container-test.sh [core|app|server|all] [-- <arguments for the test binaries>]    (default: core)
 #   sh scripts/linux-container-test.sh image
 #
 # Modes: `core` runs `cargo test -p holzwave-core`, `app` runs `cargo test -p holzwave-app` (the app crate needs a
-# built page: `npm --prefix app run build` runs first), `all` runs the whole workspace. Everything after `--` goes to
+# built page: `npm --prefix app run build` runs first), `server` runs `cargo test` for the packages of the browser build
+# (`holzwave-host`, `holzwave-server` and `holzwave-spawn-helper`; the server serves the built page, so the page is
+# built first as for `app`), `all` runs the whole workspace. Everything after `--` goes to
 # the test binaries, for example `-- --test-threads=1` or a test name.
 #
 # The container is `ubuntu:26.04`, which is arm64 on an Apple Silicon Mac: a proxy for x86_64 (the same kernel API
@@ -50,7 +52,7 @@ root=$(dirname "$here")
 
 mode=core
 case "${1:-}" in
-    core | app | all | image)
+    core | app | server | all | image)
         mode=$1
         shift
         ;;
@@ -59,7 +61,7 @@ case "${1:-}" in
     "") ;;
     --) shift ;;
     *)
-        echo "usage: sh scripts/linux-container-test.sh [core|app|all|image] [-- <arguments for the test binaries>]" >&2
+        echo "usage: sh scripts/linux-container-test.sh [core|app|server|all|image] [-- <arguments for the test binaries>]" >&2
         exit 2
         ;;
 esac
@@ -171,6 +173,7 @@ fi
 case "$mode" in
     core) package="-p holzwave-core" ;;
     app) package="-p holzwave-app" ;;
+    server) package="-p holzwave-host -p holzwave-server -p holzwave-spawn-helper" ;;
     all) package="--workspace" ;;
 esac
 

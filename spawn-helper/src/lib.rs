@@ -7,12 +7,13 @@
 //! request: the user range, the home base, the worker program, the shell and the limits all come from its own
 //! arguments, which [`args`] checks at start.
 //!
-//! The pure rules ([`args`], [`protocol`], [`validate`] and the wording in [`caps`]) build everywhere; the
-//! parts that talk to the Linux kernel are compiled on Linux only.
+//! The pure rules ([`args`], [`protocol`], [`validate`], the parsing in [`sweep`] and the wording in [`caps`]) build
+//! everywhere; the parts that talk to the Linux kernel are compiled on Linux only.
 
 pub mod args;
 pub mod caps;
 pub mod protocol;
+pub mod sweep;
 pub mod validate;
 
 #[cfg(target_os = "linux")]

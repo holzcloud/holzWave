@@ -123,6 +123,7 @@ fn every_refusal_is_a_fixed_word_that_holds_no_byte_of_the_request() {
         Refusal::WipeFailed,
         Refusal::WipeTimeout,
         Refusal::RemoveFailed,
+        Refusal::KillFailed,
     ];
     let mut seen = std::collections::BTreeSet::new();
     for refusal in all {

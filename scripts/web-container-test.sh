@@ -99,7 +99,10 @@ CAPS_VOLUME=holzwave-web-caps$SUFFIX
 CAPS_TESTS="spawns_a_worker_as_the_person_with_nothing_left fails_closed_without_file_caps
     refuses_what_the_range_forbids refuses_a_symlink_as_home home_directory_is_private
     a_second_spawn_for_a_live_uid_is_refused the_worker_limit_is_enforced
-    the_worker_gets_exactly_four_descriptors_and_a_fixed_environment a_person_cannot_run_the_helper"
+    the_worker_gets_exactly_four_descriptors_and_a_fixed_environment a_person_cannot_run_the_helper
+    the_helper_reports_a_worker_that_exits kill_uid_ends_every_process_of_the_person
+    remove_home_removes_the_tree_and_the_directory the_helper_ends_its_workers_when_the_control_socket_closes
+    no_process_in_the_container_has_uid_zero the_stand_in_supervisor_has_no_capabilities"
 
 # Builds the helper and the test binary as root, and lays out /opt/hw on the volume: the helper twice (0750, root and the
 # group of the test user, so that a person's worker cannot execute it), the file capabilities on one copy only, the test

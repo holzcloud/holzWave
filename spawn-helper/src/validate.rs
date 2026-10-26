@@ -183,11 +183,16 @@ mod tests {
         use super::super::*;
         use std::os::unix::fs::PermissionsExt;
 
+        // Under the build directory and not under /tmp: the check refuses a directory that everybody can write to, which
+        // /tmp is on Linux.
         fn scratch(tag: &str) -> PathBuf {
-            let dir = std::env::temp_dir().join(format!("hw-spawn-helper-{tag}-{}", std::process::id()));
+            let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("target").join("worker-file-tests");
+            let dir = base.join(format!("{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for made in [&dir, &base] {
+                std::fs::set_permissions(made, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
             dir
         }
 
