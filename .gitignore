@@ -21,3 +21,6 @@ dist/
 
 # Planning lives in the private repository holzcloud/holzWave-planning
 .planning
+
+# Lokale Claude-Einstellungen gehören nicht in das öffentliche Repo
+.claude/settings.local.json
