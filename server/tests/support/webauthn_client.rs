@@ -18,9 +18,9 @@
 
 #![allow(dead_code)]
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use serde_json::{json, Value};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde_json::{Value, json};
 use webauthn_authenticator_rs::error::WebauthnCError;
 use webauthn_authenticator_rs::softpasskey::SoftPasskey as Backend;
 use webauthn_authenticator_rs::{AuthenticatorBackend, WebauthnAuthenticator};
@@ -138,7 +138,10 @@ impl SoftPasskey {
             .and_then(Value::as_array)
             .is_none_or(Vec::is_empty);
         if discoverable {
-            let id = self.credential_id.as_ref().ok_or(WebauthnCError::Internal)?;
+            let id = self
+                .credential_id
+                .as_ref()
+                .ok_or(WebauthnCError::Internal)?;
             public_key.insert(
                 "allowCredentials".into(),
                 json!([{ "type": "public-key", "id": URL_SAFE_NO_PAD.encode(id) }]),
@@ -168,15 +171,18 @@ impl SoftPasskey {
 }
 
 /// The library serialises its response types with the field name `extensions`; the browser's `toJSON()` form names it
-/// `clientExtensionResults` and leaves out an absent `userHandle`. The page posts the browser's form.
+/// `clientExtensionResults`, holds only the extensions that answered, and leaves out an absent `userHandle`. The page posts the browser's form.
 fn browser_form(mut credential: Value) -> Result<Value, WebauthnCError> {
     let object = credential.as_object_mut().ok_or(WebauthnCError::Json)?;
-    let extensions = object.remove("extensions").unwrap_or_else(|| json!({}));
+    let mut extensions = object.remove("extensions").unwrap_or_else(|| json!({}));
+    if let Some(entries) = extensions.as_object_mut() {
+        entries.retain(|_, value| !value.is_null());
+    }
     object.insert("clientExtensionResults".into(), extensions);
-    if let Some(response) = object.get_mut("response").and_then(Value::as_object_mut) {
-        if response.get("userHandle").is_some_and(Value::is_null) {
-            response.remove("userHandle");
-        }
+    if let Some(response) = object.get_mut("response").and_then(Value::as_object_mut)
+        && response.get("userHandle").is_some_and(Value::is_null)
+    {
+        response.remove("userHandle");
     }
     Ok(credential)
 }
