@@ -2099,6 +2099,7 @@ version = "0.0.1-beta1"
 dependencies = [
  "holzwave-apple-ai",
  "holzwave-core",
+ "holzwave-host",
  "holzwave-ipc",
  "holzwave-local-network",
  "objc2",
@@ -2154,6 +2155,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "holzwave-host"
+version = "0.0.1-beta1"
+dependencies = [
+ "holzwave-core",
+ "holzwave-ipc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "holzwave-ipc"
 version = "0.0.1-beta1"
 dependencies = [
@@ -2169,6 +2180,20 @@ version = "0.0.1-beta1"
 dependencies = [
  "swift-rs",
 ]
+
+[[package]]
+name = "holzwave-server"
+version = "0.0.1-beta1"
+dependencies = [
+ "holzwave-core",
+ "holzwave-host",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "holzwave-spawn-helper"
+version = "0.0.1-beta1"
 
 [[package]]
 name = "holzwave-spike"

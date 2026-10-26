@@ -1,0 +1,12 @@
+[package]
+name = "holzwave-spawn-helper"
+description = "The privileged helper of the holzWave server: the only process that holds file capabilities"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "holzwave-spawn-helper"
+path = "src/main.rs"

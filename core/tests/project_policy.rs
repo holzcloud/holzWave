@@ -131,6 +131,7 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
                  table so Windows, Linux and mobile builds never compile it",
             ),
             ("holzwave-core", "everything the shell shows and controls"),
+            ("holzwave-host", "the application logic the shell wraps in its commands"),
             ("holzwave-ipc", "server side of the local socket that wsh talks to (lib.rs, state.rs)"),
             (
                 "holzwave-local-network",
@@ -168,6 +169,33 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
             ("serde_json", "the request and answer lines"),
         ],
     ),
+    (
+        "holzwave-host",
+        &[
+            (
+                "holzwave-core",
+                "the terminal, layout, settings and every other part of the application logic that the host serves as \
+                 commands; used without the keyring feature, which only the desktop app turns on",
+            ),
+            ("holzwave-ipc", "the local socket that the command line client talks to, served by the application logic"),
+            ("serde", "arguments and results of the commands"),
+            ("serde_json", "JSON of the command arguments, results and event payloads"),
+        ],
+    ),
+    (
+        "holzwave-server",
+        &[
+            ("holzwave-core", "the terminal engine, panes, files and settings that every worker runs for its person"),
+            (
+                "holzwave-host",
+                "the command table and the plain command functions that the worker dispatches; the server never turns on \
+                 the keyring feature",
+            ),
+            ("serde", "the configuration, the wire between the page and the server and the frames between server processes"),
+            ("serde_json", "JSON of the configuration, the wire and the frames"),
+        ],
+    ),
+    ("holzwave-spawn-helper", &[]),
     (
         "holzwave-apple-ai",
         &[
@@ -851,6 +879,105 @@ fn first_party_rust_files() -> Vec<PathBuf> {
     files
 }
 
+/// The workspace crates whose source is the network product: `(directory, reason)`. The network scan of the first-party
+/// Rust skips the `src` directory of exactly these crates, because listeners and clients are the point of them. Every
+/// other member, the application logic crate `host` included, stays scanned. The closure guard
+/// ([`desktop_closure_problems`]) is what keeps these crates and their libraries out of the desktop.
+const NETWORK_PRODUCT_CRATES: &[(&str, &str)] = &[
+    (
+        "server",
+        "the server of the browser build: its listeners, its TLS and its HTTP clients (sign-in, certificate requests) are \
+         the product; the desktop closure guard keeps the crate and its libraries out of the desktop app",
+    ),
+    (
+        "spawn-helper",
+        "the privileged helper of the server: it listens on a Unix socket for the server only; the desktop closure guard \
+         keeps the crate out of the desktop app",
+    ),
+];
+
+/// What is wrong with a list of network product crates, one sentence each: an entry without a reason, an entry whose
+/// directory is not a workspace member, and an entry whose `src` directory holds no Rust file (so it exempts nothing).
+/// `member_dirs` are the member directories of the root manifest, `rust_files` the first-party Rust files as
+/// [`shown`] writes them.
+fn network_product_crate_problems(
+    entries: &[(&str, &str)],
+    member_dirs: &[String],
+    rust_files: &[String],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (directory, reason) in entries {
+        if reason.trim().is_empty() {
+            problems.push(format!("the network product crate {directory} has no reason: say why its source may use sockets"));
+        }
+        if !member_dirs.iter().any(|member| member == directory) {
+            problems.push(format!(
+                "the network product crate {directory} is no workspace member: remove it from NETWORK_PRODUCT_CRATES"
+            ));
+        }
+        let prefix = format!("{directory}/src/");
+        if !rust_files.iter().any(|file| file.starts_with(&prefix)) {
+            problems.push(format!(
+                "the network product crate {directory} has no Rust file below {prefix}: the entry exempts nothing, remove it"
+            ));
+        }
+    }
+    problems
+}
+
+/// Whether the network scan skips `file` (as [`shown`] writes it): it lies below the `src` directory of an entry.
+fn is_network_product_source(file: &str, entries: &[(&str, &str)]) -> bool {
+    entries.iter().any(|(directory, _)| file.starts_with(&format!("{directory}/src/")))
+}
+
+/// The Rust files the network scan reads: [`first_party_rust_files`] minus the `src` directories of the network product
+/// crates. Every other guard keeps the full list.
+fn network_scanned_rust_files() -> Vec<PathBuf> {
+    let mut files = first_party_rust_files();
+    files.retain(|file| !is_network_product_source(&shown(file), NETWORK_PRODUCT_CRATES));
+    files
+}
+
+/// The crates that must never be in the dependency closure of the desktop app, the core, the socket protocol, the
+/// command line client or the application logic: the server and the helper, and the libraries only they use.
+const SERVER_ONLY_CRATES: &[&str] = &[
+    "holzwave-server",
+    "holzwave-spawn-helper",
+    "axum",
+    "webauthn-rs",
+    "webauthn-rs-core",
+    "webauthn-rs-proto",
+    "webauthn-attestation-ca",
+    "webauthn-authenticator-rs",
+    "openidconnect",
+    "totp-rs",
+    "instant-acme",
+    "rust-embed",
+    "yawc",
+];
+
+/// The packages whose closure must stay free of [`SERVER_ONLY_CRATES`].
+const DESKTOP_ROOTS: &[&str] = &["holzwave-app", "holzwave-core", "holzwave-ipc", "wsh", "holzwave-host"];
+
+/// What is wrong with the closures of `roots` against `forbidden`, one sentence each: a forbidden package in the closure
+/// of a root (naming both), and a root that is not in the graph (the guard would check nothing).
+fn desktop_closure_problems(graph: &Graph, roots: &[&str], forbidden: &[&str]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for root in roots {
+        if !graph.contains_key(*root) {
+            problems.push(format!("{root} is not in the lock: the desktop closure guard has nothing to walk"));
+            continue;
+        }
+        let reached = closure(graph, root);
+        for name in forbidden.iter().filter(|name| reached.contains(**name)) {
+            problems.push(format!(
+                "{name} is in the dependency closure of {root}: the server and its libraries must stay out of the desktop"
+            ));
+        }
+    }
+    problems
+}
+
 // ---- dependencies -----------------------------------------------------------------------------------------
 
 /// What is wrong with the direct dependencies of the workspace crates, one sentence each: a member with no entry in
@@ -1120,7 +1247,7 @@ fn no_ci_workflows_exist() {
 
 #[test]
 fn first_party_sources_use_no_network_apis() {
-    let rust_files = first_party_rust_files();
+    let rust_files = network_scanned_rust_files();
     assert!(rust_files.len() >= 15, "only {} Rust files found: is the walk broken?", rust_files.len());
 
     let mut page_files = files_below("app/src", &["ts", "html", "css"]);
@@ -2237,12 +2364,111 @@ fn test_module_skip_applies_only_to_a_declared_cfg_test_module() {
 fn first_party_rust_files_include_ipc_and_wsh() {
     let files: BTreeSet<String> = first_party_rust_files().iter().map(|file| shown(file)).collect();
 
-    let expected_files =
-        ["core/src/lib.rs", "core/src/sync/engine/mod.rs", "ipc/src/lib.rs", "wsh/src/main.rs", "app/src-tauri/build.rs"];
+    let expected_files = [
+        "core/src/lib.rs",
+        "core/src/sync/engine/mod.rs",
+        "host/src/lib.rs",
+        "ipc/src/lib.rs",
+        "wsh/src/main.rs",
+        "app/src-tauri/build.rs",
+    ];
     for expected in expected_files {
         assert!(files.contains(expected), "{expected} is not scanned: {files:?}");
     }
     assert!(!files.contains("core/src/sync/engine/tests.rs"), "the declared test module is scanned");
+}
+
+#[test]
+fn the_workspace_has_the_application_logic_the_server_and_the_helper() {
+    let members = members_of(&read("Cargo.toml"));
+    for expected in ["host", "server", "spawn-helper"] {
+        assert!(members.iter().any(|member| member == expected), "{expected} is not a workspace member: {members:?}");
+    }
+    let names = workspace_member_names();
+    for expected in ["holzwave-host", "holzwave-server", "holzwave-spawn-helper"] {
+        assert!(names.contains(expected), "{expected} is not a workspace package: {names:?}");
+    }
+}
+
+#[test]
+fn the_network_scan_skips_the_product_crates_and_nothing_else() {
+    let scanned: BTreeSet<String> = network_scanned_rust_files().iter().map(|file| shown(file)).collect();
+    let all: BTreeSet<String> = first_party_rust_files().iter().map(|file| shown(file)).collect();
+    assert!(scanned.contains("host/src/lib.rs"), "host/src is not scanned: it is no network product");
+    assert!(scanned.contains("core/src/lib.rs") && scanned.contains("wsh/src/main.rs"), "a desktop crate is not scanned");
+    assert!(all.contains("server/src/lib.rs") && all.contains("spawn-helper/src/main.rs"), "the product crates have no source");
+    assert!(!scanned.contains("server/src/lib.rs"), "server/src is scanned");
+    assert!(!scanned.contains("spawn-helper/src/main.rs"), "spawn-helper/src is scanned");
+    // Only files below the two directories are missing, and every one of them is.
+    for file in all.difference(&scanned) {
+        assert!(file.starts_with("server/src/") || file.starts_with("spawn-helper/src/"), "{file} is skipped");
+    }
+    assert!(all.iter().filter(|file| file.starts_with("server/src/")).all(|file| !scanned.contains(file.as_str())));
+}
+
+#[test]
+fn the_list_of_network_product_crates_is_consistent_with_the_workspace() {
+    let members = members_of(&read("Cargo.toml"));
+    let files: Vec<String> = first_party_rust_files().iter().map(|file| shown(file)).collect();
+    let problems = network_product_crate_problems(NETWORK_PRODUCT_CRATES, &members, &files);
+    assert!(problems.is_empty(), "NETWORK_PRODUCT_CRATES is out of step:\n  {}", problems.join("\n  "));
+}
+
+#[test]
+fn the_network_product_list_reports_an_empty_reason_a_non_member_and_an_entry_without_a_file() {
+    let members = vec!["core".to_owned(), "server".to_owned(), "quiet".to_owned()];
+    let files = vec!["core/src/lib.rs".to_owned(), "server/src/lib.rs".to_owned()];
+
+    assert!(network_product_crate_problems(&[("server", "the product")], &members, &files).is_empty());
+
+    let empty = network_product_crate_problems(&[("server", "  ")], &members, &files);
+    assert_eq!(empty.len(), 1, "{empty:?}");
+    assert!(empty[0].starts_with("the network product crate server has no reason"), "{empty:?}");
+
+    let stranger = network_product_crate_problems(&[("ghost", "the product")], &members, &files);
+    assert!(stranger.iter().any(|p| p.starts_with("the network product crate ghost is no workspace member")), "{stranger:?}");
+
+    let no_file = network_product_crate_problems(&[("quiet", "the product")], &members, &files);
+    assert_eq!(no_file.len(), 1, "{no_file:?}");
+    assert!(no_file[0].starts_with("the network product crate quiet has no Rust file below quiet/src/"), "{no_file:?}");
+
+    // The exemption is the src directory of the entry and nothing that only starts with the same letters.
+    let entries = [("server", "the product")];
+    assert!(is_network_product_source("server/src/http/ws.rs", &entries));
+    assert!(!is_network_product_source("server-tools/src/lib.rs", &entries));
+    assert!(!is_network_product_source("server/build.rs", &entries));
+    assert!(!is_network_product_source("host/src/lib.rs", &entries));
+}
+
+#[test]
+fn the_desktop_closure_holds_no_server_crate_or_server_library() {
+    let problems = desktop_closure_problems(&lock_graph(), DESKTOP_ROOTS, SERVER_ONLY_CRATES);
+    assert!(problems.is_empty(), "a server crate reached the desktop:\n  {}", problems.join("\n  "));
+}
+
+#[test]
+fn the_desktop_closure_guard_reports_a_server_library_under_the_core_and_a_missing_root() {
+    let mut graph = Graph::new();
+    graph.insert("holzwave-core".to_owned(), set(&["serde", "axum"]));
+    graph.insert("holzwave-app".to_owned(), set(&["holzwave-core"]));
+    graph.insert("axum".to_owned(), set(&["tower"]));
+    graph.insert("serde".to_owned(), BTreeSet::new());
+    graph.insert("tower".to_owned(), BTreeSet::new());
+
+    // From the core the library is one problem naming both; from the app it is reached through the core.
+    let from_core = desktop_closure_problems(&graph, &["holzwave-core"], SERVER_ONLY_CRATES);
+    assert_eq!(from_core.len(), 1, "{from_core:?}");
+    assert!(from_core[0].contains("axum") && from_core[0].contains("holzwave-core"), "{from_core:?}");
+    let from_app = desktop_closure_problems(&graph, &["holzwave-app"], SERVER_ONLY_CRATES);
+    assert_eq!(from_app.len(), 1, "{from_app:?}");
+    assert!(from_app[0].contains("axum") && from_app[0].contains("holzwave-app"), "{from_app:?}");
+
+    // A clean graph is quiet, and a root the graph lacks is a problem instead of a silent pass.
+    graph.insert("holzwave-core".to_owned(), set(&["serde"]));
+    assert!(desktop_closure_problems(&graph, &["holzwave-core", "holzwave-app"], SERVER_ONLY_CRATES).is_empty());
+    let missing = desktop_closure_problems(&graph, &["holzwave-host"], SERVER_ONLY_CRATES);
+    assert_eq!(missing.len(), 1, "{missing:?}");
+    assert!(missing[0].starts_with("holzwave-host is not in the lock"), "{missing:?}");
 }
 
 #[test]
@@ -2597,10 +2823,13 @@ fn the_result_check_flags_a_filled_cell_and_accepts_an_empty_one() {
 // ---- no plan label in the public tree -----------------------------------------------------------------------
 
 /// The first-party directories whose text files are public: the labels of the private planning tree stay out of them.
-const PLAN_LABEL_DIRS: [&str; 13] = [
+const PLAN_LABEL_DIRS: [&str; 16] = [
     "core",
     "ipc",
     "wsh",
+    "host",
+    "server",
+    "spawn-helper",
     "plugins",
     "spike",
     "app/src",
@@ -2685,6 +2914,7 @@ fn plan_label_phases() -> Vec<(String, String)> {
     vec![
         (String::from("0") + "7", String::from("0") + "7-extras"),
         (String::from("0") + "8", String::from("0") + "8-" + "native" + "-integrationen"),
+        (String::from("1") + "1", String::from("1") + "1-" + "web"),
     ]
 }
 
@@ -2733,9 +2963,14 @@ fn no_public_file_carries_a_plan_label() {
 
 #[test]
 fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips_dates_and_longer_numbers() {
-    // Every sample is built from pieces, so that this file holds no label itself. Each row runs for both phases.
+    // Every sample is built from pieces, so that this file holds no label itself. Each row runs for every phase.
+    assert_eq!(plan_label_phases().len(), 3, "the phases whose labels stay out of the public tree");
     let second_name = String::from("native") + "-integrationen";
-    for (phase, name) in [(String::from("0") + "7", "extras"), (String::from("0") + "8", second_name.as_str())] {
+    for (phase, name) in [
+        (String::from("0") + "7", "extras"),
+        (String::from("0") + "8", second_name.as_str()),
+        (String::from("1") + "1", "web"),
+    ] {
         let id = format!("{phase}-{}", 12);
         let hit = |text: &str| plan_label_hits(text).into_iter().map(|(_, label)| label).collect::<Vec<_>>();
         assert_eq!(hit(&id), [id.clone()], "an id alone ({phase})");
@@ -2773,7 +3008,9 @@ fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips
     assert!(hit(&format!("the {words}6 numbers")).is_empty(), "a spike word with another digit");
     // A line that holds labels of both phases reports both.
     let both = format!("{}-01 and {}-02", String::from("0") + "7", String::from("0") + "8");
-    assert_eq!(hit(&both).len(), 2, "both phases on one line");
+    assert_eq!(hit(&both).len(), 2, "two phases on one line");
+    let three = format!("{both} and {}-03", String::from("1") + "1");
+    assert_eq!(hit(&three).len(), 3, "all three phases on one line");
 }
 
 // ---- the architecture and the golden of the protocol ----------------------------------------------------------
@@ -2941,9 +3178,11 @@ fn integration_spawn_problems(files: &[(String, String)], allowed: &[(&str, &str
 /// minus the declared out-of-line test modules. There may be none yet.
 fn integration_source_files() -> Vec<PathBuf> {
     let mut files = files_below("core/src/integrate", &["rs"]);
-    let host = root().join("app/src-tauri/src/integrate_host.rs");
-    if host.is_file() {
-        files.push(host);
+    for host in ["host/src/integrate_host.rs", "app/src-tauri/src/integrate_host.rs"] {
+        let host = root().join(host);
+        if host.is_file() {
+            files.push(host);
+        }
     }
     files.retain(|file| !is_declared_test_module(file));
     files.sort();
@@ -3295,7 +3534,18 @@ fn documented_test_targets(doc: &str) -> Vec<String> {
 
 /// Whether a test target of that name exists in one of the crates that have integration tests.
 fn test_target_exists(name: &str) -> bool {
-    ["core/tests", "ipc/tests", "wsh/tests", "app/src-tauri/tests", "plugins/apple-ai/tests"].iter().any(|dir| {
+    [
+        "core/tests",
+        "ipc/tests",
+        "wsh/tests",
+        "host/tests",
+        "server/tests",
+        "spawn-helper/tests",
+        "app/src-tauri/tests",
+        "plugins/apple-ai/tests",
+    ]
+    .iter()
+    .any(|dir| {
         let base = root().join(dir);
         base.join(format!("{name}.rs")).is_file() || base.join(name).join("mod.rs").is_file()
     })

@@ -1,0 +1,21 @@
+[package]
+name = "holzwave-host"
+description = "The application logic of holzWave without a window shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "holzwave_host"
+
+[features]
+# The platform keychain store. The desktop app turns it on; the server never does, so its tree holds no keychain crate.
+keyring = ["holzwave-core/keyring"]
+
+[dependencies]
+holzwave-core = { path = "../core" }
+holzwave-ipc = { path = "../ipc" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
