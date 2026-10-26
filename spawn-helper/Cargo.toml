@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lib]
+name = "holzwave_spawn_helper"
+path = "src/lib.rs"
+
 [[bin]]
 name = "holzwave-spawn-helper"
 path = "src/main.rs"
